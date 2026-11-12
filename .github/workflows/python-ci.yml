@@ -4612,19 +4612,25 @@ jobs:
     #     archive has no PG16 client — so the in-step `apt-cache show`
     #     precondition is what fails closed") is why it is worth spelling out:
     #     the pin no longer DEPENDS on the box's ARCHIVE carrying the major
-    #     (#12051 round 3 makes `<codename>-pgdg` the source that RESOLVES it),
-    #     so a supported release needs no fail-closed branch. ⚠️ Not "the archive
-    #     is gone": it is still configured and apt merges both indexes — PGDG's
-    #     candidate wins on VERSION ORDER, not by exclusivity (measured on noble:
-    #     `16.15-1.pgdg24.04+2` over `16.15-0ubuntu0.24.04.1`) — but the
-    #     resolution no longer TURNS ON what the image ships, which is the class
-    #     that killed round 1. The artifact contract is held by the in-step
-    #     `pg_dump --version` / `pg_restore --version` assertion, which is
+    #     (#12051 round 3 makes `<codename>-pgdg` the source that RESOLVES it, and
+    #     the step ASSERTS that index SUPPLIED the candidate — `apt-cache policy`
+    #     must name apt.postgresql.org — because `apt-get update` reports a
+    #     repository it could not FETCH as a WARNING and exits 0, so an egress
+    #     failure would otherwise fall back to the box's own archive with every
+    #     check green), so a supported release needs no fail-closed branch. ⚠️ Not
+    #     "the archive is gone": it is still configured and apt merges both
+    #     indexes — PGDG's candidate wins on VERSION ORDER, not by exclusivity
+    #     (measured on noble: `16.15-1.pgdg24.04+2` over `16.15-0ubuntu0.24.04.1`)
+    #     — but the resolution no longer TURNS ON what the image ships, which is
+    #     the class that killed round 1. The artifact contract is held by the
+    #     in-step `pg_dump --version` / `pg_restore --version` assertion, which is
     #     box-independent. What still fails closed is AMONG: a key fetch that
-    #     fails (egress/DNS/503), a release PGDG does not publish (the named
-    #     `apt-get update` guard), one whose os-release carries no codename, a
-    #     suite that resolves without this major, and a resolved package that
-    #     will not install — and each of those names the RUNNER, not just the image
+    #     fails (egress/DNS/503, or no `curl`), a release PGDG does not publish
+    #     (the named `apt-get update` guard), an index that never LOADED (a SOFT
+    #     failure the update's own exit status cannot see — the ORIGIN check
+    #     catches it), one whose os-release carries no codename, a suite that
+    #     resolves without this major, and a resolved package that will not
+    #     install — and each of those names the RUNNER, not just the image
     #     (`RUNNER_*` is set on BOTH classes while `ImageOS`/`ImageVersion` are
     #     hosted-only). #10289: a `=on` x64 box can carry this label.
     runs-on: ubuntu-24.04
@@ -4768,10 +4774,16 @@ jobs:
           # a pool box, still exits non-zero — it is just not named). What IS named here is
           # every class that would otherwise surface as apt's or curl's OWN text, since those
           # are the ones that read as a typo in this step:
-          #   1. the signing key cannot be FETCHED (egress/DNS/503) — guarded at the fetch;
+          #   1. the signing key cannot be FETCHED (egress/DNS/503, or `curl` absent) — guarded at the fetch;
           #   2. the box carries no VERSION_CODENAME, so there is no suite to name — guarded below;
-          #   3. the repo does not RESOLVE once added (suite name, key, archive) — `apt-get update`;
-          #   4. the repo resolves but has no `postgresql-client-<major>` — the probe below;
+          #   3. `apt-get update` fails HARD (a suite/key/archive fault apt reports as an error) — guarded below;
+          #   4. the index does not SUPPLY `postgresql-client-<major>` — either because its fetch
+          #      failed SOFTLY (apt only WARNS and exits 0: DNS/egress/5xx) or because the suite
+          #      carries no such package — guarded by the ORIGIN check below, the only guard that
+          #      can see a soft failure. MEASURED, review cycle 7 of `fc9d4204aa`: with the PGDG
+          #      host unresolvable, `apt-get update -qq` exits 0 (`W: Some index files failed to
+          #      download`), the distro archive still satisfies a bare `apt-cache show` on noble,
+          #      and the step would have gone GREEN with the mechanism this PR installs never applied;
           #   5. the package RESOLVES but cannot be INSTALLED — the install itself, named below.
           # ⛔ (5) IS NOT PEDANTRY on a POOL box: this job is pool-eligible, and a shared box
           # can hold the dpkg frontend lock (the image's own unattended-upgrades) or run out of
@@ -4784,7 +4796,7 @@ jobs:
           # `pg_dump`/`pg_restore`. It is deliberately outside this list: this list is about
           # GETTING a client onto the leg, that one is about the client it GOT.
           if ! curl -fsSL -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc; then
-            echo "::error::could not FETCH the PGDG signing key (ACCC4CF8.asc) [$identity] — the client this drill needs comes from apt.postgresql.org, so without the key nothing can be installed and BOTH provisioned servers are pg16 (#12051). Check network egress from this runner to www.postgresql.org."
+            echo "::error::could not FETCH the PGDG signing key (ACCC4CF8.asc) [$identity] — the client this drill needs comes from apt.postgresql.org, so without the key nothing can be installed and BOTH provisioned servers are pg16 (#12051). Either this runner cannot reach www.postgresql.org (egress/DNS/503), or curl/ca-certificates are not installed on it — test with 'command -v curl' before chasing the firewall."
             exit 1
           fi
           # The keyring's DIRECTORY is created here rather than assumed: PGDG publishes it inside
@@ -4806,16 +4818,20 @@ jobs:
             echo "::error::apt-get update FAILED after the PGDG source was added (suite ${VERSION_CODENAME:-unknown}-pgdg) [$identity] — the repository or its signing key did not resolve, so the pg16 client this drill needs cannot be installed, and BOTH provisioned servers are pg16 (#12051). Check the key at /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc, the suite name derived from /etc/os-release, and network egress."
             exit 1
           fi
-          if ! apt-cache show postgresql-client-16 >/dev/null 2>&1; then
-            # ⛔ THIS BRANCH'S REMEDY IS NAMED FROM ITS OWN CAUSE, not from release drift.
-            # MEASURED, review cycle 4 of `3c2946ce9c`: the committed step exits 0 on
-            # `ubuntu:26.04` — the very "box is not the release that claims the label"
-            # case — because `${VERSION_CODENAME}-pgdg` is resolute's own suite and PGDG
-            # publishes 16 for it; and a release PGDG does NOT publish (no suite) exits
-            # 100 at `apt-get update`, i.e. the guard ABOVE. So #10289 routing drift cannot
-            # land here, and the old `--repair-labels` remedy here was advice that could
-            # not change apt's answer.
-            echo "::error::a PGDG suite RESOLVED but carries no postgresql-client-16 for this codename [$identity] — apt-get update succeeded and the probe still found nothing, so this is the PACKAGE, not the repo. BOTH provisioned servers are pg16, so this job cannot run here (#12051): either the pin and the two 'pgvector/pgvector:pg16' servers must move together, or '${VERSION_CODENAME:-this release}' is a codename PGDG publishes no PG16 package for. Check 'apt-cache policy postgresql-client-16' and the suite derived from /etc/os-release."
+          # ⛔ THE ORIGIN IS THE FACT; A BARE PROBE'S EXIT STATUS IS NOT. `apt-get update`
+          # reports a repository it could not FETCH as a WARNING and exits 0 (MEASURED,
+          # review cycle 7 of `fc9d4204aa`: a DNS failure gives `W: Some index files failed
+          # to download`, exit 0), so on a release whose own archive also carries the major
+          # a bare `apt-cache show` passes with PGDG never applied — the mechanism this
+          # change installs, silently absent and green. So the CANDIDATE must be listed by
+          # apt.postgresql.org itself. Both causes share one guard, because they read
+          # identically from here: the index fetch failed, or the suite carries no such
+          # package. THIS BRANCH'S REMEDY IS NAMED FROM ITS OWN CAUSE, not from release
+          # drift: a release PGDG does not publish (no suite) fails HARD at `apt-get update`,
+          # i.e. the guard ABOVE, so the old `--repair-labels` advice here was advice that
+          # could not change apt's answer.
+          if ! apt-cache policy postgresql-client-16 > /tmp/pgdg-policy.txt 2>/dev/null || ! grep -qF 'apt.postgresql.org' /tmp/pgdg-policy.txt; then
+            echo "::error::apt.postgresql.org did not SUPPLY postgresql-client-16 for this codename [$identity] — either its index never LOADED (apt-get update only WARNS and exits 0 on a DNS/egress/5xx failure; look for 'W: Some index files failed to download' above) or the suite '${VERSION_CODENAME:-unknown}-pgdg' carries no such package. BOTH provisioned servers are pg16 and the client major is part of the artifact's contract (#12051), so this drill cannot fall back to the image's own archive client. Check 'apt-cache policy postgresql-client-16': the candidate must be listed under apt.postgresql.org."
             exit 1
           fi
           if ! sudo apt-get install -y --no-install-recommends postgresql-client-16; then

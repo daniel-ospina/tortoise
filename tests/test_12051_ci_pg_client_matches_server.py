@@ -260,8 +260,10 @@ def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
 
 #: A (runner label -> PostgreSQL client major) fact table, PROVEN and not assumed.
 #: ⚠️ WHAT THIS TABLE DECIDES, AFTER THE PGDG CHANGE: it records that a NAMED
-#: release is a sound place to run this job — measured by `<codename>-pgdg`
-#: carrying the client major, and by the release's own archive carrying it too.
+#: release is a sound place to run this job — measured by that release's
+#: `<codename>-pgdg` suite carrying the client major. The release's OWN ARCHIVE is
+#: no longer part of the measurement (and cannot be: `ubuntu-26.04`'s archive
+#: carries 18 and no 16, while `resolute-pgdg` carries 16).
 #: It does NOT decide where the client comes from: since #12051 round 3 the step
 #: INSTALLS `postgresql-client-<major>`, resolving it from `apt.postgresql.org`, and the live
 #: invariant is the in-step `pg_dump`/`pg_restore` assertion (major == the two
@@ -463,12 +465,18 @@ def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> 
 
       · a BACKTICK anywhere is refused — there is no legitimate one in this step, and a
         backtick in a double-quoted `echo` is the exact defect this test exists for;
-      · `$(` is refused when it appears in the text a line PRINTS — i.e. AFTER an
-        `echo`/`printf` on that line, at any indentation or position (`… && echo "…"`,
-        `printf '%s\n' "…"`), while staying legal where the step substitutes on purpose:
+      · `$(` is refused when it appears AFTER an `echo`/`printf` on a CODE line, at
+        any indentation or position (`… && echo "…"`, `printf '%s\n' "…"`), while
+        staying legal where the step substitutes on purpose:
         `major="$(printf '%s\n' "$version" | sed …)"` puts the `printf` INSIDE a
         substitution whose output is wanted — the opposite case, and the first cut of this
         test false-redded exactly that line (measured, cycle 6).
+      · DELIBERATELY CONSERVATIVE, and said so here so it reads as a choice rather than a
+        bug: an ESCAPED `\\$(…)` prints literally and is exempted, but text after a
+        trailing `#` on a printing line is still refused (the scan cannot tell a comment
+        from a `#` inside quotes without a parser, and this step has no legitimate `$(` in
+        any printed message). A future lane that needs one should move the message to a
+        single-quoted string instead of widening this guard.
 
     ⛔ A LINE-INITIAL `echo` SCAN IS NOT ENOUGH, and that is a correction this test needed: an
     earlier version checked only lines whose stripped form BEGAN with `echo `, so a backticked
@@ -484,7 +492,9 @@ def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> 
             offenders.append(stripped[:140])
             continue
         for match in re.finditer(r"\b(?:echo|printf)\b", stripped):
-            if "$(" in stripped[match.end():]:
+            # An ESCAPED `\$(` prints literally, so it is not the defect; strip the
+            # escaped form and refuse anything left.
+            if "$(" in stripped[match.end():].replace("\\$(", ""):
                 offenders.append(stripped[:140])
                 break
     assert not offenders, (
@@ -532,16 +542,17 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
     label = labels[0]
     assert label in KNOWN_GOOD_IMAGE_MAJOR, (
         f"`{JOB}` runs on {label!r}, which nobody has measured for this drill. "
-        "PROVE it — `apt-cache policy "
-        f"postgresql-client-{server_major}` on that image, and that its "
-        "`-pgdg` suite carries the same major — then add the pair to "
-        "KNOWN_GOOD_IMAGE_MAJOR. Adopting an unmeasured release is how #12051 "
-        "round 2 shipped."
+        "PROVE it — run the pin's own ORIGIN check on that image (`apt-cache "
+        f"policy postgresql-client-{server_major}` after adding its `-pgdg` "
+        "suite): the candidate must be listed under apt.postgresql.org — then "
+        "add the pair to KNOWN_GOOD_IMAGE_MAJOR. Adopting an unmeasured release "
+        "is how #12051 round 2 shipped."
     )
     assert KNOWN_GOOD_IMAGE_MAJOR[label] == server_major, (
-        f"`{JOB}`'s two servers are pg{server_major}, but {label} is measured for "
-        f"a pg{KNOWN_GOOD_IMAGE_MAJOR[label]} client: the artifact would be "
-        "dumped by a client whose major differs from the restore target (#12051)."
+        f"`{JOB}`'s two servers are pg{server_major}, but {label}'s `-pgdg` suite "
+        f"is measured for a pg{KNOWN_GOOD_IMAGE_MAJOR[label]} client: the drill "
+        "would install a client whose major differs from the restore target "
+        "(#12051)."
     )
 
     _, pin = _pin_step(_steps(job))
@@ -711,6 +722,32 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
         "stale index that predates the PGDG source"
     )
 
+    # ⛔ THE ORIGIN, NOT THE PROBE'S EXIT STATUS. `apt-get update` only WARNS (exit 0)
+    # when a repo cannot be FETCHED, so a bare `apt-cache show` passes on any release
+    # whose archive also carries the major — the mechanism gone, the step green.
+    # MEASURED, review cycle 7 of `fc9d4204aa`: PGDG unresolvable -> update exit 0,
+    # `apt-cache show postgresql-client-16` exit 0 from the distro archive.
+    probes = [
+        line for line in code.splitlines()
+        if re.search(r"apt-cache\s+(?:show|policy)\s+['\"]?postgresql-client-\d+", line)
+        # ⛔ NOT the message that NAMES the probe: the guard's own `::error::` quotes
+        # `apt-cache policy postgresql-client-16` and the package's origin, so without
+        # this exclusion the assertion is satisfied by PROSE and survives removing the
+        # origin predicate (MEASURED, review cycle 8 mutation b).
+        and "::error::" not in line
+    ]
+    assert probes, (
+        "the step has no availability probe before the install, so a failed index "
+        "fetch reaches `apt-get install` and reads as apt's own exit 100"
+    )
+    assert any("apt.postgresql.org" in line for line in probes), (
+        "the availability probe never asserts WHERE the candidate came from, so on a "
+        "release whose own archive carries the major it passes with PGDG never applied "
+        "(`apt-get update` only WARNS on a failed fetch) — the fix silently reverted "
+        "with every check green. The probe must prove the candidate is listed by "
+        f"apt.postgresql.org: {probes!r}"
+    )
+
     # ⛔ AND THE INSTALL ITSELF IS NAMED. It is the one pre-version branch the executable
     # arm cannot reach (that arm stops at the install line by construction), so text is all
     # there is — and without this assertion adding the guard would itself be the
@@ -788,8 +825,17 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     substitution asserts it matched exactly once, so a future rename reds here
     instead of silently restoring the host dependency.
 
-    Five arms over the step's FOUR named pre-install branches — the key fetch, the
-    codename, `apt-get update`, and the probe — plus TWO branches no arm executes: the
+    ⏔ AND THE ORIGIN CHECK'S POLICY FILE IS THE SAME CLASS A THIRD TIME. The
+    guard writes `apt-cache policy` to `/tmp/pgdg-policy.txt`, so the prefix run
+    verbatim would write the HOST's `/tmp` — outside this test's hermeticity
+    claim. That path is REPLACED with one under `tmp_path` (the substitution
+    asserts it matched exactly TWICE: the redirect and the `grep` argument),
+    which is what keeps "no write outside `tmp_path`" true.
+
+    Six arms over the step's FOUR named pre-install branches — the key fetch, the
+    codename, `apt-get update`, and the ORIGIN check (THREE arms: an `apt-cache`
+    that fails, an index that loaded but does not name apt.postgresql.org, and
+    the control that reaches past) — plus TWO branches no arm executes: the
     install guard (unreachable by construction, since this arm stops AT the install line;
     it is pinned in text by `test_the_client_comes_from_pgdg_not_the_distro_archive`) and
     the version branch (its reachability is a stated limit, see `_version_branch`).
@@ -829,6 +875,16 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "fall back to reading the HOST's file"
     )
     prefix = prefix.replace(". /etc/os-release", f". {os_release}")
+
+    policy_file = tmp_path / "pgdg-policy.txt"
+    policy_substitutions = _code_only(prefix).count("/tmp/pgdg-policy.txt")
+    assert policy_substitutions == 2, (
+        "the origin guard's policy file is expected to appear exactly twice in the "
+        f"prefix's CODE (the redirect and the `grep` argument); found "
+        f"{policy_substitutions}. Re-derive the substitution rather than letting the "
+        "arm write the HOST's /tmp"
+    )
+    prefix = prefix.replace("/tmp/pgdg-policy.txt", str(policy_file))
 
     def run_with(
         stub: str,
@@ -884,14 +940,41 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         f"point is that a missing client reads as THIS defect, not an apt error: {combined!r}"
     )
 
-    present = run_with("apt-cache() { return 0; }")
+    present = run_with(
+        'apt-cache() { echo "Candidate: 16.15-1.pgdg24.04+2"; '
+        'echo "     500 https://apt.postgresql.org/pub/repos/apt noble-pgdg/main amd64 Packages"; }'
+    )
     assert present.returncode == 0, (
-        "with `apt-cache` SUCCEEDING the precondition stopped the step — the job "
-        f"would red on every image that carries the client: {present.stderr!r}"
+        "with the candidate listed by apt.postgresql.org the precondition stopped the "
+        f"step — the job would red on the label it is pinned to: {present.stderr!r}"
     )
     assert "REACHED_PAST_PRECONDITION" in present.stdout, (
         "the script never reached the line after the precondition even when the "
-        "package resolved — the block is unconditional"
+        "package resolved from PGDG — the block is unconditional"
+    )
+
+    # ⛔ THE SOFT FAILURE — the state a BARE probe cannot see, and the one the origin
+    # check exists for. MEASURED, review cycle 7 of `fc9d4204aa`: with the PGDG host
+    # unresolvable, `apt-get update` exits 0 (`W: Some index files failed to download`)
+    # and `apt-cache show postgresql-client-16` still succeeds from the DISTRO archive
+    # on noble — so this arm is the only thing that reds the reverted mechanism here.
+    not_pgdg = run_with(
+        'apt-cache() { echo "Candidate: 16.15-0ubuntu0.24.04.1"; '
+        'echo "     500 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages"; }'
+    )
+    not_pgdg_combined = not_pgdg.stdout + not_pgdg.stderr
+    assert not_pgdg.returncode != 0, (
+        "with the candidate available ONLY from the distro archive the step carried "
+        "on — that is the silent fallback #12051 exists to remove: the drill runs and "
+        f"nobody learns that apt.postgresql.org was never reached: {not_pgdg_combined!r}"
+    )
+    assert "REACHED_PAST_PRECONDITION" not in not_pgdg.stdout, (
+        "the step continued past the origin check with no PGDG candidate, so an "
+        f"egress failure that apt only WARNS about is invisible: {not_pgdg_combined!r}"
+    )
+    assert "::error::" in not_pgdg_combined, (
+        "the origin check stopped the step but named nothing — a soft index failure "
+        f"must read as THIS defect, not as apt's own text: {not_pgdg_combined!r}"
     )
 
     # ⛔ THE OTHER NAMED BRANCH — `apt-get update` failing (repo, key or egress).
