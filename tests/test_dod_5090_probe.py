@@ -2215,10 +2215,19 @@ def test_the_shipped_default_is_searched_not_assumed(monkeypatch):
     rather than only the ambient env — `measure()` clears the env, so an
     env-only read would report `False` forever and bullet 1 could never see a
     shipped default.
+
+    ⛔ `#11455`: the value the ROW reports is the DEPLOYMENT reading
+    (`shipped["deployment"]["on"]`), not the any-surface bool — so this falsifier
+    is written against that field and against the per-surface census the row must
+    carry. Asserting `shipped["on"]` here would re-pin the exact single-bool
+    reading the issue exists to remove.
     """
     monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
     shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
     assert isinstance(shipped["on"], bool), shipped
+    deployment = shipped["deployment"]
+    assert isinstance(deployment["on"], bool), shipped
+    assert set(deployment["surfaces"]) <= set(shipped["surfaces"]), shipped
     # ⛔ `searched` is the WALK (every file this repo's shipped surfaces hold),
     # `mentions` is the subset that names the flag. The previous version of this
     # falsifier asserted `shipped["searched"]` was non-empty and justified it as
@@ -2235,7 +2244,16 @@ def test_the_shipped_default_is_searched_not_assumed(monkeypatch):
         assert hit.split(":")[0] in shipped["searched"], hit
     row = probe.score_rule_bullet()
     note = next(n for n in row.notes if n.startswith("gate enabled by default:"))
-    assert f"gate enabled by default: {shipped['on']}" in note, (note, shipped)
+    assert f"gate enabled by default: {deployment['on']}" in note, (note, shipped)
+    # The census the issue asks for: EVERY surface this repo ships is named with
+    # its state, and the armed/silent split is stated — so a reader can tell a
+    # measured `True` from a sampled one without re-running the walk.
+    assert "per surface:" in note, note
+    for rel in probe.CONFIG_SURFACES:
+        assert f"{rel}=" in note, (rel, note)
+    assert "deployment surfaces that can arm a deployed process:" in note, note
+    for rel in deployment["surfaces"]:
+        assert f"{rel}=" in note, (rel, note)
 
 
 @pytest.mark.parametrize("text", [
@@ -2279,6 +2297,438 @@ def test_a_line_that_merely_mentions_the_flag_is_not_a_shipped_default(
     assert shipped["on"] is False, shipped
     # It is still RECORDED — a mention is reported, just not scored as a value.
     assert shipped["mentions"] == ["config/x.yml"], shipped
+
+
+#: ── `#11455`: the default is a PER-SURFACE reading, not any-one-surface ──────
+def test_the_gate_is_not_read_True_off_ONE_armed_surface(tmp_path, monkeypatch):
+    """The measured shape: `.env.example` arms it, `docker-compose.yml` is silent.
+
+    This is exactly this repo's tree after `#11445`, reproduced on a synthetic root
+    (the falsifier `#11455` states). The row read one bool over all six surfaces, so
+    the armed TEMPLATE published `gate enabled by default: True` while the surface
+    `docker compose up` actually consumes declares nothing — and `#11086` item 4
+    (*"row-1's condition reads True"*) could then be ticked and read as item 1
+    (*"a deployment built from the shipped config rejects an identifier-only row"*),
+    which is false for the compose path.
+
+    So: the any-surface read is REPORTED (`on` — a template that arms the flag is a
+    fact), the deployment read is `False` and NAMES the silent surface, and the row
+    says so in its own text rather than reading a bare `True`.
+    """
+    (tmp_path / ".env.example").write_text("TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    environment:\n      FOO: bar\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is True, shipped
+    assert shipped["armed"] == [".env.example"], shipped
+    assert shipped["deployment"]["on"] is False, shipped
+    assert shipped["deployment"]["silent"] == ["docker-compose.yml"], shipped
+    note = _gate_note(shipped)
+    assert "gate enabled by default: False" in note, note
+    assert ".env.example=ON" in note, note
+    assert "docker-compose.yml=OFF" in note, note
+    assert "UNARMED deployment file(s) ['docker-compose.yml']" in note, note
+    # The OFF branch states a PER-FILE fact, not a deployment consequence (fresh
+    # review of PR #12016, P3): a silent compose file that builds from an armed
+    # `Dockerfile*` inherits the image's `ENV`, so the deployment IS armed and the
+    # unqualified "a deployment built from them runs with the gate OFF" published the
+    # opposite of what the walk measured. Pin the qualification, not just the claim.
+    assert "read from that file ALONE the gate is off" in note, note
+    assert "INHERITS that image's `ENV`" in note, note
+    # ⛔ The OFF branch closes on PER-FILE semantics, never on a negation of the
+    # sentence above it (fresh review of PR #12016, P2): the clause used to read
+    # "This condition is SCOPED to the surface(s) that arm it (.env.example) and is
+    # NOT a claim about a deployment built from the silent path(s)" — naming the
+    # ANY-SURFACE template as the population of a DEPLOYMENT reading, and telling the
+    # reader the row says nothing about `docker compose up` (the `#11455` reading).
+    assert "this reading is PER FILE" in note, note
+    assert "is NOT a claim about a deployment built from the silent path" not in note, note
+    # ⛔ …and neither spelling of the wrong-population scope may come back: the clause
+    # named `shipped["armed"]` (the ANY-SURFACE template list) as the population of a
+    # DEPLOYMENT reading. `.env.example` cannot arm a deployment on its own.
+    assert "SCOPED to the surface(s) that arm it" not in note, note
+
+
+def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
+        tmp_path, monkeypatch):
+    """The `#11455` CLAUSE, SCORED — one armed TEMPLATE must not complete row 1.
+
+    ⛔ Fresh review of PR #12016 (P2): nearly every `probe.score_rule_bullet()` call
+    site in this file feeds a reading in which `shipped["on"]` and
+    `shipped["deployment"]["on"]` AGREE — `_fake_shipped` sets both from one argument,
+    and `_row_one_fixture` arms `docker-compose.yml`, which is both an any-surface and a
+    deployment surface. ⛔ NO COUNT IS STATED HERE ON PURPOSE: every commit that adds a
+    call site moves it, and this PR's own fix commits already did, three times over. Do
+    not substitute `31 + 1` either — measure. And a bare `grep -c` over this file also
+    matches THIS sentence, so it over-reports by one (fresh review of PR #12016, P3).
+    The call sites that DIVERGE are this test, the `#11455` row-holds test below, and
+    `test_the_shipped_default_is_searched_not_assumed` — which scores the REAL tree but
+    asserts only the note, never `row.verdict`. So reverting the one line
+    `on_by_default = deployment["on"]` to `shipped["on"]`, or folding `ambient` back
+    into it, left the WHOLE suite green — and `row.verdict` is the artefact `#11086`
+    item 4 is ticked on, so the clause `#11455` exists for was pinned nowhere.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    # The divergent shape: the TEMPLATE arms the flag, the deployment surface does not.
+    (tmp_path / ".env.example").write_text("TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers",
+                        lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is True, shipped
+    assert shipped["deployment"]["on"] is False, shipped
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert "docker-compose.yml" in hold, hold
+    # ⛔ The TEMPLATE branch, pinned (round-12 review, P3): with `.env.example` the only
+    # armed surface the intersection with the deployment surfaces is EMPTY, so the note
+    # must carry the template clause and NOT the deployment one. Without this the branch
+    # selection could be inverted (`if shipped["armed"] else`) and the whole suite stayed
+    # green — measured — while the real tree, the shape a reader actually reads, printed
+    # "the surface(s) that do arm it () are themselves deployment files, so a build that
+    # uses one of them carries the flag" (EMPTY parentheses: the clause interpolates the
+    # intersection, which the mutated condition never computes).
+    assert "do not deploy the container's environment on their own" in hold, hold
+    assert "the flag is armed in deployment file(s)" not in hold, hold
+    # ⛔ The `#11455` sentence lives in THIS arm and must be PINNED here (fresh review
+    # of PR #12016, P3): it was moved out of the shared tail, and nothing asserted its
+    # presence — deleting it left the whole file green while the real tree, which takes
+    # this very arm, lost the reading from the published row.
+    assert "no armed non-deployment surface makes this a shipped default" in hold, hold
+    assert "`#11455` reading" in hold, hold
+    # ⛔ …and the noun is population-neutral ON PURPOSE: this arm is reached by ANY
+    # armed non-deployment surface, and `config/` and `.github/workflows` are IN that
+    # population, so calling it "a TEMPLATE" would name a shape narrower than the arm's.
+    # ⛔ Stated as a SHAPE, not a measurement: on this tree both read OFF, so asserting
+    # that they arm it would be a measurement the walk never made (fresh review of PR
+    # #12016, P3 — this comment previously said they "arm the flag", which is false).
+    assert "one armed TEMPLATE" not in hold, hold
+
+    # ⛔ And the THIRD shape, where NOTHING arms the flag at all (fresh review of PR
+    # #12016, P3). The two-arm form published "the surfaces that do arm it (none) do
+    # not deploy the container's environment on their own" and closed "one armed
+    # TEMPLATE is not a shipped default" — naming a set as `none` while still speaking
+    # about the surfaces that DO arm it, and asserting a template where zero templates
+    # arm the flag. A published diagnostic must name ITS OWN state, not a neighbour's;
+    # the `#11455` reading now lives in the arm where a template really does arm it.
+    (tmp_path / ".env.example").write_text("SOME_OTHER_VAR=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["armed"] == [], shipped
+    assert shipped["deployment"]["armed"] == [], shipped
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert "no shipped surface arms it at all" in hold, hold
+    assert "(none)" not in hold, hold
+
+    # ⛔ And the FOURTH shape, where the only candidate surface could not be READ
+    # (fresh review of PR #12016, P3). `shipped["armed"]` holds only `ON` rels, so an
+    # UNMEASURED surface is absent from it too — and the arm above would then publish
+    # "no shipped surface arms it at all" over a path the walk never read, the exact
+    # absence-over-UNREAD claim `flag_in_shipped_configs` forbids ("a file that could
+    # not be read is not a file that is silent"). The 2 MB bound is the walk's own.
+    (tmp_path / ".env.example").write_text(
+        "#" + "x" * 2_100_000, encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["armed"] == [], shipped
+    assert shipped["unmeasured"] == [".env.example"], shipped
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert "could not be read" in hold, hold
+    assert "UNMEASURED here, not a measurement" in hold, hold
+    assert "no shipped surface arms it at all" not in hold, hold
+
+    # ⛔ And a HIT in the same surface root as an unreadable file must still read
+    # ARMED (fresh review of PR #12016, P3). `UNMEASURED` used to SUPERSEDE `ON`, so
+    # such a root was dropped from `armed` entirely and the note then published "no
+    # surface the walk could READ arms it" over a file it had just READ arming it — an
+    # absence asserted over a positive measurement. A hit is a positive measurement; an
+    # unreadable sibling adds uncertainty about the files not read, it cannot
+    # un-measure one the walk did read. The unreadable file must nonetheless stay
+    # REPORTED, which is the arm that keeps this from becoming a quiet OFF.
+    (tmp_path / ".env.example").write_text("SOME_OTHER_VAR=1\n", encoding="utf-8")
+    cfg = tmp_path / "config"
+    cfg.mkdir(exist_ok=True)
+    (cfg / "armed.yml").write_text(
+        "value_gate:\n  TORTOISE_EMBED_GATE: 1\n", encoding="utf-8")
+    (cfg / "big.yml").write_text("#" + "x" * 2_100_000, encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["armed"] == ["config"], shipped
+    assert shipped["unmeasured"] == [], shipped
+    assert shipped["unreadable"] == ["config/big.yml"], shipped
+    row = probe.score_rule_bullet()
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert "the surface(s) that do arm it (config)" in hold, hold
+    assert "could not be read" not in hold, hold
+
+    # …and the `ambient` HALF of the same clause: a lane's exported flag is not a
+    # DEFAULT. With the switch armed in the ENVIRONMENT and the deployment still
+    # silent, an `ambient or deployment["on"]` reading turns this row `MET` — the
+    # `#11455` defect in its other direction, which is why `measure()` pins the
+    # switches OFF before scoring.
+    monkeypatch.setenv("TORTOISE_EMBED_GATE", "1")
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+
+
+def test_every_shipped_surface_is_named_with_a_state(tmp_path, monkeypatch):
+    """ON / OFF / ABSENT / UNMEASURED per surface — never a single bool.
+
+    `#11455`'s Targets: "for EVERY surface in `CONFIG_SURFACES` the row note states
+    ON / OFF / absent". The four states are distinct on purpose: an absent compose
+    file and a silent one are different facts, and an UNREADABLE file is neither —
+    silence is a measurement, and a surface that could not be read must not be read
+    as silent (that is the UNMEASURED arm, tested separately below).
+    """
+    (tmp_path / ".env.example").write_text("TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "x.yml").write_text("nothing here\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    states = {rel: shipped["per_surface"][rel]["state"] for rel in probe.CONFIG_SURFACES}
+    assert states == {
+        ".env.example": "ON",
+        "docker-compose.yml": "OFF",
+        "docker-compose.yaml": "ABSENT",
+        "Dockerfile": "ABSENT",
+        "config": "OFF",
+        ".github/workflows": "ABSENT",
+    }, states
+    note = _gate_note(shipped)
+    for rel, state in states.items():
+        assert f"{rel}={state}" in note, (rel, state, note)
+
+
+def test_an_unreadable_deployment_surface_is_UNMEASURED_not_silent(
+        tmp_path, monkeypatch):
+    """A file the walk could not read makes the surface UNMEASURED, never OFF.
+
+    `#11455`'s posture (`#11465`'s too): a row that cannot be read is UNMEASURED,
+    never a pass. "Silent" is a MEASUREMENT; a surface half of which was never read
+    cannot supply it, and reading it as OFF would blame the product's config for the
+    instrument's own blindness.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "environment:\n  TORTOISE_EMBED_GATE: \"1\"\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    real_read_text = Path.read_text
+
+    def _boom(self, *a, **kw):
+        if self.name == "docker-compose.yml":
+            raise OSError("unreadable")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["docker-compose.yml"]["state"] == "UNMEASURED", shipped
+    assert shipped["deployment"]["on"] is False, shipped
+    assert shipped["deployment"]["unmeasured"] == ["docker-compose.yml"], shipped
+    note = _gate_note(shipped)
+    # ⛔ The leading value is UNMEASURED, never `False`: `False` is an answer about a
+    # population this run could not read (fresh review of PR #12016, P3).
+    assert "gate enabled by default: UNMEASURED" in note, note
+    assert "gate enabled by default: False" not in note, note
+    assert "docker-compose.yml=UNMEASURED" in note, note
+
+
+def test_a_tree_with_NO_deployment_surface_is_UNMEASURED(tmp_path, monkeypatch):
+    """No compose file and no Dockerfile: nothing can answer "what a deployment gets".
+
+    The pre-`#11455` bool reported `False` here, which reads as "the config sets
+    nothing" — a claim about a population that does not exist. The row must say
+    UNMEASURED and hold, and must not claim a default either way.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)  # rule tree + one armed compose surface
+    (tmp_path / "docker-compose.yml").unlink()  # …and now no deployment surface at all
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is False, shipped
+    assert shipped["deployment"]["present"] == [], shipped
+    assert shipped["deployment"]["measured"] is False, shipped
+    assert shipped["deployment"]["on"] is False, shipped
+    note = _gate_note(shipped)
+    assert "gate enabled by default: UNMEASURED" in note, note
+    assert "no deployment surface exists" in note, note
+    # …and the ROW holds on it, naming UNMEASURED rather than "the config sets
+    # nothing" — the misattribution `#11455`'s third requirement forbids.
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = next(n for n in row.notes if n.startswith("shipped default UNMEASURED"))
+    assert "present none" in hold, hold  # names the empty POPULATION, not a verdict
+    assert "never True" in hold, hold
+
+
+def test_an_ARMED_deployment_surface_reads_ON(tmp_path, monkeypatch):
+    """The positive pole: the tighter reading must not become unable to say True.
+
+    Without this case a probe that could never report an armed deployment would pass
+    every negative above — the mirror objection `#11444`'s MET-pole test exists for.
+    """
+    (tmp_path / ".env.example").write_text("TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    environment:\n      TORTOISE_EMBED_GATE: \"1\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["present"] == ["docker-compose.yml"], shipped
+    assert shipped["deployment"]["on"] is True, shipped
+    assert shipped["deployment"]["silent"] == [], shipped
+    note = _gate_note(shipped)
+    assert "gate enabled by default: True" in note, note
+    assert "every deployment file that builds the Tortoise process is armed" in note, note
+
+
+def test_an_armed_compose_file_does_not_stand_for_the_IMAGE_build_files(
+        tmp_path, monkeypatch):
+    """`Dockerfile` is a CLASS, and every variant is a deployment input of its own.
+
+    Fresh review of PR #12016 (P2), measured on THIS tree: the image build files are
+    `Dockerfile.hosted` (`deploy-hosted.yml` builds it) and `Dockerfile.selfhost`
+    (`docker-compose.yml`'s `build.dockerfile`) — there is no plain `Dockerfile`, so
+    an exact-filename walk read NEITHER and reported the surface `ABSENT`. That left
+    the same false PASS one surface-pair over: once `#11086` arms the compose file,
+    `deployment["on"]` would read `True` off it while the hosted image ships the gate
+    off, and the note's "every existing deployment surface is armed" would tell a
+    reader the population was complete when two of its members were never walked.
+
+    So the deployment reading is per FILE (compose files and every `Dockerfile*`),
+    and one armed compose file cannot stand in for a silent image build.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  t:\n    environment:\n      TORTOISE_EMBED_GATE: \"1\"\n",
+        encoding="utf-8")
+    (tmp_path / "Dockerfile.hosted").write_text(
+        "FROM python:3.12\nENV HF_HOME=/app\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.selfhost").write_text(
+        "FROM python:3.12\nENV TORTOISE_DB_PATH=/data\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped
+    assert shipped["per_surface"]["Dockerfile"]["searched"] == [
+        "Dockerfile.hosted", "Dockerfile.selfhost"], shipped
+    assert shipped["deployment"]["present"] == [
+        "docker-compose.yml", "Dockerfile.hosted", "Dockerfile.selfhost"], shipped
+    assert shipped["deployment"]["armed"] == ["docker-compose.yml"], shipped
+    assert shipped["deployment"]["on"] is False, shipped
+    note = _gate_note(shipped)
+    assert "gate enabled by default: False" in note, note
+    assert "Dockerfile.hosted=OFF" in note and "Dockerfile.selfhost=OFF" in note, note
+
+
+def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
+        tmp_path, monkeypatch):
+    """The VERDICT, not just the note: an unarmed deployment surface holds row 1.
+
+    `#11455` exists because the row reached `MET` on one armed template while the
+    compose path shipped the gate off; the row's own hold note must name that path.
+    ⛔ WHAT MOVES ON THIS TREE IS THE CLAUSE, NOT THE VERDICT (fresh review, P3,
+    measured): row 1 is `PARTIAL` on BOTH sides of this change, and only
+    `gate enabled by default` moves `True` → `False`, which is the field `#11086`
+    item 4 is ticked on. An earlier draft of this docstring said the row
+    "moves `MET` → `PARTIAL`", which misleads the other way too: arming
+    `docker-compose.yml` ALONE does not flip it back, because the two `Dockerfile*`
+    files stay silent (measured at this head). The VERDICT flip is pinned on the
+    divergent fixture in
+    `test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool`.
+    ⛔ NO attribution of WHICH writer held the row at `origin/main` is stated here,
+    on purpose. Two review rounds each caught a wrong one — the first draft named
+    `session_indexer::main`, which the register declares as a `recognised_producer`;
+    the second named the mechanism's history, which is itself a claim that rots.
+    This test does not read that writer, so it does not claim it: the shape is
+    pinned where it is measured, in `test_the_LIVE_register_credits_every_writer…`
+    and the census tests.
+
+    This fixture is also WHY the verdict cannot move here: `_row_one_fixture` arms
+    `docker-compose.yml` and deliberately no `.env.example`, so overwriting the
+    compose file with `services: {}` leaves the tree with no armed surface under
+    EITHER clause — the hold this test asserts is the deployment one, and it says so.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers", lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert "docker-compose.yml" in hold, hold
+    # ⛔ The hold must not state a DEPLOYMENT consequence it did not measure (fresh
+    # review of PR #12016, P2): a silent compose file that BUILDS from an armed image
+    # build file inherits that image's `ENV`, so "a deployment built from them runs
+    # with the rule off" was false for exactly the shape below — the same
+    # per-file-vs-merged-view conflation the note builder above had already been
+    # corrected for. Both notes now qualify it.
+    assert "Read from that file ALONE the deployment is unarmed" in hold, hold
+    assert "INHERITS that image's `ENV`" in hold, hold
+
+    # The latent shape, executed: the compose file is silent while a DEPLOYMENT file
+    # (`Dockerfile.selfhost`) arms the flag — the two facts the qualification exists
+    # for. ⛔ This walk globs `Dockerfile*` only; it does NOT parse the compose file's
+    # `build:` stanza, so what this fixture pins is the PER-FILE reading and the note's
+    # scoping of it, not a measured compose→image inheritance (that merge is `#12022`).
+    (tmp_path / "Dockerfile.selfhost").write_text(
+        'FROM python:3.12-slim\nENV TORTOISE_EMBED_GATE="1"\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["on"] is False, shipped
+    assert shipped["deployment"]["armed"] == ["Dockerfile.selfhost"], shipped
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert "Read from that file ALONE the deployment is unarmed" in hold, hold
+    # ⛔ And the SIBLING note carries the same defect class (round-13 review, P3): the
+    # gate note led with "a deployment built from that file ALONE runs with the gate
+    # OFF" and retracted it a sentence later — and this shape makes it reachable, not
+    # hypothetical: `docker-compose.yml` really sets
+    # `build.dockerfile: Dockerfile.selfhost`, so a compose deployment can carry the
+    # image's `ENV`. The note must state the PER-FILE fact and name the merge as its
+    # scope, never assert the deployment consequence it then takes back.
+    gate_note = probe.shipped_default_note(
+        probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE"),
+        "TORTOISE_EMBED_GATE", False)
+    assert "read from that file ALONE the gate is off" in gate_note, gate_note
+    assert "does not model a compose file that BUILDS from an armed" in gate_note, gate_note
+    assert "a Tortoise deployment built from that file" not in gate_note, gate_note
+    # ⛔ And the OTHER half of the same conflation (round-11 review, P2): with an armed
+    # surface that IS a deployment file, the note must NOT claim that surface "does
+    # not deploy the container's environment on their own" — a build using it carries
+    # the flag. The clause is scoped to templates; here it states the opposite fact.
+    assert "do not deploy the container's environment on their own" not in hold, hold
+    # ⛔ The arm-1 wording, pinned by a phrase ONLY it produces. The old pin
+    # (`"themselves deployment files" in hold`) could not discriminate, because the
+    # old noun made the sentence a tautology — every rewording kept the pin green, so
+    # reverting to the over-claiming form went unnoticed (fresh review of PR #12016,
+    # P3). The negative arm is what stops that noun returning.
+    assert "the flag is armed in deployment file(s) (Dockerfile.selfhost)" in hold, hold
+    assert "the surface(s) that do arm it" not in hold, hold
+    # ⛔ …and the clause must name the armed VARIANT, not the surface ROOT (fresh
+    # review of PR #12016, P3). The population this clause speaks about is per FILE,
+    # so interpolating the root intersection published "(Dockerfile) … a build that
+    # uses one of them carries the flag" while the walk had armed exactly one
+    # variant — a class claim over a per-file measurement, which is the R7/R10
+    # false-PASS this PR removes. `(Dockerfile)` cannot be a substring of
+    # `(Dockerfile.selfhost)`, so the negative arm is exact rather than fuzzy.
+    assert "(Dockerfile.selfhost)" in hold, hold
+    assert "(Dockerfile)" not in hold, hold
+
+    # ⛔ And no clause on THIS shape may scope the reading to `shipped["armed"]` — the
+    # ANY-SURFACE armed list is the TEMPLATE here, while this note's subject is the
+    # DEPLOYMENT population (`silent` = ['docker-compose.yml'], `armed` =
+    # ['Dockerfile.selfhost']), which the note names correctly four words away. That
+    # mix is the P2 this round removes, so pin it OUT on the shape that prints both.
+    shipped_default = _gate_note(shipped)
+    assert "UNARMED deployment file(s) ['docker-compose.yml']" in shipped_default, shipped_default
+    assert "Dockerfile.selfhost=ON" in shipped_default, shipped_default
+    assert "SCOPED to the surface(s) that arm it" not in shipped_default, shipped_default
 
 
 @pytest.mark.parametrize("text", [
@@ -3625,8 +4075,55 @@ def _fake_rule_tree(tmp_path) -> None:
 
 
 def _fake_shipped(on: bool) -> dict:
-    return {"on": on, "surfaces": ["Dockerfile"], "searched": ["Dockerfile"],
-            "unreadable": [], "mentions": [], "files": ["Dockerfile"] if on else []}
+    """A shipped-config reading in the SHAPE `flag_in_shipped_configs` returns.
+
+    ⛔ `#11455` moved row 1 onto `deployment["on"]` — the every-existing-deployment-
+    surface reading — so this fake MUST carry a `deployment` block. Without it the
+    row-1 tests would be measuring a `KeyError` (or a `shipped["on"]` fallback this
+    change exists to remove), not the clause they name.
+
+    `Dockerfile` is the deployment surface the fake ships: the same name the
+    pre-`#11455` fake used, now with the state that makes the reading real.
+    """
+    state = "ON" if on else "OFF"
+    return {
+        "on": on,
+        "surfaces": ["Dockerfile"],
+        "per_surface": {"Dockerfile": {"state": state, "hits": [],
+                                       "files": {"Dockerfile": {"state": state, "hits": []}},
+                                       "searched": ["Dockerfile"], "unreadable": []}},
+        "armed": ["Dockerfile"] if on else [],
+        "silent": [] if on else ["Dockerfile"],
+        "absent": [],
+        "unmeasured": [],
+        "deployment": {
+            "surfaces": ["Dockerfile"],
+            "files": {"Dockerfile": state},
+            "present": ["Dockerfile"],
+            "armed": ["Dockerfile"] if on else [],
+            "silent": [] if on else ["Dockerfile"],
+            "absent": [],
+            "unmeasured": [],
+            "measured": True,
+            "on": on,
+        },
+        "searched": ["Dockerfile"],
+        "unreadable": [],
+        "mentions": [],
+        "files": ["Dockerfile"] if on else [],
+        "documented_only": 0,
+    }
+
+
+def _gate_note(shipped: dict) -> str:
+    """Row 1's shipped-default note, built from a shipped reading.
+
+    Calls the tool's OWN note builder (the function the row calls), so the tests
+    below pin the text a reader sees rather than a copy of it — and they can do it
+    on a root holding only config surfaces, without standing up row 1's whole rule
+    tree and writer population.
+    """
+    return probe.shipped_default_note(shipped, "TORTOISE_EMBED_GATE", False)
 
 
 def _gated_writer(name: str) -> dict:
@@ -3864,8 +4361,20 @@ def _registered_population(monkeypatch, declarations, writers) -> None:
 
 def _row_one_fixture(tmp_path, monkeypatch):
     """A tree where the rule holds and the gate is shipped ON, so only the WRITER
-    clauses of row 1 can decide the verdict."""
+    clauses of row 1 can decide the verdict.
+
+    ⛔ `#11455`: the flag must be armed in a DEPLOYMENT surface, not only in a
+    template — row 1 reads the deployment subset, so an `.env.example` here would
+    (correctly) leave the row at `PARTIAL` and every writer-clause test below would
+    then pass for a reason it never names. `docker-compose.yml` is the file this
+    repo's own deployment path uses, so the fixture arms that one.
+    """
     _fake_rule_tree(tmp_path)
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  tortoise:\n    environment:\n"
+        '      TORTOISE_EMBED_GATE: "1"\n',
+        encoding="utf-8",
+    )
     monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
 
 
@@ -7283,7 +7792,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # existed, but the note that enrols it did not until `#12000`'s F1b note),
     # and a provenance asserted here would be the false record this note exists
     # to prevent. ⛔ The count is SCOPED
-    # to that head rather than re-cut, because this file collects 171 now and no
+    # to that head rather than re-cut, because this file collects 179 now and no
     # run of it can report
     # 152; an unscoped figure here would be the stale-measurement defect §6 of the
     # census doc exists to forbid. What closed the gap is the AST guard below —
@@ -7311,8 +7820,8 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # DELTA on purpose, not as an absolute split: the split moves with the
     # interpreter and the LANE — the docstring of
     # `test_the_census_doc_collects_what_the_file_collects` (below) says so
-    # itself — so an absolute figure here is the same rot this row exists to
-    # forbid. The reason was
+    # itself — so an absolute MUTATED split here is the same rot this row exists
+    # to forbid. The reason was
     # honest and unstated:
     # the row-set test above performs the same assertion on the real doc, so the
     # residual stays protected while the DORMANCY does not — a one-line refactor
@@ -7371,11 +7880,14 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `170 passed, 1 skipped`
-    (the skip is the `<3.12` re-derive) and the carve-out lane reads
-    `169 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
-    fixture, which only a lane with a `TORTOISE_DB_URI` satisfies). Both splits add
-    to the `171` re-derived below, which is why the doc states its split as
+    defect. Measured at this tree: the docker lane reads `178 passed, 1 skipped`
+    (the skip is the `<3.12` re-derive; the three `main` reds this docstring used
+    to record — `#12045`'s undeclared `tortoise.api::_emit` /
+    `_verify_record_vector_width` writers — are cleared by `#12042`, landed as
+    `b367c54214a2`) and the carve-out lane reads `177 passed, 2 skipped` (that
+    skip plus `tests/_live_utils.py`'s live-graph fixture, which only a lane with
+    a `TORTOISE_DB_URI` satisfies). Both splits add to the `179` re-derived
+    below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
     root = Path(probe.__file__).resolve().parent.parent

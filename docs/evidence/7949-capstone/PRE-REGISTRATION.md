@@ -520,7 +520,7 @@ option A (2026-09-25) put the version anchor on the **derivation** link, and the
 names those classes: `_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})`
 (`tortoise/projection/edges.py:843`) — `:Object` links are identity/mention links and are pinned
 property-free by `tests/test_source_version_references_5199.py::test_identity_link_stays_property_free`
-(`tortoise/projection/edges.py:817-819`, `docs/architecture/STORAGE-ARCHITECTURE.md:763`). Counting `:Object` mentions in
+(`tortoise/projection/edges.py:817-819`, `docs/architecture/STORAGE-ARCHITECTURE.md:789`). Counting `:Object` mentions in
 E3's denominator therefore made `= 1.000` **unreachable as registered**: every mention link is
 unanchored by rule, so a run would have reported the decision as a defect. `:Point` carries the anchor
 on the node itself (`#5038`), which is why the derivation set is those two link labels **plus**
@@ -2656,18 +2656,23 @@ to answer.
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit,
   per §8's rule for *any* edit to this file.
-- **Also re-derived by the same merges: four `edges.py` / `record_projection.py` cites in the LIVE
-  carriers** — §3.4 (the identity/mention rule, `edges.py:817-819`), §3.7 (both, twice), and §7 —
-  the composition fold (`edges.py:1619-1620`), `create_edge`'s own predicate set
-  (`edges.py:717-726`, which admits the composition spelling and refuses its sibling), the
-  identity/mention rule that keeps `Object` property-free (`edges.py:817-819`), and the record
-  projection's copy of the same fold map (`record_projection.py:4996-4997`) — and the
-  `_DERIVATION_REFERENCES_LABELS` cite in §3.7 (`edges.py:843`). Citations only; no criterion
-  value moved.
+- **Also re-derived by the same merges: five `edges.py` occurrences in the LIVE carriers** — §3.4
+  carries two (`edges.py:817-819`, the identity/mention rule that keeps `Object` property-free,
+  and `edges.py:843`, `_DERIVATION_REFERENCES_LABELS`), §3.7 carries two (`edges.py:1619-1620`,
+  the four-spelling hierarchy fold; `edges.py:717-726`, `create_edge`'s own predicate set, which
+  admits the composition spelling and refuses its sibling), and §7 carries the fold again at the
+  `a1_relation_family_fold` site. The sixth re-derivation — the record projection's own copy of
+  that fold map (`record_projection.py:4996-4999` — all four spellings, not the opening two: this
+  is the record's only pointer to that map, so a later edit to `contains` or `wraps` must be
+  inside the range) — has **no live carrier**: its only occurrence OUTSIDE this entry is §10.11's
+  history entry, which keeps the number it measured (`record_projection.py:4771-4779`). Its
+  current value therefore lives **here and nowhere else**, which is a property of this record a
+  reader should not have to discover by grep. Citations only; no criterion value moved.
 - ⛔ **§10.1 and §10.11 are HISTORY and were NOT re-pointed.** Their numbers (`edges.py:747`,
   `edges.py:721-723`, `edges.py:1513`, `record_projection.py:4771-4779`, `edges.py:621-632`) name
   the head each entry measured, per §10.19/§10.22/§10.24 — an earlier cut of this branch's own
   cite sweep edited them in place and was reverted. A reader who needs the live numbers takes
-  them from §3.4/§3.7/§7 above, or from this entry's list.
+  the `edges.py` ones from §3.4/§3.7/§7 above, and the `record_projection.py` one from this
+  entry, because no live carrier holds it.
 - **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
   supersede marker.

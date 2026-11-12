@@ -2464,7 +2464,7 @@ def test_a_dead_SOURCE_is_not_an_active_edge(sdk):
     _obj(sdk, "PolicyV2")
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
 
-    rows = [i for i in _issues(sdk, "superseded_object_active_edges")]
+    rows = _issues(sdk, "superseded_object_active_edges")
     assert rows == [], (
         "a dead source is not an active edge, and the belief was lost at the "
         f"ARCHIVE, not here: {[i.detail for i in rows]}")

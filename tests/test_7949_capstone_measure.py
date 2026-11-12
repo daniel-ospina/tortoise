@@ -5067,21 +5067,24 @@ _EPIC_CITE_SOURCES = {
     "ci_surfaces": _REPO / "config/ci-surfaces.yml",
     # ⛔ `relation_write.py`'s `plan_hierarchy_edges` call is cited by two documents
     # (and by an artifact row that talks about the same seam) and by NOTHING else in
-    # this file. Measured commit-by-commit across ALL of #12112's 36 commits (every
-    # one of them carries the call; none predates it): it sat at `:631` on
-    # `origin/main` (8 commits), then `:687` (22), then `:695` (4), then `:700` at
-    # the squash (2) — **four** numbers, not three. ⛔ An earlier draft closed that
-    # sentence with "the documents trailing one behind at each step"; a review could
-    # not reproduce it (over the same 36 commits the citing document was current at
-    # some steps and two behind at another), so the count stands and the gloss is
-    # gone. A claim labelled Measured must reproduce. (`:687` is the move an earlier
-    # draft of this comment dropped, and dropping it is the same error the comment is
-    # about.) ⛔ Do not mix
-    # denominators: restricted to the 30 SINGLE-PARENT commits the split is
-    # 8 / 18 / 3 / 1, and an earlier draft took `:631` and `:687` from the 36-commit
-    # population but `:695` and `:700` from the 30-commit one — the arithmetic closed
-    # only because it then asserted two commits predated the call, which no commit
-    # does. One population, or the numbers mean nothing.
+    # this file. Measured commit-by-commit across ALL 36 of #12112's commits — every
+    # object confirmed PRESENT (`git cat-file -e`) before it was read. That check is
+    # the whole lesson: `git show <sha>:<path>` exits **128** on an object the clone
+    # lacks, so `git show … 2>/dev/null | grep -c …` prints `0` and reports GREP's
+    # status — an unreadable tree reads exactly like an absent call. That pipeline,
+    # not `git show`, is what let a draft of this comment count unreadable commits as
+    # "pre-dating the call". Correct distribution: `:631` (8 commits), `:687` (22),
+    # `:695` (4), `:700` (2) = 36 — **four** VALUES and **three** moves. (`:687` is
+    # the move the first draft dropped, and dropping it was the same error the comment
+    # is about. `:631` is where `main` already had it, so it is the starting value,
+    # not a move.) The documents trailed by ONE step at two of the three moves and by
+    # TWO at the middle one — measured, not uniform, so "one behind at each step"
+    # would have been a second wrong number in the comment about wrong numbers.
+    # ⛔ Do not mix denominators: restricted to the 30 SINGLE-PARENT commits the split
+    # is 8 / 18 / 3 / 1, and a draft of this comment took `:631` and `:687` from the
+    # 36-commit population but `:695` and `:700` from the 30-commit one — the
+    # arithmetic closed only because it then asserted two commits predated the call,
+    # which no commit does. One population, or the numbers mean nothing.
     # ⛔ ONE TREE, ONE NUMBER: `:631` is the call at `aebf91352bfd` and is
     # `declared=None,` at the branch's forward merge `5b17de24de42` (that merge is what
     # made the number wrong). Quoting either tree's reading as if it described both is
@@ -5127,18 +5130,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # whole sentence's three numbers, so a re-derivation of one cannot leave
         # its neighbours behind the way it did at `a08f7bce3d`.
         ("RECONCILE-A1-A2-A5.md", "`TortoiseSDK._extract_session_v2` at", (
-            # 17974 -> 18571: #12060 adds 179 net lines to sdk.py above this call, and two
-            # forward merges of `origin/main` (`1f28d107cf`, then `c7499ac7a7`,
-            # which carried #12112/#12111) moved the region again, so every number
-            # in this table moved with them. The anchors are unchanged — that is
-            # the point of keying a row on the symbol.
-            ("18571", "relation_write = apply_relation_edges("),
+            # 17974 -> 18728: #12060 adds its own lines to sdk.py above this call,
+            # and every forward merge of `origin/main` (`1f28d107cf`, `c7499ac7a7`
+            # carrying #12112/#12111, then `9828250732`) moved the region again, so
+            # every number in this table moved with them. Re-derived off THIS merged
+            # tree (`grep -nF 'relation_write = apply_relation_edges(' tortoise/sdk.py`),
+            # never carried forward from either side. The anchors are unchanged —
+            # that is the point of keying a row on the symbol.
+            ("18728", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("18570", "from tortoise.relation_write import apply_relation_edges"),
+            ("18727", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18558", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("18715", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5148,8 +5153,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("9829", "subject_binding_available,"),
-            ("9882", "and not subject_binding_available(graph):"),
+            ("9867", "subject_binding_available,"),
+            ("9920", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("6607", "def subject_binding_available(graph) -> bool:"),
@@ -5158,13 +5163,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("9829", "subject_binding_available,"),
-            ("9882", "and not subject_binding_available(graph):"),
+            ("9867", "subject_binding_available,"),
+            ("9920", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("18218", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("18375", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
         # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
@@ -5189,19 +5194,30 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         # and the section bounds
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # At this head (`18ede56f41` + `main` `f0da5505b3`): entry 9941,
-        # `carve_out:` opens 9815, `uri_requiring:` 10146 — so 9941 is inside the
-        # section, and the identical text also sits at 6080 and 8457, which is what
-        # the 5th element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8223) of `surfaces:`, so the resolver's
-        # nearest-column-zero-key rule reports the PARENT: a cite onto 8457 refuses
+        # The file is tool-MAINTAINED, not generated from a source of truth:
+        # `tools/ci_selection.py::register_tests` reads the text, splices the new
+        # entry into the surface's block and writes every other line back verbatim,
+        # which is why it also carries hand-authored prose. Either way the property
+        # this row trips on holds: an insertion anywhere above the entry moves it —
+        # measured on `main` as `#12159` (`33781512b6`) registering
+        # `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`, ONE
+        # insertion that moved every number below it. That is the class here — a
+        # line-number pin over a number another tool owns, not a citation anyone
+        # mis-copied. At THIS merge (`main` `9828250732` plus #12060's own 8-line
+        # registration block, which lands above the entry): entry 9951,
+        # `carve_out:` opens 9825, `uri_requiring:` 10156 — so 9951 is inside the
+        # section, and the identical text also sits at 6090 and 8467 (+8 on `main`'s
+        # 6082 / 8459 for the same cause), which is what the 5th element exists to
+        # refuse. ⚠️ Both of those are INDENTED sub-keys
+        # (`core:` 2235, `sdk:` 8233 — the latter also +8, same cause) of `surfaces:`,
+        # so the resolver's nearest-column-zero-key rule reports the PARENT: a cite onto 8467 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
         # The `plan_hierarchy_edges` CALL, in the two documents that name it, keyed
-        # by the sentence rather than by the number: #12112 moved this line four
-        # times (`631` on main, `687`, `695`, `700`) and each move left a document
-        # behind.
+        # by the sentence rather than by the number: `:631` is where `main` had it,
+        # then #12112 moved it three times (`687`, `695`, `700`) and each move left a
+        # document behind — four VALUES, three moves.
         # ⛔ Three rows, not one, because a row scopes to ONE document + ONE source
         # and the 11083 record is a different file that no sweep reads at all.
         ("RECONCILE-A1-A2-A5.md", "one of them the **call**", (
@@ -5213,12 +5229,32 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("11083/README.md", "calls `pack_hierarchy.plan_hierarchy_edges`", (
             ("700", "planned = plan_hierarchy_edges("),
         ), "relation_write"),
+        # ⛔ The BLOCK that read `` (`:53 :653 :695 :700`), `:695` being the CALL ``
+        # while `:695` was `continue` is why this whole pin exists — printably
+        # self-contradictory. (It is named by its TEXT, not by its markdown line:
+        # its line number is exactly the kind of number these rows exist to stop
+        # trusting, and this commit moved it.) The first version of the table pinned
+        # only the two PROSE sentences and left the block unpinned, so mutating it
+        # back to its previous numbers ran 282 green (measured at `2931c9c59c`,
+        # review cycle 2). A repaired cite that nothing pins is a repair the next
+        # move of the symbol undoes silently.
+        ("RECONCILE-A1-A2-A5.md", "is the same module's own internal", (
+            ("700", "planned = plan_hierarchy_edges("),
+        ), "relation_write"),
+        ("RECONCILE-A1-A2-A5.md", "being the CALL", (
+            ("53", "``pack_hierarchy.plan_hierarchy_edges`` is the oracle"),
+            ("658", "plan_hierarchy_edges,"),
+            ("700", "planned = plan_hierarchy_edges("),
+            ("705", "`plan_hierarchy_edges` returns one"),
+        ), "relation_write"),
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            # 9714 -> 9941: the row was already stale at origin/main (the entry sat
-            # at 9810 there, already past the pin), #12060's +8 in this file and
-            # two forward merges of `origin/main` moved it again — re-derived from
-            # the tree, not from the old number.
-            ("9941", "- test_pack_logic_writeprobe_11083.py"),
+            # 9714 -> 9951: re-derived from THIS merged tree (`awk
+            # '/^- test_pack_logic_writeprobe_11083.py$/{print NR}'
+            # config/ci-surfaces.yml`), never carried forward from either side of
+            # the merge — `main` read 9943 and the branch read 9941, and neither
+            # number describes a tree that adds BOTH. The 8-line delta over `main`
+            # is #12060's own registration block above the entry.
+            ("9951", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
@@ -11348,7 +11384,7 @@ _CITE_QUALIFIER_PATTERN = (
     # optional `(?:-\d+)?` tail the helper reported BOTH of them as UNQUALIFIED — a
     # false BLOCK of a conformant edit whose own message told the author to add the base
     # they had already added (measured by a fresh-context review at `f885a51663`).
-    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:16529-16543`
+    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:17987-18001`
     # (`A2`'s mint seam) is printed UNQUALIFIED in the record, and that is not a false
     # block — the range arm below reads the range OUT OF THE RECORD and asserts both of its
     # endpoints against `tortoise/sdk.py`, so this cite is pinned by derivation instead of
@@ -12176,7 +12212,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # ⛔ AND THE HOLE IS NOT CONFINED TO BARE `:N` CITES — §2 carries NINE FILE-QUALIFIED
         # cites and only THREE are held (main's enumeration, re-measured on this tree at this
         # merge: 9 found, matching this list exactly). Held: `identity_hold.py:125` and
-        # `tortoise/value_gate.py:81` (`_cite` loop below) and `sdk.py:16529-16543` (the count-3
+        # `tortoise/value_gate.py:81` (`_cite` loop below) and `sdk.py:17987-18001` (the count-3
         # range arm) — re-staling each inside §2 reds. UNHELD: `extractor_v2.py:1154`, `:8880`,
         # `:9617`, `:11731-11732`, and the `research-brief.md` / `02-research-brief.md` cites.
         # ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's SCOPE paragraph

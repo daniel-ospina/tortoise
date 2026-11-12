@@ -155,7 +155,7 @@ above (they declare `mechanism: IMPL`, so the `operator` path binds; the predica
 set). The **`mechanism`** leg *is* read at the write door by `declared_mechanisms`
 (`pack_registry.py:1035-1136`, the `CORE_PREDICATES` membership test at `:1136`), consumed by `create_operator`. Unread: (i) the
 **`semantics`** leg — surfaced at `:472-484`, and nothing derives an op_type or direction from it; and (ii)
-**`hierarchies`** — validated only (`pack_registry.py:2388-2402`). ⚠️ The operator writers (`commit_ops.py:426-429`,
+**`hierarchies`** — validated only (`pack_registry.py:2415-2429`). ⚠️ The operator writers (`commit_ops.py:426-429`,
 `sdk.create_operator`) are the **Point-layer** mechanism; they are not evidence about Object→Object.
 
 **R5 · The declared-mechanism registry is a contract, not a list.** `config/v4-mechanisms.yml` — 13 rows,
@@ -167,7 +167,7 @@ closed on a cycle or an `implemented` row on an unbuilt precondition. Four rows 
 (#5087). ⇒ **none of the owner's five assertions has a row.** That is the gap stated as an artifact.
 
 **R6 · The DOOR is the v2 lane, and that corrects the brief.** `hosted_api._capture_lane()`
-(`tortoise/hosted_api.py:17901`) returns `"v2"` **unless** `TORTOISE_SESSION_EXTRACTOR == "m2"`, so
+(`tortoise/hosted_api.py:17926`) returns `"v2"` **unless** `TORTOISE_SESSION_EXTRACTOR == "m2"`, so
 fleet captures land in `_extract_session_v2` → `extract_session_v2` (`tortoise/extractor_v2.py`) — the
 **LLM v2 lane**, not `extractor.py`'s rule extractor (that is the opt-in `m2` lane,
 `_extract_session_llm`). ⚠️ **The brief's premise — "today the fleet writes through the legacy rule
@@ -420,11 +420,11 @@ fan-out respected; C8 holds.
 **The contradiction to adjudicate:** `#4889` ("the Subject layer is unpopulated in production") is
 **CLOSED**, and the owner measured **26 Subjects against 19,300 points**. One of those is false.
 **Produces:** the binder's attach rate (`bind_point_subjects`, `tortoise/subject_binding.py:344`, called
-from `sdk.py`'s point-creation path at `:18218` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
+from `sdk.py`'s point-creation path at `:18375` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
 `subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6607` and
-consumed at `sdk.py:9829`/`:9882` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
+consumed at `sdk.py:9867`/`:9920` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
 this pair is keyed by **symbol**), the slots are absent in the
 corpus, or the graph served is not the graph measured — are decided by evidence.
 **Proof:** Subjects `26 → N` on a real corpus, four families non-zero, both customer readers non-empty —
