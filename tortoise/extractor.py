@@ -1535,9 +1535,18 @@ class LLMExtractor:
                     # removed), while `span` below is DOCUMENT coordinates
                     # `[content_start, content_end]`. The two fields of this
                     # one record therefore cannot be combined: do NOT compute
-                    # the document index as `span[0] + phrase_offset` (measured:
-                    # that lands one char left of the surface on the fixture
-                    # above). Nothing consumes the pair yet; stated because
+                    # the document index as `span[0] + phrase_offset`. The gap is
+                    # NOT a constant — it is the WIDTH OF THE STRIPPED PREFIX:
+                    # measured 0 for a flush-left body and -3 for a body indented
+                    # three spaces (`span[0]+offset` = 53 against a true document
+                    # index of 53 and 56 respectively), so no fixed correction
+                    # exists. (An earlier revision of this note claimed the
+                    # combination "lands one char left"; that does not reproduce.
+                    # A constant-offset story invites a caller to apply a constant
+                    # correction, which is why the measured mechanism replaces it —
+                    # #12102 review P3.) Both arms are pinned by
+                    # `test_the_phrase_offset_does_not_share_a_coordinate_base_with_span`.
+                    # Nothing consumes the pair yet; stated because
                     # the census exists to feed a measurement (#5087 R1) and a
                     # provenance-looking pair that silently disagrees is how a
                     # measurement goes wrong in the quiet direction.
