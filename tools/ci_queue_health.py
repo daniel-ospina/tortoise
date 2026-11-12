@@ -79,15 +79,19 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               per REPO — the PR WORK WAS NOT WITNESSED, for one of three reasons:
               (a) a FEED WAS CUT AT ITS PAGE CAP, so the older runs — the end the
               age clause needs — were never read. ⛔ THE ``pr_running == 0`` QUALIFIER
-              BELONGS TO THE QUEUED LEG ONLY: the cut ``pending``/``requested`` legs
-              degrade here with PR runs EXECUTING (measured: ``pr_running=1`` with
-              ``pending_truncated=True``), so a reader who took the qualifier as part
-              of the cause would rule it out on exactly the shape that produces it;
+              COVERS THE QUEUED *AND* RUNNING LEGS, because those two ride ONE flag
+              (``truncated = queued_truncated or running_truncated``): measured, a cut
+              feed with an EXECUTING PR run present still returns ``OK``, so the
+              qualifier is what decides there. The cut ``pending``/``requested`` legs
+              are the ones that carry NO qualifier — they degrade with PR runs
+              executing (measured: ``pr_running=1`` with ``pending_truncated=True``);
               (b) a WAITING PR-EVENT RUN's current-attempt age is unmeasurable
               (see QueuedRun.wait_age_seconds — not just its created_at); or (c) the
               RUNNING CENSUS IS UNWITNESSED — every run counted in ``pr_running``
-              was UNMEASURED (the jobs probe could not read it, or the probe budget
-              did not reach it), so that count is the pre-#12037 status-string
+              was UNMEASURED, which has THREE routes (the read did not happen, the read
+              did not PROVE the run idle — including an all-``completed`` list whose
+              stillness was never corroborated — or the probe budget never reached
+              it), so that count is the pre-#12037 status-string
               census and cannot certify health. Case (c) is about the CENSUS, not
               the wait: the wait may be perfectly measured while the census is not,
               and the module still refuses ``OK`` on it. (c) is deliberately a
@@ -280,9 +284,9 @@ PR_STARVED = "PR-STARVED"
 #: PR_STARVED (which means nothing of the PR work is executing at all): the two are
 #: true of different queues, and neither may be inferred from the other.
 PR_BACKLOGGED = "PR-BACKLOGGED"
-#: A truncated feed — the QUEUED one (which needs `pr_running == 0` to degrade),
-#: the RUNNING one (whose missing tail is part of the census), OR a cut
-#: ``pending``/``requested`` leg (which needs no such qualifier) — a WAITING PR-event run
+#: A truncated feed — the QUEUED or RUNNING one (ONE flag, so both carry the
+#: `pr_running == 0` qualifier), OR a cut ``pending``/``requested`` leg (which has
+#: none) — a WAITING PR-event run
 #: (queued/pending/requested) whose CURRENT-ATTEMPT age cannot be measured, OR a running
 #: census made entirely of unmeasured runs: the PR work is neither witnessed nor DISPROVED,
 #: so this is not ``OK``. ⛔ The age rule has ONE owner — `QueuedRun.wait_age_seconds` — and
@@ -1028,7 +1032,8 @@ class QueueHealth:
         OLDEST runs, and the oldest queued PR run is the wait clause's only witness. A
         truncated `OK` therefore cannot rule a backlog out. That is the same refusal
         `OK` makes when nothing is executing and the feed was cut — applied here to the
-        GATE, so the verdict keeps saying exactly what it measured.
+        GATE, so the verdict keeps saying exactly what it measured. (The wait witness is
+        the OLDEST waiting PR run over BOTH wait legs, not the queued leg alone.)
         """
         if self.delays_pr:
             return True
@@ -1537,8 +1542,10 @@ def classify_queue(
     def health(verdict: str, **override: Any) -> QueueHealth:
         # A TRUNCATED FEED CANNOT CERTIFY HEALTH. The runs endpoint is newest-first
         # and ignores `sort`/`direction` (measured — see the module docstring), so a
-        # capped read drops the OLDEST runs, and the oldest queued PR run is the age
-        # clause's only witness. With `pr_running == 0` the difference between "PR CI
+        # capped read drops the OLDEST runs, and the oldest WAITING PR run (queued OR
+        # pending — `oldest_pr_age` is a max over both legs, so a pending-only wait IS
+        # the witness) is the age clause's witness. With `pr_running == 0` the difference
+        # between "PR CI
         # is not running" and "we did not read far enough back" is exactly what the
         # truncation destroyed, so `OK` is not available: the verdict degrades to
         # PR-UNWITNESSED and NAMES the lost dimension instead of inferring health.
@@ -1549,9 +1556,10 @@ def classify_queue(
             verdict = PR_UNWITNESSED
             reasons.append(
                 "PR-UNWITNESSED: a feed was cut at the page cap, and the feed is "
-                "NEWEST-FIRST, so its oldest runs were never read — the queued leg's "
-                "oldest run is the AGE clause's only witness, and the in-progress "
-                "leg's is part of the running census; no PR-event run is executing, "
+                "NEWEST-FIRST, so its oldest runs were never read — the oldest "
+                "WAITING run (queued or pending) is the AGE clause's witness, and the "
+                "in-progress leg's feeds the running census; no PR-event run is "
+                "executing, "
                 "so starvation is neither witnessed nor disproved — not reported as OK"
             )
         # ⛔ AND THE SAME REFUSAL FOR THE `pending`/`requested` LEGS, FROM HERE RATHER
@@ -1698,7 +1706,7 @@ def classify_queue(
     def healthy() -> QueueHealth:
         """`OK` — but only when the PR wait was MEASURED and inside the budget.
 
-        Every clause that used to return `OK` returns through here. `OK` is a claim
+        Every clause that returns `OK` through this seam goes via here. `OK` is a claim
         about the QUEUE, and "one PR run is executing" is not evidence that the
         queued PR runs are being served: with 2 executing and 20 queued, the tool
         printed a clean bill of health while the required gate answered in hours.
@@ -1707,8 +1715,12 @@ def classify_queue(
         why it is not routed through the `PR-UNWITNESSED` degradation.
 
         The one `OK` that does NOT come through here is the `no PR-event run is
-        waiting` clause below. For the VERDICT that is sound — with nothing waiting in
-        any READ leg there is no wait to be past a budget — but it is NOT sound for the
+        waiting` clause below. For the VERDICT that is sound ONLY when every wait leg was
+        read to completion — and that is enforced in `health()`, not here: a cut
+        `pending`/`requested` leg demotes the verdict before this seam is reached, because
+        "nothing was read" is not "nothing was waiting". Given that, with nothing waiting
+        in any COMPLETELY READ leg there is no wait to be past a budget — but it is NOT
+        sound for the
         destructive gate: `waiting` is deliberately unread (approval-parked), and a run
         can be absent from all three read legs for reasons this reading cannot see.
         That clause therefore returns `pr_wait_measured=False`,
@@ -1867,13 +1879,19 @@ def classify_queue(
         # `queued` leg alone this clause swallowed a PENDING-ONLY wait and answered
         # `OK` for it — the one reading a destructive gate must not consume.
         reasons.append(
-            "not a flood: no PR-event run is QUEUED or PENDING in either wait leg, "
-            "so starvation of PR CI was not witnessed (an idle fleet looks the same)"
+            "not a flood: no PR-event run was READ as queued or pending in either "
+            "wait leg, so starvation of PR CI was not witnessed (an idle fleet looks "
+            "the same) — and where a leg was cut at its page cap, this says what the "
+            "READ found, not that the leg was empty (the cut is named in its own "
+            "reason above)"
         )
         # `pr_wait_measured=False` EXPLICITLY: there was no wait to read, so this
-        # reading can never certify a queue CLEAR to a destructive gate — there was
-        # nothing in `queued`, `pending` or `requested` to measure, and the fourth
-        # non-completed status (`waiting`) is approval-parked and never read.
+        # reading can never certify a queue CLEAR to a destructive gate — the `queued`,
+        # `pending` and `requested` legs held nothing this reading could MEASURE as a
+        # waiting PR run (and where one of them was cut at its page cap, `health()` has
+        # already demoted the verdict, because "nothing read" is not "nothing there"),
+        # and the fourth non-completed status (`waiting`) is approval-parked and never
+        # read.
         return health(OK, pr_queued=0, oldest_pr_queued_age_seconds=None,
                       pr_wait_measured=False)
     if oldest_pr_age is None:

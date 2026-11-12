@@ -1216,7 +1216,7 @@ def test_an_ok_with_nothing_queued_cannot_certify_the_queue_clear():
     quiet = classify(flood_queued(12))
     assert quiet.verdict == Q.OK
     assert quiet.pr_queued == 0
-    assert any("no PR-event run is QUEUED" in r for r in quiet.reasons), (
+    assert any("no PR-event run was READ as queued or pending" in r for r in quiet.reasons), (
         "the fixture must be the clause under test")
     assert quiet.pr_wait_measured is False, (
         "there was no queued PR-event run, so no wait was read")
