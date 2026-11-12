@@ -938,13 +938,6 @@ _ALLOWED_OPERATOR = {
     'tortoise/sdk.py': {
         # D: SEARCH surface — the FTS/query clause. A name is the query.
         'clauses.append("(toLower(e.name) CONTAINS $q OR any(kw IN e.keywords WHERE toLower(kw) CONTAINS $q))")': 1,
-        # #5509 A: `belief_timeline`'s ONLY remaining name arm — the
-        # UNADDRESSABLE fallback. Reached only when the resolver proved there
-        # is EXACTLY ONE live holder (and it carries no `id`), so this name
-        # cannot name two carriers; `_terminal_excluded` keeps the terminal
-        # holders out. The ambiguous and terminal-only cases are refused before
-        # this branch (test_5509_name_keyed_identity_reads.py).
-        'entity_predicate = ( "(o.name = $topic OR o.canonical_name = $topic) " f"AND {_terminal_excluded(\'o.status\')}")': 1,
         # C: `update_point`'s TAGGED landing witness (#7405), the existence
         # probe for the EDGE half of a write. `:Tag` identity IS its name —
         # the reconciler MERGEs `(t:Tag {name:$tag})` in the same routine

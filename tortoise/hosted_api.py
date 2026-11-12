@@ -21850,6 +21850,13 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # `_upsert_subject` / `_upsert_document`), i.e. one reference with two
     # dispositions, the live/replay parity break R8 forbids.
     for _eid, _name, _exact_only in _deferred_about_objects:
+        # #12120 review: strip ONCE, here. Both sibling sites strip before they
+        # compare (`sdk.py` `_n = name.strip()`, `near_dup_merge.py` the same),
+        # and the arm this one replaces (`resolve_fold_name`) folded — which
+        # strips. Comparing the raw payload spelling made `" The Team "` exact on
+        # the Point channel and on the local path but a MISS on this one, so an
+        # about-object edge that `main` wrote was silently dropped here.
+        _name = str(_name).strip()
         if _exact_only:
             # Fold-equal to a declared subject-kind name: attribute EXACT-name
             # Objects only (the `#4934` rule), never a fold-only carrier. The

@@ -1083,7 +1083,8 @@ def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
     return out
 
 
-def _ref_candidates(entities, label: str) -> list:
+def _ref_candidates(entities, label: str, *, id_idx: int = 1,
+                    status_idx: int = 3) -> tuple[list, set]:
     """The candidate ROWS a REF probe may address, from grouped entities.
 
     Two rules meet here and must not be traded for each other:
@@ -1102,25 +1103,54 @@ def _ref_candidates(entities, label: str) -> list:
     So a group with a representative contributes it; a group whose survivor is
     gone contributes its LIVE members, and the existing never-guess count then
     reproduces the raw arm's behaviour exactly (two live carriers → refuse, one →
-    fold). Terminal members are dropped: folding onto one is the round-5 defect.
+    fold). Terminal members are dropped: folding onto one is the round-5 defect,
+    and the keep-first arms own a terminal TARGET.
 
-    ⛔ A terminal member of a GONE-survivor group is therefore not carried to the
-    keep-first arms either — those arms need a TARGET, and this probe is where the
-    ref side gets one. Such a record is refused EARLIER, by the caller's
-    gone-survivor guard ("ref carrier's survivor is gone" on the Object lane; the
-    Subject lane's `not by_name` arm otherwise), so the correct statement is "no lane
-    folds it", not "keep-first owns it".
+    Returns ``(rows, widened_ids)``. ``widened_ids`` names the rows contributed by
+    a GONE-SURVIVOR group — the only rows for which the never-guess count is a
+    NODE count over ONE entity (two live carriers of one merged entity), not a
+    count of entities. A caller that refuses on that count must say so: the
+    refusal is "this merged entity's survivor is gone, so its carriers cannot be
+    addressed one-of-them", NOT the duplicate-name corruption the ordinary
+    never-guess arm reports (review round 17) — otherwise the durable
+    ``record_non_folded`` entry claims a repair the graph's own grouping denies and
+    the dangling ``resolved_from`` is reported nowhere on this path.
+
+    ``id_idx``/``status_idx`` are the row columns of the projection the caller
+    passed to ``_entity_rows`` (the REF probes' 5-column shape by default; the
+    successor probes' 3-column ``_SUCCESSOR_PROJECTION`` cannot be read here —
+    indexing it blind raised ``IndexError`` out of ``apply_supersessions``, which
+    the module's "corruption is a REFUSAL, never an exception" rule forbids).
     """
     terminal = (SUBJECT_TERMINAL_STATUSES if label == "Subject"
                 else _RECALL_OBJECT_EXCLUDED_STATUS)
     rows = []
+    widened: set = set()
     for rep, _key, members in entities:
         if rep is not None:
             rows.append(rep)
             continue
-        rows.extend(m for m in members
-                    if m[1] and (m[3] or "") not in terminal)
-    return rows
+        for m in members:
+            if not m[id_idx] or (m[status_idx] or "") in terminal:
+                continue
+            rows.append(m)
+            if m[id_idx]:
+                widened.add(str(m[id_idx]))
+    return rows, widened
+
+
+def _ref_is_one_gone_entity(widened, rows, id_idx: int = 1) -> bool:
+    """Every refused REF candidate came from a GONE-survivor group's expansion.
+
+    The never-guess refusal then means "one merged ENTITY whose survivor is gone",
+    not "two entities claim this name" (review round 17). False otherwise — a
+    genuine duplicate-name/duplicate-id refusal keeps its own arm and its own
+    ``record_non_folded`` shape.
+    """
+    if not widened:
+        return False
+    ids = [str(r[id_idx]) for r in rows if r[id_idx]]
+    return bool(ids) and set(ids) <= widened
 
 
 def _id_claimant_count(g, label: str, node_id: str) -> int:
@@ -1352,7 +1382,7 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
         # the rows are grouped by ENTITY first so a merged-away carrier is not
         # counted as a second carrier (see `_entity_rows`).
         _ref_space, _ref_params = name_key_space_same_entity("s", ref)
-        by_name = _ref_candidates(_entity_rows(
+        by_name, _ref_widened = _ref_candidates(_entity_rows(
             proj.g, "Subject",
             proj.g.query(
                 f"MATCH (s:Subject) WHERE {_ref_space} "
@@ -1390,6 +1420,20 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
             if _live_rows:
                 by_name = _live_rows
         if len(by_name) > 1:
+            if _ref_is_one_gone_entity(_ref_widened, by_name):
+                # ⛔ One merged ENTITY, not two carriers claiming a name: every
+                # refused candidate came from a GONE-survivor group, so the true
+                # condition is the dangling `resolved_from`, and the durable
+                # shape says so instead of claiming duplicate-name corruption
+                # the graph's own grouping denies (review round 17).
+                record_non_folded("Subject", ref,
+                                  display_holder_ids([r[1] for r in by_name]),
+                                  shape="unaddressable-name")
+                warn(f"subject supersession {ref!r} resolves to "
+                     f"{len(by_name)} carriers of ONE entity whose merged "
+                     f"survivor is gone — skipped (no addressable carrier)")
+                _skip(ref, supersedes_by, "ref carrier's survivor is gone")
+                return False
             # #1423 review P2: durable record, not just a log line — the
             # Object twin's `:1184` call mirrored with `label="Subject"`.
             record_non_folded("Subject", ref,
@@ -1874,7 +1918,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # supersession-probe site review).
         _id_node_keys = {_row[0] for _row in _id_rows}
         rows = [list(_row[1:]) for _row in _id_rows]
-        _name_arm_rows = _ref_candidates(_entity_rows(
+        _name_arm_rows, _name_widened = _ref_candidates(_entity_rows(
             proj.g, "Object",
             [_row for _row in _name_rows if _row[0] not in _id_node_keys],
             with_groups=True), "Object")
@@ -2037,6 +2081,21 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                 if _live_rows:
                     by_name = _live_rows
             if len(by_name) > 1:
+                if _ref_is_one_gone_entity(_name_widened, by_name, id_idx=0):
+                    # ⛔ One merged ENTITY, not two carriers claiming a name
+                    # (review round 17): the refusal is the dangling
+                    # `resolved_from`, and its durable shape must not claim the
+                    # duplicate-name corruption this graph does not have.
+                    record_non_folded("Object", ref,
+                                      display_holder_ids(
+                                          [r[0] for r in by_name]),
+                                      shape="unaddressable-name")
+                    warn(f"supersession ref {ref!r} resolves to "
+                         f"{len(by_name)} carriers of ONE entity whose merged "
+                         f"survivor is gone — skipped (no addressable carrier)")
+                    _skip(ref, supersedes_by,
+                          "ref carrier's survivor is gone")
+                    continue
                 # never-guess: two Objects claim the same name, do not pick
                 # one (a blind LIMIT 1 would fold an arbitrary carrier).
                 record_non_folded("Object", ref,

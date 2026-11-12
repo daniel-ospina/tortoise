@@ -3520,11 +3520,14 @@ class TestThe12120ReviewRound3:
         The `resolved_from` pointer can outlive its target (the survivor was
         deleted). Falling back to the group's own row folded onto exactly the
         incarnation the merge retired; such a group contributes its LIVE members
-        only (review round 10), and a carrier that is already terminal is refused —
-        by the gone-survivor guard ("ref carrier's survivor is gone") on the Object
-        lane, NOT by keep-first, which never sees a target: `_ref_candidates`
-        contributes nothing for this shape, so there is no target to keep. Either
-        way it is never folded again.
+        only (review round 10), and a carrier that is already terminal is dropped
+        by `_ref_candidates`' terminal filter, so the ref probe has no
+        addressable carrier and refuses `"ref carrier's survivor is gone"`.
+        (Keep-first would refuse it too, but only once the ref resolved to one
+        row — it does not here, which is why the pin asserts the REASON and not
+        just the outcome: a regression that kept terminal members would satisfy
+        `applied == 0` through the `"terminal object target"` arm and this pin
+        would not notice.)
 
         (Round 10 is the other half of the same rule: a carrier that is still
         LIVE beside a gone survivor IS addressable, and is folded —
@@ -3546,7 +3549,10 @@ class TestThe12120ReviewRound3:
                 {"superseded": "Old Team", "supersedes_by": "New Team",
                  "evidence": "test"}])
             assert applied == 0, (applied, skips, msgs)
-            assert skips, ("the refusal did not report itself: " f"{skips!r}")
+            assert [s.get("reason") for s in skips] == [
+                "ref carrier's survivor is gone"], (
+                "the refusal came from a different arm than the terminal filter "
+                f"this pin names: {skips!r} (warnings: {msgs!r})")
             row = g.query(
                 "MATCH (o:Object {id:'obj-12120-orphan'}) "
                 "RETURN o.status, o.supersededBy"
@@ -4368,7 +4374,9 @@ class TestThe12120ReviewRound16:
         conversation on a corrupt graph into a reported refusal (and burn the
         caller's warning budget), while the Subject twin stayed silent for the
         same shape — the two families disagreeing on a rule one of them states in
-        prose. Both lanes now answer: `applied=0, skips=[]`.
+        prose. Both lanes now answer: `applied=0, skips=[]` — pinned here for BOTH
+        (the Subject half is a second graph in the same test, because a claim
+        about agreement that only one family pins reddens for neither).
         """
         sdk = sdk_factory()
         try:
@@ -4401,8 +4409,91 @@ class TestThe12120ReviewRound16:
                 "WHERE o.status = 'superseded' RETURN o.supersededBy"
             ).result_set
             assert folded and folded[0][0] == "Survivor", folded
+
+            # ── the Subject half of the same claim ───────────────────────
+            g.query(
+                "CREATE (ss:Subject {id:'ent-r16-ss', name:'Survivor Team', "
+                "subjectKind:'organization', status:'live'}) "
+                "CREATE (st:Subject {id:'ent-r16-st', name:'Target Team', "
+                "subjectKind:'organization', status:'live'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Target Team",
+                 "supersedes_by": "Survivor Team", "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            g.query("CREATE (sd:Subject {id:'ent-r16-st', name:'Other Team', "
+                    "subjectKind:'organization', status:'live'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Target Team",
+                 "supersedes_by": "Survivor Team", "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips == [] and msgs == [], (
+                "the Subject lane reported an idempotent re-ingest of an "
+                f"already-folded target: {skips} / {msgs}")
         finally:
             sdk.close()
+
+    def test_two_live_carriers_of_a_gone_survivor_are_not_duplicate_names(
+            self, sdk_factory):
+        """Round 17: the refusal's durable shape must name the TRUE condition.
+
+        Two LIVE carriers of ONE merged entity (its survivor deleted) are two
+        addressable nodes of a single entity — the never-guess count refuses them,
+        which is right, but the durable `record_non_folded` shape for that arm
+        must be the dangling `resolved_from` (`unaddressable-name`), not
+        `ambiguous-name`: the graph's own grouping says these two are one entity,
+        so a repair consumer reading `ambiguous-name` would be told to merge a pair
+        the merge already made, and the true condition would be reported nowhere
+        on this path.
+        """
+        from tortoise.entity_identity import (
+            clear_non_folded_entries,
+            non_folded_entries,
+        )
+
+        for label, kind, terminal_ok in (("Object", "document", True),
+                                         ("Subject", "organization", True)):
+            assert terminal_ok  # both families carry the same contract
+            sdk = sdk_factory()
+            try:
+                g = sdk._get_proj().g
+                if label == "Object":
+                    sdk.create_object("New Co", "document")
+                    g.query(
+                        "CREATE (a:Object {id:'gone-r17-a', name:'Old Co', "
+                        "objectKind:'document', status:'live', "
+                        "resolved_from:'gone-r17-surv'}) "
+                        "CREATE (b:Object {id:'gone-r17-b', name:'Old Co', "
+                        "objectKind:'document', status:'live', "
+                        "resolved_from:'gone-r17-surv'})")
+                    rec = {"superseded": "Old Co",
+                           "supersedes_by": "New Co", "evidence": "test"}
+                else:
+                    sdk.create_subject("New Team", kind)
+                    g.query(
+                        "CREATE (a:Subject {id:'gone-r17-a', name:'Old Team', "
+                        "subjectKind:'organization', status:'live', "
+                        "resolved_from:'gone-r17-surv'}) "
+                        "CREATE (b:Subject {id:'gone-r17-b', name:'Old Team', "
+                        "subjectKind:'organization', status:'live', "
+                        "resolved_from:'gone-r17-surv'})")
+                    rec = {"superseded": "Old Team",
+                           "supersedes_by": "New Team", "evidence": "test"}
+                clear_non_folded_entries()
+                applied, skips, msgs = self._apply(sdk, [rec])
+                assert applied == 0, (applied, skips, msgs)
+                reasons = [str(s.get("reason") or "") for s in skips]
+                assert reasons and all("survivor is gone" in r
+                                       for r in reasons), (
+                    f"{label}: the refusal did not name the dangling "
+                    f"`resolved_from`: {skips!r} (warnings: {msgs!r})")
+                shapes = [e.shape for e in non_folded_entries()
+                          if e.name == ("Old Co" if label == "Object"
+                                        else "Old Team")]
+                assert shapes == ["unaddressable-name"], (
+                    f"{label}: the durable shape claims duplicate-name "
+                    f"corruption this graph does not have: {shapes}")
+            finally:
+                sdk.close()
 
     def test_a_duplicate_id_subject_target_refuses(self, sdk_factory):
         """The Subject twin: same disarm, and the Subject write is not CAS-gated."""
