@@ -1036,10 +1036,36 @@ def _referentiality_hold(surface: str) -> tuple[str, str] | None:
     (``#3590`` D1) that mints when no live holder exists.
 
     So a pronoun or a discourse-generic head that the model returned as a
-    subject became a durable ``:Subject`` on the document path. The repair is
-    NOT a new rule set — it is calling the SAME leaf, under the SAME flag and
-    under the SAME fail-open discipline, so the two generations cannot disagree
-    about a surface, including when the cue RAISES:
+    subject became a durable ``:Subject`` on the document path — through THIS
+    stage's write. The repair is NOT a new rule set — it is calling the SAME
+    leaf, under the SAME flag and under the SAME fail-open discipline, so the
+    two generations cannot disagree about a surface **this stage returns**,
+    including when the cue RAISES:
+
+    ⛔ **THIS STAGE'S WRITE IS THE WHOLE SCOPE — state it that way, because a
+    wider claim is false.** The same document ingest reaches a SECOND
+    ``:Subject`` mint that this predicate does not gate: each Point's
+    ``aboutEntities`` is passed VERBATIM to ``api.add_point`` (``_run_document``,
+    below), which runs the rel-agnostic about* cascade and mints a Subject stub
+    (``_mint_subject_stub``) for a name that resolves to nothing. So this cue
+    does not make the *document* free of a minted non-referent, and an armed run
+    can leave that surface's Subject population unchanged — measured at the
+    #12102 review (``api.add_point(aboutEntities=["it", "the former"])`` →
+    ``[['it', 'it'], ['the former', 'the former']]``).
+
+    ⛔ **It is DECLINED here, not fixed, and that is a decision with a reason.**
+    The construction the door lands in is a recorded design, not an oversight:
+    ``#8398`` deliberately WITHDREW the retirement of that stub, because *"a
+    name no producer registered lost its link on every replay"*, and journals
+    ``mint_if_absent: true`` so live and replay agree. So the open question is
+    not "add a missing predicate" — it is *"may a non-referent be an about*
+    target at all"*, which is that design's decision to take and not this cue's;
+    v4 answered it on its own path (``route_mentions`` strips held surfaces from
+    claim/event ``about_entities``) and v1 has NOT, which is the asymmetry.
+    Tracked as ``#12247``; siblings ``#12118`` (identifier class) and ``#12119``
+    (the v1 Object loop). Pinned by
+    ``test_the_point_about_entities_door_is_declined_and_still_mints``, so a
+    later fix here fails loudly and reads this paragraph first.
 
     * ``referentiality.judge`` owns the cue and its flag
       (``TORTOISE_REFERENTIALITY``, **OFF** by default per ``#5087`` plan R1 —
@@ -1081,7 +1107,9 @@ def _referentiality_hold(surface: str) -> tuple[str, str] | None:
       ``reference``/``path``. So the 453 ``issue:<repo>#<n>`` Subjects #12060
       measured still mint on this path — tracked as ``#12118``, NOT discharged
       by this cue. The same holds for the Object loop ~20 lines below (also
-      unclaimed, ``#12119``); this PR is the Subject mint only.
+      unclaimed, ``#12119``); this PR is the S7 **Subject** mint only — not "the
+      one Subject mint on this path", which the ``aboutEntities`` door above
+      falsifies.
 
     ``the owner`` / ``the founder`` / ``the user`` are NOT held by this
     predicate and must not become so: ``#2453``/``#4899`` measured them as real
