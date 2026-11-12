@@ -508,7 +508,7 @@ def test_the_audit_discriminates_a_call_from_a_mention(tmp_path):
     source = probe.read_text(encoding="utf-8").splitlines()
     rows = {
         n: f"{probe}:{n}:{source[n - 1]}"
-        for n in (2, 3, 4, 5, 6, 9)
+        for n in (2, 3, 4, 5, 6, 8, 9)
     }
     callers = _classify_propagate_shock_refs(list(rows.values()))
 
@@ -516,7 +516,7 @@ def test_the_audit_discriminates_a_call_from_a_mention(tmp_path):
         "a docstring line that only NAMES propagate_shock is prose, not a "
         f"caller; bucketed as: {callers['prose only']}")
     assert callers["production_code"] == [
-        rows[3], rows[4], rows[5], rows[6], rows[9]], (
+        rows[3], rows[4], rows[5], rows[6], rows[8], rows[9]], (
         "a real CALL site, and every reference that can be invoked later, must "
         f"be reported as production code; bucketed as: {callers['production_code']}")
 
