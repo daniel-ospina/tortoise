@@ -898,18 +898,18 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
          carrier_count, _carrier_id, carrier_status, carrier_sb,
          carrier_is_operator, carrier_op_type, carrier_outdated, next_count,
          next_status, next_outdated, next_is_operator, next_op_type) = row
-        # ⛔ ``is_op_flag is True`` misses the INTEGER ``1``: ``update_entity(p,
-        # is_operator=1)`` is a door (measured — the property then holds ``1``), and
-        # this engine compares ``1 = true`` as True, so EP's operator arm builds the
-        # factor while an ``is True`` test sent the row to the neither-arm lane and
-        # announced "no factor … no skipped-factor record" over a factor that runs
-        # (measured: two confidences before the supersession, one after,
-        # ``skipped: None``). ``== 1`` also accepts the boolean, and still rejects
-        # ``'false'`` (a string, measured) and ``0`` (which this engine does NOT
-        # compare equal to false, so EP's direct arm refuses it).
+        # ⛔ ``is True`` is the whole test, and the INTEGER ``1`` must NOT pass it:
+        # ``update_entity(p, is_operator=1)`` is a door (measured — the property then
+        # holds ``1``), but this engine does NOT compare ``1 = true`` (``RETURN 1 =
+        # true, 1 = false`` → ``[False, False]``, the same strictness that makes the
+        # string ``'false'`` neither arm). So EP's operator arm matches nothing, the
+        # direct arm's ``_non_op`` refuses it too (``1 = false`` is False), and the
+        # factor is never built: measured, ``compute_confidence(factors=[p])`` →
+        # ``iterations: 0``, a 0.5 stub, no ``skipped_factors``. Accepting the integer
+        # announced the OPERATOR lane — "idx 0 is the source slot", re-point advice —
+        # over a node with no factor at all.
         _is_operator = ("Point" in (active_labels or [])
-                        and (is_op_flag is True or is_op_flag == 1
-                             or op_type is not None))
+                        and (is_op_flag is True or op_type is not None))
         return {
             "sup_id": sup_id, "sup_name": sup_name, "sup_sb": sup_sb,
             "edge_type": edge_type, "idx": idx,
@@ -1024,8 +1024,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         reads perfectly. (``is_operator='false'``/``0`` rows reach the neither arm,
         so the shape text belongs to the direct lane only.)
         """
-        return ("``is_operator`` is not ``false``" if s["is_operator"]
-                else "``is_operator`` is not ``false`` — or an ``op_type`` is set")
+        # The parenthetical is the WHOLE quote, prefix included: the operator lane's
+        # test is ``_non_operator`` (EP's OPERATOR-INPUT test), which ADMITS an
+        # absent flag — so "is_operator is not false" alone would read as a positive
+        # match on a flagless successor — and calling it EP's "shape test" is the
+        # conflation of SHAPE and PREDICATE that ``_4b_state`` warns against.
+        return ("(EP's operator-input test: ``is_operator`` is present and not "
+                "``false``)" if s["is_operator"]
+                else "(EP's shape test: ``is_operator`` is not ``false`` — or an "
+                     "``op_type`` is set)")
 
     def _dropped_input(s: dict) -> str:
         """What EP does when the re-point sends this input where EP will not read it.
@@ -1117,7 +1124,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # is NOT ``= true``, so "(is_operator=true)" named a value the node does
             # not hold and a reader checking with ``= true`` found nothing.
             return ("; the successor it names is itself OPERATOR-SHAPED "
-                    "(EP's shape test: " + _succ_test(s) + "), which EP "
+                    + _succ_test(s) + ", which EP "
                     "excludes from a factor's inputs "
                     "(#9269) — " + _dropped_input(s) + ", and a re-audit reads "
                     "CLEAN over it. Target a CLAIM successor")
@@ -1186,15 +1193,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # re-audit reads CLEAN).
         if _next_refused(s):
             return (f"names the next link ({_quoted(s['carrier_sb'])}), which is "
-                    "OPERATOR-SHAPED (EP's shape test: " + _succ_test(s) + ") — EP "
+                    "OPERATOR-SHAPED " + _succ_test(s) + " — EP "
                     "excludes it from a factor's inputs (#9269), so "
                     + _dropped_input(s) + ", and a re-audit reads CLEAN over it: "
                     "target a CLAIM successor")
         if (s["next_status"] or "") == DRAFT_STATUS:
             return (f"names the next link ({_quoted(s['carrier_sb'])}), which is "
                     f"'{DRAFT_STATUS}' — EP strips a draft input like a terminal one "
-                    "(#780), so targeting it leaves the factor degenerate: it needs "
-                    "promoting to live as well")
+                    "(#780), so " + _dropped_input(s) + ": it needs promoting to "
+                    "live as well")
         return (f"names the next link ({_quoted(s['carrier_sb'])}), which is LIVE — "
                 "target THAT, not the immediate successor")
 
@@ -1297,9 +1304,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         status = s["carrier_status"]
         succ = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "the successor"
         if _succ_refused(s):
-            return (f" ⛔ {succ} is OPERATOR-SHAPED (EP's shape test: "
-                    + _succ_test(s) +
-                    "), which EP excludes from a factor's inputs (#9269): "
+            return (f" ⛔ {succ} is OPERATOR-SHAPED " + _succ_test(s) +
+                    ", which EP excludes from a factor's inputs (#9269): "
                     f"{_dropped_input(s)} — target a CLAIM successor")
         if (status or "") == DRAFT_STATUS:
             return (f" ⛔ {succ} is '{DRAFT_STATUS}', which EP strips the same way "
