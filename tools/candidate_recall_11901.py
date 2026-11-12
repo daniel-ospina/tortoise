@@ -263,38 +263,71 @@ def run(args: argparse.Namespace) -> int:
             return [{"id": r.get("id", ""), "name": r.get("content", ""),
                      "kind": r.get("point_kind", "")} for r in (rows or [])]
 
-        sample = pop[: args.sample]
+        # STRATIFIED, not head-sliced: ``build_population`` emits class by class,
+        # so ``pop[:n]`` would sample one class only and report its recall as the
+        # population's. Each class contributes its own proportional share.
+        _by_cls: dict[str, list[dict]] = collections.defaultdict(list)
+        for row in pop:
+            _by_cls[row["cls"]].append(row)
+        sample: list[dict] = []
+        for cls in sorted(_by_cls):
+            share = round(args.sample * len(_by_cls[cls]) / len(pop))
+            sample.extend(_by_cls[cls][:share])
+        sample = sample[: args.sample] or pop[: args.sample]
         arms: dict[str, dict] = {}
 
         # ── ARM 1: the mention IS the stored name (the exact rung of the ladder)
         # A miss is split into the two states that have DIFFERENT fixes:
-        #   ``empty``   the leg returned no row at all (the query found nothing)
-        #   ``ranked``  the canonical exists but fell past the k cut
+        #   ``miss_past_k``          the canonical is in the k=15 window and fell
+        #                            past THIS k cut → width is the fix.
+        #   ``miss_absent_at_max_k`` the canonical is absent even at k=15 → no
+        #                            width reaches it; the leg's own recall is
+        #                            the constraint.
+        # ``rows_zero`` counts the sub-case where the leg returned nothing at
+        # all, which is a different defect again and is counted separately so
+        # "absent from a 15-row window" is never reported as "the leg answered
+        # nothing".
         exact = {k: {"in_window": 0, "rank_sum": 0, "attached": 0,
-                     "miss_empty": 0, "miss_ranked": 0} for k in KS}
+                     "miss_absent_at_max_k": 0, "miss_past_k": 0,
+                     "rows_zero": 0} for k in KS}
+        exact_by_class: dict[str, dict[str, dict[str, int]]] = collections.defaultdict(
+            lambda: {str(k): {"n": 0, "in_window": 0, "rows_zero": 0} for k in KS})
         exact_misses: list[dict] = []
+        # Token-overlap siblings in the population: how crowded the window is
+        # for a given name. Computed from the population, not the graph, so the
+        # crowding claim is measured rather than asserted.
+        _tok = {row["name"]: frozenset(re.findall(r"[a-z0-9]+", row["name"].lower()))
+                for row in pop}
+        _siblings = {n: sum(1 for m, t in _tok.items()
+                            if m != n and len(t & _tok[n]) >= 2) for n in _tok}
         for row in sample:
             name = row["name"]
             wide = window(name, max(KS))
             for k in KS:
                 rows = window(name, k)
+                exact_by_class[row["cls"]][str(k)]["n"] += 1
                 hit = next((i for i, r in enumerate(rows) if r["name"] == name), None)
                 if hit is not None:
                     exact[k]["in_window"] += 1
+                    exact_by_class[row["cls"]][str(k)]["in_window"] += 1
                     exact[k]["rank_sum"] += hit + 1
                 else:
                     # one over-fetch tells "never returned" from "cut at k"
                     if any(r["name"] == name for r in wide):
-                        exact[k]["miss_ranked"] += 1
+                        exact[k]["miss_past_k"] += 1
                     else:
-                        exact[k]["miss_empty"] += 1
-                    if k == KS[0] and len(exact_misses) < 40:
+                        exact[k]["miss_absent_at_max_k"] += 1
+                        if not rows:
+                            exact[k]["rows_zero"] += 1
+                            exact_by_class[row["cls"]][str(k)]["rows_zero"] += 1
+                    if k == KS[0] and len(exact_misses) < 200:
                         toks = _sanitise_query_text(name).split()
                         exact_misses.append({
                             "name": name, "cls": row["cls"],
                             "returned": len(rows),
                             "wide_returned": len(wide),
                             "tokens": len(toks),
+                            "siblings_2tok": _siblings.get(name, 0),
                             "tokens_kept_numeric": len(
                                 [t for t in toks if not t.isdigit()]) != len(toks),
                             "wide_top": [r["name"] for r in wide[:5]],
@@ -305,6 +338,7 @@ def run(args: argparse.Namespace) -> int:
                     exact[k]["attached"] += 1
         arms["exact"] = exact
         arms["exact_misses"] = exact_misses
+        arms["exact_by_class"] = {c: dict(v) for c, v in sorted(exact_by_class.items())}
 
         # ── ARM 2: the mention is a surface VARIANT of the stored name.
         # The stored node exists; the capture says it a different (real) way, so
@@ -344,6 +378,7 @@ def run(args: argparse.Namespace) -> int:
                         var[k]["attached_folded"] += 1
                         by_class[vclass][str(k)]["attached_folded"] += 1
         arms["variant"] = var
+        arms["variant_by_class"] = {c: dict(v) for c, v in sorted(by_class.items())}
 
         # ── ARM 3: what a capture actually hands ``resolve_entities``.
         # ``search_graph`` accumulates every query's rows into ONE id-keyed dict,
@@ -377,7 +412,6 @@ def run(args: argparse.Namespace) -> int:
                        "sample": len(sample), "elapsed_s": round(time.time() - t0, 1)},
             "ks": list(KS),
             "arms": arms,
-            "variant_by_class": {c: dict(v) for c, v in sorted(by_class.items())},
         }
         payload = json.dumps(report, indent=1, sort_keys=True)
         if args.out:
