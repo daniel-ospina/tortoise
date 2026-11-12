@@ -1511,11 +1511,15 @@ class TestEventOperatorEndpoints:
 
     def test_mitigates_targets_event_endpoint_edge(self):
         # MITIGATES targets an IMPL edge whose dst is an event (T1+T3 shape).
+        # ⛔ ONE `op_type` on this operator, the MITIGATES one (#12265): the dict
+        # carried a second `"op_type": "IMPL"` that last-wins semantics silently
+        # dropped, so the fixture READ as if it authored an op_type that never
+        # reached the validator. Same class as `#9314`'s declaration-dict pins.
         raw = self._payload([
             {"src": PT0, "dst": EV64, "op_type": "IMPL"},
-            {"src": PT1, "dst": EV64, "op_type": "IMPL",
+            {"src": PT1, "dst": EV64,
              "target": {"src": PT0, "dst": EV64, "op_type": "IMPL"},
-             "op_type": "MITIGATES", "strength": 0.3}],  # noqa: F601
+             "op_type": "MITIGATES", "strength": 0.3}],
             n_points=2)
         res, _ = _check(raw)
         assert res.ok, res.errors

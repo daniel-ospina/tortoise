@@ -7880,13 +7880,13 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `179 passed, 1 skipped`
+    defect. Measured at this tree: the docker lane reads `181 passed, 1 skipped`
     (the skip is the `<3.12` re-derive; the three `main` reds this docstring used
     to record — `#12045`'s undeclared `tortoise.api::_emit` /
     `_verify_record_vector_width` writers — are cleared by `#12042`, landed as
-    `b367c54214a2`) and the carve-out lane reads `178 passed, 2 skipped` (that
+    `b367c54214a2`) and the carve-out lane reads `180 passed, 2 skipped` (that
     skip plus `tests/_live_utils.py`'s live-graph fixture, which only a lane with
-    a `TORTOISE_DB_URI` satisfies). Both splits add to the `180` re-derived
+    a `TORTOISE_DB_URI` satisfies). Both splits add to the `182` re-derived
     below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
@@ -8240,3 +8240,125 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
             f"{name} declares {dupes} more than once. Python keeps the LAST "
             "binding, so the earlier row is DEAD — an active override, not a "
             "harmless no-op (#9314, measured on #11996)")
+# ── #12265 (root: #9314) — a duplicated declaration key is a SILENT loser ────
+#
+# `#11996` landed two duplicate `"tortoise.sdk::create_source"` rows in this
+# file's census dicts and a third in `tortoise/embed_writer_register.py`. The two
+# DICT rows were silently resolved by Python's last-wins semantics — the earlier
+# entry, the one a review had pinned, simply stopped existing, and every test
+# stayed green. ⛔ The duplicate was born AT THE MERGE, not inside either PR: each
+# PR's own tree held ONE row (`#12016` landed at 20:43Z; `#11996`'s base predated
+# it), so no run of either PR could see two. `main-lint.yml`'s ruff gate (`#2174`,
+# `on: push: branches: [main]`) then red the pushed tree — `F601` twice, 16 minutes
+# after the merge — and that lint job was the whole detection this class had. The
+# register's own copy raised `DuplicateWriterDeclaration` at IMPORT, which is loud
+# but is a different shape (a list of tuples, checked by `load()` — see
+# `tests/test_embed_writer_register.py::test_a_duplicate_key_raises`).
+#
+# So this is the DICT half: one scan, run wherever a tree holds both rows.
+
+#: Roots whose dict literals gate behaviour by MEMBERSHIP — a name in
+#: `WRITER_CENSUS`/`CENSUS_EVIDENCE` is exempt from (or owes evidence to) the
+#: unresolved-writer verdict, and a duplicated key makes the loser DEAD. The scan
+#: is repo-wide over these roots on purpose: the class is not specific to this
+#: file, and naming files here would re-open the hole the moment a declaration
+#: moves into one that was not named.
+#:
+#: ⛔ IT IS NOT FREE, measured: 1,970 modules, `ast.parse` alone 12.6 s, and this
+#: test is ~20 s of `tests/test_dod_5090_probe.py`'s ~110 s run. Recorded so the
+#: next reader does not assume it is cheap — and so a future budget discussion has
+#: the figure. There is no sound cheap pre-filter: narrowing the roots narrows the
+#: guard, which is the hole the scan exists to close.
+_DUP_KEY_ROOTS = ("tortoise", "tools", "tests")
+
+
+def _duplicate_constant_key_sites(source: str) -> list[tuple[int, int, str]]:
+    """`(first_lineno, duplicate_lineno, key)` for every duplicated dict-literal key.
+
+    The `seen` map is keyed on the VALUE, not on a type-prefixed spelling of it, so
+    the comparison IS Python's own: `1`, `1.0` and `True` collapse to ONE key (they
+    hash equal), `None` is a key like any other, and `b"a"` stays distinct from
+    `"a"`. A type-prefixed marker would read `{1: 'a', 1.0: 'b'}` as two keys and
+    miss a real shadow — the exact class this guard exists for (found in this
+    guard's own first draft by a fresh review).
+
+    Only CONSTANT keys can be compared without evaluating anything: a computed key
+    (`f"{x}"`) is not a declaration this can read, and guessing would report a
+    duplicate that is not one. `**splat` in a literal parses as a `None` entry in
+    `node.keys`, not a Constant, so it is skipped rather than mistaken for the key
+    `None`.
+    """
+    sites: list[tuple[int, int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Dict):
+            continue
+        seen: dict[object, int] = {}
+        for key in node.keys:
+            if not isinstance(key, ast.Constant):
+                continue
+            if key.value in seen:
+                sites.append((seen[key.value], key.lineno, repr(key.value)))
+            else:
+                seen[key.value] = key.lineno
+    return sites
+
+
+def test_the_duplicate_key_detector_catches_a_duplicate():
+    """The detector must be able to come back RED, or the scan below proves nothing.
+
+    This module's own contract (see the file docstring): an instrument that can
+    only print `MET` is machinery. A guard whose scan silently returned `[]` for
+    every input would pass the repo-wide assertion below forever.
+    """
+    source = (
+        "DECLARATIONS = {\n"
+        "    'a::b': ('first', 1),\n"
+        "    'c::d': ('other', 2),\n"
+        "    'a::b': ('second', 3),\n"
+        "}\n"
+    )
+    assert _duplicate_constant_key_sites(source) == [(2, 4, "'a::b'")]
+    # …and a clean map reports nothing, so the positive case above is the ONLY
+    # reason a red is possible.
+    assert _duplicate_constant_key_sites("D = {'a': 1, 'b': 2}\n") == []
+    # A computed key is not a declaration this reads: no false positive.
+    assert _duplicate_constant_key_sites("D = {K: 1, K: 2}\n") == []
+    # The comparison must BE Python's own key equality, in the MISS direction too:
+    # `1`, `1.0` and `True` are ONE key, so a numeric/alias shadow must be caught
+    # (a type-prefixed marker misses it — this guard's own first draft did).
+    assert _duplicate_constant_key_sites("D = {1: 'a', 1.0: 'b'}\n") == [(1, 1, "1.0")]
+    assert _duplicate_constant_key_sites("D = {1: 'a', True: 'b'}\n") == [(1, 1, "True")]
+    assert _duplicate_constant_key_sites("D = {None: 1, None: 2}\n") == [(1, 1, "None")]
+    # …while genuinely distinct keys stay silent: bytes are not text, and a
+    # `**splat` is not the key `None`.
+    assert _duplicate_constant_key_sites("D = {b'a': 1, 'a': 2}\n") == []
+    assert _duplicate_constant_key_sites("D = {None: 1, **x}\n") == []
+
+
+def test_no_module_declares_the_same_dict_key_twice():
+    """#12265: a duplicated literal key silently disables the entry that loses.
+
+    Measured at `origin/main` `9828250732`: three sites — two in this file
+    (`WRITER_CENSUS`, `CENSUS_EVIDENCE`) and one in `tests/test_commit_schema.py`
+    (a fixture `op_type` that last-wins discarded, silenced with `# noqa: F601`).
+    This assertion is the lane-independent catch `#9314` asks for: it reds in the
+    pytest shard, not only where lint runs.
+    """
+    violations: list[str] = []
+    scanned = 0
+    for root in _DUP_KEY_ROOTS:
+        for path in sorted(Path(root).rglob("*.py")):
+            if ".worktrees" in path.parts:
+                continue
+            scanned += 1
+            for first, duplicate, key in _duplicate_constant_key_sites(
+                    path.read_text(encoding="utf-8")):
+                violations.append(f"{path}:{duplicate} re-declares key {key} (first at :{first})")
+    # A scan that read nothing would satisfy the assertion below vacuously.
+    assert scanned > 1000, f"the duplicate-key scan covered only {scanned} module(s)"
+    assert not violations, (
+        "a dict literal declares the same key twice, so the entry that loses the "
+        "last-wins race is DEAD while every test stays green (#12265, root #9314). "
+        "Delete the stale row (or correct the reason) — do not add `# noqa: F601`:\n  "
+        + "\n  ".join(violations)
+    )
