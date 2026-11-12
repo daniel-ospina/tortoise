@@ -215,15 +215,29 @@ def test_documents_humans_copy_do_not_name_the_retired_host():
 
 
 def test_onboarding_skill_points_at_the_reference_copy_on_the_canonical_origin():
-    """#11762 decided `/docs` lives on the company origin; the served document
-    must name it there, and keep the `#chatgpt` anchor that the reference copy
-    carries (measured live 2026-11-11: id=\"chatgpt\" is present)."""
+    """#11762 decided the docs page lives on the company origin; the served
+    document must name it there, and keep the `#chatgpt` anchor the reference
+    copy carries (measured live 2026-11-12: `id="chatgpt"` is present on the
+    page both spellings end on).
+
+    ⛔ BOTH spellings are accepted, on purpose. `/docs` is a permanent SAME-HOST
+    301 onto `/tortoise/docs` (#11763's map — one hop, both on the canonical
+    origin), and `/tortoise/docs` is the 200 they end on; measured live
+    2026-11-12 the chain is `301` then `200`, one redirect. Pinning either
+    spelling alone REDS the other, and the flip between them is #11764's
+    canonical sweep rather than a defect — a pin that forbids the better URL is
+    how a guard blocks the follow-up it exists to make safe. What must not come
+    back is the `.html` file form (itself a 301) or the retired host, which
+    `test_documents_humans_copy_do_not_name_the_retired_host` refuses.
+    """
     skill = (REPO / "tortoise/onboarding/SKILL.md").read_text(encoding="utf-8")
-    assert f"{CANONICAL_ORIGIN}/docs#chatgpt" in skill
-    assert f"{CANONICAL_ORIGIN}/tortoise/docs" not in skill, (
-        "the /tortoise/docs target does not exist yet (#11764); the channel "
-        "redirect keeps premiselabs.co/docs a permanent alias, so emitting it "
-        "now is correct and emitting a 404 is not")
+    assert (f"{CANONICAL_ORIGIN}/docs#chatgpt" in skill
+            or f"{CANONICAL_ORIGIN}/tortoise/docs#chatgpt" in skill), (
+        "the served document must point at the reference copy on the canonical "
+        f"origin, at one of the two accepted spellings ({CANONICAL_ORIGIN}"
+        "/docs#chatgpt or /tortoise/docs#chatgpt)")
+    assert f"{CANONICAL_ORIGIN}/docs.html#chatgpt" not in skill, (
+        "docs.html is itself a 301; the document names the canonical path")
 
 
 def test_every_allowlisted_occurrence_has_a_reason():

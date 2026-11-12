@@ -351,8 +351,13 @@ def appeal_url() -> str:
 
     #11767: the host is the CANONICAL company origin, not the retired
     `tortoise.premiselabs.co`. ``/docs#appeal`` (not ``/docs.html``) because the
-    canonical path is what the redirect map serves; today that is one 301 into
-    the live docs page, and #11764 settles the final ``/tortoise/docs`` path.
+    canonical path is what the redirect map serves. It is ONE hop, deliberately:
+    ``/docs`` is a permanent SAME-HOST 301 onto the docs page's terminal address
+    ``/tortoise/docs`` (#11763; measured live 2026-11-12 — 301, then 200, one
+    redirect, both on the company origin). Emitting the terminal path here would
+    make it 0 hops; that flip belongs to #11764's canonical sweep, which is also
+    what re-points the onboarding document, so the two move together instead of
+    one drifting.
 
     ⚠️ The fragment is DEAD and this function does not claim otherwise: the
     docs page has no ``id="appeal"`` (and no occurrence of the word), so this
