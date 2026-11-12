@@ -749,11 +749,16 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
       `tests/test_sdk_legacy_coverage.py::_make_operator`) — but none of them
       exercises `_trivial_stamp`, so the drift is unobservable where it would
       matter: no test that OBSERVES the trivial-stamp population carries an
-      edge-less operator. It IS pinned behaviourally in the drop-claims
-      direction: a widened `is_operator` test would drop an isolated claim from
-      that population and redden the passes that must trivially stamp one
+      edge-less operator. It IS pinned behaviourally in the DROP-CLAIMS
+      direction — and the mechanism is a NARROWING, not a widening (a widening
+      cannot remove a node from a population, measured: the widest relaxation
+      leaves this fixture's population at 2 and the freshness suites green):
+      deleting the `= false` arm matches only `is_operator IS NULL`, which drops
+      every `is_operator: false` claim — the shape `create_point` writes — so the
+      passes that must trivially stamp an isolated claim redden
       (`tests/test_epic903_freshness.py`
-      `test_local_pass_trivially_stamps_fresh_isolated_claim`).
+      `test_local_pass_trivially_stamps_fresh_isolated_claim`, measured: reddens
+      under that mutation).
     * an ADDITIVE widening of the excluded status vocabulary is **not pinned
       anywhere** — a known, stated residual, not a covered case. It needs a node
       of the newly-excluded status, and no test has one: this fixture would need
