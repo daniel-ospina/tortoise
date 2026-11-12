@@ -5460,6 +5460,48 @@ def _shell_function_body(code: str, name: str) -> str | None:
     return None
 
 
+def _flag_comes_from_a_positive_probe(code: str, path: str, flag: str) -> bool:
+    """`code` sets `flag=1` under a POSITIVE `-e <path>` test that GATES it.
+
+    Reads the construct, not a spelling. Accepted: `[ -e P ]` and `test -e P`, gated
+    by `then` or `&&`, with the assignment on the same line or in the construct's
+    body. Refused, because each INVERTS the fact and makes the trap delete a path it
+    does not own:
+
+      · `[ -e P ] || F=1` — P present ⇒ test succeeds ⇒ `F` stays 0 ⇒ the trap
+        removes the operator's file; P absent ⇒ `F=1` ⇒ the step's own source is left
+        on the pool box. Both documented defects, and MEASURED GREEN under the plain
+        `[^\n]*?` window this replaces (review cycle 16).
+      · `[ -e P ]; F=1` — no gate at all, so the flag is 1 unconditionally.
+      · `[ ! -e P ] && F=1` — the negated test does not match here at all.
+
+    ⛔ WHY NOT A WINDOW. A `[^\n]*?` between the test and the assignment is satisfied
+    by the CONSTRUCT UNLESS the construct is the thing read: MEASURED (review cycle 16),
+    the trap is ONE line carrying both flags, so a window after `"${had_sources…}"`
+    reached `"${had_keyring:-0}" = 0` and accepted `= 1`, `!= 0` and `-n` — a
+    fail-open in the very row that exists to stop the trap deleting an operator's file.
+    The bound is the construct, and the negated gate is refused explicitly.
+    """
+    for test in re.finditer(
+        rf"(?:\[\s*-e\s+{re.escape(path)}\s*\]|test\s+-e\s+{re.escape(path)})",
+        code,
+    ):
+        window = code[test.end():]
+        gate = re.match(r"\s*;\s*then\b|\s*&&", window)
+        if gate is None:
+            continue
+        body = window[gate.end():]
+        closing = re.search(r"\n\s*fi\b", body)
+        body = body[: closing.start()] if closing else "\n".join(body.splitlines()[:2])
+        assignment = re.search(rf"(?<![\w.]){re.escape(flag)}=1\b", body)
+        if assignment is None:
+            continue
+        if re.search(r"\|\|", body[: assignment.start()]):
+            continue
+        return True
+    return False
+
+
 def _cleanup_trap(code: str) -> str:
     """The registered `EXIT`/`0` trap, resolved through a named function.
 
@@ -5511,17 +5553,20 @@ def test_the_cleanup_trap_owns_only_what_this_step_created(job: dict) -> None:
         # explicit `else F=0` is the same fact made redundant. Pinning the first spelling
         # refused the other three with a message false about what was written (MEASURED,
         # review cycle 15) — the false-block class this file has now paid for five times.
-        detected = re.search(
-            rf"(?:\[\s*-e\s+{re.escape(path)}\s*\]|test\s+-e\s+{re.escape(path)})"
-            rf"[^\n]*?{flag}=1",
-            code,
+        assert _flag_comes_from_a_positive_probe(code, path, flag), (
+            f"`{flag}` is not set to 1 by a POSITIVE `-e {path}` test, so the trap may "
+            f"delete a file this step did not create (or skip one it did): {code[:400]!r}"
         )
-        assert detected, (
-            f"`{flag}` is not read from `{path}`, so the trap may delete a file this step "
-            f"did not create (or skip one it did): {code[:400]!r}"
-        )
+        # ⛔ THE WHOLE BRACKETED TEST, LEFT OPERAND ANCHORED TO THIS FLAG. A window
+        # ("flag … then somewhere a zero comparison") is satisfied by the SIBLING flag
+        # on the same line: MEASURED (review cycle 16), `= 1`, `!= 0` and `-n` in the
+        # `had_sources` test all left the suite GREEN because the trap is one line and
+        # the walk reached `"${had_keyring:-0}" = 0`. That is a fail-open in the one row
+        # that stops the trap deleting an operator's pre-existing PGDG config.
         assert re.search(
-            rf"\$\{{?{flag}:?-?[^}}]*\}}[^\n]*?(?:=\s*0|-eq\s*0)", trap[0]
+            rf"(?:\[|\[\[)\s*\"?\$\{{?{flag}[:-][^}}\n]*\}}?\"?\s*"
+            rf"(?:==|=|-eq)\s*[\"\']?0[\"\']?\s*(?:\]|\]\])",
+            trap[0],
         ), (
             f"the trap does not GUARD on `{flag}`, so it removes a path it may not own: {trap[0]!r}"
         )
@@ -5600,9 +5645,13 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     arm count moves, because this paragraph has now been stale TWICE: every arm
     that must stop on a NAMED branch — key fetch, `apt-get update`, os-release
     SOURCE, ORIGIN-fires, no-codename — asserts its OWN branch's text AND that the
-    neighbouring branch's is ABSENT. Only the `apt-cache`-fails arm asserts a
-    bare `::error::`, and it is the one arm where no earlier branch can fire, so
-    its discrimination is the absence of the `REACHED_PAST_PRECONDITION` marker;
+    neighbouring branch's is ABSENT. THREE arms also carry a bare `::error::`
+    check — `not_pgdg`, `codename`, and the `apt-cache`-fails arm — but only on
+    top of their own attributed assertion; the `apt-cache`-fails arm is the one
+    whose discrimination RESTS on the bare check, because in it no earlier branch
+    can fire (its `apt_get` stub returns 0, os-release is present, the codename is
+    bound), so the marker's absence is what separates "this guard armed" from
+    "silent";
     `present` and `match_then_noise` are CONTROLS and assert the marker's PRESENCE.
     Plus TWO branches no arm executes: the install guard
     (unreachable by construction — this arm stops AT the install line; it is pinned
