@@ -4808,16 +4808,19 @@ jobs:
           # failure anywhere later still cleans up, and the SOURCE is removed FIRST so there is no
           # window in which it outlives the key that signs it. `${key_file:-}` because the trap can
           # fire before that mktemp call, where `set -u` in the trap would itself abort.
-          # ⛔ OWN ONLY WHAT THIS STEP WROTE. A pool box may ALREADY carry PGDG configuration
-          # (an operator's, or `postgresql-common`'s own keyring at exactly that path); an
-          # unconditional `rm` would delete state this job never created — on any later
-          # failure, not just the success path (MEASURED: with an operator file planted and
-          # the key fetch forced to fail, an unconditional trap still deleted it).
+          # ⛔ OWN ONLY WHAT THIS STEP WROTE. A pool box may ALREADY carry an operator's
+          # `apt.postgresql.org.asc` — created by PGDG's own manual procedure, at exactly
+          # this path — so an unconditional `rm` would DELETE state this job never created,
+          # on any later failure and not just the success path (MEASURED: with an operator
+          # file planted and the key fetch forced to fail, an unconditional trap removed it).
+          # ⚠️ The flag decides REMOVAL only: the `tee` below REPLACES a pre-existing sources
+          # file's contents (it does not append), so what the trap restores is the FILE's
+          # existence, not its contents.
           had_sources=0
           if [ -e /etc/apt/sources.list.d/pgdg.list ]; then had_sources=1; fi
           had_keyring=0
           if [ -e /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc ]; then had_keyring=1; fi
-          trap 'if [ "${had_sources:-0}" = 0 ]; then sudo rm -f /etc/apt/sources.list.d/pgdg.list; fi; if [ "${had_keyring:-0}" = 0 ]; then sudo rm -f /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; fi; sudo rm -f "${key_file:-}"; true' EXIT
+          trap 'if [ "${had_sources:-0}" = 0 ]; then sudo rm -f /etc/apt/sources.list.d/pgdg.list || true; fi; if [ "${had_keyring:-0}" = 0 ]; then sudo rm -f /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc || true; fi; sudo rm -f "${key_file:-}" || true' EXIT
           # ⚠️ `mktemp`, not a fixed `/tmp/pgdg.asc`: this job is pool-eligible and `curl -o`
           # FOLLOWS symlinks, so a co-tenant could pre-create that path and redirect this write.
           key_file="$(mktemp)"

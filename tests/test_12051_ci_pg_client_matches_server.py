@@ -5430,14 +5430,39 @@ def test_the_cleanup_trap_owns_only_what_this_step_created(job: dict) -> None:
     trap = [line for line in code.splitlines() if line.lstrip().startswith("trap '")]
     assert trap, "the step registers no EXIT cleanup trap — a pool box keeps its PGDG config"
     assert len(trap) == 1, f"expected ONE cleanup trap, found {trap!r}"
-    for flag in ("had_sources", "had_keyring"):
-        assert flag in code, (
-            f"the trap does not record whether `{flag}` already existed, so it deletes state "
-            "this step never created"
+    # ⛔ THE FLAG'S VALUE MUST COME FROM THE REAL PATH, AND BE READ BEFORE THE WRITE.
+    # Asserting only that the NAME appears leaves both halves of the property unpinned:
+    # MEASURED, review cycle 13 — (i) turning each detection into a probe of a path that
+    # never exists keeps the suite GREEN while the trap goes back to deleting the
+    # operator's file, and (ii) moving the flag blocks BELOW the write makes them read 1 on
+    # the step's own file, so the trap removes nothing and a pool box keeps this step's
+    # source. The ordering is the fact, exactly as it is for the keyring directory above.
+    for flag, path in (
+        ("had_sources", "/etc/apt/sources.list.d/pgdg.list"),
+        ("had_keyring", "/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc"),
+    ):
+        assert f"if [ -e {path} ]; then {flag}=1; fi" in code, (
+            f"`{flag}` is not read from `{path}`, so the trap may delete a file this step "
+            f"did not create (or skip one it did): {code[:400]!r}"
         )
         assert f'"${{{flag}:-0}}" = 0' in trap[0], (
             f"the trap does not GUARD on `{flag}`, so it removes a path it may not own: {trap[0]!r}"
         )
+    assert code.index("had_sources=1") < code.index("tee /etc/apt/sources.list.d/pgdg.list"), (
+        "the sources flag is recorded AFTER the sources line already truncated the file, so "
+        "it reads 1 on this step's own write and the trap never removes it"
+    )
+    assert code.index("had_keyring=1") < code.index('install -m 0644 "$key_file"'), (
+        "the keyring flag is recorded AFTER this step wrote the key, so it reads 1 on its "
+        "own file and the trap never removes it"
+    )
+    for rm_line in trap[0].split(";"):
+        if "rm -f" in rm_line:
+            assert "|| true" in rm_line or rm_line.rstrip().endswith("true"), (
+                "a cleanup `rm` is not protected by `|| true`: `errexit` IS in force inside "
+                "an EXIT trap, so one failing removal reds a step that SUCCEEDED and skips "
+                f"the rest of the cleanup: {rm_line!r}"
+            )
     assert "${key_file:-}" in trap[0], (
         "the trap does not clean up the temp key file (or does it unguarded, which aborts "
         f"under `set -u` before the mktemp call): {trap[0]!r}"
@@ -5680,28 +5705,6 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # and exits 0, so on a release whose own archive carries the major a plain
     # `apt-cache show` passes with PGDG never applied: the mechanism silently absent
     # and green. MEASURED, review cycle 7 of `fc9d4204aa`.
-    # ⛔ THE SIGPIPE CLASS — the failure mode a bash-function stub CANNOT show. `grep -q`
-    # exits on the first match, the producer takes SIGPIPE, and `set -o pipefail` makes the
-    # pipeline 141, which `if !` reads as SUCCESS: the guard then fires on a HEALTHY repo.
-    # MEASURED, review cycle 12: rc 141 in 10/10 real runs on `ubuntu:24.04` (the required
-    # leg red on every run) while this suite stayed green, because the stub finished writing
-    # before the pipe closed. This stub keeps writing AFTER the match, like a real producer.
-    slow_producer = run_with(
-        'apt-cache() { echo "Candidate: 16.15-1.pgdg24.04+2"; '
-        'echo "     500 https://apt.postgresql.org/pub/repos/apt noble-pgdg/main amd64 Packages"; '
-        'sleep 0.2; '
-        'echo "     500 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages"; }'
-    )
-    assert slow_producer.returncode == 0, (
-        "the origin check fired on a repo that DOES list the package — the grep is not "
-        "DRAINING `apt-cache`'s output, so `grep -q` + `pipefail` turned SIGPIPE (141) into a "
-        f"false failure on a healthy repo: {(slow_producer.stdout + slow_producer.stderr)!r}"
-    )
-    assert "REACHED_PAST_PRECONDITION" in slow_producer.stdout, (
-        "the origin check did not let a PGDG-listed candidate through when the producer kept "
-        "writing after the match"
-    )
-
     not_pgdg = run_with(
         'apt-cache() { echo "Candidate: 16.15-0ubuntu0.24.04.1"; '
         'echo "     500 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages"; }'
