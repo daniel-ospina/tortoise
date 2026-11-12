@@ -1723,8 +1723,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # same string (#12210 review, P2).
             _draft_mech = (
                 "the same edge write builds the factor after the promotion "
-                "(``effective_n 2.263``) and, before it, EP strips that input and "
-                "re-scores over whatever remains (the arity ladder stated above)"
+                "(this row's figure is in the finding's detail) and, before it, "
+                "EP strips that input and re-scores over whatever remains "
+                "(the arity ladder stated above)"
                 if s["is_operator"] else
                 "``confidences {}`` while it is a draft and while the endpoint still "
                 "carries the shape: the promotion is a PRECONDITION, not the repair "
@@ -1741,8 +1742,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 + ". Drop only a refutation that MOTIVATED the correction")
         elif unread:
             # ⛔ Neutral rows never reach here either — the ``neutral`` arm above has
-            # already taken them (same note as the DRAFT arm). The conjunct that used
-            # to be here was dead (#12210 review, P3).
+            # already taken them (same note as the DRAFT arm): a ``not neutral``
+            # conjunct here was dead (#12210 review, P3).
             # false (measured: carrying a neutral input onto a live node leaves both
             # posteriors at the bare prior, ``effective_n 2.0``) and it contradicted
             # the DROP the same string states (#12210 review, P2).
@@ -1768,7 +1769,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # the same sentence's "would establish one" (#12210 review, P2).
                 + (" (measured: the same posteriors as before the supersession once "
                    "the edge lands on the node that carries it)"
-                   if not s["sup_refused"] else
+                   if not (s["sup_refused"] or neither_arm) else
+                   # ⛔ ``sup_flag_shaped`` implies ``sup_refused`` on both lanes
+                   # (``_4b_state``), so it could never change this branch
+                   # (#12210 review, P3); ``neither_arm`` can.
                    " (measured: the prescribed edge onto a live claim successor "
                    "restores two confidences, ``effective_n 2.5255``)")
                 )

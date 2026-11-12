@@ -3495,3 +3495,77 @@ def test_a_neither_arm_re_point_moves_no_belief_only_WHILE_shaped(sdk):
     assert "moves no belief until the shape is cleared" in fix, (
         "the re-point DOES carry once the shape is cleared: " + fix)
     assert "moves no belief either way" not in fix, fix
+
+
+def test_a_neither_arm_row_never_quotes_a_measurement_from_a_readable_lane(sdk):
+    """Neither-arm rows: no factor ever ran, so "the same posteriors" is unavailable.
+
+    Measured on `shaped Subject → IMPL → V1`, V2 archived with a LIVE chain head:
+    `compute_confidence(factors=[src])` is `n=0 iters=0` before the supersession, after
+    it, and only becomes `n=2 iters=12` once the shape is cleared and the edge carried
+    onto the head — so the readable-lane parenthetical ("the same posteriors") and the
+    `2.9296` figure are both false on this row (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    v3 = _obj(sdk, "PolicyV3")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='live'", {"i": v3["id"]})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "target THAT" in fix, fix
+    assert "the same posteriors as before the supersession" not in fix, (
+        "no factor ever ran on this row, so nothing can be 'the same': " + fix)
+    assert "restores two confidences" in fix, fix
+
+
+def test_a_neither_arm_draft_detail_quotes_no_readable_lane_figure(sdk):
+    """The draft `detail` must not quote `2.9296` where the shape blocks the repair.
+
+    Measured: promote the draft and move the edge with the endpoint still shaped →
+    `confidences {}`, `iterations 0`; adding `is_operator=false` → two confidences,
+    `effective_n 2.5255` (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    assert "2.9296" not in issue.detail, (
+        "that figure is the readable-endpoint measurement: " + issue.detail)
+    assert "PRECONDITION of this repair" in issue.detail, (
+        "the promotion is a precondition here, and the shape must be cleared too: "
+        + issue.detail)
+
+
+def test_one_row_quotes_one_measurement_for_one_operation(sdk):
+    """The `detail` and the `fix` must not quote two different figures for one operation.
+
+    Measured on `direct/flowing/draft`: promotion + edge write is a single operation, so
+    at most one of `2.9296` / `2.263` can be this row's measurement (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    figures = [n for n in ("2.9296", "2.263") if n in issue.detail or n in issue.fix]
+    assert len(figures) <= 1, (
+        "one operation, one measured figure — got " + repr(figures) + " in: "
+        + issue.detail + " / " + issue.fix)
