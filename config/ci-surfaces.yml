@@ -2249,10 +2249,10 @@ surfaces:
   # `refs/pull/N/merge` — measured on #12002, `COMPLETED FAILURE` with the merge
   # blocked. ⚠️ That is HISTORY, not the current tree: #11837 (`3557a476e1`)
   # registered the file on `main` first, in the `api` block, and `--integrity`
-  # on `main` is green, and `main` DOES carry this `core` arm (since #12005,
+  # on `main` is green; `main` carries this `core` arm too (since #12005,
   # `d088425a7c`; #12035 then collapsed the extra copies). So this row is no
-  # longer a repair — it is the row both surfaces share, and the `api` block's
-  # own row covers `metering.py`: a second `api` row reds the gate it greens.
+  # longer a repair: it is the `core` arm, and the `api` block's own row covers
+  # `metering.py` — one row per surface, never one row for both of them.
   # Same class as the `test_percent_value_11915.py` row directly above — which is
   # what #11978 was filed for 42 minutes before this drift landed (issue
   # 2026-11-12T00:47:22Z, `a3d20763ab` 01:29:58Z), not hours.
