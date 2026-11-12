@@ -106,8 +106,10 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #:     load-bearing the moment anything re-stamps the record.
 #:   • `embedding_verbatim` — ⛔ NOT payload-only, and saying it was is the
 #:     same over-claim this guard was added to fix. Its entry is
-#:     ``projection/entities.py:2386``, under the comment at ``:2378``: a
-#:     DECLARED node property with its own SET clause, because a later re-emit
+#:     ``projection/entities.py``'s ``"embedding_verbatim"``, under the
+#:     ``#5004 round-3`` note that starts "a DECLARED node property (own SET
+#:     clause below)" — the entry's OWN note, not the identity triple's above
+#:     it: a DECLARED node property with its own SET clause, because a later re-emit
 #:     (``promote_point`` &c.) reads the point back and must carry the storage
 #:     form. A forged one therefore writes ``n.embedding_verbatim = true`` AND
 #:     flips the journal's storage form — the node and the record both.
@@ -119,7 +121,9 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #:     ``{"type": ..., "evidence_fold": True}`` AND for
 #:     ``{"type": ..., "point": {"evidence_fold": True}}`` (measured). Either way
 #:     the decay plan and the terminalizer stamp diverge from the live tree.
-#:     ``sdk.py:6837`` calls it a HARD-REJECT key for that reason.
+#:     `sdk._sanitize_props` calls it a HARD-REJECT key for that reason (its own
+#:     ``if "evidence_fold" in props:`` arm, beside the ``embedding_preserved``
+#:     precedent it follows).
 #:   • `embeddingText` — the enriched text the vector is computed from; a
 #:     caller-set one forges the text↔vector identity the ``#8488`` hash attests.
 #:   • `extractedFromAll`, `sourceVersion`, `sourceVersions` — the source-ref
@@ -127,7 +131,7 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #:     (``_forged_keys``): a caller-supplied value puts the payload's edges AHEAD
 #:     of the ``:Source`` resolution this seam performs, so the record asserts
 #:     provenance the graph does not have. ``extractedFromAll`` is
-#:     ``_POINT_HANDLED`` (``entities.py:2419``) and is what
+#:     ``_POINT_HANDLED`` (``projection/entities.py``) and is what
 #:     ``_point_all_source_refs`` reads.
 #:
 #: ⛔ `sourceVersionTransit` is deliberately NOT in the set although it looks
@@ -336,7 +340,8 @@ _ENVELOPE_KEYS_AT_PASSTHROUGH = _ENVELOPE_KEYS | {
 #: false too (#11996 review rounds 18 and 20, measured: `projection_version=1` is
 #: refused by `add_event`, `add_object` and `emit_belief`, journalled=0, and
 #: `_emit("PointAdded", {"id": "p", "content": "c", "projection_version": 0})` is
-#: refused by the `_envelope_keys(record=True)` call in `_emit`). ⛔ `_emit`'s OWN
+#: refused by the `_refuse_caller_named_envelope_keys(…, record=True)` call in
+#: `_emit`). ⛔ `_emit`'s OWN
 #: keyword channel cannot refuse PRESENCE for the reason above, so it refuses the
 #: TYPE instead (see
 #: the `projection_version` arm there): an exact `int` is the producers' own value,
@@ -566,10 +571,14 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     So this VERIFIES instead. The harm the marker rule exists to prevent is a
     marker that LIES — a declared ``f32`` over values it does not describe,
     which a later width/base64 migration trusts (#5004 round-7). The decision is
-    a pure function of the values, so re-derive it: copy the record WITHOUT its
-    declared width and ask the seam again (the same trick ``add_point`` uses to
-    defeat the seam's own ``f32`` idempotency guard). Agreement means the marker
-    is the seam's; disagreement is the lie.
+    a pure function of the values, so re-derive it by asking the SEAM'S OWN TWO
+    QUESTIONS about ``f32`` (is the vector its shortest-round-trip text? is it on
+    the float32 grid?) — see the re-stamp note further down. What is NOT done is
+    the tidier-looking version of the same idea, copying the record WITHOUT its
+    declared width and re-running `stamp_journal_embedding`: that OVER-BLOCKS,
+    because the seam's ``f32`` idempotency arm reads the marker itself, so
+    stripping it re-decides ``f64`` for every already-narrowed payload. The
+    compatibility note below carries the measurement.
 
     Measured before this guard, through the private channel only:
 
@@ -709,9 +718,11 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
 
     ⛔ THE ENUMERATION IS SCOPED TO THIS CHANNEL. `sdk._emit_event` carries no
     `_verify_record_vector_width` call at all (the module holds exactly two call
-    sites, both here), so the SDK funnel declares no width of its own to
-    enumerate — it is guarded by the marker-family refusal the public props
-    doors run instead, and that half is CLOSED. #11858, merged as #12113
+    sites, both here), so no CALLER-DECLARED width reaches the SDK funnel to be
+    verified — the width its records carry is minted THERE, by
+    `stamp_journal_embedding` inside `sdk._emit_event` itself (it stamps the
+    vector `update_point` splats onto `PointRevised`). The caller's marker is
+    refused at the DOORS instead, and that half is CLOSED. #11858, merged as #12113
     (`18d43e0462`) and so present only AFTER this branch's first head, refuses
     the whole family over `create_source`'s ASSEMBLED `ev`
     (`sdk._SERVER_MANAGED_EMBEDDING_MARKERS`). Measured at THIS head, with its
@@ -1771,9 +1782,10 @@ class EventAPI:
         #     api._emit("PointAdded", id="p1", content="c", event_id="forged-id")
         #       -> JOURNALLED `{"event_id": "forged-id", …, "type": "PointAdded"}`
         #
-        # `projection/__init__.py:8395` calls `event_id` "the only handle that
-        # locates the diverging journal line", so a caller could pick the identity
-        # of its own record — the same harm the record channel refuses it for
+        # `projection._warn_entity_mutation_fold_miss`'s docstring calls `event_id`
+        # "the only handle that locates the diverging journal line", so a caller
+        # could pick the identity of its own record — the same harm the record
+        # channel refuses it for
         # (`_ENVELOPE_KEYS_AT_PASSTHROUGH`, which the three splatting doors use).
         # ⛔ Scoped to the ONE producer that legitimately passes it: reversing
         # `add_document`'s pin would be a reopen of #125/#167, not a fix, and
