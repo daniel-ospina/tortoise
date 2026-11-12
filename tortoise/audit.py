@@ -1119,16 +1119,40 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         ``degenerate``.
         """
         if s["shape"] and not s["is_operator"]:
-            return ("EP assembles no factor for this endpoint in either arm, so the "
-                    "re-point moves no belief either way")
+            # ⛔ …and it is TRUE only WHILE the endpoint stays shaped: measured on a
+            # neither-arm row whose chain has a live head, clearing the shape and
+            # writing the edge onto that head restores the belief (``effective_n
+            # 2.5255``, re-audit 0 rows) — so the old absolute ("the re-point moves no
+            # belief either way") contradicted the repair the same string ordered
+            # (#12210 review, P2).
+            return ("EP assembles no factor for this endpoint in either arm WHILE it "
+                    "stays shaped, so the re-point moves no belief until the shape is "
+                    "cleared; once it is cleared, an edge onto a readable successor "
+                    "does carry it (measured: ``effective_n 2.5255``)")
         fwd, bwd = direction_flows(s["direction"])
         if not (fwd or bwd):
             return (f"this edge is {_quoted(s['direction'])} (neutral), so no "
                     "confidence transfers through it by design and the re-point "
                     "moves no belief either way")
         if not s["is_operator"]:
+            # ⛔ …and the DIRECT arm has its own split, on the endpoint that was
+            # superseded: where that endpoint is one EP refuses (``op_type`` only, or
+            # ``is_operator`` true), NO belief was ever carried through this edge —
+            # measured: ``confidences {}`` and ``skipped_factors None`` BEFORE the
+            # supersession, in both shapes — so "the direct edge carried belief … that
+            # belief is NOT moved" contradicted the same finding's own ``detail``
+            # ("no confidence was ever carried through this edge"), and only this
+            # helper failed to consult the flag every other consequence helper reads
+            # (#12210 review, P2).
+            if s["sup_refused"] or s["sup_flag_shaped"]:
+                return ("EP's direct-edge arm refuses the superseded endpoint itself "
+                        "(it is operator-shaped), so no confidence was EVER carried "
+                        "through this edge — measured ``confidences {}`` and "
+                        "``skipped_factors None`` before the supersession — and an "
+                        "edge written onto a live claim successor is what would "
+                        "establish one; a carry onto the dead name changes nothing")
             # ⛔ Every caller is an "EP will not read it" arm (an operator-shaped or
-            # draft successor — a neutral edge returns at the rung above and never
+            # dead successor — a neutral edge returns at the rung above and never
             # reaches this one), so the honest sentence is that the belief this edge
             # DID carry is NOT moved by the repair named — measured:
             # a direct edge re-pointed onto an operator-shaped successor leaves
@@ -1693,18 +1717,19 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "re-scores over whatever remains (the arity ladder stated above)"
                 if s["is_operator"] else
                 "``confidences {}`` while it is a draft and while the endpoint still "
-                "carries the shape: the promotion is a PRECONDITION, not the repair"
+                "carries the shape: the promotion is a PRECONDITION, not the repair "
+                "— EP builds no factor for this endpoint at all (the row is "
+                "excluded before evaluation), so nothing is dropped or re-scored"
                 if neither_arm else
                 "``confidences {}`` while it is a draft and two once it is live, "
-                "because EP's direct-edge arm EXCLUDES the row before evaluation — "
-                "no factor and no skipped-factor record")
+                "because EP builds no factor for this endpoint at all (the row is "
+                "excluded before evaluation), so nothing is dropped or re-scored")
             disposal = (
                 "a DRAFT successor is the destination ONCE PROMOTED: set it "
                 "``status='live'`` first, then CARRY the IMPL (and any NAND that "
                 "STILL APPLIES) onto it — measured, " + _draft_mech + _shape_too
                 + ". Drop only a refutation that MOTIVATED the correction")
         elif unread and not neutral:
-            # ⛔ …and NOT on a NEUTRAL row, which transfers nothing: a CARRY there is
             # false (measured: carrying a neutral input onto a live node leaves both
             # posteriors at the bare prior, ``effective_n 2.0``) and it contradicted
             # the DROP the same string states (#12210 review, P2).
@@ -1723,8 +1748,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "live one, named by ID), and drop only a refutation that MOTIVATED "
                 "the correction. A carry onto the dead name itself changes nothing: "
                 + _dropped_input(s)
-                + " (measured: the same posteriors as before the supersession once "
-                "the edge lands on the node that carries it)")
+                # ⛔ …and this parenthetical is only true where the edge DID carry
+                # belief before the supersession: with a shaped superseded endpoint it
+                # never did (measured ``confidences {}`` before, ``effective_n 2.5255``
+                # after the prescribed repair), so "the same posteriors" contradicted
+                # the same sentence's "would establish one" (#12210 review, P2).
+                + (" (measured: the same posteriors as before the supersession once "
+                   "the edge lands on the node that carries it)"
+                   if not (s["sup_refused"] or s["sup_flag_shaped"]) else
+                   " (measured: the prescribed edge onto a live claim successor "
+                   "restores two confidences, ``effective_n 2.5255``)")
+                )
         else:
             disposal = (
                 "an IMPL may CARRY to the successor, and so may a NAND that STILL "
