@@ -313,13 +313,15 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   it points outside it, because rewriting every citation to an absolute one used to leave the page
   CLEAN with nothing resolved. A citation **embedded in a longer span** is refused too — appending one
   word inside the backticks defused a legitimate out-of-range red (the example is unspanned for the
-  same reason as the others above). The one
-  remaining carve-out is a `~`-rooted path (a dated reading of something outside this repo, §5): it is
-  recognised and COUNTED in BOTH spellings — `path:line` and the permalink form — and the permalink
-  arm defers to it rather than reding a citation this paragraph exempts (measured: refusing
-  `~`-rooted permalinks reded over a §5 reading that §8 declares exempt) — and the guard raises
-  UNVERIFIED rather than reporting clean when nothing but
-  exempt citations remain, so a page cannot be re-pointed wholesale onto them;
+  same reason as the others above). A **`~`-rooted path is not a carve-out either**: it is refused as a
+  dangling citation, in both spellings (`path:line` and the permalink form), because §5's own first
+  consequence already says a `~/.swarm` citation is now a **broken** citation. This page carried a
+  `~` carve-out until #11902's review measured it **fail-open**: the exemption skipped both spellings,
+  so an out-of-range `~/`-rooted citation read CLEAN and the only floor under it was "nothing resolved
+  at all" — and the carve-out's stated justification was itself false, since no revision of this page
+  has ever carried a `~`-rooted `path:line` or permalink (measured over all 37 commits that touch it:
+  zero matches in either spelling). The exemption protected nothing and defused a real red, so it is
+  gone rather than narrowed;
 - the **§3 headline tally** is derived too. The "N of the twelve rows no longer read as written"
   count, the letter list beside it, and the four-of-the-seven "overtaken" figure are all recomputed
   from the verdict cells and compared with the sentence a reader actually quotes. Unguarded, flipping
@@ -362,9 +364,9 @@ The self-test that proves those rules still fire has its own **population floor*
 a gate reporting OK when it cannot run — so a shrunk population now reds instead.
 
 Exactly one arm needs `git` **history**: the frontmatter's `measured_at_commit` must be an ancestor of
-`HEAD`. The other eleven read this checkout's tree and nothing else, and the tool keeps that split
+`HEAD`. The other twelve read this checkout's tree and nothing else, and the tool keeps that split
 (`check_document()` / `check_all()`) because the two jobs that run it differ: the REQUIRED `docs` job
-checks out at `fetch-depth: 0` and runs `--check` (all twelve arms), while the `test` jobs check out at
+checks out at `fetch-depth: 0` and runs `--check` (all thirteen arms), while the `test` jobs check out at
 the default depth 1, cannot resolve `f70d884b7` at all, and are where this page's own test module runs.
 In a depth-1 clone `--check` therefore reports **exit 2 UNVERIFIED** — never `0`, and never a verdict
 against the document it could not read — and `--self-test`, which drives only the tree-only arms,

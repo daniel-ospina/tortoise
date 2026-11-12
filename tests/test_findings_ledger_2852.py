@@ -594,12 +594,21 @@ def test_an_absolute_path_outside_the_tree_is_refused(tmp_path, monkeypatch):
     assert any("absolute path outside" in p for p in problems), problems
 
 
-def test_a_page_of_nothing_but_exempt_citations_is_unverifiable(tmp_path, monkeypatch):
-    """FAILS if the "measured nothing" floor can be reached past by `~`-exempting.
+def test_a_page_of_nothing_but_tilde_citations_is_drift(tmp_path, monkeypatch):
+    """FAILS if re-pointing every citation at `~` buys silence instead of a verdict.
 
-    The floor counted MATCHES rather than RESOLUTIONS, so every citation exempted to
-    `~` still counted as measured. It is exit 2, never 0: a guard that measured
-    nothing must not report clean.
+    Two defects met here. The floor counted MATCHES rather than RESOLUTIONS, so
+    every citation exempted to `~` still counted as measured and a page of nothing
+    but exempt citations could reach the "measured nothing" refusal by luck rather
+    than by rule. And the `~` exemption itself was the fail-open #11902's review
+    measured: a `~`-rooted `path:line` was skipped entirely, so an out-of-range
+    `~/tortoise/pipeline.py:999999` read CLEAN.
+
+    The verdict is now DRIFT (exit 1), not UNVERIFIED: every one of these citations
+    is a dangling reference, which §5's own first consequence states — a citation
+    into `~/.swarm` is a BROKEN citation. Either way it is never clean, which is the
+    property this arm exists to protect, and asserting `1` is strictly stronger
+    than the old `2` because it names the false claim instead of refusing to look.
     """
     _mutated(
         tmp_path,
@@ -608,8 +617,52 @@ def test_a_page_of_nothing_but_exempt_citations_is_unverifiable(tmp_path, monkey
             r"`((?:tortoise|tests|docs|\.github|config|tools)/[^`]*:\d[^`]*)`", r"`~\1`", t
         ),
     )
-    with pytest.raises(flc.Unverifiable):
-        _doc_problems()
+    problems = _doc_problems()
+    assert problems, "a page of nothing but `~`-rooted citations reported CLEAN"
+    assert any("does not exist in the tree" in p for p in problems), problems
+
+
+def test_a_tilde_rooted_citation_is_refused_in_both_spellings(tmp_path, monkeypatch):
+    """FAILS if a `~`-rooted citation is exempt again, in EITHER spelling.
+
+    Measured before this arm: an out-of-range `~/tortoise/pipeline.py:999999` read
+    CLEAN (`[]`), and so did `~/.swarm/x.md#L999999` — the exemption covered
+    `path:line` and the GitHub permalink form alike. No revision of the page ever
+    carried such a citation (measured over all 37 commits that touch it: zero in
+    either spelling), so the carve-out protected nothing and only disabled a red.
+    §8 now says so, and §5.1 already called such a citation BROKEN.
+    """
+    for needle, expected in (
+        ("`~/tortoise/pipeline.py:999999`", "does not exist in the tree"),
+        ("`~/.swarm/x.md#L999999`", "not a recognised citation"),
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _n=needle: t.replace("`tortoise/pipeline.py:16`", _n, 1),
+            )
+            problems = _doc_problems()
+            assert any(expected in p for p in problems), (needle, problems)
+
+
+def test_a_page_of_nothing_but_absolute_citations_is_refused(tmp_path, monkeypatch):
+    """FAILS if re-pointing every citation at `/` buys silence instead of a verdict.
+
+    The same hole as the `~` arm above, for the other half of the old
+    `startswith(("~", "/"))` exemption: an absolute path is only evidence if it
+    points INSIDE this tree, and otherwise each citation must be reported.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: re.sub(
+            r"`((?:tortoise|tests|docs|\.github|config|tools)/[^`]*:\d[^`]*)`", r"`/nope/\1`", t
+        ),
+    )
+    problems = _doc_problems()
+    assert problems, "a page of nothing but absolute citations reported CLEAN"
+    assert any("absolute path outside" in p for p in problems), problems
 
 
 def test_an_evidence_reference_to_a_missing_section_is_rejected(tmp_path, monkeypatch):
@@ -1123,7 +1176,13 @@ def test_the_s8_citation_carve_outs_stay_skippable(tmp_path, monkeypatch):
     spellings the arm DOES measure (`path N` and `path START-END`) are refused.
     """
     refused = ("tortoise/nope_module.py 16-18", "tortoise/nope_module.py 16",
-               "tortoise/nope_module.py|16")
+               "tortoise/nope_module.py|16",
+               # A `~`-rooted path was a §8 carve-out until #11902's review measured it
+               # fail-open in both spellings: the exemption skipped `~/…`, so this
+               # permalink (and an out-of-range `~/` `path:line`) read CLEAN while no
+               # revision of the page ever carried one (measured over all 37 commits
+               # that touch it: zero). §5.1 already called such a citation BROKEN.
+               "~/.swarm/x.md#L999999")
     for spelling in refused:
         with monkeypatch.context() as patch:
             _mutated(
@@ -1147,11 +1206,6 @@ def test_the_s8_citation_carve_outs_stay_skippable(tmp_path, monkeypatch):
         "Makefile 12",
         "daniel-ospina/tortoise#9363",
         "index.html 200",
-        # A `~`-rooted path is §8's remaining carve-out and it covers BOTH spellings —
-        # the resolver counts `~`-rooted `path:line` readings as exempt, and the
-        # permalink arm defers to it. Refusing the permalink form reded the required
-        # `docs` job over a §5 citation §8 declares exempt (measured, found by review).
-        "~/.swarm/x.md#L999999",
     ):
         with monkeypatch.context() as patch:
             _mutated(
@@ -1324,11 +1378,12 @@ def test_out_of_tree_citation_is_reported(tmp_path, monkeypatch):
     `is_file()` accepts, so the existence-only check certified "evidence" the repo
     does not contain — the class this page is about.
 
-    ⚠️ The arm is about RELATIVE escapes only. A `~`- or `/`-rooted path is §8's
-    deliberate exemption (a dated reading of something outside this repo) and is
-    recognised, counted and skipped — do not read this test as closing that door,
-    and do not "fix" it by un-exempting absolute paths: that would reverse a
-    recorded decision.
+    ⚠️ The arm is about RELATIVE escapes only: a `/`-rooted path is resolved against
+    the repository root and refused if it points outside it (its own arm), and a
+    `~`-rooted path is refused by the citation arm outright — that exemption was
+    measured fail-open and removed (#11902), so do not read this test as protecting
+    it. Do not "fix" a red here by re-exempting either: that would restore a
+    fail-open.
     """
     def add_escaping_citation(text: str) -> str:
         return text.replace(
@@ -1754,6 +1809,71 @@ def test_missing_section_is_unverifiable(tmp_path, monkeypatch):
     _mutated(tmp_path, monkeypatch, lambda t: t.replace("## 3. The corrections log", "## 3. Corrections"))
     with pytest.raises(flc.Unverifiable):
         _doc_problems()
+
+
+@pytest.mark.parametrize("heading", flc.SECTION_HEADINGS)
+def test_every_section_is_required_not_just_the_bounded_ones(tmp_path, monkeypatch, heading):
+    """FAILS (exit 2) if ANY of the eight sections can be deleted into greenness.
+
+    Reachable, and measured before this arm existed: §1–§4 and §6–§7 were each
+    bounded by a `_region()` pair and refused when renumbered away, but §5 and §8
+    were bounded by nothing — deleting either WHOLE returned `check_document() ==
+    []`, i.e. `--check` at rc 0 over a page missing one of its two headline halves.
+    §5 is the at-risk inventory the review's own conclusion rests on, and prose
+    outside it cites it; §8 is the page's statement of what IS checked, so its
+    absence silently widens every other claim on the page.
+
+    The section is removed by cutting its heading and body up to the next heading,
+    which is what a lane "simplifying" the page would actually commit — not just a
+    renumbered heading, so this covers the loss the `_region` arms never saw.
+    """
+    def drop_section(text: str) -> str:
+        start = text.find(heading)
+        assert start >= 0, heading
+        rest = text[start + len(heading) :]
+        nxt = rest.find("\n## ")
+        assert nxt >= 0 or start + len(heading) + len(rest) == len(text)
+        return text[:start] + (rest[nxt + 1 :] if nxt >= 0 else "")
+
+    _mutated(tmp_path, monkeypatch, drop_section)
+    with pytest.raises(flc.Unverifiable):
+        _doc_problems()
+
+
+def test_an_unanswerable_git_is_unverifiable_not_drift(monkeypatch, capsys):
+    """FAILS if a `git` that cannot be RUN reports DRIFT (1) instead of UNVERIFIED (2).
+
+    Measured before this arm: `env PATH=/tmp/nogit python3
+    tools/findings_ledger_check.py --check` escaped as a `FileNotFoundError`
+    traceback and Python's interpreter exit — **1** — which this module defines as
+    "drift: a named claim is false, and the message names the claim". There is no
+    claim: nothing opened the document's git question at all, so a cell wired to
+    that exit code would red a correct page. The sibling map's `_git` exists for
+    exactly this (`tools/problem_map_check.py`), so the refusal shape is the
+    recorded one. `PermissionError` and `TimeoutExpired` take the same path.
+    """
+    def boom(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(flc.subprocess, "run", boom)
+    with pytest.raises(flc.Unverifiable) as excinfo:
+        flc.check_measured_commit(flc.read_doc(REPO), REPO)
+    assert "could not be run" in str(excinfo.value)
+    assert "FileNotFoundError" in str(excinfo.value)
+
+
+def test_main_exit_two_when_git_cannot_be_run(monkeypatch, capsys):
+    """FAILS if the CLI turns an unaskable `git` into exit 1 (or a traceback).
+
+    Same defect as the test above, asserted at the CONTRACT boundary the `docs`
+    job reads: `2` says the checker could not look, `1` accuses the document.
+    """
+    def boom(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "git")
+
+    monkeypatch.setattr(flc.subprocess, "run", boom)
+    assert flc.main(["--check", "--root", str(REPO)]) == 2
+    assert "UNVERIFIED" in capsys.readouterr().err
 
 
 # ── exit-code contract ─────────────────────────────────────────────────────
