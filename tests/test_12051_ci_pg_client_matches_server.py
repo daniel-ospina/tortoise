@@ -206,7 +206,7 @@ not a tenth spelling — it is the one a text guard cannot reach:
   command position.
 - **The directory arm reads a text, and a text can be laundered.** The destination
   is taken as the last POSITIONAL path token of the owning verb's command
-  segment, with redirect targets and `-`-prefixed options skipped. FIVE residuals
+  segment, with redirect targets and `-`-prefixed options skipped. SIX residuals
   are stated rather than claimed closed, and each spares or refuses for its OWN
   mechanism — they are not one: an option whose VALUE carries a path
   (`rsync … --log-file="$SCRATCH/x.log"`, `-e "ssh -o X=/a"`) moves the
@@ -216,13 +216,22 @@ not a tenth spelling — it is the one a text guard cannot reach:
   both mentions in COMMAND position, so the arm is skipped; a destination reached
   through an EXPANSION or an assigned variable (`d="$b/16/bin"; rsync -a
   "$b/17/bin/" "$d/"`) names no token the pattern can read, so again the arm is
-  not reached; and a versioned path under a VARIABLE base is the OPPOSITE
-  direction — it is REFUSED (`d=$RUNNER_TEMP/tools; sudo chmod -R a+rX
-  "$d/16/bin"` red, the same act on the literal path green), which is
-  fail-closed and kept because a variable base cannot be resolved. The task's own
-  `pg_dump --version` assertion is the observation that does not depend on this
-  text at all; this row is the static half, and it fails closed on every spelling
-  it can read.
+  not reached; a versioned path under a VARIABLE base is the OPPOSITE direction —
+  it is REFUSED (`d=$RUNNER_TEMP/tools; sudo chmod -R a+rX "$d/16/bin"` red, the
+  same act on a literal path with an extra component green), which is fail-closed
+  and kept because a variable base cannot be resolved; and an EXTRACTOR's
+  destination is not graded at all (`tar -xf x.tgz -C "$b/16/bin"`, `unzip -o
+  x.zip -d "$b/16/bin"`, `dpkg-deb -x x.deb "$b/16/bin"`, `cpio -D "$b/16/bin"`
+  each overwrite every client). That last one is deliberate: the extractor verbs
+  are absent from the mutation list by design (round 9 — `tar -czf …`,
+  `unzip -l …` are reads), `dpkg-deb -x` takes no flag value, one shared flag set
+  lets `unzip -x` shadow `-d`, `cpio` reads as command position, and `tar -C` is a
+  SOURCE chdir outside extract mode — a half-built arm that reds correct trees is
+  the defect the whitelist's own note names. The admitted spellings are pinned in
+  `BINARY_MUTATION_POLARITY`. The task's own `pg_dump --version` assertion is the
+  observation that does not depend on this text at all; this row is the static
+  half, and it fails closed on every spelling whose destination it can READ —
+  not on every spelling that exists.
 
 So: a green run means "no plausible spelling of the regression is in this
 text", not "the job provably installs and uses pg16". The job's own assertion is
@@ -1156,12 +1165,19 @@ def _replaces_a_client_binary(line: str) -> bool:
         return True
     verb = BINARY_MUTATION_RE.search(line)
     if not verb:
-        # ⛔ AN EXTRACTOR NAMES ITS DESTINATION BY FLAG, NOT BY VERB (#12069 review
-        # round 23, measured). `tar`/`unzip` are deliberately absent from
-        # `BINARY_MUTATION_RE` (round 9: `tar -czf …` and `unzip -l …` are READS),
-        # so a standalone `sudo unzip -o pg17.zip -d "$b/16/bin"` never reached the
-        # directory arm at all — it returned here, before the arm could run.
-        return _extractor_replaces_a_client_dir(line)
+        # ⛔ AN EXTRACTOR'S DESTINATION IS A STATED RESIDUAL, NOT A GRADED ARM
+        # (#12069 review round 24). `tar -xf x.tgz -C "$b/16/bin"`, `unzip -o
+        # x.zip -d "$b/16/bin"`, `dpkg-deb -x x.deb "$b/16/bin"` and `cpio -D
+        # "$b/16/bin"` DO write every client, and none of them is visible here:
+        # their verbs are deliberately absent from `BINARY_MUTATION_RE` (round 9 —
+        # `tar -czf …` and `unzip -l …` are READS), their destination is a flag
+        # or a positional with no shared grammar, and grading `tar -C` without
+        # honouring the MODE reds 192 correct create/list lines (`tar -czf
+        # /tmp/o.tgz -C "$b/16/bin" .` chdirs a SOURCE). A half-built arm that
+        # reds correct trees is the defect this file's round-9 note names; the
+        # limit is stated in the docstring's residual list instead, and the
+        # admitted spellings are pinned in `BINARY_MUTATION_POLARITY`.
+        return False
     # ⛔ A DIRECTORY-LEVEL replacement names no binary (#12069 review round 19,
     # measured GREEN): `sudo rsync -a "$b/17/bin/" "$b/16/bin/"` overwrites
     # every client in the pinned dir and passed the name-based rule below. A
@@ -1197,16 +1213,11 @@ def _replaces_a_client_binary(line: str) -> bool:
                 continue
             owner = _owning_verb(line, dir_match.start())
             if owner is None:
-                # No RECOGNISED mutating verb of its own segment names this
-                # directory. An EXTRACTOR's destination flag still writes INTO
-                # it, and extractor verbs are deliberately absent from
-                # `BINARY_MUTATION_RE` (round 9: `tar -czf …` / `unzip -l …` are
-                # reads). Measured before this arm: a compound spelling
-                # (`cp … && tar -xf pg17.tgz -C "$b/16/bin"`) was refused only as
-                # a side effect of the first-verb bug round 23 removes, so it
-                # became GREEN here (#12069 review round 23).
-                if _extractor_destination_covers(line, dir_match.start(), dir_match.end()):
-                    return True
+                # No verb the guard RECOGNISES in this mention's own segment. An
+                # EXTRACTOR can still write into the directory (`tar -xf … -C`,
+                # `dpkg-deb -x`), and that is a STATED residual rather than a
+                # graded spelling — see the docstring's residual list and the
+                # admitted rows in `BINARY_MUTATION_POLARITY` (#12069 round 24).
                 continue
             if owner.group(0).strip() in _DESTINATION_VERBS and not _is_last_path_token(
                 line, dir_match.start(), dir_match.end(), owner
@@ -1284,50 +1295,17 @@ _REDIRECT_RE = re.compile(r"\d*>>?\s*\S+")
 #: had `-t`'s value looked like an option and the real target was skipped.
 _TARGET_OPTION_RE = re.compile(r"(?:^|\s)(?:-t|--target-directory)(?:=|\s)\s*(?P<value>[^\s]+)")
 
-#: Extractors write INTO a directory named by a FLAG, and the verbs themselves are
-#: deliberately NOT in `BINARY_MUTATION_RE` — round 9 dropped them because
-#: `tar -czf "$RUNNER_TEMP/out.tgz" …` and `unzip -l …` are READS, and a whitelist
-#: that reds a correct tree is worse than a shorter one. The destination flag is
-#: still a destination (#12069 review round 23, measured):
-#:
-#:     sudo tar -xf pg17.tgz -C "$b/16/bin"     — overwrites every client
-#:     sudo unzip -o pg17.zip -d "$b/16/bin"
-#:
-#: `_owning_verb` answers None for both (no recognised verb in the segment), so
-#: they are graded by this instead of by the mutation list. `-l`/`-czf` name no
-#: destination and stay green.
-_EXTRACTOR_DESTINATION_RE = re.compile(
-    r"\b(?:tar|unzip|dpkg-deb|cpio)\b[^;&|]*?\s(?:-C|-d|-x|-D)(?:\s+|=)\s*(?P<value>[^\s;&|]+)"
-)
-
-
-def _extractor_destination_covers(line: str, start: int, end: int) -> bool:
-    """Is `[start, end)` the directory an EXTRACTOR's flag writes INTO?"""
-
-    seg_start, seg_end = _segment_bounds(line, start)
-    for match in _EXTRACTOR_DESTINATION_RE.finditer(line, seg_start, seg_end):
-        if start >= match.start("value") and end <= match.end("value"):
-            return True
-    return False
-
-
-def _extractor_replaces_a_client_dir(line: str) -> bool:
-    """Does an EXTRACTOR flag on this line write into a client directory?
-
-    The standalone half of the extractor rule (#12069 review round 23, measured):
-    with no mutating verb on the line, `_replaces_a_client_binary` used to return
-    False before the directory arm could run, so `sudo unzip -o pg17.zip -d
-    "$b/16/bin"` was GREEN. The `$GITHUB_PATH`/`$GITHUB_ENV` exclusion is the
-    directory arm's, so the two cannot disagree.
-    """
-
-    if "GITHUB_PATH" in line or "GITHUB_ENV" in line:
-        return False
-    return any(
-        not _is_command_position(line, match.start())
-        and _extractor_destination_covers(line, match.start(), match.end())
-        for match in CLIENT_DIR_ANY_BASE_RE.finditer(line)
-    )
+#: Extractors write INTO a directory named by a FLAG or a POSITIONAL, and they are
+#: a STATED RESIDUAL, not a graded arm (#12069 review round 24). The verbs are
+#: deliberately absent from `BINARY_MUTATION_RE` (round 9: `tar -czf …` and
+#: `unzip -l …` are READS), and a half-built flag grammar cannot be made correct:
+#: `dpkg-deb -x` takes NO flag value (the destination is positional), `unzip -x`
+#: takes a PATTERN that shadows a later `-d` under one shared alternation, `cpio`
+#: reads as command position to `_is_command_position`, and `tar -C` is a SOURCE
+#: chdir in create/list mode (`tar -czf /tmp/o.tgz -C "$b/16/bin" .` — measured,
+#: 192 such lines would have been refused by the withdrawn arm). The limit is in
+#: the docstring's residual list, and the admitted spellings are pinned as rows in
+#: `BINARY_MUTATION_POLARITY` so closing them is a deliberate edit.
 
 
 def _segment_bounds(line: str, pos: int) -> tuple[int, int]:
@@ -1358,8 +1336,10 @@ def _segment_bounds(line: str, pos: int) -> tuple[int, int]:
 def _owning_verb(line: str, pos: int) -> re.Match[str] | None:
     """The MUTATING VERB of the command SEGMENT that contains `pos`.
 
-    The LAST such verb before `pos` in that segment, or None — a directory named
-    in a segment with no mutating verb is not being written by anything there.
+    The LAST such verb before `pos` in that segment, or None — a directory named in
+    a segment with no mutating verb THIS GUARD RECOGNISES. None is not "nothing
+    writes there": an EXTRACTOR can (`tar -xf … -C`, `dpkg-deb -x`), which is a
+    stated residual rather than a graded spelling (#12069 review round 24).
     """
 
     seg_start, seg_end = _segment_bounds(line, pos)
@@ -4814,19 +4794,25 @@ BINARY_MUTATION_POLARITY = [
     (
         'sudo chmod -R a+rX "$RUNNER_TEMP/tools/16/bin"',
         False,
-        "CONTROL: the same act on a LITERAL scratch base stays green — the round-22 "
-        "narrowing, still intact (#12069 round 23)",
+        "CONTROL: the token must sit DIRECTLY under the base, which is what spares "
+        "this — the extra `tools/` component, NOT literalness (`$RUNNER_TEMP/16/bin` "
+        "is the red one; measured, #12069 round 24)",
+    ),
+    (
+        'sudo tar -xf pg17.tgz -C "$b/16/bin"',
+        False,
+        "STATED RESIDUAL: an EXTRACTOR's destination is not graded (`tar -xf … -C` "
+        "overwrites every client). Pinned so closing it is a deliberate edit: the "
+        "verbs are absent from the mutation list by design (round 9), `dpkg-deb -x` "
+        "takes no flag value, `unzip -x` shadows `-d`, and `tar -C` is a SOURCE "
+        "chdir outside extract mode (#12069 round 24)",
     ),
     (
         'sudo cp x y && sudo tar -xf pg17.tgz -C "$b/16/bin"',
-        True,
-        "#12069 round-23 P2: an EXTRACTOR's destination flag writes every client, "
-        "and `tar` is not in `BINARY_MUTATION_RE` — spared until this arm (measured)",
-    ),
-    (
-        'sudo unzip -o pg17.zip -d "$b/16/bin"',
-        True,
-        "#12069 round-23 P2: same act through `unzip -d`",
+        False,
+        "STATED RESIDUAL, compound spelling: same act one segment on. It was RED "
+        "before round 23 only as a side effect of the first-verb bug, so the "
+        "verdict is admitted rather than claimed (#12069 round 24)",
     ),
     (
         'tar -czf "$RUNNER_TEMP/pg_dump-output.tgz" "$b/16/bin"',
@@ -4837,7 +4823,13 @@ BINARY_MUTATION_POLARITY = [
     (
         'unzip -l "$b/16/bin/keep.zip"',
         False,
-        "CONTROL: `-l` names no destination — the extractor arm must not red a list",
+        "CONTROL: `-l` names no destination — a listing is a read",
+    ),
+    (
+        'sudo tar -czf "$RUNNER_TEMP/o.tgz" -C "$b/16/bin" .',
+        False,
+        "CONTROL: in CREATE mode `tar -C` is a source chdir — grading it without the "
+        "mode refused 192 correct lines in the withdrawn arm (#12069 round 24)",
     ),
     (
         'sudo sh -c "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"',
