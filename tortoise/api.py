@@ -119,8 +119,9 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #: bought. A positional argument cannot be reached by a kwargs splat at all, so
 #: the gate below is total: whatever a caller names,
 #: `point` in the keyword payload is refused, and `point` inside the positional
-#: one is refused. `add_event` / `emit_belief` still refuse it at their own
-#: doors, for a message that names the door the caller actually called.
+#: one is refused. `add_event` / `emit_belief` / `add_object` still refuse it
+#: at their own doors, for a message that names the door the caller actually
+#: called.
 #:
 #: ⛔ AND THE SAME HOLE, ONE NAME OVER (#11948): `**props` splats onto the
 #: ENVELOPE as well, where `type=` RE-TYPES the record and `event_id=` /
@@ -177,6 +178,79 @@ _ENVELOPE_KEYS_AT_PASSTHROUGH = _ENVELOPE_KEYS | {
     "corrects",
     "actor",
 }
+
+
+def _verify_record_vector_width(record: dict, type_: str) -> None:
+    """A width declared on `_emit`'s POSITIONAL record must be the SEAM's answer.
+
+    ⛔ NOT a refusal of the family, and that distinction is measured: the record
+    doors legitimately carry the markers, because each stamps its own payload
+    through `stamp_journal_embedding` (``_point`` with ``creating=True``;
+    ``add_point`` with ``creating=False`` after popping a stale width). Refusing
+    `_SERVER_MANAGED_EMBEDDING_KEYS` on this channel breaks every vector-bearing
+    ``PointAdded``/``OperatorAdded`` — the reviewer who found the gap proposed
+    exactly that, and it reds the whole width suite.
+
+    So this VERIFIES instead. The harm the marker rule exists to prevent is a
+    marker that LIES — a declared ``f32`` over values it does not describe,
+    which a later width/base64 migration trusts (#5004 round-7). The decision is
+    a pure function of the values, so re-derive it: copy the record WITHOUT its
+    declared width and ask the seam again (the same trick ``add_point`` uses to
+    defeat the seam's own ``f32`` idempotency guard). Agreement means the marker
+    is the seam's; disagreement is the lie.
+
+    Measured before this guard, through the private channel only:
+
+        _emit("PointAdded", {"id": "p1", "content": "c",
+                             "embedding": [0.1234567890123, 1/3],
+                             "embedding_width": "f32"})
+          -> journalled, values [0.1234567890123, 0.3333333333333333],
+             declared `f32`   ← the marker LIE, on the one channel built to be
+                                unreachable from any door
+
+    Undecidable input (a non-numeric ``embedding``, an unimportable seam —
+    #5148: an import must never fail a WRITE) is treated as NO MISMATCH, i.e.
+    exactly the behaviour before this guard; the guard only ever turns a lie
+    into a refusal, never a write into an I/O failure.
+
+    ⛔ THE PREDICATE IS "would the seam also have said `f32`", NOT a re-stamp.
+    An earlier draft copied the record WITHOUT the declared width and re-ran
+    `stamp_journal_embedding` — and that OVER-BLOCKS, measured: the seam's
+    ``f32`` idempotency arm reads the marker itself, so stripping it makes every
+    already-narrowed payload (whose text is off-grid as a float64 by
+    construction) re-decide ``f64``, and every real `add_point` with an embedder
+    available would raise. So ask the seam's own two questions in the one order
+    that cannot over-block: a declared ``f32`` is truthful iff the values ARE
+    its shortest-round-trip text (the idempotent case) or ARE on the float32
+    grid (the case it would narrow). A declared ``f64`` is always truthful — it
+    only forgoes narrowing, which the raw form is entitled to.
+    """
+    if not isinstance(record, dict):
+        return
+    try:
+        from .embeddings import JOURNAL_VECTOR_WIDTH_F32 as _F32
+        from .embeddings import JOURNAL_VECTOR_WIDTH_KEY as _KEY
+        from .embeddings import _is_shortest_f32_text, shortest_float32_vector
+    except Exception:  # noqa: BLE001, RUF100 — #5148
+        return
+    declared = record.get(_KEY)
+    if declared is None or declared != _F32:
+        return
+    values = record.get("embedding")
+    try:
+        truthful = (_is_shortest_f32_text(values)
+                    or shortest_float32_vector(values) is not None)
+    except Exception:  # noqa: BLE001, RUF100 — undecidable input keeps the old posture
+        return
+    if not truthful:
+        raise ValueError(
+            f"{_KEY}={declared!r} is not what the values say: this payload's "
+            f"`embedding` is neither the seam's shortest float32 text nor on "
+            f"the float32 grid, so `f32` describes a width the values do not "
+            f"have. A declared width is a server-managed journal field and "
+            f"`{type_}`'s record may only carry a truthful one — a marker that "
+            f"lies is trusted by the next width/base64 migration (#5004 "
+            f"round-7).")
 
 
 def _refuse_caller_named_record_keys(keys, door: str) -> None:
@@ -299,11 +373,11 @@ def _refuse_invisible_point_kinds_in_payload(payload: dict) -> None:
     for kind_prop, value in kind_spellings_in_payload(payload):
         if kind_prop == "pointKind":
             # ⛔ NOT one door's name: this gate runs at the FUNNEL (`_emit`) for
-            # every write door, and eagerly at the doors that carry a payload
-            # (`add_point`, `emit_belief`), so naming one of them told a caller
-            # who came in through another to fix the wrong call — and on the
-            # `emit_belief` path this message is the caller's ONLY signal
-            # (nothing journalled, nothing logged).
+            # every write door, and `emit_belief` ALSO runs its PURE half eagerly
+            # (outside the arm that swallows I/O). Naming `add_point` — which
+            # runs no eager gate at all — told a caller who came in anywhere else
+            # to fix the wrong call, and on the belief path this message is the
+            # caller's ONLY signal (nothing journalled, nothing logged).
             _refuse_invisible_kind("pointKind", value, door="EventAPI")
 
 
@@ -436,9 +510,17 @@ class EventAPI:
         # empty. ⚠️ THE CONTENTS ARE CALLER-REACHABLE ALL THE SAME — `add_point`
         # does `p.update(fields)` and hands `p` positionally, which is how the
         # envelope family got in one nesting level down (#11948 review at
-        # `95b98e6cf1`). So the record is checked against BOTH families, and
-        # ALL THREE refusals run before the append below (the commit point),
-        # which therefore leaves nothing to replay.
+        # `95b98e6cf1`). So the record is checked against TWO of the three
+        # families — `point` and the envelope names — and ALL THREE refusals run
+        # before the append below (the commit point), which therefore leaves
+        # nothing to replay.
+        #
+        # ⛔ THE MARKER FAMILY IS DELIBERATELY NOT CHECKED HERE, and that is not
+        # a gap to tidy away: `_point`'s own `stamp_journal_embedding` writes
+        # `embedding_width` into this very record, so a funnel-wide marker
+        # refusal would refuse every `add_point`. The caller-marker refusal
+        # lives at that door (`_forged_keys`) instead, and `add_operator` takes
+        # no `**kwargs` — so no public door can reach this channel with one.
         _refuse_caller_named_record_keys(payload, f"the `{type_}` envelope")
         if record:
             if len(record) > 1:
@@ -452,6 +534,11 @@ class EventAPI:
             # `event_id=` here re-types or re-attributes the replayed record.
             _refuse_caller_named_envelope_keys(
                 record[0], f"the `{type_}` record door")
+            # ⛔ And the MARKER family is VERIFIED here rather than refused —
+            # see `_verify_record_vector_width` for why a refusal is the wrong
+            # shape on this channel (the record doors legitimately carry the
+            # markers; each stamps its own payload through the seam).
+            _verify_record_vector_width(record[0], type_)
             payload["point"] = record[0]
         # #7951 — THE JOURNAL ORDERING CONTRACT: **journal first, then
         # project.** The full contract (and the failure-mode argument) lives at
@@ -1306,10 +1393,14 @@ class EventAPI:
         inner.get("eventId")``).
 
         ``**extra`` is a passthrough straight onto the ENVELOPE, so a caller can
-        put a top-level ``embedding`` on the record here. It does not have to
-        police that itself: ``_emit`` refuses a caller-set marker and stamps
-        every vector that reaches it, so the rule lives in one place. It must
-        NOT accept a record-shaped payload (`point=`) either — a caller-built
+        put a top-level ``embedding`` on the record here. That is allowed — a
+        vector is not an origin attestation — and ``_emit`` stamps every vector
+        that reaches it. A caller-set MARKER is a different matter: it is refused
+        here AS WELL AS at the funnel, the same set in two placements
+        (`_refuse_caller_named_markers`), so the message names the door the
+        caller actually used and a newly added family cannot be wired at one
+        placement and silently missing at the other. It must NOT accept a
+        record-shaped payload (`point=`) either — a caller-built
         record reaches the replay's fold chain untested by that rule — so it is
         refused here for a message that names THIS door, and again at `_emit`
         (`_NESTED_RECORD_KEYS`), which is where the refusal is total. Nor may

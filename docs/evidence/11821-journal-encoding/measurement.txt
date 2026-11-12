@@ -49,7 +49,7 @@ The two halves of the delta are separately attributable:
   * float32 shortest text   — the vector term above, and the whole
     `embedding` field, not a separator count;
   * compact separators     — ~8% on EVERY record (the `PointRevised`/
-    `EntityLinked` 1.08x rows above carry NO vector and move only by it).
+    `EntityLinked` 1.08-1.09x rows above carry NO vector and move only by it).
 
 VERDICT: P0's measured delta. It is NOT 'half the record' — a JSON
   number encoding cannot reach 50 % of 8,414 B at float32 precision
