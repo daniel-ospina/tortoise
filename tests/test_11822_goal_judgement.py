@@ -1620,35 +1620,63 @@ def test_a_missing_predecessor_is_refused_as_missing(sdk):
     )
 
 
-def test_the_DERIVED_path_also_asserts_the_scope(sdk):
-    """The guard must run on the resolved predecessor, not only the explicit seam.
 
-    MEASURED before this pin: omitting `indicator_id` (and `previous_point_id`)
-    made the writer take the predecessor from `latest_judgement`, which DROPS a
-    `None` dimension from its WHERE clause — so an indicator-scoped claim was
-    superseded by an unscoped one, its arrow transferred, and the successor
-    carried no `indicatorId`. No later scoped pass could see it again: 2 live
-    judgements in one goal, 2 IMPL arrows, and the successor permanently
-    un-supersedable.
+
+def test_an_unscoped_write_is_refused_on_both_shapes(sdk):
+    """A judgement MUST name its indicator — the chain it belongs to.
+
+    MEASURED both ways before this refusal: (a) an unscoped pass followed by a
+    scoped one left TWO live judgements and two IMPL arrows in one goal (belief
+    0.5000 where the single-chain value on the same evidence is 0.3498), because
+    `latest_judgement` drops an undeclared dimension from its WHERE clause so the
+    scoped pass could never find the unscoped claim; and (b) two unscoped passes
+    on one goal+target retired each other's live claim and transferred the arrow
+    (#6180), because the scope guard's `None == None` cannot tell "both absent"
+    from "same chain".
     """
     indicator, target_node, goal = _world(sdk)
     target = Target.from_node(target_node)
     _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    met = judge(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                target=target)
+
+    # (a) nothing has been written yet: the unscoped write is refused outright
+    with pytest.raises(ValueError) as exc:
+        record_judgement(sdk, goal_id=goal["id"], judgement=met, target=target)
+    assert "indicator_id" in str(exc.value)
+    assert _judgement_points(sdk, goal["id"]) == []
+
+    # (b) a scoped predecessor exists: still refused, and it stays live
     j1 = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                           target=target)
     assert j1["written"] is True
-
-    # a caller that omits indicator_id (and the seam) must be refused, not
-    # silently re-scoped
     _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
-    unscoped = judge(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
-                     target=target)
+    unmet = judge(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                  target=target)
     with pytest.raises(ValueError) as exc:
-        record_judgement(sdk, goal_id=goal["id"], judgement=unscoped,
-                         target=target)          # no indicator_id, no seam
-    assert "indicatorId" in str(exc.value)
-
+        record_judgement(sdk, goal_id=goal["id"], judgement=unmet, target=target)
+    assert "indicator_id" in str(exc.value)
     assert sdk.get_entity(j1["point_id"])["status"] == "live"
     live = [r for r in _judgement_points(sdk, goal["id"])
             if r[1] not in {"superseded", "retracted"}]
-    assert len(live) == 1, f"{len(live)} live judgements after a refused pass"
+    assert len(live) == 1
+
+
+def test_two_unscoped_passes_cannot_retire_each_others_claims(sdk):
+    """Two indicators on one goal+target, both written with no indicator_id.
+
+    Before the refusal: the second pass superseded the first's live claim and
+    transferred its IMPL arrow (#6180), so indicator A's belief was driven by
+    indicator B's evidence. Now neither write is allowed at all.
+    """
+    a_ind, target_node, goal = _world(sdk, tag="a")
+    b_ind, _, _ = _world(sdk, tag="b")
+    target = Target.from_node(target_node)
+    _reading(sdk, a_ind, 9.0, at="2026-11-11T10:00:00Z")
+    _reading(sdk, b_ind, 12.0, at="2026-11-11T10:00:00Z")
+    j_a = judge(sdk, goal_id=goal["id"], indicator_id=a_ind["id"], target=target)
+    j_b = judge(sdk, goal_id=goal["id"], indicator_id=b_ind["id"], target=target)
+    for j in (j_a, j_b):
+        with pytest.raises(ValueError):
+            record_judgement(sdk, goal_id=goal["id"], judgement=j, target=target)
+    assert _judgement_points(sdk, goal["id"]) == []

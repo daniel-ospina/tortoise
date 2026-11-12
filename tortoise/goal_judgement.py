@@ -970,6 +970,24 @@ def record_judgement(
     # able to brick the judgement (or the EP run that reads it).
     alpha, beta = prior_for(judgement.state, strength)
 
+    # ⛔ The INDICATOR must be NAMED. It is the chain's identity, and the whole
+    # point of this module is "indicator + target + reading -> a judgement": a
+    # judgement that names neither indicator cannot be found by any scoped pass
+    # (`latest_judgement` drops an undeclared dimension from its WHERE clause), so
+    # it is PERMANENTLY un-supersedable — and two unscoped passes on one
+    # goal+target supersede each other, because the scope guard's `None == None`
+    # cannot tell "both absent" from "same chain". MEASURED, both: an unscoped
+    # pass followed by a scoped one left 2 live judgements and 2 IMPL arrows with
+    # goal belief 0.5 (the single-chain value is 0.3498), and two unscoped passes
+    # on one target retired each other's live claim and transferred the arrow.
+    if indicator_id is None:
+        raise ValueError(
+            "record_judgement needs `indicator_id`: the indicator is the chain a "
+            "judgement belongs to, and an unscoped judgement can neither be found "
+            "by a scoped pass (so it can never be superseded) nor be told apart "
+            "from another unscoped chain (so they would supersede each other)."
+        )
+
     # ⛔ The target must be NAMED. `targetId` is what scopes the supersession
     # chain: with it absent, two targets on the same goal+indicator (D4 allows
     # n targets) both look up "the last judgement for this goal+indicator" and
@@ -1023,6 +1041,11 @@ def record_judgement(
     if previous_point_id is None:
         previous_point_id = (prior_point or {}).get("id")
     # ⛔ THE SCOPE IS ASSERTED ON THE RESOLVED ID, WHICHEVER BRANCH PRODUCED IT.
+    # With `indicator_id` and `target_id` both REQUIRED, the derived lookup is
+    # fully scoped and this assert is belt-and-braces there (a predecessor it can
+    # return already matches). It stays because it is the seam's ONLY guard, and
+    # because "the guard runs whichever branch produced the id" is a property
+    # worth holding by construction rather than by the argument above.
     # Asserting only in the explicit-seam branch left the DERIVED branch
     # unguarded, and `latest_judgement` DROPS a `None` dimension from its WHERE
     # clause — so a caller who omitted `indicator_id` had its previous judgement
