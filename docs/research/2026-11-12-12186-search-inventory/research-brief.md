@@ -227,8 +227,9 @@ correctly.** This is already recorded twice in-repo and the epic contains neithe
 
 1. **No search engine AT AUTHORING TIME** (rungs 1–2 failed, §0), so **Mem0's April-2026 algorithm was not
    read** — its vendor blog returned **HTTP 404** on the only path this pass could construct. Mem0's numbers
-   here are its **arXiv paper** (LoCoMo 92.5, +26 % over OpenAI, graph memory **+2 %** over base) plus its own
-   published 2026 report (**94.4 LongMemEval, ~6,900 tokens/query**) — ⚠️ **both vendor self-reports, neither
+   here are its **arXiv paper** (LoCoMo **66.88**, 68.44 with graph memory, +26 % over OpenAI, graph memory
+   **+2 %** over base) plus its own published **2026 report** (**LoCoMo 92.5**, **94.4 LongMemEval**,
+   ~6,900 tokens/query) — ⚠️ **both vendor self-reports, neither
    independently re-run by us.** ⛔ **Mastra is no longer in this list:** §5.1 read its primary source and
    verified the 94.87 % figure against it.
 2. **Cognee and Honcho remain unread — and this is now the largest hole.** §5.1 read **Mastra** and
@@ -380,18 +381,20 @@ Primary sources fetched (`web_fetch` / raw): `docs.falkordb.com/cypher/indexing/
 `Search tool:` rung 1 — `mcp__seo-intelligence__perplexity_search` (~$0.005/query; the MCP search tool
 exposes no model parameter, so none can be named) — queries: **9 attempted / 9 returned**; rung 2 not used;
 rung 3 (`web_fetch`, free) for every primary source above.
-`Graph:` **0 hit(s) over 0 queries — unread — no query ran** | wrote: **not written — no graph call was
-attempted** (no reachable tenant for these populations, §7.9 item 1; `/v1/search` never issued) → nothing to
-report | failed: **none (no query attempted)**.
+`Graph:` **0 hit(s) over 0 queries — unread — no query ran** | wrote: **not written — write-back owed, no
+write attempted** (no reachable tenant for these populations, §7.9 item 1; `/v1/search` never issued) →
+nothing observed, and a lane with a reachable tenant still **must** mint point + `IMPL → #12186` + NAND edges
+| failed: **none (no query attempted)**.
 
 The slot above is the skill's own vocabulary, not a substitute: `unread — no query ran` is the honest value
 for a box that cannot reach the graph, and it is **not** `nothing held` — the skill refuses that value at any
 query count when no query ran, so a zero here says nothing about what the graph holds.
 
 ⚠️ **Locators drift, and a pin is not a citation.** Round 1's `sdk.py:39588-39606` for the BM25 arm's wiring
-is **`:40737-40835`** at this head — the file grew **1,184** lines in one day of merges (`1f28d107cf` =
-51,075 → `9828250732` = 52,259; `_prf_supersedes_the_arm` moved `39585 → 40737`, **+1,152**, and the arm's
-enclosing block now runs to `:40835`). Every locator below
+is **`:40740-40758`** at this head — the file grew **1,184** lines in one day of merges (`1f28d107cf` =
+51,075 → `9828250732` = 52,259; every anchor in this region moves **+1,152** — `_prf_supersedes_the_arm`
+`39585 → 40737`, the `is_embedded` gate `39588 → 40740`, the block's close `39606 → 40758` — and the arm's
+enclosing block is `:40806-40854`). Every locator below
 is re-derived at `9828250732`; a lane reading this doc at a later head must re-derive, not copy.
 
 ## 7.1 C2 SETTLED — the product lane runs TF-IDF, that is the vendor's own name for it, and BM25 is one gate away
