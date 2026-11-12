@@ -136,7 +136,7 @@ uv run python tools/test_lane.py run -- tests/test_cache_projection_live.py \
     tests/test_record_serve.py tests/test_reconciliation.py \
     tests/test_record_reconcile_trigger.py tests/test_11641_runtime_vector_label.py \
     tests/test_embed_writer_register.py -q
-→ 323 passed, 3 skipped
+→ 324 passed, 3 skipped
 
 uv run ruff check tortoise/ tools/ tests/   → clean
 ```
