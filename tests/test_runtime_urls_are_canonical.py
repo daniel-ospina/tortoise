@@ -291,6 +291,26 @@ def test_mcp_cors_allowlist_records_why_the_retired_origin_stays():
         assert cond in block, (
             f"the removal trigger must name {cond!r} — all four conditions were "
             "measured on #11767 and none of them is a judgement call")
+    # ⛔ THE TRIGGER'S PREMISE IS PINNED TOO (#11767 review, P2 — measured). The
+    # first version of this block argued the entry was safe to leave because
+    # `website/404.html` was the ONE document left on the host. It was
+    # false: `tortoise.premiselabs.co/contact` answers **200** with a `<script>`
+    # (`_middleware.ts`'s product-host block does not intercept it and
+    # `website/_redirects` maps `/contact.html` host-agnostically), so a sweep
+    # reading it could have satisfied its own condition (c) from a premise that
+    # never held. The substring asserts above could not catch that — they pin
+    # TOKENS, and `404.html` appears in the true and the false version alike. These
+    # two pin the CLAIM: the measured live path must be named, and the retracted
+    # premise must not come back.
+    assert "/contact" in block, (
+        "the trigger must name the path that keeps this host live — `/contact` "
+        "answers 200 there, so 'a scriptless 404 and nothing else' is not the reason "
+        "the entry is safe to keep")
+    for retracted in ("only remaining document", "only non-redirect HTML"):
+        assert retracted not in block, (
+            f"the retracted premise is back ({retracted!r}): the host serves more "
+            "than `website/404.html` (measured: `/contact` -> 200 with a <script>), "
+            "so an argument built on that premise is an argument from a false one")
 
 
 # ── A5b — the Supabase edge-function allowlists, pinned ──────────────────────
