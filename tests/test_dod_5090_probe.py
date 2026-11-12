@@ -7194,7 +7194,9 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # via the docstring example and two body comments that commit rewrote — the
     # verifier itself is `#11835`'s) and both undeclared in the writer register — so
     # a baseline taken while they were live
-    # could not show what the mutation ADDS. `#12042` declared both, and the
+    # is not a CLEAN baseline: the mutation still adds exactly one failure, but
+    # three reds sit beside it and the old text reported them as "repo context",
+    # which is the false provenance here. `#12042` declared both, and the
     # figures above are measured at the tree that carries it; the three reds are
     # therefore historical, not repo context, and this note cites them by issue
     # so the next lane does not "correct" one cut into a false record. ⛔ Stated as a
