@@ -812,8 +812,11 @@ def _same_successor(stored: str, successor: str, candidate_names=()) -> bool:
     two families cannot drift on what "same successor" means.
 
     ``candidate_names`` is the spelling set the successor PROBE resolved for this
-    very record (``sb_rows``' own ``name`` column). It is required, not
-    decoration: ``_entity_rows`` collapses a merged-away carrier onto its
+    very record — the CARRIERS' spellings, flattened from ``_entity_rows``'
+    groups (never the representatives: a group's representative is the
+    merged-away SURVIVOR, whose spelling this record may never have resolved, and
+    it can be ``None`` for a group whose survivor was deleted). It is required,
+    not decoration: ``_entity_rows`` collapses a merged-away carrier onto its
     SURVIVOR, so a record whose successor is spelled ``"Acme"`` can store the
     survivor's ``"Acme Corporation"`` — a spelling that folds DIFFERENTLY, and
     the fold arm alone would then report every re-ingest of that record as a
@@ -852,14 +855,29 @@ def _one_successor_spelling(names, default: str) -> str:
     ⛔ Two visible carriers spelled differently under one folded key make "the"
     successor spelling a choice, and choosing one by ROW ORDER is the
     backend-order dependence #2164 P2-2 forbids — so the tie is broken
-    deterministically, and the record's OWN spelling is used only when a node
-    actually carries it. It is never used as a blind fallback: the record's
-    spelling is whatever the extractor wrote, and when no node is spelled that way
-    the stored value names nothing, so `audit`'s ``superseded_by_unresolvable``
-    fires and the renderer reports "no successor record found" about a live
-    successor — measured with a merged carrier under one folded key (review
-    round 9, P2; a merged entity contributes BOTH spellings once the gate reads
-    its carriers, which is what narrowed this from "candidates agree").
+    deterministically (`min`), and the record's own spelling is preferred only
+    when a carrier actually carries it: the record's spelling is whatever the
+    extractor wrote, and when no node is spelled that way the stored value names
+    nothing, so `audit`'s ``superseded_by_unresolvable`` fires and the renderer
+    reports "no successor record found" about a live successor — measured with a
+    merged carrier under one folded key (review round 9, P2; a merged entity
+    contributes BOTH spellings once the gate reads its carriers, which is what
+    narrowed this from "candidates agree").
+
+    ⛔ STATED RESIDUAL — the one path back to the record's spelling, and why it is
+    kept. ``spellings`` is empty when EVERY visible candidate carries the folded
+    key through ``canonical_name``/``aliases`` with no ``name`` of its own (an
+    id-less legacy row). The value stored is then the record's spelling, which
+    those RAW readers resolve against NO node even though the fold is CORRECT —
+    the exact case ``#5370``'s prefix tolerance and ``audit``'s
+    ``superseded_by_unresolvable`` exist for. Refusing the fold instead was
+    considered and rejected: the successor is real and visible, refusing leaves
+    the superseded entity ``live`` and search-visible (the harm this lane
+    removes), and the pre-fix behaviour stored the record's spelling
+    unconditionally — so this arm can only ever be reached on input the pre-fix
+    code also mis-recorded, never on input it got right. That is a RESIDUAL, not
+    a guarantee: the claim "never a blind fallback" would be false here, which is
+    why it is written down.
     """
     spellings = {str(n) for n in names if n}
     if not spellings:
@@ -1548,6 +1566,22 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             _successor_candidates(proj.g, "Object", _sb_space, _sb_params),
             id_idx=0, projection=_SUCCESSOR_PROJECTION, with_groups=True)
         sb_rows = [_rep for _rep, _key, _members in sb_entities]
+        # ⛔ The CARRIERS' spellings, flattened from the GROUPS — never the
+        # representatives. A representative can be None (round 9's
+        # gone-survivor sentinel: a group whose `resolved_from` target has been
+        # deleted keeps its members and reports `(None, key, members)`) and it
+        # can be the merged-away SURVIVOR, whose spelling this record may never
+        # have resolved. Unpacking the representative rows as `(id, name,
+        # status)` triples raised `TypeError: cannot unpack non-iterable
+        # NoneType` out of `apply_supersessions` — aborting the WHOLE batch with
+        # that record in neither `skipped` nor a warn, against the contract the
+        # docstring above states ("a bad record still never aborts the ingest"),
+        # and on the hosted §6b path turning a deterministic payload into one
+        # that can never be ingested.
+        _sb_carrier_spellings = {
+            str(mname)
+            for _rep, _key, members in sb_entities
+            for _mid, mname, _mst in members if mname}
         if not sb_rows:
             # #1423: the successor may be a :Subject. #1370 routes the
             # extractor's declared §5 Subject kinds (team / role /
@@ -1894,7 +1928,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # so `_same_successor` accepts them — a same-successor re-ingest
             # stays a silent dedup on new AND legacy rows.
             stored = o_sb or ""
-            _candidate_spellings = {str(n) for _sid, n, _sst in sb_rows if n}
+            _candidate_spellings = _sb_carrier_spellings
             same_successor = _same_successor(
                 stored, supersedes_by,
                 candidate_names=_candidate_spellings)

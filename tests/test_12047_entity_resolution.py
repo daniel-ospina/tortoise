@@ -3047,6 +3047,65 @@ class TestThe12120ReviewRound8:
         finally:
             sdk.close()
 
+    def test_a_gone_survivor_on_the_terminal_target_path_refuses_not_raises(
+            self, sdk_factory):
+        """Round 9's `(None, key, members)` sentinel also reaches the TERMINAL arm.
+
+        `_entity_rows` reports `(None, key, members)` for a group whose
+        `resolved_from` survivor has been deleted (round 9), and round 9 adapted
+        the duplicate-id fetch for it. The terminal-target arm was the SECOND
+        consumer of the representative list, and it unpacked the representatives
+        as `(id, name, status)` triples — so this shape raised `TypeError:
+        cannot unpack non-iterable NoneType` out of `apply_supersessions`,
+        aborting the WHOLE batch with the record in neither `skipped` nor a warn.
+        On the hosted §6b path that is a deterministic payload which can never be
+        ingested; on capture it drops every supersession in the payload behind a
+        misleading warning.
+
+        The fix reads the candidate spellings from the GROUPS (the carriers), so
+        a sentinel cannot be unpacked at all. Reverting to the representative
+        unpack reds this on the raise, before any assertion.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            # Terminal target: the re-record's DIVERGENT arm is the one that
+            # reads the candidate spellings.
+            sdk.create_object("Widget", "document")
+            sdk.update_entity(
+                g.query("MATCH (o:Object {name:'Widget'}) RETURN o.id")
+                .result_set[0][0],
+                status="superseded", supersededBy="Older Widget")
+            # A LIVE successor carrier whose merged survivor is gone — the
+            # round-9 sentinel shape, reached through the supported merge door.
+            g.query(
+                "CREATE (c:Object {id:'r11-gone-co', name:'Gone Co', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'gone co', "
+                "resolved_from:'obj-12120-survivor-deleted'})")
+            sdk.create_object("Alpha", "document")
+            sdk.create_object("Later Co", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Widget", "supersedes_by": "Gone Co",
+                 "evidence": "test"},
+                {"superseded": "Alpha", "supersedes_by": "Later Co",
+                 "evidence": "test"}])
+            # The bad-shaped record is a REFUSAL: it reports and the batch goes
+            # on, which is the whole contract (`apply_supersessions` promises one
+            # `{ref, successor, reason}` dict for every record it did not apply).
+            assert applied == 1, (applied, skips, msgs)
+            assert [s["ref"] for s in skips] == ["Widget"], skips
+            assert skips[0]["reason"] == "terminal object target", skips
+            rows = g.query(
+                "MATCH (o:Object {name:'Alpha'}) "
+                "RETURN o.id, o.status, o.supersededBy").result_set
+            assert rows and tuple(rows[0][1:]) == (
+                "superseded", "Later Co"), (
+                "the batch stopped at the bad record instead of refusing it: "
+                f"{(applied, skips, msgs)!r}")
+        finally:
+            sdk.close()
+
     def test_a_retired_carrier_alone_still_refuses(self, sdk_factory):
         """The other side of the same rule: nothing visible under the name."""
         sdk = sdk_factory()
