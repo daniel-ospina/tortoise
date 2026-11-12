@@ -4291,7 +4291,11 @@ jobs:
       # part of #11609's batch 1 rather than half-done here — do NOT read this green as
       # tamper-resistant until the pin lands.
       - name: The archive's restore anchors resolve and hold their frozen bodies
-        run: python3 tools/archive_surface.py verify-anchors
+        # `--require-entries` too: with no entries every other arm is silent, so an emptied
+        # manifest must be a RED in the job that runs on every PR — not a vacuous OK.
+        run: |
+          python3 tools/archive_surface.py verify-anchors
+          python3 tools/archive_surface.py check --require-entries
       # ── PIN THE TOOLING TO THE BASE REF (#4606) ───────────────────────────
       # The step below would otherwise run the CHECKOUT'S OWN copy, so a PR
       # could add a surface tool and stub the gate out in the same commit: the

@@ -155,10 +155,17 @@ def test_the_committed_rows_cite_the_commit_the_writer_would_record() -> None:
     answer and must not be turned into a false red.
     """
     ref = arch.default_branch_ref(arch.ROOT)
-    if ref is None or arch._git(arch.ROOT, "rev-parse", "--verify", "--quiet",
-                                f"{ref}^{{commit}}")[0] != 0:
-        pytest.skip(f"{ref or 'no default-branch ref'} is not resolvable here")
-    for entry in arch.load_manifest(arch.ROOT / "archive" / "MANIFEST.json")["entries"]:
+    entries = arch.load_manifest(arch.ROOT / "archive" / "MANIFEST.json")["entries"]
+    # ⛔ THREE-VALUED, like every other anchor arm: `actions/checkout` defaults to
+    # `fetch-depth: 1`, and on the post-merge push the archived path is DELETED at the tip — so
+    # `rev-list <ref> -- <path>` is empty and a correct archive would raise here (measured in
+    # review cycle 7). An absence this clone cannot interpret is a SKIP, never an assertion:
+    # `verify-anchors` runs in the depth-0 job and is where the proof belongs.
+    if ref is None or not all(
+        arch._git_has_commit(arch.ROOT, str(e.get("archived_at") or "")) for e in entries
+    ):
+        pytest.skip("this clone cannot resolve the anchored commits (shallow) — see verify-anchors")
+    for entry in entries:
         expected, _ref = arch.anchor_sha(arch.ROOT, entry["sources"])
         assert entry["archived_at"] == expected, (
             f"{entry['symbol']} cites {entry['archived_at']}, but the writer now records "
@@ -911,6 +918,55 @@ def test_a_packages_find_glob_that_matches_the_archive_is_reported(tree: Path) -
         encoding="utf-8",
     )
     assert any("matches the archive" in problem for problem in arch.package_violations(tree))
+
+
+def test_the_anchor_is_the_newest_commit_that_HOLDS_the_path(tree: Path) -> None:
+    """`rev-list -1 -- <path>` also returns the commit that DELETED it, and holds nothing.
+
+    The batch PR deletes the source, so the squash merge touches every archived path — with
+    `-1`, the anchor would name a commit that never contained the code. No fixture distinguished
+    the two until this one, so reverting the walk kept the suite green (review cycle 7).
+    """
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    adding = arch._git(tree, "rev-parse", "HEAD")[1].strip()
+    subprocess.run(["git", "rm", "-q", "tortoise/gone.py"], cwd=tree, check=True)
+    _commit(tree)
+    deleting = arch._git(tree, "rev-parse", "HEAD")[1].strip()
+    assert adding != deleting
+    # The naive answer is the DELETION commit — the one the walk must not choose.
+    assert arch._git(tree, "rev-list", "-1", "main", "--", "tortoise/gone.py")[1].strip() == deleting
+    sha, _ref = arch.anchor_sha(tree, ["tortoise/gone.py"])
+    assert sha == adding, "the anchor must be the commit that still HOLDS the code"
+    assert arch._git_blob(tree, sha, "tortoise/gone.py") is not None
+
+
+def test_a_body_that_exists_in_the_file_but_is_not_the_symbol_is_reported(tree: Path) -> None:
+    """The exactness arm's positive control: a SUBSTRING of the anchored file is not the symbol.
+
+    Both existing anchor tests anchor at a commit that holds no blob, so they are carried by the
+    "commit does not hold the path" arm; weakening the comparison back to containment stayed
+    green (measured in review cycle 7). This forges a body that IS in the file.
+    """
+    entry = arch.archive_symbol(
+        arch.SDK_METHOD, "get_entity", "batch-a", "r", root=tree
+    )
+    # `_declares_apply_first_write_lane(...)`'s body is in sdk.py at the anchor, and it is NOT
+    # `get_entity` — a containment test accepts it, the exact test must not.
+    sdk = (tree / "tortoise" / "sdk.py").read_text(encoding="utf-8")
+    other = next(line for line in sdk.splitlines() if line.startswith("def _declares"))
+    forged = other + "\n    return lambda fn: fn"
+    text, frozen = arch.render_archive_file(
+        entry["kind"], entry["symbol"], entry["batch"], entry["reason"],
+        entry["archived_from"], entry["archived_at"], [("tortoise/sdk.py", forged, "FunctionDef:get_entity")],
+    )
+    (tree / entry["file"]).write_text(text, encoding="utf-8")
+    problems = arch.file_violations(
+        [dict(entry, blocks=frozen)], tree / "archive", tree
+    )
+    assert any("does not exist in" in problem or "not what" in problem for problem in problems), (
+        "a body that is merely PRESENT in the anchored file is not the symbol"
+    )
 
 
 def test_two_module_symbols_cannot_share_one_archived_file(tree: Path) -> None:

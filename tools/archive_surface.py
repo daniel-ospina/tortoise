@@ -782,8 +782,8 @@ def check(root: Path | None = None, *, require_entries: bool = False) -> list[st
 
     `require_entries` is OFF by default because the documented restore path ends with a LEGAL
     empty archive: restoring the last entry deletes its row and file, and `check` must then be
-    clean (`archive/README.md` step 4). CI passes the flag, where an empty archive means the
-    archived code was deleted rather than restored.
+    clean (`archive/README.md` step 4). The `surface-guard` job passes the flag, where an empty
+    archive means the archived code was deleted rather than restored.
     """
     root = Path(root or ROOT)
     manifest = load_manifest(root / "archive" / "MANIFEST.json")
