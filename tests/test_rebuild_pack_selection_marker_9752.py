@@ -1,5 +1,28 @@
 """#9752 — `rebuild_all` must not wipe the `:PackSelection` pack-set marker.
 
+⛔ WHAT IS NOT PINNED HERE, named so it is not mistaken for coverage (#9752 r10).
+Six operator-facing arms this change adds are LOG LINES with no count or shape
+behind them, and no test reds if they are deleted or their level degraded:
+
+  `projection/__init__.py:17525`  "restore attempt raised …"        (per-attempt)
+  `projection/__init__.py:17624`  "… treated as transient …"        (gap summary)
+  `projection/__init__.py:13737`  "%d marker(s) were captured, but …"  (rebuild())
+  `projection/__init__.py:13790`  "… but the read-back FAILED …"    (_replay_log)
+  `projection/__init__.py:14576`  "%d TeamMeta, %d PackSelection)"  (union summary)
+  `projection/__init__.py:14999`  "The wipe would also destroy …"   (pre-wipe warn)
+
+Measured: `elif pack_selection_restore_failures:` → `elif False:` leaves this
+file and both `_replay_log` arms GREEN. That is a REAL gap, not a design choice:
+the visible half of this change is largely a reporting change, so a log line is
+load-bearing for an operator. They are disclosed rather than silently assumed
+covered, and pinning them (one arm each — a raise inside the restore write, a
+raise inside `_replay_log`'s read-back, a sidecar-persist failure, a two-marker
+graph) is the follow-up #9752 asks for. What IS pinned: every count, every
+shape, every level that the arms above are derived FROM (`gap`, `restored`,
+`verified`, `conflict`, `state_unknown`, the CONFLICT-before-UNKNOWN rung, the
+absent/UNVERIFIED rungs, and the WARNING level of `rebuild()`'s success line).
+
+
 `:PackSelection` is the one node per graph whose **presence** says "this graph's
 pack set was DELIBERATELY configured" (#2728 / PR #8648). `pack_state` writes it
 with a bare ``MERGE (s:PackSelection)`` — no identity property, because the graph
@@ -1006,6 +1029,41 @@ def test_rebuild_all_reports_a_pre_9752_sidecar_as_state_unknown(
                for r in caplog.records), (
         "the pre-preservation UNKNOWN must be an ERROR naming its consequence — "
         "not a silent clean rebuild")
+
+
+def test_a_current_version_sidecar_missing_the_key_is_also_unknown(
+        tmp_path, caplog):
+    """The SECOND gate: the KEY, and it is not the version clause in disguise.
+
+    FAILING VALUE: the gate is `not isinstance(version, int) or version < 7 or
+    "pack_selection" not in leftover`. Every other fixture on this path is
+    `version=6`, so the VERSION clause fires first and the KEY clause was never
+    the reason anything happened — measured: deleting `or "pack_selection" not
+    in leftover` left this file's two UNKNOWN fixtures GREEN (#9752 r10).
+
+    It matters because the loader accepts a missing section key
+    (`_validate_prewipe_snapshot` uses `data.get(key, [])`), so a hand-edited or
+    foreign-written CURRENT-version file without the key would read as
+    "captured and empty" — i.e. conclude the graph was never configured, and
+    adopt the union fallback that re-admits a removed pack.
+
+    REACHABLE: a v7 sidecar written by something that predates the section, with
+    a live graph that is marker-free.
+    """
+    sdk, events = _mk_sdk(tmp_path)
+    _write_journal(events)
+    payload = _sidecar_payload(batch_snapshot=[{"id": "b1"}])   # CURRENT version
+    payload.pop("pack_selection")
+    _plant(Path(_sidecar_path(events)), payload)
+
+    with caplog.at_level(logging.ERROR):
+        counts = _proj(sdk).rebuild_all(str(events), confirm_destructive=True)
+
+    assert counts["pack_selection_expected"] == 0
+    assert counts["pack_selection_state_unknown"] is True, (
+        "a CURRENT-version sidecar with no `pack_selection` key cannot say the "
+        f"class was empty — it must read UNKNOWN: {counts}")
+    assert counts["pack_selection_gap"] == 1, counts
 
 
 def test_rebuild_refuses_before_the_wipe_when_the_marker_capture_fails(
