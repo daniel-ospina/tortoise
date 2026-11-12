@@ -1711,7 +1711,7 @@ class TestReviewRound4Closed:
 
     @staticmethod
     def _validate(confusion, guard_extra=None, ont_extra=None,
-                  all_pack_kinds=None):
+                  all_pack_kinds=None, depends_on=None):
         from tortoise.pack_registry import PackRegistry
 
         entry = {"kind": "concept", "layer": "object",
@@ -1724,7 +1724,7 @@ class TestReviewRound4Closed:
         # without a loaded catalog — which is the point: this is the INSTALL
         # gate, and it must answer for a manifest that is not installed.
         reg = PackRegistry.__new__(PackRegistry)
-        return reg._validate_guards(ont, "acme", [],
+        return reg._validate_guards(ont, "acme", depends_on or [],
                                     all_pack_kinds or {"concept"})
 
     def test_a_misspelled_linkPredicate_KEY_is_refused_at_install(self):
@@ -1885,30 +1885,61 @@ class TestReviewRound4Closed:
             )
             assert errs and "NIL bucket" in " ".join(errs), (nil, errs)
 
-    def test_a_redirect_typo_is_caught_by_the_TABLE_not_a_second_gate(self):
-        """One defect, one gate: the KIND question belongs to `guard_table_problems`.
+    def test_an_OWN_NAMESPACE_redirect_typo_is_refused_at_install(self, tmp_path):
+        """The table ABSTAINS for a pack target, so nothing else asks.
 
-        Round-7 review P2 claimed `redirect: core:WrokItem` "installs ✓ Clean"
-        and asked for a hard schema error here. Measured: it installs `ok: false`
-        and exits 1, because `guard_table_problems()` reports "not routed to one
-        layer by kind_layers" — the SAME verdict, from the gate that has the layer
-        authority. A hard error beside it was redundant AND displaced the
-        table-level diagnostic two shipped tests pin, so the fix is the DOCSTRING
-        (R3a closes the namespace) plus this pin, not a second gate.
+        Round-7 review P2, measured on a real manifest: `redirect: acme:konpekt`
+        printed `\u2713 Clean` and exited 0, because the redirect arm checked only
+        the NAMESPACE, and `guard_table_problems` deliberately skips an unrouted
+        PACK target (`_layer_of_kind` reads the ambient catalog, so a pack kind it
+        cannot see would false-refuse every legitimate cross-pack guard). The
+        guard then degraded to `fallback` on every match, silently.
+
+        This pack's own namespace is the ONE kind list install has in hand, so it
+        is knowable here \u2014 and it is the ONLY namespace checked here: a `core`
+        typo is the table's question (it answers in the same verdict), and a
+        `depends_on` namespace is not this pack's to enumerate.
         """
-        c = Confusion(
-            rule="acme:red-typo", when="nameMatches", pattern=r"^r-[0-9]+$",
-            redirect="acme:konpekt", fallback="core:WorkItem", reason="x",
-            guarded_kind="acme:concept", guarded_layer="object")
-        problems = kg.guard_table_problems((c,), include_catalog=False)
-        assert problems and any("not routed to one layer" in p for p in problems), (
-            problems)
-        # the real spelling is silent, so the report discriminates
-        ok = Confusion(
-            rule="acme:red-ok", when="nameMatches", pattern=r"^r-[0-9]+$",
-            redirect="core:Project", fallback="core:WorkItem", reason="x",
-            guarded_kind="acme:concept", guarded_layer="object")
-        assert kg.guard_table_problems((ok,), include_catalog=False) == []
+        base = {"rule": "acme:red", "pattern": r"^r-[0-9]+$",
+                "fallback": "core:WorkItem", "reason": "x"}
+        # the real spelling is silent, so the refusal discriminates
+        assert self._validate({**base, "redirect": "acme:brief"},
+                              all_pack_kinds={"concept", "brief"}) == []
+        errs = self._validate({**base, "redirect": "acme:konpekt"},
+                              all_pack_kinds={"concept", "brief"})
+        assert errs and "redirect" in " ".join(errs), errs
+        # a depends_on target names a namespace this pack does not own: its kind
+        # list is not knowable here, so it must NOT be refused (else the arm is a
+        # false block on the cross-pack case it exists to allow)
+        assert self._validate({**base, "redirect": "venture:investment"},
+                              depends_on=["venture"],
+                              all_pack_kinds={"concept"}) == []
+
+        # ⛔ END-TO-END, on a real manifest — because the round's FIRST version of
+        # this test hand-built a `Confusion` (declaring_pack=None) and therefore
+        # "passed" by exercising the CORE branch, never the path a manifest takes
+        # (round-7 review P2, measured: the real one printed `✓ Clean`, exit 0).
+        def _cli(target):
+            d = tmp_path / target.replace(":", "_")
+            guards = f"""\
+  - kind: concept
+    layer: object
+    onConfusion:
+      - when: nameMatches
+        pattern: '^r-[0-9]+$'
+        redirect: {target}
+        fallback: core:WorkItem
+        reason: x
+"""
+            man = _write_pack(d / "packs", "acme",
+                              object_kinds="concept, widget", guards=guards)
+            return _run_cli("pack", "validate", str(man.parent))
+
+        ok = _cli("acme:widget")          # a kind this pack really declares
+        assert ok.returncode == 0, ok.stdout + ok.stderr
+        bad = _cli("acme:konpekt")
+        assert bad.returncode == 1, bad.stdout + bad.stderr
+        assert "redirect: 'acme:konpekt'" in bad.stdout, bad.stdout
 
     def test_a_fromKinds_scope_naming_no_CORE_kind_is_refused(self):
         """`core:WrokItem` is a typo the own-namespace arm cannot see.

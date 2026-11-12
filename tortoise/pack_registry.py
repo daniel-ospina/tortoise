@@ -2918,17 +2918,26 @@ class PackRegistry:
         Two refusals, and they are exactly the two failure modes that would
         otherwise surface as a broken write months later (#12060 R3):
 
-        * **R3a target closure** — every ``redirect`` target must be a CORE kind,
-          a kind in THIS pack's namespace, or a kind in a pack named in
-          ``depends_on``. A target resolved from the catalog instead would name
-          a kind the graph cannot legally write, because the catalog is a
-          SUPERSET of any one graph's partition (#5163).
-        ⛔ AND R3a HERE CHECKS THE TARGET’S NAMESPACE, NOT ITS KIND. A core typo
-        (``redirect: core:WrokItem``) is caught by ``guard_table_problems()`` —
-        “not routed to one layer by kind_layers” — which runs in the SAME install
-        verdict (``ok: false``, exit 1). One defect, one gate: the kind question
-        needs the table and the layer authority, and answering it twice is how a
-        message stops matching its mechanism (measured, round-7 review).
+        * **R3a target closure** — every ``redirect`` target must resolve into
+          ``core``, THIS pack's own namespace, or a pack named in ``depends_on``.
+          A target resolved from the catalog instead would name a kind the graph
+          cannot legally write, because the catalog is a SUPERSET of any one
+          graph's partition (#5163).
+        ⛔ R3a CLOSES TWO DIFFERENT THINGS AND BOTH ARE CHECKED HERE, but not at
+        the same place, because only one of them has an answer at install:
+
+        * the target's **NAMESPACE** — here, below; and
+        * the target's **KIND** — for THIS pack's own namespace, here (it is the
+          one namespace whose kind list install has in hand); for ``core``, in
+          ``guard_table_problems()``, which reports “not routed to one layer by
+          kind_layers” in the SAME verdict (``ok: false``, exit 1 — measured).
+          That gate cannot answer for a PACK target: ``_layer_of_kind`` reads the
+          process's ambient catalog, so a pack kind invisible to it would
+          false-refuse every legitimate cross-pack guard (round-2 review P1), and
+          it abstains by design. So the own-namespace typo would otherwise be
+          nobody's question — measured, round-7 review: ``redirect:
+          acme:konpekt`` printed ``✓ Clean`` and exited 0, then every match
+          silently re-filed to the fallback instead of the intended kind.
 
         * **R3b a core fallback** — every ``onConfusion`` entry must declare a
           ``fallback`` that is a CORE kind. The fallback is what the write-time
@@ -2968,8 +2977,9 @@ class PackRegistry:
         # neither alone. `CORE_KINDS` misses the entire §5 SUBJECT vocabulary
         # (`organization`, `team`, `role`, `naturalPerson`, `legalPerson`, …):
         # measured, 33 forms live only in `core_kind_names()`. `core_kind_names()`
-        # in turn misses the SECTION names (`Object`, `Subject`, `Document`, …):
-        # measured, 44 forms live only in `CORE_KINDS`. Round 6 used `CORE_KINDS`
+        # in turn misses 44 forms — the SECTION names (`Object`, `Subject`,
+        # `Document`, …) among them, alongside the event/document/action/point
+        # kinds. Round 6 used `CORE_KINDS`
         # alone and therefore REFUSED `fromKinds: [core:organization]` — a live
         # scope, and precisely the misfiling vocabulary this feature exists to fix
         # (round-7 review P1, measured: the redirect fires and the same file
@@ -3156,22 +3166,32 @@ class PackRegistry:
                     errors.append(f"{cw}.redirect: required")
                 else:
                     _qualified, tns = _resolve_ref(target.strip())
+                    _bare = _qualified.split(":", 1)[-1] if ":" in _qualified \
+                        else _qualified
                     if tns is not None and tns not in allowed_ns:
                         errors.append(
                             f"{cw}.redirect: '{target}' targets namespace "
                             f"'{tns}', which this pack neither owns nor declares "
                             f"in depends_on — either add the dependency or "
                             f"redirect to a core kind (R1/R3)")
-                    # ⛔ THE TARGET'S *KIND* IS NOT CHECKED HERE, DELIBERATELY —
-                    # and the docstring used to claim otherwise. `redirect:
-                    # core:WrokItem` is caught by `guard_table_problems()`
-                    # ("not routed to one layer by kind_layers"), which runs in the
-                    # SAME install verdict: `pack validate` reports `ok: false`
-                    # and exits 1 (measured, round-7 review). The round briefly
-                    # added a hard schema error here as well; it was redundant and
-                    # it displaced the table-level diagnostic the shipped tests
-                    # pin, so it is not here. Two gates for one defect is how a
-                    # message stops matching its mechanism.
+                    elif tns is not None and tns == (ns or None) \
+                            and _bare not in all_pack_kinds:
+                        # ⛔ THIS PACK'S OWN NAMESPACE IS THE ONE KIND LIST
+                        # INSTALL ACTUALLY HAS — so a typo here is knowable, and
+                        # it must be refused: `guard_table_problems()` ABSTAINS
+                        # for a pack target by design (the ambient catalog cannot
+                        # see it), so nothing else asks. Left unchecked, the
+                        # guard installs `✓ Clean` and silently degrades to
+                        # `fallback` on every match (measured, round-7 review).
+                        # A `core` typo is NOT duplicated here: the table reports
+                        # it in the same verdict, and two gates for one defect is
+                        # how a message stops matching its mechanism.
+                        errors.append(
+                            f"{cw}.redirect: '{target}' is this pack's own "
+                            f"namespace but names no kind it declares — the "
+                            f"guard would degrade to its fallback on every "
+                            f"match, and a redirect that never happens is a "
+                            f"declaration that lies")
                 fb = c.get("fallback")
                 if not isinstance(fb, str) or not fb.strip():
                     errors.append(
