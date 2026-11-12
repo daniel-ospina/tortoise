@@ -89,14 +89,15 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > clause is about, and do NOT agree on how history is kept — so only the narrow claim is made here. **None of them requires the CALLER
 > to name a successor** to mark something no-longer-current: Graphiti/Zep sets an edge's `invalid_at` to the invalidating edge's
 > `valid_at` and lets the SYSTEM link them; Cognee's conflict review labels a contradicted fact `superseded` and its counterpart
-> `current` (`cognee/modules/conflicts/methods.py`), with no successor argument from the caller; mem0's
+> `current` (`cognee/tasks/memify/review_conflicts/schema.py` — `ReviewedConflict.current` / `.superseded`), with no successor
+> argument from the caller; mem0's
 > **Supersede** action ("marks an older fact as outdated when a newer one contradicts it", always on, all plans) infers both the
 > supersession and its replacement link in the background — `replaced_by`/`lifecycle_state` are written by the system, not
-> passed by a caller. ⚠️ **Three corrections to an earlier version of this paragraph, each falsified by review.** (a) It said *"Every
+> passed by a caller. ⚠️ **Four corrections to an earlier version of this paragraph, each falsified by review.** (a) It said *"Every
 > agent-memory system surveyed uses **soft revocation** rather than deletion"*; arXiv 2609.08258v1 (*"Revoked but Still
 > Authoritative: An Empirical Study of Revocation Enforcement in Agent-Memory Systems"*) says **"Many** agent-memory systems
-> preserve history through soft revocation", and its §3.3 names two of the five it measures (cognee, langmem) as deleting the superseded
-> record outright under direct insertion — a universal claim is exactly wrong, and cognee is named three lines above. The paper is
+> preserve history through soft revocation", and its §4.1 names two of the five it measures (cognee, langmem) as deleting the superseded
+> record outright under direct insertion — a universal claim is exactly wrong, and cognee is named above. The paper is
 > **v1 of 2026-09-08** (its submission date — it states no measurement window and names no cognee version), which is BEFORE the
 > 1.6.5 conflict review cited above, so it records cognee without a fact-level
 > contradiction step while the same paragraph credits it with one — both are true of their own version (the review's is 1.6.5, released
@@ -104,7 +105,16 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > here so the two do not read as a source refuting its own example. (b) It said
 > *"mem0 and Letta have no successor concept"*, which is false of mem0 (its Supersede feature carries a system-inferred replacement
 > pointer) and was never verified for Letta from a primary source. (c) It named Cognee's `close_node()`, which cognee removed in 1.6.5
-> (2026-10-16) — an API that no longer exists. What survives all three is the narrower, load-bearing claim:
+> (2026-10-16) — an API that no longer exists. (d) It pointed two different citations at the wrong place: the sentence about cognee and
+> langmem deleting the superseded record outright under **direct insertion** is **§4.1**'s (§3.3, *"Memory systems"*, records only
+> that they *"retain nothing after an update"* — not scoped per insertion mode; its Table 3 mechanism cell,
+> *"prune-and-reingest; no fact-level contradiction step"*, is what (a) relies on — while the direct-insertion form of that claim is
+> §4.1's), and the `current`/`superseded` labelling above was cited from `cognee/modules/conflicts/methods.py`, which first exists
+> in **1.6.6** (a dataset-authorized conflict API that *imports* `cognee/tasks/memify/review_conflicts/`, not a move of it), while
+> the review it describes is **1.6.5** — there the labels are declared in `cognee/tasks/memify/review_conflicts/schema.py`
+> (`ReviewedConflict.current` / `.superseded`), carried per fact as `AcceptedConflict.fact_statuses` (`models.py`), and applied via
+> `STATUS_PRIORITY` (`write_conflicts.py`). Both verified 2026-11-12 against the paper's HTML build and cognee tags
+> `v1.6.5` / `v1.6.6`. What survives all four is the narrower, load-bearing claim:
 > **the successor pointer is system-inferred, so no caller is required to supply it.** The tension runs the other way too — and this
 > next sentence is the entry's OWN REASONING, not a sourced finding: an earlier version put it in quotation marks with no
 > attribution, and it appears in neither the cited study nor any comment on #11824, so it could not be checked from the artifact.
