@@ -2657,13 +2657,13 @@ to answer.
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit,
   per §8's rule for *any* edit to this file.
 - **Also re-derived by the same merges: four `edges.py` / `record_projection.py` cites in the LIVE
-  carriers** — §3.4 (the identity/mention rule, `edges.py:817-819`), §3.7 (both, twice), and §7 —
+  carriers** — §3.4 (the identity/mention rule, `edges.py:817-819`, and the
+  `_DERIVATION_REFERENCES_LABELS` cite, `edges.py:843`), §3.7 (both, twice), and §7 —
   the composition fold (`edges.py:1619-1620`), `create_edge`'s own predicate set
   (`edges.py:717-726`, which admits the composition spelling and refuses its sibling), the
   identity/mention rule that keeps `Object` property-free (`edges.py:817-819`), and the record
-  projection's copy of the same fold map (`record_projection.py:4996-4997`) — and the
-  `_DERIVATION_REFERENCES_LABELS` cite in §3.7 (`edges.py:843`). Citations only; no criterion
-  value moved.
+  projection's copy of the same fold map (`record_projection.py:4996-4997`). Citations only; no
+  criterion value moved.
 - ⛔ **§10.1 and §10.11 are HISTORY and were NOT re-pointed.** Their numbers (`edges.py:747`,
   `edges.py:721-723`, `edges.py:1513`, `record_projection.py:4771-4779`, `edges.py:621-632`) name
   the head each entry measured, per §10.19/§10.22/§10.24 — an earlier cut of this branch's own
