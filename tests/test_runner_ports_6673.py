@@ -579,9 +579,13 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         #
         # One consequence worth knowing: the first entry is the whole stripped
         # statement INCLUDING its trailing comment, so it is anchored to that
-        # wording. Rewording `test_test_lane_tool.py:2087`'s comment would make
-        # the entry inert — and `test_every_seam_exemption_is_consulted` is the
-        # alarm for exactly that (it reds on an inert entry).
+        # wording. Rewording `test_test_lane_tool.py:2087`'s comment makes the
+        # entry inert, and the guard then REDS on that now-unexempted line —
+        # loud, not silent. Deleting the fixture line instead leaves the entry
+        # dead with nothing watching it: the non-vacuity check is per-FILE
+        # (`_exemptions_no_file_can_consult` returns `set(allow) - population`),
+        # so it catches a file that left the population, never an entry that
+        # stopped matching a line.
         #
         # The FOUR fixtures below are full statements for the SAME reason. The
         # two port-shaped ones especially: `127.0.0.1:<port>:6379` is exactly
@@ -589,11 +593,15 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         # the `docker://` URI tail, so the BARE literals would each have
         # exempted a real dial on the same line — the failure this guard
         # exists to catch. No dial to a LANE PORT exists in
-        # `tests/test_test_lane_tool.py` — every `_docker` call there is
-        # monkeypatched, and its two REAL TCP connects are `_ping_over_host`
-        # probes (`:1697`, `:1706`) to port 1 and to an ephemeral loopback
-        # server, neither carrying a lane-port literal. So the narrow spelling
-        # costs nothing and keeps a future one red.
+        # `tests/test_test_lane_tool.py`: every `_docker` call in the TEST
+        # PROCESS is monkeypatched, and its two REAL TCP connects are
+        # `_ping_over_host` probes (`:1697`, `:1721`) to loopback port 1 and to
+        # an ephemeral loopback server — neither carries a lane-port literal.
+        # (One real CHILD process exists, `:2899`'s shell-contract test; it runs
+        # the tool against `DOCKER_HOST=tcp://127.0.0.1:1`, so its `_docker`
+        # calls reach nothing and the declared `6379` URI is only ever WRITTEN
+        # into that script, never dialled.) So the narrow spelling costs
+        # nothing and keeps a future lane port red.
         '"falkordb-16379",      # the orchestration graph instance',
         'for shared in ("falkordb", "falkordb-16379"',
         '_remove_and_describe("falkordb-16379")',
