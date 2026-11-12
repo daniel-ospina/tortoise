@@ -923,7 +923,12 @@ class Operator(BaseModel):
 
     src: str
     dst: str
-    op_type: Literal["IMPL", "NAND", "MITIGATES"]
+    # #12067: the mechanism set is closed at THREE, and the wire contract must
+    # carry every mechanism the SDK accepts — a payload carrying a coherence
+    # operator is shape-valid (`validate_payload_dict` is what both the hosted
+    # API and the SDK's client-side pre-check run), so leaving the third value
+    # out made the commit surface disagree with `create_operator`.
+    op_type: Literal["IMPL", "NAND", "coherence", "MITIGATES"]
     # #7852: the Layer-1 direction vocabulary — the model's four values plus
     # the two legacy aliases. Must stay equal to `live.ACCEPTED_DIRECTION_VALUES`;
     # `tests/test_direction_storage_7852.py` pins the two sets, so widening one

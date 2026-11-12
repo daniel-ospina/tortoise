@@ -10837,6 +10837,39 @@ def _property_filter_clause(key: str) -> str:
     return f"n.`{key}` = ${key}"
 
 
+def _live_operator_mechanism_pairs(proj, ids):
+    """The mechanisms live operators already carry over ``ids`` (#12067).
+
+    Returns ``{operator_id: (op_type, other_endpoint_ids)}`` for every LIVE
+    operator that touches at least one id in ``ids``. ONE reader, because the
+    closed-set invariant has TWO doors that must judge the same population: the
+    operator door (``create_operator``) and the operator-less direct-edge door
+    (``create_direct_edge``). A second copy is how one door stops seeing a shape
+    the other writes — the bypass this helper was extracted to close (#12067
+    review, P1: a direct edge could be added beside an existing operator even
+    though the operator's own door refused the mirror image).
+
+    ⛔ The endpoint's LABEL is not part of the pair: ``create_operator`` admits
+    any of :Point/:Subject/:Object/:Event (#7902), so a probe whose PATTERN says
+    ``(p:Point)`` cannot see a pair whose endpoint is a :Subject. The swept
+    ``{label}`` keeps the per-(label, id) index (``epistemic_label_queries``) and
+    the far side is reached BY THE EDGE, so no label is imposed on it.
+    """
+    rows_out: dict[str, tuple[str | None, set[str]]] = {}
+    for _q in epistemic_label_queries(
+        "MATCH (o:Point)-[:IMPL|NAND]->(p:{label}), "
+        "(o)-[:IMPL|NAND]->(q) "
+        "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
+        f"AND {_live_only('o.status')} "
+        "AND p.id IN $ids "
+        "RETURN DISTINCT o.id, o.op_type, q.id"
+    ):
+        for _oid, _otype, _qid in proj.g.query(
+                _q, params={"ids": sorted(ids)}).result_set:
+            rows_out.setdefault(_oid, (_otype, set()))[1].add(_qid)
+    return rows_out
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -23957,9 +23990,11 @@ class TortoiseSDK:
                 "reason=..., strength=0.10..0.50) (MCP: "
                 "tortoise_mitigate_operator) to attach the dampener."
             )
-        if op_type not in ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps"):
+        if op_type not in ("IMPL", "NAND", "coherence", "composedOf",
+                           "decomposesInto", "contains", "wraps"):
             raise ValueError(
-                f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
+                f"op_type must be 'IMPL', 'NAND', 'coherence', or a part/whole "
+                f"type, got {op_type!r}"
             )
         # #1934 (epic #1891 slice 3): relation-level write validation —
         # warn-not-block (governance D1/D2). An undeclared domain label is
@@ -24291,6 +24326,126 @@ class TortoiseSDK:
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
 
+        # ── CLOSED SET, refused at the door (#12067, ONTOLOGY §8) ────────────
+        # “Every epistemic relation between two beliefs is exactly one of three
+        # mechanisms. The set is CLOSED, and a pair carries AT MOST ONE.”
+        #
+        # WHY A REFUSAL AND NOT A WARNING, next to a door whose mechanism arm is
+        # deliberately warn-not-block (#1934 D1/D2, #9963): the two answer
+        # DIFFERENT questions. #9963 asks *did this ONE write contradict the
+        # meaning it itself declared?* — a disclosure, and the write is still
+        # coherent. This asks *would this write give ONE PAIR two mechanisms?* —
+        # a state the model cannot price, because the two mechanisms then fight
+        # over the same belief with different functional forms, and the
+        # over-statement is INVISIBLE in the output (it looks like strong
+        # support). Support and coherence specifically AGREE while everything
+        # rises and diverge everywhere else, so the double count only shows up
+        # as over-confidence — the canonical dependent-evidence error the
+        # closure exists to make unwritable. #12067's acceptance names the
+        # refusal explicitly (“A pair carrying two mechanisms is refused at the
+        # write door, with a message naming both”), which is the newer ruling.
+        #
+        # SCOPE EXACTLY AS WRITTEN:
+        #  * a MECHANISM op_type only (part/whole declares no mechanism, so
+        #    `composedOf` beside a NAND is not two mechanisms);
+        #  * a shared ENDPOINT PAIR of at least two claims — n-ary operators are
+        #    compared pair-wise, and a self-support `(a, a)` never forms a pair;
+        #  * DIRECTION is not consulted. Direction says how far an assertion
+        #    reaches, never what it means, so IMPL `a->b` beside NAND `b->a` is
+        #    still one pair with two mechanisms;
+        #  * LIVE operators only (`_live_only`): a DRAFT operator prices no
+        #    belief, so it carries no mechanism to conflict with. (`_live_only`
+        #    also excludes terminal statuses; an operator cannot currently be
+        #    moved to one through the SDK — `retract_point` refuses operators —
+        #    so the draft exclusion is the reachable arm, and the terminal one
+        #    is correct if a legacy/raw write ever produces it. Refusing on
+        #    either would be a false block, the #8175 class.)
+        # There is NO backfill: existing pairs keep whatever they carry, and this
+        # only governs what is written from here (#12067 “No backfill —
+        # explicitly”).
+        from tortoise.pack_registry import CORE_PREDICATES
+
+        if op_type in CORE_PREDICATES:
+            _new_endpoints = set(inputs)
+            # The population reader is SHARED with `create_direct_edge`
+            # (`_live_operator_mechanism_pairs`): the two doors must judge the
+            # same operators, or one of them stops seeing what the other writes.
+            _existing = _live_operator_mechanism_pairs(proj, _new_endpoints)
+            for _oid, (_otype, _endpoints) in _existing.items():
+                if _otype not in CORE_PREDICATES or _otype == op_type:
+                    continue
+                _shared = _endpoints & _new_endpoints
+                if len(_shared) < 2:
+                    continue
+                raise ValueError(
+                    f"create_operator: the pair {sorted(_shared)} already carries "
+                    f"the {_otype!r} mechanism (operator {_oid!r}), so it cannot "
+                    f"also carry {op_type!r} (#12067 — the mechanism set is "
+                    f"CLOSED and a pair carries at most one). Two mechanisms on "
+                    f"one pair are not additive: they fight over the same belief "
+                    f"with different functional forms, and the resulting "
+                    f"over-confidence looks exactly like strong support. Pick "
+                    f"the mechanism that fits — 'supports'/'causes'/'addresses' "
+                    f"are support (IMPL), 'refutes'/'mutuallyExclusive' are "
+                    f"attack (NAND), 'dependsOn'/'hasPart' are coherence — and "
+                    f"state the other intent as a separate claim (a different "
+                    f"claim as the other endpoint), or delete the existing "
+                    f"operator first if the pair genuinely changed meaning. "
+                    f"NOTE the cost: an operator has no retract path today "
+                    f"(retract_point refuses operators), so `delete_point` is "
+                    f"the only route — a sanctioned 'replace this pair's "
+                    f"mechanism' verb does not exist yet."
+                )
+
+            # The OPERATOR-LESS direct edge carries its mechanism as the REL
+            # itself, so it is the other arm of the same invariant: a bare
+            # `:IMPL` beside a NAND operator (or a bare `:NAND` beside a
+            # support/coherence operator) is two mechanisms on one pair, and
+            # `ep.py` already documents the shape as unsupported ("parallel
+            # direct edges between the same pair share one message slot, last
+            # writer wins"). Refusing is strictly better than the silent
+            # last-writer. `a.op_type IS NULL` keeps operator-mediated edges out
+            # of this arm — they were judged above, on their NODE's op_type.
+            # ⛔ WHICH bare edge conflicts depends on the mechanism, and the
+            # comparison is against the NEW mechanism, never its storage type: a
+            # bare edge's mechanism IS its rel type (`IMPL` → support, `NAND` →
+            # attack), while an operator's mechanism is its NODE `op_type`. So
+            # every bare edge type that is not the new mechanism conflicts — for
+            # `coherence` that is `IMPL` **and** `NAND` (it conflicts with
+            # support even though it is STORED as one), for `IMPL` it is `NAND`,
+            # for `NAND` it is `IMPL`. The pre-fix single-value form compared a
+            # coherence write against a bare `:NAND` only, so a bare `:IMPL`
+            # beside a coherence operator (support + coherence on one pair) was
+            # writable (#12067 review, P1); filtering on the STORAGE type
+            # instead re-opens the same hole from the other side.
+            _direct = []
+            for _q in epistemic_label_queries(
+                "MATCH (a:{label})-[r:IMPL|NAND]->(b) "
+                "WHERE a.id IN $ids AND b.id IN $ids "
+                "AND a.op_type IS NULL "
+                "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                "RETURN a.id, b.id, type(r) LIMIT 10"
+            ):
+                _direct.extend(
+                    (_a, _b, _t) for _a, _b, _t in proj.g.query(
+                        _q, params={"ids": sorted(_new_endpoints)},
+                    ).result_set
+                    if _t != op_type
+                )
+                if _direct:
+                    break
+            if _direct:
+                raise ValueError(
+                    f"create_operator: the pair {sorted(_direct[0][:2])} already "
+                    f"carries the {_direct[0][2]!r} mechanism as a direct edge, "
+                    f"so it cannot also carry {op_type!r} (#12067 — the "
+                    f"mechanism set is CLOSED and a pair carries at most one). "
+                    f"A direct edge is an operator-less mechanism edge; one pair "
+                    f"carrying two of them shares a single message slot, so the "
+                    f"last writer silently wins. Remove the direct edge first, "
+                    f"or wire the second intent against a different claim."
+                )
+
         # #2351: the override guard — a DERIVED claim may not IMPL-cascade above
         # (or NAND-attack) an ASSERTED one. `source_id` is the factor's SOURCE
         # slot (idx 0 — the position `_update_factor` reads the forward
@@ -24367,7 +24522,17 @@ class TortoiseSDK:
         # (s)-[:INPUT]->(o) edge — the same shape the OperatorAdded replay
         # MERGEs (projection/edges.py), so live graphs and rebuilt graphs
         # carry identical INPUT edges (fold-parity).
-        edge_type = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
+        # #12067: `coherence` is a MECHANISM, so it rides the `IMPL` edge rel
+        # type exactly as `NAND` rides its own — the rel type is the STORAGE
+        # leg, and the mechanism of record is the operator node's `op_type`,
+        # which is what `ep.py` prices the factor from (`_affected_factors`
+        # returns `o.op_type`). Writing a third rel type instead would make the
+        # mechanism invisible to every reader that enumerates `IMPL|NAND`
+        # (158 sites across 22 modules — measured, #12067's inventory) until
+        # each one learned it, i.e. INERT on those surfaces, which is exactly
+        # the #8169 failure. Only a part/whole op_type is structural (`hasPart`).
+        edge_type = ("hasPart" if op_type not in ("IMPL", "NAND", "coherence")
+                     else ("IMPL" if op_type == "coherence" else op_type))
         for i, inp_id in enumerate(inputs):
             # #7405: the typed edge and its INPUT mirror are created by ONE
             # statement; the abort means NEITHER landed, and the endpoints/idx
@@ -25337,8 +25502,11 @@ class TortoiseSDK:
     # #4937: MITIGATES is deliberately NOT here — it is not an operator KIND,
     # so it is never a `conn["operator"]` value. A connection spec expresses a
     # mitigation in its `mitigation` dict (see `_connection_route`).
+    # #12067: `coherence` IS an operator kind, so the sync above requires it
+    # here — leaving it out refused an ingest that `create_operator` accepts.
     _INGEST_OPERATOR_TYPES = frozenset(
-        ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps")
+        ("IMPL", "NAND", "coherence", "composedOf", "decomposesInto",
+         "contains", "wraps")
     )
 
     # ── Shared pre-validation check helpers (epic #902 W4 A1) ────────────
@@ -29943,6 +30111,35 @@ class TortoiseSDK:
             raise ValueError(_claim_class.override_refusal(
                 source_id=source_id, target_ids=[target_id],
                 surface=f"create_direct_edge({op_type})"))
+
+        # ── The SAME closed-set invariant, from the other door (#12067) ───────
+        # `create_operator` refuses to put a second mechanism on a pair, and
+        # this door writes the OPERATOR-LESS half of the same epistemic layer:
+        # a bare `:IMPL` beside a NAND operator is two mechanisms on one pair
+        # exactly as a NAND operator beside an IMPL one is. Without this arm the
+        # invariant was enforceable in only ONE direction — measured: create an
+        # IMPL operator, then `create_direct_edge("NAND", a, b)` was accepted,
+        # producing the state the refusal exists to make unwritable (#12067
+        # review, P1). `coherence` is included through its OWN spelling: it is
+        # stored as `:IMPL` but it is a DIFFERENT mechanism, so an operator
+        # declaring it conflicts with a bare IMPL edge.
+        from tortoise.pack_registry import CORE_PREDICATES as _CORE_PREDICATES
+        _op_pairs = _live_operator_mechanism_pairs(
+            proj, {source_id, target_id})
+        for _oid, (_otype, _endpoints) in _op_pairs.items():
+            if _otype not in _CORE_PREDICATES or _otype == op_type:
+                continue
+            if not {source_id, target_id} <= _endpoints:
+                continue
+            raise ValueError(
+                f"create_direct_edge: the pair {[source_id, target_id]} already "
+                f"carries the {_otype!r} mechanism (operator {_oid!r}), so it "
+                f"cannot also carry a {op_type!r} direct edge (#12067 — the "
+                f"mechanism set is CLOSED and a pair carries at most one). "
+                f"Delete the operator first if the pair genuinely changed "
+                f"meaning, or state the second intent against a different "
+                f"claim."
+            )
 
         # BARE-pattern MERGE + attribute SET (last-writer-wins; exactly one
         # edge per (src,tgt,type)). `created` is detected by a pre-count

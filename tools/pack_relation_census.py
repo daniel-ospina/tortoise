@@ -148,7 +148,15 @@ def _operator_edge_type(predicate: str, mechanism: str | None) -> str | None:
     so reporting the declared spelling as the *edge* label would name a label no
     writer stamps — which is why `written_label` and `written_edge_type` are
     separate cells.
+
+    #12067: `coherence` is the THIRD mechanism, and it rides the `IMPL` edge rel
+    type (the mechanism of record is the operator node's `op_type`, which is
+    what `ep.py` prices) — so the cell must report `IMPL`, not None. Reporting
+    None would say "no writer stamps an edge for this row", which is the exact
+    opposite of what a coherence relation write does.
     """
+    if mechanism == "coherence":
+        return "IMPL"
     return mechanism if mechanism in ("IMPL", "NAND") else None
 
 

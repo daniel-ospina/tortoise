@@ -1758,7 +1758,7 @@ OUTPUT_CONTRACT = """{
               "supersedes": "existing-id|content|null",  # replaces a prior-session point found in search (CORRECTS fold; omit = none)
               "source_turn_id": int|null}],  # {index}: turn in the SOURCE TRANSCRIPT (E3)
   "operators": [
-    {"src": str, "dst": str, "op_type": "IMPL|NAND"},
+    {"src": str, "dst": str, "op_type": "IMPL|NAND|coherence"},
     {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
   ],
   "relations": [{"src": str, "dst": str, "predicate": "IMPL|NAND|addresses|supports|refutes|causes|produces|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy", "semantics": "addresses|supports|refutes|causes|produces|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy|null"}],  # S5 Job 1 (#10999): an ENTITY↔ENTITY relation the NARRATIVE itself states (e.g. "the retry storm causes the deadline slip"). src/dst are entity NAMES that must ALSO appear in entities[] above — spell one exactly as emitted (a case/whitespace/Unicode-fold-only variant resolves to the emitted spelling); an endpoint is never invented here, and one this emission does not produce is DROPPED. `predicate` is an ALLOWLIST spelled out in full above: those verbs are accepted verbatim, plus any verb a loaded pack declares as a relation. An invented verb is DROPPED. `semantics` is the optional Layer-2 meaning (ONTOLOGY §8) — same vocabulary; a token outside it is dropped from the RECORD (the relation survives). Emit only what the story asserts: a per-item aggregate of coincidences is not a relation.
@@ -11187,7 +11187,10 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not isinstance(_op, dict):
             continue
         _op_type = str(_op.get("op_type", "")).upper()
-        if _op_type not in ("IMPL", "NAND", "MITIGATES"):
+        # #12067: `coherence` is the third mechanism. The emission contract is
+        # case-insensitive (`.upper()` below), so the check admits the upper
+        # spelling and the payload maps back to the canonical lower-case value.
+        if _op_type not in ("IMPL", "NAND", "COHERENCE", "MITIGATES"):
             continue
         for _side in ("src", "dst"):
             _ref = str(_op.get(_side, "") or "")
@@ -11347,7 +11350,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             continue
         o = dict(op)
         op_type = str(o.get("op_type", "")).upper()
-        if op_type not in ("IMPL", "NAND", "MITIGATES"):
+        if op_type not in ("IMPL", "NAND", "COHERENCE", "MITIGATES"):
             warnings.append(f"operator with unknown op_type {op_type!r} dropped")
             continue
         src = _resolve(str(o.get("src", "")))
@@ -11356,7 +11359,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             warnings.append(f"operator dropped: src/dst did not resolve to an "
                             f"emitted point/event ({o.get('src')!r} → {o.get('dst')!r})")
             continue
-        if op_type in ("IMPL", "NAND"):
+        if op_type in ("IMPL", "NAND", "COHERENCE"):
             if op_type == "NAND":
                 # #2552 (op_02): canonicalize the NAND direction so the
                 # newer counter-claim is src (new-claim-attacks-existing,
@@ -11370,10 +11373,17 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                         f"swapped so the newer counter-claim is src "
                         f"({src[:60]!r} ↔ {dst[:60]!r})")
                     src, dst = canon
+            # #12067: `coherence` is spelled lower-case everywhere else
+            # (`op_type`, `CORE_PREDICATES`); the emission contract is
+            # case-insensitive, so map back before the payload leaves. Without
+            # this the reclassified `dependsOn`/`hasPart` meanings are
+            # UNREACHABLE from extraction — the registry says `coherence` and
+            # the model can only emit `IMPL|NAND`.
+            mech = "coherence" if op_type == "COHERENCE" else op_type
             payload_operators.append({
-                "src": src, "dst": dst, "op_type": op_type,
+                "src": src, "dst": dst, "op_type": mech,
                 "direction": "unidirectional"})
-            emitted_edges.add((src, dst, op_type))
+            emitted_edges.add((src, dst, mech))
             continue
         # MITIGATES — relevance attack on an edge (deferred to pass 2)
         mitigates_pending.append({**o, "_src": src, "_dst": dst})
@@ -13578,7 +13588,7 @@ def _candidate_item_is_content(section: str, item: Mapping) -> bool:
 
     ⛔ **NOT ``name or content`` FOR OPERATORS** (#11554 review, P1). The
     operator contract in ``_OUTPUT_SCHEMA`` is
-    ``{"src": str, "dst": str, "op_type": "IMPL|NAND"}`` — no ``name``, no
+    ``{"src": str, "dst": str, "op_type": "IMPL|NAND|coherence"}`` — no ``name``, no
     ``content`` — so a name-or-content predicate counts a CONTRACT-SHAPED
     operator as absent, and the false zero this counter exists to remove comes
     straight back one layer down: measured, a model returning

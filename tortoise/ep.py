@@ -16,7 +16,13 @@ import time
 
 from .exceptions import UnaddressableClaimError
 from .projection import _declares_apply_first_write_lane
-from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
+from .quadrature import (
+    tilted_moments,
+    moments_to_beta,
+    phi_nand,
+    phi_impl,
+    phi_coherence,
+)
 from . import claim_class
 from .live import (
     EPISTEMIC_LABELS,
@@ -30,6 +36,46 @@ from .live import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── The closed mechanism set (#12067, ONTOLOGY §8) ─────────────────────────
+# ONE declaration, read by the factor update: the epistemic mechanism IS the
+# operator's `op_type`, and each mechanism carries a DIFFERENT potential.
+# The set is closed and a pair carries at most one — `create_operator` refuses
+# a second mechanism over an existing pair (`sdk.py`, the closed-set gate).
+# Adding a fourth behaviour here without an entry there is how a mechanism
+# becomes inert (#8169: a relation that matched nowhere on the message path).
+_MECHANISM_POTENTIALS = {
+    "IMPL": phi_impl,           # support     — evidence transfer (difference)
+    "NAND": phi_nand,           # attack      — contradiction (product)
+    "coherence": phi_coherence,  # coherence   — necessary condition (one corner)
+}
+
+#: The mechanism values `op_type` may carry. Derived from the potential map so a
+#: mechanism cannot exist in one place and not the other.
+MECHANISM_VALUES = frozenset(_MECHANISM_POTENTIALS)
+
+#: Mechanism → the REL TYPE it is STORED as. Two of the three mechanisms reuse an
+#: existing edge type, and this map is the ONLY place that fact is stated: the
+#: message slots (`r.msg_alpha`/`r.msg_beta`) live on the EDGE, and the edge a
+#: `coherence` operator writes is `:IMPL` (`sdk.create_operator` maps it, and
+#: `projection/edges.py`'s fold replays the same mapping). Passing the MECHANISM
+#: into a Cypher `[r:{rel}]` pattern — which is what this file did while
+#: `op_type` and rel type happened to be equal — matches nothing for the third
+#: mechanism: the message read back as (0, 0), the flush wrote 0 rows, and the
+#: mechanism priced a belief while never persisting the evidence for it (#12067
+#: review, P0). Keep this map and the two write/replay maps in step.
+MECHANISM_REL_TYPES: dict[str, str] = {
+    "IMPL": "IMPL",
+    "NAND": "NAND",
+    "coherence": "IMPL",
+}
+
+
+def mechanism_rel_type(op_type: str) -> str:
+    """The REL TYPE a mechanism is stored as (an unknown mechanism keeps its own
+    spelling: the historical fallback is IMPL's potential, and a legacy op_type
+    that reached a factor was stored under its own name)."""
+    return MECHANISM_REL_TYPES.get(op_type, op_type)
 
 # ── Degeneration-guard thresholds (#395, Phase-3 profiling pinned) ──
 # A max_hops=None closure must not expand unboundedly on the interactive
@@ -940,13 +986,18 @@ class TortoiseEP:
         # sources with several bidirectional direct edges do not collide.
         direct = (op_id == id_a)
 
+        # The cavity is the posterior MINUS this factor's own message, so it
+        # reads the same SLOT the write below targets — the storage rel type, not
+        # the mechanism (#12067 review P0; a `coherence` cavity read nothing and
+        # the factor then re-applied evidence that was never stored).
+        _slot = mechanism_rel_type(op_type)
         if direct:
             post_eta_a = self._posterior_natural(id_a)
-            back_a = self._read_back_message(id_a, id_b, op_type)
+            back_a = self._read_back_message(id_a, id_b, _slot)
             cav_eta_a = (post_eta_a[0] - back_a[0], post_eta_a[1] - back_a[1])
         else:
-            cav_eta_a = self._cavity_natural(id_a, op_id, op_type)
-        cav_eta_b = self._cavity_natural(id_b, op_id, op_type)
+            cav_eta_a = self._cavity_natural(id_a, op_id, _slot)
+        cav_eta_b = self._cavity_natural(id_b, op_id, _slot)
         alpha_a, beta_a = self._beta_from_natural(*cav_eta_a)
         alpha_b, beta_b = self._beta_from_natural(*cav_eta_b)
 
@@ -957,7 +1008,36 @@ class TortoiseEP:
         # Dung-style directed attack an agent opts into), and for `-` neither
         # endpoint does. Default is bidirectional
         # (mutual contradiction) per product owner (#753).
-        phi = phi_nand if op_type == "NAND" else phi_impl
+        # The THREE mechanisms (#12067) each carry their own potential, and the
+        # mechanism is the operator's `op_type` — the ONE dispatch point for it.
+        # The set is CLOSED (ONTOLOGY §8): support = `IMPL` (evidence transfer,
+        # difference coupling), attack = `NAND` (contradiction, product coupling),
+        # coherence = `coherence` (necessary condition, one-corner product
+        # coupling — see `quadrature.phi_coherence`). An unrecognised op_type
+        # keeps the historical IMPL fallback: a part/whole operator never reaches
+        # a factor (its rel type is `hasPart` and no factor is built from it), so
+        # the fallback is only ever reached by a legacy/unknown spelling, where
+        # support is the safe reading.
+        # ⛔ TWO of the three potentials are ASYMMETRIC in their slots, and this
+        # is where the direction flag is read for them. ``phi_impl`` and
+        # ``phi_nand`` are symmetric (swapping the endpoints changes nothing but
+        # which message each one receives, which `direction` already decides).
+        # ``phi_coherence(ca, cb) = exp(-w*(1-ca)*cb)`` is NOT: slot 0 is the
+        # NECESSARY CONDITION and slot 1 the DEPENDENT, so the loss only flows
+        # one way. Reading `<-` as "write the slot-0 message instead" — which is
+        # all the symmetric potentials need — would publish the contrapositive
+        # (raise the condition) and never propagate the loss the mechanism
+        # exists for (#12067 review, P1: measured +0.00591 on the source, 0.0 on
+        # the target). So for a coherence factor the slots swap with the
+        # direction: `->` = "the FIRST input is necessary for the second",
+        # `<-` = "the SECOND is necessary for the first", `<->` keeps the stated
+        # order and flows both ways, `-` flows nothing.
+        fwd_early, bwd_early = direction_flows(direction)
+        _phi = _MECHANISM_POTENTIALS.get(op_type, phi_impl)
+        if op_type == "coherence" and bwd_early and not fwd_early:
+            phi = lambda ca, cb, w=1.0: _phi(cb, ca, w)  # noqa: E731
+        else:
+            phi = _phi
         mom_a, mom_b = tilted_moments(
             alpha_a, beta_a, alpha_b, beta_b, weight, phi, self.n_quad
         )
@@ -981,25 +1061,27 @@ class TortoiseEP:
         # Proportional boost: breaks EP fixed-point symmetry that forces
         # messages to near-zero for unevidenced targets. Fades as evidence
         # accumulates: Beta(1,1)=3×, Beta(4,4)≈1.29×, Beta(10,10)≈1.1× (1+2/max(α+β−1,1)).
-        # Applied to IMPL agreement messages ONLY: boosting a NAND
-        # (contradiction) message to a weakly-evidenced claim would crush it
+        # Applied to the SUPPORT mechanism ONLY (op_type `IMPL`): boosting a
+        # NAND (contradiction) message to a weakly-evidenced claim would crush it
         # to ~0 (T4 claim hit by a T0 NAND at w=8 collapses 0.52→0.15 raw,
-        # →0.001 boosted), cratering the whole downstream chain (#855).
+        # →0.001 boosted), cratering the whole downstream chain (#855). Coherence
+        # is excluded for the same reason NAND is: its message is a LOSS, and
+        # amplifying a loss is the #855 failure with a new name.
         alpha_a, beta_a = self._beta_from_natural(*cav_eta_a)
         alpha_b, beta_b = self._beta_from_natural(*cav_eta_b)
         boost_a = 1.0 + 2.0 / max(alpha_a + beta_a - 1.0, 1.0)
         boost_b = 1.0 + 2.0 / max(alpha_b + beta_b - 1.0, 1.0)
-        if op_type == "NAND":
+        if op_type != "IMPL":
             boost_a, boost_b = 1.0, 1.0
         raw_eta_a = (raw_eta_a[0] * boost_a, raw_eta_a[1] * boost_a)
         raw_eta_b = (raw_eta_b[0] * boost_b, raw_eta_b[1] * boost_b)
 
         d = self.damping
         if direct:
-            old_eta_a = self._read_back_message(id_a, id_b, op_type)
+            old_eta_a = self._read_back_message(id_a, id_b, _slot)
         else:
-            old_eta_a = self._read_message(op_id, id_a, op_type)
-        old_eta_b = self._read_message(op_id, id_b, op_type)
+            old_eta_a = self._read_message(op_id, id_a, _slot)
+        old_eta_b = self._read_message(op_id, id_b, _slot)
 
         damped_a = (d * raw_eta_a[0] + (1 - d) * old_eta_a[0],
                     d * raw_eta_a[1] + (1 - d) * old_eta_a[1])
@@ -1016,13 +1098,19 @@ class TortoiseEP:
         # selects WHICH endpoint receives. `->` writes the target message;
         # `<-` writes the SOURCE message (the reverse of the legacy default);
         # `<->` both; `-` neither.
+        # #12067: the message SLOT is the storage edge, so every read/write in
+        # this factor addresses `mechanism_rel_type(op_type)` — ``coherence``
+        # persists on the `:IMPL` edge its operator wrote. The cache key carries
+        # the same rel type, because it keys the SAME slot (the closed set is
+        # what makes one slot per pair sound).
+        _rel = _slot
         if fwd:
-            self._write_message(op_id, id_b, *damped_b, op_type)
+            self._write_message(op_id, id_b, *damped_b, _rel)
         if bwd:
             if direct:
-                self._write_back_message(id_a, id_b, *damped_a, op_type)
+                self._write_back_message(id_a, id_b, *damped_a, _rel)
             else:
-                self._write_message(op_id, id_a, *damped_a, op_type)
+                self._write_message(op_id, id_a, *damped_a, _rel)
 
     def _update_nary_factor(self, op_id: str, op_type: str,
                             input_ids: list[str], weight: float = 1.0,
@@ -1071,7 +1159,8 @@ class TortoiseEP:
         # to the pairwise computations, so copying just those keys between
         # pairs is O(arity) instead of O(|cache|).
         overlay_base = {k: v for k, v in saved.items()
-                        if k[0] == op_id and k[2] == op_type}
+                        if k[0] == op_id
+                        and k[2] == mechanism_rel_type(op_type)}
         orig_damping = self.damping
         acc: dict[str, tuple[float, float]] = {c: (0.0, 0.0) for c in input_ids}
         touched: set[str] = set()
@@ -1091,7 +1180,8 @@ class TortoiseEP:
                         continue
                     if c == b and not fwd:
                         continue
-                    msg = self._msg_cache.get((op_id, c, op_type))
+                    msg = self._msg_cache.get(
+                        (op_id, c, mechanism_rel_type(op_type)))
                     if msg is not None:
                         ea, eb = acc[c]
                         acc[c] = (ea + msg[0], eb + msg[1])
@@ -1117,7 +1207,7 @@ class TortoiseEP:
         # + each target), matching the binary factor's total at the same
         # weight. Star targets are diluted 1/(n-1) (evidence dilution across
         # siblings).
-        is_star = (op_type != "NAND") or not mutual
+        is_star = (op_type == "IMPL") or not mutual
         scale = (1.0 / (n - 1)) if is_star else (2.0 / (n * (n - 1)))
         d = self.damping
         for c in input_ids:
@@ -1131,20 +1221,23 @@ class TortoiseEP:
                 # MATCH…SET is a no-op when no edge exists, so write always.
                 receives = bwd if c == input_ids[0] else fwd
                 if not receives:  # noqa: SIM102
-                    if cache is None or saved.get((op_id, c, op_type)) is not None:
-                        self._write_message(op_id, c, 0.0, 0.0, op_type)
+                    if cache is None or saved.get(
+                            (op_id, c, mechanism_rel_type(op_type))) is not None:
+                        self._write_message(
+                            op_id, c, 0.0, 0.0, mechanism_rel_type(op_type))
                 continue
             ea, eb = acc[c]
             new_eta = (ea * scale, eb * scale)
             new_eta = (max(min(new_eta[0], 1000), -1000),
                        max(min(new_eta[1], 1000), -1000))
+            _rel_c = mechanism_rel_type(op_type)
             if cache is not None:
-                old_eta = saved.get((op_id, c, op_type), (0.0, 0.0))
+                old_eta = saved.get((op_id, c, _rel_c), (0.0, 0.0))
                 damped = (d * new_eta[0] + (1 - d) * old_eta[0],
                           d * new_eta[1] + (1 - d) * old_eta[1])
             else:
                 damped = new_eta  # graph mode: no damping base available
-            self._write_message(op_id, c, *damped, op_type)
+            self._write_message(op_id, c, *damped, _rel_c)
 
     def _update_claim_posterior(self, claim_id: str,
                                  run_evidence: dict | None = None) -> None:
@@ -1635,9 +1728,14 @@ class TortoiseEP:
         it guards (#9275).
         """
         n = len(input_ids)
-        if op_type == "IMPL" or (op_type == "NAND" and not mutual):
-            # IMPL is a star: `input_ids[0]` is the source. Directed NAND too:
-            # targets do not attack each other (#795).
+        if op_type == "IMPL" or not mutual:
+            # IMPL is a star: `input_ids[0]` is the source. A one-way NAND too:
+            # targets do not attack each other (#795). A ONE-WAY coherence is
+            # also a star: `input_ids[0]` is the necessary condition, and a
+            # necessary condition does not make its siblings depend on each
+            # other. MUTUAL coherence stays a clique (mutual dependence: each is
+            # necessary for every other) — the same shape as a mutual NAND, and
+            # `_update_nary_factor`'s `is_star` MUST agree with this branch.
             return [(input_ids[0], input_ids[j]) for j in range(1, n)]
         return [(input_ids[i], input_ids[j])
                 for i in range(n) for j in range(i + 1, n)]

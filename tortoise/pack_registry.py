@@ -441,7 +441,10 @@ def canonical_kind_words() -> frozenset[str]:
 
 
 # Core mechanism predicates — valid chain-edge / enforcement targets without a
-# pack relation. IMPL/NAND ONLY. `MITIGATES` is not a predicate: the F1 ruling
+# pack relation. THE CLOSED MECHANISM SET (#12067, ONTOLOGY §8): `IMPL` =
+# support, `NAND` = attack, `coherence` = coherence. Three, and no more —
+# `create_operator` refuses a pair carrying two of them.
+# `MITIGATES` is not a predicate: the F1 ruling
 # (#2552, ontology v3.17, implemented by #4937 / PR #5225) retired it from the
 # OPERATOR MENU, and a mitigation is a Point attached to the operator bridge it
 # damps — `(op:Point {is_operator:true})-[:mitigated_by]->(m)`, ontology §3.9.
@@ -451,10 +454,10 @@ def canonical_kind_words() -> frozenset[str]:
 # `chains[].edges: [MITIGATES]` and validate clean WITHOUT declaring a relation —
 # advertising a chain edge the engine cannot build.
 # (#4626 / #2766 / #5322)
-CORE_PREDICATES = frozenset({"IMPL", "NAND"})
+CORE_PREDICATES = frozenset({"IMPL", "NAND", "coherence"})
 
 # ── Layer 2 — the semantics vocabulary (ONTOLOGY §8, #7852) ──────────────
-# A relation has three layers: `mechanism` (how it acts — IMPL/NAND) +
+# A relation has three layers: `mechanism` (how it acts — IMPL/NAND/coherence) +
 # `direction` (which way it runs), `semantics` (what it MEANS), and the
 # `predicate` (the specific verb). The semantics vocabulary is **CLOSED** —
 # core is canonical and a pack aligns to it, so a value outside this set is a
@@ -547,6 +550,18 @@ SEMANTICS_DIRECTIONS: dict[str, str] = {
 SEMANTICS_MECHANISMS: dict[str, str] = {
     "addresses": "IMPL",
     "causes": "IMPL",
+    # ⛔ #12067 — `dependsOn` and `hasPart` are NECESSITY, not evidence, and the
+    # mechanism that prices necessity is `coherence`. They stay `IMPL` in this
+    # map because this map drives the OPERATOR-LESS direct-edge leg, and a bare
+    # edge carries its mechanism as its EDGE TYPE: `create_direct_edge` accepts
+    # IMPL/NAND only, so a `coherence` here is a relation the narrative-relations
+    # leg cannot write and drops with a reason that blames the pack (measured:
+    # nine rows, #12067 review P1). Coherence is reachable as an OPERATOR today
+    # (`create_operator(op_type="coherence")`, and the extractor mints it);
+    # teaching the direct leg to carry it needs a third edge type or an
+    # operator-minting ingest arm, which is the follow-up recorded on #12067.
+    # Do NOT flip these two values without that carriage: the change silently
+    # un-writes the relations that declare them.
     "dependsOn": "IMPL",
     "hasPart": "IMPL",
     "supports": "IMPL",
@@ -584,7 +599,7 @@ SEMANTICS_TRANSITION: dict[str, str] = {
 # predicate invented one (`measures`; #7551, ≈25 such edges).
 #
 # The set is DERIVED, never re-transcribed, so it cannot drift from its two
-# sources: the mechanism pair (§3.9 "Epistemic edges (operators): IMPL, NAND")
+# sources: the mechanism set (§3.9 / §8, `CORE_PREDICATES`)
 # UNIONED with the CLOSED Layer-2 semantics vocabulary (§8) — the "(+ semantic
 # label)" §3.9 admits. Widening the accepted vocabulary is therefore a change
 # to `SEMANTICS_VALUES` or `CORE_PREDICATES` (and to §8's table, which the
@@ -652,8 +667,9 @@ def declared_relation_predicates() -> frozenset[str] | None:
 #
 #   operator   — ``sdk.create_operator(op_type=<mechanism>, label=<predicate>)``
 #                (the path ``sdk.ingest`` uses for ``connections[].label``).
-#                Requires a declared ``mechanism`` (IMPL|NAND): the mechanism
-#                is what tells a caller WHICH op_type the verb means, so a
+#                Requires a declared ``mechanism`` (IMPL|NAND|coherence): the
+#                mechanism is what tells a caller WHICH op_type the verb means,
+#                so a
 #                relation without one gives the operator path no declared
 #                op_type. The predicate itself is a free Layer-3 label
 #                (ONTOLOGY §8, #7852) and is deliberately NOT checked against a
@@ -2116,10 +2132,11 @@ class PackRegistry:
                             f"relation '{pred}': both fromKind and toKind required"
                         )
                     mechanism = rel.get("mechanism", "")
-                    if mechanism not in ("IMPL", "NAND"):
+                    if mechanism not in CORE_PREDICATES:
                         errors.append(
-                            f"relation '{pred}': mechanism must be IMPL or NAND, "
-                            f"got {mechanism!r}"
+                            f"relation '{pred}': mechanism must be IMPL, NAND "
+                            f"or coherence, got {mechanism!r} (#12067: the "
+                            f"mechanism set is closed at three)"
                         )
                     # Referential integrity: fromKind/toKind must reference
                     # existing kinds (core CANONICAL or this pack's own kinds).
@@ -2663,10 +2680,10 @@ class PackRegistry:
                         f"and toKind are required when either is given "
                         f"(a half-declared shape cannot be matched)"
                     )
-                if mechanism is not None and mechanism not in ("IMPL", "NAND"):
+                if mechanism is not None and mechanism not in CORE_PREDICATES:
                     errors.append(
                         f"extraction.relationTemplates[{i}].mechanism must be "
-                        f"IMPL or NAND, got {mechanism!r}"
+                        f"IMPL, NAND or coherence, got {mechanism!r} (#12067)"
                     )
                 for side in ("fromKind", "toKind"):
                     ref = tpl.get(side)

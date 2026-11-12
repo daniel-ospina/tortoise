@@ -4023,6 +4023,30 @@ def test_the_composition_spellings_all_land_hasPart():
                         ("INPUT", 0, "p1", "op1")], (op_type, rows)
 
 
+def test_a_coherence_operator_replays_its_IMPL_edge():
+    """⛔ #12067 — the THIRD mechanism must replay the same edge the live writer
+    writes, or a rebuilt graph prices it as inert.
+
+    `create_operator("coherence")` stores the factor on an `:IMPL` edge (the
+    mechanism of record is the node's `op_type`), and `ep.py` reads/writes the
+    message slots on that edge. Both replay maps were missing the spelling, so a
+    rebuild materialised INPUT edges ONLY: no `:IMPL` edge, no message slot, and
+    `_affected_factors` found nothing — silently divergent from the live graph
+    (#12067 review, P0). The two maps are pinned to each other elsewhere, which
+    is exactly why BOTH could be wrong together; this asserts the BEHAVIOUR.
+    """
+    rows = _operator_records(_operator_added(
+        {"op_type": "coherence", "inputs": ["p1", "p2"]}))
+    assert rows == [
+        ("IMPL", 0, "op1", "p1"),
+        ("INPUT", 0, "p1", "op1"),
+        ("IMPL", 1, "op1", "p2"),
+        ("INPUT", 1, "p2", "op1"),
+    ], rows
+    # ... and the record map says the same thing it just did.
+    assert rp._OPERATOR_REL_TYPES["coherence"] == "IMPL"
+
+
 def test_the_operator_rel_type_map_is_the_folds_own():
     """Parity pin: the mapping is restated, so pin it to `_create_edges`' source.
 

@@ -179,13 +179,13 @@ class TestRelationTemplates:
         """The template mechanism vocabulary is the literal pair IMPL|NAND. A
         template must not describe an edge the engine cannot build."""
         errors = _extraction_errors(relationTemplates=[{"mechanism": "SUPPORTS"}])
-        assert any("must be IMPL or NAND" in e for e in errors), errors
+        assert any("must be IMPL, NAND or coherence" in e for e in errors), errors
 
     def test_mitigates_is_refused_as_a_template_mechanism(self):
         """This check hardcodes the literal pair IMPL|NAND, so `MITIGATES` is
         refused even though the spelling is a live payload op_type elsewhere."""
         errors = _extraction_errors(relationTemplates=[{"mechanism": "MITIGATES"}])
-        assert any("must be IMPL or NAND" in e for e in errors), errors
+        assert any("must be IMPL, NAND or coherence" in e for e in errors), errors
 
     def test_mitigates_is_refused_as_a_chain_edge(self):
         """`MITIGATES` is not a valid chain target.

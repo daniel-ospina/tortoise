@@ -4978,6 +4978,10 @@ _EPISTEMIC_LABELS: tuple[str, ...] = ("Point", "Subject", "Object", "Event")
 _OPERATOR_REL_TYPES: dict[str, str] = {
     "NAND": "NAND",
     "IMPL": "IMPL",
+    # #12067: `coherence` is stored on the IMPL edge type — the mechanism of
+    # record is the node's `op_type`, and leaving the third mechanism out of
+    # this map made a REBUILT graph price it as inert (#12067 review, P0).
+    "coherence": "IMPL",
     # The four composition spellings all land the ONE `hasPart` predicate.
     "composedOf": "hasPart",
     "decomposesInto": "hasPart",

@@ -1509,7 +1509,12 @@ class _EdgeHandlers:
             return
         # #331 (review r3): .get() — a malformed operator dict without
         # op_type/inputs must degrade to no typed edges, not KeyError.
-        rel_type = {"NAND": "NAND", "IMPL": "IMPL",
+        # #12067: the third mechanism reuses the IMPL edge type (the mechanism of
+        # record is the operator's `op_type`, and `sdk.create_operator` writes
+        # `:IMPL` for `coherence`). Omitting it here minted INPUT edges ONLY on
+        # replay, so a rebuilt graph priced a coherence operator as inert while
+        # the live graph priced it — live/replay divergence, silently.
+        rel_type = {"NAND": "NAND", "IMPL": "IMPL", "coherence": "IMPL",
                      "composedOf": "hasPart", "decomposesInto": "hasPart",
                      "contains": "hasPart", "wraps": "hasPart"}.get(op.get("op_type"))
         import logging as _logging

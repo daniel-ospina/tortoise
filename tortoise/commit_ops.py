@@ -424,11 +424,18 @@ def apply_payload_operators(proj, sdk, operators: list, *,
         # #4971 — (op_type, src, dst) idempotency probe, on the RESOLVED
         # triple (see the docstring; a payload-keyed probe never fires on a
         # re-key). The relation type is mapped exactly as ``create_operator``
-        # maps it for the edge it writes (part/whole ops use ``hasPart``), so
-        # the probe reads the same edge the write would have created rather
-        # than inlining a raw op_type that would make it miss on those ops.
-        _edge_type = ("hasPart" if op_type not in ("IMPL", "NAND")
-                      else op_type)
+        # maps it for the edge it writes (part/whole ops use ``hasPart``; a
+        # coherence operator is stored on ``IMPL`` — #12067), so the probe reads
+        # the same edge the write would have created rather than inlining a raw
+        # op_type that would make it miss on those ops. ⛔ ``coherence`` beside
+        # IMPL/NAND is what made the probe miss: it probed ``hasPart`` while
+        # ``create_operator`` writes ``IMPL``, so a retried payload re-minted the
+        # operator over the same pair (#12067 review, P1).
+        # #12067: the map lives in `ep.py` beside `_MECHANISM_POTENTIALS`; it is
+        # imported HERE rather than at module scope because `ep` imports this
+        # package's graph layer.
+        from .ep import MECHANISM_REL_TYPES
+        _edge_type = MECHANISM_REL_TYPES.get(op_type, "hasPart")
         _dup = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$t}})-"
             f"[:{_edge_type} {{idx:0}}]->(s) WHERE s.id = $src "
@@ -448,8 +455,17 @@ def apply_payload_operators(proj, sdk, operators: list, *,
                 promote_source=False,
             )
         except ValueError as e:
-            _logger.warning(
-                "operator write skipped (inputs missing?): %s", e)
+            # #12067: a CLOSED-SET refusal is not a missing-input problem, and
+            # reporting it as one sends the caller to the wrong cause while the
+            # operator silently vanishes from the commit.
+            if "mechanism set is CLOSED" in str(e):
+                _logger.warning(
+                    "operator write REFUSED by the closed mechanism set "
+                    "(#12067) — the pair already carries another mechanism: %s",
+                    e)
+            else:
+                _logger.warning(
+                    "operator write skipped (inputs missing?): %s", e)
             continue
         target_op_ids[(src, dst, op_type)] = result["id"]
         created_ids.append(result["id"])
