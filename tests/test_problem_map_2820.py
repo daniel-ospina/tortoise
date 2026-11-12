@@ -197,11 +197,15 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     **and** promoting `#2684` to `VERIFIED-FIXED` (one row each way, so §2 stays
     22/4/0, the total 26, WS-C 4 of 6, and both headlines intact) left
     `tools/problem_map_check.py --check` with **no drift** (CLEAN where history is
-    available, UNVERIFIED in a shallow clone) and this suite at **1 failed, 58
-    passed** — and the one failure is THIS arm, which is the load-bearing half:
-    every OTHER arm in the file passes over the swap. `58 passed` is the PARENT's
-    figure, where this arm was not yet in the run; at this head it would be green
-    over the undone re-cut this revision exists to prevent. The count literals
+    available, UNVERIFIED in a shallow clone). The SUITE half split when this arm
+    landed, and the two readings are what make the arm load-bearing rather than
+    redundant: at the PARENT head `65991398a1ed` the mutant read **58 passed** —
+    the file's whole collected count, so the suite was GREEN over an undone
+    re-cut; at THIS head it reads **1 failed, 58 passed**, the one failure being
+    THIS arm, while every OTHER arm in the file still passes over the swap.
+    Those two `58`s are NOT the same number — above it is 58 collected with
+    nothing red, here it is 59 collected less this one failure — and neither
+    is the weight. The count literals
     also expire: they must be re-derived on the next re-cut, so a count-only
     guarantee lapses with the next count move.
 
@@ -489,7 +493,7 @@ def test_an_UNKNOWN_workstream_label_is_reported_not_a_KeyError(tmp_path):
     control above swaps two labels, which preserves the label set `{A,B,C,D,E}`,
     so it exercises the count-by-label BINDING and never reaches this branch.
     Measured with the branch deleted: this control FAILS with `KeyError: 'WS-F'`
-    escaping `run()` while the other 57 pass — so the mutant is caught here and
+    escaping `run()` while the other 58 pass — so the mutant is caught here and
     nowhere else.
     """
     copy = _doc_copy(tmp_path)
