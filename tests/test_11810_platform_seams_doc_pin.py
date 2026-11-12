@@ -1,6 +1,7 @@
 """#11810 review (P2) — `platform-seams.md` and the shipped install message cannot drift apart.
 
-WHY THIS PIN EXISTS. `docs/research/2026-09-01-gbrain-learnings/platform-seams.md` §3
+WHY THIS PIN EXISTS. The `#2122` Cursor section of
+`docs/research/2026-09-01-gbrain-learnings/platform-seams.md`
 cites the `tortoise install cursor` message as the evidence that the cloud-agent
 exclusion is **HOSTED**-scoped, and that record is what a future lane cites for
 #11807. The r6 review measured the drift in the DOC direction: the record quoted
@@ -43,11 +44,12 @@ WHAT IT ASSERTS, in BOTH directions:
       dropping `hosted` from the message (or restoring the unscoped quote in the
       record) REDs instead of passing silently;
   (3) the record's OWN restatements of the same scoping — the `#2122` matrix row
-      and §3.2/§3.3, which state the claim in words that are NOT the quoted
-      fragment — are each still HOSTED-scoped. Without this arm every one of
-      them could be reverted to #11806's universal with the whole file GREEN
-      (measured at r18 for four of them, and at r19 for the three §3.2
-      methodology sentences r18 missed).
+      and the two items of that section (`Hosted cloud agents get NEITHER hook`
+      and `"IDE-only" is NOT the right absolute`), which state the claim in words
+      that are NOT the quoted fragment — are each still HOSTED-scoped. Without this
+      arm every one of them could be reverted to #11806's universal with the whole
+      file GREEN (measured at r18 for four of them, and at r19 for the three
+      `"IDE-only" is NOT the right absolute` sentences r18 missed).
   (4) the customer promise #11806 added and this PR retracted — *"can get BOTH
       seams by checking a PROJECT-level `.cursor/hooks.json` into their
       repository"* — does not come back, AND the record keeps the reason it is
@@ -72,9 +74,10 @@ corrected in opposite directions without this file noticing.
 successive rounds shipped a form-exactness hole here, each one level deeper: r7
 matched `("…")` only (a re-emphasis walked through); r8's bare-words fix was
 still whitespace- and case-exact (a hard wrap inside the phrase walked through —
-this record is hard-wrapped, and the §3 sentence "the same scoping applies to the
+this record is hard-wrapped, and the `"IDE-only" is NOT the right absolute` sentence
+"the same scoping applies to the
 exclusion itself" is split across two lines; the 95-column reading is head-bound
-and moves whenever §3 gains a line above it); r9 stripped whitespace and
+and moves whenever that section gains a line above it); r9 stripped whitespace and
 case but not PUNCTUATION, so a delimiter INSIDE the phrase walked through. Every
 one of these is the same words and the same claim.
 
@@ -121,12 +124,13 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
   * this arm is deliberately OVER-BROAD in the safe direction: it bans the words
     wherever they appear in any order-adjacent form, so an HONEST correction that
     quotes the retracted wording to reject it — this record's own house style,
-    see the §3 sentence that names the retracted IDE-only label in order to
+    see the `"IDE-only" is NOT the right absolute` sentence that names the retracted
+    IDE-only label in order to
     reject it — REDs. Reword such an entry instead of reproducing the phrase
     verbatim. Likewise the presence arm answers "are these words in this file",
     not "is this an actual quote", so it cannot tell a quote from prose.
   * (3) pins the seven restatements as WORD SEQUENCES, so a legitimate RE-WORDING of
-    the matrix row or of §3.2/§3.3 — even one that KEEPS the hosted scoping — REDs.
+    the matrix row or of either item — even one that KEEPS the hosted scoping — REDs.
     That is the same trade arms (1)/(2) already take (the claim IS the words):
     reword such a sentence only together with its `_RESTATEMENTS` row, in one edit.
   * (4)'s PRESENCE needles are that SAME word-sequence trade: re-wording any of
@@ -153,8 +157,8 @@ WHAT IT STILL DOES NOT CATCH, stated so the docstring is not the next over-claim
     "guard rationale vs guard lines" class.
 
 MUTATION (each verified RED at this head, restoring byte-identical):
-  * restore the unscoped quote at §3's "settled for the **hosted VM**"
-    sentence (`platform-seams.md`, section 3.2)                → (1) RED
+  * restore the unscoped quote at the `"IDE-only" is NOT the right absolute`
+    "settled for the **hosted VM**" sentence                   → (1) RED
   * re-add with OTHER delimiters, whole-phrase (`*"…"*`)      → (1) RED (r8)
   * re-add with a LINE BREAK / double space / capital           → (1) RED (r8)
   * re-add with in-phrase `**`, `` ` ``, `*`, `~~`, `_`         → (1) RED (r9)
@@ -164,7 +168,7 @@ MUTATION (each verified RED at this head, restoring byte-identical):
   * drop `hosted` from `tortoise/__main__.py`'s message         → (2) RED
   * delete the record's quoted sentence                         → (1) RED
   * widen the tag strip back to `<[^>]+>` and inject one
-    "a hook count of < 5 is suspect" before §3's quote          → new tag test RED
+    "a hook count of < 5 is suspect" before the record's quote → new tag test RED
   * `_renderings` → `[_normalised(text)]` (the `_TAG` reading only)
     → the bare-attribute sample REDs               (r12 P3 #1)
   * `_renderings` → the bare-attribute reading only
@@ -181,11 +185,11 @@ MUTATION (each verified RED at this head, restoring byte-identical):
     → the forged-tag PRESENCE assert REDs          (r12 P3 #1)
   * drop `hosted` from the record's `#2122` matrix row
     ("A hosted cloud agent runs neither")            → (3) RED   (r18 P2)
-  * drop `Hosted ` from §3.2's heading
-    ("Hosted cloud agents get NEITHER hook")         → (3) RED   (r18 P2)
-  * drop `**hosted**` from §3.2's "so a hosted Cursor cloud agent
+  * drop `Hosted ` from the `Hosted cloud agents get NEITHER hook` heading
+                                                      → (3) RED   (r18 P2)
+  * drop `**hosted**` from that item's "so a hosted Cursor cloud agent
     runs no Tortoise hook at all"                     → (3) RED   (r18 P2)
-  * drop `Hosted-` from §3.3's "Hosted-cloud-agent users'"
+  * drop `Hosted-` from the "…pull only" consequence in that same item
                                                       → (3) RED   (r18 P2)
   * `it is settled for the **hosted VM**` → `**cloud agents**`
                                                       → (3) RED   (r19 P2)
@@ -202,10 +206,11 @@ MUTATION (each verified RED at this head, restoring byte-identical):
   * delete `plus team and enterprise-managed hooks on Enterprise` from the
     `#2122` matrix row                                 → (2b) RED  (r21 P2)
   * delete `(plus team and enterprise-managed hooks on Enterprise — the page's
-    own gate)` from §3                               → (2b) RED  (r21 P2)
+    own gate)` from the `"IDE-only" is NOT the right absolute` item
+                                                      → (2b) RED  (r21 P2)
   * reduce the quoted evidence to `command-based project hooks.`
                                                       → (2b) RED  (r22 P2)
-  * reduce §3's own summary to `(the page names project hooks there)`
+  * reduce that item's own summary to `(the page names project hooks there)`
                                                       → (2b) RED  (r22 P2)
   * prefix a negator to a `_RETRACTION_CAUSE` needle ("which do **not** register
     by **absolute** path")                            → (4) RED  (r22 P3)
@@ -218,6 +223,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+from markdown_it import MarkdownIt
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PLATFORM_SEAMS_DOC = (_REPO_ROOT / "docs" / "research"
@@ -232,17 +239,30 @@ _PY = sys.executable
 #: scoped each of them. None of those words is `_SHIPPED_FRAGMENT`, so none was
 #: covered until r18: deleting the single word that scopes any one of them restored
 #: the pre-PR universal with the whole file GREEN (measured: four at r18, and the
-#: three §3.2 methodology sentences the first arm missed, each at r19).
+#: three `"IDE-only" is NOT the right absolute` sentences the first arm missed, each
+#: at r19).
 #:
-#:   1. `#2122` matrix row            A hosted cloud agent runs neither
-#:   2. §3.2 heading                  Hosted cloud agents get NEITHER hook
-#:   3. §3.2 result                   a **hosted** Cursor cloud agent runs no …
-#:   4. §3.2 what the source settles  it is settled for the **hosted VM**
-#:   5. §3.2 the row it cites         this row ("a hosted cloud agent")
-#:   6. §3.2 what the disclosure does scopes the exclusion to the hosted VM
-#:   7. §3.3 consequence              Hosted-cloud-agent users' … pull only
+#: The SITE column names the record's own BOLD ITEM HEADING, never a section number.
+#: This legend used to carry `§3.2`/`§3.3`, and those resolve NOWHERE: the record has
+#: no such section (its only `§` literals point at OTHER documents), so the labels were
+#: guidance that could not be followed — and two of the seven named the WRONG item even
+#: where the numbering read plausibly (the "pull only" consequence sits in the
+#: `Hosted cloud agents get NEITHER hook` item, while the three sentences beside it sit
+#: in the `"IDE-only" is NOT the right absolute` item). A heading-named site cannot be
+#: renumbered by a later edit, and `_RESTATEMENT_SITES` (index-aligned with the tuple
+#: below) makes it checkable — see
+#: `test_every_restatement_site_label_names_the_item_that_states_it` (review r27 P3 #1).
 #:
-#: Rows 1/4/5/6 carry an ABSENCE leg as well; 2/3/7 do not. An absence leg is sound
+#:   #  site                                   needle
+#:   1. `#2122` matrix row                    A hosted cloud agent runs neither
+#:   2. Hosted cloud agents get NEITHER hook   Hosted cloud agents get NEITHER hook
+#:   3. Hosted cloud agents get NEITHER hook   a **hosted** Cursor cloud agent runs no …
+#:   4. Hosted cloud agents get NEITHER hook   Hosted-cloud-agent users' … pull only
+#:   5. "IDE-only" is NOT the right absolute   it is settled for the **hosted VM**
+#:   6. "IDE-only" is NOT the right absolute   this row ("a hosted cloud agent")
+#:   7. "IDE-only" is NOT the right absolute   scopes the exclusion to the hosted VM
+#:
+#: Rows 1/5/6/7 carry an ABSENCE leg as well; 2/3/4 do not. An absence leg is sound
 #: only where the unscoped form is NOT a word subsequence of the scoped one —
 #: `a cloud agent runs neither` breaks the sequence at `a _ cloud`, whereas
 #: `a hosted cursor cloud agent runs no tortoise hook` CONTAINS `cursor cloud agent
@@ -259,6 +279,59 @@ _RESTATEMENTS: tuple[tuple[str, str | None], ...] = (
     ('this row ("a hosted cloud agent")', 'this row ("a cloud agent")'),
     ("scopes the exclusion to the hosted vm", "scopes the exclusion to cloud agents"),
 )
+
+#: The SITE of each `_RESTATEMENTS` row, aligned BY INDEX with the tuple above (so a
+#: row added without a site reds the length assert in the label guard rather than
+#: silently inheriting its neighbour's). Each site is the record's own BOLD ITEM
+#: HEADING, matched as WORDS against a SINGLE LINE, so a re-WORDING dies visibly —
+#: but a REFLOW that moves part of the phrase onto the next line does NOT survive
+#: it: the heading would stop resolving and the guard would RED, misreporting an
+#: honest re-wrap as stale guidance (measured: both item sites return "" after an
+#: in-phrase wrap). That bound is recorded at `_record_site_block`; it fails
+#: CLOSED, so it can over-block but never pass a moved sentence off as found.
+#: `_MATRIX_ROW` is the contracts-table row, which is not inside any numbered item.
+_MATRIX_ROW = "matrix row"
+_ITEM_NEITHER_HOOK = "Hosted cloud agents get NEITHER hook"
+_ITEM_NOT_ABSOLUTE = '"IDE-only" is NOT the right absolute'
+_RESTATEMENT_SITES: tuple[str, ...] = (
+    _MATRIX_ROW,           # A hosted cloud agent runs neither
+    _ITEM_NEITHER_HOOK,    # the heading itself
+    _ITEM_NEITHER_HOOK,    # the item's result sentence
+    _ITEM_NEITHER_HOOK,    # the item's consequence ("pull only")
+    _ITEM_NOT_ABSOLUTE,    # "it is settled for the **hosted VM**"
+    _ITEM_NOT_ABSOLUTE,    # "this row (\"a hosted cloud agent\")"
+    _ITEM_NOT_ABSOLUTE,    # "scopes the exclusion to the hosted VM"
+)
+
+#: The `_RESTATEMENTS` rows (1-based, index-aligned with the tuple above) whose
+#: restatement needle is ALREADY CONTAINED in their own site phrase. For those the label
+#: guard's SECOND assert cannot vary: `_record_site_block` returns a block only when
+#: some item line already carries the site's word sequence, so for row 2 —
+#: `_ITEM_NEITHER_HOOK` naming the very heading it restates — a passing `assert block`
+#: has already proved the sentence is "in" the block (`review r30 P3 #1`, measured: for
+#: every other row a moved sentence or a re-pointed label reds the second assert, and
+#: for row 2 NO mutation can red it while the first passes). ⛔ `site != _MATRIX_ROW` there
+#: is DEFENSIVE, not load-bearing: the `_MATRIX_ROW` block is located by its TABLE PREFIX
+#: (`| #2122`), never by the site's words, so the entailment this paragraph relies on does
+#: not hold for row 1 — deriving its membership from containment would silently drop that
+#: row's independent content check (review r34 P3 #2). ⚠️ Measured DECORATION today, and
+#: described as such: row 1's needle is not contained in the site string `matrix row`, so
+#: dropping the clause yields the same `{2}` (review r36 P3 #3). It is kept because it is
+#: what makes the reason above TRUE of the code, not because a current row needs it. The predicate is CONTAINMENT
+#: (`needle ⊆ site`), not equality: an equal phrase is the case that occurs today, but a
+#: needle that is a proper part of its site is entailed just the same, and an equality
+#: test would let such a new row inherit the dead leg silently — precisely the guarantee
+#: this derivation exists to give. Such a row is not dead weight — the FIRST assert is
+#: its whole job, and it reds the moment that heading is re-worded or the item deleted —
+#: but the second assert would be an assertion whose value cannot vary, which is the dead
+#: weight this file's own review rounds remove (r19 P2: the second assert removed beside
+#: `test_no_single_tag_strip_can_hide_the_unscoped_phrase`, which was unfalsifiable by
+#: construction — named by CONSTRUCT, not by line: a line number here went stale the
+#: next time this file grew, the rule `tests/test_markers.py` states for its own table).
+#: It is skipped BY DERIVATION below and the derived set is asserted, so a NEW circular
+#: row cannot inherit the dead leg silently, and a row that STOPS being circular cannot
+#: lose its content check.
+_CIRCULAR_SITE_ROWS = frozenset({2})
 
 #: (4) — the customer promise THIS PR RETRACTED, and the correction that replaced it.
 #:
@@ -324,8 +397,9 @@ _RETRACTION_NEGATIONS: tuple[str, ...] = (
 #: Item 2 of this PR exists because #11806's correction named only the
 #: PROJECT-level source, and naming one of three reads as EXCLUSIVE. Every site
 #: that states all three was measured revertible to the one-source reading with the
-#: whole file GREEN: two at r21 (the `#2122` matrix row and §3's consequence
-#: sentence, while the PR body meanwhile claimed this very arm existed), and two
+#: whole file GREEN: two at r21 (the `#2122` matrix row and the
+#: `"IDE-only" is NOT the right absolute` item's consequence sentence, while the PR
+#: body meanwhile claimed this very arm existed), and two
 #: more at r22 (the quoted evidence itself, and the record's own summary of it —
 #: sites the r21 arm's "both places" claim had missed). The counts live in that
 #: history, never in a standing claim: r21 said "two" and r22 measured four.
@@ -338,7 +412,7 @@ _HOOK_SOURCE_RESTATEMENTS: tuple[str, ...] = (
     "project hooks plus team and enterprise managed hooks on enterprise",           # #2122 matrix row
     "command based project hooks and on enterprise also run team and enterprise managed hooks",  # quoted evidence
     "the page names project team and enterprise managed hooks there",               # record's own summary
-    "registration plus team and enterprise managed hooks on enterprise",            # §3 consequence
+    "registration plus team and enterprise managed hooks on enterprise",            # that item's consequence
 )
 
 #: A tag's attributes AS MARKUP — `name=value`, quoted or bare. NOT `[^<>\n]*`:
@@ -356,8 +430,8 @@ _TAG_ATTRS_ASSIGNED = (r"(?:\s+[A-Za-z_:][-A-Za-z0-9_:.]*\s*=\s*"
 #: …and a TAG-SHAPED strip, deliberately not `<[^>]+>`. The fully loose form spans
 #: any `<` … `>` anywhere in a 50 KB document, so one ordinary sentence — "a hook
 #: count of < 5 is suspect" — swallows everything up to the next `>`. Measured on
-#: THIS record with that sentence inserted as its own line IMMEDIATELY BEFORE §3's
-#: quote: `<[^>]+>` matches ONE span of 2,485 characters / 2,498 bytes that
+#: THIS record with that sentence inserted as its own line IMMEDIATELY BEFORE the
+#: quote in the `"IDE-only" is NOT the right absolute` item: `<[^>]+>` matches ONE span of 2,485 characters / 2,498 bytes that
 #: CONTAINS the quoted words, so it deletes them and false-REDs the presence arm on
 #: a record that states the right thing; `_TAG` matches nothing containing the
 #: quote. ⚠️ That figure is RECIPE-dependent and must not be hand-copied as a
@@ -480,6 +554,101 @@ def _absent(fragment: str, text: str) -> bool:
     return not any(needle in rendering for rendering in _renderings(text))
 
 
+#: The RECORD's item markers, matched once and used by the LOCATOR — and nothing else,
+#: since the item's EXTENT is the parser's (below). Every shape the record can spell an
+#: item as must be here, because a locator that MISSES a shape leaves the site
+#: unresolvable, and a locator that matches a line the parser does not make an item gets
+#: no extent — `_parser_item_end` returns `None`, the block is "", and the first assert
+#: REDs. ⛔ Both of those fail CLOSED. That is the opposite of the pre-parser rule, where
+#: a locator wider than the hand-computed boundary was a fail-OPEN that let a MOVED
+#: sentence read as "in" the labelled item (review r28 P3 #1 measured a bold-numbered
+#: `**3.** …` pseudo-item leaving `8 passed`; r41 P3 #1 caught this line still justifying
+#: itself with that deleted boundary). Hence `\d+[.]` AND `\d+)` AND a `**`-wrapped number.
+_ITEM_START = re.compile(r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s")
+
+#: ⛔ The item's EXTENT comes from the CommonMark parser, not from a boundary this file
+#: computes. Six review rounds are the evidence for why a hand-rolled terminator loses:
+#: every rule that enumerated marker shapes let a shape through (r34 P3 #1 column-0
+#: bullets, r35 P3 #1 indented furniture and table rows, r36 P2 #1 blockquotes, fences,
+#: setext rules and plain paragraphs), and every rule that replaced the enumeration with
+#: an INDENTATION test traded one error for the other: column-0-only swallowed a
+#: blank-separated de-indent (r38 P3 #1), terminating on any less-indented line falsely
+#: reddened LAZY continuations and a pure renumber (r39 P2 #1), and gating on a blank
+#: line let a paragraph-INTERRUPTING construct at 1-2 spaces stay inside the block while
+#: `markdown_it` renders it OUTSIDE the item (r40 P2 #1).
+#:
+#: `markdown-it-py` is already a declared test dependency (`pyproject.toml`'s `test`
+#: extra, added so `tests/test_blog_authoring_doc.py` could import it), and it IS the
+#: CommonMark reference implementation the review rounds kept measuring against. So the
+#: block is the `list_item_open` token's own `map`, and there is no boundary left for a
+#: future edit to disagree with. Measured identical to every boundary this file has
+#: produced on the current record: `764 / 1393 x3 / 2309 x3`.
+#:
+#: ⚠️ The LOCATOR below stays a local regex: an item is found by its BOLD HEADING's
+#: words, which the parser cannot answer for us without the same needle match.
+
+
+def _parser_item_end(doc: str, start: int) -> int | None:
+    """The line index one past the end of the list item that BEGINS on `start`.
+
+    The parser is the authority for where an item ends (see the note above
+    `_ITEM_START`): a hand-rolled boundary reddened honest edits and passed moved
+    sentences in the same six rounds. `None` when no `list_item_open` token starts on
+    that line — the caller treats that as "cannot locate", which REDs, so an unexpected
+    document shape fails CLOSED.
+    """
+    for token in MarkdownIt("commonmark").parse(doc):
+        if token.type == "list_item_open" and token.map and token.map[0] == start:
+            return token.map[1]
+    return None
+
+
+def _record_site_block(doc: str, site: str) -> str:
+    """The record text `site` names — the contracts-table row, or one numbered item.
+
+    An item runs from its own first line (`2. **Heading …**`) to the line the COMMONMARK
+    PARSER ends it on (`_parser_item_end`). Nothing here computes a boundary: six review
+    rounds measured a hand-rolled one failing in both directions (see the note above
+    `_ITEM_START`), and the parser is already a declared test dependency. An item is
+    still LOCATED by its BOLD HEADING's words, not by its NUMBER — a renumbering cannot
+    make a label point at a neighbour.
+
+    Returns "" when the site cannot be located, so a re-worded heading REDs the
+    label guard. Returning the whole document instead would make every label pass
+    wherever its sentence had MOVED to, which is the false PASS this guard exists
+    to prevent (review r27 P3 #1: two rows named the wrong item, and nothing could
+    tell).
+
+    ⚠️ Recorded bound: the site is matched against ONE LINE, not a reflowed block. An
+    honest re-wrap that moves part of the heading's phrase onto the next line leaves
+    no single line carrying the needle, so the block is "" and the label guard REDs —
+    misreporting a pure reflow as a re-worded heading. Measured on both item sites
+    (1393/2309 chars before, 0 after an in-phrase wrap). It fails CLOSED: the wrong
+    direction here is a false block, never a sentence found wherever it moved.
+
+    ⚠️ Recorded bound: the `_MATRIX_ROW` block is the FIRST `| #2122` table row (the
+    contracts row today — it is the only one). A second `| #2122` row added elsewhere
+    would not widen it, but would also not be reachable as a site; the row's needle is
+    the only thing pinned there either way.
+    """
+    # `split("\n")`, not `splitlines()`: the parser counts `\n` only, and a
+    # document carrying a `\x0c`/`\u2028` would otherwise shift every index after
+    # it — a false RED on an intact item, reported as "the site does not resolve"
+    # (review r42 P3 #1, measured).
+    lines = doc.split("\n")
+    if site == _MATRIX_ROW:
+        return next((ln for ln in lines if ln.startswith("| #2122")), "")
+    needle = _normalised(site)
+    start = next((i for i, ln in enumerate(lines)
+                  if _ITEM_START.match(ln) and needle in _normalised(ln)), None)
+    if start is None:
+        return ""
+    end = _parser_item_end(doc, start)
+    if end is None:
+        return ""
+    return "\n".join(lines[start:end])
+
+
 def _install_cursor_stdout(tmp_path) -> str:
     """The REAL `tortoise install cursor` output, on an isolated HOME.
 
@@ -546,8 +715,9 @@ def test_the_record_quotes_the_HOSTED_scoped_fragment():
 def test_every_restatement_of_the_scoping_in_the_record_is_HOSTED_scoped():
     """(3) — the record states the claim SEVEN times, not only where it quotes the message.
 
-    The `#2122` matrix row and §3.2/§3.3 put the same scoping in their own words, and
-    THIS PR edited every one of them:
+    The `#2122` matrix row, and the two items of that section (`Hosted cloud agents
+    get NEITHER hook` and `"IDE-only" is NOT the right absolute`), put the same
+    scoping in their own words, and THIS PR edited every one of them:
 
       `A cloud agent runs neither`            → `A hosted cloud agent runs neither`
       `Cloud agents get NEITHER hook`         → `Hosted cloud agents get NEITHER hook`
@@ -564,7 +734,7 @@ def test_every_restatement_of_the_scoping_in_the_record_is_HOSTED_scoped():
     r19 P2 measured the last three, which r18's arm did not reach).
 
     Mutation: drop the scoping word from any of the seven — each REDs here, and
-    rows 1/4/5/6 RED both their presence and their absence leg."""
+    rows 1/5/6/7 RED both their presence and their absence leg."""
     doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
     normalised_doc = _normalised(doc)
     for scoped, unscoped in _RESTATEMENTS:
@@ -574,6 +744,129 @@ def test_every_restatement_of_the_scoping_in_the_record_is_HOSTED_scoped():
         if unscoped is not None:
             assert _absent(unscoped, doc), (
                 f"the record states the UNSCOPED result again: {unscoped!r}")
+
+
+def test_the_item_extent_is_the_parsers_map():
+    """`_parser_item_end` IS the boundary, so it is pinned hermetically (r42 P2 #1).
+
+    The whole guard rests on this one expression (`token.map[1]`), and before this test a
+    ONE-CHARACTER edit to it (`map[1] + 1`) kept every assertion in this file green while
+    re-opening the fail-OPEN six rounds closed: the block grows past the item, a sentence
+    that moved onto the NEXT item's first line reads as "in" the labelled one (measured).
+
+    Small inline documents, not the record: a pin on the record would still pass with an
+    off-by-one, because the record's items are separated by `###` headings whose text the
+    needles do not occur in.
+    """
+    plain = "1. **A** first\n   cont\n\n2. **B** second\n"
+    assert _parser_item_end(plain, 0) == 3      # includes the trailing blank line
+    assert _parser_item_end(plain, 3) == 4      # the last item ends at EOF
+
+    nested = "1. **A** first\n   - sub point\n     sub cont\n\n2. **B** second\n"
+    assert _parser_item_end(nested, 0) == 4     # an indented sub-bullet is INSIDE
+
+    outside = "1. **A** first\n\nout of the item\n\n2. **B** second\n"
+    assert _parser_item_end(outside, 0) == 2    # blank-separated de-indent is OUTSIDE
+
+    lazy = "1. **A** first\ncol0 lazy line\n\n2. **B** second\n"
+    assert _parser_item_end(lazy, 0) == 3       # a lazy continuation stays INSIDE
+
+    assert _parser_item_end("not a list\n", 0) is None
+
+
+def test_every_restatement_site_label_names_the_item_that_states_it():
+    r"""(3, labels) — the legend's SITE must resolve AND hold the sentence it claims.
+
+    The `_RESTATEMENTS` legend is the map a next rewriter follows to find the seven
+    places this PR scoped. It carried `§3.2`/`§3.3` labels, and the record has no
+    such section at all — so the map could not be followed, and two rows named the
+    WRONG item while reading perfectly plausible (review r27 P3 #1: the "pull only"
+    consequence is stated in the `Hosted cloud agents get NEITHER hook` item, the
+    three sentences beside it in `"IDE-only" is NOT the right absolute`). Guidance
+    that misdirects is how the NEXT round re-derives what this one already measured.
+
+    So the labels are pinned twice over, and each half is a distinct failure:
+
+      * a re-worded or removed heading leaves `_record_site_block` with no block →
+        the first assert, because a label that names nothing is the defect itself;
+      * a sentence MOVED to another item resolves to a block that does not contain
+        it → the second assert, which the "whole document" reading this guard
+        deliberately avoids (`_record_site_block` never falls back to the full text)
+        is the only thing that can catch.
+
+    ⚠️ The halves are distinct for SIX of the seven rows. Row 2's site IS its
+    restatement needle (`Hosted cloud agents get NEITHER hook`), so locating the block by
+    that phrase already proves the phrase is in it — its second assert can never vary,
+    and is skipped by derivation (`_CIRCULAR_SITE_ROWS`), with the DERIVED set asserted so
+    a new row whose needle is contained in its site cannot inherit the same dead leg
+    (review r30 P3 #1). Row 2 keeps its whole job: a re-worded heading reds the first
+    assert.
+
+    Mutation (measured): move any restatement's sentence into the sibling item →
+    the second assert REDs naming that needle and the site; re-word either heading
+    → the first assert REDs naming the site; move a sentence into a **BOLD-NUMBERED**
+    pseudo-item (`**3.** …`) inserted before the real item → RED here, at every head:
+    the extent is the parser's `map`, so there is no boundary to narrow. (Narrowing the
+    LOCATOR to `^\d+\.\s` also REDs, by a different route: the pseudo-item becomes
+    unlocatable, so the real item is used and the sentence is measured outside it —
+    measured, `1291` chars and the needle absent. The old "GREEN if narrowed" clause
+    described the hand-computed boundary deleted at r40, review r41 P3 #2.) The LOCATOR
+    still has to cover every shape the record can spell an item as.
+
+    ⛔ The EXTENT is the parser's. Six rounds measured a hand-rolled boundary failing in
+    BOTH directions: it swallowed a sentence moved into a column-0 bullet, a table row, a
+    blockquote, a fence, a setext rule, a plain paragraph, and a blank-separated
+    de-indent (r34 P3 #1, r35 P3 #1, r36 P2 #1, r38 P3 #1, r40 P2 #1 — every one a FALSE
+    PASS), and it falsely REDded an honest sub-bullet added inside an item and a pure
+    RENUMBER (r36 P2 #2, r39 P2 #1 — a FALSE FAIL, the direction this guard must not
+    have). The block is now the `list_item_open` token's own `map` from `markdown-it-py`,
+    the CommonMark implementation those rounds measured against.
+
+    ⚠️ DECLARED RESIDUAL, not covered and deliberately so: a sentence moved into a
+    sub-bullet (or any indented furniture) that is INSIDE the labelled item still reads
+    GREEN — it IS item content, and ending the block at an indented marker is exactly the
+    false RED r36 P2 #2 filed (measured: block 1395, needle present, identical to the
+    pre-parser answer). The guard catches a sentence that LEAVES the item, not one that
+    moves within it.
+
+    ⚠️ The extent is only as good as `_parser_item_end`, so THAT is pinned by its own
+    hermetic test (`test_the_item_extent_is_the_parsers_map`): before the pin existed,
+    an off-by-one there kept every OTHER assertion in this file green while re-opening
+    the fail-OPEN (r42 P2 #1, measured then, on the then-8-test file: `map[1] + 1` →
+    all 8 tests still passed, and the moved sentence read GREEN). At this head the same
+    mutation reds that one pin instead — `RED: ['test_the_item_extent_is_the_parsers_map']`
+    with the other 8 passing — which is the whole point of it.
+
+    Measured identical on the current record: `764 / 1393 x3 / 2309 x3`."""
+    doc = _PLATFORM_SEAMS_DOC.read_text(encoding="utf-8")
+    assert len(_RESTATEMENT_SITES) == len(_RESTATEMENTS), (
+        "every `_RESTATEMENTS` row needs a site label — the legend's map is one "
+        "row per restatement")
+    circular = frozenset(
+        row for row, ((scoped, _unscoped), site) in enumerate(
+            zip(_RESTATEMENTS, _RESTATEMENT_SITES, strict=True), start=1)
+        if _normalised(scoped) in _normalised(site) and site != _MATRIX_ROW)
+    assert circular == _CIRCULAR_SITE_ROWS, (
+        f"the rows whose restatement needle is already contained in their site are "
+        f"{sorted(circular)}, not {sorted(_CIRCULAR_SITE_ROWS)} — a row that became "
+        f"circular just lost its independent content check, and a row that stopped "
+        f"being circular needs that check back; re-derive `_CIRCULAR_SITE_ROWS` from "
+        f"the two tuples")
+    for row, ((scoped, _unscoped), site) in enumerate(
+            zip(_RESTATEMENTS, _RESTATEMENT_SITES, strict=True), start=1):
+        block = _record_site_block(doc, site)
+        assert block, (
+            f"the site {site!r} that the `_RESTATEMENTS` legend names does not resolve "
+            f"in the record — a re-worded heading or a deleted item leaves the legend "
+            f"pointing at nothing")
+        if row in circular:
+            # Locating the block BY this row's own words already proved they are in it;
+            # see `_CIRCULAR_SITE_ROWS`. Asserting it again would be an assertion whose
+            # value cannot vary, and this file removes those rather than carrying them.
+            continue
+        assert _normalised(scoped) in _normalised(block), (
+            f"{scoped!r} is not stated in the item the legend names ({site!r}) — the "
+            f"label is stale, or the sentence MOVED to another item")
 
 
 def test_the_retracted_project_level_promise_cannot_come_back():
@@ -623,7 +916,7 @@ def test_every_hook_source_restatement_names_all_three_sources():
     three reads as EXCLUSIVE — which is the defect item 2 of this PR fixes, in the
     message and in the record. Review r21 measured two record sites unpinned:
     deleting the "plus team and enterprise-managed hooks on Enterprise" clause from
-    EITHER the `#2122` matrix row or §3's consequence sentence left the whole file
+    EITHER the `#2122` matrix row or that item's consequence sentence left the whole file
     GREEN, while the PR body already claimed a `_HOOK_SOURCE_RESTATEMENTS` arm that
     did not exist at this head. Review r22 then measured TWO MORE — the quoted
     evidence, and the record's own summary of it — so r21's "both places" claim was
