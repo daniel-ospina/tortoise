@@ -21,6 +21,7 @@ Runnable (URI-less embedded):
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -33,7 +34,6 @@ import tortoise.money as money_module
 from tortoise.commit_schema import CommitEvent, Entity
 from tortoise.money import (
     AMOUNT_MINOR,
-    AS_OF,
     CURRENCY,
     ISO_4217_MINOR_UNITS,
     MINOR_UNIT_EXPONENT,
@@ -96,7 +96,12 @@ def _point_row(sdk: TortoiseSDK, content_prefix: str) -> dict:
     return rows[0][0]
 
 
-# ── representation: the five flat sibling fields ───────────────────────────
+#: #11827: the RETIRED name, spelled once here so every "there is no date
+#: field" assertion below names the thing that is gone instead of a blank.
+AS_OF = "asOf"
+
+
+# ── representation: the four flat sibling fields ───────────────────────────
 
 class TestIso4217Table:
     """The pinned `(currency, exponent)` table (design OD2 / T4) — the table is
@@ -127,23 +132,21 @@ class TestIso4217Table:
 
 
 class TestMoneyProps:
-    def test_builds_the_five_declared_flat_fields(self):
+    def test_builds_the_four_declared_flat_fields(self):
         props = money_props(
             COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
-            verbatim="R$ 250.000,00", as_of="2026-06-30")
+            verbatim="R$ 250.000,00")
         assert props == {
             AMOUNT_MINOR: 25_000_000,
             CURRENCY: "BRL",
             MINOR_UNIT_EXPONENT: 2,
             VERBATIM: "R$ 250.000,00",
-            AS_OF: "2026-06-30",
         }
         assert tuple(props) == MONEY_VALUE_FIELDS
 
-    def test_optional_fields_are_omitted_not_none(self):
+    def test_the_optional_field_is_omitted_not_none(self):
         props = money_props(100, "USD", minor_unit_exponent=2)
         assert VERBATIM not in props
-        assert AS_OF not in props
 
     def test_never_a_float(self):
         with pytest.raises(MoneyValueError):
@@ -218,28 +221,19 @@ class TestMoneyProps:
         with pytest.raises(MoneyValueError):
             money_props(100, "USD", minor_unit_exponent=2, verbatim="")
 
-    def test_as_of_must_be_an_iso_date(self):
-        with pytest.raises(MoneyValueError):
-            money_props(100, "USD", minor_unit_exponent=2, as_of="next tuesday")
-        # a non-empty prefix is accepted exactly as Point._iso_date_prefix
-        # accepts it — and nothing looser: trailing junk is not a date.
-        with pytest.raises(MoneyValueError):
+    def test_there_is_no_date_field_to_pass(self):
+        """#11827: a value carries no temporal slot of its own.
+
+        The instant is the CARRIER's valid-time start (`when`/`validFrom`,
+        §4.7), so `money_props` has no date parameter at all — the retirement
+        is structural, not a deprecation that still accepts the name. A caller
+        still passing it is told so by `TypeError` rather than silently having
+        a second spelling written to the node.
+        """
+        assert AS_OF not in MONEY_VALUE_FIELDS
+        with pytest.raises(TypeError):
             money_props(100, "USD", minor_unit_exponent=2,
-                        as_of="2026-06-30junk")
-        with pytest.raises(MoneyValueError):
-            money_props(100, "USD", minor_unit_exponent=2, as_of="2026-6-30")
-        with pytest.raises(MoneyValueError):
-            money_props(100, "USD", minor_unit_exponent=2, as_of="")
-        assert money_props(
-            100, "USD", minor_unit_exponent=2,
-            as_of="2026-06-30T00:00:00Z")[AS_OF] == "2026-06-30T00:00:00Z"
-        assert money_props(
-            100, "USD", minor_unit_exponent=2,
-            as_of="2026-06-30 12:00")[AS_OF] == "2026-06-30 12:00"
-        # Point strips before matching; so does this (same acceptance set).
-        assert money_props(
-            100, "USD", minor_unit_exponent=2,
-            as_of=" 2026-06-30 ")[AS_OF] == " 2026-06-30 "
+                        as_of="2026-06-30")
 
 
 # ── reading one value out of a mixed record set ────────────────────────────
@@ -412,13 +406,15 @@ class TestEntityRoundTrip:
         created = sdk.create_object(
             "Tranche A", "venture:tranche",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
-                          verbatim="R$ 250.000,00", as_of="2026-06-30"))
+                          verbatim="R$ 250.000,00"))
         node = _node_props(sdk, "Object", "name", "Tranche A")
         assert node[AMOUNT_MINOR] == COMMITTED_MINOR
         assert node[CURRENCY] == "BRL"
         assert node[MINOR_UNIT_EXPONENT] == 2
         assert node[VERBATIM] == "R$ 250.000,00"
-        assert node[AS_OF] == "2026-06-30"
+        # #11827: the shape carries no date, so none is written — the instant
+        # belongs to the CARRIER (`validFrom`), never to the value.
+        assert AS_OF not in node
         # and the entity read door returns them
         got = sdk.get_entity(created["id"])
         assert got[AMOUNT_MINOR] == COMMITTED_MINOR
@@ -429,7 +425,7 @@ class TestEntityRoundTrip:
         sdk.create_event(
             "Disbursement 1", "venture:disbursement",
             **money_props(RELEASED_MINOR, "BRL", minor_unit_exponent=2,
-                          verbatim="R$ 187.500,00", as_of="2026-07-01"))
+                          verbatim="R$ 187.500,00"))
         node = _node_props(sdk, "Event", "name", "Disbursement 1")
         assert node[AMOUNT_MINOR] == RELEASED_MINOR
         assert node[CURRENCY] == "BRL"
@@ -464,7 +460,7 @@ class TestPointLane:
     so the shared live+replay writer does not log a false drift warning for a
     documented money prop on every rebuild (#2782)."""
 
-    def test_the_five_fields_are_declared_for_point_replay(self):
+    def test_the_four_fields_are_declared_for_point_replay(self):
         from tortoise.projection.entities import _EntityHandlers
         declared = _EntityHandlers._POINT_DECLARED_PROPS
         for field in MONEY_VALUE_FIELDS:
@@ -480,7 +476,22 @@ class TestPointLane:
         assert set(MONEY_VALUE_FIELDS) <= _EntityHandlers._POINT_DECLARED_PROPS
         assert set(MONEY_VALUE_FIELDS) == set(money_props(
             COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
-            verbatim="R$ 250.000,00", as_of="2026-06-30"))
+            verbatim="R$ 250.000,00"))
+
+    def test_the_retired_as_of_name_stays_declared_so_legacy_replay_is_quiet(self):
+        """#11827: `asOf` left the SHAPE and stayed in the DECLARATION.
+
+        A legacy node still holds the stored prop, and `rebuild_all` replays it
+        verbatim (replay is deliberately ungated), so dropping the declaration
+        too would log a false "`asOf` is not declared" drift warning on every
+        rebuild of every legacy money node — muting the signal that is supposed
+        to point at GENUINE undeclared props. Declared ≠ emitted: the shape no
+        longer carries it, `money_props` cannot build it, and nothing reads it.
+        """
+        from tortoise.money import MONEY_VALUE_FIELDS as _FIELDS
+        from tortoise.projection.entities import _EntityHandlers
+        assert AS_OF not in _FIELDS
+        assert AS_OF in _EntityHandlers._POINT_DECLARED_PROPS
 
     def test_point_carries_the_money_value_and_survives_rebuild(
             self, journaled_sdk, caplog):
@@ -490,10 +501,11 @@ class TestPointLane:
         sdk.create_point(
             "statement", "tranche one is R$ 250.000,00",
             **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
-                          verbatim="R$ 250.000,00", as_of="2026-06-30"))
+                          verbatim="R$ 250.000,00"))
         live = _point_row(sdk, "tranche one is")
-        assert (live[AMOUNT_MINOR], live[CURRENCY], live[AS_OF]) == (
-            COMMITTED_MINOR, "BRL", "2026-06-30")
+        assert (live[AMOUNT_MINOR], live[CURRENCY], live[VERBATIM]) == (
+            COMMITTED_MINOR, "BRL", "R$ 250.000,00")
+        assert AS_OF not in live
 
         with caplog.at_level(logging.WARNING,
                              logger="tortoise.projection.entities"):
@@ -501,9 +513,8 @@ class TestPointLane:
 
         after = _point_row(sdk, "tranche one is")
         assert (after[AMOUNT_MINOR], after[CURRENCY],
-                after[MINOR_UNIT_EXPONENT], after[VERBATIM],
-                after[AS_OF]) == (
-            COMMITTED_MINOR, "BRL", 2, "R$ 250.000,00", "2026-06-30")
+                after[MINOR_UNIT_EXPONENT], after[VERBATIM]) == (
+            COMMITTED_MINOR, "BRL", 2, "R$ 250.000,00")
         undeclared = [r.getMessage() for r in caplog.records
                       if "is not declared" in r.getMessage()
                       and any(f"{f!r}" in r.getMessage()
@@ -543,7 +554,7 @@ class TestTrancheReleaseScenario:
             sdk.create_event(
                 f"Disbursement 1.{i}", "venture:disbursement",
                 **money_props(amt, "BRL", minor_unit_exponent=2,
-                              verbatim=f"R$ {amt}", as_of="2026-07-01"))
+                              verbatim=f"R$ {amt}"))
 
         rows = sdk._get_proj().g.query(
             "MATCH (n) WHERE n.amountMinor IS NOT NULL "
@@ -754,13 +765,13 @@ class TestWriteBoundary:
                           minorUnitExponent=None)
         assert read_money_value(sdk.get_entity(created["id"])) is None
 
-    def test_the_optional_members_are_graded_with_the_value(self,
-                                                            journaled_sdk):
-        """`verbatim` and `asOf` are money members with their own validators,
-        and `read_money_value` never applied them — so an int `verbatim` was
-        durable state `money_props` would have refused. They are graded at the
-        DOOR when the value carries money, and left alone when it does not
-        (they are somebody else's props then)."""
+    def test_the_optional_member_is_graded_with_the_value(self,
+                                                          journaled_sdk):
+        """`verbatim` is a money member with its own validator, and
+        `read_money_value` never applied it — so an int `verbatim` was durable
+        state `money_props` would have refused. It is graded at the DOOR when
+        the value carries money, and left alone when it does not (it is
+        somebody else's prop then)."""
         sdk, _events = journaled_sdk
         value = money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2)
         with pytest.raises(ValueError, match="write boundary"):
@@ -769,11 +780,11 @@ class TestWriteBoundary:
         created = sdk.create_object("Tranche cited", "venture:tranche",
                                     **value)
         with pytest.raises(ValueError, match="write boundary"):
-            sdk.update_entity(created["id"], asOf="not-a-date")
-        # no money in the bag: `asOf` is an ordinary prop, untouched
-        note = sdk.create_object("Note asOf", "venture:note",
-                                 asOf="2026-06-30")
-        assert sdk.get_entity(note["id"])["asOf"] == "2026-06-30"
+            sdk.update_entity(created["id"], verbatim="")
+        # no money in the bag: `verbatim` alone is an ordinary prop, untouched
+        note = sdk.create_object("Note verbatim", "venture:note",
+                                 verbatim="quoted text")
+        assert sdk.get_entity(note["id"])["verbatim"] == "quoted text"
 
     def test_the_gate_is_the_readers_own_rule(self):
         """One home: every shape the reader refuses is refused at the door, and
@@ -786,16 +797,19 @@ class TestWriteBoundary:
             with pytest.raises(MoneyValueError):
                 refuse_malformed_money(props)    # so the door must too
         good = money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2,
-                           verbatim="R$ 250.000,00", as_of="2026-06-30")
+                           verbatim="R$ 250.000,00")
         assert read_money_value(good) == ("BRL", COMMITTED_MINOR, 2)
         assert refuse_malformed_money(good) is None
 
     @pytest.mark.parametrize("prop", [VERBATIM, AS_OF, MINOR_UNIT_EXPONENT])
     def test_a_non_money_prop_is_not_collateral_damage(self, journaled_sdk,
                                                        prop):
-        """`MONEY_VALUE_FIELDS` is the money GROUP, not five reserved names: a
+        """`MONEY_VALUE_FIELDS` is the money GROUP, not four reserved names: a
         sibling alone carries no amount, so it is not a money value — the gate
-        inherits the reader's engagement rule and must stay a no-op."""
+        inherits the reader's engagement rule and must stay a no-op. `asOf` is
+        in this list on purpose (#11827): retired as a MONEY member, it is now
+        exactly what it always was on a value-free node — an ordinary legacy
+        prop nobody reads, which the gate must not start refusing."""
         sdk, _events = journaled_sdk
         value = {VERBATIM: "some quoted text",
                  AS_OF: "2026-06-30",
@@ -1046,23 +1060,35 @@ class TestALegacyOptionalMemberDoesNotBrickTheRow:
     the SCALE triple from the node and the two OPTIONAL members only from the
     CALLER.
 
-    ``verbatim``/``asOf`` describe provenance, not scale, and the read side is
-    deliberately lenient about them so rows written before this rule keep
+    ``verbatim`` describes provenance, not scale, and the read side is
+    deliberately lenient about it so rows written before this rule keep
     reading (``_validate_present_optional_fields``: "pre-existing data keeps
-    reading"). Carrying the STORED ones into the graded view contradicted that
-    in the one population the leniency exists for: a node holding
-    ``asOf='Q3 2026'`` — accepted by the props passthrough before this change,
-    and still reproduced by ``rebuild_all`` because replay is deliberately
+    reading"). Carrying the STORED one into the graded view contradicted that
+    in the one population the leniency exists for: a node holding a non-string
+    ``verbatim`` — accepted by the props passthrough before this change, and
+    still reproduced by ``rebuild_all`` because replay is deliberately
     ungated — was REFUSED on ``update_entity(id, amountMinor=…)`` and on the
     ordinary idempotent capture re-ingest, for a member the caller never
-    mentioned, with ``asOf=None`` as the only escape. A legacy row that cannot
-    be written is a false block, and the write door is not the place to
+    mentioned, with ``verbatim=None`` as the only escape. A legacy row that
+    cannot be written is a false block, and the write door is not the place to
     re-litigate a value it cannot see.
+
+    #11827: `asOf` left the money shape entirely, so the same population is
+    covered by a STRONGER version of the rule — a legacy `asOf` is not a money
+    member at all, it is an inert ordinary prop, and nothing re-grades it.
     """
 
     @pytest.mark.parametrize("door", UPDATE_DOORS)
-    def test_a_legacy_non_iso_as_of_does_not_block_an_ordinary_update(
+    def test_a_legacy_as_of_prop_does_not_block_an_ordinary_update(
             self, journaled_sdk, door):
+        """#11827: the retired name is INERT legacy data on a legacy node.
+
+        Replay is deliberately ungated, so `rebuild_all` restores a stored
+        `asOf` verbatim — and because it is no longer a money member, an
+        ordinary money update neither grades it nor strips it. The alternative
+        (a deny-list entry) would have made every legacy row unwritable for a
+        field the caller never mentioned.
+        """
         sdk, _events = journaled_sdk
         node_id = _create_money_carrier(sdk, door)
         # The pre-change shape: a valid scale triple beside a free-text date.
@@ -1091,18 +1117,38 @@ class TestALegacyOptionalMemberDoesNotBrickTheRow:
         assert after_asof[0][0] == "Q3 2026"
 
     @pytest.mark.parametrize("door", UPDATE_DOORS)
-    def test_the_caller_s_own_as_of_is_still_graded(self, journaled_sdk, door):
+    def test_the_caller_s_own_verbatim_is_still_graded(self, journaled_sdk,
+                                                       door):
         """The other half: leniency about a STORED member must not become
         leniency about the one the caller is writing NOW."""
         sdk, _events = journaled_sdk
         node_id = _create_money_carrier(sdk, door)
         with pytest.raises(ValueError, match="write boundary"):
             getattr(sdk, door)(node_id, amountMinor=COMMITTED_MINOR + 1,
-                               asOf="Q3 2026")
+                               verbatim=123)
         assert _money_node(sdk, node_id) == {
             AMOUNT_MINOR: COMMITTED_MINOR, CURRENCY: "BRL",
             MINOR_UNIT_EXPONENT: 2}
         assert _whole_sum(sdk) == {"BRL": COMMITTED_MINOR}
+
+    def test_as_of_is_no_longer_a_money_member_at_all(self, journaled_sdk):
+        """#11827's actual retirement, at the door: `asOf` beside a money value
+        is now just an ordinary prop — neither graded nor stripped.
+
+        ⚠️ Stated, not hidden: the name is NOT reserved, so a caller can still
+        write an inert `asOf`. Reserving it would be a new ontology decision
+        (and would refuse a natural metadata key on non-money nodes); nothing
+        in the tree reads it, and the write path no longer emits it.
+        """
+        sdk, _events = journaled_sdk
+        created = sdk.create_object(
+            "Tranche with a stray date", "venture:tranche",
+            **money_props(COMMITTED_MINOR, "BRL", minor_unit_exponent=2),
+            asOf="Q3 2026")
+        node = _node_props(sdk, "Object", "name", "Tranche with a stray date")
+        assert node[AS_OF] == "Q3 2026"      # written as an ordinary prop
+        assert read_money_value(node) == ("BRL", COMMITTED_MINOR, 2)
+        assert sdk.get_entity(created["id"])[AMOUNT_MINOR] == COMMITTED_MINOR
 
     def test_a_legacy_verbatim_does_not_block_the_idempotent_re_ingest(
             self, journaled_sdk):
@@ -1475,7 +1521,8 @@ class TestNonSanitizedSeams:
     def test_the_pipeline_seam_cannot_land_a_malformed_money_value(
             self, journaled_sdk, tmp_path, door):
         """All THREE prop-carrying doors, including the one that NESTS its
-        payload (`add_point` → `_emit("PointAdded", point=p, …)`).
+        payload (`add_point` → `_emit("PointAdded", p, …)`, rendered onto the
+        record as `point`).
 
         #11836 review P1 (measured): the gate graded the flat record, so
         `add_point(content, provenance, amountMinor=25_000_000)` was ACCEPTED
@@ -1638,12 +1685,21 @@ class TestNonSanitizedSeams:
         assert rows[0][0] is None, "money reached a :Source surface"
         journal = events / "events.jsonl"
         assert journal.exists(), "the create did not journal"
-        text = journal.read_text()
-        assert "SourceCreated" in text, "no SourceCreated record in the journal"
-        assert f'"amountMinor": {COMMITTED_MINOR}' in text, (
+        records = [json.loads(line) for line in journal.read_text().splitlines()
+                   if line.strip()]
+        created = [r for r in records if r.get("type") == "SourceCreated"]
+        assert created, "no SourceCreated record in the journal"
+        # ⛔ PARSE the record; do NOT substring-match its text. #11821 made the
+        # journal writer emit COMPACT separators
+        # (`json.dumps(..., separators=(",", ":"))`), so the needles this row
+        # used to carry — `'"amountMinor": 25000000'` and
+        # `'"currency": "BRL"'`, both with the space — matched nothing and the
+        # row went red on a formatting change that moved no value. The claim is
+        # about what the RECORD carries, so read the record.
+        assert created[-1].get("amountMinor") == COMMITTED_MINOR, (
             "the bound moved: the journal no longer carries the well-formed "
             "value, so this docstring is stale")
-        assert '"currency": "BRL"' in text
+        assert created[-1].get("currency") == "BRL"
 
 
 class TestThePayloadWalkFailsClosedAtItsDepthBound:
@@ -1685,14 +1741,39 @@ class TestThePayloadWalkFailsClosedAtItsDepthBound:
             refuse_malformed_money_in_payload,
         )
 
-        # the bound itself still grades (a malformed bag deep inside is caught)
-        with pytest.raises(ValueError, match="write boundary"):
-            refuse_malformed_money_in_payload(
-                self._nest(_MONEY_PAYLOAD_MAX_DEPTH - 1), door="test")
-        # … and past it the answer is a REFUSAL, never a silent pass
+        # past the bound the answer is a REFUSAL, never a silent pass
         with pytest.raises(ValueError, match="nests deeper than"):
             refuse_malformed_money_in_payload(
                 self._nest(_MONEY_PAYLOAD_MAX_DEPTH + 1), door="test")
+
+    @pytest.mark.parametrize("offset", [0, 1])
+    def test_the_bound_itself_still_grades(self, offset):
+        """A malformed bag AT the bound is graded by the MONEY rule.
+
+        ⛔ Pin the END of the range, not ``MAX - 1`` only: the sibling test used
+        to grade ``_MONEY_PAYLOAD_MAX_DEPTH - 1`` while claiming "the bound
+        itself still grades", so flipping ``>`` to ``>=`` — which refuses a
+        payload of exactly the bound while the message claims it "nests deeper
+        than 32" — left every test green (measured). The two refusals are
+        distinguishable by their message, so the discriminating assertion is
+        that the SHAPE rule did NOT fire on a payload it should have graded.
+        """
+        from tortoise.money import (
+            _MONEY_PAYLOAD_MAX_DEPTH,
+            refuse_malformed_money_in_payload,
+        )
+
+        depth = _MONEY_PAYLOAD_MAX_DEPTH - 1 + offset
+        with pytest.raises(MoneyValueError) as caught:
+            refuse_malformed_money_in_payload(self._nest(depth), door="test")
+        message = str(caught.value)
+        assert "nests deeper than" not in message, (
+            f"a malformed bag at depth {depth} (the bound is "
+            f"{_MONEY_PAYLOAD_MAX_DEPTH}) was refused by the SHAPE rule "
+            f"instead of being graded by the money rule: {message!r}")
+        assert "money value refused" in message, (
+            f"the money rule did not grade the bag at depth {depth}: "
+            f"{message!r}")
 
     def test_a_real_door_refuses_a_payload_it_cannot_grade(self):
         import tempfile
@@ -1722,20 +1803,40 @@ class TestThePayloadWalkFailsClosedAtItsDepthBound:
         payload is MONEY-FREE: a deep malformed bag is correctly refused, so
         only a money-free one can tell "no collateral damage" apart from "the
         walk never ran".
+
+        ⛔ The depth is a FIXED literal, never ``_MONEY_PAYLOAD_MAX_DEPTH - n``:
+        a payload derived from the constant TRACKS the bound, so for any bound
+        of 1 or more, tightening the bound could never red this test. (At a
+        bound of 0 the derived payload stops being degenerate — every payload
+        is past it — so the scoping is stated rather than assumed.) Measured on the MERGED head (before
+        this change), with the bound set to 2: THIS test still passed — its
+        payload was ``MAX - 2``, i.e. zero levels at a bound of 2 — while its
+        sibling ``test_a_cyclic_sequence_is_cut_by_identity_not_by_the_depth_bound``
+        red there on its fixed 3-level fixture. So the class was not uniformly
+        blind: this test alone DEGENERATED — its payload collapsed to zero
+        levels at a bound of 2 — while the constant-derived siblings still
+        exercise a refusal below and above whatever bound they see (they just
+        cannot detect a TIGHTENING, which is a separate pin this change does
+        not claim to fix). The literal is what makes this test a guard: 10 is
+        far BELOW the bound itself (``32``) and ABOVE the deepest journal
+        payload the bound's comment says exists (``~4``, ``money.py``'s
+        ``_MONEY_PAYLOAD_MAX_DEPTH``). Measured, not assumed: tightening the
+        bound to 10 or less reds this test (the 10-level payload is refused),
+        while 11..31 leaves it green — a tightening inside that band is the pin
+        this change does not claim.
         """
         import tempfile
         from pathlib import Path
 
         from tortoise.api import EventAPI
         from tortoise.log import EventLog
-        from tortoise.money import _MONEY_PAYLOAD_MAX_DEPTH
 
         with tempfile.TemporaryDirectory() as tmp:
             journal = Path(tmp) / "events.jsonl"
             api = EventAPI(EventLog(str(journal)), initiated_by="extractor")
             api.add_object(
                 "deep metadata is fine", "venture:tranche",
-                meta=self._nest_money_free(_MONEY_PAYLOAD_MAX_DEPTH - 2))
+                meta=self._nest_money_free(10))
             assert journal.exists() and journal.read_text(), (
                 "the write did not land — a legitimate deep payload was refused")
             assert "ObjectRegistered" in journal.read_text()

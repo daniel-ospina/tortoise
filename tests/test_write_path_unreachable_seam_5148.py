@@ -134,6 +134,37 @@ def test_point_without_caller_vector_survives_unreachable_seam():
     assert recs[0]["point"]["embedding"] is None
 
 
+def test_the_emit_funnel_survives_unreachable_seam():
+    """`EventAPI._emit` is a WRITE-path seam, and its `#5148` arm was unpinned.
+
+    `_emit` is the funnel every EventAPI door shares, and `#11835` review round 3
+    (finding 1) gave it a width stamp — so it acquired the same obligation its
+    siblings above already had: an unimportable seam must never fail a WRITE.
+    That review's own fresh-context pass found this arm guarded but pinned by
+    nothing (the exact defect this module's docstring says it exists to
+    prevent), and `grep -n add_event tests/test_write_path_unreachable_seam_5148.py`
+    returned nothing.
+
+    Non-vacuity, measured: delete the `except` in `tortoise/api.py::EventAPI._emit`'s
+    stamp block and this reds with the test's own `ImportError`, because the
+    append never happens — the vector is not what is at stake here, the RECORD is.
+    """
+    api, log = _api()
+    with _UnimportableSeam():
+        api.add_event("evt-5148", "AgentSession", embedding=[0.25, 0.5])
+
+    recs = [e for e in log.read_all() if e.get("type") == "EventRecorded"]
+    assert len(recs) == 1, (
+        "the record must still reach the journal when the seam is unreachable "
+        "— `_emit` imports it at the call site, and a write must not depend on "
+        f"an import (got {recs!r})")
+    assert recs[0]["embedding"] == [0.25, 0.5], (
+        "the caller's vector must be journalled as supplied")
+    assert "embedding_width" not in recs[0], (
+        "with no seam there is no declaration to mint — an invented one would "
+        "describe a width nothing measured")
+
+
 @pytest.mark.embedded_only
 def test_sdk_emit_event_survives_unreachable_seam(tmp_path):
     """The PRIMARY write path must not lose its journal record.

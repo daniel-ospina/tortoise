@@ -75,6 +75,12 @@ MIGRATIONS = sorted(
         # — append-only history means the LAST declaration is the one in force,
         # the rule `record_projection.key_properties()` applies.
         "20261027000001_record_semantic_id_key.sql",
+        # #11827: the FORWARD migration that DROPS a column (`ALTER TABLE
+        # public.point DROP COLUMN as_of`). Read here for the same reason as the
+        # ADD file above: append-only history means a landed column can only ever
+        # be removed this way, and a read that understood only the ADD would keep
+        # certifying a column the database no longer has.
+        "20261110000001_record_point_retire_as_of_11827.sql",
     )
 )
 
@@ -121,9 +127,11 @@ CONDITIONAL = {("Point", "baseline_source")}  # PRIMARY only when author-set
 
 # The resolved totals (02-identity-and-placement.md §2.7). Asserting them is what
 # catches a change to the TABLE as well as to the SQL.
-EXPECTED_TOTALS = {"P": 192, "D": 29, "U": 0}
-#: 216 from the `#7955` pass + the 5 `#2782` money rows (all PRIMARY).
-EXPECTED_TOTAL_NAMES = 221
+EXPECTED_TOTALS = {"P": 191, "D": 29, "U": 0}
+#: 216 from the `#7955` pass + the 5 `#2782` money rows (all PRIMARY)
+#: − the 1 row `#11827` RETIRES (`asOf`, a second name for the carrier's
+#: valid-time start; its column is dropped by a forward migration).
+EXPECTED_TOTAL_NAMES = 220
 
 _SECTION_RE = re.compile(r"^## (Event|Source|Session|Object|Subject|Point) \(node\)")
 _EDGES_RE = re.compile(r"^## Edges / operators")
@@ -223,6 +231,11 @@ _ADDED_COLUMN_RE = re.compile(
     r"(text|boolean|integer|bigint|double precision|jsonb|timestamptz|numeric)\b",
     re.I,
 )
+#: The mirror: `ALTER TABLE … DROP COLUMN [IF EXISTS] <col>` (#11827 retires
+#: `point.as_of`). Same reason as the ADD form — the read must see the shrink.
+_DROPPED_COLUMN_RE = re.compile(
+    r"DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?\"?(\w+)\"?", re.I
+)
 
 
 def columns_in_create_body(body: str) -> set[str]:
@@ -258,11 +271,28 @@ def parse_sql_columns() -> dict[str, set[str]]:
     ):
         name, body = block.group(1), block.group(2)
         tables[name] = columns_in_create_body(body)
+    # Forward ALTERs, applied IN THE ORDER THE SQL STATES THEM: a drop is the
+    # shrinking direction, and one migration both drops and re-adds the same
+    # name (`20261027000001` re-declares `node_identity.key_property`, which is
+    # `GENERATED ALWAYS` and cannot be altered in place). Grouping "all adds,
+    # then all drops" deletes a live column — the same ordering rule
+    # `record_projection._ordered_column_ops` applies.
+    ops: list[tuple[int, str, str, str]] = []
     for block in _ALTER_ADD_COLUMN_RE.finditer(text):
         name, body = block.group(1), block.group(2)
         if name not in tables:
             continue  # an ALTER on a table this file does not pin (non-record)
-        tables[name] |= {m.group(1).strip('"') for m in _ADDED_COLUMN_RE.finditer(body)}
+        for m in _ADDED_COLUMN_RE.finditer(body):
+            ops.append((block.start() + m.start(), name,
+                        m.group(1).strip('"'), "add"))
+        for m in _DROPPED_COLUMN_RE.finditer(body):
+            ops.append((block.start() + m.start(), name,
+                        m.group(1).strip('"'), "drop"))
+    for _position, name, column, kind in sorted(ops):
+        if kind == "add":
+            tables[name] |= {column}
+        else:
+            tables[name] -= {column}
     return tables
 
 
@@ -1833,8 +1863,14 @@ def test_relation_is_never_a_bare_id():
         )
 
 
-MONEY_COLUMNS = ("amount_minor", "currency", "minor_unit_exponent", "verbatim", "as_of")
+MONEY_COLUMNS = ("amount_minor", "currency", "minor_unit_exponent", "verbatim")
+#: `as_of` was the FIFTH money column (#2782) and is RETIRED (#11827). It is
+#: named here, not deleted from the record, for one reason: the migration that
+#: ADDED it is landed history (append-only), so the migration-text pins below
+#: must still account for five columns while the LIVE record has four.
+MONEY_RETIRED_COLUMNS = ("as_of",)
 MONEY_MIGRATION = "20261018000001_record_point_money_value_2782.sql"
+RETIRE_MIGRATION = "20261110000001_record_point_retire_as_of_11827.sql"
 
 
 def test_a_forward_migration_adds_the_money_columns_and_the_read_sees_them():
@@ -1927,7 +1963,10 @@ def test_the_money_columns_are_the_integer_shape_not_floats():
     assert types, "no ADD COLUMN parsed from the forward money migration"
     assert types.get("amount_minor") == "bigint", types
     assert types.get("minor_unit_exponent") == "integer", types
-    assert set(types) == set(MONEY_COLUMNS), types
+    # The ADD file is landed history and still declares five columns; `as_of` is
+    # retired by a LATER file (#11827), so it is expected here and must NOT be
+    # in `MONEY_COLUMNS` (the live set).
+    assert set(types) == set(MONEY_COLUMNS) | set(MONEY_RETIRED_COLUMNS), types
 
 
 def test_the_money_note_declares_the_column_types_the_migration_has():
@@ -1953,13 +1992,98 @@ def test_the_money_note_declares_the_column_types_the_migration_has():
         )
     }
     assert set(declared) == set(MONEY_COLUMNS), (
-        f"the note declares {sorted(declared)}, the money columns are {MONEY_COLUMNS}"
+        f"the note declares {sorted(declared)}, the LIVE money columns are "
+        f"{MONEY_COLUMNS} (the note must not re-list a retired column)"
     )
-    assert declared == actual, (
+    # The note describes the LIVE record, so it is compared against the ADD file
+    # minus the retired column — the ADD file itself is landed history and keeps
+    # declaring all five (#11827).
+    live = {k: v for k, v in actual.items() if k not in MONEY_RETIRED_COLUMNS}
+    assert declared == live, (
         f"the note's column TYPES disagree with the migration: doc {declared} vs "
-        f"SQL {actual} — a reader following the note would look for a column the "
+        f"SQL {live} — a reader following the note would look for a column the "
         "record does not have"
     )
+
+
+def test_the_retired_as_of_column_is_dropped_by_a_forward_migration():
+    """#11827: `public.point.as_of` is retired by a NEW, append-only migration.
+
+    Two halves, both machine-checked: the ADD file is untouched (editing it is
+    what the `check-migration-append-only` gate refuses), and the DROP reaches
+    the record's schema read — otherwise `_split_properties` would keep placing
+    a replayed legacy `asOf` into a column the database no longer has, and the
+    record's insert would fail on the legacy rows it exists to carry.
+    """
+    forward = REPO_ROOT / "supabase" / "migrations" / RETIRE_MIGRATION
+    assert forward.exists(), f"the retirement migration is gone: {forward}"
+    assert forward in MIGRATIONS, (
+        "the retirement migration must be READ, not merely on disk — an unread "
+        "DROP COLUMN is invisible to this pin"
+    )
+    sql = forward.read_text(encoding="utf-8")
+    assert re.search(
+        r"ALTER\s+TABLE\s+public\.point[^;]*DROP\s+COLUMN\s+IF\s+EXISTS\s+as_of",
+        sql, re.I | re.S), (
+        "the retirement migration no longer drops point.as_of — read "
+        f"{forward.name}"
+    )
+    columns = parse_sql_columns()["point"]
+    for column in MONEY_COLUMNS:
+        assert column in columns, column
+    for column in MONEY_RETIRED_COLUMNS:
+        assert column not in columns, (
+            f"point.{column} is retired (#11827) but the schema read still "
+            "reports it — the DROP COLUMN form is not read"
+        )
+
+
+def test_the_two_schema_readers_agree_on_every_record_table():
+    """#11827 review P1: ONE column set, TWO readers, and they must agree.
+
+    `parse_sql_columns()` here is the placement checker's independent parse, and
+    `record_projection.table_columns()` is what the record's writer reads. They
+    diverged the moment a DROP COLUMN entered the tree: this file applied "all
+    adds, then all drops" while the projection read drops last over the WHOLE
+    set, so BOTH readers dropped `node_identity.key_property` — a column
+    `20261027000001_record_semantic_id_key.sql` re-adds a few characters after
+    the `DROP COLUMN` in the SAME `ALTER TABLE` (it is `GENERATED ALWAYS`, so it
+    cannot be altered in place). Measured then: `table_columns()` lacked the
+    column while `column_types()` had it, and `_split_properties` moved
+    `keyProperty` into the free-form `props` tail.
+
+    Both readers are now position-ordered, and this pin is what keeps a future
+    drop-and-re-add (or any other ordering subtlety) from making them disagree
+    silently: an independent parse that answers differently from the writer's is
+    a pin that cannot hold.
+    """
+    from tortoise.record_projection import column_types, table_columns
+
+    independent = parse_sql_columns()
+    real = table_columns()
+    # ⚠️ `session_narrative` is deliberately outside this file's `MIGRATIONS`
+    # (the `creates`-conditional tenth table), so this parse cannot speak about
+    # it; and `embedding_vec` is a `public.vector(384)` column this file's
+    # deliberately narrow type vocabulary does not model. Neither is the axis
+    # this pin exists for.
+    assert set(real) - set(independent) <= {"session_narrative"}, (
+        sorted(set(real) - set(independent)))
+    for table in sorted(independent):
+        missing = independent[table] - real[table]
+        assert not missing, (
+            f"{table}: the placement checker reads columns the record writer "
+            f"does not have — {sorted(missing)}. A column set that shrinks in "
+            "one reader and not the other is the #11827 ordering defect "
+            "(a DROP and a re-ADD in one `ALTER TABLE`)"
+        )
+    # …and the reader-internal invariant: a column with a DECLARED TYPE is a
+    # column. This is exactly what broke — `column_types()` still carried
+    # `node_identity.key_property` after `table_columns()` had dropped it.
+    for table, declared in column_types().items():
+        if table in real:
+            assert set(declared) <= real[table], (
+                f"{table}: declared types for columns the column set does not "
+                f"have — {sorted(set(declared) - real[table])}")
 
 
 def test_every_table_is_tenant_scoped_and_rls_enabled():

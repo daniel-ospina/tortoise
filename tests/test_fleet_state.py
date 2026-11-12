@@ -2228,7 +2228,7 @@ def test_a_measured_issue_read_publishes_its_count_even_when_the_pr_read_failed(
 
 
 def test_an_open_issue_read_below_the_cap_is_not_truncated(monkeypatch) -> None:
-    """The normal case (989 open issues against a limit of 2000 on 2026-10-14):
+    """The normal case (3 open issues against the window):
     absence from `index.issues` IS a measured "nobody", so the flag must be exactly
     False — not merely absent — because `collision_preflight._board_can_answer`
     refuses a board that does not stamp its coverage."""
@@ -2237,10 +2237,58 @@ def test_an_open_issue_read_below_the_cap_is_not_truncated(monkeypatch) -> None:
     assert rec["open_issues_truncated"] is False
     assert rec["open_issues_read"] == 3
     assert rec["open_issues_limit"] == fs.OPEN_ISSUES_LIMIT
-    assert fs.OPEN_ISSUES_LIMIT > 989, (
-        "the limit must clear this repo's open-issue count, or every board is "
-        "truncated and every absent issue refuses"
+
+
+def test_the_open_issue_window_clears_the_largest_verified_crossing(monkeypatch) -> None:
+    """A window at or below the coverage it was last verified to have re-creates the
+    #11872 outage, and the suite must RED on it (#11917).
+
+    The only floor before this was a literal from 2026-10-14 (989) while the repo
+    passed 2005 on 2026-11-11, so any window in `(989, 2005]` — 2000 included —
+    satisfied the suite while making `open_issues_truncated` True for every real
+    board, which turns the pre-flight's *absent issue* surface into `INCOMPLETE
+    (exit 2)` for every issue nobody has taken yet. That is not hypothetical: the
+    revert reached main's shape once through a merge resolution on a PR that never
+    touched this file (#11839), and every check stayed green.
+
+    ⛔ WHAT THIS GUARD CAN AND CANNOT PROVE — say it plainly, because the weaker
+    claim is the true one. `issues_truncated = len(rows) >= OPEN_ISSUES_LIMIT`, so a
+    window EQUAL to a count SATURATES at it: the relation must be STRICT, and the
+    second assertion exercises the boundary from the saturated side. What that buys
+    is "the window was not silently shrunk below the coverage it was last verified
+    to have". It does NOT buy headroom: the recorded crossing is a SNAPSHOT the repo
+    has since grown past, so a window sized to today's count still passes. That is a
+    limit of any committed constant, not something this test can close — which is
+    why the window itself carries ~2x (`tools/fleet_state.py`: "a window sized just
+    above today's count would re-cliff within days") rather than being sized to the
+    crossing.
+    """
+    assert fs.OPEN_ISSUES_LIMIT > fs.OPEN_ISSUES_WINDOW_RECORDED_CROSSING, (
+        "the window must exceed the largest open-issue count it was verified "
+        f"against ({fs.OPEN_ISSUES_LIMIT} <= "
+        f"{fs.OPEN_ISSUES_WINDOW_RECORDED_CROSSING}) — a window equal to a count "
+        "saturates at it, truncating every board and refusing every absent issue"
     )
+    # The boundary, from the saturated side: pin the window TO the crossing and the
+    # same-size read saturates — that is the off-by-one a `>=` comparison would bless.
+    monkeypatch.setattr(fs, "OPEN_ISSUES_LIMIT", fs.OPEN_ISSUES_WINDOW_RECORDED_CROSSING)
+    saturated = _issues_build(monkeypatch, fs.OPEN_ISSUES_WINDOW_RECORDED_CROSSING)
+    assert saturated["reconciliation"]["open_issues_truncated"] is True, (
+        "a window EQUAL to the read's size reported not-truncated: `>=` is the "
+        "saturation test, so a window pinned to a count saturates at that count"
+    )
+    # Drop the pinned window before the positive case below, or it measures the pin.
+    monkeypatch.undo()
+    # …and the board answers at the size it was last verified to cover.
+    st = _issues_build(monkeypatch, fs.OPEN_ISSUES_WINDOW_RECORDED_CROSSING)
+    rec = st["reconciliation"]
+    assert rec["open_issues_truncated"] is False, (
+        "a read the size of the last verified crossing saturated the window: "
+        f"{rec['open_issues_read']} issue(s) at limit {rec['open_issues_limit']} — "
+        "the pre-flight would refuse every unattributed issue"
+    )
+    assert rec["open_issues_read"] == fs.OPEN_ISSUES_WINDOW_RECORDED_CROSSING
+
 
 
 # ---------------------------------------------------------------------------

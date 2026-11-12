@@ -69,15 +69,27 @@ from .ids import ulid
 # reader would refuse, instead of it becoming durable state.
 from .money import (
     MONEY_VALUE_FIELDS,
+    VERBATIM,
     money_view_after_update,
     refuse_malformed_money,
+)
+# #11915: the percent value's WRITE gate — the SAME one-intake rule money uses
+# (#11836's pattern), so a percentage the reader would refuse cannot become
+# durable state. Sibling module, not a mode of `money`: percent's invariant is
+# the 0–10000 bound, money's is the ISO 4217 exponent table.
+from .percent import (
+    PERCENT_VALUE_FIELDS,
+    refuse_malformed_percent,
+    refuse_shared_evidence,
 )
 # #2817: the S5 money derivation (prose → typed value). Module scope because the
 # capture seam's `warn_on` narrowing below is derived from the CLOSED
 # `DROP_REASONS` vocabulary at import time, so a renamed reason fails here
 # instead of silently muting a warning. `value_normalizer` imports only
 # `tortoise.money` (no cycle; `money` is already loaded via the projection).
-from .value_normalizer import DROP_REASONS, normalize_money_props
+from .value_normalizer import (
+    DROP_REASONS, asserted_date, normalize_money_props,
+)
 from .vector_write import (  # #4520: the ONE clear-then-set vector seam
     EMBEDDING_PROPERTY,
     clear_embedding,
@@ -6501,7 +6513,8 @@ def _is_real_number(value) -> bool:
 def _sanitize_props(props: dict, *, reject_id: bool = False,
                     reject_belief_props: bool = False,
                     reject_claim_class: bool = False,
-                    money_views: list[dict] | None = None) -> dict:
+                    money_views: list[dict] | None = None,
+                    value_shapes: frozenset[str] | None = None) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
@@ -6555,8 +6568,8 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     is how a later reader comes to treat one of them as a third state.
 
     ``money_views`` (#2782): the MONEY group (``amountMinor``, ``currency``,
-    ``minorUnitExponent``, ``verbatim``, ``asOf`` — ``money.MONEY_VALUE_FIELDS``)
-    is a structural VALUE, not five reserved names, so the money members are NOT
+    ``minorUnitExponent``, ``verbatim`` — ``money.MONEY_VALUE_FIELDS``) is a
+    structural VALUE, not four reserved names, so the money members are NOT
     refused here — they are GRADED, against the state the write leaves.
     ``None`` (the default) and an EMPTY list both mean the caller's bag IS that
     state (a CREATE — and the empty case is graded the same way on purpose, so
@@ -6579,13 +6592,12 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     is either a state the READER cannot read — a member deleted out of a
     carried value (half a value), a mis-scaled exponent, a float or
     out-of-domain amount, an inactive or lowercase code — or, BEYOND the
-    reader's checks, a malformed ``verbatim``/``asOf`` on a value that carries
-    money. That second class is deliberately stricter than the reader, which
-    never looks at those two members (``money._validate_present_optional_fields``
-    states why the read side stays lenient). `currency=None` on a carrier is
-    caught because it LEAVES that half value, not because the bag "looks
-    partial": deleting all five members together leaves no money and is
-    admitted.
+    reader's checks, a malformed ``verbatim`` on a value that carries money.
+    That second class is deliberately stricter than the reader, which never
+    looks at that member (``money._validate_present_optional_fields`` states why
+    the read side stays lenient). `currency=None` on a carrier is caught
+    because it LEAVES that half value, not because the bag "looks partial":
+    deleting all four members together leaves no money and is admitted.
     """
     props = dict(props)
     # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
@@ -6673,6 +6685,23 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     else:
         for _view in money_views:
             refuse_malformed_money(_view, door="props")
+    # #11915: the SAME one intake, for the percent shape (`tortoise/percent.py`,
+    # the #11836 pattern). A percent is ONE required scalar, so there is no
+    # update-side merge to build — the caller's bag IS the state the write
+    # leaves (a `basisPoints=None` deletes it into "no percent here"), and the
+    # optional `verbatim` is graded on the caller's own bag, the leniency
+    # money's optional member states. Prior to this, a declared `percent`
+    # value field had no storable shape at all: the extraction prompt rendered
+    # `targetPct(percent, required)` and nothing in the tree could hold it
+    # (#11915).
+    refuse_malformed_percent(props, door="props")
+    # #11827 review P1: `verbatim` is ONE property on the carrier, so it can be
+    # ONE value's evidence — `percent.refuse_shared_evidence` refuses a bag that
+    # would give it to two values. `value_shapes` is the shapes the TARGET node
+    # already carries (probed by the update doors, `None` on a create where
+    # nothing is stored), exactly like `money_views`: the same "grade the state
+    # the write leaves, never the bag alone" rule this function states above.
+    refuse_shared_evidence(props, stored=value_shapes, door="props")
     for key in ("sourcePath", "source_path"):
         if key in props:
             raise ValueError(
@@ -6786,7 +6815,13 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
         # `stamp_journal_embedding` skip the identity on a CREATING record, so
         # a caller could silence the model-change record R1 exists to keep
         # (and, living only on the live side, it is a parity break too).
-        "embedding_verbatim", "embedding_preserved"}
+        "embedding_verbatim", "embedding_preserved",
+        # #11821 P0: the journal payload's vector WIDTH marker. Server-minted
+        # beside the vector (`stamp_journal_embedding`), and it must stay out of
+        # caller props for the same reason as the identity stamps: it is a
+        # recorded fact about the journal's text, and a caller could otherwise
+        # forge it.
+        "embedding_width"}
     if _embed_identity_keys:
         raise ValueError(
             f"{sorted(_embed_identity_keys)} are server-managed embedding "
@@ -10222,24 +10257,25 @@ def _money_views_for_update(g, props: dict, *, node_id: str,
     by a bag that names a money member, and the PROJECTION matters for the same
     reason: only the money members are read, because ``RETURN properties(n)``
     drags the node's ``content`` and its vector along (3.80 ms vs 0.51 ms on a
-    ``:Point`` carrying a 1024-dim vector — 7.4x, for five keys).
+    ``:Point`` carrying a 1024-dim vector — 7.4x, for four keys).
     """
     if not any(key in props for key in MONEY_VALUE_FIELDS):
         return None
     # ⛔ Project the money members, never `properties(n)`: the whole-node form
-    # drags `content` and the embedding across the wire for five keys (measured
+    # drags `content` and the embedding across the wire for four keys (measured
     # 3.80 ms vs 0.51 ms on a 1024-dim :Point).
+    #
+    # `n.verbatim` is DEAD for this view: `money_view_after_update` carries the
+    # optional member from the caller only, so a STORED value is dropped. It
+    # stays in the projection because the view is built by zipping this RETURN
+    # list against `MONEY_VALUE_FIELDS` with `strict=True` — dropping it would
+    # make the zip raise on every money-naming update, and narrowing the tuple
+    # instead would give up the drift guard that makes a drifted RETURN fail
+    # closed. (`n.asOf` was here for the same reason until #11827 retired it;
+    # a legacy node may still hold the prop, and nothing reads it.)
     probe = ("MATCH (n{label} {{{match_prop}:$id}}) "
              "RETURN n.amountMinor, n.currency, n.minorUnitExponent, "
-             "       n.verbatim, n.asOf")
-    #
-    # `n.verbatim` / `n.asOf` are DEAD for this view: `money_view_after_update`
-    # carries the optional members from the caller only, so a STORED value in
-    # those two columns is dropped. They stay in the projection because the view
-    # is built by zipping this RETURN list against `MONEY_VALUE_FIELDS` with
-    # `strict=True` — dropping them would make the zip raise on every
-    # money-naming update, and narrowing the tuple instead would give up the
-    # drift guard that makes a drifted RETURN fail closed.
+             "       n.verbatim")
     # ⛔ EVERY pair is probed, and the views are UNIONED — never "the first pair
     # that matched". `_update_entity` fans out: its label loop writes EVERY label
     # whose identity key equals `$id`, so one call can stamp a `:Point` and an
@@ -10270,6 +10306,59 @@ def _money_views_for_update(g, props: dict, *, node_id: str,
     if not views:
         return [money_view_after_update({}, props)]
     return views
+
+
+#: The union of the VALUE shapes' declared field names (#11827/#11915). Used by
+#: the capture seam to tell "this point carries a value" from "this point is
+#: prose" — the question §4.7's absent-start REPORT turns on. A union, not one
+#: shape's tuple: the report is about the CARRIER, and a new value shape must not
+#: silently fall out of it.
+_VALUE_FIELDS: frozenset[str] = frozenset(MONEY_VALUE_FIELDS) | frozenset(
+    PERCENT_VALUE_FIELDS)
+
+#: Which VALUE SHAPES a node carries — the projection of the one probe below.
+#: Only the members that identify a shape (money's three GROUP fields, percent's
+#: one), never `verbatim`: the question is "is a value here", and `verbatim`
+#: alone is ordinary quoting metadata.
+_STORED_VALUE_SHAPES_PROBE = (
+    "MATCH (n{label} {{{match_prop}:$id}}) "
+    "RETURN n.amountMinor, n.currency, n.minorUnitExponent, n.basisPoints"
+)
+
+
+def _stored_value_shapes(g, props: dict, *, node_id: str, label: str = "",
+                         keys: tuple[tuple[str, str], ...] | None = None,
+                         ) -> frozenset[str] | None:
+    """`{"money", "percent"}` for the node(s) an UPDATE would touch (#11827).
+
+    The state half of :func:`tortoise.percent.refuse_shared_evidence`: a bag that
+    supplies a `verbatim` beside a value member must be graded against the shape
+    the carrier ALREADY holds, because that is what the evidence property is
+    currently describing. Returns ``None`` — no read spent — unless the bag
+    supplies a `verbatim` at all, since no other bag can overwrite evidence.
+
+    ⛔ Same identity discipline as :func:`_money_views_for_update`, and for the
+    same measured reason (#11836 review Finding 1): the probe is handed the
+    WRITE'S OWN ``(label, match_prop)`` enumeration, so an `:Event` keyed by
+    `eventId` — which the writes reach — is probed too. A `{id:$id}`-only read
+    would be inert exactly where the write is not.
+    """
+    if props.get(VERBATIM) is None:
+        return None
+    shapes: set[str] = set()
+    for probe_label, match_prop in (keys or ((label, "id"),)):
+        rows = g.query(
+            _STORED_VALUE_SHAPES_PROBE.format(
+                label=probe_label, match_prop=match_prop),
+            params={"id": node_id},
+        ).result_set
+        for amount, currency, exponent, basis_points in rows:
+            if any(value is not None
+                   for value in (amount, currency, exponent)):
+                shapes.add("money")
+            if basis_points is not None:
+                shapes.add("percent")
+    return frozenset(shapes)
 
 
 def _refuse_inconsistent_validity_precision(g, props: dict, *,
@@ -12834,6 +12923,31 @@ class TortoiseSDK:
         if id is not None:
             event["id"] = id
         event.update(extra)
+        # #11835 review F1 (P1): EVERY journalled vector declares its width —
+        # including the ones that arrive through `extra` on this (`id=`) branch,
+        # which the `point=` branch above covers only for ITS payload. Two live
+        # producers journal a vector here (`_session_event_write`,
+        # `_embedding_repair_attempt`, both `EventRecorded`), and
+        # `update_point` splats a caller vector onto the same top level for
+        # `PointRevised`; before this, all three wrote a vector with NO marker,
+        # so `embeddings.py::JOURNAL_VECTOR_WIDTH_KEY`'s "absent means
+        # PRE-CHANGE / FOREIGN record" was false for records written AFTER the
+        # change. `creating=False` because none of these computed a vector from
+        # the content riding with them; the seam still decides every arm
+        # itself: a verbatim/preserved vector keeps its raw form and declares
+        # `f64` (#5004 round-7), an off-grid or unrepresentable vector is left
+        # untouched and declares `f64`, and only a value our own embedder
+        # produced is narrowed and declares `f32`.
+        if "embedding" in event:
+            try:
+                from .embeddings import stamp_journal_embedding
+            except Exception:  # noqa: BLE001, RUF100
+                # Same posture as the `point=` branch above: a write must not
+                # depend on an import succeeding. Nothing is lost but the
+                # normalisation and the width declaration.
+                stamp_journal_embedding = None
+            if stamp_journal_embedding is not None:
+                event = stamp_journal_embedding(event, creating=False)
         # #2600: server-resolved actor as the LAST write on the envelope
         # (after event.update(extra)), matching the graph branch order.
         if _jsonl_actor is not None:
@@ -13507,6 +13621,27 @@ class TortoiseSDK:
             record["eventKind"] = event_kind
         if embedding is not None:
             record["embedding"] = embedding
+            # #11821 P0: this door is a producer of a journal payload that
+            # carries a vector (a session `:Event`, whose vector is
+            # `_session_embedding`'s — our embedder's float32 — or a value read
+            # back off the node). ⛔ It does NOT stamp here, and must not: the
+            # seam's `creating=False` stamp lives ONE layer down, in
+            # `_emit_event`'s `id=`/`**extra` branch (`if "embedding" in
+            # event:`), which is where this payload actually lands.
+            # `_journal_entity_event` hands the record to `_emit_event` with
+            # `**_journal_record_payload(event)` ~130 lines above, so a stamp
+            # HERE is dead code — its value is overwritten by the same seam a
+            # moment later (#11835 review finding 2, measured: deleting this
+            # block reddened no row anywhere; deleting the emit branch's stamp
+            # reddened two). One stamp, one home: the emit branch owns every
+            # payload that meets it — this door's, `_session_event_write`'s,
+            # `_embedding_repair_attempt`'s and `update_point`'s top-level
+            # caller vector alike.
+            # ⚠️ `creating=False` (the emit branch's) stamps no identity, and
+            # that arm DROPS identity keys the props already carried (measured:
+            # `embedding_model`/`embedding_revision`/`embedding_text_hash` are
+            # popped) — a caller-supplied one is now absent. `_META_KEYS` skips
+            # them, so no node/replay change follows.
         built = {"type": "EventRecorded", "id": event_id, **record}
         # ── #5475: the record door is a WRITE door ──
         # The payload carries kind spellings straight from frontmatter --
@@ -17352,12 +17487,46 @@ class TortoiseSDK:
                             **create_props, "mentions": _mention_records}
                     if props.get("when"):
                         create_props = {**create_props, "validFrom": props["when"]}
+                    else:
+                        # #11827 (owner D6a): the ASSERTED-DATE derivation that
+                        # used to ride the money value as `asOf` now feeds the
+                        # carrier's valid-time start — `docs/ONTOLOGY.md` §4.7,
+                        # "a value carries no temporal slot of its own". It is
+                        # a FALLBACK, never an override: a `when` the model
+                        # judged always wins (this branch only runs when the
+                        # payload named none), and a text naming no instant
+                        # yields nothing here, so the absent-start rule
+                        # applies — no start recorded, never an invented one
+                        # (the approved §4.7 clause's own wording). Measured
+                        # before the change: `as of 2026-03-31 … EUR 800` with
+                        # no `when` left the node's only date in `asOf`, which
+                        # `get_historical_knowledge` never reads, so the value
+                        # read as true at 2020-01-01.
+                        _asserted = asserted_date(content)
+                        if _asserted:
+                            create_props = {
+                                **create_props, "validFrom": _asserted}
                     # #2817: the value derived at the top of this loop rides
                     # the CREATE only — a dedup hit writes no props at all
                     # (first-writer), and its abstention has already been
                     # counted for the receipt.
                     if money:
                         create_props = {**create_props, **money}
+                    # #11827 / §4.7: "where a value names no instant … the write
+                    # path REPORTS it rather than inventing one". The record is
+                    # the absent start itself (no `validFrom`), and the RECEIPT
+                    # says so — otherwise "no start" and "nobody looked" are the
+                    # same silence, and §4.7's clause is a promise the code does
+                    # not keep. A warning, never a refusal: the value is stored
+                    # (a claim must not sink for want of a date), and this is
+                    # the same receipt channel every other capture notice uses.
+                    if "validFrom" not in create_props and any(
+                            _name in create_props for _name in _VALUE_FIELDS):
+                        warnings.append(
+                            "value names no instant — no validFrom recorded "
+                            f"for '{content[:60]}' (§4.7: an absent start is "
+                            "reported, never invented)")
+
                     _created = self.create_point(
                         kind, content,
                         id=pid, dedup=True, session_id=session_id,
@@ -18985,6 +19154,9 @@ class TortoiseSDK:
                                 reject_belief_props=True,
                                 reject_claim_class=True,
                                 money_views=_money_views_for_update(
+                                    proj.g, props, node_id=id,
+                                    label=":Point"),
+                                value_shapes=_stored_value_shapes(
                                     proj.g, props, node_id=id,
                                     label=":Point"))
         # ⛔ #11702 (review cycle 12, P2): THIS is the THIRD writer that moves a
@@ -37941,17 +38113,21 @@ class TortoiseSDK:
         (tortoise/retrieval.py::resolve_pool_size).
 
         Point results annotated with EP breakdown. confidence_mean is THE
-        point's confidence (issue #2206 contract): the belief mean α/(α+β) of
-        the persisted posterior when EP has run, else the persisted prior
-        mean — and ``null`` + ``ep_state: "absent"`` when nothing YIELDS a mean
-        and no readable ``n.confidence`` mirror supplies one:
-        nothing persisted, a half pair, a 0/0 pair, a negative operand, or an
-        operand this process cannot read (#11702: there is then no belief
-        to report; the neutral Beta(1,1) 0.5 was indistinguishable from a
-        measured symmetric coin flip, so it is no longer substituted anywhere
-        on a read/rank surface — ``get_confidence`` remains the EP prior read
-        and still answers 0.5 there). contention/evidence stay
-        the structural edge-ratio family (a different quantity). Non-Point
+        point's confidence (issue #2206 contract), and the contract is stated
+        ONCE — as R1/R2/R3 in ``tortoise/search_engine.py``, above
+        :func:`ep_measured_cypher`, where :class:`EpBreakdown` points: a
+        readable ``n.confidence`` MIRROR leads, else α/(α+β) of the persisted
+        pair, else ``null`` + ``ep_state: "absent"``. Do NOT re-derive it from
+        shapes here: this line used to say "else the persisted prior mean",
+        which is the wrong answer for a declared Beta(3,1) beside a stored 0.9
+        (the mirror serves 0.9 — and ``update``/``update_entity`` clear a
+        stale mirror precisely so the two cannot disagree), and every list of
+        shapes this comment has carried was later falsified by a shape beside
+        it (#11702: with nothing to report the neutral Beta(1,1) 0.5 was
+        indistinguishable from a measured symmetric coin flip, so it is no
+        longer substituted on a read/rank surface — ``get_confidence`` remains
+        the EP prior read and still answers 0.5 there). contention/evidence
+        stay the structural edge-ratio family (a different quantity). Non-Point
         entities skip EP annotation. min_confidence filters on
         confidence_mean (belief); defaults to 0.0 (no filter).
 
@@ -44217,6 +44393,10 @@ class TortoiseSDK:
                                 reject_belief_props=True,
                                 reject_claim_class=True,
                                 money_views=_money_views_for_update(
+                                    self._get_proj().g, props,
+                                    node_id=id_val,
+                                    keys=_entity_identity_probes()),
+                                value_shapes=_stored_value_shapes(
                                     self._get_proj().g, props,
                                     node_id=id_val,
                                     keys=_entity_identity_probes()))

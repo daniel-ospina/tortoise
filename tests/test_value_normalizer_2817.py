@@ -39,7 +39,6 @@ from tortoise.commit_schema import Point
 from tortoise.extractor_v2 import _resolve_source_turn
 from tortoise.money import (
     AMOUNT_MINOR,
-    AS_OF,
     CURRENCY,
     ISO_4217_MINOR_UNITS,
     MINOR_UNIT_EXPONENT,
@@ -60,9 +59,14 @@ from tortoise.value_normalizer import (
     DROP_REASONS,
     PROSE_FIELDS,
     Normalization,
+    asserted_date,
     normalize_money,
     normalize_money_props,
 )
+
+#: #11827: the RETIRED money member, spelled once so the assertions below name
+#: what is gone (`tortoise.money` no longer exports it — deliberately).
+AS_OF = "asOf"
 
 #: Every reason a table below legitimately expects — and no others. Keeping
 #: this closed is the point: a reason is a decision, not a message.
@@ -688,7 +692,9 @@ def test_a_date_adjacent_to_the_amount_is_not_read_as_one():
     800`` must type one value, not abstain on ``31 EUR``."""
     props = typed("as of 2026-03-31 EUR 800")
     assert props[AMOUNT_MINOR] == 80_000
-    assert props[AS_OF] == "2026-03-31"
+    # #11827: the date is the CARRIER's, not the value's.
+    assert AS_OF not in props
+    assert asserted_date("as of 2026-03-31 EUR 800") == "2026-03-31"
     dropped("EUR 2026-03-31", "no_currency_anchor")
 
 
@@ -797,37 +803,60 @@ def test_the_value_is_traceable_to_its_source_turn():
     assert props[VERBATIM] in edus[turn]["text"]
 
 
-# ── mode 8: asOf ≠ when ────────────────────────────────────────────────────
-def test_as_of_is_only_an_asserted_date():
+# ── the asserted date is the CARRIER's slot (#11827) ───────────────────────
+#
+# `asOf` was retired: the derivation did not disappear, it was LIFTED OUT of the
+# money path (`asserted_date`) so a claim that names a date but no amount still
+# yields one, and the write seam puts it on `validFrom` — `docs/ONTOLOGY.md`
+# §4.7, "a value carries no temporal slot of its own". These tests assert the
+# derivation's own contract; `tests/test_capture_session.py` asserts the seam's
+# (a Point created from "as of … " content carries that date as `validFrom`).
+
+
+def test_the_asserted_date_is_the_valid_time_start():
+    assert asserted_date("as of 2026-03-31, EUR 800 committed") == "2026-03-31"
+    # …and the VALUE no longer carries it.
     props = typed("as of 2026-03-31, EUR 800 committed")
-    assert props[AS_OF] == "2026-03-31"
+    assert AS_OF not in props
+    assert set(props) == set(MONEY_VALUE_FIELDS)
 
 
 @pytest.mark.parametrize("source", [
     "on 2026-03-31 we committed EUR 800",     # an occurrence time, not validity
-    "EUR 800",                                # no date stated → absent (OD3)
+    "EUR 800",                                # no date stated → nothing derived
     "as of next tuesday, EUR 800",            # junk is not a date
     "as of 30/06/2026, EUR 800",              # not ISO
+    # several asserted instants name no single one — never pick
+    "as of 2026-03-31 and effective 2026-04-30, EUR 800",
 ])
-def test_as_of_is_absent_when_the_text_states_no_assertion_date(source):
-    assert AS_OF not in typed(source)
+def test_no_asserted_date_when_the_text_names_no_single_instant(source):
+    assert asserted_date(source) is None
 
 
 @pytest.mark.parametrize("shape_only", ["2026-99-99", "2026-02-31"])
-def test_as_of_is_shape_only_in_parity_with_point_when(shape_only):
+def test_the_asserted_date_is_shape_only_in_parity_with_point_when(shape_only):
     """``Point._iso_date_prefix`` is a SHAPE gate (``YYYY-MM-DD...``), not a
-    calendar: ``2026-99-99`` passes both contracts. Pinning the agreement is
-    the point — a stricter calendar check here would break the parity this
-    issue asks for."""
+    calendar: ``2026-99-99`` passes the derivation too. A stricter calendar
+    check here would put a start on the carrier that the Point schema refuses,
+    or refuse one it accepts — either way the two contracts drift."""
     assert _point(when=shape_only).when == shape_only
-    assert money_props(100, "USD", minor_unit_exponent=2,
-                       as_of=shape_only)[AS_OF] == shape_only
+    assert asserted_date(f"as of {shape_only}, EUR 800") == shape_only
 
 
-def test_as_of_never_borrows_the_occurrence_slot():
+def test_the_derivation_works_where_no_value_is_typed():
+    """The reason it was lifted out: it used to run ONLY inside the money path,
+    so a claim naming a date but no amount produced no date at all. That is the
+    measured shape of the defect (#11827 scope correction)."""
+    source = "as of 2026-03-31, the tranche stood at eight hundred thousand"
+    assert normalize_money(source).typed is False
+    assert asserted_date(source) == "2026-03-31"
+
+
+def test_the_derivation_never_borrows_the_occurrence_slot():
     props = typed("on 2026-03-31 we committed EUR 800")
     assert AS_OF not in props
     assert "when" not in props
+    assert asserted_date("on 2026-03-31 we committed EUR 800") is None
 
 
 def test_two_asserted_dates_do_not_pick_one():
@@ -876,41 +905,31 @@ def _point(**overrides) -> Point:
 
 
 @pytest.mark.parametrize("value", [
-    "2026-03-31", "2026-03-31T00:00:00Z", "2026-03-31 12:00", " 2026-03-31 ",
+    "2026-03-31", "2026-03-31T00:00:00Z", "2026-03-31 12:00",
     "", "next tuesday", "2026-6-30", "2026-06-30junk", "31/03/2026", "null",
 ])
-def test_as_of_accepts_exactly_what_point_when_accepts(value):
-    """For every non-empty candidate, acceptance is identical (the ``""`` row
-    is asserted below as the one documented divergence, not as parity).
-
-    No symmetric parity test existed for the date contract: the asOf rules
-    were asserted inline in ``tests/test_money_value_2782.py`` (``:181-204``)
-    with a comment pointing at ``Point._iso_date_prefix``. This is the mirror
-    for the VALUE: for every candidate the Layer-1 validator
-    (``money_props``) accepts iff ``Point.when`` accepts. It reds the moment
-    either regex drifts."""
-    if not value:
-        # The ONE documented divergence, not a parity failure: ``when=""``
-        # MEANS "undated" on a Point, while an ``asOf`` that is present must be
-        # a date (absence is expressed by omitting the field, per OD3). The
-        # derivation never produces an empty asOf, so this row cannot be hit.
-        assert _point(when=value).when == value
-        with pytest.raises(MoneyValueError):
-            money_props(100, "USD", minor_unit_exponent=2, as_of=value)
-        return
+def test_point_when_is_the_one_date_contract_now(value):
+    """#11827: the date contract had TWO homes (``Point._iso_date_prefix`` and
+    ``money._validate_as_of``) and a parity test keeping them equal. The
+    retirement removes the second home, so the parity question disappears —
+    what is left to pin is that ``Point.when`` is still the contract the
+    derivation feeds, and that the derivation only ever produces a value that
+    contract accepts (a bare ``YYYY-MM-DD``, which every row here that
+    ``Point.when`` accepts also accepts)."""
     try:
-        _point(when=value)
+        # Attribute access is part of what is being pinned (``Point.when`` must
+        # be readable), so it is bound rather than left as a bare statement.
+        _ = _point(when=value).when
         point_accepts = True
     except Exception:
         point_accepts = False
-    try:
-        money_props(100, "USD", minor_unit_exponent=2, as_of=value)
-        money_accepts = True
-    except MoneyValueError:
-        money_accepts = False
-    assert point_accepts == money_accepts, (
-        f"{value!r}: Point.when accepts={point_accepts} but asOf "
-        f"accepts={money_accepts} — the two Layer-1 contracts have drifted")
+    derived = asserted_date(f"as of {value}, EUR 800")
+    if derived is not None:
+        # Every value the derivation CAN produce is a bare ISO day, so it must
+        # be one `Point.when` accepts.
+        assert point_accepts, (
+            f"{value!r}: the derivation produced {derived!r} for a date "
+            "`Point.when` refuses — the two contracts have drifted")
 
 
 @pytest.mark.parametrize("source,field,value", [
@@ -1110,7 +1129,7 @@ def test_the_drops_sink_counts_by_reason_and_only_what_warn_on_reports():
 
 
 def test_a_long_input_is_not_quadratic():
-    """Cycle-2 P2: ``_as_of`` was recomputed per candidate (24 KB took ~10 s).
+    """Cycle-2 P2: the asserted-date scan ran per candidate (24 KB took ~10 s).
     A generous bound: a structural regression shows up in orders of magnitude."""
     import time
     source = " ".join(f"EUR {i}" for i in range(1, 3001))

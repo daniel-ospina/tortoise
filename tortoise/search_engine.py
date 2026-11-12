@@ -1469,24 +1469,40 @@ class EpBreakdown:
     # TortoiseEP.compute_confidence / sdk.get_confidence return for the same
     # point WHENEVER one is persisted — THOSE TWO READ α/β ONLY, so a readable
     # mirror is the first stated divergence (they answer the pair mean where
-    # this field answers the mirror's value) — EXCEPT where the stored pair is
-    # one R1 rejects: those two read the COALESCED operands with a per-operand
-    # `1.0` default, so a half pair answers 0.3333 there and ``None`` here, a
-    # (0,0) pair answers 0.5 there and ``None`` here, a negative pair answers a
-    # negative "mean" there and ``None`` here, an unreadable operand RAISES
-    # there and is ``None`` here, and a sum that overflows divides bare there
-    # (0.0) where this field uses the stable mean (0.5). Those are the rest of
-    # the second stated divergence. The one case that stays 0.5 is a claim with
-    # NO operands at all, because they are the EP read under an explicit
-    # `require_calibration=False`, not a read/rank surface. That divergence is
-    # deliberate and recorded in the #11702 decision
+    # this field answers the mirror's value). ⛔ Scope of that second reader: the
+    # EP read under an explicit `require_calibration=False`. Under its own
+    # default the gate raises `CalibrationError` for a LIVE non-operator Point
+    # whose kind is ABSENT (no `pointKind` at all, gated like a statement) or
+    # `''`/`statement`/`observation`/`hypothesis`, and that has no prior the run
+    # can APPLY — i.e. NOT `baseline_set` with BOTH `ep_α` and `ep_β`. It never
+    # reads `posterior_*` or `n.confidence`, so a claim that already CARRIES a
+    # belief still raises there; a draft, a terminal, or a `goal`/`plan`/`vision`
+    # claim raises nothing and the arithmetic below runs under the default too.
+    # So that raise is the calibration gate, not this arithmetic.
+    # The second divergence is the pairs R1 REFUSES: those two read each operand
+    # on its OWN `1.0` default (`coalesce(posterior_α, ep_α, 1.0)` and the β
+    # twin), then answer `α / (α + β)` — with a `total <= 0` guard that answers
+    # 0.5 instead of dividing. ⛔ So the outcome is a property of the stored
+    # COLUMNS, not of the defect class: a missing β answers α/(α+1), a missing α
+    # answers 1/(1+β), and a negative or non-finite pair can come back negative,
+    # above 1, 0.0, 0.5 or nan. Compute it, do not predict it. That arithmetic
+    # raises only on an operand Python cannot coerce at all.
+    # A pair whose SUM OVERFLOWS is not one of those: R1 ACCEPTS it and answers
+    # the overflow-free identity, so (1.7e308, 1e307) serves 0.9444 here while
+    # there the total becomes `inf` and the division answers 0.0 — a divergence
+    # in VALUE, not in presence. ⛔ Do not assume the two readers agree on a
+    # shape because they agree on the pairs R1 accepts. A claim with NO operands
+    # at all also answers 0.5 there — via those `1.0` defaults, `1.0/(1.0+1.0)`,
+    # NOT via the guard; that is the divergence recorded in the #11702 decision
     # comment (issuecomment-6781252637) — it is the one place a claim with NO
-    # operands at all still answers 0.5, and it is
-    # outside this field's contract rather than a second vocabulary for it.
+    # operands at all still answers 0.5, and it is outside this field's contract
+    # rather than a second vocabulary for it.
     # Historically this
     # field was the structural edge-ratio impl/(impl+nand); it is NOT that
     # quantity anymore — a claim EP converged at 0.88 with no incoming IMPL
-    # edges reads 0.88 here, and 0.0 only for a genuinely impossible store.
+    # edges reads 0.88 here, and the old quantity's 0.0 was reserved for a
+    # genuinely impossible store — a real 0.0 HERE is a claim whose belief IS
+    # 0.0.
     #
     # #11702: ``None`` when R1 finds NOTHING READABLE — see the three rules above
     # `ep_measured_cypher`. Stated as the rule, not as a list of shapes: no
@@ -5448,7 +5464,10 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     `docs/architecture/SEARCH-ARCHITECTURE.md` §6.3: absent state is ``null``
     with ``ep_state: "absent"``, never 0.5. A claim that DOES carry a
     persisted belief keeps its number: a computed posterior of 0.5 still
-    reads 0.5 — the distinction is presence, not value. contention=0.0.
+    reads 0.5 — the distinction is presence, not value. contention is computed
+    from EDGES, not from the belief: `0.0` means `nand_count == 0` — no
+    IMPL/NAND edges at all, ONLY IMPL edges (that IS a real `0/N` fraction), or
+    an ID this read did not MATCH; it never means "no belief".
     variance/contested are computed from the PERSISTED posterior
     (posterior_alpha/beta, falling back to ep_alpha/beta priors) (posterior
     stability), not from edge ratios.

@@ -221,6 +221,15 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # the pre-ALTER schema, so `_split_properties` would leave an amount in the
     # `props` tail and `cache_projection` would not project it.
     "20261018000001_record_point_money_value_2782.sql",
+    # A FORWARD migration DROPPING a COLUMN (`ALTER TABLE public.point DROP
+    # COLUMN as_of`, #11827). It contributes no column and no refusal, so no
+    # reader needs it for its PARSE — it is listed for the registry reason the
+    # tuple's own header states: the filename is the only total partition of
+    # "is this the record's schema", and `test_9231_record_migrations_trigger`
+    # pins both directions. Leaving it out would also leave the reader silently
+    # blind to a future edit that grew a DROP into something the parsers do
+    # care about.
+    "20261110000001_record_point_retire_as_of_11827.sql",
     # A FORWARD migration NARROWING a column's TYPE (`ALTER TABLE public.session
     # ALTER COLUMN capture_redactions TYPE integer`, #9264). The readers do not
     # parse this form, and deliberately: the projection hands a non-`dict`/
@@ -591,6 +600,13 @@ TURNS_SNAPSHOT_KEYS: frozenset[str] = frozenset({
 #: with no origin, which is the silent model change the stamps expose.
 TURNS_SNAPSHOT_OPTIONAL_KEYS: frozenset[str] = frozenset({
     "embedding_preserved",
+    # #11821 P0: the width the snapshot's vector text was written at. OPTIONAL
+    # for the same reason as the identity stamps below: `stamp_journal_embedding`
+    # is the only writer and it is GUARDED at the call site (`#5148` — a write
+    # must not depend on an import), so a capture whose seam was unimportable
+    # journals the vector with no width — exactly the pre-#11821 shape, which
+    # this set must keep accepting.
+    "embedding_width",
     "embedding_model", "embedding_revision", "embedding_text_hash",
     # #8488 scope 1: the enriched text the turn's vector describes rides the
     # snapshot ONLY on the branch where the gate was ON and the enrichment
@@ -1493,11 +1509,32 @@ _ALTER_DERIVED_CHECK_RE = re.compile(
 #: poorer than it is — `_split_properties` would push the value into the `props`
 #: tail and `cache_projection` would drop it as unplaced, while §17.5's pin
 #: reports the PRIMARY property as MISSING COLUMN.
+#: ⚠️ `ONLY` is part of the spelling: `ALTER TABLE ONLY public.point …` is
+#: pg_dump's canonical form, and a reader that cannot see it reports a column the
+#: live schema no longer has — a DROP read as absent is fail-OPEN. ONE matcher
+#: serves every ALTER shape (`_ordered_column_ops` reads ADD and DROP from the
+#: same body), so the keyword is added here and not per-shape.
 _ALTER_ADD_COLUMN_RE = re.compile(
-    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?public\.([a-z_]+)\b([^;]*?);", re.S
+    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?public\.([a-z_]+)\b([^;]*?);",
+    re.S
 )
 _ADDED_COLUMN_RE = re.compile(
     r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?\"?([a-z_][a-z0-9_]*)\"?",
+    re.I,
+)
+#: A FORWARD migration that DROPS a COLUMN: `ALTER TABLE public.<t> DROP COLUMN
+#: [IF EXISTS] <col>` (#11827 retired `point.as_of`). The mirror of the ADD rule
+#: above, and it needs the mirror for the same reason: history is append-only, so
+#: a landed column can only ever be REMOVED this way, and a read that understood
+#: only the ADD would keep reporting a column the database no longer has.
+#: ⛔ That is not cosmetic — `_split_properties` would place a LEGACY `asOf`
+#: (which `rebuild_all` replays verbatim) into `as_of`, and the record's insert
+#: would fail on a column that does not exist, i.e. the record would refuse
+#: exactly the legacy rows the projection exists to carry. With the drop read,
+#: the retired name falls through to the open-set `props` tail, which is where a
+#: legacy value belongs.
+_DROPPED_COLUMN_RE = re.compile(
+    r"DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?\"?([a-z_][a-z0-9_]*)\"?",
     re.I,
 )
 
@@ -1705,6 +1742,35 @@ def _parse_record_tables(sql: str) -> dict[str, frozenset[str]]:
         # `props` is spelled `props jsonb NOT NULL DEFAULT …` — matched above.
         tables[name] = frozenset(columns)
     return tables
+
+
+def _ordered_column_ops(
+        sql: str) -> list[tuple[int, str, str, str, str | None]]:
+    """`(position, table, column, kind, type)` for every forward ADD/DROP.
+
+    ``kind`` is ``"add"`` (``type`` is the declared type) or ``"drop"``
+    (``type`` is ``None``). ⛔ ORDERED BY POSITION IN THE SQL, not grouped by
+    kind, because one real migration does BOTH to the same name in ONE
+    statement: `20261027000001_record_semantic_id_key.sql` drops
+    `node_identity.key_property` (it is `GENERATED ALWAYS`, so it cannot be
+    altered in place) and re-declares it a few characters later. A reader that
+    applied "every add, then every drop" deleted a column that migration
+    re-declares — measured as `table_columns()` and `column_types()` disagreeing
+    about the same table, and `_split_properties` then moving `keyProperty` into
+    the free-form `props` tail.
+    """
+    ops: list[tuple[int, str, str, str, str | None]] = []
+    for match in _ALTER_ADD_COLUMN_RE.finditer(sql):
+        table, body = match.group(1), match.group(2)
+        if table not in THE_RECORD_TABLES:
+            continue
+        for found in _ADDED_COLUMN_TYPED_RE.finditer(body):
+            ops.append((match.start() + found.start(), table, found.group(1),
+                        "add", found.group(2).lower()))
+        for found in _DROPPED_COLUMN_RE.finditer(body):
+            ops.append((match.start() + found.start(), table, found.group(1),
+                        "drop", None))
+    return sorted(ops)
 
 
 def _parse_added_columns(sql: str) -> dict[str, frozenset[str]]:
@@ -1962,7 +2028,20 @@ def _declared_types_for_dir(migrations_dir: Path) -> dict[str, dict[str, str]]:
          reversed (#9264). ⚠️ The load-bearing one: a reader that skips it
          reports the superseded type, and the obvious "fix" for the resulting
          false red — exempt the column, or revert the narrowing — re-creates the
-         outage the pin exists to prevent (#11075).
+         outage the pin exists to prevent (#11075);
+      4. `ALTER TABLE … DROP COLUMN <col>` — a SUBTRACTION, not a declaration: a
+         column the live schema does not have is not a declared type (#11827's
+         `public.point.as_of`).
+
+    ⚠️ The four shapes are ordered by their POSITION IN THE FILE, not grouped by
+    kind, because one real migration both drops and re-adds the same name in ONE
+    statement: `20261027000001_record_semantic_id_key.sql` drops
+    `node_identity.key_property` (it is `GENERATED ALWAYS`, so it cannot be
+    altered in place) and re-declares it in the same `ALTER TABLE … DROP COLUMN
+    … , ADD COLUMN …`. Grouping "all adds, then all drops" deleted the column the
+    file re-declares, and the #11075 pin then reddened on a correct tree
+    (measured). Position order makes the re-add win because the ADD is later in
+    the text — and a CREATE TABLE always sorts before the ALTERs that follow it.
 
     Comments are stripped first (:func:`_strip_sql_comments`), so a migration's
     recorded DOWN direction cannot be read as its UP.
@@ -1973,28 +2052,35 @@ def _declared_types_for_dir(migrations_dir: Path) -> dict[str, dict[str, str]]:
         if not path.exists():
             continue
         sql = _strip_sql_comments(path.read_text(encoding="utf-8"))
-        for table, body in _TABLE_RE.findall(sql):
+        # (position, table, column, type-or-None-for-a-drop)
+        ops: list[tuple[int, str, str, str | None]] = []
+        for match in _TABLE_RE.finditer(sql):
+            table, body = match.group(1), match.group(2)
             if table not in THE_RECORD_TABLES:
                 continue
+            for column_match in _COLUMN_TYPE_RE.finditer(body):
+                ops.append((match.start() + column_match.start(), table,
+                            column_match.group(2),
+                            column_match.group(3).lower()))
+        for match in _ALTER_COLUMN_TYPE_RE.finditer(sql):
+            table, column, type_name = match.groups()
+            if table not in THE_RECORD_TABLES:
+                continue
+            ops.append((match.start(), table, column, type_name.lower()))
+        # ⚠️ Per STATEMENT, not per file, and by sub-position inside the body:
+        # `_ALTER_ADD_COLUMN_RE`'s body is the text between `ALTER TABLE public.<t>`
+        # and the `;`, so an ALTER that both drops and re-adds a name yields both
+        # ops from ONE match. Attribution is by that match's own offset, so the
+        # DROP and the ADD that follows it stay in the order the SQL states them.
+        for position, table, column, kind, type_name in _ordered_column_ops(sql):
+            ops.append((position, table, column,
+                        None if kind == "drop" else type_name))
+        for _position, table, column, type_name in sorted(ops):
             here = found.setdefault(table, {})
-            for _quoted, column, type_name in _COLUMN_TYPE_RE.findall(body):
-                here[column] = type_name.lower()
-        for table, body in _ALTER_ADD_COLUMN_RE.findall(sql):
-            if table not in THE_RECORD_TABLES:
-                continue
-            here = found.setdefault(table, {})
-            for column, type_name in _ADDED_COLUMN_TYPED_RE.findall(body):
-                here[column] = type_name.lower()
-        # ⚠️ Matched against the WHOLE file, not an ALTER's `body`: the statement
-        # this shape needs is `ALTER TABLE public.<t> ALTER COLUMN …`, and the
-        # `[^;]*?` body `_ALTER_ADD_COLUMN_RE` yields has already consumed the
-        # `ALTER TABLE public.<t>` prefix the regex anchors on. Matching the body
-        # silently found NOTHING — so the narrowing read as the base `jsonb` and
-        # the pin would have reddened on a correct tree (#11075, measured).
-        for table, column, type_name in _ALTER_COLUMN_TYPE_RE.findall(sql):
-            if table not in THE_RECORD_TABLES:
-                continue
-            found.setdefault(table, {})[column] = type_name.lower()
+            if type_name is None:
+                here.pop(column, None)
+            else:
+                here[column] = type_name
     return found
 
 
@@ -2136,6 +2222,17 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     for table, added in _parse_added_columns(sql).items():
         if table in tables:
             tables[table] = tables[table] | added
+    # …and a forward `ALTER TABLE … [ADD|DROP] COLUMN` is applied in the order
+    # the SQL states it (#11827, #2782): a drop SHRINKS the set, and one
+    # migration both drops and re-adds the same name — see
+    # :func:`_ordered_column_ops`.
+    for _position, table, column, kind, _type in _ordered_column_ops(sql):
+        if table not in tables:
+            continue
+        if kind == "add":
+            tables[table] = tables[table] | {column}
+        else:
+            tables[table] = tables[table] - {column}
     missing = [t for t in THE_RECORD_TABLES if t not in tables]
     if missing:
         raise RecordProjectionError(
@@ -2318,6 +2415,13 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # node property — the fold's `_POINT_HANDLED` drops them too).
     "embedding_model", "embedding_revision", "embedding_text_hash",
     "embedding_preserved",
+    # #11821 P0: the WIDTH the payload's vector text was written at (`f32` /
+    # `f64`, `embeddings.JOURNAL_VECTOR_WIDTH_KEY`). A description of the
+    # JOURNAL's encoding, in the same class as the identity stamps above: it is
+    # not a record column and must not fall into the record's `props` jsonb,
+    # where `cache_projection._props_from_row` would copy it back onto the node
+    # as a live-only property a rebuild never restores.
+    "embedding_width",
     # #10010 review P1: the dedup fold's RECORD flag (a description of the
     # record, never node state — `_POINT_HANDLED` drops it on replay too). It
     # states that this creation-shaped record folded evidence into an EXISTING

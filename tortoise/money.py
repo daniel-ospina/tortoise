@@ -15,7 +15,18 @@ Shape (design §2.1, §2.4 — a value is a FLAT field on the entity that owns i
                                KWD/BHD=3; a pair the table contradicts is
                                refused, never guessed)
     verbatim             str   the exact source text the value came from
-    asOf                 str   ISO ``YYYY-MM-DD`` assertion/validity date
+
+⛔ **A value carries no temporal slot of its own** (``docs/ONTOLOGY.md`` §4.7,
+#11827). The value's instant is the CARRIER's valid-time start —
+``when``/``validFrom`` on a Point, ``startedAt`` on an Event — so this shape
+has no date field. ``asOf`` was RETIRED rather than kept as a second name for
+that slot: it was written and read by nothing, and a node could carry the same
+instant under three spellings while the only one the temporal read path honours
+(``validFrom``) was absent — so a value asserted on 2026-03-31 read as true in
+2020. The S5 normalizer's asserted-date derivation feeds ``validFrom`` now
+(``value_normalizer.asserted_date``). A legacy node keeps its stored ``asOf``
+prop, inert and unread, and the record's column is dropped by a forward
+migration.
 
 FalkorDB has no map property and no decimal type, so the value cannot be a
 nested ``{amount, currency}`` object and a ``Decimal`` would be an unindexable
@@ -79,11 +90,11 @@ from tortoise.numeric_domain import numeric_alteration_reason
 
 __all__ = [
     "AMOUNT_MINOR",
-    "AS_OF",
     "CURRENCY",
     "ISO_4217_MINOR_UNITS",
     "MINOR_UNIT_EXPONENT",
     "MONEY_VALUE_FIELDS",
+    "PAYLOAD_MAX_DEPTH",
     "VERBATIM",
     "MoneyValueError",
     "money_props",
@@ -100,20 +111,24 @@ AMOUNT_MINOR = "amountMinor"
 CURRENCY = "currency"
 MINOR_UNIT_EXPONENT = "minorUnitExponent"
 VERBATIM = "verbatim"
-AS_OF = "asOf"
 
-#: The five declared sibling fields of one money value, in canonical order.
+#: The four declared sibling fields of one money value, in canonical order.
+#: ``asOf`` was here (#2782) and is RETIRED (#11827): a value carries no
+#: temporal slot of its own — its instant is the carrier's ``validFrom``.
 MONEY_VALUE_FIELDS: tuple[str, ...] = (
-    AMOUNT_MINOR, CURRENCY, MINOR_UNIT_EXPONENT, VERBATIM, AS_OF,
+    AMOUNT_MINOR, CURRENCY, MINOR_UNIT_EXPONENT, VERBATIM,
 )
 
-#: The three fields that TOGETHER are the value. ``verbatim``/``asOf`` are
-#: siblings that carry no amount, so they never engage the write gate on their
-#: own (a bare ``asOf`` belongs to ordinary dated metadata).
+#: The three fields that TOGETHER are the value. ``verbatim`` is a sibling that
+#: carries no amount, so it never engages the write gate on its own (a bare
+#: ``verbatim`` belongs to ordinary quoting metadata).
 _MONEY_GROUP: tuple[str, ...] = (AMOUNT_MINOR, CURRENCY, MINOR_UNIT_EXPONENT)
 
-#: Depth bound for :func:`refuse_malformed_money_in_payload`. Journal payloads
-#: nest two or three levels (``PointAdded.point``, ``EventRecorded.uses[]``).
+#: Depth bound for the journal-payload walks (``refuse_malformed_money_in_
+#: payload`` here, and ``tortoise.percent.refuse_malformed_percent_in_payload``,
+#: which shares it so the two value shapes cannot drift on payload SHAPE).
+#: Journal payloads nest two or three levels (``PointAdded.point``,
+#: ``EventRecorded.uses[]``).
 #: ⛔ This bound is NOT the loop guard — ``seen`` is, and it cuts a
 #: self-referential payload for MAPPINGS AND SEQUENCES alike (measured: a
 #: `list` cycle used to be terminated by this bound instead, #11836 review P2).
@@ -125,6 +140,10 @@ _MONEY_GROUP: tuple[str, ...] = (AMOUNT_MINOR, CURRENCY, MINOR_UNIT_EXPONENT)
 #: refusal is reachable only by a payload that is pathological, and the message
 #: says so instead of silently grading nothing.
 _MONEY_PAYLOAD_MAX_DEPTH = 32
+
+#: Public alias of that bound — a second value shape's payload walk needs the
+#: number without importing a private name, and a copy would drift silently.
+PAYLOAD_MAX_DEPTH = _MONEY_PAYLOAD_MAX_DEPTH
 
 #: ISO 4217 permits 0, 1, 2, 3 and (CLF/UYW) 4 minor-unit digits.
 _MIN_EXPONENT = 0
@@ -173,9 +192,6 @@ ISO_4217_MINOR_UNITS: Mapping[str, int | None] = _iso4217_table(
 #: with ``match`` the ``$`` also matches before a trailing newline, so
 #: ``"USD\n"`` would validate and silently split one total into two currencies.
 _CURRENCY_RE = re.compile(r"[A-Z]{3}")
-#: ``Point._iso_date_prefix``'s contract (``tortoise/commit_schema.py``), over
-#: the stripped value: a bare ``YYYY-MM-DD`` or a datetime after ``T``/space.
-_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([Tt ].*)?$")
 
 _BASIS_POINTS = 10_000
 
@@ -251,24 +267,19 @@ def _validate_currency_exponent(currency: str, exponent: int) -> int:
     return exponent
 
 
-def _validate_as_of(value: Any) -> str:
-    if not isinstance(value, str) or not _DATE_PREFIX_RE.match(value.strip()):
-        raise MoneyValueError(
-            f"{AS_OF} must be an ISO YYYY-MM-DD date (design OD3 leaves it "
-            f"absent when the text states none), got {value!r}")
-    return value
-
-
 def money_props(amount_minor: int, currency: str, *,
                 minor_unit_exponent: int,
-                verbatim: str | None = None,
-                as_of: str | None = None) -> dict[str, Any]:
+                verbatim: str | None = None) -> dict[str, Any]:
     """Build the flat money value fields for one amount.
 
     Validates at the boundary (never guess), so a malformed amount can neither
     be constructed nor reach a write. Optional fields are OMITTED when absent
     rather than written as ``None`` — the projection's ``SET n += $props``
-    drops ``None`` anyway, and an explicit absence is what OD3 asks for.
+    drops ``None`` anyway, and an explicit absence is what the shape asks for.
+
+    There is no date parameter (#11827): the value's instant is the carrier's
+    valid-time start, so a caller that knows when the amount held sets
+    ``validFrom``/``when`` on the CARRIER — never a field here.
     """
     currency = _validate_currency(currency)
     exponent = _validate_currency_exponent(
@@ -280,8 +291,6 @@ def money_props(amount_minor: int, currency: str, *,
     }
     if verbatim is not None:
         props[VERBATIM] = _validate_verbatim(verbatim)
-    if as_of is not None:
-        props[AS_OF] = _validate_as_of(as_of)
     return props
 
 
@@ -309,9 +318,9 @@ def money_view_after_update(stored: Mapping[str, Any],
     """The money view an UPDATE leaves on the node.
 
     The SCALE triple (``amountMinor``/``currency``/``minorUnitExponent``) comes
-    from ``stored`` and is then edited by ``props``; the two OPTIONAL members
-    (``verbatim``/``asOf``) come from ``props`` ONLY. The ⛔ paragraph below
-    states why that asymmetry is deliberate — read it before "fixing" it.
+    from ``stored`` and is then edited by ``props``; the OPTIONAL member
+    (``verbatim``) comes from ``props`` ONLY. The ⛔ paragraph below states why
+    that asymmetry is deliberate — read it before "fixing" it.
 
     A props value of ``None`` DELETES the stored property, because the writers
     persist props with ``SET n += $props`` and a null value removes the key —
@@ -328,20 +337,21 @@ def money_view_after_update(stored: Mapping[str, Any],
     Only the declared money members are carried, so a caller's unrelated props
     never appear in the view (and can never be read as money).
 
-    ⛔ The two OPTIONAL members (``verbatim``/``asOf``) are carried ONLY from
-    the caller's bag, never from ``stored``, and that asymmetry is the whole
-    point rather than an oversight. They describe the value's PROVENANCE — the
-    exact source text and the date it was quoted — not its scale, and the read
-    side is deliberately lenient about them so rows written before this rule
-    keep reading (``_validate_present_optional_fields``: "pre-existing data
-    keeps reading"). Carrying a STORED ``asOf`` into the view made those very
-    rows unwritable instead: a node holding ``asOf='Q3 2026'`` (a shape the
-    props passthrough accepted before this change, and one ``rebuild_all``
-    still reproduces because replay is deliberately ungated) was refused on
-    ``update_entity(id, amountMinor=…)`` — and on the ordinary idempotent
-    capture re-ingest — for a member the caller never mentioned and cannot see
-    is invalid, leaving ``asOf=None`` as the only escape. Grading the
-    caller's OWN ``asOf`` still refuses a malformed one at the door.
+    ⛔ The OPTIONAL member (``verbatim``) is carried ONLY from the caller's bag,
+    never from ``stored``, and that asymmetry is the whole point rather than an
+    oversight. It describes the value's PROVENANCE — the exact source text —
+    not its scale, and the read side is deliberately lenient about it so rows
+    written before this rule keep reading
+    (``_validate_present_optional_fields``: "pre-existing data keeps reading").
+    Carrying a STORED ``verbatim`` into the view made those very rows
+    unwritable instead: a node holding a non-string or empty ``verbatim`` (a
+    shape the props passthrough accepted before this rule, and one
+    ``rebuild_all`` still reproduces because replay is deliberately ungated)
+    was refused on ``update_entity(id, amountMinor=…)`` — and on the ordinary
+    idempotent capture re-ingest — for a member the caller never mentioned and
+    cannot see is invalid, leaving ``verbatim=None`` as the only escape.
+    Grading the caller's OWN ``verbatim`` still refuses a malformed one at the
+    door.
     """
     view = {key: stored[key] for key in _MONEY_GROUP if key in stored}
     for key in MONEY_VALUE_FIELDS:
@@ -355,24 +365,21 @@ def money_view_after_update(stored: Mapping[str, Any],
 
 
 def _validate_present_optional_fields(view: Mapping[str, Any]) -> None:
-    """Grade the two OPTIONAL money members when the value carries money.
+    """Grade the OPTIONAL money member when the value carries money.
 
-    ``verbatim`` and ``asOf`` are declared money members with their own
-    validators, but :func:`read_money_value` never applied them — so an int
-    ``verbatim`` or a garbage ``asOf`` was durable state that ``money_props``
-    would have refused. They are graded HERE, at the write door, and NOT in
-    the reader: the read side stays lenient for rows written before this rule,
-    so pre-existing data keeps reading instead of making a sum unanswerable
-    twice over.
+    ``verbatim`` is a declared money member with its own validator, but
+    :func:`read_money_value` never applied it — so an int ``verbatim`` was
+    durable state that ``money_props`` would have refused. It is graded HERE,
+    at the write door, and NOT in the reader: the read side stays lenient for
+    rows written before this rule, so pre-existing data keeps reading instead
+    of making a sum unanswerable twice over.
 
-    ⛔ And for the same reason they are graded on the CALLER's bag only:
-    :func:`money_view_after_update` does not carry a stored ``verbatim``/``asOf``
-    into the view, so an update never re-grades a legacy row's optional members.
+    ⛔ And for the same reason it is graded on the CALLER's bag only:
+    :func:`money_view_after_update` does not carry a stored ``verbatim`` into
+    the view, so an update never re-grades a legacy row's optional member.
     """
     if view.get(VERBATIM) is not None:
         _validate_verbatim(view[VERBATIM])
-    if view.get(AS_OF) is not None:
-        _validate_as_of(view[AS_OF])
 
 
 def refuse_malformed_money(props: Mapping[str, Any], *,
@@ -386,12 +393,12 @@ def refuse_malformed_money(props: Mapping[str, Any], *,
     Returns ``None`` when the view carries no money at all — it inherits
     :func:`read_money_value`'s engagement rule (neither ``amountMinor`` nor
     ``currency`` present), so a non-money prop bag, and a bare ``verbatim`` /
-    ``asOf`` / ``minorUnitExponent`` that belongs to something else, are all
-    untouched. When money IS present it applies exactly the reader's checks:
-    an int minor-unit amount (never a float, never a bool), an active ISO 4217
+    ``minorUnitExponent`` that belongs to something else, are all untouched.
+    When money IS present it applies exactly the reader's checks: an int
+    minor-unit amount (never a float, never a bool), an active ISO 4217
     currency, and an explicit ``minorUnitExponent`` the pinned table agrees
-    with — plus, at this boundary only, the two optional members' own
-    validators (:func:`_validate_present_optional_fields`).
+    with — plus, at this boundary only, the optional member's own validator
+    (:func:`_validate_present_optional_fields`).
 
     WHY AN UPDATE PASSES A DIFFERENT VIEW (measured, #2782 review): the reader
     judges ONE bag, and a bag is not a state. The update doors write with a bare
@@ -406,7 +413,7 @@ def refuse_malformed_money(props: Mapping[str, Any], *,
     grade THAT; the create doors pass the bag, which is the state they leave.
 
     ⛔ A lone sibling on a node that carries NO money stays the no-op it is on a
-    CREATE (``MONEY_VALUE_FIELDS`` is a group, not five reserved names), which is
+    CREATE (``MONEY_VALUE_FIELDS`` is a group, not four reserved names), which is
     what keeps an idempotent create idempotent: ``create_point(dedup=True)``
     forwards the caller's create-shaped bag into ``update_point``, and the merged
     view of a no-money node is still a mere stray property (#11836 review
@@ -457,9 +464,9 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
     one flat bag the way the SDK doors do: it passes the RECORD it is about to
     journal, and WHERE the money keys sit depends on the door —
     ``ObjectRegistered`` / ``EventRecorded`` splat them at the top level, but
-    ``PointAdded`` nests the whole record under ``point=`` (``add_point`` builds
-    ``p`` and emits ``point=p``); ``EventRecorded`` also carries ``uses[]``
-    items. A gate that read only the top level was measured INERT on the Point
+    ``PointAdded`` nests the whole record under ``point`` (``add_point`` builds
+    ``p`` and passes it to ``_emit`` as the record payload, which the funnel
+    renders as ``point``); ``EventRecorded`` also carries ``uses[]`` items. A gate that read only the top level was measured INERT on the Point
     door — the door ``extractor`` / ``ingest`` / ``docs_miner`` / ``mining`` /
     the CLI all write through — so ``add_point(..., amountMinor=…)`` landed
     ``amountMinor`` with no currency beside it and made :func:`total_minor`
@@ -481,6 +488,12 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
     Widening engagement here would refuse legitimate writes — that is what the
     review's "presence-based" candidate was withdrawn for.
 
+    ⚠️ SHAPE IS THE ONE OTHER TRIGGER, and it is not a money rule: a payload
+    nested deeper than :data:`_MONEY_PAYLOAD_MAX_DEPTH` is refused whether or
+    not it carries money at all (see the depth refusal below), so "gated only
+    if it carries an ``amountMinor``/``currency``" describes the money REFUSAL,
+    not every refusal this walk can raise (#11836 review P3).
+
     ⚠️ FAILURE DIRECTION — REFUSE, not admit, for the family it matches: a
     nested mapping that carries a non-null ``amountMinor``/``currency`` for a
     non-money purpose would be refused too, because the bag alone cannot say
@@ -491,10 +504,9 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
     refusal is about one, so a writer that hits it can act on it.
 
     ⚠️ THE DEPTH REFUSAL IS NOT ABOUT A MONEY VALUE, and its message must not
-    pretend otherwise: the walk refuses a payload it could not finish reading
-    EVEN WHEN that payload carries no money at all (#11836 review P3). It says
-    what it measured (the depth) and what it could not do (see inside), never a
-    member it never found.
+    pretend otherwise: it fires on the SHAPE stated above, so it can refuse a
+    payload that carries no money at all. It says what it measured (the depth)
+    and what it could not do (see inside), never a member it never found.
     """
     seen: set[int] = set()
     stack: list[tuple[object, int]] = [(payload, 0)]

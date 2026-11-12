@@ -4,7 +4,7 @@ This is the **derive** half of the WS-C design
 (``docs/plans/2026-09-10-ws-c-numeric-normalization.md``). Its sibling
 ``tortoise/money.py`` (#2782, PR #8641) is the **validate + consume** half:
 it owns the flat field shape (``amountMinor``/``currency``/
-``minorUnitExponent``/``verbatim``/``asOf``), the pinned ISO 4217 minor-unit
+``minorUnitExponent``/``verbatim``), the pinned ISO 4217 minor-unit
 table, the Layer-1 refusal of a malformed amount, and the sum/ratio
 arithmetic. **Nothing here rebuilds any of that** — this module turns raw text
 into :func:`tortoise.money.money_props` and invents no second canonicaliser
@@ -115,9 +115,12 @@ this module is additive and never moves a number out of ``content``/``quote``.
 * Every ``verbatim`` is a **byte-exact substring of the source text**, so the
   value is recoverable from what was stored (design §6/T1) — normalize-then-
   lose-the-source is the silent-corruption path this exists to prevent.
-* ``asOf`` is only an **asserted** date (``as of``/``as at``/``effective``),
-  never an occurrence time: extracting a date from the sentence into
-  ``Point.when``'s meaning would conflate the two (design §3/OD3, mode 8).
+* ``asOf`` was retired (#11827): a value carries no temporal slot of its own.
+  The date an "as of/effective" marker names is the CARRIER's valid-time start
+  (``docs/ONTOLOGY.md`` §4.7), so :func:`asserted_date` returns it to the write
+  seam, which puts it on ``validFrom`` when the model returned no ``when`` —
+  never on the value, and never in place of a ``when`` the model judged.
+  ``money_props`` then validates the money value at Layer 1.
 
 Wiring this into ``execute_embed`` is **not done here**, but the reason is no
 longer the dependency it once was: the field's declaration on the Point
@@ -160,6 +163,7 @@ from tortoise.money import (
 __all__ = [
     "DROP_REASONS",
     "Normalization",
+    "asserted_date",
     "normalize_money",
     "normalize_money_props",
 ]
@@ -585,13 +589,28 @@ def _classify_token(token: str, *, text: str, end: int,
     return None
 
 
-def _as_of(text: str) -> str | None:
-    """The ASSERTED date, or ``None`` — never an occurrence time (OD3/mode 8).
+def asserted_date(text: str) -> str | None:
+    """The instant this text ASSERTS as its valid time, or ``None``.
 
-    Only an explicit assertion marker counts, so ``on 2026-03-31 we committed
-    EUR 800`` yields no ``asOf``: that date is the occurrence time
-    (``Point.when``), and reusing it as assertion validity is the mode-8
-    error. ``money_props`` then validates the ISO shape at Layer 1.
+    Only an explicit assertion marker counts — ``as of`` / ``as at`` /
+    ``effective`` / ``valid as of`` — so ``on 2026-03-31 we committed EUR 800``
+    names no asserted instant here: that phrase is the session's occurrence
+    time, which the extractor states as ``when``, and this function must not
+    compete with it. Several asserted dates name no single instant, so the
+    answer is ``None`` rather than a pick.
+
+    The result is the CARRIER's valid-time start, never a value field
+    (``docs/ONTOLOGY.md`` §4.7, #11827). The write seam
+    (``TortoiseSDK._extract_session_v2``) uses it for ``validFrom`` **only when
+    the model returned no ``when``** — the derivation is deterministic where
+    ``when`` is model-judged, so it is a fallback, not an override. A text that
+    names no instant yields ``None``, and the carrier's absent-start rule
+    applies: no start recorded, never an invented one.
+
+    Lifted OUT of :func:`normalize_money` (#11827): it used to run only inside
+    the money path, so a claim that named a date but no amount produced no date
+    at all — a derivation usable only where an unrelated value happened to be
+    typed.
     """
     dates = {m.group("d") for m in _AS_OF.finditer(text)}
     if len(dates) > 1:
@@ -631,7 +650,6 @@ def normalize_money(text: str) -> Normalization:
         return _drop("range_or_qualifier", text[:60])
 
     props: list[dict[str, Any]] = []
-    as_of = _as_of(text)          # once, not per candidate
     unresolved_anchor: str | None = None
     for cand in candidates:
         before = text[max(0, cand.span_start - 24):cand.span_start]
@@ -711,7 +729,7 @@ def normalize_money(text: str) -> Normalization:
         try:
             props.append(money_props(
                 amount_minor, currency, minor_unit_exponent=exponent,
-                verbatim=verbatim, as_of=as_of))
+                verbatim=verbatim))
         except MoneyValueError as exc:
             # REACHABLE, and load-bearing. `money_props` refuses a value the
             # store cannot hold — an `amountMinor` outside the store's INTEGER
@@ -723,7 +741,7 @@ def normalize_money(text: str) -> Normalization:
             # P1). The other refusals are pre-empted above (the anchor is a
             # table member, the exponent IS the table's, `no_minor_unit`
             # returns early, `verbatim` is non-empty by `_NUM`'s grammar,
-            # `asOf` comes from the asserted-date shape) and the `int()` guard
+            # `verbatim` is non-empty by `_NUM`'s grammar) and the `int()` guard
             # is just above — this branch is the one that stays live because
             # `money.py` is a LIVE contract that tightened twice already
             # (#8976, then the store domain).
