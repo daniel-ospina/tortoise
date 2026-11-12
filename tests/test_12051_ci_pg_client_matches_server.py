@@ -121,14 +121,28 @@ _SQUOTED_RE = re.compile(r"'[^']*'")
 _HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)(?P<tag>\w+)\1")
 
 #: A fail action's `exit 1`, ANCHORED at the start of its STATEMENT — line start,
-#: or just after `;` / `&&` / `||` / `{` / `(`. Enumerating what may FOLLOW it
+#: or just after `;` / `&&` / `||` / `{` / `(`, a block keyword that OPENS one
+#: (`then`, `else`, `elif`, `do`), a `case` arm's `)` or a `;;`.
+#: Enumerating what may FOLLOW it
 #: instead (`;`, `}`, `)`, end-of-string) red every nested or commented fail
 #: action: `exit 1  # fail closed`, an `exit 1` whose branch was indented one
 #: level deeper, and the `if true; then … fi` wrapper all failed "does not
 #: `exit 1`" over a guard that exits 1 (MEASURED, review of `bfb7af441a`), while
 #: the same text passed the EXECUTED arm — the most misleading failure this file
 #: can produce.
-_EXIT_1_RE = re.compile(r"(?:^|;|&&|\|\||\{|\()[ \t]*exit[ \t]+1\b", re.MULTILINE)
+#:
+#: ⛔ THE KEYWORDS ARE PART OF THAT SAME SET, and leaving them out was a false
+#: block in the OTHER direction: `if [ -z "$major" ]; then exit 1; fi` is
+#: ordinary bash whose fail action sits at the end of its own one-line guard, and
+#: the separator-only set refused it (MEASURED, review of `48370b8261`: `then
+#: exit 1; fi`, `else exit 1; fi` and `case …) exit 1;;` all read as NO fail
+#: action, while `origin/main` accepted every one of them). A one-line guard IS
+#: the shipped shape's own idiom (`if [ -n "${ImageOS:-}" ]; then … fi`).
+_EXIT_1_RE = re.compile(
+    r"(?:^|;|&&|\|\||\{|\(|\bthen\b|\belse\b|\belif\b|\bdo\b|;;|\))"
+    r"[ \t]*exit[ \t]+1\b",
+    re.MULTILINE,
+)
 
 
 def _statements(line: str) -> str:
@@ -138,6 +152,26 @@ def _statements(line: str) -> str:
     removing single-quoted spans first would eat the tail of a double-quoted one.
     """
     return _SQUOTED_RE.sub("''", _DQUOTED_RE.sub('""', line))
+
+
+#: A quoted span, bounded to ONE line. Line-bounded on purpose: `_SQUOTED_RE`
+#: allows newlines inside a span, so an apostrophe in a message on one line and
+#: another later would mark every `>> $GITHUB_PATH` between them as message text
+#: and the write COUNT would go blind in the fail-open direction.
+_QUOTED_LINE_RE = re.compile(r'"[^"\\\n]*(?:\\.[^"\\\n]*)*"|\'[^\'\n]*\'')
+
+
+def _in_quotes_mask(text: str) -> bytearray:
+    """One flag per character: is it INSIDE a quoted span?
+
+    POSITIONS, not a rewrite: `_statements` BLANKS a span, which also removes the
+    `"$GITHUB_PATH"` a REAL write names, so it cannot be reused by a reader whose
+    values live inside quotes.
+    """
+    mask = bytearray(len(text))
+    for span in _QUOTED_LINE_RE.finditer(text):
+        mask[span.start() : span.end()] = b"\x01" * (span.end() - span.start())
+    return mask
 
 
 def _heredoc_tags(line: str) -> list[tuple[str, bool]]:
@@ -275,6 +309,27 @@ _GITHUB_PATH_WRITE_RE = re.compile(
     + r"|\|[ \t]*(?:sudo[ \t]+(?:-{1,2}[A-Za-z]+[ \t]+)*)?tee[ \t]+"
     r"(?:-{1,2}[A-Za-z]+[ \t]+)*" + _GITHUB_PATH_REF
 )
+
+
+def _github_path_writes(prepared: str) -> list[re.Match[str]]:
+    """Writes to `$GITHUB_PATH` whose REDIRECT/`tee` is CODE, not message text.
+
+    A quoted span is DATA. The step's own `::error::` remediation NAMES an
+    `$GITHUB_PATH` write, and a raw `findall` counted that mention as a second
+    write and red a step that has exactly one (MEASURED, review of
+    `48370b8261`) — the false-block direction `_statements` already closes for
+    `exit 1`.
+
+    The START of the match decides it, which is what keeps BOTH directions
+    honest without blanking the values the reader needs: a real write keeps its
+    operator (`>>`, `>`, `|`) OUTSIDE the quotes (`echo … >> "$GITHUB_PATH"`),
+    while a mention quoted whole puts the operator inside them. STATED LIMIT: a
+    write executed from inside a quoted string (`bash -c "echo … >>
+    $GITHUB_PATH"`) is not counted — the same polarity `_statements` accepts,
+    and the shipped step has no such shape.
+    """
+    mask = _in_quotes_mask(prepared)
+    return [m for m in _GITHUB_PATH_WRITE_RE.finditer(prepared) if not mask[m.start()]]
 
 
 @pytest.fixture(scope="module")
@@ -459,10 +514,12 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # pair is satisfiable by two different lines and by an inert `export`.
     # ONE write to `$GITHUB_PATH`, then read it: each write is PREPENDED, so a
     # second one decides PATH. Counted over code with comments and heredoc bodies
-    # removed (a trailing comment naming a write is inert shell).
-    writes = _GITHUB_PATH_WRITE_RE.findall(
-        _strip_comments(_without_heredocs(_code_only(text)))
-    )
+    # removed (a trailing comment naming a write is inert shell), and with a
+    # quoted MENTION dropped: this step's own `::error::` names a
+    # `$GITHUB_PATH` write, and prose is not a write (MEASURED, review of
+    # `48370b8261`).
+    _prepared = _strip_comments(_without_heredocs(_code_only(text)))
+    writes = _github_path_writes(_prepared)
     assert len(writes) == 1, (
         f"the pin writes `$GITHUB_PATH` {len(writes)} times — each write is "
         "PREPENDED, so the LAST one decides `PATH` and only this assertion's "
@@ -473,7 +530,6 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # trailing comments and heredoc bodies, so a real `/usr/bin` write with the
     # versioned dir left in a comment (or in a heredoc body) satisfied this read
     # (MEASURED, review of `aec7c83e15`).
-    _prepared = _strip_comments(_without_heredocs(_code_only(text)))
     prepend = GITHUB_PATH_PREPEND_RE.search(_prepared)
     assert prepend, (
         "the pin step never writes a `/usr/lib/postgresql/<major>/bin` entry to "
@@ -657,7 +713,20 @@ _IF_PRECONDITION_RE = re.compile(
     # review of `7dc1da573a`) — the false block this comment block promises not
     # to produce.
     r"^(?P<ind>[ \t]*)if\s+!\s*(?:sudo\s+)?apt-cache\s+(?:show|policy)\s+['\"]?"
-    r"postgresql-client-(?P<major>\d+)['\"]?[^;]*;\s*then(?P<body>.*?)^(?P=ind)fi[ \t]*$",
+    r"postgresql-client-(?P<major>\d+)['\"]?[^;]*;\s*then"
+    # ⛔ THE HEADER ENDS AT ITS OWN LINE, for the same reason
+    # `_VERSION_BRANCH_RE`'s does: without the end-of-line anchor a ONE-LINE
+    # gutted guard (`… ; then :; fi`) matches, and because the body is
+    # `.*?^ind fi` it then swallows the NEXT same-indent block — including that
+    # block's `::error::`/`exit 1` — so a disarmed precondition is certified as
+    # armed (#12141, MEASURED against `origin/main`, which refused the input).
+    r"(?:[ \t]*#[^\n]*)?[ \t]*$"
+    # A closer may carry a trailing COMMENT (`fi  # end of version check`):
+    # `_OR_PRECONDITION_RE` learned that for `}`/`)` (review of `3726d2f400`) and
+    # the `fi` closers were left strict, so a present-but-commented closer read as
+    # ABSENT — a false block over an armed guard (MEASURED, review of
+    # `48370b8261`).
+    r"(?P<body>.*?)^(?P=ind)fi[ \t]*(?:#.*)?$",
     re.DOTALL | re.MULTILINE,
 )
 _OR_PRECONDITION_RE = re.compile(
@@ -731,7 +800,16 @@ _VERSION_BRANCH_RE = re.compile(
     # `; then` and a newline before `then` are the two forms bash ACCEPTS. `] then`
     # (no separator) is a syntax error, so it must NOT match: accepting it would
     # assert an armed branch over one the shell cannot parse.
-    r"(?:\s*;\s*then|\n[ \t]*then)"
+    #
+    # ⛔ AND THE HEADER ENDS AT ITS OWN LINE, which is the whole discriminator: a
+    # one-line GUTTED branch (`if [ "$major" != "16" ]; then :; fi`) arms
+    # nothing, yet the step below it carries a `::error::`/`exit 1` pair of its
+    # own — and the body is `.*?^ind fi`, so a header that does not END at its
+    # line feeds that next same-indent block back as THIS branch's body and the
+    # guard certifies a gutted arm as armed. `origin/main` refused the input; the
+    # anchorless alternation matched it (#12141, MEASURED by running this module:
+    # the swallowed body contained `::error::` and `exit 1`).
+    r"(?:\s*;\s*then|\n[ \t]*then)(?:[ \t]*#[^\n]*)?[ \t]*$"
     # The branch ENDS at the HEADER's own indent (`(?P=ind)`), which is what
     # `origin/main`'s deleted `_closing_fi(indent)` helper did. A nested `if … fi`
     # indented DEEPER than the header therefore cannot end the body early;
@@ -742,7 +820,19 @@ _VERSION_BRANCH_RE = re.compile(
     # written FLAT, at the header's own indent, still ends the body early — bash
     # does not require indentation, and matching braces instead would mean a
     # shell parser (review of `17847279b1` measured that flat shape RED).
-    r"(?P<body>.*?)^(?P=ind)fi[ \t]*$",
+    #
+    # ⚠️ THE ANCHOR ALSO REFUSES A ONE-LINE ARMED BRANCH (`…; then exit 1; fi`),
+    # an unmatched spelling this docstring already lists and which does not occur
+    # in THIS STEP (0 occurrences, measured). That is the accepted cost of closing
+    # #12141: the same anchor is what refuses the one-line GUTTED branch, and a
+    # matcher cannot tell the two apart without counting quotes and braces — i.e.
+    # without being the shell.
+    # A closer may carry a trailing COMMENT, for the same reason the `{ }` / `)`
+    # closer tolerates one (review of `3726d2f400`) and this one did not: `fi  #
+    # end of version check` is a block that IS closed, and refusing it reds "the
+    # pin has no `if [ … ]` block" — a false block whose diagnosis claims the
+    # block does not exist (MEASURED, review of `48370b8261`).
+    r"(?P<body>.*?)^(?P=ind)fi[ \t]*(?:#.*)?$",
     re.DOTALL | re.MULTILINE,
 )
 
@@ -1014,3 +1104,157 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "the script never reached the line after the precondition even when the "
         "package resolved — the block is unconditional"
     )
+
+
+# ── the matchers' OWN shapes: the rows that kill a mutant ─────────────────────
+# Every assertion above reads the SHIPPED step, and a shipped step is green under
+# a matcher that is too permissive — which is the whole class this file has spent
+# twelve review cycles on. The rows below feed the matchers text the step does NOT
+# contain, so a header that stops ending at its own line, a fail-action anchor
+# that refuses ordinary bash, or a stricter closer reds HERE instead of silently
+# certifying a gutted guard (#12141).
+
+
+def test_the_version_branch_refuses_a_one_line_gutted_branch() -> None:
+    """A ONE-LINE gutted branch is not a branch, even when the text after it is.
+
+    `if [ "$major" != "16" ]; then :; fi` arms nothing, yet the block below it
+    carries a `::error::`/`exit 1` pair of its own — so a header that does not END
+    at its own line runs the body on to that next same-indent `fi` and hands this
+    guard another block's failure text as this branch's body (#12141).
+
+    Discriminating on PURPOSE: no legitimate row in this file is a one-line branch
+    followed by a same-indent block, so restoring the anchorless alternation leaves
+    every other row green — which is how the defect survived twelve cycles.
+    """
+    code = (
+        '      if [ "$major" != "16" ]; then :; fi\n'
+        '      if [ "$tool" = "never" ]; then\n'
+        '        echo "::error::something else entirely"\n'
+        '        exit 1\n'
+        '      fi\n'
+    )
+    with pytest.raises(AssertionError, match="no `if"):
+        _version_branch(code, 16)
+
+
+def test_the_precondition_refuses_a_one_line_gutted_guard() -> None:
+    """The same swallow, in the SIBLING matcher — the header anchor is the fix.
+
+    The precondition's header had the same missing end-of-line anchor, so a gutted
+    one-liner inherited the next same-indent block's `::error::`/`exit 1` and a
+    disarmed precondition read as armed. Both matchers are pinned here because a
+    fix applied to one of two identical defects is how the `fi` closer stayed
+    strict for three cycles after the `{ }` closer was fixed.
+    """
+    code = (
+        'if ! apt-cache show postgresql-client-16 >/dev/null 2>&1; then :; fi\n'
+        'if [ -n "${LATER:-}" ]; then\n'
+        '  echo "::error::something else entirely"\n'
+        '  exit 1\n'
+        'fi\n'
+    )
+    with pytest.raises(AssertionError, match="precondition"):
+        _precondition(code)
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        'if [ "$major" != "16" ]; then',
+        'if [ "${major}" != "16" ]; then',
+        'if test "$major" != "16"; then',
+        'if [ "$major" != "16" ];   then   ',
+        'if [ "$major" != "16" ]; then  # the version check',
+        'if [ "$major" != "16" ]\n      then',
+    ],
+)
+def test_the_version_branch_still_finds_every_legitimate_header(header: str) -> None:
+    """The anchor must not narrow the guard into a false block on real spellings.
+
+    Each row is a branch bash arms and a human writes: `[ … ]`, `${major}`, the
+    `test` builtin, trailing whitespace, a trailing comment after `then`, and a
+    newline before `then`.
+    """
+    code = f"      {header}\n        exit 1\n      fi\n"
+    assert "exit 1" in _version_branch(code, 16)
+
+
+def test_a_closer_carrying_a_trailing_comment_is_still_a_closer() -> None:
+    """`fi  # …` closes the block — refusing it claims the block does not exist.
+
+    `origin/main` refused this too, but it DIAGNOSED correctly ("no closing `fi`").
+    A closer that is present but differently spelled must not read as ABSENCE: the
+    message then says the armed branch is missing, which is the most misleading
+    possible red (MEASURED, review of `48370b8261`).
+    """
+    branch = (
+        '      if [ "$major" != "16" ]; then\n'
+        '        echo "::error::x"\n'
+        '        exit 1\n'
+        '      fi  # end of the version check\n'
+    )
+    assert "exit 1" in _version_branch(branch, 16)
+    guard = (
+        "if ! apt-cache show postgresql-client-16 >/dev/null 2>&1; then\n"
+        '  echo "::error::x"\n'
+        "  exit 1\n"
+        "fi  # end of the precondition\n"
+    )
+    assert _has_exit_1(_precondition(guard).group("body"))
+
+
+@pytest.mark.parametrize(
+    "one_line_guard",
+    [
+        'if [ -z "$major" ]; then exit 1; fi',
+        'if [ -z "$major" ]; then\n  :\nelse exit 1; fi',
+        'case "$major" in\n  *) exit 1;;\nesac',
+        "for t in pg_dump pg_restore; do exit 1; done",
+    ],
+)
+def test_a_fail_action_at_any_statement_start_is_one(one_line_guard: str) -> None:
+    """Ordinary bash puts `exit 1` at the END of its own one-line guard.
+
+    The separator-only start-set refused all four of these while `origin/main`
+    accepted them — a false block on an ARMED branch, which is worse than a missed
+    read because it teaches the next lane to widen the assertion instead of
+    trusting it (MEASURED, review of `48370b8261`).
+    """
+    assert _has_exit_1(one_line_guard), one_line_guard
+
+
+def test_a_fail_action_inside_a_message_is_still_not_one() -> None:
+    """The widening above must not start reading prose as a fail action.
+
+    This is the fail-OPEN direction and the reason the start-set is enumerated at
+    all: `echo "…then exit 1"` prints the words and exits 0.
+    """
+    assert not _has_exit_1('echo "on a mismatch: then exit 1"')
+    assert not _has_exit_1('echo "do exit 1"  # for the reader')
+
+
+def _path_writes(text: str) -> int:
+    """The shipped reader's count, over the same preparation the assertion uses."""
+    return len(_github_path_writes(_strip_comments(_without_heredocs(_code_only(text)))))
+
+
+def test_a_quoted_mention_of_the_write_is_not_a_second_write() -> None:
+    """Prose naming the write must not read as a second write — and a real one must.
+
+    The step's own `::error::` remediation names an `$GITHUB_PATH` write, so a raw
+    `findall` counted a MENTION as the second `PATH` entry and red a step that
+    writes once (MEASURED, review of `48370b8261`). Both directions are pinned
+    here: the mention is ignored, and the three spellings a revert really uses are
+    still counted.
+    """
+    shipped = 'echo /usr/lib/postgresql/16/bin >> "$GITHUB_PATH"\n'
+    assert _path_writes(shipped) == 1
+    assert _path_writes(shipped + "echo 'the write is >> $GITHUB_PATH'\n") == 1
+    assert (
+        _path_writes(shipped + 'echo "::error::never run echo /usr/bin >> $GITHUB_PATH"')
+        == 1
+    )
+    assert _path_writes(shipped + 'echo /usr/bin >> "$GITHUB_PATH"\n') == 2
+    assert _path_writes(shipped + 'echo /usr/bin > "$GITHUB_PATH"\n') == 2
+    assert _path_writes(shipped + 'echo /usr/bin | tee -a "$GITHUB_PATH"\n') == 2
