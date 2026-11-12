@@ -66,6 +66,18 @@ GITHUB_PATH_PREPEND_RE = re.compile(
     r"\s*>>\s*['\"]?\$GITHUB_PATH"
 )
 
+#: The fail-closed branch as ONE unit (#12051 review round 4, P1): the `if` line
+#: that compares `$major`, its body, and its `fi`. "`::error::` and `exit 1`
+#: appear somewhere in the step" is NOT the claim — `if false && [ "$major" !=
+#: "16" ]; then` keeps both tokens in the text and can never fire.
+FAIL_CLOSED_BRANCH_RE = re.compile(
+    r'^[ \t]*if[ \t]+\[[ \t]*"\$major"[ \t]*!=[ \t]*"(?P<major>\d+)"[ \t]*\][ \t]*;'
+    r'[ \t]*then[ \t]*\n'
+    r'(?P<body>(?:[ \t]*(?!fi\b)[^\n]*\n)*?)'
+    r'[ \t]*fi[ \t]*$',
+    re.MULTILINE,
+)
+
 
 @pytest.fixture(scope="module")
 def job() -> dict:
@@ -93,19 +105,38 @@ def _run_code(step: dict) -> str:
     the runner image's client — i.e. the guard could not distinguish the fix
     from its tombstone. Assertions therefore read this, never the raw body.
 
-    STATED LIMIT: only COMMENT LINES are stripped (a line whose first
-    non-space character is `#`). A TRAILING comment on a live line is left in
-    place, so `echo "/usr/bin" >> "$GITHUB_PATH"  # was: …/postgresql/16/bin`
-    still satisfies `GITHUB_PATH_PREPEND_RE` (measured, round 3). That is the
-    direction a careless hand-written edit takes rarely, and stripping trailing
-    comments would break on `#` inside quoted strings / `$GITHUB_PATH` URLs;
-    the in-job assertion remains the backstop.
+    STATED LIMIT: this strips COMMENT LINES only (a line whose first non-space
+    character is `#`), and the fail-closed branch is matched structurally by
+    `FAIL_CLOSED_BRANCH_RE` for the same reason: presence is not gating. A
+    TRAILING comment on a live line is dropped by `_run_commands()` for the two
+    searches that read a line as a unit — measured, a trailing `# was: …`
+    carrying the versioned write made a live `/usr/bin` line satisfy the
+    prepend, and a correct `apt-get` line whose trailing comment named the
+    capstone made the pin step look like the leg (`assert 4 < 4`, a false RED).
     """
 
     return "\n".join(
         line
         for line in _run_text(step).splitlines()
         if not line.lstrip().startswith("#")
+    )
+
+
+def _run_commands(step: dict) -> str:
+    """`_run_code()` with trailing comments removed, for line-as-a-unit searches.
+
+    ` #…` (whitespace before the `#`) is the shell's comment start outside
+    quotes, which is what both call sites need: they match a whole write/entry
+    line, and a trailing comment there is either a tombstone (the value it
+    names is NOT what runs) or noise (the capstone's name in the pin step).
+    STATED LIMIT: a `#` inside a quoted string is not special-cased — it is
+    only reached here when a line quotes a literal `#` AND names one of the two
+    paths, which then reds rather than silently passing.
+    """
+
+    return "\n".join(
+        re.split(r"\s+#", line, maxsplit=1)[0]
+        for line in _run_code(step).splitlines()
     )
 
 
@@ -196,7 +227,7 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # ONE regex over the WHOLE command: the versioned dir must be the value
     # WRITTEN TO `$GITHUB_PATH`. A bare `CLIENT_PATH_RE`/`"GITHUB_PATH" in text`
     # pair is satisfiable by two different lines and by an inert `export`.
-    prepend = GITHUB_PATH_PREPEND_RE.search(text)
+    prepend = GITHUB_PATH_PREPEND_RE.search(_run_commands(pin))
     assert prepend, (
         "the pin step never writes a `/usr/lib/postgresql/<major>/bin` entry to "
         "`$GITHUB_PATH`; a prepend that only exists as an `export` inside this "
@@ -234,15 +265,22 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     text = _run_code(pin)
     server_major = _postgres_image_majors(job)[0]
 
-    assert "::error::" in text and "exit 1" in text, (
-        "the client pin asserts nothing about the version it actually got — it "
-        "must `echo \"::error::…\"` and `exit 1` on a mismatch, so a runner "
-        "image change surfaces as this step, not as an unrestorable artifact"
+    branch = FAIL_CLOSED_BRANCH_RE.search(text)
+    assert branch, (
+        "the pin has no ARMED fail-closed branch — it must be one unit, "
+        '`if [ "$major" != "<major>" ]; then … fi`, not a substring pair: '
+        '`if false && [ "$major" != "16" ]; then` keeps both `::error::` and '
+        "`exit 1` in the text while being unable to fire, which is the "
+        "disjunction this assertion used to be (measured, #12051 round 4)"
     )
-    assert f'"$major" != "{server_major}"' in text, (
-        "the pin never COMPARES the client's major with the servers' "
-        f"({server_major}) — a branch that cannot fire is the same symptom as no "
-        "branch at all, which is what left #12051 invisible for a day"
+    assert int(branch.group("major")) == server_major, (
+        "the fail-closed branch compares against major "
+        f"{branch.group('major')} but the provisioned servers are pg{server_major} — "
+        "a branch that can never be true is the same symptom as no branch"
+    )
+    assert "::error::" in branch.group("body") and "exit 1" in branch.group("body"), (
+        "the armed branch does not both announce (`::error::`) and stop "
+        "(`exit 1`) — a branch that prints and continues ships the bad artifact"
     )
     for tool in ("pg_dump", "pg_restore"):
         assert tool in text, (
@@ -269,7 +307,7 @@ def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
     leg_indexes = [
         index
         for index, step in enumerate(steps)
-        if "test_9567_record_capstone.py" in _run_code(step)
+        if "test_9567_record_capstone.py" in _run_commands(step)
     ]
     assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
     assert pin_index < min(leg_indexes), (
