@@ -162,9 +162,9 @@ Interface A states four properties, and the failure each one prevents:
 ## 2. Field placement — the schema is the contract
 
 `#7968` pins `§17.5`'s placement table to the SQL, in both directions, and its own
-test asserts the resolved totals (221 properties → 192 PRIMARY / 29 DERIVED-VOLATILE / 0 U
-— 216 names at the `#7955` pass, plus `#2782`'s five PRIMARY money rows, annotated rather
-than folded into that pass's numbers).
+test asserts the resolved totals (220 properties → 191 PRIMARY / 29 DERIVED-VOLATILE / 0 U
+— 216 names at the `#7955` pass, plus `#2782`'s five PRIMARY money rows and less the one
+`#11827` retires, annotated rather than folded into that pass's numbers).
 This module therefore reads the SQL rather than the table: they cannot disagree,
 because `#7968`'s pin already fails if they do.
 

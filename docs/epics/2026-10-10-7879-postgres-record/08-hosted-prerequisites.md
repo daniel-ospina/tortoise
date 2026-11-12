@@ -197,8 +197,8 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 ### A5. Embeddings — **durable today, not searchable, and that is not a defect**
 
-`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). ⛔ **THIS PARAGRAPH WAS TRUE UNTIL `#11642` AND IS KEPT AS THE MEASURED RECORD OF WHAT THE MOVE REPLACED — do not read it as the state of this head.** At the census point **no migration and no module used `pgvector`**. **At this head** the same census is: `grep -riE 'pgvector|vector\('` over all 81
-migrations returns **30** (it returned **0** at that pin), all 30 in ONE file — `20261109000001_record_embedding_vector.sql` (the `CREATE EXTENSION`, the `record_embedding_vector` converter, three `vector(384)` GENERATED columns and three HNSW indexes) — and `git grep -il pgvector -- 'tortoise/*'` is **4**, in `record_projection.py`, `projection/__init__.py`, `record_vector.py` and `search_engine.py` (it was **0**). `#11642` implemented V1. The word itself
+`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). ⛔ **THIS PARAGRAPH WAS TRUE UNTIL `#11642` AND IS KEPT AS THE MEASURED RECORD OF WHAT THE MOVE REPLACED — do not read it as the state of this head.** At the census point **no migration and no module used `pgvector`**. **At this head** the same census is: `grep -riE 'pgvector|vector\('` over all 82
+migrations returns **30** (it returned **0** at that pin; the denominator is 82 at this head — `#11827`'s `20261110000001_record_point_retire_as_of_11827.sql` added no vector), all 30 in ONE file — `20261109000001_record_embedding_vector.sql` (the `CREATE EXTENSION`, the `record_embedding_vector` converter, three `vector(384)` GENERATED columns and three HNSW indexes) — and `git grep -il pgvector -- 'tortoise/*'` is **4**, in `record_projection.py`, `projection/__init__.py`, `record_vector.py` and `search_engine.py` (it was **0**). `#11642` implemented V1. The word itself
 appears in prose only — e.g. this document, §12.1c's decided record, this epic's
 `03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which was
 exactly right while §2.0 kept the cache fully populated, and **V1 is now DECIDED** (§12.1c/§14.3, 2026-11-07):
@@ -738,7 +738,7 @@ R1 keeps is the rotation hazard, not a pending arming.
 `8767b1c8b` measurement **there was no dedicated table for it** — the text was carried as data, in the
 `point.content` column and in the layer-1 `journal_event.payload` mirror of the record that wrote it
 (see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-65 migrations returned **0** (at this head, 81 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
+65 migrations returned **0** (at this head, 82 migrations, the same command matches it on 62 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
 tenant policy for that very table), 36 in `20261023000001_record_session_narrative.sql` and 19 in
 `20261024000001_record_session_narrative_carrier.sql` — the table this
 item's DECIDED block adds);
