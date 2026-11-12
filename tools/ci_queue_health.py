@@ -75,11 +75,19 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               (ISSUE 3 of the #9118 review: clause order used to return ``OK``
               here, which is a clean bill of health for a CI that is not running.)
   PR-UNWITNESSED
-              per REPO — the PR WAIT was not witnessed, for one of two reasons:
+              per REPO — the PR WORK WAS NOT WITNESSED, for one of three reasons:
               (a) the FEED WAS CUT AT ITS PAGE CAP, so the older runs — the end
               the age clause needs — were never read (and no PR-event run is
-              executing); or (b) the QUEUED PR-EVENT RUNS CARRY NO READABLE
-              ``created_at``, so the wait cannot be measured at all. Neither
+              executing); (b) the QUEUED PR-EVENT RUNS CARRY NO READABLE
+              ``created_at``, so the wait cannot be measured at all; or (c) the
+              RUNNING CENSUS IS UNWITNESSED — every run counted in ``pr_running``
+              was UNMEASURED (the jobs probe could not read it, or the probe budget
+              did not reach it), so that count is the pre-#12037 status-string
+              census and cannot certify health. Case (c) is about the CENSUS, not
+              the wait: the wait may be perfectly measured while the census is not,
+              and the module still refuses ``OK`` on it. (c) is deliberately a
+              degradation and not ``UNKNOWN``: a measured wait and a lower-bounded
+              census are both worth reporting, and ``UNKNOWN`` would discard them. Neither
               starvation nor health is witnessed: it is not ``OK`` (the fail-open
               the truncation residual of the #9118 review names, and the same
               refusal `age_seconds` documents for an unreadable stamp), and not
@@ -265,12 +273,14 @@ PR_STARVED = "PR-STARVED"
 #: PR_STARVED (which means nothing of the PR work is executing at all): the two are
 #: true of different queues, and neither may be inferred from the other.
 PR_BACKLOGGED = "PR-BACKLOGGED"
-#: A truncated feed with no PR-event run executing, or queued PR-event runs whose
-#: timestamps cannot be read: the PR WAIT is neither witnessed nor DISPROVED, so
-#: this is not ``OK``. See the truncation note in the module docstring — the runs
-#: endpoint is newest-first and cannot be asked for the oldest end, so a capped
-#: read loses exactly the runs the age clause needs — and see `age_seconds` for
-#: why an unreadable stamp cannot be treated as zero.
+#: A truncated feed with no PR-event run executing, queued PR-event runs whose
+#: timestamps cannot be read, OR a running census made entirely of unmeasured runs:
+#: the PR work is neither witnessed nor DISPROVED, so this is not ``OK``. See the
+#: truncation note in the module docstring — the runs endpoint is newest-first and
+#: cannot be asked for the oldest end, so a capped read loses exactly the runs the age
+#: clause needs — and see `age_seconds` for why an unreadable stamp cannot be treated
+#: as zero, and `DEFAULT_MAX_JOB_PROBES` for why an unprobed run cannot certify a
+#: census.
 PR_UNWITNESSED = "PR-UNWITNESSED"
 UNKNOWN = "UNKNOWN"
 
@@ -1016,6 +1026,7 @@ def classify_queue(
     max_pr_wait_seconds: float = DEFAULT_MAX_PR_WAIT_SECONDS,
     pending: Sequence[QueuedRun] = (),
     pending_truncated: bool = False,
+    probe_attempted: bool = False,
 ) -> QueueHealth:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
@@ -1246,18 +1257,20 @@ def classify_queue(
         # this is a degradation and not a `MeasureError`. When at least one counted run was
         # READ as executing, `pr_running > 0` is a measurement and `PR-BACKLOGGED` stands.
         #
-        # ⛔ AND IT ONLY APPLIES WHEN THE PROBE IS ACTUALLY IN USE FOR THIS READING. `None`
-        # means both "probed and unmeasurable" and "no probe was attempted", and conflating
-        # the two made this degradation fire for every caller that constructs `QueuedRun`s
-        # without probing — a behaviour change to a function documented as pure, which the
-        # defect does not ask for. `probes_in_use` separates the facts: if SOMETHING in this
-        # reading was measured, an unmeasured run is a real gap; if NOTHING was, the reading is
-        # in the pre-#12037 mode and is treated as such (no worse than the baseline it replaces,
-        # and it is the mode every legacy caller is in).
-        probes_in_use = any(run.has_live_job is not None for run in pr_in_progress)
+        # ⛔ AND IT IS DRIVEN BY `probe_attempted`, WHICH THE CALLER MUST SUPPLY — NOT
+        # INFERRED FROM THE ANSWERS. `None` means both "probed and unmeasurable" and "no
+        # probe was attempted", and the two need opposite treatment: the first is a real gap,
+        # the second is a legacy caller whose reading must not change. Inferring it as "some
+        # probe returned True or False" LOOKS equivalent and is not: when every probe times
+        # out (the likeliest state under the load this tool exists to report) nothing is
+        # measured, the flag reads False, the clause cannot fire, and the reading reverts to
+        # exactly the pre-fix `OK` + `congests_pr is False` this change removes. Only
+        # `read_health` knows whether it spent the budget, so only it can answer — hence a
+        # declared parameter rather than a derivation, and a default of `False` that keeps
+        # every existing (non-probing) caller's contract intact.
         if (
             verdict == OK
-            and probes_in_use
+            and probe_attempted
             and pr_running > 0
             and pr_running == pr_running_unmeasured
         ):
@@ -1653,7 +1666,8 @@ def read_run_live_job(
     which is why paging cannot make this abstain in the direction that matters.
 
     ⚠️ ``filter=latest`` IS LOAD-BEARING AND IS SPELLED EXPLICITLY. This parameter has been
-    corrected TWICE, so BOTH halves are stated instead of implied:
+    corrected TWICE, so BOTH halves are stated instead of implied (and a THIRD correction follows
+    below, where the attempt proof changes what `all` would do):
 
       * Its DEFAULT is already ``latest`` (GitHub's OpenAPI description: "``latest``
         returns jobs from the most recent execution … ``all`` returns all jobs for a
@@ -1669,15 +1683,14 @@ def read_run_live_job(
         answer ``False`` and read a run that is about to execute as proved idle. ``latest``
         is what makes that list EMPTY, so the abstention above can fire.
 
-    So it is not decoration: `latest` is what makes that list EMPTY, so the abstention above
-    can fire. ⚠️ AND `filter=all` WOULD NO LONGER MISLEAD THIS PROBE, BECAUSE OF THE ATTEMPT
-    CHECK BELOW — that check is the real guard, and the parameter is the cheap first line.
-    Stated exactly, since this rationale has now been wrong three times: under `filter=all` a
-    fresh re-run returns its previous attempt's completed jobs, but with ``attempt`` supplied
-    those rows fail the `run_attempt` test and the probe ABSTAINS (``None``) rather than
-    answering ``False``. Switching to `all` is still wrong — it throws away the empty-list
-    signal and makes every re-run abstain — but it is no longer the destructive direction, and
-    a reader must not be told otherwise.
+    ⚠️ AND `filter=all` WOULD NO LONGER MISLEAD THIS PROBE, BECAUSE OF THE ATTEMPT CHECK
+    BELOW — that check is the real guard, and the parameter is the cheap first line. Stated
+    exactly, since this rationale has been wrong three times: under `filter=all` a fresh re-run
+    returns its previous attempt's completed jobs, but with ``attempt`` supplied those rows fail
+    the `run_attempt` test and the probe ABSTAINS (``None``) rather than answering ``False``.
+    Switching to `all` is still wrong — it throws away the empty-list signal and makes every
+    re-run abstain — but it is no longer the destructive direction, and a reader must not be
+    told otherwise.
 
     ⛔ AND THE ATTEMPT IS CHECKED FROM THE PAYLOAD, NOT TRUSTED FROM THE QUERY STRING.
     GitHub's `Job` schema carries ``run_attempt`` ("Attempt number of the associated
@@ -1794,12 +1807,15 @@ def read_health(
     # non-int here would surface as a bare `TypeError` from the slice at the last line of this
     # function and kill the reading with NO state line — the failure mode the budget's own
     # comment exists to prevent. Turning it into `MeasureError` gives exit 2 and a message.
-    try:
-        probes = max(0, int(max_job_probes))
-    except (TypeError, ValueError) as exc:
+    # STRICT, and floor 1: `type(...) is int` so a float is not silently truncated, and a
+    # budget of 0 is REFUSED rather than clamped, because "probe nothing" is precisely the
+    # pre-#12037 mode — reachable today by a typo like `--max-job-probes -1` — and a silent
+    # switch back to the defect is the one thing this tool must not offer.
+    if type(max_job_probes) is not int or max_job_probes < 1:
         raise MeasureError(
-            f"max_job_probes must be an integer, got {max_job_probes!r}"
-        ) from exc
+            f"max_job_probes must be an integer >= 1, got {max_job_probes!r}"
+        )
+    probes = max_job_probes
     running, running_truncated = read_runs(repo, "in_progress", max_pages)
     # ⛔ THE IN-PROGRESS LEG IS PROBED AT JOB LEVEL, NOT TRUSTED FROM `status` (#12037).
     # `pr_running` is a census of EXECUTING work — every clause keyed on it treats it as
@@ -1862,6 +1878,9 @@ def read_health(
         max_pr_wait_seconds=max_pr_wait_seconds,
         pending=_project(pending) + _project(requested),
         pending_truncated=pending_truncated or requested_truncated,
+        # The FACT, not an inference from the answers (see the clause in `classify_queue`).
+        # Non-empty `probed` means the budget was spent on at least one run.
+        probe_attempted=bool(probed),
     )
 
 

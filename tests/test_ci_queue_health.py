@@ -2511,7 +2511,7 @@ def test_the_probe_budget_is_bounded_and_spent_oldest_first(monkeypatch):
 
 
 def test_a_capped_probe_never_subtracts_a_run(monkeypatch):
-    """Hitting the budget degrades DETECTION, never the safety property."""
+    """Hitting the budget degrades DETECTION; only a READ answer may subtract."""
     monkeys = [
         {"id": 7, "name": "python-ci", "event": "pull_request",
          "created_at": "2026-10-19T03:00:00Z"},
@@ -2526,16 +2526,16 @@ def test_a_capped_probe_never_subtracts_a_run(monkeypatch):
     )
     monkeypatch.setattr(Q, "read_run_live_job", lambda repo, rid, attempt=None: False)
 
-    # Budget 0 = probe nothing: the run keeps has_live_job=None and still counts.
-    health = Q.read_health("o/r", NOW, max_job_probes=0)
-    assert health.pr_running == 1
-    assert health.pr_running_excluded == ()
-    assert health.pr_running_unmeasured == 1
-
     # Budget 1 = probe it, and only then may it be subtracted.
     health = Q.read_health("o/r", NOW, max_job_probes=1)
     assert health.pr_running == 0
     assert health.pr_running_excluded == (7,)
+    assert health.pr_running_unmeasured == 0
+
+    # A budget of 0 is REFUSED, not clamped: "probe nothing" is the pre-#12037 mode, and a
+    # silent switch back to the defect is the one thing this tool must not offer.
+    with pytest.raises(Q.MeasureError):
+        Q.read_health("o/r", NOW, max_job_probes=0)
 
 
 def test_the_reason_line_does_not_report_an_exclusion_that_did_not_happen():
@@ -2556,8 +2556,11 @@ def test_the_audit_trail_records_the_filter_param_because_it_is_load_bearing():
     """A guard on the parameter VALUE, not just its presence (review finding, round 1).
 
     `filter=all` returns old executions, so a fresh attempt-2 would be read through its
-    completed attempt-1 jobs and answered `False`. The source must therefore keep
-    `filter=latest`, and this pin fails if someone switches it to `all` or drops it.
+    completed attempt-1 jobs rather than through the empty list that means "nothing started".
+    (With the `run_attempt` proof in place those rows now ABSTAIN instead of answering
+    `False`, so `all` is no longer the destructive direction — but it still destroys the
+    empty-list signal and makes every re-run abstain.) The source must keep `filter=latest`,
+    and this pin fails if someone switches it to `all` or drops it.
     """
     import inspect
 
@@ -2703,19 +2706,19 @@ def test_a_census_of_only_unmeasured_runs_cannot_certify_health():
     """
     queued = [run(1, "python-ci", event="pull_request", age_seconds=1000)]
 
-    within_budget = classify(queued, in_progress=_frozen(8, probed=8))
+    within_budget = classify(queued, in_progress=_frozen(8, probed=8), probe_attempted=True)
     assert within_budget.pr_running == 0
     assert within_budget.verdict == Q.PR_STARVED
     assert within_budget.congests_pr is True
 
-    over_budget = classify(queued, in_progress=_frozen(9, probed=8))
+    over_budget = classify(queued, in_progress=_frozen(9, probed=8), probe_attempted=True)
     assert over_budget.pr_running == 1
     assert over_budget.pr_running_unmeasured == 1
     assert over_budget.verdict == Q.PR_UNWITNESSED, "not OK — nothing was proved executing"
     assert over_budget.congests_pr is None, "a destructive caller must not read this as clear"
     assert any("UNMEASURED" in r for r in over_budget.reasons)
 
-    worse = classify(queued, in_progress=_frozen(12, probed=8))
+    worse = classify(queued, in_progress=_frozen(12, probed=8), probe_attempted=True)
     assert worse.pr_running == worse.pr_running_unmeasured == 4
     assert worse.verdict == Q.PR_UNWITNESSED
 
@@ -2747,12 +2750,22 @@ def test_a_reading_where_nothing_was_probed_keeps_the_pre_fix_contract():
     no reading of the defect asks for. If NOTHING in the reading was measured, this is the
     pre-#12037 mode and it behaves as it always did.
     """
-    queued = [run(1, "python-ci", event="pull_request", age_seconds=6000)]
+    # A wait INSIDE the 5400 s budget, so `OK` is reachable and the degradation clause is the
+    # only thing that could move it. (An earlier version used 6000 s and asserted
+    # PR-BACKLOGGED — a verdict that never reaches the clause, so the test stayed green under
+    # the very mutation it exists to catch.)
+    queued = [run(1, "python-ci", event="pull_request", age_seconds=1000)]
     never_probed = [run(2, "Python CI", event="pull_request", age_seconds=30)]  # all None
     health = classify(queued, in_progress=never_probed)
     assert health.pr_running == 1
     assert health.pr_running_unmeasured == 1
-    assert health.verdict == Q.PR_BACKLOGGED, "legacy callers keep the old reading"
+    assert health.verdict == Q.OK, "legacy callers keep the old reading"
+
+    # ... and the SAME reading, declared as having probed, must NOT be `OK`: the census it
+    # rests on was never measured. This is the pair that makes the scope a real decision.
+    attempted = classify(queued, in_progress=never_probed, probe_attempted=True)
+    assert attempted.verdict == Q.PR_UNWITNESSED
+    assert attempted.congests_pr is None
 
 
 def test_read_health_WIRES_the_run_attempt_into_the_probe(monkeypatch):
@@ -2791,7 +2804,12 @@ def test_an_invalid_probe_budget_is_a_measured_error_not_a_crash(monkeypatch):
     no state line — the failure the budget's own rationale exists to prevent.
     """
     monkeypatch.setattr(Q, "read_runs", lambda repo, status, max_pages=5: ([], False))
-    for bad in (None, "eight", object()):
+    # `"eight"` and `object()` must not crash; `2.9` must not be SILENTLY TRUNCATED to 2
+    # probes (`int(2.9)` succeeds, which is how a float budget used to pass unnoticed);
+    # `True` is an `int` to `isinstance` and would become a budget of 1; and any budget
+    # below 1 — `0` and negatives alike — is the pre-#12037 mode, which is REFUSED rather
+    # than clamped, so a typo cannot silently switch the defect back on.
+    for bad in (None, "eight", object(), 2.9, True, 0, -1):
         with pytest.raises(Q.MeasureError) as exc:
             Q.read_health("o/r", NOW, max_job_probes=bad)
         assert "max_job_probes" in str(exc.value)
@@ -2803,8 +2821,69 @@ def test_a_bool_is_not_accepted_as_an_attempt_or_a_job_count(monkeypatch):
     monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None, p=payload: p)
     assert Q.read_run_live_job("o/r", 1, attempt=1) is None, "a bool must not match attempt 1"
 
-    payload = {"total_count": True, "jobs": [{"status": "completed", "run_attempt": 1}]}
+    payload = {"total_count": True,
+               "jobs": [{"status": "completed", "run_attempt": 1}] * Q.PER_PAGE}
     monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None, p=payload: p)
-    # A bool `total_count` is not a usable count; the short page still settles it, so the
-    # answer comes from the page-length signal instead of a `true == 1` coincidence.
-    assert Q.read_run_live_job("o/r", 1, attempt=1) is False
+    # ⛔ A FULL page is what makes this discriminating: on a 1-job page BOTH branches answer
+    # `False` (`1 <= 1` and `1 < 100`), so the assertion cannot tell `type(total) is int` from
+    # `isinstance(total, int)` — that weaker form of this test survived the mutant. With
+    # `isinstance`, a JSON `true` counts as 1, which is below a full page, so it would return
+    # `False` — "proved idle" on a payload that proves nothing.
+    assert Q.read_run_live_job("o/r", 1, attempt=1) is None, (
+        "a bool count is not a usable count, and a FULL page is not provably complete"
+    )
+
+
+def test_read_health_where_EVERY_probe_times_out_is_not_OK(monkeypatch):
+    """⭐ ROUND-4 P1: the degradation was inferred from the ANSWERS, so all-timeout was OK.
+
+    `probe_attempted` used to be `any(run.has_live_job is not None ...)` — "some probe
+    returned True or False". When every probe ABSTAINS (the 15 s bound expires, the payload is
+    unreadable, an empty jobs list, an attempt mismatch) nothing is measured, that expression
+    read `False`, and the clause could not fire. The reading then came out byte-identical to
+    the pre-#12037 output the PR exists to remove — `OK` with `congests_pr is False` — which
+    authorises `ci_check_repair`'s cancel-then-rerun. It is also the LIKELIEST state under
+    load, because load is exactly what makes the probes time out.
+
+    The fact is now supplied by the only caller that knows it: `read_health` spent the budget.
+    """
+    frozen = [
+        {"id": 9000 + i, "name": "ai-review-gate", "event": "pull_request_target",
+         "created_at": NOW - timedelta(seconds=7 * 86400)}
+        for i in range(3)
+    ]
+    monkeypatch.setattr(
+        Q, "read_runs",
+        lambda repo, status, max_pages=5: (frozen if status == "in_progress" else [], False),
+    )
+    monkeypatch.setattr(Q, "read_run_live_job", lambda repo, rid, attempt=None: None)
+
+    health = Q.read_health("o/r", NOW, max_job_probes=8)
+
+    assert health.pr_running == 3, "an unmeasured run is counted as executing (fail-closed)"
+    assert health.pr_running_unmeasured == 3
+    assert health.verdict == Q.PR_UNWITNESSED, (
+        "a census made entirely of abstained probes is not a measurement"
+    )
+    assert health.congests_pr is None, "no destructive authorisation may rest on it"
+
+
+def test_a_legacy_caller_and_an_abstained_probe_are_DIFFERENT():
+    """The scope of the pure-function contract: `probe_attempted` defaults to False.
+
+    `classify_queue` is documented as pure and its reading for a caller that never probes must
+    be unchanged, which is why the flag is a PARAMETER rather than a proof of "nothing was
+    measured". Same inputs, two answers, one declared difference.
+    """
+    queued = [run(1, "python-ci", event="pull_request", age_seconds=1000)]
+    unmeasured = [run(2, "Python CI", event="pull_request", age_seconds=30)]
+
+    legacy = classify(queued, in_progress=unmeasured)
+    modern = classify(queued, in_progress=unmeasured, probe_attempted=True)
+
+    assert (legacy.pr_running, legacy.pr_running_unmeasured) == (
+        modern.pr_running, modern.pr_running_unmeasured
+    ), "the flag must not alter the census, only what the verdict may CLAIM"
+    assert legacy.verdict == Q.OK
+    assert modern.verdict == Q.PR_UNWITNESSED
+    assert legacy.congests_pr is False and modern.congests_pr is None
