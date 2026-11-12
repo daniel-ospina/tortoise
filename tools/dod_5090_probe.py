@@ -1122,13 +1122,16 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         CENSUS_EXEMPT,
         "`tortoise/api.py::_verify_record_vector_width` — a VERIFIER, not a producer: it reads "
         "the record's declared `embedding_width` and the width's own vector and asks the seam "
-        "whether the declaration is truthful (`#11835` review round 9, P1). The instrument's "
-        "matches are its PROSE — the DOCSTRING reproducing the measured `_emit(...)` calls, and "
-        "the TWO BODY COMMENTS that record the later measured cases (a non-numeric "
-        "`embedding` and the fold storing the raw text); a lane that reworded only the "
-        "docstring is still in the population (measured). `_EMBED_WRITE` reads raw source, so "
-        "prose QUOTING the shape matches, as `tortoise.projection::_prewipe_synthetic_write_scope`'s "
-        "does. It issues no write at all (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`)"),
+        "whether the declaration is truthful (`#11835` review round 9, P1). ⛔ IT DOES CONTAIN ONE "
+        "WRITE — the `#11996` round-14 materialisation writes an envelope-carried one-shot "
+        "iterable back into the journal payload (`payload[\"embedding\"] = seam_values`, "
+        "`api.py:843`), which is the CONTAINER-KEY shape `#11274` widened this instrument for. "
+        "That write lands in no graph and names no label, so `NO_LIVE_VECTOR` still holds; the "
+        "earlier wording (\"its matches are its PROSE … issues no write at all\") is now false "
+        "and is corrected here rather than left to mislead the next reader. The OTHER matches "
+        "are prose — the DOCSTRING reproducing the measured `_emit(...)` calls and the body "
+        "comments recording later measured cases — because `_EMBED_WRITE` reads raw source, as "
+        "it does for `tortoise.projection::_prewipe_synthetic_write_scope`'s"),
     "tortoise.api::_int_is_float_exact": (
         CENSUS_EXEMPT,
         "`tortoise/api.py::_int_is_float_exact` — a pure PREDICATE (`float(value) == value`, "
