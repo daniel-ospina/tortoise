@@ -758,7 +758,6 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     positive traversal): the negated pattern is a production cost, and a
     handful of nodes is the only place it is affordable.
     """
-    from tortoise.dream import TRIVIAL_STAMP_PREDICATE
     _chain(sdk, 3)
     _islands(sdk, 2)
     live = _claim(sdk, "edged only to a draft")

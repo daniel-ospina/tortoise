@@ -145,20 +145,26 @@ EMBEDDED_LATENCY_BUDGET_S = 0.5
 # not by text, and `tests/test_11823_propagation_cap_signal.py`
 # (`test_untested_operator_less_population_matches_trivial_stamp`) is what keeps
 # them equal. ⛔ That test builds ITS query FROM this constant (#12138 §6), so a
-# drift in the status VOCABULARY or in the `IMPL|NAND` alternation reddens it
-# (measured: dropping the status clause 2→3, dropping the negated-edge term
-# 2→6; before #12138 it compared against a third hand-copied literal and could
-# not see this constant move at all).
+# drift in the status VOCABULARY or in the `IMPL|NAND` alternation reddens it —
+# measured on this fixture, whose true count is 2: dropping the status clause
+# 2→3, narrowing the alternation to `IMPL` 2→4, and un-negating the edge term
+# 2→6 (removing that term entirely 2→8). Before #12138 the test compared
+# against a third hand-copied literal and could not see this constant move at
+# all.
 # Two of this constant's clauses are NOT observable on that fixture, measured:
 # every Point there carries an explicit status (so the `status IS NULL` arm is
 # invisible — and it is load-bearing, since it is what keeps a status-absent
-# Point in BOTH populations), and every operator Point is edged (so the
-# `is_operator` conjunct is indistinguishable from `NOT (n)-[:IMPL|NAND]-()`).
-# The remedy for the first arm is a node of the newly-excluded status in the §6
-# fixture; an EDGE-LESS operator (`create_point(..., is_operator=True)` builds
-# one where `create_operator` always wires an edge) is pinned only in the
-# drop-claims direction, by the passes that must trivially stamp an isolated
-# claim.
+# Point in BOTH populations; the fix is a status-ABSENT node here, NOT a node of
+# some other status, which cannot tell the two spellings apart), and every
+# operator Point is edged (so the `is_operator` conjunct is indistinguishable
+# from `NOT (n)-[:IMPL|NAND]-()`). An EDGE-LESS operator
+# (`create_point(..., is_operator=True)` builds one where `create_operator`
+# always wires an edge) is pinned only in the drop-claims direction, by the
+# passes that must trivially stamp an isolated claim.
+# ⛔ And one drift class has NO pin anywhere: an ADDITIVE widening of the
+# excluded status vocabulary — measured: widening the clause to exclude
+# `'archived'` as well leaves that test GREEN. Whoever widens the vocabulary
+# must add a node of the newly-excluded status to this fixture.
 # The block keeps deriving its own number because the negated pattern is a
 # production cost and that test's handful of nodes is the only place it is
 # affordable.

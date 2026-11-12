@@ -33807,8 +33807,10 @@ class TortoiseSDK:
         # NARROWER (or label-blind) denominator lets the numerator exceed it,
         # so `no_belief` goes negative or `belief_coverage_pct` exceeds 1. A
         # WIDER denominator keeps BOTH in range (`belief_present` fixed over a
-        # larger denominator ⇒ the ratio falls and `no_belief` rises; measured:
-        # denominator +4 ⇒ pct 0.2, no_belief +4), so the ranges cannot see it.
+        # larger denominator ⇒ the ratio falls and `no_belief` rises; measured on
+        # the pinned fixture, `belief_present=1`: a denominator 4→5 moves `pct`
+        # 0.25→0.2 and `no_belief` 3→4 — absolute values, not a delta), so the
+        # ranges cannot see it.
         # What reddens on an inflated denominator is the counts pinned against
         # independent queries in `tests/test_11823_propagation_cap_signal.py`
         # (`test_counts_match_an_independent_query`), and, from a different
