@@ -340,11 +340,18 @@ RETIRED_HOST_ALLOWLIST = {
 #:   website/apps/dashboard/src/harnesses.js                 1  DOCS_ORIGIN
 #:   website/apps/dashboard/src/overviewEmptyAction.js       1  ONBOARDING_FUNNEL_HREF (app origin)
 #:   website/apps/dashboard/src/billingCta.js                1  COMPARE_PLANS_URL
-#: None is a broken link (every one still 301s onto the canonical host); they are
-#: a SCOPE deferral, and ALL FOURTEEN files listed above ARE in
-#: `RETIRED_HOST_ALLOWLIST` with the same kind of reason — recording a count is not
-#: blessing the literal, it is what makes the deferral visible and what forces a
-#: sweep to update the record in the same commit.
+#: None of the THIRTEEN deferrals is a broken link (every one still 301s onto the
+#: canonical host); they are a SCOPE deferral, and all thirteen files they name ARE
+#: in `RETIRED_HOST_ALLOWLIST` with the same kind of reason — recording a count is
+#: not blessing the literal, it is what makes the deferral visible and what forces
+#: a sweep to update the record in the same commit.
+#: ⛔ The FOURTEENTH file in the list above is NOT a deferral and is NOT in the map:
+#: `website/functions/blog/_lib.ts` sits at 0 because #11767 repointed its three
+#: `navHtml` hrefs to the terminal forms and DELETED the row (#11764 closed without
+#: doing it). It stays in `RUNTIME_FILES` on purpose — with no row its expected count
+#: is 0, so a literal coming back REDS this guard instead of leaving the surface.
+#: An earlier revision of this paragraph said "ALL FOURTEEN … ARE in
+#: `RETIRED_HOST_ALLOWLIST`", which stopped being true when that row was removed.
 #:
 #: ⛔ An earlier revision of this paragraph said the OPPOSITE — that they were
 #: "deliberately NOT added", because blessing them "would turn a deferral into a

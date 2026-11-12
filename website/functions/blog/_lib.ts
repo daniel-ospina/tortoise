@@ -1339,7 +1339,7 @@ export function navHtml(active: string): string {
 <div class="links">
   <a href="https://premiselabs.co/tortoise/docs" >Docs</a>
   <a href="/blog" class="${active === "blog" ? "active" : ""}">Blog</a>
-  <a href="https://premiselabs.co/tortoise#pricing">Pricing</a>
+  <a href="https://premiselabs.co/tortoise#pricing-section">Pricing</a>
   <a href="https://app.premiselabs.co/auth" class="cta">Log in</a>
 </div>
 </nav>`;
