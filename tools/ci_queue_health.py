@@ -699,7 +699,8 @@ class QueueHealth:
     #: `total_count` above the page, a PRESENT-but-not-an-int count, and no count on a full
     #: page — named only because that is the growth which falsified the last numerals. (It is
     #: NOT the count in `pr_running_census_unwitnessed`'s comment, which is about something
-    #: else; this sentence used to say "the one count below" and pointed a reader there.) Layers are not routes: three layers is stable, a route count is not. The
+    #: else; this sentence used to say "the one count below" and pointed a reader there.)
+    #: Layers are not routes: three layers is stable, a route count is not. The
     #: callee's routes are in `read_run_live_job`'s Returns block (and the caller's two
     #: layers — the settle gate and the budget split — are in `read_health`); re-derive
     #: from those, never from here. (`has_live_job`'s bullet above spans all three layers and

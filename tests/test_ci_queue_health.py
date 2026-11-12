@@ -2388,13 +2388,20 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     #: QUIET for 300 s" redded. So the tuple carries the stillness PHRASING A CORRECTED EDIT MAY
     #: USE — not "the vocabulary these docs use", which was measured false and is the wrong
     #: test: bare `quiet` and `stops moving` occur in these files with OTHER referents (a quiet
-    #: repo, a quiet queue, a count that stops moving), so they are `… FOR` here, on the same
-    #: reasoning that rejects bare `still` below.
+    #: repo, a quiet queue, a count that stops moving), so `quiet` is `quiet for` and
+    #: `stops moving` is `stopped moving` here, on the same reasoning that rejects bare `still`
+    #: below.
     #: `still for` rather than bare `still`: "still counted" is ordinary prose in THIS module
     #: (an abstained run is "still counted as executing"), so the loose token would disarm real
     #: hits — measured.
+    #: ⛔ NO `settle window` TOKEN (review P1, round 11). It was added to admit the prose "now
+    #: that we are inside the settle window", and admitting it is a FALSE PASS: this tuple is
+    #: consumed only to SUPPRESS a hit, and in this module's own vocabulary the settle window is
+    #: the 300 s during which stillness is NOT yet established (`_settled_still`) — so "inside
+    #: the settle window" is the NEGATION of the proof, and a gate noun rather than a stillness
+    #: predicate. Measured: a one-half claim qualified with it passed the guard.
     SECOND_HALF = ("updated_at", "job_settle_seconds", "still for", "motionless",
-                   "quiet for", "stopped moving", "has been still", "settle window")
+                   "quiet for", "stopped moving", "has been still")
 
     def hits(hay: str, needle: str) -> bool:
         """Does ``needle`` occur where the second half is NOT also stated nearby?
@@ -2609,15 +2616,20 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         "exclusion proof hold), so none of them is executing anything",
         # ⛔ THESE FOUR PIN THE WIDENED VOCABULARY ITSELF. Each embeds a needle that exists
         # in `retracted` AND is disarmed ONLY by one of the tokens added for it, so deleting
-        # that token — a change that can only WEAKEN detection, and so is invisible in the
-        # dangerous direction — reds here instead of passing silently. Verified by deleting
-        # each token in turn.
+        # that token reds here instead of passing silently. ⛔ THE RISK DIRECTION IS THE
+        # OTHER WAY FROM WHAT IT LOOKS: this tuple only ever SUPPRESSES a hit, so DELETING a
+        # token makes the guard STRICTER and reds loudly (noise, not silence); the dangerous
+        # edit is ADDING vocabulary, which weakens detection and which NO assertion can see.
+        # This leg keeps a pin from being dropped silently — it does not, and cannot, prove
+        # the vocabulary is not over-wide. That is why the `settle window` token was a P1, and
+        # why every future addition must be argued from `_settled_still`, never from the prose
+        # it is meant to admit.
         "False is a PROOF (every job of the run is completed, so it is executing nothing) "
         "because its stamp is motionless",
         "now READ: every job is completed, so none of them is executing anything, and the run "
         "has been quiet for 300 s",
         "the runs read out because EVERY job of them was completed (a proof of "
-        "non-execution), and how many, now that we are inside the settle window",
+        "non-execution), and how many, now that its stamp has been still for 300 s",
         "all-jobs-completed is the PROOF that EXCLUDES a run from pr_running (see the "
         "excluded sentence), so it can never contribute to an unmeasured census once its "
         "stamp has stopped moving",
@@ -2634,8 +2646,8 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
                 disarming.append((phrase, needle_phrase))
     # ⛔ THE DISARM PATH MUST BE EXERCISED, not merely described (round 10). Every assertion
     # above passes trivially for an entry that contains no needle span, so without this a
-    # future edit could delete the ONE entry that makes `hits()`'s context check
-    # load-bearing and the whole suite would stay green (measured).
+    # future edit could delete the entries that make `hits()`'s context check load-bearing and
+    # the whole suite would stay green (measured when there was only one to delete).
     assert len({entry for entry, _ in disarming}) >= 5, (
         f"hits()'s disarm path is exercised by only "
         f"{len({entry for entry, _ in disarming})} distinct `correct` entries — it "
@@ -2731,6 +2743,22 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
                 f"a RETRACTED COUNT is back in the {name}: {phrase!r} — no count is given "
                 f"anywhere any more, so this check does not use the stillness discriminator"
             )
+    # ⛔ AND THIS LEG NEEDS A DETECTION-DIRECTION PROOF OF ITS OWN (review P2, round 11): the
+    # `exercised` assertion above covers `retracted` only, so a typo in one of these needles was
+    # SILENT (measured: changing the first one's em dash to a hyphen left the suite green). Each
+    # is asserted to occur in the sentence that actually shipped, so a needle that stopped
+    # matching its own target reds.
+    for phrase, shipped in (
+        ("disproved — three causes, one bucket",
+         "disproved — three causes, one bucket: the jobs could NOT be read"),
+        ("disproved — FOUR causes, one bucket",
+         "disproved — FOUR causes, one bucket"),
+        ("disproved. FOUR causes, ONE bucket",
+         "disproved. FOUR causes, ONE bucket — and the causes span three layers"),
+    ):
+        assert flat(phrase) in flat(shipped), (
+            f"this count needle no longer matches the sentence it exists to catch: {phrase!r}"
+        )
 
     # ⛔ AND THE DELETION CLASS NEEDS A POSITIVE LEG (review P2). A blocklist cannot see a site
     # that went SILENT, and `pre_fix` only covers sentences that shipped: the ops doc's
@@ -2739,23 +2767,27 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # the clause is PRESENT.
     must_state = [
         # the ops doc's definition of a frozen run
-        "in_progress` with every job `completed` and its own `updated_at` motionless for",
+        ("doc", "in_progress` with every job `completed` and its own `updated_at` motionless for"),
         # QueuedRun.has_live_job's `False` bullet
-        "the list is PROVABLY COMPLETE, AND the run's own `updated_at` has",
+        ("module", "the list is PROVABLY COMPLETE, AND the run's own `updated_at` has"),
         # read_run_live_job's summary sentence
-        "COMPLETE**, and whose own `updated_at` has been STILL",
+        ("module", "COMPLETE**, and whose own `updated_at` has been STILL"),
         # ⛔ THE PROBE QUALIFIER, which is this PR's own correction to the ops doc: a frozen run
         # is excluded only once it has been PROBED. Reverting just that hunk restores the
         # "can never make the census unmeasured" claim this guard calls FALSE, and NO needle can
         # catch it — the claim's own sentence carries `updated_at`, so `hits()` self-disarms it
         # (measured: doc/h01 reverted -> GREEN before this entry existed).
-        "once it has been PROBED and its jobs read back all-completed",
+        ("doc", "once it has been PROBED and its jobs read back all-completed"),
     ]
-    for phrase in must_state:
+    # ⛔ PER-FILE, NOT "SOMEWHERE" (review NIT, round 11). The comments above name a SITE, so
+    # a presence check over all four surfaces passes when the named site loses the clause and
+    # any OTHER file happens to carry the same phrase — the exact silent-deletion shape this
+    # leg exists to catch. Each entry declares the surface it belongs to.
+    for where, phrase in must_state:
         needle = flat(phrase)
-        assert any(needle in hay for hay in flats.values()), (
-            f"a MANDATORY clause went SILENT — this clause must be PRESENT somewhere in the "
-            f"scanned files, and it is not: {phrase!r}"
+        assert needle in flats[where], (
+            f"a MANDATORY clause went SILENT in the {where} — it must be PRESENT there, and "
+            f"it is not: {phrase!r}"
         )
 
     for phrase in pre_fix:
