@@ -5211,8 +5211,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "pack_registry"),
         # ...and the THIRD copy of the same sentence, in the test-design table, where
         # the range is a bare continuation (`:N-N`) and so is invisible to every
-        # sweep that reads a source-qualified cite. Unpinned, it outlived both of its
-        # siblings; the phrase is the document's own words, not a markdown line.
+        # sweep that reads a source-qualified cite. Unpinned, it went stale for the
+        # SAME stretch as its `00-plan.md` sibling — only the pinned `00-align.md`
+        # copy was re-derived at `4ed2eb028d` (measured: at that commit the block sat
+        # at 2439 and both unpinned documents still read 2415-2429) — and being a bare
+        # continuation, no source-qualified sweep could see it either. The phrase is
+        # the document's own words, not a markdown line.
         ("03-test-design.md", "`hierarchies` (validated only", (
             ("2478", "# Validate hierarchies"),
             ("2492", 'errors.append("hierarchies: entry missing \'type\' field")'),
