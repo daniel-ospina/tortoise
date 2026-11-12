@@ -45,11 +45,12 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
        node types instead and each enumeration silently missed a shape the old
        matcher had caught (first a callee, then a bare decorator, then an aliased
        import) — a token cannot be in the wrong position.
-    2. every string literal whose VALUE contains the name, unless that string is
-       prose — which covers the name resolved dynamically from a string
-       (``getattr(m, "propagate_shock")``, ``globals()["propagate_shock"]``,
-       ``eval("propagate_shock(1)")``). The value is read from the AST, never from
-       the literal's source text: implicit concatenation
+    2. every ``str`` **or** ``bytes`` literal whose VALUE contains the name,
+       unless that string is prose — which covers the name resolved dynamically
+       from a string (``getattr(m, "propagate_shock")``,
+       ``globals()["propagate_shock"]``, ``eval("propagate_shock(1)")``, and
+       ``getattr(m, b"propagate_shock".decode())``). The value is read from the
+       AST, never from the literal's source text: implicit concatenation
        (``"propagate_" "shock"``), an escape (``"propagate_shoc\\x6b"``) and the
        same split across lines all fold to one ``ast.Constant`` whose value is the
        name, while no single TOKEN holds it. This over-includes a non-prose string
@@ -84,7 +85,10 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
     """
     if path.suffix not in (".py", ".pyi"):
         try:
-            text = path.read_text(encoding="utf-8")
+            # ⛔ BYTES, not `read_text`: text mode applies UNIVERSAL NEWLINES (a
+            # lone `\r` becomes `\n`), so the file's own line breaks are gone
+            # before any split can honour grep's numbering.
+            text = path.read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError):
             return None
         # No parser to ask, so the word boundary is the whole rule: it is a word
@@ -92,9 +96,14 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
         # place. `re.split` on the parser's own line endings keeps the returned
         # line numbers in the coordinate space `grep -rn` reports.
         word = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])")
+        # Split on `\n` ALONE, because the caller's line number comes from
+        # `grep -rn`, and grep counts only `\n`: on a file carrying a lone `\r`
+        # (old-Mac line endings) any other split numbers the hit one line too
+        # high, and the audit then reports the file as prose. The reference space
+        # here is grep's, not a parser's.
         return frozenset(
             i
-            for i, line in enumerate(re.split(r"\r\n|\r|\n", text), start=1)
+            for i, line in enumerate(text.split("\n"), start=1)
             if word.search(line)
         )
     try:
@@ -105,56 +114,37 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
             IndentationError):
         return None
 
-    # ⛔ ONE COORDINATE SPACE. `ast` reports `col_offset`/`end_col_offset` as
-    # UTF-8 BYTE offsets (CPython ASDL: "col_offset is the byte offset in the utf8
-    # string the parser uses"), while `tokenize.generate_tokens` over a `str`
-    # reports CHARACTER columns. Comparing the two directly makes the prose box's
-    # right edge drift right by one column per extra UTF-8 byte, so a docstring
-    # holding enough non-ASCII swallows a literal that really lies after its
-    # closing quotes — a live `getattr(m, "...")` on the terminator line read as
-    # prose, i.e. the same fail-open the box exists to close. The bytes are
-    # converted to characters here, at the only place that reads AST columns.
-    # `by.splitlines()` is avoided deliberately: it also splits on `\v`, `\f`,
-    # `\x85`, `\u2028`/`\u2029`, which the parser does NOT treat as line ends, so
-    # indices could shift. Split on exactly the parser's own line endings.
-    src_lines = re.split(r"\r\n|\r|\n", src)
-
-    def _char_col(lineno: int, byte_col: int) -> int | None:
-        """The CHARACTER column of a UTF-8 ``byte_col`` on ``lineno``.
-
-        AST offsets always land on a character boundary; ``errors="ignore"`` only
-        keeps the conversion total (it can never drop a whole character).
-
-        ``None`` means the line is outside the parser's own line model, so the
-        column cannot be placed at all. A box that cannot be placed is DROPPED by
-        the caller, never built in the byte unit: dropping an exemption makes the
-        prose read as CODE (the loud direction), while returning ``byte_col`` here
-        would restore the exact fail-open this conversion removes.
-        """
-        if not 1 <= lineno <= len(src_lines):
-            return None
-        return len(src_lines[lineno - 1].encode("utf-8")[:byte_col].decode("utf-8", "ignore"))
-
-    # Prose strings: any statement whose whole value is a string literal. Kept as
-    # an exact (line, column) BOX, not a line range.
-    # ⛔ LINE-granularity is a fail-open: `"""Doc."""; x = getattr(m,
-    # "propagate_shock")` puts a live string-resolved dependency on a line the
-    # docstring owns, and a line test discards it — the audit then reports no
-    # dependency while one exists. Containment is therefore column-aware, so only
-    # a literal lying INSIDE the prose statement's box is prose; the string on the
-    # terminator line is code.
+    # ⛔ ONE COORDINATE SPACE, BY CONSTRUCTION — and NO conversion. Both boxes
+    # compared below (the prose statement's, and the mentioning constant's) come
+    # from `ast`, whose `col_offset`/`end_col_offset` are UTF-8 BYTE offsets
+    # (CPython ASDL: "col_offset is the byte offset in the utf8 string the parser
+    # uses"). Byte-vs-byte is unit-consistent and monotonic within a line, so
+    # containment is decided correctly for non-ASCII content with no converter in
+    # the middle. An earlier revision compared a TOKEN's character column against
+    # an AST byte column and needed one; the string branch now reads the tree, so
+    # that converter had become INERT (measured: removing it left every row green
+    # and every verdict identical over 100+ non-ASCII shapes). It is deleted
+    # rather than kept with a comment claiming work it no longer does — and the
+    # three em-dash rows that pinned it are gone for the same reason: a row that
+    # cannot fail is not a pin.
     prose_boxes: list[tuple[int, int, int, int]] = []
 
     def _box(node: ast.AST) -> tuple[int, int, int, int] | None:
-        """The (top, left, bottom, right) character box of an AST node."""
+        """The (top, left, bottom, right) box of an AST node, in AST columns."""
         right_line = getattr(node, "end_lineno", None) or node.lineno
         right_col = getattr(node, "end_col_offset", None)
-        left = _char_col(node.lineno, node.col_offset)
-        right = _char_col(right_line, right_col) if right_col is not None else 0
-        if left is None or right is None:
+        if right_col is None:
             return None
-        return (node.lineno, left, right_line, right)
+        return (node.lineno, node.col_offset, right_line, right_col)
 
+    # Prose strings: any statement whose whole value is a string literal, as an
+    # exact BOX rather than a line range.
+    # ⛔ LINE-granularity is a fail-open: `"""Doc."""; x = getattr(m,
+    # "propagate_shock")` puts a live string-resolved dependency on a line the
+    # docstring owns, and a line test discards it — the audit then reports no
+    # dependency while one exists. Containment is column-aware, so only a literal
+    # lying INSIDE the prose statement's box is prose; the string after the
+    # closing quotes is code.
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Expr)
@@ -174,22 +164,30 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
     lines: set[int] = set()
 
     # ⛔ THE STRING BRANCH READS THE LITERAL'S **VALUE**, NEVER ITS SOURCE TEXT.
-    # Matching the raw token text is a fail-open in three shapes whose source
-    # spelling differs from the value the runtime resolves: implicit
-    # concatenation `getattr(m, "propagate_" "shock")` (tokenize emits TWO STRING
-    # tokens, neither holding the name), an escape `"propagate_shoc\x6b"`, and the
-    # same concatenation split ACROSS lines. The AST holds the folded value in all
-    # three — `ast.Constant.value == "propagate_shock"` — so the check is asked of
+    # Matching the raw token text is a fail-open in shapes whose source spelling
+    # differs from the value the runtime resolves: implicit concatenation
+    # `getattr(m, "propagate_" "shock")` (tokenize emits TWO STRING tokens, neither
+    # holding the name), an escape `"propagate_shoc\x6b"`, and the same
+    # concatenation split ACROSS lines. The AST holds the folded value in all of
+    # them — `ast.Constant.value == "propagate_shock"` — so the check is asked of
     # the value, and the box that decides prose-vs-code is the CONSTANT's box (the
     # whole folded literal in the multi-line case), not a token's.
+    #
+    # ⛔ AND IT COVERS `bytes`, because a bytes literal reaches the same runtime
+    # name through `.decode()`: `getattr(m, b"propagate_shock".decode())`. A
+    # `str`-only test drops that, and the pre-fix matcher CAUGHT it (the token's
+    # source text holds the name) — so str-only would be a quieter guard than the
+    # one this change replaced, in exactly the direction it forbids.
     #
     # An f-string's literal parts need no special case under this rule: a
     # `JoinedStr` holds them as `ast.Constant` nodes, so they are seen here (3.12's
     # FSTRING_MIDDLE token type is a tokenizer detail, not a fact about the tree).
+    needle = name.encode("utf-8")
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))):
             continue
-        if name not in node.value:
+        value = node.value
+        if not (name in value if isinstance(value, str) else needle in value):
             continue
         box = _box(node)
         if box is None:
@@ -296,6 +294,11 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
             'value = getattr(m, "propagate_" "shock")(1)\n', {1}),
         "string_escape": ('value = getattr(m, "propagate_shoc\\x6b")(1)\n', {1}),
         "string_dunder_all_concat": ('__all__ = ["propagate_" "shock"]\n', {1}),
+        # ⛔ `bytes`: the same runtime name through `.decode()`. A str-only value
+        # test drops it and the pre-fix matcher caught it, so this row is the
+        # difference between a guard that gets louder and one that gets quieter.
+        "bytes_getattr": ('value = getattr(m, b"propagate_shock".decode())(1)\n', {1}),
+        "bytes_implicit_concat": ('value = getattr(m, b"propagate_" b"shock".decode())\n', {1}),
         "string_implicit_concat_multiline": (
             'value = getattr(\n    m,\n    "propagate_"\n    "shock",\n)(1)\n', {3, 4}),
         # ── multi-line callee: the name is NOT on `node.lineno` ──
@@ -321,9 +324,10 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
         # byte/char drift "where the box's right edge is tested", but their mention
         # sits on an INTERIOR line, so containment compares (4, col) <= (5, …) and
         # the columns never decide — both were green under every unit, including
-        # the pre-fix mutant. A row that cannot fail is not a pin, so they were
-        # dropped and this one stays for the plain regression it names. The unit
-        # itself is pinned by the `_non_ascii` rows below.
+        # A docstring whose columns never decide is not a unit pin. This row stays
+        # for the plain regression it names — a prose mention inside a non-ASCII
+        # module/class docstring is prose — and the `_non_ascii` rows above are
+        # gone for the same reason two earlier rows went: they could not fail.
         "class_docstring": ('class C:\n    """propagate_shock is deprecated."""\n', set()),
         "module_docstring": ('"""propagate_shock is deprecated."""\nvalue = 1\n', set()),
         # PEP 257's TOLERATED forms, which a "first statement of a def" rule misses:
@@ -342,24 +346,15 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
             'def f():\n    """Doc."""; x = getattr(m, "propagate_shock")\n', {2}),
         "docstring_then_plain_string_same_line": (
             'def f():\n    """Doc."""; y = "propagate_shock"\n', {2}),
-        # ⛔ The SAME two shapes with a NON-ASCII docstring. `ast` columns are
-        # UTF-8 bytes and `tokenize` columns are characters, so an ASCII-only row
-        # cannot see an off-by-N-bytes comparison: the prose box's right edge
-        # drifts right by one column per extra byte and swallows the literal that
-        # follows the closing quotes. 18 em dashes = 54 UTF-8 bytes but 18
-        # characters, i.e. a 36-column drift on one line — the pre-fix box ends at
-        # column 64 against a true end of 28, so the literal at column 45 is
-        # inside it. First fail-open measured at 17 em dashes (34 columns of
-        # drift); every row here is above that wedge.
-        "docstring_then_string_same_line_non_ascii": (
-            'def f():\n    """' + "\u2014" * 18 + '"""; x = getattr(m, "propagate_shock")\n', {2}),
-        "docstring_then_plain_string_same_line_non_ascii": (
-            'def f():\n    """' + "\u2014" * 18 + '"""; y = "propagate_shock"\n', {2}),
-        # ⛔ …and the same fail-open on a MULTI-line docstring, whose box is the one
-        # a single-line-only conversion never exercises: a regression that
-        # converted the columns only when the span's start and end share a line
-        # passes EVERY single-line row above and still reads this live dependency
-        # as prose (measured: `[]` against the correct `{3}`).
+        # Columns are AST BYTE offsets on both sides of the containment test, by
+        # construction, so non-ASCII content needs no separate unit row: an
+        # ASCII-only row decides the same thing. (Two such rows were deleted here
+        # after measuring that they could not fail — see the coordinate-space note
+        # in `_code_lines_naming`.)
+        # ⛔ A prose box that SPANS lines: the docstring starts on line 2 and ends
+        # on line 3, and the live dependency shares line 3. Collapsing the box to
+        # its start line reds this row (measured), while the single-line rows
+        # above cannot see that regression. The em dashes are incidental content.
         "multiline_non_ascii_docstring_then_string_same_line": (
             'def f():\n    """\u2014 the pass\n    ' + "\u2014" * 18
             + '"""; x = getattr(m, "propagate_shock")\n', {3}),
@@ -417,6 +412,14 @@ def test_a_non_python_file_is_read_as_code_not_as_prose(tmp_path):
 
     # ...and an UNREADABLE non-Python file is a degraded read, not a clean one.
     assert _code_lines_naming(tmp_path / "absent.sh", "propagate_shock") is None
+
+    # ⛔ LINE NUMBERS ARE GREP'S, not a parser's: `grep -rn` counts only `\n`, so a
+    # file carrying a lone `\r` must be numbered the same way. Splitting on `\r`
+    # too numbers the hit one line too high, the caller's grep line then misses it,
+    # and a file that names the helper is reported as prose.
+    cr = tmp_path / "mac.md"
+    cr.write_bytes(b"prose line 1\rline2: propagate_shock is imported by the hook\r")
+    assert _code_lines_naming(cr, "propagate_shock") == frozenset({1}), "grep numbers this line 1"
 
     # The word scan must not match a LONGER identifier that merely contains it.
     longer = tmp_path / "longer.md"
