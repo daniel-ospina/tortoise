@@ -751,7 +751,6 @@ NOT_BOUND_BY_A_PYTHON_VALUE: frozenset[str] = frozenset({
     "point.annotator_consistency",
     "point.annotator_directness",
     "point.annotator_precision",
-    "point.as_of",
     "point.assessor",
     "point.authored_by",
     "point.baseline_alpha",
@@ -904,9 +903,24 @@ def test_the_vocabulary_captures_every_column_the_migrations_declare():
     The closure test above derives "every" from `column_types()`, so on its own
     it cannot see a column of a type OUTSIDE `_DECLARED_TYPE_ALTERNATION` -- such
     a column would be skipped by the reader and therefore absent from both the
-    accounting and the unexplained set. This arm scans the `CREATE TABLE` bodies
-    with a deliberately DUMB reader (name + any first token) and requires every
-    column it finds to be one the vocabulary captured.
+    accounting and the unexplained set. This arm scans the SQL with a
+    deliberately DUMB reader (a name, then whatever token follows) and requires
+    the reader's answer to match what that scan says the LIVE schema holds.
+
+    Four shapes, all read with the same dimness: `CREATE TABLE … ( <col> <type> … )`,
+    `ADD COLUMN`, `ALTER COLUMN … TYPE`, and `DROP COLUMN`. ⚠️ Without the last
+    two the arm is blind to the ONLY ways a landed table changes shape: `ADD
+    COLUMN` is #2782's growth path, `ALTER COLUMN … TYPE` is #9264's reversal,
+    and `DROP COLUMN` is #11827's retirement of `public.point.as_of` — a column
+    the reader CORRECTLY no longer reports, and which a three-shape arm would
+    report as missing on a correct tree.
+
+    ⚠️ ORDERED BY POSITION IN THE MIGRATION TEXT, not grouped by shape, because
+    `20261027000001_record_semantic_id_key.sql` drops `node_identity.key_property`
+    and re-declares it in ONE `ALTER TABLE` (`GENERATED ALWAYS` cannot be altered
+    in place). The LAST event per `(table, column)` decides: a declaration must
+    be captured by the reader, and a retirement must be ABSENT from it — so a
+    drop the reader ignored reds here rather than passing silently.
     """
     # ⚠️ The directory is passed EXPLICITLY: the file half of this arm reads
     # `MIGRATIONS` and the type half would otherwise read `_migrations_dir()`, so
@@ -915,12 +929,6 @@ def test_the_vocabulary_captures_every_column_the_migrations_declare():
     # never opened) — #11075 review round 5.
     declared = rp.column_types(MIGRATIONS or None)
     loose = re.compile(r'^\s*"?([a-z_][a-z0-9_]*)"?\s+\S', re.M)
-    #: The two FORWARD shapes, read with the same deliberate dimness: a column
-    #: name, then whatever token follows. ⚠️ Without these the arm is blind to
-    #: the ONLY way a landed table gains (or re-types) a column — `ADD COLUMN` is
-    #: #2782's growth path and `ALTER COLUMN … TYPE` is #9264's reversal — so a
-    #: column of an unlisted type could join the schema with every test GREEN
-    #: (#11075 review round 2, measured with `int4range` / `citext`).
     token = (r"(double\s+precision|character\s+varying"
              r"|timestamp\s+(?:with|without)\s+time\s+zone|[a-z_][a-z0-9_]*)"
              r"(\[\])?")
@@ -929,14 +937,25 @@ def test_the_vocabulary_captures_every_column_the_migrations_declare():
         r'\s+' + token, re.I)
     retyped = re.compile(
         r'ALTER\s+COLUMN\s+"?([a-z_][a-z0-9_]*)"?\s+TYPE\s+' + token, re.I)
+    retired = re.compile(
+        r'DROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?"?([a-z_][a-z0-9_]*)"?', re.I)
     missed: list[str] = []
+    #: `(table, column) -> (position, kind, detail)` for the LAST shape event,
+    #: position being monotone across the whole migration ORDER (file index then
+    #: character offset, so an ADD after a DROP in one statement sorts later).
+    events: dict[tuple[str, str], tuple[tuple[int, int], str, str]] = {}
     #: `(table, column) -> type of the LAST `ALTER COLUMN … TYPE` over the WHOLE
     #: migration set. ⚠️ Hoisted out of the per-file loop on purpose: a landed
     #: migration is never edited, so a genuine SECOND retype always arrives in a
     #: NEW file — a per-file "last wins" reds on the earlier file's rewrite,
     #: against a reader that is right (#11075 review round 4, measured).
     rewrites: dict[tuple[str, str], str] = {}
-    for name in rp.RECORD_MIGRATIONS:
+
+    def note(table, column, position, kind, detail):
+        if (table, column) not in events or position >= events[(table, column)][0]:
+            events[(table, column)] = (position, kind, detail)
+
+    for index, name in enumerate(rp.RECORD_MIGRATIONS):
         path = MIGRATIONS / name
         if not path.exists():
             continue
@@ -948,8 +967,8 @@ def test_the_vocabulary_captures_every_column_the_migrations_declare():
                 column = found.group(1)
                 if column in _CONSTRAINT_LEADERS:
                     continue
-                if column not in declared.get(table, {}):
-                    missed.append(f"{table}.{column} ({name})")
+                note(table, column, (index, found.start()), "declared",
+                     f"{table}.{column} ({name})")
         # ⚠️ The dumb forward-shape reader, INDEPENDENT of `_ALTER_ADD_COLUMN_RE`:
         # inheriting the reader's own prefix regex would make this arm blind to
         # any spelling the reader misses — `ALTER TABLE ONLY public.point …`
@@ -968,24 +987,32 @@ def test_the_vocabulary_captures_every_column_the_migrations_declare():
                 type_token = re.sub(
                     r"\s+", " ", found.group(2).strip().lower()
                 ) + (found.group(3) or "")
-                if column not in declared.get(table, {}):
-                    missed.append(
-                        f"{table}.{column} (forward ADD COLUMN in {name}, "
-                        f"type {type_token!r} — the column is not captured "
-                        "at all)")
+                note(table, column, (index, found_alter.start() + found.start()),
+                     "declared",
+                     f"{table}.{column} (forward ADD COLUMN in {name}, "
+                     f"type {type_token!r} — the column is not captured at all)")
+            for found in retired.finditer(alter_body):
+                note(table, found.group(1),
+                     (index, found_alter.start() + found.start()),
+                     "retired",
+                     f"{table}.{found.group(1)} (RETIRED by DROP COLUMN in "
+                     f"{name}, but the reader still reports it)")
             for found in retyped.finditer(alter_body):
                 column = found.group(1)
                 type_token = re.sub(
                     r"\s+", " ", found.group(2).strip().lower()
                 ) + (found.group(3) or "")
-                if column not in declared.get(table, {}):
-                    missed.append(
-                        f"{table}.{column} (forward REWRITE in {name} to "
-                        f"{type_token!r} — the column is not captured at all)")
-                    continue
+                note(table, column, (index, found_alter.start() + found.start()),
+                     "declared",
+                     f"{table}.{column} (forward REWRITE in {name} to "
+                     f"{type_token!r} — the column is not captured at all)")
                 # LAST rewrite (over the WHOLE set) wins, matching
                 # `_declared_types_for_dir`'s documented rule.
                 rewrites[(table, column)] = type_token
+    for (table, column), (_position, kind, detail) in events.items():
+        present = column in declared.get(table, {})
+        if (kind == "declared" and not present) or (kind == "retired" and present):
+            missed.append(detail)
     for (table, column), type_token in rewrites.items():
         if table in declared and column in declared[table] and (
                 declared[table][column] != type_token):
@@ -998,7 +1025,6 @@ def test_the_vocabulary_captures_every_column_the_migrations_declare():
         "`_DECLARED_TYPE_ALTERNATION`, so they are outside every pin -- widen "
         "the vocabulary:\n  " + "\n  ".join(missed)
     )
-
 
 def test_comment_stripping_is_what_keeps_a_DOWN_direction_out_of_the_read():
     """The stripper is load-bearing, and this is the input that proves it.
