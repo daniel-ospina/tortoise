@@ -126,6 +126,7 @@ uv run python tools/surface-guard.py
 
 # 4. Assert the archive and the live surface agree.
 uv run python tools/archive_surface.py check
+uv run python tools/archive_surface.py check --require-entries   # CI's form: never "0 entries, OK"
 uv run python tools/test_lane.py run -- tests/test_archive.py -q
 #    (a bare `pytest` refuses without TORTOISE_DB_URI — epic #1647 P4 — so use the lane runner
 #     even though this file is hermetic)
@@ -157,7 +158,10 @@ direction is part of [#12237](https://github.com/daniel-ospina/tortoise/issues/1
    of a live function;
 2. re-add the registry/declaration row and re-cut the manifest (`tools/surface_manifest.py cut`);
 3. delete the manifest row and the archived file, then `tools/archive_surface.py index`;
-4. `tools/archive_surface.py check` must be clean.
+4. `tools/archive_surface.py check` must be clean. **Restoring the LAST entry leaves a legal
+   empty archive** — the plain form is green at zero entries on purpose, so this step works;
+   `check --require-entries` and `verify-anchors` are the forms that refuse an empty one, and
+   CI runs the latter, where an empty archive means the code was deleted rather than restored.
 
 ⛔ **Restoring the code is not permission to re-expose it.** Putting a symbol back on the live
 surface is a **new surface change** and needs the owner's approval again (`AGENTS.md` →

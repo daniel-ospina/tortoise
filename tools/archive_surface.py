@@ -84,8 +84,10 @@ Usage
     uv run python tools/archive_surface.py archive sdk-method <method> --batch <slug> --reason <text>
     uv run python tools/archive_surface.py archive module <dotted.module> --batch <slug> --reason <text>
 
-    Run `archive` BEFORE deleting the symbol from its source file: it reads the source as
-    it stands at HEAD and records that commit, so the restore recipe is exact.
+    Run `archive` BEFORE deleting the symbol from its source file: it reads the source from
+    the working tree, requires it to match the commit on the DEFAULT BRANCH that last held it,
+    and records THAT commit — so the restore recipe is exact AND the citation survives the
+    squash merge that lands the batch.
 
 Exit 0 = clean. Exit 1 = violations (printed one per line). Exit 2 = usage/refusal.
 """
@@ -94,6 +96,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import fnmatch
 import hashlib
 import json
 import re
@@ -296,6 +299,15 @@ def _anchor_violations(
     expected = expected_block(
         str(entry.get("kind") or ""), symbol, source_path, blob, node_key
     )
+    if expected is None and node_key:
+        # ⛔ Do NOT fall through to containment here. A key that names no node in the anchored
+        # commit is either a hand-edited row or a row written before block keys existed, and the
+        # containment test accepts any fragment of the file — so falling through demotes the
+        # strongest arm to the weakest exactly when the record is least trustworthy.
+        return [
+            f"{symbol}: {rel}'s block records node {node_key!r}, which does not exist in "
+            f"{sha}:{source_path} — the record cannot name the code it froze"
+        ]
     if expected is not None:
         if expected.rstrip() != body.strip("\n"):
             return [
@@ -430,6 +442,15 @@ def anchor_unverified(root: Path | None = None) -> list[str]:
     out: list[str] = []
     for entry in entries:
         sha = str(entry.get("archived_at") or "")
+        ref = default_branch_ref(root)
+        if ref is not None and _git_has_commit(root, sha):
+            code, _out = _git(root, "merge-base", "--is-ancestor", sha, ref)
+            if code != 0:
+                out.append(
+                    f"{entry.get('symbol')}: `archived_at`={sha} is not an ancestor of {ref} — "
+                    "a squash merge would orphan this citation, so the anchor must name a "
+                    "commit on the default branch (see `anchor_sha`)"
+                )
         for row in entry.get("blocks") or []:
             path = str(row.get("path") or "")
             if not _git_has_commit(root, sha) or _git_blob(root, sha, path) is None:
@@ -694,7 +715,9 @@ def package_violations(root: Path | None = None) -> list[str]:
         raise ArchiveRefused(f"could not read pyproject.toml: {exc}") from exc
     include = (pyproject.get("tool", {}).get("setuptools", {}).get("packages", {})
                .get("find", {}).get("include", []))
-    if any(pat.startswith("archive") or pat == "*" for pat in include):
+    # A GLOB, not a prefix: `arch*` and `a*` both match `archive`, and the prefix test let them
+    # through while claiming the opposite (measured, review cycle 5).
+    if any(fnmatch.fnmatchcase("archive", pat) or pat == "*" for pat in include):
         out.append(
             f"pyproject.toml `packages.find.include` matches the archive ({include}) — an "
             "archived module would ship in the wheel, so it would be importable after install"
@@ -739,18 +762,24 @@ def index_violations(entries: list[dict], root: Path | None = None) -> list[str]
     return []
 
 
-def check(root: Path | None = None) -> list[str]:
-    """Every violation, or an empty list when the archive is consistent."""
+def check(root: Path | None = None, *, require_entries: bool = False) -> list[str]:
+    """Every violation, or an empty list when the archive is consistent.
+
+    `require_entries` is OFF by default because the documented restore path ends with a LEGAL
+    empty archive: restoring the last entry deletes its row and file, and `check` must then be
+    clean (`archive/README.md` step 4). CI passes the flag, where an empty archive means the
+    archived code was deleted rather than restored.
+    """
     root = Path(root or ROOT)
     manifest = load_manifest(root / "archive" / "MANIFEST.json")
     entries = manifest["entries"]
     problems: list[str] = []
     problems += manifest_violations(manifest, root / "archive")
-    if not entries:
+    if require_entries and not entries:
         # A VACUOUS PASS. With no entries every arm below is silent, so a PR that empties the
         # manifest and deletes the archived files would be green — in the job whose whole point
-        # is that removed code stays recoverable. The archive is permanently non-empty from
-        # batch 0 onward, so an empty one is a defect, not a first run.
+        # is that removed code stays recoverable. Off by default (see the docstring): the
+        # restore path legitimately ends at zero.
         problems.append(
             "the archive is EMPTY — batch 0 landed one entry and every removal batch ADDS one; "
             "an empty manifest means the archived code was deleted, not that there is none"
@@ -840,14 +869,16 @@ def default_branch_ref(root: Path) -> str | None:
     `origin/main` first: a lane worktree always has it, and it is the ref a squash-merge lands
     on. The local branch names are the fallback for a plain clone or a test fixture.
     """
+    # git's OWN answer first: a repo whose default branch is `develop` but which still carries a
+    # `main` ref (mirror, legacy branch, tooling) would otherwise be anchored to `main`, which
+    # need not be an ancestor of the default branch at all.
+    code, out = _git(root, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    if code == 0 and out.strip():
+        return out.strip().removeprefix("refs/remotes/")
     for ref in ("origin/main", "main", "origin/master", "master"):
         code, _ = _git(root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
         if code == 0:
             return ref
-  # A clone with a non-standard default branch: ask git, then map the remote HEAD to a ref.
-    code, out = _git(root, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
-    if code == 0 and out.strip():
-        return out.strip().removeprefix("refs/remotes/")
     return None
 
 
@@ -875,31 +906,6 @@ def anchor_sha(root: Path, paths: list[str]) -> tuple[str, str]:
             "branch, so there is no released state to restore. Delete it; do not archive it"
         )
     return sha, ref
-
-
-def _head_sha(root: Path) -> str:
-    """The commit the code is being frozen FROM — the restore anchor.
-
-    REFUSES rather than returning a placeholder: an archive that cannot name its own
-    commit is not a record, and `"unknown"` would render a restore row that reads as a
-    citation while citing nothing.
-    """
-    try:
-        sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise ArchiveRefused(
-            f"could not read HEAD in {root} ({type(exc).__name__}) — the archive must record the "
-            "commit it was frozen from, so run it in a git checkout"
-        ) from exc
-    if not _SHA_RE.match(sha):
-        raise ArchiveRefused(f"`git rev-parse HEAD` returned {sha!r}, not a commit sha")
-    return sha
 
 
 def _segment(source: str, node: ast.AST) -> str:
@@ -1280,6 +1286,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    check_parser.add_argument(
+        "--require-entries",
+        action="store_true",
+        help=(
+            "fail when the manifest has NO entries (CI passes this: an empty archive means the "
+            "archived code was deleted, not restored — the plain form stays green so the "
+            "documented restore of the last entry can finish)"
+        ),
+    )
+
     index_parser = sub.add_parser("index", help="regenerate archive/INDEX.md")
     index_parser.add_argument("--check", action="store_true", help="assert it is current")
 
@@ -1293,7 +1309,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.cmd == "check":
-            problems = check()
+            problems = check(require_entries=args.require_entries)
             if args.anchors:
                 problems += anchor_unverified()
             if problems:
@@ -1316,7 +1332,15 @@ def main(argv: list[str] | None = None) -> int:
             # (#11057): a gate that runs only where it cannot answer is a NO-OP gate, and
             # before this step nothing in the repo invoked `--anchors` at all (review cycle 4).
             entries = load_manifest()["entries"]
-            problems = file_violations(entries) + anchor_unverified()
+            if not entries:
+                # Every other arm is silent over nothing, so an empty archive would print OK —
+                # a vacuous green in the only archive gate that runs on every PR.
+                problems = [
+                    "the archive is EMPTY — every entry was removed; if that was a restore, "
+                    "say so in the PR; if it was a deletion, the code is gone"
+                ]
+            else:
+                problems = file_violations(entries) + anchor_unverified()
             if problems:
                 print(f"ANCHORS NOT PROVEN — {len(problems)} violation(s):")
                 for problem in problems:

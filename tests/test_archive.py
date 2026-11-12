@@ -77,7 +77,7 @@ def _commit(root: Path, *paths: str) -> None:
 @pytest.fixture()
 def tree(tmp_path: Path) -> Path:
     """A minimal repo root: a registry, an SDK module, pyproject, an EMPTY git repo, archive/."""
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
     subprocess.run(
         ["git", "-c", "user.email=r@example.com", "-c", "user.name=reviewer",
          "commit", "-q", "--allow-empty", "-m", "init"],
@@ -143,6 +143,28 @@ def tree(tmp_path: Path) -> Path:
 def test_the_committed_archive_is_consistent() -> None:
     problems = arch.check(ROOT)
     assert problems == [], "tools/archive_surface.py check is red:\n" + "\n".join(problems)
+
+
+def test_the_committed_rows_cite_the_commit_the_writer_would_record() -> None:
+    """The real manifest, not a fixture: the row is what today's writer produces.
+
+    The committed row cited a commit that merely HELD the file (main's HEAD at archive time), so
+    the README's "the commit on the default branch that last held it" was not what it said and
+    nothing noticed — the writer↔row equality was only ever asserted on a tmp tree (review
+    cycle 5). Guards on the ref being resolvable, because a depth-1 CI clone legitimately cannot
+    answer and must not be turned into a false red.
+    """
+    ref = arch.default_branch_ref(arch.ROOT)
+    if ref is None or arch._git(arch.ROOT, "rev-parse", "--verify", "--quiet",
+                                f"{ref}^{{commit}}")[0] != 0:
+        pytest.skip(f"{ref or 'no default-branch ref'} is not resolvable here")
+    for entry in arch.load_manifest(arch.ROOT / "archive" / "MANIFEST.json")["entries"]:
+        expected, _ref = arch.anchor_sha(arch.ROOT, entry["sources"])
+        assert entry["archived_at"] == expected, (
+            f"{entry['symbol']} cites {entry['archived_at']}, but the writer now records "
+            f"{expected} — re-anchor it (see archive/README.md), or the citation drifts from "
+            "the rule"
+        )
 
 
 def test_the_committed_index_is_current() -> None:
@@ -639,7 +661,10 @@ def test_a_block_the_anchored_commit_does_not_hold_is_reported(tree: Path) -> No
         arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree
     )
     path, body = arch.frozen_blocks((tree / entry["file"]).read_text(encoding="utf-8"))[0]
-    head = arch._head_sha(tree)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tree, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
     # A commit that IS present here but never held this path: the repository's ROOT commit (the
     # fixture's `--allow-empty` init) is in the object store and contains no files at all.
     later = subprocess.run(
@@ -743,8 +768,10 @@ def test_an_empty_archive_is_reported(
     # `check` refuses a foreign tree by design (`live_surface(root)`), so the surface half is
     # stubbed here — an empty manifest is a defect regardless of what the surface says.
     monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
-    problems = arch.check(tree)
-    assert any("EMPTY" in problem for problem in problems)
+    # Off by default, because the documented restore of the LAST entry legitimately ends at zero
+    # (finding from review cycle 5: the arm made step 4 of the restore procedure unreachable).
+    assert not any("EMPTY" in problem for problem in arch.check(tree))
+    assert any("EMPTY" in problem for problem in arch.check(tree, require_entries=True))
 
 
 def test_a_re_anchored_entry_is_caught_by_check_not_just_by_the_helper(tree: Path) -> None:
@@ -778,6 +805,83 @@ def test_a_manifest_row_with_no_file_is_reported(tree: Path) -> None:
     entry.pop("file")
     problems = arch.file_violations([entry], tree / "archive", tree)
     assert any("carries no `file`" in problem for problem in problems)
+
+
+def test_a_node_key_that_names_no_node_is_reported(tree: Path) -> None:
+    """A key that resolves to nothing must RED, not demote the arm to containment."""
+    entry = arch.archive_symbol(
+        arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree
+    )
+    path, body = arch.frozen_blocks((tree / entry["file"]).read_text(encoding="utf-8"))[0]
+    problems = arch._anchor_violations(
+        tree, "tortoise_search", entry["file"], entry, path, body, "FunctionDef:not_a_function"
+    )
+    assert any("does not exist in" in problem for problem in problems)
+
+
+def test_an_anchor_that_is_not_on_the_default_branch_is_reported(tree: Path) -> None:
+    """The durability the writer enforces must also be CHECKED, or a hand-edited row slips by."""
+    entry = arch.archive_symbol(
+        arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree
+    )
+    (tree / "tortoise" / "side.py").write_text("Y = 2\n", encoding="utf-8")
+    subprocess.run(["git", "checkout", "-q", "-b", "side"], cwd=tree, check=True)
+    _commit(tree, "tortoise/side.py")
+    branch_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tree, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_at=branch_sha)]},
+        tree / "archive" / "MANIFEST.json",
+    )
+    problems = arch.anchor_unverified(tree)
+    assert any("is not an ancestor of" in problem for problem in problems), problems
+
+
+def test_verify_anchors_exits_non_zero_on_a_forged_entry(tree: Path) -> None:
+    """The CI step's ONE line of proof: gutting the verb must red, not print OK.
+
+    Nothing called `arch.main(...)` before this, so `problems = []` inside `verify-anchors`
+    would still have satisfied the workflow assertion (review cycle 5).
+    """
+    entry = arch.archive_symbol(
+        arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree
+    )
+    root_commit = subprocess.run(
+        ["git", "rev-list", "--max-parents=0", "HEAD"],
+        cwd=tree, check=True, capture_output=True, text=True,
+    ).stdout.strip().splitlines()[0]
+    path, body = arch.frozen_blocks((tree / entry["file"]).read_text(encoding="utf-8"))[0]
+    text, frozen = arch.render_archive_file(
+        entry["kind"], entry["symbol"], entry["batch"], entry["reason"],
+        entry["archived_from"], root_commit, [(path, body, None)],
+    )
+    (tree / entry["file"]).write_text(text, encoding="utf-8")
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_at=root_commit, blocks=frozen)]},
+        tree / "archive" / "MANIFEST.json",
+    )
+    monkey_monkey = arch.ROOT
+    arch.ROOT = tree
+    try:
+        assert arch.main(["archive_surface.py", "verify-anchors"]) == 1
+        # …and an empty manifest must not print OK over nothing.
+        arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+        for f in (tree / "archive").rglob("*.py"):
+            f.unlink()
+        assert arch.main(["archive_surface.py", "verify-anchors"]) == 1
+    finally:
+        arch.ROOT = monkey_monkey
+
+
+def test_a_packages_find_glob_that_matches_the_archive_is_reported(tree: Path) -> None:
+    """`arch*` matches `archive`; a prefix test said otherwise (review cycle 5)."""
+    (tree / "pyproject.toml").write_text(
+        '[tool.setuptools.packages.find]\ninclude = ["tortoise*", "arch*"]\n',
+        encoding="utf-8",
+    )
+    assert any("matches the archive" in problem for problem in arch.package_violations(tree))
 
 
 def test_two_module_symbols_cannot_share_one_archived_file(tree: Path) -> None:

@@ -2,7 +2,7 @@
 #
 # batch:   pre-mechanism-legacy-search
 # reason:  pre-mechanism archive: shipped importable inside the package; moved out of the product (#11609 batch 0)
-# source:  tortoise/archived/search_legacy.py @ f0da5505b38c8656c7ef54a91f91be05348a8fe9
+# source:  tortoise/archived/search_legacy.py @ 4abff72cbb65966ab6b8ec9d51ac7b9315d8648b
 #
 # This file IS the source of record. To restore: copy each block below back into the
 # file named in ITS OWN `verbatim from <path>` banner (one symbol can span more than
@@ -16,7 +16,7 @@ ARCHIVED_KIND = 'module'
 ARCHIVED_SYMBOL = 'tortoise.archived.search_legacy'
 ARCHIVED_BATCH = 'pre-mechanism-legacy-search'
 ARCHIVED_FROM = 'tortoise/archived/search_legacy.py'
-ARCHIVED_AT = 'f0da5505b38c8656c7ef54a91f91be05348a8fe9'
+ARCHIVED_AT = '4abff72cbb65966ab6b8ec9d51ac7b9315d8648b'
 
 # ── verbatim from tortoise/archived/search_legacy.py ──
 
