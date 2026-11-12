@@ -423,7 +423,7 @@ fan-out respected; C8 holds.
 from `sdk.py`'s point-creation path at `:17621` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
-`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6588` and
+`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6607` and
 consumed at `sdk.py:9540`/`:9593` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
 this pair is keyed by **symbol**), the slots are absent in the
 corpus, or the graph served is not the graph measured — are decided by evidence.
