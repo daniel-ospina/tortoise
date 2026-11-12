@@ -1470,23 +1470,24 @@ class EpBreakdown:
     # point WHENEVER one is persisted — THOSE TWO READ α/β ONLY, so a readable
     # mirror is the first stated divergence (they answer the pair mean where
     # this field answers the mirror's value). The second is the pairs R1
-    # REFUSES: those two coalesce each MISSING operand to `1.0`, then divide
-    # bare, so where R1 answers ``None`` they answer whatever `a / (a + b)`
-    # yields over the COALESCED operands — for a half pair that is α/(α+1), and
-    # on a negatively-signed or non-finite pair it can be negative, above 1,
-    # `0.0`, `0.5` or `nan` depending on the stored columns. ⛔ Compute it, do
-    # not predict it: the outcome is a property of the division, not of the
-    # defect class. They RAISE only on an operand Python cannot coerce at all.
+    # REFUSES: those two read each operand on its OWN `1.0` default
+    # (`coalesce(posterior_α, ep_α, 1.0)` and the β twin), then answer
+    # `α / (α + β)` — with a `total <= 0` guard that answers 0.5 instead of
+    # dividing. ⛔ So the outcome is a property of the stored COLUMNS, not of
+    # the defect class: a missing β answers α/(α+1), a missing α answers
+    # 1/(1+β), and a negative or non-finite pair can come back negative, above
+    # 1, 0.0, 0.5 or nan. Compute it, do not predict it. They raise only on an
+    # operand Python cannot coerce at all.
     # A pair whose SUM OVERFLOWS is not one of those: R1 ACCEPTS it and answers
     # the overflow-free identity, so (1.7e308, 1e307) serves 0.944 here while
-    # those two divide bare and answer 0.0 — a divergence in VALUE, not in
-    # presence. ⛔ Do not assume the two readers agree on a shape because they
-    # agree on the pairs R1 accepts. A claim with NO operands at all also answers 0.5 there (the
-    # per-operand defaults); that is the divergence recorded in the #11702
-    # decision
+    # there the total becomes `inf` and the division answers 0.0 — a divergence
+    # in VALUE, not in presence. ⛔ Do not assume the two readers agree on a
+    # shape because they agree on the pairs R1 accepts. A claim with NO operands
+    # at all also answers 0.5 there — via that same `total <= 0` guard, not via a
+    # default operand; that is the divergence recorded in the #11702 decision
     # comment (issuecomment-6781252637) — it is the one place a claim with NO
-    # operands at all still answers 0.5, and it is
-    # outside this field's contract rather than a second vocabulary for it.
+    # operands at all still answers 0.5, and it is outside this field's contract
+    # rather than a second vocabulary for it.
     # Historically this
     # field was the structural edge-ratio impl/(impl+nand); it is NOT that
     # quantity anymore — a claim EP converged at 0.88 with no incoming IMPL
