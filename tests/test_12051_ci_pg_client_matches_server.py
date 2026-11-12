@@ -364,7 +364,7 @@ def _precondition(code: str) -> re.Match[str]:
 #: stayed green with `if [ "$major" != "16" ]; then :; fi`. FACTS only: the
 #: comparison is on `$major`, against a literal, inside `then … fi`.
 _VERSION_BRANCH_RE = re.compile(
-    r"^[ \t]*if\s+"
+    r"^(?P<ind>[ \t]*)if\s+"
     # TWO spellings for the same FACT, because `[ … ]` and the `test …` builtin are
     # the same test and a guard that reds one is a false block (MEASURED, review of
     # `7b02823f41`: narrowing to `[ … ]` alone re-introduced a false block on
@@ -376,7 +376,13 @@ _VERSION_BRANCH_RE = re.compile(
     # (no separator) is a syntax error, so it must NOT match: accepting it would
     # assert an armed branch over one the shell cannot parse.
     r"(?:\s*;\s*then|\n[ \t]*then)"
-    r"(?P<body>.*?)^[ \t]*fi[ \t]*$",
+    # The branch ENDS at the HEADER's own indent (`(?P=ind)`), so a nested `if … fi`
+    # inside it cannot end the body early. MEASURED (review of `25b89e4e94`): with a
+    # wildcard indent, the nested `if [ -n "${ImageOS:-}" ]` this pin step already
+    # uses truncated the body before its `::error::`/`exit 1`, and the guard
+    # reported a gutted fail-closed arm over one that was present and armed — the
+    # false block `origin/main`'s `_closing_fi(indent)` helper existed to prevent.
+    r"(?P<body>.*?)^(?P=ind)fi[ \t]*$",
     re.DOTALL | re.MULTILINE,
 )
 
@@ -404,14 +410,17 @@ def _version_branch(code: str, server_major: int) -> str:
         # consequence: a false block that opens with "the artifact would be
         # unrestorable" over a mere spelling change is what taught the last lane
         # to widen this assertion instead of trusting it (MEASURED, review of
-        # `7b02823f41`). `if [[ "$major" != "16" ]]; then` is the one bash spelling
-        # NOT matched here — the `[[ … ]]` form; nothing in this workflow uses it
-        # (0 occurrences), so widening to it is a deliberate edit, not this guard's
-        # implicit promise.
+        # `7b02823f41`). The unmatched spellings are MEASURED, not guessed (review
+        # of `25b89e4e94`): `[[ … ]]`, a single-quoted literal (`'16'`), reversed
+        # operands (`[ "16" != "$major" ]`), a compound condition joined with
+        # `&&`, and a one-line `if … then …; fi`. NONE of them occurs in this
+        # workflow (0 occurrences), so widening is a deliberate edit with a
+        # measured matrix — not this guard's implicit promise.
         "the pin has no `if [ \"$major\" != \"<major>\" ]; then … fi` block "
         "(`[ … ]` or the `test …` builtin, `$major` or `${major}`, `; then` or a "
-        "newline before `then`) — a branch that cannot be FOUND is the same "
-        "symptom as no branch at all: the job would carry on with a client whose "
+        "newline before `then`, closed at the header's own indent) — a branch "
+        "that cannot be FOUND is the same symptom as no branch at all: the job "
+        "would carry on with a client whose "
         f"major differs from the servers' ({server_major})"
     )
     major = match.group("bracket_major") or match.group("test_major")
