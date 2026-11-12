@@ -69,10 +69,10 @@ name: ci-queue-health
 # unwitnessed — every run counted in `pr_running` was unmeasured (the jobs probe
 # could not read it, or the budget did not reach it), which is #12037's own defect
 # returned by the budget and is cleared by the frozen runs being repaired or the
-# budget being raised, NOT by --max-pages. Neither can block a merge, because a `schedule`-event run is
-# a NON-CODE event: the merge rail's own `NON_CODE_EVENTS` set excludes
-# `schedule|issues|issue_comment` from the merge decision, so a red scheduled run
-# never gates a PR.
+# budget being raised, NOT by --max-pages. Neither can block a merge, because a
+# `schedule`-event run is a NON-CODE event: the merge rail's own `NON_CODE_EVENTS`
+# set excludes `schedule|issues|issue_comment` from the merge decision, so a red
+# scheduled run never gates a PR.
 #
 # `schedule` / `workflow_dispatch` ONLY. The tool is the single implementation;
 # run it by hand for a dry run:

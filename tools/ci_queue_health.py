@@ -417,10 +417,21 @@ PER_PAGE = 100
 #: it is not neutral: an inflated `pr_running` is what makes ``OK`` reachable at 5400 s and
 #: hands ``congests_pr is False`` to a destructive caller (#10237). So the honest statement is
 #: that the budget degrades DETECTION IN BOTH DIRECTIONS, and the abstention is only
-#: fail-closed for the verdict that cancels runs. The budget is set above the measured live
-#: PR-event population (3-5 on this repo, `in_progress` total 5-10) so it does not bind in
-#: practice; when it does bind, the OLDEST runs are the probed ones, which is the population a
-#: long-standing frozen run lives in.
+#: fail-closed for the verdict that cancels runs.
+#:
+#: ⚠️ IT NO LONGER SITS ABOVE THE LIVE POPULATION, AND NOTHING SHOULD ASSUME IT DOES (#12037
+#: review round 8). An earlier revision of this comment claimed "3-5 on this repo, in_progress
+#: total 5-10"; measured at round 8 the repo carried 8 PR-event `in_progress` runs (5 measured
+#: executing, 3 frozen) out of 11 `in_progress` in total — i.e. the budget is AT the population,
+#: not above it. That is fine and was designed for: when it binds, the OLDEST runs are the
+#: probed ones (the population a long-standing frozen run lives in) and a surplus degrades the
+#: verdict through the `PR-UNWITNESSED` clause rather than silently restoring the old census.
+#: Do not read the number as a capacity claim — read the degradation as the guarantee.
+#:
+#: And the 600 s arithmetic above is this WORKFLOW's budget only: the second consumer,
+#: `ci_check_repair.read_queue_health`, calls `read_health(repo)` with these defaults inside a
+#: `timeout-minutes: 15` job, so it can spend up to 8 × 15 s = 120 s there. Bounded and small,
+#: but it is a second budget the first sentence does not account for.
 DEFAULT_MAX_JOB_PROBES = 8
 
 #: Timeout for ONE jobs probe. Much shorter than `_gh`'s 120 s default on purpose: a stalled
@@ -1036,6 +1047,30 @@ def _project(raw: Iterable[Mapping[str, Any]]) -> list[QueuedRun]:
     return out
 
 
+def _executing_claim(pr_running: int, pr_running_unmeasured: int) -> str:
+    """Say "executing" ONLY as strongly as the evidence allows (#12037 reviews 5, 8).
+
+    ⛔ THIS EXISTS BECAUSE THE SAME OVERCLAIM WAS FIXED ONE ARM AT A TIME, THREE TIMES. The
+    pre-#12037 module read `pr_running` off the run `status` string, so "PR CI is executing"
+    was as true as the string was. This change declares that string non-evidence: a counted
+    run may have been PROVED to have a live job, or merely be UNMEASURED (the probe abstained
+    and the count is the old census). A reason line that keeps the old phrasing over a census
+    of nothing-but-unmeasured runs contradicts the `UNMEASURED … counted as executing` note in
+    the SAME reason list, and the whole payload is concatenated into the step summary an
+    operator reads.
+
+    One function so a fourth site cannot drift: `pr_running > 0 and pr_running ==
+    pr_running_unmeasured` means NO run was proved executing, and nothing else qualifies.
+    """
+    if pr_running > 0 and pr_running == pr_running_unmeasured:
+        return (
+            f"PR CI is REPORTED executing ({pr_running} run(s)) — NONE of them was "
+            "measured: every job probe abstained, so this is the pre-#12037 status-string "
+            "census, not a job-level proof"
+        )
+    return f"PR CI IS executing ({pr_running} run(s))"
+
+
 def classify_queue(
     queued: Sequence[QueuedRun],
     in_progress: Sequence[QueuedRun],
@@ -1412,7 +1447,7 @@ def classify_queue(
                 reasons.append(
                     "PR-UNWITNESSED: "
                     + (
-                        f"PR CI is executing ({pr_running} run(s)) but the "
+                        f"{_executing_claim(pr_running, pr_running_unmeasured)} but the "
                         if pr_running
                         else "no PR-event run is executing and the "
                     )
@@ -1461,16 +1496,9 @@ def classify_queue(
         # (the direction is fail-closed: `congests_pr is True`, no destructive
         # authorisation), but the sentence the fleet quotes has to say which of the two
         # it is resting on instead of asserting the stronger one.
-        if pr_running == pr_running_unmeasured:
-            executing_claim = (
-                f"PR-BACKLOGGED: PR CI is REPORTED executing ({pr_running} run(s)) — "
-                f"⚠️ NONE of them was measured: every job probe abstained, so this is the "
-                f"pre-#12037 status-string census, not a job-level proof"
-            )
-        else:
-            executing_claim = f"PR-BACKLOGGED: PR CI IS executing ({pr_running} run(s))"
         reasons.append(
-            f"{executing_claim}, but the oldest "
+            f"PR-BACKLOGGED: {_executing_claim(pr_running, pr_running_unmeasured)}, but the "
+            f"oldest "
             f"waiting PR-event run (queued/pending/requested) has waited "
             f"{backlogged_wait:.0f}s "
             f"(> max_pr_wait_seconds={max_pr_wait_seconds:.0f}s), so the REQUIRED "
@@ -1542,7 +1570,7 @@ def classify_queue(
         # it knows — the ABSENCE the flood clause names does not hold — and leaves
         # whether that execution is ENOUGH to the wait witness in `healthy()`.
         reasons.append(
-            f"not a flood: {pr_running} PR-event run(s) are executing, so this is "
+            f"not a flood: {_executing_claim(pr_running, pr_running_unmeasured)}, so this is "
             "NOT the absence the flood clause names (whether that execution is "
             "ENOUGH is the wait-budget question below)"
         )
@@ -1869,7 +1897,6 @@ def read_health(
         raise MeasureError(
             f"max_job_probes must be an integer >= 1, got {max_job_probes!r}"
         )
-    probes = max_job_probes
     queued, queued_truncated = read_runs(repo, "queued", max_pages)
     running, running_truncated = read_runs(repo, "in_progress", max_pages)
     # ⛔ THE IN-PROGRESS LEG IS PROBED AT JOB LEVEL, NOT TRUSTED FROM `status` (#12037).
@@ -1924,7 +1951,7 @@ def read_health(
     )
     probed = {
         run.id: read_run_live_job(repo, run.id, attempt=run.run_attempt)
-        for run in probe_order[:probes]
+        for run in probe_order[:max_job_probes]
     }
     running = [
         replace(run, has_live_job=probed[run.id]) if run.id in probed else run

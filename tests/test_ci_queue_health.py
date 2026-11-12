@@ -3156,3 +3156,138 @@ def test_a_starved_reading_still_names_its_WITNESS():
         "satisfies that floor — an empty witness set contradicts the verdict beside it"
     )
     assert 1 in health.wait_witness_ids
+
+
+# ── the workflow's cause selector (round-8 P2-1) ───────────────────────────
+
+def _pr_unwitnessed_arm_and_branches():
+    """The `PR-UNWITNESSED` arm, CUT PAST its nested `if`.
+
+    ⛔ `_verdict_arms` ENDS AN ARM AT A NESTED `if [` (that is what `_ARM_END_RE` does for
+    every other arm's benefit), so it returns only the leading comment block of this arm. Two
+    mutations of the round-5 cause selector — misspelling the JSON key, and deleting the whole
+    census branch — were therefore invisible to the suite: the only pin on
+    `pr_running_census_unwitnessed` was on the PRODUCER (`to_dict`), never on the CONSUMER that
+    picks the lever. This helper slices the region directly, so the contract "the annotation
+    must not prescribe one cause's lever for another's" is actually asserted.
+    """
+    wf = (Path(__file__).resolve().parents[1]
+          / ".github/workflows/ci-queue-health.yml").read_text()
+    lines = wf.splitlines()
+    start = next(i for i, line in enumerate(lines)
+                 if 'elif [ "$verdict" = "PR-UNWITNESSED" ]' in line)
+    end = next(i for i, line in enumerate(lines[start:], start=start)
+               if 'echo "ci-queue-health exit=' in line)
+    return "\n".join(lines[start:end])
+
+
+def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
+    """The three causes take different levers, and the arm must not mix them (rounds 5 and 8).
+
+    Round 5 replaced a numeric selector with the payload's own flag because the counts cannot
+    distinguish the causes. Round 8 measured that nothing pinned the replacement: a typo in the
+    key, and deleting the branch outright, both survived the suite.
+    """
+    arm = _pr_unwitnessed_arm_and_branches()
+
+    # 1. the selector reads the PRODUCER'S FLAG, spelled exactly as `to_dict` emits it
+    assert "json.load(open('/tmp/ci-queue-health.json')).get('pr_running_census_unwitnessed')" in arm, (
+        "the arm must key on the flag the tool emits; the counts cannot tell the causes apart"
+    )
+    code = "\n".join(line for line in arm.splitlines()
+                      if not line.lstrip().startswith("#"))
+    assert code.count("pr_running_census_unwitnessed") == 1, (
+        "one READER in the shell, so a second copy cannot drift from it "
+        f"(comment mentions excluded): {code.count('pr_running_census_unwitnessed')}"
+    )
+
+    # 2. the census branch exists, and names ITS lever and not the wait one
+    census_i = arm.find('pr_running_census_unwitnessed')
+    camel = arm.find("RUNNING CENSUS was not witnessed")
+    assert camel > census_i, "the census branch is gone or detached from its selector"
+    census_branch = arm[camel:arm.find("else", camel)]
+    assert "--max-job-probes" in census_branch, census_branch
+    assert "--max-pages" in census_branch and "NOT --max-pages" in census_branch, (
+        "the census cause must actively REFUTE the wait lever, not merely omit it"
+    )
+
+    # 3. the wait branch (the `else`) names the wait lever and not the census one
+    wait_branch = arm[arm.find("else", camel):]
+    assert "--max-pages" in wait_branch, wait_branch
+    assert "--max-job-probes" not in wait_branch, (
+        "the wait cause must not be handed the census lever"
+    )
+
+
+def test_an_unmeasured_NON_PR_run_cannot_degrade_a_measured_reading():
+    """Round-8 M4: `pr_running_unmeasured` is scoped to PR-event runs, and nothing pinned it.
+
+    Summing it over ALL `in_progress` runs survived the suite. The effect is a FALSE alarm in
+    the fail-closed direction: one unmeasured non-PR run makes
+    `pr_running == pr_running_unmeasured` hold on a reading where every PR-event run WAS
+    measured, so a good `OK` degrades to `PR-UNWITNESSED` — and the `N run(s) UNMEASURED`
+    sentence would count runs that are not in `pr_running` at all.
+    """
+    executing = Q.QueuedRun(id=11, name="Python CI", event="pull_request",
+                           created_at=(NOW - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                           has_live_job=True)
+    foreign = Q.QueuedRun(id=12, name="main-lint", event="push",
+                         created_at=(NOW - timedelta(seconds=45)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                         has_live_job=None)   # unmeasured, and NOT PR-event
+    health = classify(
+        [run(1, "python-ci", event="pull_request", age_seconds=1000)],
+        in_progress=[executing, foreign],
+        probe_attempted=True,
+    )
+    assert health.pr_running == 1
+    assert health.pr_running_unmeasured == 0, (
+        "a non-PR run is not part of the PR census, so it can neither raise nor degrade it"
+    )
+    assert health.verdict == Q.OK, "one measured executing PR run certifies the census"
+    assert health.pr_running_census_unwitnessed is False
+    assert not any("UNMEASURED" in r for r in health.reasons)
+
+
+def test_every_reason_line_that_says_executing_is_as_strong_as_its_evidence():
+    """Round-8 P2-2: the same overclaim was fixed one arm at a time, three times.
+
+    With nothing but unmeasured runs, the `PR-BACKLOGGED` arm was corrected in round 5 while
+    the unreadable-wait arm and the not-a-flood arm still said "PR CI is executing" — in the
+    SAME reason list as the `UNMEASURED … counted as executing` note that refutes it. All
+    three now route through one helper; this asserts none of them regressed.
+    """
+    unmeasured = [run(2, "Python CI", event="pull_request", age_seconds=30)]
+
+    # (b) an unreadable wait beside a fully unmeasured census
+    unreadable_wait = classify(
+        [run(1, "python-ci", event="pull_request", created_at="not-a-timestamp")],
+        in_progress=unmeasured,
+        probe_attempted=True,
+    )
+    assert unreadable_wait.verdict == Q.PR_UNWITNESSED
+    claim = next(r for r in unreadable_wait.reasons if r.startswith("PR-UNWITNESSED"))
+    assert "is REPORTED executing" in claim and "NONE of them was measured" in claim, claim
+    assert "PR CI is executing (" not in claim
+
+    # not-a-flood: a reporting workflow leads the queue, the PR census is fully unmeasured
+    not_a_flood = classify(
+        [*flood_queued(12), run(1, "python-ci", event="pull_request", age_seconds=1000)],
+        in_progress=unmeasured,
+        probe_attempted=True,
+    )
+    flood_claim = next(r for r in not_a_flood.reasons if r.startswith("not a flood"))
+    assert "is REPORTED executing" in flood_claim, flood_claim
+    assert "are executing" not in flood_claim
+
+    # ... and a MEASURED census keeps the strong claim on both arms
+    executing = [Q.QueuedRun(id=13, name="Python CI", event="pull_request",
+                             created_at=(NOW - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                             has_live_job=True)]
+    strong = classify(
+        [*flood_queued(12), run(1, "python-ci", event="pull_request", age_seconds=1000)],
+        in_progress=executing,
+        probe_attempted=True,
+    )
+    assert "PR CI IS executing (1 run(s))" in next(
+        r for r in strong.reasons if r.startswith("not a flood")
+    )
