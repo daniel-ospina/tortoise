@@ -145,9 +145,11 @@ def test_counts_match_an_independent_query(sdk):
 def test_no_belief_stays_inside_its_invariants(sdk):
     """RANGES catch ONE direction of a mixed population, not both (#12138 §2).
 
-    A NARROWER (or label-blind) denominator is the direction a range CAN see:
-    the numerator can exceed it, so `no_belief` goes negative (measured -8.0)
-    or the ratio exceeds 1.0.
+    A NARROWER denominator (or a label-blind NUMERATOR over a narrower one) is
+    the direction a range CAN see: the numerator can exceed it, so `no_belief`
+    goes negative (measured -8.0) or the ratio exceeds 1.0. ⛔ A label-blind
+    DENOMINATOR is the opposite case — that set is a SUPERSET of the `:Point`
+    reach, so it is WIDER and belongs to the paragraph below, not this one.
 
     The direction this fixture is about is the WIDER one, and it is INVISIBLE
     to the ranges: with `belief_present` fixed, a larger denominator makes the

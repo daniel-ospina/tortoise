@@ -301,13 +301,14 @@ unreadable test goes red; drop the closure term from `_reachable_claim_count` wh
   partition is exact).
 - R10 (added after review, #12116 C-P3; **corrected #12138 §2**) a mixed population is silently
   corrected by a clamp instead of being visible → the clamp is gone (and the counts are reported as
-  measured). ⚠️ The RANGES (`test_no_belief_stays_inside_its_invariants`) catch only the NARROWER /
-  label-blind direction — numerator > denominator ⇒ `no_belief < 0`, ratio > 1. The direction that
-  matters here is the WIDER one, and it is INVISIBLE to them: with `belief_present` fixed, a larger
-  denominator makes the ratio FALL and `no_belief` RISE, both in range (measured on the §2 fixture,
-  `belief_present=1`: denominator 4→5 gives `pct` 0.25→0.2 and `no_belief` 3→4 — absolute values, not
-  a delta; the earlier `/ +4` shorthand read as one and is not). So the ranges are a lower bound, not
-  the control: `test_counts_match_an_independent_query` pins `ep_reachable_claims`, `belief_present`
+  measured). ⚠️ Only ONE direction is visible to the RANGES
+  (`test_no_belief_stays_inside_its_invariants`): a NARROWER denominator (or a label-blind NUMERATOR
+  over a narrower one) lets the numerator exceed it, so `no_belief < 0` or the ratio exceeds 1. A
+  label-blind DENOMINATOR is the opposite case — that set is a SUPERSET of the `:Point` reach, so it
+  is WIDER, the ratio FALLS and `no_belief` RISES, both in range, and the ranges are blind to it. That
+  second direction is the one that matters here (measured on the §2 fixture, `belief_present=1`:
+  denominator 4→5 gives `pct` 0.25→0.2 and `no_belief` 3→4 — absolute values, not a delta; the earlier
+  `/ +4` shorthand read as one and is not). So the ranges are a lower bound, not the control: `test_counts_match_an_independent_query` pins `ep_reachable_claims`, `belief_present`
   and `points_edged` against independently written queries, which is what reddens on an inflated
   denominator.
 - R7 the new reads make a polled endpoint expensive (`GET /v1/dream/health` is per-request; the

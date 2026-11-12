@@ -33804,8 +33804,9 @@ class TortoiseSDK:
         # silently corrected into a plausible "fully covered" (#12116 review
         # C-P3: a clamp is the opposite of the asserted invariant the comment
         # claimed). ⛔ #12138 §2 — only ONE direction is visible that way: a
-        # NARROWER (or label-blind) denominator lets the numerator exceed it,
-        # so `no_belief` goes negative or `belief_coverage_pct` exceeds 1. A
+        # NARROWER denominator, or a label-blind NUMERATOR over one, lets the
+        # numerator exceed it, so `no_belief` goes negative or
+        # `belief_coverage_pct` exceeds 1. A
         # WIDER denominator keeps BOTH in range (`belief_present` fixed over a
         # larger denominator ⇒ the ratio falls and `no_belief` rises; measured on
         # the pinned fixture, `belief_present=1`: a denominator 4→5 moves `pct`
