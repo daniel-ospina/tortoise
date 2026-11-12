@@ -641,7 +641,20 @@ def test_a_complete_record_that_lost_only_its_newline_is_terminated():
 
     body = _raw(p)
     assert SEAL_SENTINEL.encode() not in body, body
-    assert body == b'{"id": "r0"}\n{"id": "r1"}\n{"id": "r2"}\n', body
+    # The shape is stated STRUCTURALLY, not as the writer's literal bytes: the
+    # journal is compact-separated since `#11821` P0, and a hard-coded
+    # `b'{"id": "r0"}\n…'` here red on that change while pinning nothing this
+    # test is about (it broke in the CI shard that runs this file). What the seal
+    # must preserve is exactly three lines, the hand-written fragment
+    # byte-for-byte, and a terminating newline after it.
+    lines = body.split(b"\n")
+    assert lines[-1] == b"", f"the journal must end on a newline: {body!r}"
+    assert len(lines) == 4, (
+        f"exactly three records and no sentinel line: {body!r}")
+    assert [json.loads(line) for line in lines[:3]] == [
+        {"id": "r0"}, {"id": "r1"}, {"id": "r2"}], body
+    assert lines[1] == b'{"id": "r1"}', (
+        f"the fragment must be terminated, never re-encoded: {lines[1]!r}")
     reader = EventLog(p)
     assert [r["id"] for r in reader.read_all()] == ["r0", "r1", "r2"]
     assert reader.torn_trailing_count == 0, reader.torn_trailing_raw
@@ -926,7 +939,12 @@ def test_a_sealed_fragment_at_the_end_is_still_counted():
     log.append({"id": "next-1"})
     # drop the record the append wrote, leaving `...\nfragment\nmarker\n`
     data = _raw(p)
-    cut = data.rindex(b'{"id": "next-1"}')
+    # The appended record is the journal's LAST line, located structurally: a
+    # literal `b'{"id": "next-1"}'` pinned the writer's pre-`#11821`-P0 spacing
+    # and red on the compact-separator change while proving nothing here.
+    assert data.endswith(b"\n"), data
+    cut = data.rindex(b"\n", 0, len(data) - 1) + 1
+    assert json.loads(data[cut:]) == {"id": "next-1"}, data
     Path(p).write_bytes(data[:cut])
 
     reader = EventLog(p)

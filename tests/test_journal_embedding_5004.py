@@ -1145,9 +1145,17 @@ def test_eventapi_rejects_the_server_managed_journal_markers(tmp_path):
         try:
             api = EventAPI(log, initiated_by="extractor",
                            projection=sdk._get_proj())
+            # #11821 P0: `embedding_width` is the marker this PR added to the
+            # SAME `_forged` set (`api.py`). Without it in this loop, deleting
+            # that entry leaves every row GREEN — `_forged` is a function-local
+            # literal, so no test can assert its membership, and this door is
+            # the ONLY one that can redden the refusal (the new file's "every
+            # home" test covers the six module-level homes; `_sanitize_props`
+            # has its own). Measured: removing the `api.py` entry with this key
+            # present reds this row; without it, nothing does.
             for key in ("embedding_verbatim", "embedding_preserved",
                         "embedding_model", "embedding_revision",
-                        "embedding_text_hash"):
+                        "embedding_text_hash", "embedding_width"):
                 with pytest.raises(ValueError, match="server-managed"):
                     api.add_point("forged marker probe",
                                   provenance("src:1", [0, 4], "q"),
