@@ -58,10 +58,12 @@ logger = logging.getLogger(__name__)
 #: ⛔ AND THE RULE IS ONE NESTING LEVEL DEEP (#11835 review round 4, F1). The
 #: two gates below read the ENVELOPE, which is safe only while a record-shaped
 #: payload is DOOR-BUILT — `add_point`/`add_operator` hand `_emit` their record
-#: POSITIONALLY (rendered onto the envelope as `point`) after stamping it
-#: themselves (with `creating=True`, so the origin attestation rides a creating
-#: record's own basis). A CALLER that builds one bypasses both gates, and the
-#: funnel must not "just stamp it" to close that: `creating=False`
+#: POSITIONALLY (rendered onto the envelope as `point`). `add_point` also stamps
+#: it (with `creating=True`, so the origin attestation rides a creating record's
+#: own basis); `add_operator`'s record carries NO vector to attest — `_point`
+#: builds one only for the operator-less, string-content path — so there is no
+#: marker on it to lie about. A CALLER that builds one bypasses both gates, and
+#: the funnel must not "just stamp it" to close that: `creating=False`
 #: DROPS `embedding_model`/`embedding_revision`/`embedding_text_hash`, which would
 #: strip the attestation off every ordinary `PointAdded` (R1). So the nested
 #: shape is REFUSED, at `_emit` itself, via `_NESTED_RECORD_KEYS` below — a gate
@@ -513,7 +515,11 @@ class EventAPI:
         # ⛔ THE MARKER FAMILY IS DELIBERATELY NOT CHECKED HERE, and that is not
         # a gap to tidy away: `_point`'s own `stamp_journal_embedding` writes
         # `embedding_width` into this very record, so a funnel-wide marker
-        # refusal would refuse every `add_point`. The caller-marker refusal
+        # refusal would refuse every `add_point` THAT CARRIES A VECTOR — the
+        # population the marker exists for. (A record with no vector carries no
+        # marker either: `_stamp_journal_vector_width` pops the key when
+        # `embedding` is None, and `_point` sets `embedding` only on the
+        # operator-less, non-empty-content path.) The caller-marker refusal
         # lives at that door (`_forged_keys`) instead, and `add_operator` takes
         # no `**kwargs` — so no public door can reach this channel with one.
         _refuse_caller_named_record_keys(payload, f"the `{type_}` envelope")
