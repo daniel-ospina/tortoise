@@ -118,7 +118,7 @@ def test_null_and_blank_are_ONE_absent_state_reported_as_its_own_share():
     """FAILS IF a blank kind is folded into a declared kind, or `NULL` is folded into `statement`.
 
     Both folds manufacture a typing/coverage win nobody made: `''` is what the `#548` rebuild
-    SNAPSHOT synthesis writes for a kindless operator (`projection/__init__.py:14248-14250` —
+    SNAPSHOT synthesis writes for a kindless operator (`projection/__init__.py:14265-14267` —
     `# Ensure pointKind is present (operators often lack it)` / `clean["pointKind"] = ""`; the
     anchor is cited by its comment because `#11795`/`#9752`/`#11839` each moved it), and
     `NULL` is the absent property. They are ONE state (absent) and neither is a label.
@@ -299,8 +299,8 @@ def test_the_three_layers_are_reported_SEPARATELY_and_never_blended():
 def test_the_claim_layer_keeps_its_EXCLUSION_predicate_so_capture_rows_are_not_claims():
     """FAILS IF the per-layer rewrite drops the `is_episodic`/`is_operator` filter.
 
-    Turn rows are written `pointKind='event'` (`sdk.py:2553` `_TURN_WRITE_CYPHER`, whose
-    `t.pointKind=turn.k` is fed by the payload's own `"k": "event"` at `sdk.py:3086`) and operator
+    Turn rows are written `pointKind='event'` (`sdk.py:2554` `_TURN_WRITE_CYPHER`, whose
+    `t.pointKind=turn.k` is fed by the payload's own `"k": "event"` at `sdk.py:3087`) and operator
     Points are operators, not claims. On the committed corpus 159 of 354 Points are turn rows, so
     counting them read ~45 % "typed" against the owner's 0.6 % reading (`#10982` review, finding 4).
     ⛔ Asserted on the QUERY TEXT: the fake answers the same rows with the clause deleted, so this

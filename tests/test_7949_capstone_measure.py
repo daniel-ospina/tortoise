@@ -5152,17 +5152,17 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         # and the section bounds
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # At this head (rebase onto main `edcac493a5`): entry 9906, `carve_out:`
-        # opens 9780, `uri_requiring:` 10104 — so 9906 is inside the section, and
-        # the identical text also sits at 6056 and 8422, which is what the 5th
+        # At this head (rebase onto main `c7499ac7a7`): entry 9933, `carve_out:`
+        # opens 9807, `uri_requiring:` 10138 — so 9933 is inside the section, and
+        # the identical text also sits at 6072 and 8449, which is what the 5th
         # element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8188) of `surfaces:`, so the resolver's
-        # nearest-column-zero-key rule reports the PARENT: a cite onto 8422 refuses
+        # (`core:` 2235, `sdk:` 8215) of `surfaces:`, so the resolver's
+        # nearest-column-zero-key rule reports the PARENT: a cite onto 8449 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            ("9917", "- test_pack_logic_writeprobe_11083.py"),
+            ("9933", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (

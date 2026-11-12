@@ -136,7 +136,7 @@ owns the **implementation**, and its lane is the one that will build the mechani
 - **A5 (Subjects) — the exception, argued rather than assumed.** The principle *"a capstone does not
   implement"* is scoped to the **extraction-path mechanism a sibling already owns**. For the subject layer
   there is no sibling issue **and possibly no mechanism gap**: `bind_point_subjects`
-  (`subject_binding.py:341`) exists and is called from the commit path — but ⚠️ **`#4889`'s own investigation
+  (`subject_binding.py:344`) exists and is called from the commit path — but ⚠️ **`#4889`'s own investigation
   records the opposite of "shipped":** *"the Subject half was never implemented, at any commit … 'shipped'
   covered the `aboutObject` half only. That is a closure that overstated scope"*, and its scope comment says
   the layer has *"no reachable producer"*. So **C6 decides which is true now** — the point is that the answer
@@ -185,9 +185,9 @@ cost of the wrong assumption compounds per lane.
 | # | assumption | confidence | source | validation plan |
 |---|---|---|---|---|
 | A-a | the `live-v4` baseline in §Feature is accurate | **high** | owner-measured 2026-11-04, per-kind breakdowns | C1's extended census re-derives it |
-| A-b | the packs *do* declare part-whole object relations; schema + writers admit them | **high** | tree: `packs/dev/manifest.yaml:142,148,193`; `projection/edges.py:621-630`; ONTOLOGY §3.7 | C3 |
+| A-b | the packs *do* declare part-whole object relations; schema + writers admit them | **high** | tree: `packs/dev/manifest.yaml:142,148,239`; `projection/edges.py:717-726`; ONTOLOGY §3.7 | C3 |
 | A-c | the gap is the **declaration → consumer** seam, not a missing writer | **high** | tree: zero `create_edge` in `extractor_v2.py`; `hierarchies` validated-only (`pack_registry.py:2341-2355`) | C3 |
-| A-d | a corpus reachable **through the door the fleet writes through** exists or is capturable | **medium** | ⚠️ **Transports, not lanes.** The committed arm *is* the **v2 lane** — `llm:deepseek-direct` is what `sdk.py:15650` states as *"the v2 path reports `extraction_mode: llm:<route>`"* (keyed by symbol: `extraction_mode`), and `probes/capstone_measure.py` drives `TortoiseSDK.capture_session`. What **no committed capstone arm** exercises is the **hosted transport** the fleet's sessions actually use — `POST /v1/sessions` (`tortoise/pi-hooks/tortoise-capture.ts:948`, the plain `postCapture`; `:938` is the `install-probe` sibling, `hosted_api.py:20319`), with its quota/auth gates, and the registered corpus is a **fixture** (`tests/eval/write_path`, `pinned_by: fixtures_hash`). Also: **E1b's deterministic `m2` control has no committed artifact**. | C1 + C2 (the open decision is *which transport*, not *which lane*) |
+| A-d | a corpus reachable **through the door the fleet writes through** exists or is capturable | **medium** | ⚠️ **Transports, not lanes.** The committed arm *is* the **v2 lane** — `llm:deepseek-direct` is what `sdk.py:15996-15997` states as *"the v2 path reports `extraction_mode: llm:<route>`"* (keyed by symbol: `extraction_mode`), and `probes/capstone_measure.py` drives `TortoiseSDK.capture_session`. What **no committed capstone arm** exercises is the **hosted transport** the fleet's sessions actually use — `POST /v1/sessions` (`tortoise/pi-hooks/tortoise-capture.ts:948`, the plain `postCapture`; `:938` is the `install-probe` sibling, `hosted_api.py:20344`), with its quota/auth gates, and the registered corpus is a **fixture** (`tests/eval/write_path`, `pinned_by: fixtures_hash`). Also: **E1b's deterministic `m2` control has no committed artifact**. | C1 + C2 (the open decision is *which transport*, not *which lane*) |
 | A-e | `TAGGED edges: 0` is a gap | **rejected** | no extraction path writes `tags`; `_sync_tags` is the only writer | no child; recorded so it never becomes a target |
 | A-f | E1–E5 need a fresh instrument | **rejected** | `#9075` registration + `probes/capstone_measure.py` + verdict gate, all committed | C1 extends it |
 
@@ -200,7 +200,7 @@ Written here because a decision that cites only its conclusion is unauditable; t
 
 - **R1/R2 — the packs already declare it** (`decomposesInto`, `hasPart`, `hierarchies`), the schema admits
   it (`hasPart` on the structural allowlist; Object→Object per ONTOLOGY §3.7) and the writer exists
-  (`edges.py:2900`). ⚠️ `decomposesInto` is **not itself writable** — its route is `semantics: hasPart`,
+  (`edges.py:3100`). ⚠️ `decomposesInto` is **not itself writable** — its route is `semantics: hasPart`,
   and **nothing derives the writable predicate from the declaration**.
 - **R3 — the extraction lane writes no structural edge at all.**
 - **R6 — the door is the v2 lane** (`_capture_lane()` → `"v2"` unless `TORTOISE_SESSION_EXTRACTOR=m2`).
@@ -235,7 +235,7 @@ Two recorded decisions and one closed-but-unsettled metric sit under the owner's
    > written — a later stage resolving a fork this stage opened is the pipeline working, not a contradiction;
    > read the ruling, not the fork.
 2. **ASK — §13.8 Q1**, to-graph connection by model or mechanically: recorded **OPEN**
-   (`EXTRACTOR-V4-ARCHITECTURE.md:2085` — under §13.8's heading at `:2057` — and `:2061`) while **D6 stands** (`:1400`, `:1095`). **C5 measures conformance to D6** — the two connection sets are `#10999` (Job 1) and `#10998` (Job 2); C5 builds neither.
+   (`EXTRACTOR-V4-ARCHITECTURE.md:2084` — under §13.8's heading at `:2075` — and `:2086`) while **D6 stands** (`:1418`, `:1113`). **C5 measures conformance to D6** — the two connection sets are `#10999` (Job 1) and `#10998` (Job 2); C5 builds neither.
 3. **`#9736`** — E3's denominator. **CLOSED 2026-11-04T15:37Z** *before* this head; its amendment landed
    (`8c1151426`) and E3 is still RED at 157/397 because 193 of 354 Points cannot carry an anchor. Its
    closure leaves two owner-gated lines owed. `blocker-states.json` still says OPEN — a stale pointer of
