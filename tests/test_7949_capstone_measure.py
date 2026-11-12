@@ -5104,7 +5104,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            ("9600", "- test_pack_logic_writeprobe_11083.py"),
+            ("9633", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces"),
     )
     assert len(rows) >= 9, (
