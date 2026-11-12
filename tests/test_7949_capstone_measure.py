@@ -5189,21 +5189,31 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # The two cites this forward merge re-pointed in the documents no row read —
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
         # few lines still "contains" the number the document names.
+        # ⛔ RE-DERIVED at the merge of this PR's round-18 code onto the capstone
+        # lane's head: the two branches each re-derived this pair, +5 apart, so
+        # the merged tree's numbers are MEASURED here
+        # (`grep -nF '# Validate hierarchies'` / `grep -nF "hierarchies: entry
+        # missing 'type' field"`) — never one side's value carried over. All
+        # three documents were re-pointed to the same measured pair.
         ("00-align.md", "the gap is the **declaration → consumer** seam", (
-            # re-derived at THIS head (`grep -nF '# Validate hierarchies'` /
-            # `grep -nF "hierarchies: entry missing 'type' field"`), not carried:
-            # the #12060 review rounds above this region moved it +39, and the
-            # document was re-pointed to the same measured pair.
             ("2478", "# Validate hierarchies"),
             ("2492", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
-        # ⛔ THE OTHER HALF OF THAT CITE, which had NO pin (measured by a round-18
-        # review that mutated this document's number to `2400-2414` and watched
-        # every test stay green): the same range is quoted from a DIFFERENT
-        # sentence in `00-plan.md`, and a row scopes to one document — so one pin
-        # cannot cover both, and the unpinned one re-stales silently on the next
-        # insertion above the block.
+        # The SAME claim in the plan, which no row covered — and it is the proof of
+        # why an unpinned cite is not merely a cosmetic miss: `00-plan.md:158` kept
+        # the relation-semantics lines (2415-2429) through every
+        # merge that re-derived its `00-align.md` sibling, because nothing read it.
+        # Same anchors, same range, so the next insertion above the block reds here
+        # too instead of leaving one document true and the other stale.
         ("00-plan.md", "**`hierarchies`** — validated only", (
+            ("2478", "# Validate hierarchies"),
+            ("2492", 'errors.append("hierarchies: entry missing \'type\' field")'),
+        ), "pack_registry"),
+        # ...and the THIRD copy of the same sentence, in the test-design table, where
+        # the range is a bare continuation (`:N-N`) and so is invisible to every
+        # sweep that reads a source-qualified cite. Unpinned, it outlived both of its
+        # siblings; the phrase is the document's own words, not a markdown line.
+        ("03-test-design.md", "`hierarchies` (validated only", (
             ("2478", "# Validate hierarchies"),
             ("2492", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
