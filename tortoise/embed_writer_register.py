@@ -790,7 +790,7 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             stores=("Event",),  # `set_embedding_clause("e")` in both of its write arms
         ),
     ),
-    # ── The instrument's own FALSE POSITIVES (a match on prose, not on a write) ───────────────
+    # ── A prose-matched CARRIER (the match is a message; the vector is the caller's) ──────────
     (
         "tortoise.sdk::create_source",
         WriterClass(

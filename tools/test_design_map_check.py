@@ -1463,6 +1463,56 @@ def self_test(text: str) -> int:
         except Refusal:
             return None
 
+    # ⛔ A `None` baseline is a REFUSAL, not a zero, and the two must be told apart
+    # (fresh review of PR #12016, P3 — MEASURED). Before this, a shape that could not
+    # be parsed at all fell into the delta message below and printed `0 violation(s)
+    # where the shipped map grades 0 … a rule that reaches only column-0 rows is
+    # firing here` with `Newly graded: []` — an arithmetic that contradicts itself,
+    # and a diagnosis pointing at a rule when the copy had lost its surface table.
+    # It is the "refuses correctly but wrongly about reality" class this file fixed one
+    # round earlier, so the refusal is now named as such, with its own message.
+    def _refusal_of(candidate: str) -> str | None:
+        try:
+            check(candidate)
+        except Refusal as exc:
+            return str(exc)
+        return None
+
+    def _baseline_delta(label: str, candidate: str, extra: str = "") -> int | None:
+        """Report a shape that does not grade what the shipped map grades.
+
+        Returns `1` when the shape is a defect (the caller returns it), or `None`
+        when the two agree. The REFUSAL branch is separate because a shape that
+        cannot be parsed has no verdict to compare, and reporting it as a delta
+        would publish a comparison the run never made.
+        """
+        candidate_baseline = _baseline(candidate)
+        if candidate_baseline == shipped_baseline:
+            return None
+        refusal = _refusal_of(candidate)
+        if refusal is not None or candidate_baseline is None:
+            print(
+                f"self-test: the {label} shape could not be GRADED — it is refused "
+                f"({refusal or 'no verdict; the check returned no baseline'}), so this "
+                "run compared nothing and the indentation-blind class is UNSTAKED for "
+                "that shape. The shipped map graded "
+                f"{len(shipped_baseline or [])} violation(s); a REFUSAL here is a copy "
+                "that lost a table or a section the rules read (the re-indent, a "
+                "mutator, or the width chooser), not a rule firing on column-0 rows",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"self-test: the {label} shape grades "
+            f"{len(candidate_baseline)} violation(s) where the shipped map "
+            f"grades {len(shipped_baseline or [])} — the shapes are the SAME "
+            "document, so a rule that reaches only column-0 rows is firing here "
+            "(and every mutation's expected violation would be satisfied by that "
+            f"baseline instead of by the mutation).{extra}",
+            file=sys.stderr,
+        )
+        return 1
+
     # ⛔ Every shape is the SAME document, so it must earn the SAME baseline verdict.
     # This is the arm that catches an indentation-blind RULE (as opposed to a
     # mutator): such a rule adds violations to the indented copy's baseline, where
@@ -1507,33 +1557,21 @@ def self_test(text: str) -> int:
             collision_baseline = _baseline(collision)
             newly_fired = [v for v in (collision_baseline or [])
                            if v not in (shipped_baseline or [])]
-            print(
-                f"self-test: a document whose rows already sit at "
-                f"{SELF_TEST_INDENT} space(s) grades "
-                f"{len(collision_baseline or [])} violation(s) where the shipped "
-                f"map grades {len(shipped_baseline or [])} — the SAME document, only "
-                "re-indented, so a RULE that reaches only column-0 rows is firing "
-                f"here (NOT the width: it moved to {collided_width} and the copy is "
-                f"not byte-identical). Newly graded: {newly_fired[:3]}",
-                file=sys.stderr,
-            )
-            return 1
+            return _baseline_delta(
+                f"document whose rows already sit at {SELF_TEST_INDENT} space(s)",
+                collision,
+                extra=(
+                    f" (NOT the width: it moved to {collided_width} and the copy is "
+                    f"not byte-identical). Newly graded: {newly_fired[:3]}"
+                ),
+            ) or 0
     total = len(SELF_TEST_MUTATIONS)
     failures = 0
     untestable = 0
     for label, candidate, verbose in passes:
-        candidate_baseline = _baseline(candidate)
-        if candidate_baseline != shipped_baseline:
-            print(
-                f"self-test: the {label} shape grades "
-                f"{len(candidate_baseline or [])} violation(s) where the shipped map "
-                f"grades {len(shipped_baseline or [])} — the shapes are the SAME "
-                "document, so a rule that reaches only column-0 rows is firing here "
-                "(and every mutation's expected violation would be satisfied by that "
-                "baseline instead of by the mutation)",
-                file=sys.stderr,
-            )
-            failures += 1
+        delta = _baseline_delta(label, candidate)
+        if delta is not None:
+            failures += delta
             continue
         pass_failures, pass_untestable = _run_mutation_pass(candidate, label, verbose=verbose)
         failures += pass_failures

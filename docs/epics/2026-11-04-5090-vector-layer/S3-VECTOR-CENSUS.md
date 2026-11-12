@@ -359,8 +359,15 @@ skip is the `<3.12` re-derive. The three `main` reds this row recorded for a day
 the width verifier and a docstring-quoted call, and `#12042` (`b367c54214a2`) CLASSED both
 `CENSUS_EXEMPT` and declared them exempt in `tortoise/embed_writer_register.py` (they are still in
 the population — `embedding_writers()` reports them as `unresolved_write` — but exemption is what
-reading (b) accepts), so row 2 no longer HOLDS on them and no nodeid here reds on this tree or on
-`origin/main` `25127b61b61c`.
+reading (b) accepts), so row 2 no longer HOLDS on them, and **no nodeid here reds on this tree**.
+⛔ THAT IS A READING OF THIS TREE, NEVER OF `main`, and the sentence this replaces got it wrong
+inside a day: it pinned `origin/main` `25127b61b61c`, a sha that PREDATES `#12113` (`18d43e0462`),
+whose `#11858` door guard put an `embedding=` into `tortoise.sdk::create_source`'s refusal MESSAGE —
+`_EMBED_WRITE` reads raw source, so that prose made the door an undeclared writer and three of
+these nodeids red again at `origin/main` `edcac493a5` (measured there: `3 failed, 168 deselected`).
+A branch sha is a moving tree — the same discipline the paragraph below already imposes on the
+population COUNT — so the claim is bound to the tree it was measured on, and this PR carries the
+declaration that clears it.
 ⛔ The SPLIT is lane-bound, and the same tree reads **177 passed, 2 skipped** under
 `TORTOISE_TEST_CARVE_OUT=1` with no `TORTOISE_DB_URI` — the second skip is
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies. Both splits add
