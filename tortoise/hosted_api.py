@@ -21343,9 +21343,17 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         )
         for name in ev.about_entities:
             _exact_only = False
-            if str(name) in subject_entity_names:
+            # #12120 review: ONE spelling for the whole decision, stripped — the
+            # membership tests below are what keeps a subject-kind name off this
+            # channel (`#1370`/`#4934`), and the deferred resolver strips too, so
+            # deciding on the raw padding made `" The Team "` a NON-subject here
+            # and an EXACT match there: the un-gated `aboutObject` edge the drop
+            # exists to prevent, written on the hosted path only (the local twin
+            # and `near_dup_merge` both strip before deciding).
+            name = str(name).strip()
+            if name in subject_entity_names:
                 _subject_channel = True
-            elif _fold(str(name)) in subject_entity_names_folded:
+            elif _fold(name) in subject_entity_names_folded:
                 # Fold-equal only: an EXACT-name Object is still F6's carrier and
                 # keeps its edge; a fold-only one must not get it.
                 _subject_channel = False
@@ -22047,7 +22055,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # F6's case (a legitimately-cased Object keeps its edge).
             if _fold(str(name)) in subject_entity_names_folded:
                 _space = f"({_space}) AND o.name = $exact"
-                _space_params = {**_space_params, "exact": str(name)}
+                _space_params = {**_space_params, "exact": str(name).strip()}
             proj.g.query(
                 f"MATCH (p:Point {{id:$pid}}), (o:Object) "
                 f"WHERE {_space} "

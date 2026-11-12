@@ -5738,6 +5738,41 @@ class TestThe12120HostedAboutObjectAnchor:
             "the claim's fold-equivalent about name dropped its `aboutObject` "
             "edge — the hosted anchor resolved on the raw name")
 
+    def test_a_padded_reference_keeps_its_exact_name_edge(self, client):
+        """Round 17: the Event channel strips before it decides AND resolves.
+
+        F6's rule (an Object whose name IS the reference keeps its edge, while a
+        fold-only carrier does not) is reached through the exact-narrowing arm,
+        which asks `o.name = $exact`. Both sibling sites strip before that compare
+        (`sdk.py`, `near_dup_merge.py`) and the arm this channel replaced folded —
+        which strips. Passing the RAW payload spelling through made `" the team "`
+        match nothing, so the edge `main` wrote disappeared on this channel alone.
+        """
+        # The Object's name IS "the team" — F6's carrier, reached by an EXACT
+        # match, which is exactly what a padded reference loses without the strip.
+        _seed_objects(client, "s12120-padsk-1", ["the team"])
+        raw = _raw_payload(
+            1, session_id="s12120-padsk-2",
+            entities=[{"name": "The Team", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": " the team ", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[])],
+            events=[{"id": "ev_" + "8" * 62, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": [" the team "]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (:Event)-[:aboutObject]->(o:Object {name:'the team'}) "
+            "RETURN count(o)").result_set
+        assert rows and rows[0][0] >= 1, (
+            "a PADDED reference lost the exact-name edge F6 keeps — the channel "
+            "compared the raw string while both sibling sites strip")
+
     def test_an_event_keeps_the_edge_for_an_exact_name_carrier(self, client):
         """Round 6: F6 holds on the EVENT channel too — narrow, don't drop.
 
