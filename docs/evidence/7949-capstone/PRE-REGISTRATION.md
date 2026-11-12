@@ -1276,7 +1276,7 @@ under either class set).
 version anchor sits on the **derivation link**, and `:Object` reaches its source through an
 identity/mention link that carries **no** `sourceVersion` **by design**. Pinned in the tree, not in
 prose: `_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})`
-(`tortoise/projection/edges.py:843`), `edges.py:817-819`'s statement of the rule, and
+(`tortoise/projection/edges.py:747`), `edges.py:721-723`'s statement of the rule, and
 `tests/test_source_version_references_5199.py::test_identity_link_stays_property_free`.
 
 **Why the old denominator was a defect and not a bar.** Counted over `Point` + `Object` + `Event`, E3's
@@ -1688,11 +1688,11 @@ exists". A2 is the one genuine absence: no S3 RESOLVE attach/mint census has eve
 `a1_relation_families: [decomposesInto, hasPart]` — the pack's two **declared hierarchy predicates**.
 `decomposesInto` is never a relationship **label**: both hierarchy entries are written `type: hasPart`,
 and the OPERATOR writers fold `composedOf`/`decomposesInto`/`contains`/`wraps` onto that same label
-(`tortoise/projection/edges.py:1619-1620`, `tortoise/record_projection.py:4996-4997`) while the hierarchy seam writes the
+(`tortoise/projection/edges.py:1513`, `tortoise/record_projection.py:4771-4779`) while the hierarchy seam writes the
 entry's `type` and REFUSES a `decomposesInto` entry
 (`tortoise/pack_hierarchy.py:215-224`: *"the edge this function would write carries `decomposesInto`,
 which `create_edge` refuses"*); `create_edge`'s own predicate set carries `hasPart` and not
-`decomposesInto` (`edges.py:717-726`). A pin on the declared
+`decomposesInto` (`edges.py:621-632`). A pin on the declared
 spelling therefore named a label that occurs zero times on every graph this repository can write, and
 the registered bar — *">= 1 edge for EACH of the two families"* — was **unsatisfiable**: `#10984` (C3)
 would have scored `A1` RED forever on a correct product. The pin is now the ONE written family
@@ -2558,9 +2558,10 @@ to answer.
 
 ### 10.28 — the §11/§9 cite block re-derived for `#12067`'s `+54`, and the `#10360` read-back re-pointed (2026-11-13, `#12067`)
 
-> ⛔ **Superseded for THIS tree by §10.29.** `34bb716315` (the `MITIGATES` bridge probe) inserts
-> a further `+9` inside the same relation-builder hunk, so every cite below moves by `+9` and the
-> read-back's band becomes `+37`. §10.29 owns the values this tree carries.
+> ⛔ **Superseded for THIS tree by §10.29.** No cite below moved: `34bb716315` inserted `+9`
+> inside the same relation-builder hunk and `391313ca9a` then removed it again (the mechanism
+> guard became the DECLARED table in `tortoise/ep.py`), so §10.29 re-measured the same numbers
+> this entry recorded while the branch's total delta grew elsewhere. §10.29 owns them.
 >
 > **A successor entry, not an edit to §10.23 or §10.24.** Both of those number the head
 > they name and must stay byte-identical to `main` — §10.19's rule, restated by §10.22
@@ -2612,9 +2613,9 @@ to answer.
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit,
   per §8's rule for *any* edit to this file.
-- **§10.29 succeeds this entry**, so nothing here is live: `34bb716315` moved the same
-  cites by a further `+9`, and the entry that carries a `LIVE for the merged tree` bullet
-  is §10.29, not this one.
+- **§10.29 succeeds this entry**, and it re-measures the same values: `34bb716315`'s `+9`
+  insert was removed again by `391313ca9a`, so nothing below moved. The entry that carries
+  a `LIVE for the merged tree` bullet is §10.29, not this one.
 
 ### 10.29 — the §11/§9 cite block re-derived for THIS branch's delta, round 15's code included (2026-11-13, `#12067`)
 
@@ -2628,7 +2629,7 @@ to answer.
 > ⚠️ **The handling is still §10.26→§10.27's**: a new dated entry, never a re-point in place.
 
 - **What moved, and why an offset cannot describe it.** The branch's delta against `origin/main` is
-  now **`+99 / -12` in sixteen hunks**, not one band: `+0` above `:1761`, `+28` at the `#10360`
+  now **`+99 / -12` in fifteen hunks**, not one band: `+0` above `:1761`, `+28` at the `#10360`
   read-back (`:10508` on `main`, `:10536` here), and `+54` from `_collect_classify_items`
   (`:11803` → `:11857`) all the way through the S2.2 VET gate (`:16779` → `:16833`). A single
   offset applied to the block would be wrong at two of those three regions, which is exactly why
@@ -2655,11 +2656,18 @@ to answer.
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit,
   per §8's rule for *any* edit to this file.
-- **Also re-derived by the same merges: four `edges.py` / `record_projection.py` cites** in
-  §3.7 and A1 — the composition fold (`edges.py:1619-1620`), `create_edge`'s own predicate set
+- **Also re-derived by the same merges: four `edges.py` / `record_projection.py` cites in the LIVE
+  carriers** — §3.4 (the identity/mention rule, `edges.py:817-819`), §3.7 (both, twice), and §7 —
+  the composition fold (`edges.py:1619-1620`), `create_edge`'s own predicate set
   (`edges.py:717-726`, which admits the composition spelling and refuses its sibling), the
   identity/mention rule that keeps `Object` property-free (`edges.py:817-819`), and the record
-  projection's copy of the same fold map (`record_projection.py:4996-4997`). Citations only; no
-  criterion value moved.
+  projection's copy of the same fold map (`record_projection.py:4996-4997`) — and the
+  `_DERIVATION_REFERENCES_LABELS` cite in §3.7 (`edges.py:843`). Citations only; no criterion
+  value moved.
+- ⛔ **§10.1 and §10.11 are HISTORY and were NOT re-pointed.** Their numbers (`edges.py:747`,
+  `edges.py:721-723`, `edges.py:1513`, `record_projection.py:4771-4779`, `edges.py:621-632`) name
+  the head each entry measured, per §10.19/§10.22/§10.24 — an earlier cut of this branch's own
+  cite sweep edited them in place and was reverted. A reader who needs the live numbers takes
+  them from §3.4/§3.7/§7 above, or from this entry's list.
 - **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
   supersede marker.

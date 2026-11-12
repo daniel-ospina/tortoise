@@ -4770,7 +4770,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("14289", "except Exception as e:  # never block capture (P1)"),
             ("14440", "except Exception as e:  # never block capture (P1)"),
         )),
-        # ⛔ #10988's `:10450` (A4's attribution). The cite is a BARE continuation —
+        # ⛔ #10988's `:10441` (A4's attribution). The cite is a BARE continuation —
         # `extractor_v2.py:10447-10450`; `:10441` is the EMPTY-kind default only — so
         # `_BUNDLE_CITE`, which requires a cite to NAME ITS FILE, cannot see it. Without
         # this row the sentence's `:10441` half has no reader at all, and the claim it
@@ -4822,7 +4822,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
             ("13851", '"classify_later": {"enabled": classify_later,'),
             ("13855", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
             ("14640", 'result["classify_later"] = {'),
-            ("14654", ("exact", "}")),
+            ("14646", ("exact", "}")),
             ("14650", 'result["vet"] = {'),
             ("14654", ("exact", "}")),
         )),
