@@ -1547,7 +1547,11 @@ def test_an_operators_arity_is_not_asserted(sdk):
     single input (measured: ``compute_confidence`` returns no factor and no
     ``skipped_factors`` record, before the supersession as well). The strings
     asserted "a two-input factor" and "the surviving input is renumbered",
-    describing an object that does not exist.
+    describing an object that does not exist — and the idx-0 source arm asserted the
+    renumbering UNCONDITIONALLY, which is the same arity claim: measured on the
+    canonical TWO-input directional operator, deleting the source edge leaving ONE
+    input does not renumber anything, the factor stops running and NO skip record
+    marks it (``skipped: None``, survivor at a bare prior).
     """
     v1 = _obj(sdk, "PolicyV1")
     _obj(sdk, "PolicyV2")
@@ -1562,14 +1566,18 @@ def test_an_operators_arity_is_not_asserted(sdk):
     assert "has no factor to begin with" in issues[0].detail, issues[0].detail
     assert "a two-input factor is then skipped" not in issues[0].detail, (
         "the row cannot prove two inputs exist: " + issues[0].detail)
-    # ⛔ The fix must scope the renumbering hazard to the rows that HAVE another
-    # input, and name the zero-remaining case, rather than assert a surviving input
-    # this row does not have (#12111 review).
-    assert "has no factor to begin with" in issues[0].fix, issues[0].fix
-    assert "where the operator has ANY other input" in issues[0].fix, (
-        "the renumbering hazard must be conditional, not asserted: " + issues[0].fix)
-    assert "any SURVIVING input is renumbered" not in issues[0].fix, (
-        "this row has no surviving input: " + issues[0].fix)
+    fix = issues[0].fix
+    # ⛔ The renumbering hazard is scoped to the rows that HAVE a survivor to
+    # renumber, and the zero-survivor case is named rather than left to "no factor to
+    # begin with" (#12111 review: measured on a two-input operator, one survivor after
+    # the delete is NOT renumbered — the factor stops with an EMPTY skip record).
+    assert "has no factor to begin with" in fix, fix
+    assert "with TWO OR MORE inputs surviving" in fix, (
+        "the renumbering is conditional on there being a survivor to renumber: "
+        + fix)
+    assert "with exactly ONE left the factor stops running altogether" in fix, fix
+    assert "any SURVIVING input is renumbered" not in fix, (
+        "that phrasing asserts the renumbering for every survivor count: " + fix)
 
 
 # ── 3. the history surface stops hiding a terminal chain head ──────
@@ -1722,6 +1730,14 @@ def test_a_zero_flag_successor_is_operator_shaped(sdk):
         "EP refuses this endpoint as a factor input (0 = false is False), so the "
         "ordinary arm's 'it inherits no belief unless rewired' understates it: "
         + issues[0].detail)
+    # ⛔ The SHAPE is EP's PREDICATE, not the stored value: this node's flag reads
+    # ``0``, so a finding that says ``(is_operator=true)`` names a value it does not
+    # hold, and a reader who checks with ``= true`` finds nothing and cannot tell
+    # why the audit flagged it.
+    for text in (issues[0].detail, issues[0].fix):
+        assert "(is_operator=true)" not in text, (
+            "the node's stored flag is the integer 0, not true: " + text)
+    assert "``is_operator`` is not ``false``" in issues[0].detail, issues[0].detail
 
 
 # ── 5. a consequence is the LADDER, never an arity (#12111 round 13) ──
@@ -1860,3 +1876,34 @@ def test_the_successorless_shaped_arm_does_not_promise_the_flag_restores(sdk):
     assert [i for i in _issues(sdk, "superseded_object_active_edges")
             if i.node_id == v1["id"]], (
         "fixture drifted: the flag-clearing step must not clear the finding")
+
+
+def test_the_zero_live_input_rung_is_stated(sdk):
+    """When every input is terminal EP assembles no factor and records NOTHING.
+
+    Measured: a three-input operator whose every input carries
+    ``status='superseded'`` → ``compute_confidence`` returns ``confidences {}`` and
+    an EMPTY skip record, while three 4b rows are emitted — one per superseded
+    anchor — each saying "two or more run without it". The ladder stopped at ONE and
+    at two-or-more, so the row a reader is most likely to meet (an operator feeding
+    several claims that were all retired) asserted a re-score that never happens.
+    """
+    p = sdk.create_point("statement", "the policy holds")
+    objs = [_obj(sdk, n) for n in ("PolicyA", "PolicyB", "PolicyC")]
+    for n in ("A", "B", "C"):
+        _obj(sdk, f"{n}Prime")
+    sdk.create_operator("IMPL", p["id"], [o["id"] for o in objs])
+    for n in ("PolicyA", "PolicyB", "PolicyC"):
+        _supersede_object(sdk, n, f"{n.replace('Policy', '')}Prime")
+
+    run = sdk.compute_confidence(factors=[p["id"]], require_calibration=False)
+    assert run["confidences"] == {} and not (run.get("skipped_factors") or []), (
+        "fixture drifted: EP must build no factor and record no skip here: "
+        f"{run.get('skipped_factors')}")
+
+    rows = [i for i in _issues(sdk, "superseded_object_active_edges")
+            if i.node_id in {o["id"] for o in objs}]
+    assert len(rows) == 3, f"fixture drifted: {len(rows)} rows"
+    for row in rows:
+        assert "NO participating input left" in row.detail, row.detail
+        assert "writes NO skipped-factor record" in row.detail, row.detail

@@ -41,11 +41,18 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+# ⛔ #12111: ``_live_only`` is EP's OWN liveness for a factor input, and a call
+# site must NOT re-spell it. The 4b filter hand-spelled
+# ``(status IS NULL OR status = 'live')``, and ``create_entity(obj, status='Live')``
+# is a DOOR (measured — so are 'LIVE' and 'active'): EP's predicate is a DENY-list,
+# so those nodes are LIVE and EP builds the factor, while the hand-spelled literal
+# dropped the row — a false CLEAN over exactly the shape this check exists to report.
 from tortoise.live import (  # #7927: traversal-position widening + the ONE
     # two-key identity declaration (``EPISTEMIC_ID_KEYS``) every widened
     # surface must resolve through.
     DRAFT_STATUS,  # #780: EP strips a DRAFT input exactly as it strips a
     # terminal one, so a draft successor is a repair that does not repair.
+    _live_only,  # EP's liveness, imported as ``sdk.py`` already does (#6597).
     direction_flows,  # the ONE read-side direction normalizer — the repair's
     # idx-0-source arm has to ask the SAME question ep.py asks.
     epistemic_disjunction,
@@ -274,6 +281,22 @@ def _status_or_flag(status, outdated: bool) -> str:
     if outdated:
         return f"{status or 'live'}(outdated)"
     return status or "live"
+
+
+#: EP's ZERO-participating-input rung — the one rung no other clause named.
+#: ``ep.py`` builds the factor from its PARTICIPATING inputs, so when every input
+#: is terminal there is no factor to re-score and no ``degenerate`` record either
+#: (measured: a three-input operator whose every input was superseded →
+#: ``confidences {}`` and an EMPTY skip record). Stating only the ONE /
+#: two-or-more rungs leaves that row asserting a re-score that never happens, so
+#: this rides in every remaining-input ladder rather than in one arm.
+#: ⚠️ The wording deliberately avoids the bare token ``None``: this module already
+#: has "never interpolate Python's ``None`` into a finding" guards on the emitted
+#: strings, and a legitimate use of the word is indistinguishable from that defect.
+_NO_INPUT_LADDER = (
+    "and with NO participating input left, EP assembles no factor at all and "
+    "writes NO skipped-factor record (measured: ``confidences {}`` and an EMPTY "
+    "skip record)")
 
 
 def _named(value: object) -> str:
@@ -726,12 +749,20 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # #7927: ``active`` is a TRAVERSAL position, so the live endpoint may be
         # a :Point/:Subject/:Event as readily as another :Object.
         f"WHERE {epistemic_disjunction('active')} "
-        "AND (active.status IS NULL OR active.status = 'live')\n"
-        # EP's own liveness for the source is ``_live_only('o.status')``, which also
-        # requires the legacy flag to be false — so an ``outdated`` source is EP-dead
-        # and the row would describe it as "active" over a factor EP never builds
-        # (``invalidate_point`` is a door into that state).
-        "AND coalesce(active.outdated, false) = false\n"
+        # ⛔ EP's OWN liveness, through the shared primitive — never a re-spelled
+        # allow-list. ``create_entity(obj, status='Live')`` is a DOOR (measured,
+        # and so are 'LIVE' and 'active'): EP's predicate is a DENY-list, so those
+        # nodes are LIVE and EP builds the factor, while the hand-spelled literal
+        # this replaces dropped the row — a false CLEAN over the exact shape the
+        # check exists to report. ``_live_only`` is also what carries the legacy
+        # ``outdated`` half (an ``invalidate_point`` source is EP-dead), so the
+        # separate conjunct below is redundant and now sits INSIDE the shared
+        # predicate instead of beside it.
+        f"AND {_live_only('active')}\n"
+        # ⚠️ Check 4 (the ``:Point`` orientation) keeps the older hand-spelled
+        # filter; that divergence is a recorded follow-up rather than half-fixed
+        # here. It is the same false-CLEAN class, so it is named rather than
+        # implied.
         "RETURN count(DISTINCT r)",
     )
     rows4b = _rows(
@@ -741,11 +772,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "WITH sup\n"
         "MATCH (sup)<-[r:IMPL|NAND]-(active) "
         f"WHERE {epistemic_disjunction('active')} "
-        "AND (active.status IS NULL OR active.status = 'live')\n"
-        # EP's own liveness for the source — see the count4b note. ⛔ Check 4 (the
-        # ``:Point`` orientation) keeps the older filter; that divergence is a
-        # recorded follow-up rather than half-fixed here.
-        "AND coalesce(active.outdated, false) = false\n"
+        # EP's own liveness — the SAME predicate as ``count4b`` above, because a
+        # half-applied filter (count filtered, rows not) inverts the module's
+        # ``count >= len(issues)`` invariant.
+        f"AND {_live_only('active')}\n"
         # ⛔ CARRIER COUNT, in the same statement, because the repair's arm turns on
         # whether the pointer RESOLVES — not on whether it is merely SET. A
         # `supersededBy` naming a renamed successor, or the node itself, is present
@@ -958,12 +988,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "slot")
         return ("EP drops that input from the factor and re-scores it over the "
                 "REMAINING inputs — TWO OR MORE run without it (measured on a "
-                "three-input operator: two confidences, ``skipped: None``), ONE "
-                "left is skipped as degenerate (``len(input_ids) < 2``), "
+                "three-input operator: two confidences and an EMPTY skip record), "
+                "ONE left is skipped as degenerate (``len(input_ids) < 2``), "
                 "``source_stripped`` instead where every input edge carries an "
                 "``idx`` and the one taken is a directional operator's idx-0 "
                 "source, and an operator whose ONLY input this was has no factor "
-                "to begin with")
+                "to begin with; " + _NO_INPUT_LADDER)
 
     def _successor_note(s: dict) -> str:
         """The pointer's state, as the trailing clause of a ``detail``.
@@ -993,8 +1023,13 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # ⛔ The CONSEQUENCE is ``_dropped_input``'s: "NO factor / confidences
             # empty" is an arity claim (true at two inputs only — measured false at
             # three, where the factor runs over the remaining two).
+            # ⛔ The SHAPE is stated as EP's PREDICATE, never as the stored value:
+            # ``is_operator=0`` (a door this head measures) is operator-shaped and
+            # is NOT ``= true``, so "(is_operator=true)" named a value the node does
+            # not hold and a reader checking with ``= true`` found nothing.
             return ("; the successor it names is itself OPERATOR-SHAPED "
-                    "(is_operator=true), which EP excludes from a factor's inputs "
+                    "(EP's #9269 test: ``is_operator`` is not ``false``), which EP "
+                    "excludes from a factor's inputs "
                     "(#9269) — " + _dropped_input(s) + ", and a re-audit reads "
                     "CLEAN over it. Target a CLAIM successor")
         if (s["carrier_status"] or "") == DRAFT_STATUS:
@@ -1062,7 +1097,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # re-audit reads CLEAN).
         if s["next_is_operator"]:
             return (f"names the next link ({_quoted(s['carrier_sb'])}), which is "
-                    "OPERATOR-SHAPED (is_operator=true) — EP excludes it from a "
+                    "OPERATOR-SHAPED (EP's #9269 test: ``is_operator`` is not "
+                    "``false``) — EP excludes it from a "
                     "factor's inputs (#9269), so targeting it leaves the operator "
                     "with NO factor and a re-audit reading CLEAN: target a CLAIM "
                     "successor")
@@ -1118,7 +1154,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "inputs is then re-scored without it — ONE left is skipped as "
                     "degenerate (#780/#2422: ep.py's ``len(input_ids) < 2``), two "
                     "or more run without it, and an operator whose ONLY input this "
-                    "is has no factor to begin with, so nothing is lost. A "
+                    "is has no factor to begin with, so nothing is lost; "
+                    + _NO_INPUT_LADDER + ". A "
                     "DIRECTIONAL operator is skipped outright "
                     "when the stripped input is its idx-0 source (source_stripped). "
                     "The successor inherits no belief from this edge unless it was "
@@ -1166,7 +1203,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         status = s["carrier_status"]
         succ = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "the successor"
         if s["carrier_is_operator"]:
-            return (f" ⛔ {succ} is OPERATOR-SHAPED (is_operator=true), which EP "
+            return (f" ⛔ {succ} is OPERATOR-SHAPED (EP's #9269 test: "
+                    "``is_operator`` is not ``false``), which EP "
                     "excludes from a factor's inputs (#9269): "
                     f"{_dropped_input(s)} — target a CLAIM successor")
         if (status or "") == DRAFT_STATUS:
@@ -1471,14 +1509,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"Write the successor ({successor}) into the SOURCE slot: this "
                 f"{s['edge_type']} edge is the operator's idx-0 source and the "
                 f"operator is {_quoted(s['direction'])}-directional, so EP drops "
-                f"the whole factor while that slot is terminal. ⛔ Deleting the "
-                f"edge alone is not the repair: where the operator has ANY other "
-                f"input, that input is renumbered into idx 0 and the factor's "
-                f"direction inverts (ep.py's source_stripped note) — and an "
-                f"operator whose ONLY input this is has no factor to begin with "
-                f"(EP's factor needs two inputs), so the successor write restores "
-                f"the WIRING, not a factor. Re-point idx 0 onto the "
-                f"successor, then delete the edge into {q}." + tail)
+                f"the whole factor while that slot is terminal — and DELETING the "
+                f"edge alone is not the repair: with TWO OR MORE inputs surviving, "
+                f"the one that takes the source slot is renumbered into it and the "
+                f"factor's direction inverts; with exactly ONE left the factor stops "
+                f"running altogether and NO skipped-factor record marks it (measured "
+                f"on a two-input directional operator: after the delete, an EMPTY "
+                f"skip record and the survivor reads a bare prior); and an operator "
+                f"whose ONLY input this was has no factor to begin with. "
+                f"Re-point idx 0 onto the successor, then delete the edge into {q}." + tail)
         if s["idx"] is None:
             return prefix + (
                 f"Re-point this {s['edge_type']} input from {q} onto the successor "
