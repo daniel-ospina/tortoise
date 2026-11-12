@@ -1248,39 +1248,60 @@ def _quoted_clause(block: str) -> str | None:
     return " ".join(quote)
 
 
-def test_the_newest_block_quotes_the_landed_4_3_clause_verbatim() -> None:
+def _block_bodies(changelog: str) -> list[str]:
+    """Every block's text, newest first (the file's own order)."""
+    starts = [m.start() for m in _BLOCK_VERSION_RE.finditer(changelog)]
+    return [changelog[a:b] for a, b in zip(starts, starts[1:] + [len(changelog)])]
+
+
+def test_a_4_3_change_must_be_quoted_verbatim_by_the_release_that_lands_it() -> None:
     """A changelog that quotes a sentence the model does not carry is a false record.
 
     ``docs/ONTOLOGY.md:39`` and ``ONTOLOGY-CHANGELOG.md:32`` both require
     *explicit approval of the exact changes*, and the approval is of **exact
-    text** — so the block's quote of the §4.3 lifecycle sentence is either the
-    landed sentence or it is a record of something that never shipped.
+    text** — so any block that quotes the §4.3 lifecycle sentence must quote the
+    sentence the model carries, and a release that CHANGES that sentence must
+    quote it at all.
 
-    Measured pre-fix at head ``6057b6d4``: the v3.34 block still quoted the
+    Measured at head ``6057b6d4``: the v3.34 block still quoted the
     PRE-restatement wording ("At the write door `superseded` requires the
-    successor …") while §4.3 carried the definition form ("`superseded` means
-    *replaced by* …"). It was verbatim before that commit and the commit updated
-    only one of the two copies, which is how an approved artifact came to
-    disagree with itself. Nothing else in the tree compares them.
+    successor …") while §4.3 carried the definition form. It was verbatim before
+    that commit and the commit updated only one of the two copies, which is how
+    an approved artifact came to disagree with itself. Nothing else in the tree
+    compares them.
 
-    Fail-closed on ABSENCE as well: the newest block must quote the clause, in
-    the same way ``_assert_declared_version_is_recorded`` requires the newest
-    block to exist. If a release genuinely does not touch §4.3 this pin should be
-    re-read rather than silently skipped — a check that does nothing when it
-    cannot run is the no-op gate this file's own conventions reject.
+    ⛔ THE RULE IS "MAY NOT CHANGE WITHOUT A QUOTE", NOT "EVERY BLOCK MUST QUOTE".
+    An earlier cut of this pin demanded a §4.3 quote in the NEWEST block
+    unconditionally, which reds the next release that touches §4.5 or §4.6 and
+    teaches the lane to paste a §4.3 quote into an entry that did not change
+    §4.3 — a changelog recording a change it did not make. The landed clause is
+    instead compared against the clause of the most recent block that DOES quote
+    it: equal means §4.3 did not move this release (nothing to pin), different
+    means it moved and this release must be the one recording the new text.
+    Absence is therefore never a silent pass — a change with no quote fails, and
+    there is no state in which both sides are uncompared.
     """
     ontology = ONTOLOGY.read_text(encoding="utf-8")
-    block = _newest_block_body(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
+    blocks = _block_bodies(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
     landed = _landed_object_lifecycle_clause(ontology)
-    quoted = _quoted_clause(block)
-    assert quoted is not None, (
-        "the newest ONTOLOGY-CHANGELOG.md block does not quote the §4.3 "
-        "lifecycle clause, so nothing records which sentence this release "
-        "landed — quote it verbatim, or re-read this pin if §4.3 was not touched")
-    assert quoted == landed, (
-        "the newest changelog block quotes a §4.3 sentence the model does not "
-        f"carry\n  quoted: {quoted}\n  landed: {landed}\n"
-        "the approval in the entry is of EXACT text, so the two must be identical")
+    quoted_pairs = [(b, q) for b in blocks if (q := _quoted_clause(b)) is not None]
+    assert quoted_pairs, (
+        "no ONTOLOGY-CHANGELOG.md block quotes the §4.3 lifecycle clause, so "
+        "nothing in the record says which sentence any release landed")
+    newest_block, newest_quote = quoted_pairs[0]
+    if newest_block == blocks[0]:
+        assert newest_quote == landed, (
+            "the newest changelog block quotes a §4.3 sentence the model does "
+            f"not carry\n  quoted: {newest_quote}\n  landed: {landed}\n"
+            "the approval in the entry is of EXACT text, so the two must be "
+            "identical")
+        return
+    assert newest_quote == landed, (
+        "§4.3's lifecycle clause differs from the last one a changelog block "
+        "quoted, so a release changed it without quoting the new sentence\n"
+        f"  last quoted: {newest_quote}\n  landed:      {landed}\n"
+        "quote the landed sentence verbatim in the block for the release that "
+        "changed it — the approval is of exact text")
 
 
 def test_the_newest_block_discharges_its_approval_with_a_comment_id() -> None:

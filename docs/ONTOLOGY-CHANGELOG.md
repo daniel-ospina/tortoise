@@ -77,10 +77,23 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > `ev.get("supersedes_by") or ""`, and `sdk.py` records the id-only legacy `ObjectSuperseded` as a
 > legitimate record row, so a refusal at the rebuild would break §11's reconstruction guarantee.
 >
+> ⚠️ **The SAME cell carries a sentence this entry does not fix, and it is the one read first.** The row opens with
+> *"Write-through cache of lifecycle events (ObjectRegistered→live; …)"*, while the clause this entry lands says an Object created
+> without a status stores none and reads as `live`. That opening is **pre-change build record and already recorded as WRONG about the
+> code** — see the #9974 entry below, which parks the exact replacement wording on **#9974** because editing it needs the owner's
+> approval of the exact text. It is called out here rather than left implicit because the two sentences now sit in one cell: read
+> together, they invite a guard that stamps `status='live'` on a statusless record — the *fabricated birth* #9974 R1 removed. Until
+> that parked wording lands, this entry's clause governs and the parenthetical describes the fold as it was.
+>
 > **Why the clause became a definition rather than a narrower door rule (research, 2026-11-12).** Every agent-memory system surveyed
-> uses *soft revocation* rather than deletion, and none requires a caller to name a successor to mark something no-longer-current:
-> Graphiti/Zep sets an edge's `invalid_at` to the invalidating edge's `valid_at` and lets the SYSTEM link them; Cognee's
-> `close_node()` stamps a validity end and takes no successor; mem0 and Letta have no successor concept. What practitioners argue
+> uses *soft revocation* rather than deletion, and **none requires the CALLER to name a successor** to mark something
+> no-longer-current: Graphiti/Zep sets an edge's `invalid_at` to the invalidating edge's `valid_at` and lets the SYSTEM link them;
+> Cognee's `close_node()` stamps a validity end and takes no successor; mem0's **Supersede** action ("marks an older fact as
+> outdated when a newer one contradicts it", always on, all plans) infers both the supersession and its replacement link in the
+> background — `replacement_memory_id`/`lifecycle_state` are written by the system, not passed by a caller. ⚠️ **An earlier version
+> of this entry said "mem0 and Letta have no successor concept", which is false of mem0** (its Supersede feature carries a
+> replacement pointer) and was never verified for Letta from a primary source; the claim that survives is the narrower, load-bearing
+> one — the pointer is *system-inferred*, so no caller is required to supply it. What practitioners argue
 > about is the opposite direction: *"a tombstone that says 'superseded' without recording what superseded it is a summary with a
 > timestamp"* — i.e. when the WORD means "replaced", the pointer is not optional. Both hold at once only if the word carries the
 > pointer and the successorless case is a different word — which is what this sentence now says. The same survey's measured
