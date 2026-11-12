@@ -721,11 +721,12 @@ class QueueHealth:
 
         `pr_running` is an UPPER BOUND whenever any counted run was not measured: an
         unmeasured run abstains toward EXECUTING, so it is counted while nothing about
-        it was observed. The fully-unmeasured degradation already has its own token
-        (`census=unmeasured`, emitted only when the verdict is `PR-UNWITNESSED`), but
-        the PARTIAL case — `0 < pr_running_unmeasured < pr_running`, the ordinary
-        outcome of a probe budget smaller than the census — rendered byte-identically
-        to a fully measured reading at the same count (#12037 review).
+        it was observed. Two shapes need naming, and this property names BOTH: the
+        PARTIAL case — `0 < pr_running_unmeasured < pr_running`, the ordinary outcome of
+        a probe budget smaller than the census, which rendered byte-identically to a
+        fully measured reading at the same count — and the FULLY-unmeasured case, which
+        emits `census=unmeasured` whenever the counted census is entirely unmeasured,
+        NOT only on the `PR-UNWITNESSED` degradation (#12037 reviews).
 
         Emitted ONLY when `pr_running_unmeasured > 0`, so every fully-measured
         reading's line is unchanged. In the fully-unmeasured case it emits
@@ -739,15 +740,24 @@ class QueueHealth:
             # Every counted run is unmeasured — the shape the docs describe as showing
             # `census=unmeasured` on the state line.
             #
-            # ⛔ ONLY THE `PR-UNWITNESSED` BRANCH EMITS THAT TOKEN, AND ONLY WHEN THE
-            # DEGRADATION FIRED: `pr_running_census_unwitnessed` is set by `read_health`
-            # for an `OK` it degraded (`verdict == OK` is part of its condition), so on
-            # every OTHER verdict — `PR-BACKLOGGED`, `PR-STARVED`, `FLOOD` — nothing
-            # else printed it, and a census made entirely of unmeasured runs rendered
-            # BYTE-IDENTICALLY to a census of MEASURED EXECUTING runs at the same count.
-            # That is the defect this token exists to remove, so the non-degraded shape
-            # names itself here. Guarded on the flag rather than emitted unconditionally
-            # so the `PR-UNWITNESSED` line cannot carry the token twice.
+            # ⛔ ONLY THE `PR-UNWITNESSED` BRANCH EMITS THAT TOKEN FROM ITS LOCAL, AND
+            # ONLY WHEN THE DEGRADATION FIRED: `pr_running_census_unwitnessed` is set by
+            # `read_health` inside its `verdict == OK`-gated clause, so on the OTHER
+            # verdicts that can carry a fully-unmeasured census nothing else printed it,
+            # and that census rendered BYTE-IDENTICALLY to one of MEASURED EXECUTING runs
+            # at the same count. That is the defect this token exists to remove, so the
+            # non-degraded shape names itself here. Guarded on the flag rather than
+            # emitted unconditionally so the `PR-UNWITNESSED` line cannot carry it twice.
+            #
+            # ⛔ THE REACHABLE SET IS NOT "every other verdict" (review finding). A
+            # fully-unmeasured census needs `pr_running > 0` with every counted run
+            # unmeasured, and an unmeasured run is always COUNTED (`is_executing` is
+            # `has_live_job is not False`), so `pr_running == 0` FORCES
+            # `pr_running_unmeasured == 0`. `PR-STARVED` and `FLOOD` both require
+            # `pr_running == 0`, so a fully-unmeasured census is UNREACHABLE there and
+            # their `census=` splice is dead text — it is not coverage. The verdicts that
+            # CAN carry the shape are `PR-BACKLOGGED`, `PR-UNWITNESSED` reached by an
+            # unreadable stamp, and `OK` from a non-probing caller.
             return "" if self.pr_running_census_unwitnessed else ", census=unmeasured"
         return f", unmeasured={self.pr_running_unmeasured}"
 
@@ -1923,13 +1933,16 @@ def read_run_live_job(
     """Does run ``run_id`` still have a job that has not COMPLETED? (#12037)
 
     The evidence a run's `status` string cannot give. A run whose every **VISIBLE** job is
-    `completed`, whose list is **PROVABLY COMPLETE**, and whose own `updated_at` has been
-    STILL for `JOB_SETTLE_SECONDS` is running NOTHING, no matter what `status` reports —
-    measured on three runs frozen at `in_progress` since 2026-11-05 while their only job
-    completed the same day, and unrepairable: `/cancel` and `/force-cancel` both answer 409
-    with contradictory reasons. ⛔ All THREE halves are load-bearing, and this summary is
-    the sentence a future caller is most likely to read and act on — see the candidate-proof
-    bullet in the Returns block below for why each one is required.
+    `completed`, whose list is **NON-EMPTY**, **ATTEMPT-CONSISTENT** and **PROVABLY
+    COMPLETE**, and whose own `updated_at` has been STILL for `JOB_SETTLE_SECONDS` is
+    running NOTHING, no matter what `status` reports — measured on three runs frozen at
+    `in_progress` since 2026-11-05 while their only job completed the same day, and
+    unrepairable: `/cancel` and `/force-cancel` both answer 409 with contradictory
+    reasons. ⛔ EVERY clause there is load-bearing, and this summary is the sentence a
+    future caller is most likely to read and act on: an EMPTY list with `total_count == 0`
+    is provably complete yet abstains, and a list whose rows are stamped for another
+    attempt proves nothing about this one. See the candidate-proof bullet in the Returns
+    block below for why each clause is required.
 
     Returns ``True`` (a non-terminal job exists), ``False`` (jobs READ, non-empty, all
     `completed`), or ``None`` when NOT MEASURED. ``None`` is

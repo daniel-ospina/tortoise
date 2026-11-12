@@ -447,7 +447,13 @@ same step with the same tail is the investigation.
   - the queued PR runs carry no readable `created_at`, so the wait cannot be measured at all —
     there is no lever here; a stamp GitHub never wrote cannot be recovered, so retry the reading;
   - the RUNNING CENSUS is unwitnessed — every run counted in `pr_running` was unmeasured. This
-    shows on the state line as `census=unmeasured`, and it has exactly TWO sub-causes with
+    shows on the state line as `census=unmeasured` **whenever the counted census is entirely
+    unmeasured, on ANY verdict that can carry that shape** (`PR-BACKLOGED`, `PR-UNWITNESSED`, and
+    an `OK` from a non-probing caller — `PR-STARVED`/`FLOOD` cannot: they require
+    `pr_running == 0`, and an unmeasured run is always counted). ⛔ The TWO-sub-cause split
+    below is reported — and its annotation arm runs — only on the `PR-UNWITNESSED`
+    degradation; on the other verdicts the token says the census was unmeasured, but no
+    sub-cause lever is named. It has exactly TWO sub-causes with
     OPPOSITE remedies, which the tool reports separately (`pr_running_unmeasured_unprobed` /
     `..._unread` in `--json`, and the annotation names the one that applies):
     - **the probe budget never REACHED the run** — raise `--max-job-probes`. The budget is spent
