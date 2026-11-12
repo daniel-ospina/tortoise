@@ -1081,8 +1081,8 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #: over, materialising the moment `#11086` arms the compose file.
 #:
 #: ⚠️ **The population is the deployment files that build/run THIS repo's Tortoise
-#: process — not every compose file and not every channel this repo has.** Two
-#: boundaries, both deliberate:
+#: process — not every compose file and not every channel this repo has.** Three
+#: boundaries, all three deliberate:
 #:
 #: * `fly.toml`'s `[env]` table and `entrypoint.sh`'s `export`s DO shape the Tortoise
 #:   process's environment and are OUTSIDE `CONFIG_SURFACES` (measured:
@@ -1117,6 +1117,16 @@ DEPLOYMENT_SURFACES: tuple[str, ...] = (
 #: The files the `Dockerfile` surface stands for. An `ENV` in any image build file
 #: reaches the running container's environment, so each variant is a deployment
 #: input of its own — a single armed variant must not stand in for the rest.
+#:
+#: ⚠️ The glob is REPO-ROOT-scoped (`REPO_ROOT.glob`), and that is a boundary like
+#: the three above rather than an unstated truth: a NESTED image file
+#: (`docker/Dockerfile.prod`, which a compose `build.dockerfile:` can reference)
+#: is outside both this glob and the walk, so moving the images out of the root
+#: would leave the surface reading `ABSENT` while `deployment["on"]` could still
+#: read `True` off armed root files — the same false-PASS class the per-FILE
+#: reading exists for. Latent today: the only tracked image files are the two root
+#: ones (`git ls-files | grep -i dockerfile` → `Dockerfile.hosted`,
+#: `Dockerfile.selfhost`). Named here so a later move is visible rather than silent.
 IMAGE_BUILD_GLOB = "Dockerfile*"
 
 
@@ -1523,15 +1533,19 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
         # a reader quotes. It is not hypothetical here either: `docker-compose.yml`
         # really does set `build.dockerfile: Dockerfile.selfhost`, so a compose
         # deployment CAN carry an image build file's `ENV` today.
+        # ⛔ And NOTHING here may scope a DEPLOYMENT reading to `shipped["armed"]` —
+        # the ANY-SURFACE root list (`.env.example`, a TEMPLATE) — or negate the sentence
+        # above it. The clause that did ("This condition is SCOPED to the surface(s) that
+        # arm it … and is NOT a claim about a deployment built from the silent path(s)")
+        # named a population that cannot arm a deployment, and told the reader the row
+        # says nothing about `docker compose up` — the `#11455` anti-reading, inside the
+        # string the probe publishes (fresh review of PR #12016, P2).
         deployment_reading = (
             f"UNARMED deployment file(s) {deployment['silent']} declare no gate of "
             "their own, so read from that file ALONE the gate is off — this reading is "
             "PER FILE and does not model a compose file that BUILDS from an armed "
             "image build file (it INHERITS that image's `ENV`), so it is not a claim "
-            "about such a deployment. This condition is "
-            "SCOPED to the surface(s) that arm it "
-            f"({', '.join(shipped['armed']) or 'none'}) and is NOT a claim about a "
-            "deployment built from the silent path(s)"
+            "about such a deployment."
         )
     return (
         f"gate enabled by default: {reported} (ambient "
