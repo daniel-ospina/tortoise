@@ -2116,8 +2116,13 @@ class PackRegistry:
                         if isinstance(k, str):
                             _refused_axis_names.add(k)
                         elif isinstance(k, list):
-                            _refused_axis_names.update(
-                                x for x in k if isinstance(x, str))
+                            # ⛔ NOT `if isinstance(x, str)` (round-17 review P3,
+                            # measured): `[[widget, 1]]` + a relation to `acme:1`
+                            # still said "not declared in this pack" for one
+                            # member of a declaration it had just refused. Every
+                            # member is recorded, stringified the way the message
+                            # renders it.
+                            _refused_axis_names.update(str(x) for x in k)
                         else:
                             _refused_axis_names.add(str(k))
                         continue
@@ -3376,7 +3381,21 @@ class PackRegistry:
                             f"{cw}.fallback: '{fb}' is not a core kind — the "
                             f"fallback is the one home that always exists, so it "
                             f"cannot itself depend on a pack (R3)")
-                for fk in c.get("fromKinds", []) or []:
+                # ⛔ THE CONTAINER FIRST (round-17 review P2, measured):
+                # `fromKinds: 7` raised `TypeError: 'int' object is not
+                # iterable` out of `_validate`, rendered by `load_all` as
+                # `✗ acme: 'int' object is not iterable` — no field, no index.
+                # And `or []` conflated FALSY with ABSENT exactly as `rule` did
+                # four hundred lines below: `fromKinds: 0` / `false` / `{}`
+                # loaded `✓ Clean` as NIL mode, and a scalar `'widget'` was
+                # char-split into six one-letter "kinds".
+                _fk_list = c.get("fromKinds")
+                if _fk_list is not None and not isinstance(_fk_list, list):
+                    errors.append(
+                        f"{cw}.fromKinds: must be a list — got "
+                        f"{type(_fk_list).__name__}")
+                    _fk_list = []
+                for fk in _fk_list or []:
                     if not isinstance(fk, str) or not fk.strip():
                         errors.append(f"{cw}.fromKinds: entries must be kinds")
                         continue
@@ -3475,7 +3494,13 @@ class PackRegistry:
                         f"— a misspelled key is read as absent, so the guard "
                         f"compiles with that feature silently OFF (known: "
                         f"{', '.join(sorted(_CONFUSION_KEYS))})")
-                for fl in c.get("fromLayers", []) or []:
+                _fl_list = c.get("fromLayers")
+                if _fl_list is not None and not isinstance(_fl_list, list):
+                    errors.append(
+                        f"{cw}.fromLayers: must be a list — got "
+                        f"{type(_fl_list).__name__}")
+                    _fl_list = []
+                for fl in _fl_list or []:
                     if fl not in ("subject", "object"):
                         errors.append(
                             f"{cw}.fromLayers: '{fl}' is not an entity layer")

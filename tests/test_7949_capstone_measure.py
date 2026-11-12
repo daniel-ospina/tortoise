@@ -5190,8 +5190,22 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
         # few lines still "contains" the number the document names.
         ("00-align.md", "the gap is the **declaration → consumer** seam", (
-            ("2439", "# Validate hierarchies"),
-            ("2453", 'errors.append("hierarchies: entry missing \'type\' field")'),
+            # re-derived at THIS head (`grep -nF '# Validate hierarchies'` /
+            # `grep -nF "hierarchies: entry missing 'type' field"`), not carried:
+            # the #12060 review rounds above this region moved it +39, and the
+            # document was re-pointed to the same measured pair.
+            ("2478", "# Validate hierarchies"),
+            ("2492", 'errors.append("hierarchies: entry missing \'type\' field")'),
+        ), "pack_registry"),
+        # ⛔ THE OTHER HALF OF THAT CITE, which had NO pin (measured by a round-18
+        # review that mutated this document's number to `2400-2414` and watched
+        # every test stay green): the same range is quoted from a DIFFERENT
+        # sentence in `00-plan.md`, and a row scopes to one document — so one pin
+        # cannot cover both, and the unpinned one re-stales silently on the next
+        # insertion above the block.
+        ("00-plan.md", "**`hierarchies`** — validated only", (
+            ("2478", "# Validate hierarchies"),
+            ("2492", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("16251", "The v2 path reports"),

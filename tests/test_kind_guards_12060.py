@@ -2374,6 +2374,15 @@ depends_on: []
         reason: r
 """
 
+        def guardfield(field, value):
+            """The guard, with one extra key on the onConfusion entry."""
+            return guard("my-rule").replace(
+                "        rule: my-rule\n", f"        rule: my-rule\n"
+                f"        {field}: {value}\n")
+
+        def guardfromkinds(value):
+            return guardfield("fromKinds", value)
+
         cases = (
             ("ontology:\n  extends: core\n  objectKinds: [[widget]]\n",
              "ontology.objectKinds: invalid kind value"),
@@ -2403,6 +2412,32 @@ depends_on: []
             (guard("0"), "got int"),
             (guard("false"), "got bool"),
             (guard("'   '"), "got str"),
+            # ⛔ A SCOPE CONTAINER THAT IS NOT A CONTAINER (round-17 review P2):
+            # `fromKinds: 7` raised `TypeError: 'int' object is not iterable` out
+            # of `_validate`; `0`/`false`/`{}` loaded `✓ Clean` as NIL mode; the
+            # scalar `'widget'` was char-split into six one-letter "kinds".
+            (guardfromkinds("7"), "fromKinds: must be a list — got int"),
+            (guardfromkinds("true"), "fromKinds: must be a list — got bool"),
+            (guardfromkinds("0"), "fromKinds: must be a list — got int"),
+            (guardfromkinds("{}"), "fromKinds: must be a list — got dict"),
+            (guardfromkinds("'widget'"), "fromKinds: must be a list — got str"),
+            # ⛔ THE SAME CONTAINER BUG ONE FIELD OVER — `fromLayers` had the
+            # identical `or []`, and reverting ONLY its check left the whole
+            # suite green (measured), so it needs its own cases: `'subject'`
+            # char-split into seven one-letter "layers".
+            (guardfield("fromLayers", "7"), "fromLayers: must be a list — got int"),
+            (guardfield("fromLayers", "0"), "fromLayers: must be a list — got int"),
+            (guardfield("fromLayers", "{}"), "fromLayers: must be a list — got dict"),
+            (guardfield("fromLayers", "'subject'"),
+             "fromLayers: must be a list — got str"),
+            (guardfield("fromLayers", "[middle]"),
+             "fromLayers: 'middle' is not an entity layer"),
+            # ⛔ AND THE MEMBER ONE NESTING LEVEL IN: `[[widget, 1]]` refused the
+            # declaration, then told the author `1` was undeclared (round-17 P3).
+            ("ontology:\n  extends: core\n  objectKinds: [[widget, 1]]\n"
+             "  relations:\n    - predicate: usesThing\n      mechanism: IMPL\n"
+             "      fromKind: acme:1\n      toKind: acme:widget\n",
+             "references '1' which is declared on a *Kinds axis"),
             # the SCALAR non-string axis kind, where the relation arm's
             # shape-based re-derivation missed the refusal (round-16 P3)
             ("ontology:\n  extends: core\n  objectKinds: [1]\n"
@@ -2432,6 +2467,9 @@ depends_on: []
                 "  kindDefs:\n    widget:\n      description: d\n"
                 f"      storeAs: {store}\n"), store
         assert "rule" not in errors(guard("my-rule"))
+        # valid scope containers stay accepted — these are shape guards only
+        assert "fromLayers" not in errors(guardfield("fromLayers", "[subject]"))
+        assert "fromKinds" not in errors(guardfield("fromKinds", "[widget]"))
 
     def test_a_fromKinds_scope_naming_no_CORE_kind_is_refused(self):
         """`core:WrokItem` is a typo the own-namespace arm cannot see.

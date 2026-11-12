@@ -1121,7 +1121,12 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                     "kind_guards: %s guards[%d].onConfusion[%d] is not a map — "
                     "skipped", namespace, i, j)
                 continue
-            rule = c.get("rule") or f"{namespace}:{entry.get('kind')}:{j}"
+            # `is None`, not `or` — `pack_registry._validate` refuses a falsy
+            # rule id, but this function is also reachable from the Python API
+            # with a dict that never went through a manifest (round-17 review).
+            rule = c.get("rule")
+            if rule is None:
+                rule = f"{namespace}:{entry.get('kind')}:{j}"
             redirect = c.get("redirect")
             if not isinstance(redirect, str) or not redirect.strip():
                 _logger.warning(
