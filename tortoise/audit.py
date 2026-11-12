@@ -1433,6 +1433,21 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"{_quoted(_status_or_flag(status, s['carrier_outdated']))} "
                 f"and it {_head_fact(s)}")
 
+    def _succ_unread(s: dict) -> bool:
+        """Is the named successor one EP cannot read as an input?
+
+        ⛔ ONE source for the two emitted strings that must agree about it: the
+        repair's DESTINATION and §3.1's CARRY/DROP disposition. A SHAPE refusal
+        (``_succ_refused``) and a TERMINAL successor are both unreadable, so a
+        "carry to the successor" in the same string as "NOT the one it names … which
+        EP refuses" is one false claim beside one true one — measured: the carry onto
+        a retracted successor left ``rows: 0`` with the belief still gone (#12210
+        review, P2). A DRAFT is deliberately NOT folded in here: ``_chain_tail``
+        offers "promote it to live as well", and promote-then-re-point measurably
+        repairs, so a draft keeps the CARRY disposition.
+        """
+        return _succ_refused(s) or s["carrier_terminal"]
+
     def _triage(s: dict) -> str:
         """ONTOLOGY §3.1's per-edge DISPOSITION, appended to every 4b repair.
 
@@ -1481,7 +1496,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         fwd, bwd = direction_flows(s["direction"])
         neither_arm = s["shape"] and not s["is_operator"]
         neutral = not (fwd or bwd)
-        if s["carrier_count"] == 1 and _succ_refused(s):
+        if s["carrier_count"] == 1 and _succ_unread(s):
             # ⛔ A CARRY needs a successor EP actually reads — and the check may only
             # say so when the name resolves to ONE carrier (an ambiguous name is the
             # repair's first problem, not a refusal). Where the successor is
@@ -1684,8 +1699,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         tail = _chain_tail(s)
         neutral = s["neutral_row"]
         _status = s["carrier_status"] or ""
-        carrier_unread = (s["carrier_count"] == 1 and not s["neutral_row"] and (
-            _succ_refused(s) or s["carrier_terminal"] or _status == DRAFT_STATUS))
+        carrier_unread = (s["carrier_count"] == 1 and not s["neutral_row"]
+                          and (_succ_unread(s) or _status == DRAFT_STATUS))
         if carrier_unread:
             _why = ("it is operator-shaped, which EP refuses as a factor input"
                     if _succ_refused(s) else
@@ -1799,10 +1814,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             return fix
         prefix = ""
         if s["carrier_count"] > 1:
+            # ⛔ …and CONFIRM the intended carrier is one EP reads: with N≥2 the
+            # refusal cannot be ATTRIBUTED to the name (``carrier_status`` is one
+            # arbitrary row — round 19), but an all-archived population is reachable
+            # and a re-point onto a dead carrier builds no factor (measured: the row
+            # goes quiet with the belief still gone, #12210 review P3).
             prefix = (f"FIRST name the successor meant: {_quoted(s['sup_sb'])} is "
                       f"carried by {s['carrier_count']} Objects (#3573) and this "
                       "check cannot pick one, so re-point onto the intended one "
-                      "by ID. ")
+                      "by ID — and confirm THAT one is live and not operator-shaped, "
+                      "because an edge written to a dead or shaped node builds no "
+                      "factor. ")
         if s["shape"] and not s["is_operator"]:
             # ⛔ NEITHER arm: "write the equivalent edge" would change nothing, so the
             # repair is to clear the SHAPE **and** move the edge — measured: clearing

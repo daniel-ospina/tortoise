@@ -2668,3 +2668,67 @@ def test_an_id_less_flowing_row_also_routes_the_destination(sdk):
     assert "NOT the one it names ('PolicyV2')" in fix, (
         "an archived successor is not a destination EP reads: " + fix)
     assert "onto that successor" not in fix, fix
+
+
+def test_a_terminal_successor_does_not_get_the_carry_disposition(sdk):
+    """§3.1's triage must agree with the withdrawn destination.
+
+    The destination withdrawal covers a terminal successor, but `_triage` tested only
+    the SHAPE, so one string said "NOT the one it names ('PolicyV2'), because it is
+    'retracted', which EP does not read as an input" and then "an IMPL may CARRY to
+    the successor". Measured: performing that carry left `rows: 0` with the belief
+    still gone (#12210 review, P2). A DRAFT keeps CARRY on purpose — the chain tail
+    offers "promote it to live as well", and promote-then-re-point measurably
+    repairs.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="retracted")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "NOT the one it names ('PolicyV2')" in fix, fix
+    assert "may CARRY to the successor" not in fix, (
+        "the same string refuses the only successor it names, so it cannot also say "
+        "the edge may carry: " + fix)
+    assert "the disposition for this edge is DROP" in fix, fix
+
+    # ...and a DRAFT keeps the carry, because promoting it repairs (measured).
+    q = sdk.create_point("statement", "second policy")
+    w1 = _obj(sdk, "DraftV1")
+    w2 = _obj(sdk, "DraftV2")
+    sdk.create_operator("IMPL", q["id"], [w1["id"]])
+    _supersede_object(sdk, "DraftV1", "DraftV2")
+    sdk.update_entity(w2["id"], status="draft")
+    draft_fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                     if i.node_id == w1["id"]).fix
+    assert "promote" in draft_fix.lower(), draft_fix
+
+
+def test_an_all_dead_ambiguous_name_warns_the_reader(sdk):
+    """With N≥2 carriers the refusal cannot be attributed — but it must be flagged.
+
+    `carrier_status` is one arbitrary row, so the check must not name a refusal (round
+    19); an all-archived population is still reachable, and a re-point onto a dead
+    carrier builds no factor (measured: the row goes quiet with the belief gone).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    # …then EVERY carrier goes dead, and a second genuine node carries the name.
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "CREATE (:Object {id:'dead-twin', name:'PolicyV2', objectKind:'other', "
+            "status:'archived'})", {})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "carried by 2 Objects" in fix, fix
+    assert "confirm THAT one is live and not operator-shaped" in fix, (
+        "an all-dead ambiguous population must not be re-pointed onto blindly: " + fix)
