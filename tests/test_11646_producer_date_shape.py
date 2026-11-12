@@ -28,7 +28,10 @@ parser change cannot satisfy one by breaking the other.
 """
 from __future__ import annotations
 
+import subprocess
+import sys
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -731,6 +734,39 @@ def test_the_instant_view_takes_whole_value_date_times_and_refuses_unreadable_ta
         assert calendar_datetime(unreadable_tail) is None, unreadable_tail
 
 
+def _run_zone_child(script: str, env_base: dict[str, str], zone: str) -> list[str]:
+    """Run ``script`` in a child under ``zone``; return its output lines.
+
+    ⛔ ``check=True`` together with ``capture_output=True`` CAPTURES the
+    diagnosis and then discards it (#11871). The raised
+    ``subprocess.CalledProcessError`` renders only the argv — and argv is
+    itself elided with ``...`` in a CI log — so a failing child reports
+    "returned non-zero exit status 1" and says nothing about WHY. The child's
+    stderr already holds the answer (a runner interpreter missing a dependency
+    names the module outright), so it is carried into the failure text instead
+    of being captured into an exception that drops it.
+
+    Pinned by ``test_a_failing_zone_child_names_its_stderr_not_just_its_argv``,
+    so reverting to ``check=True`` reds rather than silently re-blinding the CI
+    log.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={**env_base, "TZ": zone},
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"child exited {proc.returncode} under TZ={zone}\n"
+        f"argv: {proc.args!r}\n"
+        f"stdout:\n{proc.stdout}\n"
+        f"stderr:\n{proc.stderr}"
+    )
+    return proc.stdout.strip().splitlines()
+
+
 def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     """#11646 exposes a HOST-DEPENDENT verdict, and this pin exists so that it
     cannot move silently — not because the behaviour is desirable.
@@ -796,10 +832,6 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     ``os.environ["TZ"] = …; time.tzset()`` would work too); each child
     re-derives both the sort key and the write door's verdict.
     """
-    import subprocess
-    import sys
-    from pathlib import Path
-
     script = (
         "from tortoise.search_engine import _created_sort_key as k\n"
         "from tortoise.commit_schema import validate_validity_window as v\n"
@@ -832,10 +864,7 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     observed = {}
     for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles",
                  "Africa/Johannesburg"):
-        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
-                             text=True, timeout=120,
-                             env={**env_base, "TZ": zone}, check=True).stdout
-        lines = out.strip().splitlines()
+        lines = _run_zone_child(script, env_base, zone)
         (key, forward, reverse, both_naive, dst_straddle, perm_shift, end_7200,
          start_in_gap, end_not_inverted, start_wall_inverted,
          end_flip_at_shift, end_flip_past, start_flip_at_59,
@@ -918,12 +947,10 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     # +09:00), so the pair's END bound is the one in the gap and the same
     # wall-inverted pair un-inverts there. Pinned, because "it is only DST" is
     # the wrong rule.
-    pyongyang = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True,
-        timeout=120, env={**env_base, "TZ": "Asia/Pyongyang"}, check=True,
-    ).stdout.strip().splitlines()[5]  # the PERMANENT-shift line, by INDEX: a
-    # positional [-n] here silently re-binds when a print is added (it did —
-    # [−2] became the START-in-gap line and this assertion went dead)
+    # the PERMANENT-shift line, by INDEX: a positional [-n] here silently
+    # re-binds when a print is added (it did — [−2] became the START-in-gap
+    # line and this assertion went dead)
+    pyongyang = _run_zone_child(script, env_base, "Asia/Pyongyang")[5]
     assert pyongyang == "accepted", pyongyang
     assert {o[3] for o in observed.values()} == {"accepted"}, observed
     # ⛔ THE BOUNDARIES, not just the arms: the record states INCLUSIVE for an
@@ -956,3 +983,37 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     assert observed["America/Los_Angeles"][15] == "(2400.0, 0.0)", observed
     for zone in ("UTC", "Asia/Kolkata", "Africa/Johannesburg"):
         assert observed[zone][15] == "(-1200.0, 3600.0)", (zone, observed[zone])
+
+
+def test_a_failing_zone_child_names_its_stderr_not_just_its_argv():
+    """#11871: a failing child must report WHY, not only that it exited 1.
+
+    The defect this pins: ``check=True`` with ``capture_output=True`` captures
+    the child's stderr into a ``CalledProcessError`` and then renders only the
+    argv — which CI elides with ``...`` — so a runner-only failure (a toolchain
+    interpreter with no ``pydantic``, measured) produced
+    ``returned non-zero exit status 1`` and nothing diagnosable.
+
+    Reverting the helper to ``check=True`` raises ``CalledProcessError``
+    instead of ``AssertionError``, so this test reds. That is the point: the
+    failure text IS the deliverable here, and it must not regress silently.
+    """
+    marker = "ModuleNotFoundError: No module named 'pydantic'"
+    broken = (
+        "import sys\n"
+        f"sys.stderr.write({marker!r} + chr(10))\n"
+        "sys.exit(1)\n"
+    )
+    with pytest.raises(AssertionError) as excinfo:
+        _run_zone_child(
+            broken,
+            {"PATH": str(Path(sys.executable).parent),
+             "PYTHONPATH": str(Path(__file__).resolve().parent.parent)},
+            "UTC",
+        )
+    message = str(excinfo.value)
+    # the exit status is still reported…
+    assert "child exited 1" in message, message
+    # …and the datum that names the cause is carried, not discarded
+    assert marker in message, message
+    assert "TZ=UTC" in message, message
