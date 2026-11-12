@@ -684,8 +684,65 @@ def _jobs(path: Path) -> list[tuple[str, list[str]]]:
     out = []
     for n, (at, name) in enumerate(starts):
         end = starts[n + 1][0] if n + 1 < len(starts) else len(lines)
-        out.append((name, lines[at:end]))
+        body = lines[at:end]
+        out.append((name, body + _folded_scalars(body)))
     return out
+
+
+#: A `run:` whose value is a FOLDED block scalar (`>`), with YAML's optional chomping
+#: indicator. `run: |` is literal and is deliberately not matched.
+_FOLDED_RUN = re.compile(r"^(?P<indent>\s*)(?:-\s+)?run:\s*>(?P<chomp>[-+]?)\s*(?:#.*)?$")
+
+
+def _folded_scalars(lines: list[str]) -> list[str]:
+    """Each `run: >` body in `lines`, FOLDED the way YAML folds it (#12167 review).
+
+    ⛔ A FOLDED BLOCK SCALAR JOINS ITS LINES, so scanning a `run: >` body LINE BY LINE
+    splits one command into commands that never existed:
+
+        - run: >
+            echo 'bash tools/h.sh'
+            | bash
+
+    is `echo 'bash tools/h.sh' | bash` — ONE command that pipes the message into bash and
+    RUNS the helper. Line by line the first line is an inert message about a file and the
+    second names no helper, so the scan was silent (measured: the helper ran and
+    `_gh_hazards` answered `[]`). DIRECTION: an INHERITED MISS on `origin/main` and a
+    REGRESSION against pre-`#12106`, which caught it because it read every line raw.
+
+    YAML folds a newline to a space and a BLANK line to a newline, which is modelled here.
+    A single-line body folds to itself and adds nothing; the two live instances today each
+    span several physical lines for ONE command, so folding them adds one scanned line
+    each (measured: 17 053 → 17 055 scanned lines across the 41 workflows, with the hazard
+    verdicts unchanged — 0 added, 0 removed).
+
+    The rendering is ADDED to the job's body, never substituted for the physical lines:
+    this scan is allowed to see more, never less, and a hit still attributes to the job.
+    """
+    folded: list[str] = []
+    i, n = 0, len(lines)
+    while i < n:
+        m = _FOLDED_RUN.match(lines[i])
+        if m is None:
+            i += 1
+            continue
+        indent = len(m.group("indent"))
+        parts = [""]
+        j = i + 1
+        while j < n:
+            line = lines[j]
+            if not line.strip():
+                parts.append("")  # a blank line folds to a NEWLINE, not a space
+            elif len(line) - len(line.lstrip()) > indent:
+                parts[-1] = f"{parts[-1]} {line.strip()}".strip()
+            else:
+                break  # dedented: the scalar ended
+            j += 1
+        nonblank = [k for k in range(i + 1, j) if lines[k].strip()]
+        if len(nonblank) > 1:
+            folded.extend(" " * indent + part for part in parts if part)
+        i = j
+    return folded
 
 
 def _code_only(line: str) -> str:
@@ -822,18 +879,21 @@ _MESSAGE_CMDS = ("echo", "printf")
 #: summary, 14 live uses) turned PROSE into a HAZARD while its UNQUOTED twin
 #: (`> /dev/null`) stayed inert. A bare `>` with no target left is a bash SYNTAX ERROR, so
 #: treating it as a redirect that consumed nothing is the safe reading, not a hole.
+#:
+#: ⛔ AND A TARGET MAY CONTAIN ONLY **COMPLETE** ESCAPES. `\X` replaces the pair, so a LONE
+#: trailing `\` cannot appear in a target — if the class accepted one it would read
+#: `echo '…' 2>&1\` as "a redirect whose target is a file named `\`", the anchored match
+#: would succeed, and the line would answer INERT. bash reads `\`+newline as a
+#: CONTINUATION, so that line and a following `| bash` are ONE command that pipes the
+#: message into bash and RUNS the helper — measured, with the `\` accepted. DIRECTION: an
+#: INHERITED MISS on `origin/main` (it misses too) and a REGRESSION against pre-`#12106`
+#: (which HIT it), so it is closed rather than declared (#12167 review).
 _INERT_MESSAGE = re.compile(
     r"^\s*(?:-\s+)?(?:run:\s*)?(?:" + "|".join(_MESSAGE_CMDS) + r")"
     r"(?:\s+-[A-Za-z]+)*"  # the message command's own flags (`-e`, `-n`)
-    r"(?:\s*(?:\d?>>?|\d?>&|&>>?)\s*[^\s;|&<>]*)*"  # redirects only — never a pipe
+    r"(?:\s*(?:\d?>>?|\d?>&|&>>?)\s*(?:[^\s;|&<>\\]|\\.)*)*"  # redirects, complete escapes
     r"\s*$"
 )
-
-#: A TRAILING COMMENT is not code. bash starts one at a `#` that begins a WORD (preceded by
-#: whitespace or start of line); `echo foo#bar` prints `foo#bar`. Stripped from the BLANKED
-#: text only — the raw arm still sees everything — so `echo "…helper…"  # note` stays inert
-#: instead of falling through to the raw search and reporting its own comment prose.
-_TRAILING_COMMENT = re.compile(r"(?:^|\s)#.*$", re.DOTALL)
 
 #: bash's two WORD-joining rules, applied to a line so a SPLIT name is still visible to the
 #: contiguous-name matcher (see `_gh_hazards`): delete the quote characters, and unescape
@@ -926,6 +986,59 @@ def _blank_quoted(line: str) -> str:
     if quote:
         return line  # unterminated: nothing about this line is proved
     return "".join(out)
+
+
+def _comment_cut(line: str) -> int:
+    """Index where bash's trailing COMMENT starts, or `len(line)` when there is none.
+
+    ⛔ COMPUTED ON THE RAW LINE, and that is the whole point. `_blank_quoted` replaces a
+    closed span with a SPACE, which MANUFACTURES a word boundary the comment rule then
+    keys on: `echo "x"#c; bash h.sh` blanks to `echo  #c; bash h.sh`, the `#c` reads as a
+    comment, the real invocation after the `;` is deleted from the text being scanned, and
+    the line answers INERT. bash reads the `#` there as CONTINUING the word `x`, so it is
+    DATA and the `;` is a REAL separator — measured: the helper runs while the PRE-REVIEW
+    head answered nothing, and BOTH baselines (`origin/main` and pre-`#12106`) HIT it. That
+    makes this a REGRESSION the new rule introduced, closed here.
+
+    bash starts a comment at a `#` that begins a WORD. This walk decides "word start" the
+    same way `_blank_quoted` decides spans — escapes consume a PAIR, and `'…'` has no
+    escapes at all — and it is deliberately NARROWER than bash on exactly one point:
+    unescaped WHITESPACE is the only thing that opens a new word here, so a `#` right
+    after an operator (`echo x;#c`) is NOT treated as a comment. That direction is
+    fail-closed — the line keeps its tail, fails the anchored question and is searched
+    RAW — which is the only direction this gate may err in.
+    """
+    i, n = 0, len(line)
+    quote = ""
+    word_start = True  # start of line IS a word start
+    while i < n:
+        ch = line[i]
+        if quote == "'":  # a single-quoted span ends at the next `'`, escape or not
+            if ch == "'":
+                quote = ""
+            i += 1
+            word_start = False
+            continue
+        if ch == "\\" and i + 1 < n:
+            i += 2  # an escape is one WORD-internal unit, never a boundary
+            word_start = False
+            continue
+        if quote:
+            if ch == quote:
+                quote = ""
+            i += 1
+            word_start = False
+            continue
+        if ch in _QUOTE_CHARS:
+            quote = ch
+            i += 1
+            word_start = False
+            continue
+        if ch == "#" and word_start:
+            return i
+        word_start = ch.isspace()
+        i += 1
+    return n
 
 
 #: The message command must be the FIRST WORD OF THE RAW LINE — i.e. in command
@@ -1030,7 +1143,7 @@ def _message_line_is_inert(line: str) -> bool:
         return False
     if _MESSAGE_WORD.match(line) is None:
         return False
-    return _INERT_MESSAGE.match(_TRAILING_COMMENT.sub("", _blank_quoted(line))) is not None
+    return _INERT_MESSAGE.match(_blank_quoted(line[: _comment_cut(line)])) is not None
 
 
 def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
@@ -1160,7 +1273,7 @@ def test_every_pool_eligible_gh_job_is_declared():
 _ENV_DEFAULTED_GH = ("branch_reaper.py", "run_reaper.py", "e2e_live_reconcile.py")
 
 
-def test_the_job_splitter_returns_exactly_the_jobs_yaml_declares():
+def test_the_job_splitter_returns_exactly_the_jobs_yaml_declares(tmp_path):
     """`_jobs` must enumerate JOBS, not every two-space key in the file.
 
     ⛔ WITHOUT THIS PIN THE BOUND IS UNENFORCED, and it is load-bearing twice over. The
@@ -1187,6 +1300,31 @@ def test_the_job_splitter_returns_exactly_the_jobs_yaml_declares():
         "`on:` trigger child) is being scanned as a job, or a real job is being dropped from "
         "the scan: " + "; ".join(wrong)
     )
+
+    # ⛔ AND THE TOLERANCE ITSELF IS PINNED, because the tree-wide comparison above does NOT
+    # arm it: no live workflow writes a job id with a trailing comment or in quotes, so
+    # reverting `header` to the strict `^  [A-Za-z0-9_.-]+:\s*$` leaves this test green
+    # (measured). The consequence of that revert is a job SILENTLY LEAVING THE SCAN — and if
+    # it is the first two-space key in its file, its whole body with it — which is a
+    # fail-open, so the two spellings get a synthetic file of their own.
+    synthetic = tmp_path / "synthetic.yml"
+    synthetic.write_text(
+        "jobs:\n"
+        "  plain:\n"
+        "    runs-on: ubuntu-24.04\n"
+        "  build:  # a trailing comment on the id\n"
+        "    runs-on: ubuntu-24.04\n"
+        '  "quoted":\n'
+        "    runs-on: ubuntu-24.04\n"
+        "  'single-quoted':\n"
+        "    runs-on: ubuntu-24.04\n"
+    )
+    assert [name for name, _ in _jobs(synthetic)] == [
+        "plain",
+        "build",
+        "quoted",
+        "single-quoted",
+    ], "the tolerant job header stopped tolerating a spelling it is documented to tolerate"
 
 
 def test_the_gh_script_derivation_has_no_visible_blind_spot():
@@ -1289,7 +1427,7 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     EXECUTE on a line that also emits a message is a way this gate could fail OPEN — a
     job that runs a `gh` helper with no contract step, and a green suite.
 
-    ⛔ SIX CLASSES ACROSS FOUR CUTS — each one was a FALSE NEGATIVE in a fix that
+    ⛔ TWELVE CLASSES ACROSS FOUR CUTS — each one was a FALSE NEGATIVE in a fix that
     modelled the shell. Where the class was already caught on `origin/main` it is stated
     as ARMOR rather than claimed as this change's finding (`#12167` review, and the same
     correction as the shape matrix above):
@@ -1300,6 +1438,19 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
       4. `echo "$(printf ')'; bash h.sh)"`             cut 3 desynced on a quoted `)`
       5. `echo 'bash h.sh' | bash`                     cut 3: the consumer EXECUTES the text
       6. `echo 'bash h.sh' > f; bash f`                cut 3: ditto, via a file
+
+    …and classes 7-12, every one found by REVIEW on a later head rather than by a red —
+    they are the reason this docstring no longer calls any guard "covered": a guard is
+    covered when deleting it reds a row, and nothing else. Each is a FAIL-OPEN in this
+    gate's own subject (a real invocation the scan answered nothing for):
+
+      7. `printf x | bash h.sh`                        the helper AFTER a pipe
+      8. `"bash" "tools/h.sh" echo`                    quoted words in COMMAND position
+      9. `echo>\" ; bash h.sh ; \"`                     an ESCAPED quote is not an opener
+     10. `echo>a\\'~'; bash 'h.sh'`                     escape PARITY / span welding
+     11. `echo 'a\' …; bash h.sh`                       no escapes inside `'…'`
+     12. `echo "x"#c; bash h.sh`                       a `#` continuing a WORD is not a comment
+         `echo 'bash h.sh' 2>&1\\` + `| bash`           a redirect target holds no lone `\\`
 
     REGRESSIONS ON `origin/main` WHEN THIS CUT WAS WRITTEN: classes 5 and 6 only —
     measured, main's landed arm MISSes both. Classes 1-4 already HIT there and are armor:
@@ -1349,6 +1500,8 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     assert _gh_hazards([f"            echo 'bash tools/{helper}' | bash -s"], scripts)
     # 6 — …or written to a file and run from the next command on the same line.
     assert _gh_hazards([f"            echo 'bash tools/{helper}' > /tmp/x; bash /tmp/x"], scripts)
+    # 7 — the helper as the ARGUMENT-EXECUTING end of a pipeline
+    assert _gh_hazards([f"            printf x | bash tools/{helper}"], scripts)
     # 8 — the message word is in ARGUMENT position, not command position. `_blank_quoted`
     #     deletes quoted spans WHOLE, so `"bash" "tools/h.sh" echo` strips to ` echo` and
     #     would satisfy the anchored question while bash RUNS `bash tools/h.sh`. Found by
@@ -1400,8 +1553,27 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     )
     assert _gh_hazards([single_quote_escape], scripts), single_quote_escape
 
-    # 7 — the helper as the ARGUMENT-EXECUTING end of a pipeline
-    assert _gh_hazards([f"            printf x | bash tools/{helper}"], scripts)
+    # 12 — TWO SHAPES THAT DEFEATED THE *BLANKED* TEXT RATHER THAN THE WALK, both found by
+    #      `#12167` review with a marker file. Their baseline directions DIFFER, so both are
+    #      stated rather than lumped together (measured, three readers):
+    #      a) A `#` CONTINUING A WORD IS NOT A COMMENT. bash starts a comment only at the
+    #         START of a word, so in `"x"#c` the `#` is data and the `;` after it is a REAL
+    #         separator. `_blank_quoted` replaces a closed span with a SPACE, which
+    #         manufactured the boundary the old comment rule keyed on and deleted the rest
+    #         of an executable line. `_comment_cut` decides the boundary on the RAW line.
+    #         DIRECTION: a REGRESSION against BOTH baselines — `origin/main` and
+    #         pre-`#12106` both HIT this shape; only the pre-review head answered INERT.
+    assert _gh_hazards([f'            echo "x"#c; bash "tools/{helper}"'], scripts)
+    assert _gh_hazards([f"            echo 'x'#c && bash 'tools/{helper}'"], scripts)
+    assert _gh_hazards([f'            echo ""#c; bash "tools/{helper}"'], scripts)
+    #      b) A REDIRECT TARGET HOLDS NO LONE `\`. `\`+newline is a CONTINUATION, so
+    #         `echo 'bash h.sh' 2>&1\` followed by `| bash` is ONE command that pipes the
+    #         message into bash. A target class that accepted `\` read it as "a file named
+    #         `\`", the anchored match succeeded and the line answered INERT.
+    #         DIRECTION: an INHERITED MISS on `origin/main` (it misses too) and a REGRESSION
+    #         against pre-`#12106`, which HIT it — so it must be closed, not declared.
+    assert _gh_hazards([f"            echo 'bash tools/{helper}' 2>&1" + bs], scripts)
+    assert _gh_hazards([f"            echo 'bash tools/{helper}' >/tmp/x" + bs], scripts)
 
     # …and the INERT shapes that motivated the fix stay inert, so it cannot be satisfied
     # by reverting it.
@@ -1427,7 +1599,9 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     assert _gh_hazards([f'            echo "run tools/{helper}" > /dev/null'], scripts) == []
     assert _gh_hazards([f'            echo "run tools/{helper}" 2>&1'], scripts) == []
     # …and so is a QUOTED target, which `_blank_quoted` erases to a space — the shape that made
-    # `>> "$GITHUB_STEP_SUMMARY"` (14 live uses in this tree) read as a hazard while its
+    # `>> "$GITHUB_STEP_SUMMARY"` (14 live uses in this tree, 11 of them in the message +
+    # redirect position this sentence is about — `grep -rn 'GITHUB_STEP_SUMMARY'
+    # .github/workflows/ | grep '>>'`) read as a hazard while its
     # unquoted twin stayed inert. And a trailing COMMENT is not code.
     assert (
         _gh_hazards([f'            echo "run tools/{helper}" >> "$GITHUB_STEP_SUMMARY"'], scripts)
@@ -1442,6 +1616,17 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     # …but an UNQUOTED argument is not prose, and an unterminated quote is not bare.
     assert _gh_hazards([f"            echo tools/{helper}"], scripts)
     assert _gh_hazards([f'            echo "run tools/{helper}'], scripts)
+    # …and a TRAILING BACKSLASH is not bare either, and that is LOAD-BEARING rather than
+    # cosmetic: `\` at end of line is a bash CONTINUATION, so `echo 'bash h.sh' \\` plus a
+    # following `| bash` are ONE command that pipes the message into bash. `_blank_quoted`
+    # only consumes `\X` when the PAIR is complete, so a lone trailing `\` survives the walk
+    # and `_INERT_MESSAGE`'s `\s*$` can never match it. Nothing pinned that until review
+    # found it: a "handle line continuations" edit that STRIPS the trailing `\` leaves
+    # `echo  `, which IS inert, so the quoted name is hidden, the two-line fail-open lands,
+    # and the whole suite stays green (measured: shipped = hazard; stripping the lone `\` =
+    # `[]` with 0 of 40 tests red).
+    trailing_bs = "\\"  # ONE backslash, named for the same reason as `bs` above
+    assert _gh_hazards([f"            echo 'bash tools/{helper}' {trailing_bs}"], scripts)
 
 
 def test_every_printer_prefixed_shape_that_still_runs_a_command_is_a_hazard():
@@ -1635,6 +1820,61 @@ def test_the_unmodelled_word_formation_residuals_are_declared_misses():
     # …and the SAME-LINE escape IS caught, so the pin above is about the join and not about
     # escapes in general — this row is what would red if the spliced views were removed.
     assert _gh_hazards(["        run: bash tools/ci_tim\\ing.py"], scripts)
+
+
+def test_a_folded_block_scalar_is_one_command_not_two(tmp_path):
+    """`run: >` JOINS its lines, so reading the body line by line invents two commands.
+
+    ⛔ THIS IS THE SAME FAIL-OPEN CLASS AS EVERY OTHER ROW IN THIS FILE, one layer up: the
+    defect is not in the message rule but in the SPLITTER. YAML folds a `>` block scalar —
+    newline becomes a space, a blank line becomes a newline — so
+
+        - run: >
+            echo 'bash tools/h.sh'
+            | bash
+
+    is `echo 'bash tools/h.sh' | bash`: ONE command that pipes the message into bash and
+    RUNS the helper. Physically, line 1 is an inert message about a file and line 2 names
+    no helper, so the scan answered `[]` with the helper running (measured, marker file).
+    It is an INHERITED MISS on `origin/main` and a REGRESSION against pre-`#12106`.
+
+    It reds if `_folded_scalars` stops folding, and it asserts the FOLDED RENDERING is
+    present in the job body — so it cannot pass by the physical lines happening to hit.
+    """
+    scripts = _gh_executing_scripts()
+    helper = "install-ci-runner-x64.sh"
+    workflow = tmp_path / "folded.yml"
+    workflow.write_text(
+        "jobs:\n"
+        "  folded:\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    steps:\n"
+        "      - run: >\n"
+        f"          echo 'bash tools/{helper}'\n"
+        "          | bash\n"
+    )
+    bodies = dict(_jobs(workflow))
+    body = bodies["folded"]
+    folded = [line for line in body if "|" in line and "echo" in line]
+    assert folded, f"`run: >` was not folded into one command: {body}"
+    assert _gh_hazards(body, scripts), body
+
+    # …and a LITERAL block (`run: |`) is NOT folded: its lines really are separate commands,
+    # and the shape that is a hazard when folded is inert when not.
+    literal = tmp_path / "literal.yml"
+    literal.write_text(
+        "jobs:\n"
+        "  literal:\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    steps:\n"
+        "      - run: |\n"
+        f"          echo 'bash tools/{helper}'\n"
+        "          | bash\n"
+    )
+    literal_body = dict(_jobs(literal))["literal"]
+    assert not [line for line in literal_body if "|" in line and "echo" in line], (
+        "`run: |` must not be folded — its newlines are real"
+    )
 
 
 def test_the_cross_line_redirect_residual_is_a_declared_miss():
