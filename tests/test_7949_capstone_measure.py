@@ -5046,6 +5046,15 @@ _EPIC_CITE_DOCS = {
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
     "03-test-design.md":
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+    # `docs/evidence/11083/README.md` cites the SAME `relation_write.py` call the
+    # RECONCILE row below pins, and was read by nothing at all until #12112. The
+    # cite was CORRECT on main (`:631` WAS the call at `aebf91352bfd`, the parent of
+    # the squash) and went stale because #12112 moved the call twice — `:695`, then
+    # `:700` — while the record followed only as far as `:695`, where `:695` is
+    # `continue`. That is the whole lesson: the number was right when it was written,
+    # and a change moved the symbol out from under it.
+    "11083/README.md":
+        _REPO / "docs/evidence/11083/README.md",
 }
 _EPIC_CITE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
@@ -5056,6 +5065,17 @@ _EPIC_CITE_SOURCES = {
     # while the document went on naming 9548, which is the row above — a cite a
     # change moves is exactly the cite no hand-recheck keeps.
     "ci_surfaces": _REPO / "config/ci-surfaces.yml",
+    # ⛔ `relation_write.py`'s `plan_hierarchy_edges` call is cited by two documents
+    # (and by an artifact row that talks about the same seam) and by NOTHING else in
+    # this file. Measured across #12112: the call sat at `:631` on `origin/main`, then
+    # `:695` after the branch's own first fix, then `:700` after round 15's — three
+    # numbers in three commits, with the documents trailing one behind at each step.
+    # ⛔ ONE TREE, ONE NUMBER: `:631` is the call at `aebf91352bfd` and is
+    # `declared=None,` at the branch's forward merge `5b17de24de42` (that merge is what
+    # made the number wrong). Quoting either tree's reading as if it described both is
+    # the same error one layer up, so the row binds the SYMBOL, never a remembered
+    # offset.
+    "relation_write": _REPO / "tortoise/relation_write.py",
 }
 
 
@@ -5152,7 +5172,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         # and the section bounds
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # At this head (rebase onto main `c7499ac7a7`): entry 9933, `carve_out:`
+        # At this head (rebase onto main `63f725cca1`): entry 9933, `carve_out:`
         # opens 9807, `uri_requiring:` 10138 — so 9933 is inside the section, and
         # the identical text also sits at 6072 and 8449, which is what the 5th
         # element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
@@ -5161,6 +5181,20 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
+        # The `plan_hierarchy_edges` CALL, in the two documents that name it, keyed
+        # by the sentence rather than by the number: #12112 moved this line three
+        # times (`631` on main, `695`, `700`) and each move left a document behind.
+        # ⛔ Three rows, not one, because a row scopes to ONE document + ONE source
+        # and the 11083 record is a different file that no sweep reads at all.
+        ("RECONCILE-A1-A2-A5.md", "one of them the **call**", (
+            ("700", "planned = plan_hierarchy_edges("),
+        ), "relation_write"),
+        ("RECONCILE-A1-A2-A5.md", "of `plan_hierarchy_edges`**, at", (
+            ("700", "planned = plan_hierarchy_edges("),
+        ), "relation_write"),
+        ("11083/README.md", "calls `pack_hierarchy.plan_hierarchy_edges`", (
+            ("700", "planned = plan_hierarchy_edges("),
+        ), "relation_write"),
         ("03-test-design.md", "`carve_out:` holds **one**", (
             ("9933", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
