@@ -371,6 +371,22 @@ _UNRESOLVED = {
     # it delegates to `mitigate_operator`, which is its own censused door — so
     # this row declares a read and blesses no undeclared write.
     "_apply_ingest_mitigation",
+    # #12067 (round 6): the closed-set reader pair added by round 4, which landed
+    # without an entry here and left `test_every_mutating_sdk_entry_point_...`
+    # RED at that head (measured on `eba2c1f6` in a clean worktree: 1 failed, 74
+    # passed). Both statements are READS and both are unresolvable for the SAME
+    # reason: each is built by `epistemic_label_queries` from an f-string that
+    # interpolates the loop's `{label}` AND a call (`_mechanism_population(...)`),
+    # so the resolver cannot flatten either into a literal. Checked by hand, both
+    # are `MATCH (o:Point)-[:IMPL|NAND]->(p…), (o)-[r:IMPL|NAND]->(q) WHERE …
+    # RETURN …` (and the bare-edge census `MATCH (a:{label})-[r:IMPL|NAND]->(b)
+    # WHERE … RETURN …`) — no CREATE/MERGE/SET/DELETE/REMOVE, no write procedure,
+    # and neither appends a record. They are the {"one reader, no write"} half of
+    # the closed-set invariant: the WRITES they guard go through
+    # `create_operator`/`create_direct_edge`, which are censused doors of their
+    # own, so this row blesses no undeclared write.
+    "_live_operator_mechanism_pairs",
+    "_mechanism_conflicts_for_pairs",
     "_graph_presence",
     "_hop",
     # #7819: the statement is the shared `live.LIFECYCLE_FANOUT_QUERY` constant,
