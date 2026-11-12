@@ -49,9 +49,9 @@ any-surface bool this row used to publish read `True` while the surface
 explicit `environment:` and declares no `env_file:`) set nothing. The row now
 reads the DEPLOYMENT subset (`DEPLOYMENT_SURFACES`) and publishes every surface's
 state, so a reader can tell a measured `True` from one armed TEMPLATE. On the
-tree that change landed in, the compose path is the only existing deployment
-surface and it is silent — so row 1 goes back to `PARTIAL`, which is the reading
-`#11086` item 4 must not be ticked over.
+tree that change landed in, every deployment FILE — `docker-compose.yml`,
+`Dockerfile.hosted`, `Dockerfile.selfhost` — is silent, so row 1 goes back to
+`PARTIAL`, which is the reading `#11086` item 4 must not be ticked over.
 
 ## §12.2a — the distinct-predicate count
 
@@ -1037,6 +1037,16 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #: and `deployment["on"]` could read `True` off an armed compose file while the
 #: hosted image shipped the gate off: the `#11455` false PASS one surface-pair
 #: over, materialising the moment `#11086` arms the compose file.
+#:
+#: ⚠️ **The population is every deployment file the WALK's declared surfaces hold**
+#: — not every channel this repo has. `fly.toml`'s `[env]` table and
+#: `entrypoint.sh`'s `export`s also shape a deployed process's environment and are
+#: OUTSIDE `CONFIG_SURFACES` (measured: `fly.toml:211` carries
+#: `TORTOISE_LOOP_STALL_HARD_EXIT_S`, `entrypoint.sh:355-876` exports runtime
+#: defaults). Latent today — all three walked files are silent, so row 1 holds
+#: either way — and tracked by `#12022`, whose scope is the missing channels;
+#: adding them here would change the declared surface set `#11455` and its pins
+#: speak about, and needs a TOML `[env]` reader this module does not have.
 DEPLOYMENT_SURFACES: tuple[str, ...] = (
     "docker-compose.yml",
     "docker-compose.yaml",
@@ -1106,9 +1116,11 @@ def _yaml_block_scalar_bodies(text: str) -> dict[int, str]:
     elsewhere. The caller therefore scans a body introduced by an executed key
     and skips (and REPORTS) the rest.
 
-    **Wrong outcome named:** `score_rule_bullet` computes `on_by_default =
-    ambient or shipped["on"]`, which is the clause separating bullet 1's
-    `PARTIAL` from `MET` once `#5090`'s remaining writers are resolved. This
+    **Wrong outcome named:** `score_rule_bullet` reads
+    `shipped["deployment"]["on"]` as `on_by_default` (since `#11455`; the
+    per-surface reading, never `shipped["on"]` alone and never the ambient env),
+    which is the clause separating bullet 1's `PARTIAL` from `MET` once `#5090`'s
+    remaining writers are resolved. This
     repo's documentation of THIS flag already lives in a `>-` block
     (`config/v4-mechanisms.yml:426-433`), so the natural edit (a usage line
     added inside that block) was the one shape that tripped it; and CI is where
