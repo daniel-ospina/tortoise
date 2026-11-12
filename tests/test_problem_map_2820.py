@@ -3,9 +3,9 @@
 The memory-substrate problem map (`docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`)
 answers *"is this still broken?"* for 26 named defects. The issue it re-cuts went
 stale for eight weeks — its body read as 26 problems waiting while the tree had
-fixed 21 — so the map is only worth having if something can tell when its answers
-age out. This file pins the guard that makes its machine-checkable half
-falsifiable.
+already fixed 21 of them (22 now that #2782 is re-cut) — so the map is only worth
+having if something can tell when its answers age out. This file pins the guard
+that makes its machine-checkable half falsifiable.
 
 No network, no DB, no `gh`: the TRACKER half of the map is deliberately not
 guarded (a status is a dated fact — §9 of the document says so), so nothing here
@@ -174,7 +174,8 @@ def test_the_taxonomy_counts_are_what_the_summary_declares():
 def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     """Fails when two rows SWAP statuses — a compensating edit no count can see.
 
-    Reachable, and measured at the head that added this arm: BEFORE THIS ARM no
+    Reachable, and measured at the PARENT head `65991398a1ed`, where this arm did
+    not exist (the file collects 58 there): BEFORE THIS ARM no
     arm ASSERTED a row's status by issue — the arms that read the page compare
     COUNTS (§2's tally, the abstract, the WS-C cell) or check a row's presence,
     its pin, its status vocabulary and its anchors — so an edit that held the
@@ -193,10 +194,14 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     Reverting §2's `#2782` to `OPEN`
     **and** promoting `#2684` to `VERIFIED-FIXED` (one row each way, so §2 stays
     22/4/0, the total 26, WS-C 4 of 6, and both headlines intact) left
-    `tools/problem_map_check.py --check` **CLEAN** and this suite **58 passed** —
-    green over a page whose re-cut, the reason this revision exists, had been
-    undone. The count literals also expire: they must be re-derived on the next
-    re-cut, so a count-only guarantee lapses with the next count move.
+    `tools/problem_map_check.py --check` with **no drift** (CLEAN where history is
+    available, UNVERIFIED in a shallow clone) and this suite at **1 failed, 58
+    passed** — and the one failure is THIS arm, which is the load-bearing half:
+    every OTHER arm in the file passes over the swap. `58 passed` is the PARENT's
+    figure, where this arm was not yet in the run; at this head it would be green
+    over the undone re-cut this revision exists to prevent. The count literals
+    also expire: they must be re-derived on the next re-cut, so a count-only
+    guarantee lapses with the next count move.
 
     So the two sets the page's prose asserts BY NAME are pinned by issue: the
     row this re-cut is about, and the four survivors §8 counts. A count is what

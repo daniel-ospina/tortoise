@@ -465,9 +465,12 @@ rounding:**
   sentence call open" means reading prose — and §8's second clause additionally
   needs to know which row is an epic, the tracker half this guard refuses to
   read — so a guard that parsed those sentences would be a spelling trap rather
-  than a check. Measured at this head: flip `#2684` to VERIFIED-FIXED and correct
-  the counts the guard DOES read, and §2's narrated sentence goes stale with every
-  check green. That is the residual, named rather than dressed up. §9's own
+  than a check. Measured at this head: drop `#2684` from §2's narrated
+  `**#2730 and #2684 remain open**` without moving a row, and `--check` reports
+  **no drift** while the page calls an OPEN row fixed in prose and the suite
+  reports **59 passed**. Move the ROW instead and it reds, because `#2684` is one
+  of the four survivors the pin reads by issue — the pin reads statuses, not the
+  prose around them. That is the residual, named rather than dressed up. §9's own
   refusal count is the same class: a property of the RUN rather than of the
   document — it is the suite's collected count, so it moves with every control
   added, and nothing in the checker reads it.
