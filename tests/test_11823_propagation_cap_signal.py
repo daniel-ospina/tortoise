@@ -738,9 +738,10 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     `NOT (n)-[:IMPL|NAND]-()` regardless of its status, and a fixture with no
     NAND edge cannot observe the NAND half either). So the fixture now carries
     the observables the constant's two vocabularies need: an UN-EDGED draft
-    Point (a REMOVED or RE-SPELLED status reddens; an ADDITIVE widening of the
-    vocabulary does not — see the body comment below) and a NAND-only-edged
-    claim (narrowing `IMPL|NAND` to `IMPL` reddens).
+    Point (a REMOVED or RE-SPELLED status reddens; an ADDITIVE widening reddens
+    only when the newly-excluded status is one this fixture CARRIES — see the
+    body comment below) and a NAND-only-edged claim (narrowing `IMPL|NAND` to
+    `IMPL` reddens).
 
     ⛔ What that fixture CANNOT observe is named too, rather than implied away:
     every Point here carries an explicit status, so the constant's `status IS
@@ -770,10 +771,10 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     # The STATUS observable: a draft with NO edge, so only the status conjunct
     # can keep it out of the constant's population. ⛔ RE-SPELLING the excluded
     # status counts it and reddens the equality below (measured: `<> 'draft'` →
-    # `<> 'archived'` gives 2 vs 3). An ADDITIVE widening is INVISIBLE here
-    # (measured: also excluding `'archived'` leaves the count at 2 and this test
-    # GREEN) — see `dream.py`'s residual note, which says the fixture needs a
-    # node of the newly-excluded status before that class is pinned.
+    # `<> 'archived'` gives 2 vs 3). An ADDITIVE widening reddens only for a
+    # status this fixture CARRIES (measured: also excluding `'live'` gives 2 vs
+    # 0) and is INVISIBLE for one it does not (`'archived'` leaves the count at
+    # 2 and this test GREEN) — see `dream.py`'s residual note.
     sdk.create_point("statement", "un-edged draft", dedup=False,
                      status="draft")
     # The NAND observable: a claim whose only `IMPL|NAND` edge is a NAND one, so
