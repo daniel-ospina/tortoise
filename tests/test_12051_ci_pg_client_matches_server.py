@@ -214,7 +214,7 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     text = _run_text(pin)
     server_major = _postgres_image_majors(job)[0]
 
-    branch = _version_branch(_normalised_code(text), server_major)
+    branch = _version_branch(_code_only(text), server_major)
     assert "::error::" in branch, (
         "the client pin's VERSION BRANCH asserts nothing about the version it "
         "actually got — the branch's own body must `echo \"::error::…\"`, so a "
@@ -228,11 +228,12 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
         "unrestorable artifact #12051 exists to prevent. Any separator is "
         "accepted — the fact is the exit status, not the punctuation after it"
     )
-    assert f'"$major" != "{server_major}"' in text, (
-        "the pin never COMPARES the client's major with the servers' "
-        f"({server_major}) — a branch that cannot fire is the same symptom as no "
-        "branch at all, which is what left #12051 invisible for a day"
-    )
+    # The comparison is pinned by `_version_branch` itself, which asserts the
+    # matched branch's own major EQUALS the servers' — so a spelling-exact search
+    # of the raw step (`"$major" != "16"`) is not repeated here: it read text that
+    # still carried comments, and it rejected the `${major}` spelling whose
+    # expansion is the SAME operand (this file's `_version_branch` accepts it).
+    # Redundancy plus false-block surface is the worst of both.
     for tool in ("pg_dump", "pg_restore"):
         assert tool in text, (
             f"the pin must assert `{tool} --version`: the drill resolves BOTH "
@@ -353,7 +354,11 @@ def _precondition(code: str) -> re.Match[str]:
 #: stayed green with `if [ "$major" != "16" ]; then :; fi`. FACTS only: the
 #: comparison is on `$major`, against a literal, inside `then … fi`.
 _VERSION_BRANCH_RE = re.compile(
-    r"^[ \t]*if\s+\[\s*\"?\$major\"?\s*!=\s*\"?(?P<major>\d+)\"?\s*\]\s*;\s*then"
+    r"^[ \t]*if\s+\[\s*\"?\$\{?major\}?\"?\s*!=\s*\"?(?P<major>\d+)\"?\s*\]"
+    # `; then` and a newline before `then` are the two forms bash ACCEPTS. `] then`
+    # (no separator) is a syntax error, so it must NOT match: accepting it would
+    # assert an armed branch over one the shell cannot parse.
+    r"(?:\s*;\s*then|\n[ \t]*then)"
     r"(?P<body>.*?)^[ \t]*fi[ \t]*$",
     re.DOTALL | re.MULTILINE,
 )
