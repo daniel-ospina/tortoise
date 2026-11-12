@@ -295,14 +295,18 @@ def test_robots_txt_lists_blog_sitemap() -> None:
     resolves to a 200. A path that moved, or a sitemap removed from its own host,
     reds here, while #11766 can repoint the host freely.
 
-    ⛔ The HOST is graded only on a production run (#11976 review). There the URL is
-    fetched as written, so a wrong-host typo reds here too. On a LOCAL run the host
-    is rebased onto `COMPANY`, because robots.txt names an ABSOLUTE production URL
-    and fetching that verbatim made a local run call live production — around the
-    module-level `ALLOW_PROD` contract above, which only inspects the three ENV
-    hosts and therefore cannot see a URL parsed out of a fetched file. Stated as a
-    limit rather than an accident: on a local run this probe grades the PATH, and
-    the host is graded by the production run.
+    ⛔ The HOST is graded only on a run against a real origin (#11976 review).
+    There the URL is fetched as written, so a wrong-host typo reds here too. Against
+    a LOCAL wrangler server (an `http` target) the host is rebased onto `COMPANY`,
+    because robots.txt names an ABSOLUTE production URL and fetching that verbatim
+    made a local run call live production — around the module-level `ALLOW_PROD`
+    contract above, which only inspects the three ENV hosts and therefore cannot see
+    a URL parsed out of a fetched file. Stated as a limit rather than an accident:
+    on a local run this probe grades the PATH, and the host is graded by a run
+    against a real origin. The mode is decided by the SERVER UNDER TEST, never by
+    `ALLOW_PROD`: that flag says "https targets are permitted", not "this target is
+    production", and keying on it left `ALLOW_PROD=1` + a local target asserting on
+    the deployed document (review round 4).
     """
     r = SESSION.get(f"{COMPANY}/robots.txt", timeout=20)
     assert r.status_code == 200
@@ -316,16 +320,20 @@ def test_robots_txt_lists_blog_sitemap() -> None:
         f"robots.txt must cross-submit the blog sitemap; it names {named}"
     )
     for sitemap_url in blog_sitemaps:
-        # ⛔ PRODUCTION GRADES THE HOST, A LOCAL RUN REBASES (#11976 review). robots.txt
-        # names an ABSOLUTE production URL (`https://tortoise.premiselabs.co/blog/sitemap.xml`
-        # today, the company host once #11766 repoints it). Fetching that verbatim on
-        # a LOCAL run made live production calls and asserted on the deployed document,
-        # around the `ALLOW_PROD` contract above — so locally the parsed path is rebased
-        # onto `COMPANY`, the server under test. On a production run the URL is fetched
-        # AS WRITTEN, which is the only run where "the host robots.txt names is the host
-        # that answers" is assertable at all.
+        # ⛔ A REAL ORIGIN GRADES THE HOST, A LOCAL RUN REBASES (#11976 review).
+        # robots.txt names an ABSOLUTE production URL
+        # (`https://tortoise.premiselabs.co/blog/sitemap.xml` today, the company host
+        # once #11766 repoints it). Fetching that verbatim on a LOCAL run made live
+        # production calls and asserted on the deployed document, around the
+        # `ALLOW_PROD` contract above — so against a local server the parsed path is
+        # rebased onto `COMPANY`, the server under test. Against a real origin the URL
+        # is fetched AS WRITTEN, which is the only run where "the host robots.txt names
+        # is the host that answers" is assertable at all. The predicate is the TARGET's
+        # scheme, never `ALLOW_PROD`: a local wrangler server is `http`, and keying on
+        # the flag made `ALLOW_PROD=1` + a local target the one combination that still
+        # reached production (round 4).
         target = sitemap_url
-        if os.environ.get("ALLOW_PROD") != "1":
+        if urlparse(COMPANY).scheme != "https":
             parsed = urlparse(sitemap_url)
             target = urljoin(f"{COMPANY}/", parsed.path.lstrip("/"))
             if parsed.query:
