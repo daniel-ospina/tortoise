@@ -1,9 +1,17 @@
 """#11858: the :Source door may not declare an embedding marker.
 
-The marker family (`_SERVER_MANAGED_EMBEDDING_MARKERS`) is minted by
-`stamp_journal_embedding` from the values that ride WITH the record. `create_source`
-builds its own payload and passes `_skip_sanitize=True`, so the intake strip in
-`_sanitize_props` never sees it — and the door writes the node BEFORE it emits.
+The family (`_SERVER_MANAGED_EMBEDDING_MARKERS`) has TWO halves, and the refusal's
+reason differs between them: `embedding_width` / `embedding_model` /
+`embedding_revision` / `embedding_text_hash` are DERIVED by the writer beside a
+vector, while `embedding_verbatim` / `embedding_preserved` / `embeddingText` are
+INPUTS the writer READS (`tortoise/embeddings.py:539`, `:550`, `:692`) — a caller
+value there forges the reading rather than duplicating a derivation. (Stated per
+key because "the family is minted from the values" is false for the second half;
+#11858 review cycles 2 and 3 both caught that sentence.)
+
+`create_source` builds its own payload and passes `_skip_sanitize=True`, so the
+intake strip in `_sanitize_props` never sees it — and the door writes the node
+BEFORE it emits.
 
 Measured at `7e6baffc5d` (origin/main), one `create_source` call per key, no vector
 supplied in any of them — i.e. every marker describing NOTHING:
@@ -14,12 +22,16 @@ supplied in any of them — i.e. every marker describing NOTHING:
     ...and `embedding_verbatim` / `embedding_preserved` / `embedding_model` /
     `embedding_revision` / `embedding_text_hash` / `embeddingText` land identically.
 
-The same measurement over the other public props doors found this one alone:
-`create_point`, `create_entity`, `update_point` and `create_document` (which forwards
-to `_create_entity`'s props path) all refuse the name at intake. That is why the
-census below drives the WHOLE population instead of pinning this door's row alone —
-the class this file exists for (a rule stated at one door and silently absent at the
-next) has been measured twice in this repo (#11948, #11835 review round 4/5).
+The same measurement over the other TEN public props doors found this one alone:
+`create_point`, `create_entity`, `create_document`, `create_object`,
+`create_subject`, `create_event`, `update_point` and `update_entity` refuse the name
+at intake; `update` and `update_knowledge` refuse on an EXISTING node and silently
+no-op on an unknown id. (`create_source` is the eleventh of the eleven `**props`
+write doors and the only leak — that is this file's subject, driven by the rows
+above, not by the census.) That is why the census below drives every one of them
+instead of pinning this door's row alone — the class this file exists for (a rule
+stated at one door and silently absent at the next) has been measured twice in this
+repo (#11948, #11835 review round 4/5).
 
 ⚠️ THE SANCTIONED ROUTE IS `embedding=`, NOT SILENCE. A `:Source` MAY carry a vector
 — `embedding` is a declared, caller-writable prop — and this door journals it, with
@@ -207,35 +219,43 @@ def test_a_caller_vector_still_gets_a_truthfully_minted_marker(tmp_path):
         "the population #11821 P0 closed")
 
 
-@pytest.mark.parametrize("door", ["create_point", "create_entity", "create_document",
-                                  "update_point", "update", "update_entity"])
+@pytest.mark.parametrize("door", [
+    "create_point", "create_entity", "create_document", "create_object",
+    "create_subject", "create_event", "update_point", "update_entity",
+    "update", "update_knowledge",
+])
 def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
     """The census: the leak population is this one door, and starts that way.
 
     Each call passes `embedding_width="f16"` and no vector. A door that stops
     refusing is a new member of #11858's population.
 
-    ⛔ The list is the PUBLIC props doors, and the earlier four-row version did
-    not drive it — `update` and `update_entity` were missing while this file's
-    docstring claimed the WHOLE population (#11858 review cycle 2, P3). A census
-    that enumerates four of six is the same defect class in miniature.
+    ⛔ The list is the PUBLIC props doors, and the earlier versions did not drive
+    it: four rows, then six, while this file's docstring claimed the WHOLE
+    population (#11858 review cycles 2 and 3, P3). Measured now — ELEVEN doors
+    take `**props`, and nine of them refuse at intake: the eight named here plus
+    `create_source`, whose guard also runs before its write. The remaining TWO —
+    `update` and `update_knowledge` — refuse on an EXISTING node and silently
+    NO-OP on an unknown id, so those two rows create a target first (a row
+    without one asserts about a call that did nothing).
+
+    ⛔ `ValueError` + the key named in the message, not `(ValueError, TypeError)`:
+    a bare TypeError is exactly what a positional-order regression raises, and
+    accepting it is how two earlier rows passed while asserting nothing
+    (review cycle 1's finding, cycle 3's latent note).
     """
     sdk, journal = _journal(tmp_path)
     try:
-        # ⛔ The two `update*` doors must act on a node that EXISTS first: on an
-        # unknown id they are a no-op, so the prop path never runs and the row
-        # would assert about a call that did nothing (measured twice — the first
-        # version failed with DID NOT RAISE for exactly that reason, and the
-        # second still did because `create_point` MINTS its id, so the hardcoded
-        # "p-census" named nothing).
         target = "p-census"
-        if door == "update":
+        if door in ("update", "update_knowledge"):
+            # Only these two need an existing node; `update_point` and
+            # `update_entity` refuse at intake BEFORE any id lookup (measured),
+            # so creating a target for them would be dead setup that reads as if
+            # the constraint applied to all four.
             created = sdk.create_point("statement", "a census claim",
                                        source_id="s", span="1-2", quote="q")
             target = created["id"] if isinstance(created, dict) else created
-        elif door == "update_entity":
-            sdk.create_entity("object", "e-census")
-        with pytest.raises((ValueError, TypeError)):
+        with pytest.raises(ValueError) as excinfo:
             # ⛔ The positionals matter: `create_entity(type, name)` and
             # `create_document(title, documentKind)` are NOT interchangeable with
             # this row's intent. An earlier draft passed them in the wrong order,
@@ -249,12 +269,20 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
                                  embedding_width="f16")
             elif door == "create_entity":
                 sdk.create_entity("object", "e-census", embedding_width="f16")
+            elif door == "create_object":
+                sdk.create_object("o-census", None, embedding_width="f16")
+            elif door == "create_subject":
+                sdk.create_subject("s-census", None, embedding_width="f16")
+            elif door == "create_event":
+                sdk.create_event("e-census", "thing", embedding_width="f16")
             elif door == "update_point":
                 sdk.update_point("p-census", embedding_width="f16")
-            elif door == "update":
-                sdk.update(target, embedding_width="f16")
             elif door == "update_entity":
                 sdk.update_entity("e-census", embedding_width="f16")
+            elif door == "update":
+                sdk.update(target, embedding_width="f16")
+            elif door == "update_knowledge":
+                sdk.update_knowledge(target, embedding_width="f16")
             else:
                 sdk.create_document("a census title", "document",
                                     embedding_width="f16")
@@ -262,6 +290,8 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
         with contextlib.suppress(Exception):
             sdk.close()
 
+    assert "embedding_width" in str(excinfo.value), (
+        f"{door} raised for something other than the marker: {excinfo.value!r}")
     leaked = [r for r in _records(journal) if "embedding_width" in r]
     assert not leaked, f"{door} journalled a caller-declared width: {leaked!r}"
 
@@ -269,10 +299,14 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
 def test_the_sdk_and_api_spellings_agree():
     """Two modules, ONE family — a drift here is how the third door is missed.
 
-    The SDK set is a superset on purpose: `embeddingText` is a writer-minted
-    identity key that `tortoise.api` does not name (it has no `:Source`/`:_point`
-    intake of its own to guard). Every name the API funnel refuses must also be
-    refused here.
+    The SDK set is a superset on purpose, and the reason is NOT that `api` lacks an
+    intake to guard: `EventAPI.add_point` refuses `embeddingText` through its own
+    `_forged_keys` (`tortoise/api.py:1187-1195`). The name is absent from
+    `_SERVER_MANAGED_EMBEDDING_KEYS` because it is the enriched TEXT — a payload
+    field, not a marker (`api.py:58-60`) — and the SDK files it under the marker
+    family because the SDK's own `_sanitize_props` must refuse it the same way.
+    So: every name the API funnel refuses must also be refused here; the extra name
+    is an SDK placement, not an API gap.
     """
     from tortoise.api import _SERVER_MANAGED_EMBEDDING_KEYS
     from tortoise.sdk import _SERVER_MANAGED_EMBEDDING_MARKERS

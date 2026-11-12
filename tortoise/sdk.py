@@ -5068,10 +5068,17 @@ _RESERVED_ENVELOPE_PROPS = (
     "initiated_by", "projection_version",
 )
 
-#: The SERVER-MANAGED embedding journal fields — the vector markers the
-#: writer mints beside a vector it can describe, and which therefore may never
-#: arrive from a caller. ONE spelling, TWO placements, and the second placement
-#: is the fix for #11858:
+#: The SERVER-MANAGED embedding journal fields — the names a caller may never
+#: supply, for TWO different reasons that must not be collapsed into one (#11858
+#: review cycle 3, P3 — measured):
+#:
+#: * `embedding_width` / `embedding_model` / `embedding_revision` /
+#:   `embedding_text_hash` are DERIVED by the writer beside the vector;
+#: * `embedding_verbatim` / `embedding_preserved` / `embeddingText` are INPUTS
+#:   the writer READS (`tortoise/embeddings.py:539`, `:550`, `:692`) — a caller
+#:   value for those does not duplicate a derivation, it FORGES the reading.
+#:
+#: ONE spelling, TWO placements, and the second placement is the fix for #11858:
 #:
 #: * `_sanitize_props` refuses them at prop INTAKE, which covers every SDK door
 #:   that passes through it;
@@ -48615,12 +48622,16 @@ class TortoiseSDK:
         #          land identically.
         #
         # The other public props doors were driven the same way in the same
-        # measurement. `create_point`, `create_entity` (with its OWN positional
-        # order — `(type, name)`), `update_point` and `create_document` (which
-        # forwards to `_create_entity`'s props path) all refuse the name at
-        # intake with `ValueError`. This door was the only leak, which is why the
-        # guard is here and why the test drives the whole population rather than
-        # this row alone.
+        # measurement — all TEN of them (the eleven `**props` write doors minus
+        # this one), not just the four this note first listed (#11858 review
+        # cycle 3, P3): `create_point`, `create_entity`,
+        # `create_document`, `create_object`, `create_subject`, `create_event`,
+        # `update_point` and `update_entity` refuse the name at intake; `update`
+        # and `update_knowledge` refuse on an EXISTING node and silently no-op
+        # on an unknown id (so a census row for those two must create its target
+        # first — a row without one asserts nothing). This door was the only
+        # leak, which is why the guard is here and why the test drives every
+        # door rather than this row alone.
         #
         # ⚠️ Scope of "covered": this guard sits above every CALLER ingress
         # (`**props` is splatted into `ev` at the top of this method), so a
