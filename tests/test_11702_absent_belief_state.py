@@ -5779,8 +5779,15 @@ def _unqualified_claims_on(sentence: str, patterns) -> list[str]:
     grammar that failed: it does not demand an explicit object (`R1 leads` is
     fine), it does not veto `nothing` in an enumeration of the absent shapes, and
     it does not read `no readable mirror` (a legitimate *conditional* qualifier)
-    as an inversion. Direction of error: REFUSE a true sentence — a human reads
-    it — never certify a false one.
+    as an inversion.
+
+    ⛔ NAMED RESIDUAL — this is a tripwire on the WORDING the tree uses, not a
+    grammar proof, and it does NOT promise to certify no false sentence: an
+    inversion phrased with a verb other than `lead` still passes. Measured —
+    "its confidence_mean IS the declared PRIOR mean; the mirror loses to the
+    pair" is CERTIFIED, and it is false (`elif mirror is not None` reads the
+    mirror even over an explicit declared pair). A green run here means "no
+    LEAD-inversion in the shipped wordings", never "no inversion exists".
     """
     if "mirror" in sentence.lower() and not _MIRROR_LEAD_NEGATED.search(sentence):
         return []
