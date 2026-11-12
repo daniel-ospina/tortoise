@@ -417,13 +417,18 @@ def _scope_bound_names(root: ast.AST) -> set[str]:
     return bound
 
 
-def _import_aliases(*roots: ast.AST, own_scope_only: bool = False) -> dict[str, str]:
+def _import_aliases(*roots: ast.AST, own_scope_only: bool) -> dict[str, str]:
     """Local name -> the name it was IMPORTED AS, for the seams and clause builders (`#11274`).
 
     Both scopes a writer can import in: the MODULE (`from … import X as Y` at module level) and the
     WRITER'S OWN SCOPE (a function-level import). ⛔ `own_scope_only` is what keeps those two apart
     from every OTHER scope in the file: an import in a SIBLING function is not this writer's reach,
     and crediting it classed a writer `gated` while it never reached the gate (#12020 round 4).
+    ⛔ `own_scope_only` is REQUIRED — it has no default on purpose. It carried `= False` for one
+    round, which is the fail-open mode this docstring describes: a caller that forgot the argument
+    silently re-created the whole-module walk (measured — that is the shape round 4 removed). Both
+    call sites pass `True`; making the argument mandatory means a THIRD caller cannot re-open it by
+    omission, which is the only way it stays closed (`#12020` review round 5, Finding 5).
     Callers pass `own_scope_only=True` for both the module pass and the writer pass, which leaves
     the writer `unresolved_write` in the ambiguous cases — the direction that OWES a declaration.
 

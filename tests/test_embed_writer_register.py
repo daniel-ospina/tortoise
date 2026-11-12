@@ -1108,6 +1108,31 @@ LABEL_CONSTANTS: dict[str, tuple[str, str, frozenset[str]]] = {
 #: store is deliberately un-nameable in their own body (`restore_graph` interpolates its labels,
 #: `_event_raw_write_door` executes its caller's). Their COMPLETENESS therefore rests on a constant,
 #: so every member here must also appear in `LABEL_CONSTANTS` — asserted, not implied.
+#: Rows whose store is carried by a MAP MERGE (`SET n += $p`) rather than a nameable vector clause.
+#: Exactly one row, and it is the row the probe itself classifies as undecidable — the exemption this
+#: row already relies on (`#4094`) is what makes the weaker evidence legitimate. ⛔ Do not grow this
+#: set: a row added here stops redding when its vector clause is deleted (measured, `#12020` review
+#: round 5 Finding 2), so writing a vector clause is always the better evidence.
+MERGE_STORE_CLAIM = frozenset({
+    "tortoise.sdk::_update_entity",
+})
+
+
+def _claim_for(key: str) -> str:
+    """The DECLARED claim kind for a `LABEL_EVIDENCE` row.
+
+    One definition, because the pin and its falsifiers must agree: when the falsifier hard-coded
+    `claim` it defaulted to `store` for the one `merge` row and its OWN control failed, which is the
+    drift this function prevents (`#12020` review round 5).
+    """
+    if key in BOUND_LABEL_EVIDENCE:
+        return "bound"
+    if key in ASSEMBLED_LABEL_EVIDENCE:
+        return "assembly"
+    if key in MERGE_STORE_CLAIM:
+        return "merge"
+    return "store"
+
 BOUND_LABEL_EVIDENCE = frozenset({
     "tortoise.hosted_backup::restore_graph",
     "tortoise.sdk::_event_raw_write_door",
@@ -1178,8 +1203,7 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
         # and `test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row` drives both directions).
         violation = _evidence_violation(
             source, symbol, needle, iterated=ITERATED_STORE_CLAIM.get(key),
-            claim=("bound" if key in BOUND_LABEL_EVIDENCE
-                   else "assembly" if key in ASSEMBLED_LABEL_EVIDENCE else "store"))
+            claim=_claim_for(key))
         if key in BOUND_LABEL_EVIDENCE:
             # A bound row's completeness IS the constant's label set, so the constant arm below has
             # to exist for it — otherwise "the writer is bounded" is a claim with no derivation.
@@ -1262,7 +1286,7 @@ def test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row():
     iterated = ITERATED_STORE_CLAIM[key]
 
     def violation(text: str) -> str | None:
-        return _evidence_violation(text, symbol, needle, iterated=iterated)
+        return _evidence_violation(text, symbol, needle, iterated=iterated, claim=_claim_for(key))
 
     # CONTROL — the tree as it stands carries the claim, both arms.
     assert violation(source) is None, violation(source)
@@ -1295,7 +1319,7 @@ def test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row():
     store_in_the_membership_test = source.replace(
         loop,
         "            if label in _CANONICAL_ENTITY_ID_PROPS:\n"
-        '                proj.g.query(f"MATCH (n:{label} {{id:$id}}) SET n += $p ")\n'
+        '                proj.g.query(f"MATCH (n:{label} {{id:$id}}) SET n.embedding = $e ")\n'
         "            for label, _prop in _SOME_OTHER_PROPS:\n",
         1,
     )
@@ -1369,7 +1393,8 @@ def test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row():
     # … but no real statement carries it (the assertion two lines down is the half that would pass
     # vacuously if the insert had silently missed).
     # The loop half of the claim is deliberately UNTOUCHED by this mutant …
-    assert _iterated_store_problem(fn_prose, iterated, prose.splitlines()) is None, (
+    assert _iterated_store_problem(fn_prose, iterated, prose.splitlines(),
+                                   merge_store=(_claim_for(key) == "merge")) is None, (
         "the prose mutant moved the loop too — then its red is the iterated arm's, not the statement "
         "arm's, and this arm measures nothing about prose")
     # … and the needle really is left in a bare string, carried by no real statement.
@@ -1874,9 +1899,17 @@ def _constants_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:
 
 #: Text that MARKS a store inside the statement that carries it. The three clause forms are
 #: `_STORE_ALIAS`'s own (`set_embedding_clause`, `clear_then_set_prefix`, a literal `.embedding =` —
-#: never the `NULL` wipe, which removes the property), plus the map-merge (`SET n += $p`) the generic
-#: update door stores through: no alias rule can attribute that one, but it is unambiguously a
-#: store, and it is the shape `tortoise.sdk::_update_entity` declares its labels from.
+#: never the `NULL` wipe, which removes the property).
+#: ⛔ `#12020` review round 5, Finding 2: the bare map-merge (`SET n += $p`) is NOT one of them. It
+#: used to be, on the reasoning that the generic update door stores through it — and that credit was
+#: a FALSE PASS for every other `store` row, measured: delete `set_embedding_clause(...)` from
+#: `_event_plain_merge`'s and `_session_event_write`'s query entirely, leave `SET e += $props`, and
+#: both rows stayed GREEN with no vector being written at all. The premise is refuted by this
+#: repo's own probe: `tools/dod_5090_probe.py` `UNDECIDABLE_WRITE_SHAPES` states that whether a
+#: merged map carries an `embedding` is DATA FLOW, not syntax, and refuses to decide it — so a
+#: syntactic claim may not decide it either. The one row whose store genuinely IS a map-merge is
+#: declared separately in `MERGE_STORE_CLAIM`, where the weaker evidence is a NAMED exception bound
+#: to that row rather than a default inherited by every other one.
 #: ⛔ `#12020` review, Finding 1: the `.embedding =` form is NARROWED here, because the first version
 #: credited two shapes that store nothing — the false-PASS direction this whole row exists to close.
 #:   · `(?!=)` excludes the COMPARISON: `if t.embedding == prior:` is not an assignment, and the
@@ -1892,8 +1925,16 @@ def _constants_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:
 #: of limit `_declared_symbol_bodies` records for trailing comments.
 _STORE_CARRIER = re.compile(
     r"set_embedding_clause\(|clear_then_set_prefix\("
-    r"|\b\w+\.embedding\s*=(?!=)(?!\s*(?i:null)\b)|\bSET\s+\w+\s*\+="
+    r"|\b\w+\.embedding\s*=(?!=)(?!\s*(?i:null)\b)"
 )
+
+#: The map-merge form, credited ONLY to the rows in `MERGE_STORE_CLAIM` — never generically.
+#: `tortoise.sdk::_update_entity` stores its vector by merging a props map (`SET n += $p`) whose
+#: contents no syntactic rule can attribute, which is exactly the shape `UNDECIDABLE_WRITE_SHAPES`
+#: names. That row is exempt from owing a declaration on that basis (`#4094`), so its evidence is
+#: honest only if it SAYS it is the weaker kind — hence a declared claim kind rather than a silent
+#: widening of the rule every other row is scored by.
+_MERGE_STORE_CARRIER = re.compile(r"\bSET\s+\w+\s*\+=")
 
 
 #: Scope-defining node types: `ast.stmt` subclasses that establish a RANGE rather than execute a
@@ -1957,14 +1998,21 @@ def _carrying_statements(universe: list[ast.AST], lines: list[str],
     # ⛔ Every scope node is skipped, not just the `universe` ROOTS: a NESTED `def`/`class` inside the
     # cited symbol is its own body, so a needle left in a nested scope's docstring satisfied the arm
     # the same way (measured — the nested `FunctionDef`'s slice contains the nested body's stores).
-    # Skipping the scope NODE never hides the statements inside it: they are still walked, so a
-    # needle carried by a real nested statement is still found — only "the body of a nested scope"
-    # stops being a carrier.
+    # ⛔ `#12020` review round 5, Finding 3: the walk must not DESCEND into a nested scope either.
+    # The version above skipped the scope NODE while still walking its body, and the difference is
+    # measured, not theoretical: wrap `_event_plain_merge`'s real query statement in a `def _dead()`
+    # that is never called and the row stayed GREEN — the writer executes no store at all. Skipping
+    # the node alone only stops "the nested def's body" being the carrier; the statements INSIDE it
+    # were still carriers. That was the same defect round 4 closed in `_iterated_store_problem`, and
+    # the comment above claimed the two shared the rule while they did not.
+    # The slice is blanked for the same reason `_slice_own_scope` exists: a compound carrier SPANS
+    # its body, so an `if`/`for` whose text encloses a nested def would otherwise match that def's
+    # store. A claimed store must be one THIS scope executes.
     # Module CONSTANTS in `universe` are deliberately NOT excluded: a writer may hold its clause in
     # one (`_TURN_WRITE_CYPHER`), and that statement is a real carrier.
     hits: list[tuple[ast.stmt, str]] = []
     for root in universe:
-        for node in ast.walk(root):
+        for node in _walk_own_scope(root):
             if not isinstance(node, ast.stmt):
                 continue
             if isinstance(node, _SCOPE_NODES):
@@ -1972,7 +2020,7 @@ def _carrying_statements(universe: list[ast.AST], lines: list[str],
             if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
                     and isinstance(node.value.value, str)):
                 continue  # a docstring is prose, not a statement that stores
-            text = _slice(lines, node)
+            text = _slice_own_scope(lines, node)
             if needle in text:
                 hits.append((node, text))
     minimal: list[tuple[ast.stmt, str]] = []
@@ -2009,7 +2057,8 @@ def _slice_own_scope(lines: list[str], statement: ast.stmt) -> str:
     return _without_comments("\n".join(keep))
 
 
-def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> str | None:
+def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str],
+                            *, merge_store: bool = False) -> str | None:
     """Why `node` no longer has a loop over `constant` whose TARGET drives a store, or None.
 
     ⛔ This is the structural half of the `#11954` row, and the half a substring can never close:
@@ -2031,6 +2080,11 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> s
     too, so the row asserted "the writer's own loop iterates the constant" about a loop it never
     runs. The store half had carried this rule since round 4; the search that finds the loop is the
     other half of the same claim.
+
+    ⛔ `merge_store` is the `MERGE_STORE_CLAIM` half of the same declaration: the one row whose
+    store genuinely IS a map merge (`tortoise.sdk::_update_entity`, `SET n += $p`) is scored by the
+    narrower `_STORE_CARRIER` everywhere else, and opts into the merge form HERE and in the
+    statement arm — never by widening the generic pattern (#12020 review round 5, Finding 2).
     """
     for sub in _walk_own_scope(node):
         if isinstance(sub, ast.For):
@@ -2081,7 +2135,10 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> s
         # never calls — or one whose PARAMETER shadows the loop binding, or a class-body string —
         # satisfied the row while nothing stored per iteration (measured: all three GREEN).
         hits = [n for outer in body for n in _walk_own_scope(outer)
-                if isinstance(n, ast.stmt) and _STORE_CARRIER.search(_slice_own_scope(lines, n))]
+                if isinstance(n, ast.stmt)
+                and (_STORE_CARRIER.search(_slice_own_scope(lines, n))
+                     or (merge_store
+                         and _MERGE_STORE_CARRIER.search(_slice_own_scope(lines, n))))]
         # ⛔ The MINIMAL store statements: without this, the enclosing `for` itself matches (its text
         # contains every store in its body) and any mention of the binding anywhere inside would
         # satisfy the target check — i.e. the arm would degrade to "something in the loop names it".
@@ -2167,6 +2224,11 @@ def _evidence_violation(source: str, symbol: str, needle: str,
        asks only that the claim is carried by a real statement — and the COMPLETENESS of those two
        rests on `LABEL_CONSTANTS`, which the pin below re-derives in both directions and which this
        function therefore requires to exist for every bound row.
+       `claim="merge"` is for the ONE row whose store is a map merge (`MERGE_STORE_CLAIM`): its
+       vector is merged in as data the probe itself calls undecidable
+       (`UNDECIDABLE_WRITE_SHAPES`), so it is scored by the narrower rule plus that named kind —
+       never by widening `_STORE_CARRIER`, which would make every other row green with its vector
+       clause deleted (`#12020` review round 5, Finding 2).
     2. **The iterated-store arm**, for a row that names the constant its loop iterates: a `for` over
        that constant whose target drives the store (`_iterated_store_problem`).
 
@@ -2205,6 +2267,11 @@ def _evidence_violation(source: str, symbol: str, needle: str,
             )
             if claim == "bound" or _STORE_CARRIER.search(view):
                 carried.append(text)
+            elif claim == "merge" and _MERGE_STORE_CARRIER.search(view):
+                # The declared weaker kind (`MERGE_STORE_CLAIM`): the store IS the map merge, whose
+                # vector content no syntax can attribute (`UNDECIDABLE_WRITE_SHAPES`). Kept as a
+                # NAMED claim so every other row is scored by the narrower `_STORE_CARRIER`.
+                carried.append(text)
             elif claim == "assembly":
                 # The store clause is ASSEMBLED across neighbouring statements (the label in the
                 # statement that issues the query, the clause built one statement earlier), so the
@@ -2212,7 +2279,7 @@ def _evidence_violation(source: str, symbol: str, needle: str,
                 # Walked up from the carrier to the cited symbol, never out of it — a store in
                 # another function cannot satisfy it.
                 for ancestor in _enclosing_statements(statement, parents, node):
-                    if _STORE_CARRIER.search(_slice(lines, ancestor)):
+                    if _STORE_CARRIER.search(_slice_own_scope(lines, ancestor)):
                         carried.append(text)
                         break
         if not carried:
@@ -2223,7 +2290,8 @@ def _evidence_violation(source: str, symbol: str, needle: str,
             continue
         if iterated is None:
             return None
-        problem = _iterated_store_problem(node, iterated, lines)
+        problem = _iterated_store_problem(node, iterated, lines,
+                                         merge_store=(claim == "merge"))
         if problem is None:
             return None
         problems.append(f"{symbol}: {problem}")
@@ -2264,7 +2332,10 @@ def test_the_iterated_arm_does_not_credit_a_store_in_a_NESTED_scope() -> None:
         tree = ast.parse(source)
         fn = next(n for n in ast.walk(tree)
                   if isinstance(n, ast.FunctionDef) and n.name == "w")
-        return _iterated_store_problem(fn, "_KEYS", source.splitlines())
+        # `merge_store=True` because this fixture is deliberately the REAL `_update_entity` store
+        # shape (a map merge). The row that uses it is the declared `MERGE_STORE_CLAIM` one; the
+        # property under test here is the SCOPE rule, not which carrier form is credible.
+        return _iterated_store_problem(fn, "_KEYS", source.splitlines(), merge_store=True)
 
     # CONTROL — the store in the loop's own body holds, so the arms below red for the SCOPE and not
     # because the helper has become always-red.
@@ -2324,7 +2395,11 @@ def test_the_iterated_arm_finds_its_loop_in_the_WRITERS_own_scope() -> None:
         tree = ast.parse(source)
         fn = next(n for n in ast.walk(tree)
                   if isinstance(n, ast.FunctionDef) and n.name == "w")
-        return _iterated_store_problem(fn, "_KEYS", source.splitlines())
+        # `merge_store=True`: the fixture deliberately uses the REAL `_update_entity` store shape
+        # (a map merge), which only the declared `MERGE_STORE_CLAIM` row may lean on. The property
+        # under test is the LOOP's scope, not which carrier form is credible (#12020 round 5,
+        # Finding 2).
+        return _iterated_store_problem(fn, "_KEYS", source.splitlines(), merge_store=True)
 
     loop = ('for label, _prop in _KEYS:\n'
             '            proj.g.query(f"MATCH (n:{label}) SET n += $p")\n')
@@ -2375,7 +2450,6 @@ def test_the_store_carrier_does_not_credit_a_comparison_or_a_wipe() -> None:
     stores = {
         "n.embedding = $v",                       # a live assignment, the form the alias rows use
         "SET n.embedding = nullify",               # a VALUE named nullify is a store, not a wipe
-        "SET n += $p",                             # the map-merge `_update_entity` declares from
         "set_embedding_clause(n, vec)",
         "clear_then_set_prefix(n)",
     }
@@ -2383,6 +2457,101 @@ def test_the_store_carrier_does_not_credit_a_comparison_or_a_wipe() -> None:
     assert not missed, (
         "_STORE_CARRIER no longer sees a real store — the narrowing above went too far and the "
         f"statement arm now reds on rows that hold: {missed}")
+
+    # ⛔ `#12020` review round 5, Finding 2: the bare MAP MERGE is NOT a generic store, and this is
+    # the pin that keeps it out. It used to be credited here, and the cost was measured: deleting
+    # `set_embedding_clause(...)` from `_event_plain_merge`'s and `_session_event_write`'s query and
+    # leaving `SET e += $props` kept BOTH rows green with no vector written at all. The repo's own
+    # probe classes that shape undecidable (`UNDECIDABLE_WRITE_SHAPES`: whether the merged map
+    # carries an `embedding` is DATA FLOW, not syntax), so the generic arm may not decide it; the one
+    # row that genuinely stores this way DECLARES it in `MERGE_STORE_CLAIM` and is scored by
+    # `_MERGE_STORE_CARRIER`.
+    assert not _STORE_CARRIER.search("SET n += $p"), (
+        "the bare map-merge is credited as a generic store again — every `store` row then stays "
+        "green with its vector clause deleted (measured), which is the false PASS this arm exists "
+        "to close")
+    assert _MERGE_STORE_CARRIER.search("SET n += $p"), (
+        "`_MERGE_STORE_CARRIER` no longer sees the merge form, so the ONE declared row that stores "
+        "through it would red for the wrong reason")
+    assert frozenset({"tortoise.sdk::_update_entity"}) == MERGE_STORE_CLAIM, (
+        "the weak-evidence claim kind grew beyond the single row it was declared for — a row added "
+        f"here stops redding when its vector clause is deleted: {sorted(MERGE_STORE_CLAIM)}")
+
+
+def test_a_deleted_vector_clause_or_an_UNCALLED_store_reds_the_row() -> None:
+    """`#12020` review round 5, Findings 2 and 3 — DRIVEN on the real tree, not described.
+
+    Both are FALSE PASSES that the shipped guard could not see, found by review and measured on
+    `origin/main` + this branch before the fix. Each mutation is applied to the real
+    `tortoise/projection/entities.py` in memory, and the unmutated control is asserted FIRST so a
+    mutation that quietly stopped applying cannot pass as a red.
+
+    (1) **The vector clause deleted, the map merge left.** `_STORE_CARRIER` used to credit a bare
+        `SET n += $p`, so removing `set_embedding_clause(...)` from both `ON CREATE`/`ON MATCH`
+        halves left the row GREEN with no vector written at all. The premise was wrong as well as
+        unsafe: `tools/dod_5090_probe.py` `UNDECIDABLE_WRITE_SHAPES` states that whether a merged
+        map carries an `embedding` is DATA FLOW, not syntax. Only the one declared row
+        (`MERGE_STORE_CLAIM`) may lean on it now.
+    (2) **The store moved into an UNCALLED nested `def`.** `_carrying_statements` skipped the scope
+        NODE while still walking its body, so the statement inside the nested function was still a
+        carrier — the row stayed green while the writer executed no store. Round 4 had closed the
+        identical hole in `_iterated_store_problem`; the two arms now share `_walk_own_scope`.
+    """
+    key = "tortoise.projection.entities::_event_plain_merge"
+    rel, symbol, needle, _labels = LABEL_EVIDENCE[key]
+    source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+    claim = _claim_for(key)
+    assert claim == "store", (
+        f"{key} is graded as {claim!r} — this pin is about the NARROW rule, so it must not lean on "
+        "the merge exception")
+
+    def violation(text: str) -> str | None:
+        return _evidence_violation(text, symbol, needle, claim=claim)
+
+    # CONTROL — the tree carries the claim, so every mutant below starts from a green row.
+    assert violation(source) is None, violation(source)
+
+    # (1) `set_embedding_clause(...)` removed from BOTH halves; the map merge stays.
+    clause = (
+        '            "ON CREATE SET e += $props, " + set_embedding_clause("e", preserve_on_null=False) + " "\n'
+        '            "ON MATCH SET e += $props, " + set_embedding_clause("e"),\n'
+    )
+    assert clause in source, "the vector clause moved — re-derive this pin, do not delete it"
+    no_clause = source.replace(
+        clause,
+        '            "ON CREATE SET e += $props "\n'
+        '            "ON MATCH SET e += $props",\n',
+        1,
+    )
+    assert no_clause != source
+    assert "set_embedding_clause" not in _slice(
+        no_clause.splitlines(), _function_of(no_clause, symbol)), (
+        "the mutation did not remove the clause — the arm below would red for the wrong reason")
+    assert violation(no_clause) is not None, (
+        "a store row stays GREEN with its vector clause deleted and only a map merge left — that "
+        "is the false PASS `_STORE_CARRIER`'s map-merge alternative caused")
+
+    # (2) The real carrier moved into a nested `def` the function never calls.
+    carrier = (
+        '        self.g.query(\n'
+        '            "MERGE (e:Event {eventId: $eid}) "\n'
+        '            "ON CREATE SET e += $props, " + set_embedding_clause("e", preserve_on_null=False) + " "\n'
+        '            "ON MATCH SET e += $props, " + set_embedding_clause("e"),\n'
+        '            params={"eid": eid, "props": props, "embedding": embedding},\n'
+        '        )\n'
+    )
+    assert carrier in source, "the carrier moved — re-derive this pin, do not delete it"
+    uncalled = source.replace(
+        carrier,
+        "        def _dead():\n"
+        + "\n".join("    " + line for line in carrier.rstrip("\n").split("\n"))
+        + "\n        # `_dead()` is never called: this writer now executes no store at all.\n",
+        1,
+    )
+    assert uncalled != source
+    assert violation(uncalled) is not None, (
+        "a store inside an UNCALLED nested scope still satisfies the row — that is a row which "
+        "cannot fail, and it is the identical hole round 4 closed in the iterated arm")
 
 
 def test_a_bare_string_statement_is_not_a_carrier() -> None:
@@ -2438,8 +2607,12 @@ def test_a_bare_string_statement_is_not_a_carrier() -> None:
     assert hits_nested == [], (
         "a NESTED scope's docstring counts as a carrier — the statement arm can be satisfied by "
         f"prose one level down: {[(type(n).__name__, t) for n, t in hits_nested]}")
-    # …while a real statement INSIDE that nested scope is still a carrier (the exclusion is about
-    # the scope's body, not about reach into it).
+    # ⛔ `#12020` review round 5, Finding 3: a real statement INSIDE a nested scope is NOT a carrier
+    # either, and this assertion used to say the opposite. Measured: wrap the real carrier of
+    # `_event_plain_merge` in a `def _dead()` that is never called and the row stayed GREEN while the
+    # writer executed no store at all. `_walk_own_scope` now stops the walk at the scope boundary, so
+    # the enclosing scope's evidence cannot come from a function it does not call. This is the same
+    # rule round 4 applied in `_iterated_store_problem`; the two arms are one rule again.
     nested_real = (
         "def _f() -> None:\n"
         "    def _inner() -> None:\n"
@@ -2449,9 +2622,21 @@ def test_a_bare_string_statement_is_not_a_carrier() -> None:
     )
     hits_nested_real = _carrying_statements(
         [_function_of(nested_real, "_f")], nested_real.splitlines(), _PROSE_NEEDLE)
-    assert len(hits_nested_real) == 1 and isinstance(hits_nested_real[0][0], ast.For), (
-        "a real statement inside a nested scope stopped being a carrier — the exclusion went too "
-        f"far: {hits_nested_real}")
+    assert hits_nested_real == [], (
+        "a statement inside a nested, UNCALLED scope is credited to the enclosing symbol — that is "
+        "a row that cannot fail: the writer executes no store and the pin stays green. "
+        f"{[(type(n).__name__, t) for n, t in hits_nested_real]}")
+    # …and the OWN-scope carrier of the same text is still found, so the assertion above cannot pass
+    # because the helper answers nothing for this source.
+    own_scope_real = (
+        "def _f() -> None:\n"
+        "    for label, _prop in _CANONICAL_ENTITY_ID_PROPS:\n"
+        "        pass\n"
+    )
+    hits_own = _carrying_statements(
+        [_function_of(own_scope_real, "_f")], own_scope_real.splitlines(), _PROSE_NEEDLE)
+    assert len(hits_own) == 1 and isinstance(hits_own[0][0], ast.For), (
+        f"an OWN-scope statement stopped being a carrier — the exclusion went too far: {hits_own}")
 
 
 
