@@ -355,8 +355,13 @@ def appeal_url() -> str:
     ``/docs`` is a permanent SAME-HOST 301 onto the docs page's terminal address
     ``/tortoise/docs`` (#11763; measured live 2026-11-12 — 301, then 200, one
     redirect, both on the company origin). Emitting the terminal path here would
-    make it 0 hops; that flip belongs to #12049, which also re-points the pasted
-    onboarding document, so the two move together instead of one drifting.
+    make it 0 hops, and that is deliberately NOT done in this PR: this function's
+    DESTINATION is #11939's decision (`/docs#appeal` with the section written, or
+    `/contact`), so flipping the path now would decide half of a question that
+    issue may answer by moving the link somewhere else entirely. #12049 re-points
+    the pasted onboarding copies and explicitly does NOT touch this function
+    (its item 4) — so do not read this comment as "someone else will";
+    #11939 is the owner of where this link goes, and it is OPEN.
     ⛔ #12049 and not #11764: #11764's scoping assigns `onboarding/SKILL.md` to
     #11767 and lists it under "deliberately NOT do", and #11767 closes with the
     alias still in place — without #12049 the re-point would have no owner.
