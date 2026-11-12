@@ -128,15 +128,15 @@ evidence, two checker tools and a pinned registration.
 
 **R1 · The packs already declare it.** `packs/dev/manifest.yaml` declares `decomposesInto`
 (`dev:epic → dev:issue`, `:142`) with `semantics: hasPart`, `hasPart` (`dev:theme → dev:epic`, `:148`),
-and `hierarchies: Theme→Epic / Epic→Issue (type: hasPart)` (`:193`). Also
+and `hierarchies: Theme→Epic / Epic→Issue (type: hasPart)` (`:239`). Also
 `packs/product-strategy/manifest.yaml:144,187`, `packs/venture/manifest.yaml:365` (+ `hierarchies`
 `:97,:99`), `packs/marketing/manifest.yaml:57`.
 
 **R2 · The schema admits it, and the writer exists.**
-`hasPart` is on the structural write allowlist (`tortoise/projection/edges.py:621-630`) and
+`hasPart` is on the structural write allowlist (`tortoise/projection/edges.py:717-726`) and
 `docs/ONTOLOGY.md` §3.7 types it **Object → Object**, N-ary, `dcterms:hasPart`, with inverse traversal
 covering "part of" (**no separate `partOf` edge**). The writer is `TortoiseSDK.create_edge` →
-`projection.edges.create_edge` (`edges.py:2900`).
+`projection.edges.create_edge` (`edges.py:3100`).
 ⚠️ **`decomposesInto` — the predicate the packs actually declare — is NOT in that set.** Its route to a
 write is its `semantics: hasPart`, and **nothing derives the writable predicate from the declaration on
 the extraction path**. That is the seam.
@@ -155,7 +155,7 @@ above (they declare `mechanism: IMPL`, so the `operator` path binds; the predica
 set). The **`mechanism`** leg *is* read at the write door by `declared_mechanisms`
 (`pack_registry.py:1006-1118`, the `CORE_PREDICATES` membership test at `:1107`), consumed by `create_operator`. Unread: (i) the
 **`semantics`** leg — surfaced at `:3736`, and nothing derives an op_type or direction from it; and (ii)
-**`hierarchies`** — validated only (`pack_registry.py:2341-2355`). ⚠️ The operator writers (`commit_ops.py:426-429`,
+**`hierarchies`** — validated only (`pack_registry.py:2373-2387`). ⚠️ The operator writers (`commit_ops.py:426-429`,
 `sdk.create_operator`) are the **Point-layer** mechanism; they are not evidence about Object→Object.
 
 **R5 · The declared-mechanism registry is a contract, not a list.** `config/v4-mechanisms.yml` — 13 rows,
@@ -419,7 +419,7 @@ fan-out respected; C8 holds.
 
 **The contradiction to adjudicate:** `#4889` ("the Subject layer is unpopulated in production") is
 **CLOSED**, and the owner measured **26 Subjects against 19,300 points**. One of those is false.
-**Produces:** the binder's attach rate (`bind_point_subjects`, `tortoise/subject_binding.py:341`, called
+**Produces:** the binder's attach rate (`bind_point_subjects`, `tortoise/subject_binding.py:344`, called
 from `sdk.py`'s point-creation path at `:18218` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
