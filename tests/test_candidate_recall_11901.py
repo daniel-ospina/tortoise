@@ -59,6 +59,18 @@ def test_both_artifacts_declare_which_retrieval_mode_ran(report, control):
     assert report["retrieval"]["legs_seen"].get("vector") is True
     assert control["retrieval"]["has_embedder"] is False
     assert "KEYWORD-ONLY" in control["retrieval"]["note"]
+    # ⛔ The hybrid artifact's note must be the one its OWN legs imply: a note
+    # that contradicts `has_embedder`/`legs_seen` is the false label
+    # `retrieval_preflight` exists to prevent, and asserting only that the
+    # control mentions "KEYWORD-ONLY" leaves it unguarded (round 5, F2).
+    assert report["retrieval"]["note"] == "hybrid", (
+        f"the hybrid artifact's note contradicts its legs: "
+        f"{report['retrieval']['note']!r}")
+    for name, art in (("hybrid", report), ("control", control)):
+        vector = bool(art["retrieval"]["legs_seen"].get("vector"))
+        if art["retrieval"]["has_embedder"] and vector:
+            assert "KEYWORD-ONLY" not in art["retrieval"]["note"], (
+                f"{name}: declares a vector leg but its note says keyword-only")
     assert control["retrieval"]["legs_seen"].get("vector") is False
 
 
@@ -460,6 +472,86 @@ def test_the_briefs_recommendation_repeats_only_recomputed_figures(report, contr
         f"§7 does not state the identifier share of the zero-row class ({idz})")
     assert report["arms"]["exact"]["3"]["rows_zero"] == 0, (
         "the hybrid arm's zero-row claim (`rows_zero` 0) is no longer what the artifact holds")
+
+
+def test_the_briefs_restatements_all_recompute(report, control):
+    """Every figure the brief repeats OUTSIDE its main tables — §5, §7, §8, §6, §3.
+
+    Round 5's point was that pinning the strings a round names closes instances,
+    not the class: §5 is a table and matched nothing, and eight §7/§8/§6/§3
+    restatements could be edited with a green suite. Each literal below is built
+    from the artifact, so the guard is over the SURFACE, not over a list of
+    findings.
+    """
+    import collections
+    import statistics
+
+    text = _squash(BRIEF.read_text())
+    v = report["arms"]["variant"]
+    pairs = v["3"]["pairs"]
+
+    def pct(num, den):
+        return f"{100 * num / den:.1f} %"
+
+    # ── §5: the duplicate-rate-as-measured table, all four pinned rows.
+    for k in ("3", "15"):
+        row = v[k]
+        assert (f"| prior on, `limit={k}`, phase 1 | 0.0 % | "
+                f"{pct(row['in_window'], pairs)} |") in text, (
+            f"§5's `limit={k}` row does not match the artifact")
+        assert (f"| prior on, `limit={k}`, phase 1 + punctuation fold (NOT shipped) | "
+                f"{pct(row['attached_folded'], pairs)} | {pct(row['in_window'], pairs)} |") in text, (
+            f"§5's folded `limit={k}` row does not match the artifact")
+
+    # ── §3: the identifier share of the k=3 misses, and the crowding median.
+    misses = report["arms"]["exact_misses"]
+    by_cls = collections.Counter(m["cls"] for m in misses)
+    assert f"{by_cls['ident']} of the {len(misses)} misses" in text, (
+        f"§3 does not state the identifier share of the misses ({by_cls['ident']})")
+    median = statistics.median(m["siblings_2tok"] for m in misses)
+    assert f"(median {median:g})" in text, (
+        f"§3 does not state the recomputed crowding median ({median:g})")
+
+    # ── §6: the headline restated in the external-findings section.
+    exact = report["arms"]["exact"]
+    n = report["corpus"]["sample"]
+    assert f"Our {pct(exact['3']['in_window'], n)} hybrid recall@3" in text, (
+        "§6 does not restate the recomputed hybrid recall@3")
+
+    # ── §7-1: the width's reach, both ends.
+    assert (f"({pct(exact['3']['in_window'], n)} → "
+            f"{pct(exact['15']['in_window'], n)})") in text, (
+        "§7-1 does not state the recomputed k=3 → k=15 recall")
+    assert f"measured {report['arms']['pooled']['15']['set_sum'] / report['arms']['pooled']['15']['captures']:.1f}" in text, (
+        "§7-1 does not state the recomputed pooled k=15 mean")
+
+    # ── §7-2b: the fold's two figures and the width's residual gain.
+    fold3 = v["3"]["attached_folded"]
+    assert f"0 % → {pct(fold3, pairs)}" in text, (
+        f"§7-2b does not state the recomputed 0 → {pct(fold3, pairs)}")
+    # "100 % of in-window separator variants" is 114/114 and 117/117 — the
+    # fold recovers every IN-WINDOW separator pair, which is a different
+    # denominator from the 419-pair arm above.
+    sep3 = _sum_cls(report, ("hyphen-to-space", "space-to-hyphen"), "3")
+    sep15 = _sum_cls(report, ("hyphen-to-space", "space-to-hyphen"), "15")
+    assert sep3["attached_folded"] == sep3["in_window"], (
+        "the fold no longer recovers every in-window separator variant at k=3")
+    assert sep15["attached_folded"] == sep15["in_window"], (
+        "the fold no longer recovers every in-window separator variant at k=15")
+    assert (f"({sep3['in_window']}/{sep3['in_window']} at k=3, "
+            f"{sep15['in_window']}/{sep15['in_window']} at k=15)") in text, (
+        "§7-2b does not state the recomputed in-window separator fractions")
+    gain = 100 * (v["15"]["attached_folded"] - v["3"]["attached_folded"]) / pairs
+    assert f"+{gain:.1f} pts" in text, (
+        f"§7-2b does not state the recomputed width residual (+{gain:.1f} pts)")
+
+    # ── §7-3: the sweep's wall clock.
+    assert f"completed in {report['corpus']['elapsed_s']:.0f} s" in text, (
+        "§7-3 does not state the artifact's own elapsed time")
+
+    # ── §8: the hybrid zero-row claim is the artifact's, not prose.
+    assert f"(`rows_zero` {report['arms']['exact']['3']['rows_zero']} in hybrid)" in text, (
+        "§8's `rows_zero` claim does not match the hybrid artifact")
 
 
 def test_the_brief_keeps_its_two_standing_negatives():

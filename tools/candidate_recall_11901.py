@@ -61,9 +61,14 @@ THE HARVEST RULES, stated so the population is reproducible and criticisable
                 names belong to (research-brief §3.2). Frequency-ranked, because
                 a name that recurs across captures is the one link-before-create
                 exists to re-identify.
-``ident``     — ``#<n>`` references, repo-relative file paths, and snake_case
-                identifiers: the other three real name shapes the same audit
-                enumerated (§3.2: 0.5% / 1.7% / 9.0%).
+``ident``     — ``#<n>`` references and snake_case identifiers (§3.2: 0.5% and
+                9.0% of real ``:Object`` names) — one class, because both are
+                single-token identifiers whose failure mode is a lookup, not a
+                description.
+``path``      — repo-relative file paths (§3.2: 1.7%), which is a SEPARATE class
+                even though §3.2 counts it as a name shape: a path's variants are
+                basenames, not articles, so it is measured apart (``_add("path",``
+                below, and ``variant_by_class`` keys).
 
 USAGE
     # 1. start a lane container and export its four seams

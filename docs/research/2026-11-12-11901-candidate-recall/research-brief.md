@@ -91,8 +91,9 @@ turns and not its raw occurrences (a session repeating a phrase 40 times in one 
 
 **Population 1,000, stratified sample 300.** ⛔ **The class quotas are a deliberate OVERSAMPLE of the minority
 shapes, not the audit's shares.** The audit measured identifiers at ≈2.2 % of real `:Object` names (0.5 % bare
-`#<n>` + 1.7 % `PR #<n>`) and definite descriptions at 62.3 %; this population gives identifiers 30 % and paths
-10 %, so each class carries enough names for a usable per-class rate. **The composite headline is stratified,
+`#<n>` + 1.7 % `PR #<n>`) and definite descriptions at 62.3 %; this population gives the identifier class 30 % and the
+path class 10 % — **two separate classes**, though §3.2 counts all three shapes (see the harvest rules, §2's
+class list), so each carries enough names for a usable per-class rate. **The composite headline is stratified,
 never class-share weighted** — it is not an estimate of the production mix, and the per-class table is the number
 to quote for any one class.
 
@@ -317,6 +318,13 @@ uv run python tools/candidate_recall_11901.py \
 queries; the exact phase-1 matcher; the variant classes), that both committed artifacts are internally consistent
 and declare their retrieval mode, and that the tables above match the artifact — so the numbers cannot rot away
 from the evidence.
+
+**What is pinned, precisely** (because "the tables match" was untrue of §5 until round 5): every row of §1, §3, §3.1,
+§4 (both the arm table and the decomposition) and §5; §3's prose derivatives (past-this-k, absent-at-15, the
+identifier share, the crowding mean and median); §6's and §7's restatements (the recall pair, the pooled mean, the
+fold's two denominators, the width residual, the class deltas, the wall clock); and §8's `rows_zero` claim. **Not
+pinned:** §2's corpus census (file count, record count, characters — the artifact carries only the first, and the
+corpus is live). One unpinned sentence is the honest state; an unpinned TABLE is not.
 
 ## 10. Write-back
 
