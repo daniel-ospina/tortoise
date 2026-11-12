@@ -576,12 +576,21 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         # narrows it against nothing. Declaring the statements is what keeps a
         # future DIAL site a red instead of an exemption, which is the whole
         # job of this file (same shape as `test_wipe_server.py` above).
+        #
+        # The FOUR fixtures below are full statements for the SAME reason. The
+        # two port-shaped ones especially: `127.0.0.1:<port>:6379` is exactly
+        # the `docker run -p` publish spec and `127.0.0.1:6379/<graph>` exactly
+        # the `docker://` URI tail, so the BARE literals would each have
+        # exempted a real dial on the same line — the failure this guard
+        # exists to catch. No real dial exists in `tests/test_test_lane_tool.py`
+        # (every `_docker` is monkeypatched there), so the narrow spelling costs
+        # nothing and keeps a future one red.
         '"falkordb-16379",      # the orchestration graph instance',
         'for shared in ("falkordb", "falkordb-16379"',
         '_remove_and_describe("falkordb-16379")',
-        "127.0.0.1:16390->6379",
-        "127.0.0.1:6379/stale_shared_lane",
-        "127.0.0.1:16399:6379",
+        'return _R(0, "fdb-lane-x  127.0.0.1:16390->6379/tcp',
+        'export TORTOISE_DB_URI="docker://:pw@127.0.0.1:6379/stale_shared_lane',
+        'assert "127.0.0.1:16399:6379" in argv',
         "resolves 16379 and a lane's",
     ],
 }
