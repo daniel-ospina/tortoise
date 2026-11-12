@@ -16,7 +16,7 @@
 
 import { readFileSync, statSync } from "node:fs";
 
-import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd, extractVideo, validHref, authorBylineHtml, authorJsonLd, DEFAULT_AUTHOR, DEFAULT_AUTHOR_IMAGE_URL } from "../website/functions/blog/_lib.ts";
+import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd, extractVideo, validHref, authorBylineHtml, authorJsonLd, DEFAULT_AUTHOR, DEFAULT_AUTHOR_IMAGE_URL, SITE_URL, normaliseRetiredHostUrl } from "../website/functions/blog/_lib.ts";
 import { VIDEO_EMBED_ORIGINS } from "../website/functions/blog/_shared/video.ts";
 // The marketing project's policy — the one `blog/_lib.ts` `ok()` stamps on every
 // article response, so it is the policy that decides whether the embed displays.
@@ -725,12 +725,33 @@ console.log("JSON-LD cannot break out of its script element");
 // string, not as a substring absence.
 console.log("article author identity (#1383 — the byline's null-image path)");
 {
-  const AVATAR = "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg";
+  // ⛔ THE STORED VALUE, AND THE RENDERED VALUE, ARE DIFFERENT STRINGS SINCE #11765.
+  // `STORED_AVATAR` is what every production row actually holds today (measured:
+  // all six published posts), on the host that is now a PERMANENT 301. The
+  // renderer maps that host onto `SITE_URL` at render time (no data migration —
+  // drafts and archived rows are invisible to a backfill), so `AVATAR` is what a
+  // page must EMIT. Asserting input==output would pass with the normalisation
+  // deleted, so the two are named separately and compared against each other.
+  const STORED_AVATAR = "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg";
+  const AVATAR = `${SITE_URL}/blog/author-daniel-ospina.jpg`;
 
   assertEq(
-    authorBylineHtml({ author: "Daniel Ospina", author_image_url: AVATAR }),
+    authorBylineHtml({ author: "Daniel Ospina", author_image_url: STORED_AVATAR }),
     `<span class="byline"><img class="byline-avatar" src="${AVATAR}" alt="" width="22" height="22" loading="lazy"><span>By Daniel Ospina</span></span>`,
-    "an author WITH an image renders the avatar and the name",
+    "an author WITH an image renders the avatar and the name — on the CANONICAL host, whatever the stored host was",
+  );
+  assert(
+    !authorBylineHtml({ author: "Daniel Ospina", author_image_url: STORED_AVATAR }).includes("tortoise.premiselabs.co"),
+    "...and the RETIRED host never reaches the byline markup (#11765)",
+  );
+  // A third-party avatar is author-supplied and valid: it must survive untouched.
+  // Rewriting ITS origin onto SITE_URL would point at a path we do not serve — a
+  // 404 avatar in the byline and inside structured data.
+  const thirdParty = "https://lh3.googleusercontent.com/a/avatar.png";
+  assertEq(
+    normaliseRetiredHostUrl(thirdParty),
+    thirdParty,
+    "a NON-retired origin is left exactly as it was (an external avatar must not be repointed at our origin)",
   );
 
   // ⛔ THE NULL PATH — the assertion that would otherwise ship a broken <img>.
@@ -764,11 +785,11 @@ console.log("article author identity (#1383 — the byline's null-image path)");
   assert(!hostileName.includes("<script>"), "a hostile author name cannot open a <script> in the byline");
   assert(hostileName.includes("&lt;script&gt;"), "...it is escaped, not dropped");
   // A quote in the name must not survive into the avatar URL's attribute context.
-  const quoted = authorBylineHtml({ author: "Daniel Ospina", author_image_url: `${AVATAR}?"onload="alert(1)` });
+  const quoted = authorBylineHtml({ author: "Daniel Ospina", author_image_url: `${STORED_AVATAR}?"onload="alert(1)` });
   assert(!quoted.includes('"onload="'), "a quote smuggled through the image URL is escaped");
 
   // No stored author at all → the real default, never the retired anonymous one.
-  const anon = authorBylineHtml({ author: null, author_image_url: AVATAR });
+  const anon = authorBylineHtml({ author: null, author_image_url: STORED_AVATAR });
   assertEq(DEFAULT_AUTHOR, "Daniel Ospina", "the renderer's default author is a real person");
   assert(anon.includes("By Daniel Ospina"), "a null author falls back to the real author name");
   assert(!anon.includes("Tortoise team"), "the anonymous 'Tortoise team' fallback is gone");
@@ -776,7 +797,8 @@ console.log("article author identity (#1383 — the byline's null-image path)");
 
 console.log("article author structured data (#1383 — Person, image omitted when absent)");
 {
-  const AVATAR = "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg";
+  const STORED_AVATAR = "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg";
+  const AVATAR = `${SITE_URL}/blog/author-daniel-ospina.jpg`;
   const base = {
     id: "1",
     slug: "an-article",
@@ -786,7 +808,7 @@ console.log("article author structured data (#1383 — Person, image omitted whe
     cover_image_url: null,
     tags: [],
     author: "Daniel Ospina",
-    author_image_url: AVATAR,
+    author_image_url: STORED_AVATAR,
     meta_title: null,
     meta_description: null,
     published_at: "2026-01-01T00:00:00Z",
@@ -797,7 +819,19 @@ console.log("article author structured data (#1383 — Person, image omitted whe
   const withImage = articleJsonLd(base, url).find((n) => n["@type"] === "BlogPosting");
   assertEq(withImage.author["@type"], "Person", "BlogPosting.author is a Person, not an Organization");
   assertEq(withImage.author.name, "Daniel Ospina", "...carrying the byline's name");
-  assertEq(withImage.author.image, AVATAR, "...and the avatar URL");
+  assertEq(withImage.author.image, AVATAR, "...and the avatar URL — normalised onto the canonical host (#11765)");
+  assert(
+    !JSON.stringify(withImage.author).includes("tortoise.premiselabs.co"),
+    "...so `BlogPosting.author` never names the RETIRED host (structured data has no human to see a 301)",
+  );
+  // A cover stored on a retired host is the same class of leak, in `BlogPosting.image`.
+  const oldCover = articleJsonLd({ ...base, cover_image_url: "https://tortoise.premiselabs.co/assets/og-tortoise.jpg" }, url)
+    .find((n) => n["@type"] === "BlogPosting");
+  assertEq(
+    oldCover.image,
+    `${SITE_URL}/assets/og-tortoise.jpg`,
+    "a cover stored on the retired host is normalised in JSON-LD too, path preserved",
+  );
   assertEq(
     articleJsonLd(base, url).some((n) => n["@type"] === "Organization"),
     false,
@@ -835,7 +869,8 @@ console.log("the ARTICLE PAGE wires the author byline + Person schema (#1383 —
   // Supabase: a template line reverted to the old `<span>By …</span>` (no
   // avatar, Organization schema) leaves every helper assertion green.
   const { onRequestGet } = await import("../website/functions/blog/[[path]].ts");
-  const AVATAR = "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg";
+  const STORED_AVATAR = "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg";
+  const AVATAR = `${SITE_URL}/blog/author-daniel-ospina.jpg`;
   const realFetch = globalThis.fetch;
 
   const render = async (overrides) => {
@@ -848,7 +883,7 @@ console.log("the ARTICLE PAGE wires the author byline + Person schema (#1383 —
       cover_image_url: null,
       tags: ["memory"],
       author: "Daniel Ospina",
-      author_image_url: AVATAR,
+      author_image_url: STORED_AVATAR,
       meta_title: null,
       meta_description: null,
       published_at: "2026-01-01T00:00:00Z",
@@ -1005,8 +1040,8 @@ console.log("the shipped avatar exists, and is the URL the migration backfills (
   // other rather than each against a copy of the string.
   assertEq(
     DEFAULT_AUTHOR_IMAGE_URL,
-    "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg",
-    "the shipped avatar URL is the blog's own asset path",
+    "https://premiselabs.co/blog/author-daniel-ospina.jpg",
+    "the shipped avatar URL is the blog's own asset path, on the blog's CANONICAL host (#11765)",
   );
   assertEq(
     new URL(DEFAULT_AUTHOR_IMAGE_URL).pathname,
@@ -1026,9 +1061,24 @@ console.log("the shipped avatar exists, and is the URL the migration backfills (
     new URL("../supabase/migrations/20261021000001_blog_author_identity.sql", import.meta.url),
     "utf8",
   );
+  // ⛔ THE MIGRATION'S LITERAL AND THE CONSTANT ARE ALLOWED TO DIFFER SINCE #11765,
+  // AND THE INVARIANT IS THE NORMALISED FORM, NOT THE STRING. The owner's decision
+  // on this issue was explicitly "normalise at render, do not migrate the data": a
+  // backfill reaches the rows we can count (published) and silently misses the ones
+  // we cannot (drafts, archived), which is exactly where wrong structured data hides.
+  // So the frozen migrations keep writing the RETIRED host, and what must hold is
+  // that a row they backfilled RENDERS the canonical URL. Asserting string equality
+  // here would demand the data migration the owner refused — and deleting the
+  // assertion instead would lose the real protection ("the backfilled avatar is the
+  // asset we committed").
+  const backfilled = [...migration.matchAll(/author_image_url\s*=\s*'([^']+)'/g)].map((m) => m[1]);
   assert(
-    migration.includes(DEFAULT_AUTHOR_IMAGE_URL),
-    "the migration's backfill writes the SAME URL the renderer names (backfilled posts get a real avatar)",
+    backfilled.length >= 1,
+    `the backfill writes an avatar URL at all (found ${backfilled.length})`,
+  );
+  assert(
+    backfilled.every((url) => normaliseRetiredHostUrl(url) === DEFAULT_AUTHOR_IMAGE_URL),
+    `every URL the backfill writes RENDERS as the renderer's constant (found ${JSON.stringify(backfilled)} -> ${JSON.stringify(backfilled.map((u) => normaliseRetiredHostUrl(u)))})`,
   );
   assert(
     migration.includes(`'Daniel Ospina'`),
@@ -1054,8 +1104,8 @@ console.log("the shipped avatar exists, and is the URL the migration backfills (
     `the repair writes the avatar in BOTH passes (found ${written.length}; the per-write check below is vacuous below 2)`,
   );
   assert(
-    written.every((url) => url === DEFAULT_AUTHOR_IMAGE_URL),
-    `EVERY avatar URL the repair writes is the renderer's constant (found ${JSON.stringify(written)})`,
+    written.every((url) => normaliseRetiredHostUrl(url) === DEFAULT_AUTHOR_IMAGE_URL),
+    `EVERY avatar URL the repair writes RENDERS as the renderer's constant (found ${JSON.stringify(written)})`,
   );
   assert(
     repair.includes(`'Daniel Ospina'`),
