@@ -4766,9 +4766,9 @@ jobs:
           if [ -n "${ImageOS:-}" ]; then
             identity="$identity hosted-image=${ImageOS}/${ImageVersion:-unknown}"
           fi
-          # ⛔ FIVE NAMED INSTALL-PATH FAILURE CLASSES. This is an enumeration OF THESE
-          # GUARDS, not a claim that nothing else can fail: the keyring WRITES BELOW and
-          # `. /etc/os-release` are left to `set -e`, because each of them fails CLOSED already
+          # ⛔ SIX NAMED INSTALL-PATH FAILURE CLASSES. This is an enumeration OF THESE
+          # GUARDS, not a claim that nothing else can fail: the keyring WRITES BELOW are left
+          # to `set -e`, because each of them fails CLOSED already
           # and re-wrapping every write would be ceremony rather than a better diagnostic (a
           # `No space left on device` on the keyring write, or a `sudo` needing a password on
           # a pool box, still exits non-zero — it is just not named). What IS named here is
