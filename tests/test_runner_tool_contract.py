@@ -641,45 +641,61 @@ def _code_only(line: str) -> str:
     and the pin is a backstop, not the only defence: the contract step itself is
     what makes the job work.
 
-    ⛔ ONLY the `gh` arm uses THIS function. The SCRIPT-NAME arm uses
-    `_prose_stripped` below, because a script path is legitimately quoted
+    ⛔ ONLY the `gh` arm uses THIS function. The SCRIPT-NAME arm reads the RAW line,
+    because a script path is legitimately quoted
     (`bash "$GITHUB_WORKSPACE/tools/x.sh"`) — stripping every quoted span there
-    loses a real invocation.
+    loses a real invocation; what that arm exempts instead is a PRINTED MESSAGE,
+    via `_message_only` below (#12133).
     """
     return re.sub(r"'[^']*'|\"[^\"]*\"", "''", line)
 
 
-def _prose_stripped(line: str) -> str:
-    """Drop quoted spans that carry WHITESPACE — operator-facing MESSAGES only.
+#: A shell line that ONLY PRINTS a message: its text is prose, not a call site.
+#:
+#: WHY THE SCAN NEEDS THIS (#12133). `python-ci.yml`'s `test-record-postgres` runs no
+#: `gh` anywhere, but its fail-closed `::error::` text NAMES
+#: `tools/install-ci-runner-x64.sh` to tell an operator how to repair a runner's
+#: labels — so the script-name arm read the instruction as an invocation, demanded a
+#: declaration the job does not owe, and redded the REQUIRED `test-carve-out` shard on
+#: every PR in the repo. Both remedies the assertion offers are WRONG here: `ensure gh`
+#: FAILS CLOSED on a no-egress runner, and a `KNOWN_UNCOVERED` entry would declare a
+#: `gh` user that does not exist.
+#:
+#: ⛔ THREE CONDITIONS, so this cannot become a filter — the command word is
+#: `echo`/`printf` (also after a YAML `run:` prefix or a `then`/`else`), the line has NO
+#: shell operator once its quoted spans are gone, and the script name is exempted only
+#: inside such a line. A bare `.*echo` would exempt `python3 tools/x.py && echo done` —
+#: a real invocation hidden behind its own log line, the FALSE NEGATIVE the script arm
+#: exists to catch.
+#:
+#: RESIDUAL, stated rather than discovered later: a message printed by another command
+#: (`cat <<'EOF'` heredocs, `python3 -c 'print(…)'`) is still read as code, and a
+#: message that carries a shell operator is read as code too. Both fail in the SAFE
+#: direction — they ask for a declaration the job may not need, never a silent skip.
+_MESSAGE_CMD = re.compile(r"^(?:-(?:\s+)?)?(?:run:\s*)?(?:(?:then|else)\s+)?(?:echo|printf)\b")
+_SHELL_OPERATOR = re.compile(r"[;&|]")
 
-    WHY (the second false positive, #12133): `test-record-postgres` runs no `gh`
-    anywhere, but its fail-closed `::error::` text names
-    `tools/install-ci-runner-x64.sh` to tell an operator how to repair a runner's
-    labels. The script arm matched the RAW line, so the message read as an
-    invocation and the job was demanded to declare a `gh` gap it does not have —
-    while the `gh` arm had already been taught to strip quoted prose for exactly
-    this shape. The demanded remedy (`ensure gh`) FAILS CLOSED, so the false
-    positive would red a healthy job on a no-egress runner.
 
-    ⛔ BUT NOT EVERY QUOTED SPAN WITH WHITESPACE IS A SENTENCE (#12092 review): a
-    quoted COMMAND SUBSTITUTION (`OUT="$(python3 tools/x.sh --flag)"`) carries
-    whitespace and really RUNS the script, so a whitespace-only test hid two real
-    invocations that exist in this repo (`e2e-live-reconcile.yml`,
-    `mergify-guard-recut.yml`) — a false NEGATIVE in a gate, i.e. a fail-open.
-    The lookahead below therefore leaves a span whose body starts with `$(` or
-    `${` alone, which keeps those while still stripping every message. Measured
-    over all workflows: 5 job verdicts change, of which 3 are `echo` messages
-    (correct) and **2 are real invocations that stay visible**.
+def _message_only(line: str) -> bool:
+    """Is this line a PRINTED message rather than a shell call site? (#12133)
 
-    Cost, stated and the same direction as `_code_only`'s: a real invocation
-    written as plain prose inside quotes (`sh -c 'cd repo && tools/x.sh'`) is not
-    seen — a hazard the pin guards against is written as a plain step command, not
-    smuggled through a message, and the assignment shape above is the one that
-    occurs in this repo.
+    The predicate is deliberately CONSERVATIVE in both directions: it exempts a script
+    name only when the line provably does nothing but print (see `_MESSAGE_CMD`), and
+    it reads the RAW line for the name, so a quoted invocation written inside a
+    command substitution — `OUT="$(python3 graph-scripts/e2e_live_reconcile.py --json)"`
+    (e2e-live-reconcile.yml:77) or
+    `head_digest="$(python3 tools/mergify_config_guard.py --print-digest)"`
+    (mergify-guard-recut.yml:105) — stays a hazard. A whitespace-based strip cannot do
+    that: it hid both of those, one leading space defeated it, and a message that
+    merely CONTAINS a substitution was read as a call site (#12092 review).
+
+    MEASURED over the 41 `*.yml` workflows: against the pre-#12133 raw scan, exactly
+    **4** line verdicts change and **all four are printed `echo` messages** — zero real
+    invocations lost, zero new hazards. That single-baseline count is the one this
+    predicate can be held to; a count that mixes two baselines is not a measurement.
     """
-    return re.sub(
-        r"'(?!\$[({])[^']*\s[^']*'|\"(?!\$[({])[^\"]*\s[^\"]*\"", "''", line
-    )
+    code = _code_only(line).strip()
+    return bool(_MESSAGE_CMD.match(code)) and not _SHELL_OPERATOR.search(code)
 
 
 def _looks_poolable(value: str) -> bool:
@@ -794,8 +810,16 @@ def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
         if stripped.startswith("#") or stripped.startswith("- name:"):
             continue
         code = _code_only(line)
-        prose = _prose_stripped(line)
-        if _GH_CMD.search(code) or (script_ref is not None and script_ref.search(prose)):
+        if _GH_CMD.search(code):
+            hits.append(stripped)
+            continue
+        # ⛔ A MESSAGE IS NOT A CALL SITE (#12133). Read on the RAW line, not `code`,
+        # because `_code_only` strips quoted spans and the repo really does invoke
+        # helpers inside one — `head_digest="$(python3 tools/mergify_config_guard.py …)"`
+        # would become invisible if this arm read `code`. Only a printed message is
+        # exempt, and only for the script-name arm: `_GH_CMD` above is already
+        # quote-stripped and intentionally stays so.
+        if script_ref is not None and not _message_only(line) and script_ref.search(line):
             hits.append(stripped)
     return hits
 
@@ -885,51 +909,59 @@ def test_a_test_module_named_like_a_helper_is_not_a_gh_hazard():
     assert _gh_hazards(['        run: python3 "$GITHUB_WORKSPACE/tools/ci_timing.py"'], scripts)
 
 
-def test_an_error_message_naming_a_gh_script_is_not_a_hazard():
-    """A MESSAGE telling an operator to run a script is not the job running it.
+def test_a_remediation_message_is_not_read_as_a_gh_call_site():
+    """A MESSAGE naming a `gh`-executing script is not the job running it — and a
+    message is the ONLY thing exempted (#12133, pinned at the shape #12092's review
+    measured).
 
-    The second false positive of the same class as the test above, and this one went
-    live: `python-ci.yml`'s `test-record-postgres` runs no `gh` anywhere, but its
-    fail-closed `::error::` text names `tools/install-ci-runner-x64.sh` to tell an
-    operator how to repair a runner's labels. The script arm matched the RAW line,
-    so that sentence read as an invocation and the job was reported as a `gh` user
-    — measured on main's `4b1d6cd0d4`, where the REQUIRED `test-carve-out` shard
-    reds on every open PR (#12133, filed from PR #12046's head `f090e070db`).
+    The false positive went live: `python-ci.yml`'s `test-record-postgres` runs no `gh`
+    anywhere, but its fail-closed `::error::` text names
+    `tools/install-ci-runner-x64.sh` to tell an operator how to repair a runner's
+    labels, so the script-name arm read the instruction as an invocation and reported
+    the job as a `gh` user. The REQUIRED `test-carve-out` shard then redded on every
+    open PR — measured on main's `4b1d6cd0d4`. The remedies the assertion offers are
+    both wrong for that job: `ensure gh` FAILS CLOSED on a no-egress runner, and a
+    `KNOWN_UNCOVERED` entry would declare a `gh` user that does not exist.
 
-    ⛔ The remedy the old message demanded makes it worse rather than better:
-    `ensure gh` FAILS CLOSED, so adding it to a job that never calls `gh` would red
-    a healthy job on a no-egress pool runner. A scan that reds on prose is not
-    conservative, it is wrong, and it costs every lane in the repo.
-
-    REDS ON THE PRE-FIX SCAN: the first assert returned a hazard line there.
+    ⛔ THE EXEMPTION IS `_message_only`, NOT "quoted spans with whitespace": a quoted
+    span is how a real invocation is commonly written, and the substitution forms below
+    are the ones a whitespace test lost (two are in this repo today).
     """
     scripts = _gh_executing_scripts()
-    message = (
-        '            echo "::error::no client in this archive — on this box run '
-        'CI_RUNNER_OS_LABEL=off tools/install-ci-runner-x64.sh --repair-labels --count 4"'
-    )
-    assert _gh_hazards([message], scripts) == [], (
-        "an operator-facing MESSAGE that names a `gh`-executing script was read as "
-        "the job invoking it (#12133)")
-    # …and the strip is scoped to SPANS CARRYING WHITESPACE (messages), not to
-    # quoting at all: a quoted argv WORD is a real invocation and must stay a
-    # hazard, or this fix would trade one false positive for a false NEGATIVE.
+
+    # 1. The message itself: no hazard, in both the live shape and a substitution-
+    #    bearing one (`echo "$(date) — run tools/x.sh"` is still only printing).
     assert _gh_hazards(
-        ['        run: bash "$GITHUB_WORKSPACE/tools/install-ci-runner-x64.sh"'],
+        [
+            '            echo "::error::no client in this archive — on this box run '
+            'CI_RUNNER_OS_LABEL=off tools/install-ci-runner-x64.sh --repair-labels --count 4"'
+        ],
         scripts,
-    ), "a quoted script PATH is an invocation — the message strip must not hide it"
+    ) == [], "an operator-facing MESSAGE that names a `gh`-executing script was read as an invocation"
     assert _gh_hazards(
-        ["        run: bash tools/install-ci-runner-x64.sh --repair-labels"], scripts
-    ), "an unquoted script invocation must stay a hazard"
-    # …and so is a quoted COMMAND SUBSTITUTION, which carries whitespace and is
-    # therefore message-shaped. Two sites in this repo already have the shape
-    # (`e2e-live-reconcile.yml`'s `OUT="$(python3 graph-scripts/… --json)"`,
-    # `mergify-guard-recut.yml`'s `head_digest="$(python3 tools/… --print-digest)"`),
-    # so a whitespace-only strip is a fail-open in the gate (#12092 review).
-    assert _gh_hazards(
-        ['        run: OUT="$(python3 tools/install-ci-runner-x64.sh --repair-labels --count 4)"'],
+        ['        run: echo "$(date) — on failure run tools/install-ci-runner-x64.sh --repair-labels"'],
         scripts,
-    ), "a quoted command SUBSTITUTION runs its script — the message strip must not hide it"
+    ) == [], "a printed message that merely CONTAINS a substitution is still only printing"
+
+    # 2. Real invocations, including every shape a whitespace strip hid: the two in
+    #    this repo, a leading space inside the quotes, and a mid-span substitution.
+    for line, why in [
+        ('        run: OUT="$(python3 graph-scripts/e2e_live_reconcile.py --json 2>/tmp/err)"',
+         "e2e-live-reconcile.yml:77 — a quoted substitution RUNS the script"),
+        ('        run: head_digest="$(python3 tools/mergify_config_guard.py --print-digest)"',
+         "mergify-guard-recut.yml:105 — same shape, a gh arm"),
+        ('        run: OUT=" $(python3 tools/install-ci-runner-x64.sh --repair-labels)"',
+         "one leading space must not hide an invocation"),
+        ('        run: OUT="v: $(python3 tools/install-ci-runner-x64.sh --repair-labels)"',
+         "a substitution that does not start the span must not be hidden"),
+        ('        run: bash "$GITHUB_WORKSPACE/tools/install-ci-runner-x64.sh"',
+         "a quoted argv WORD is an invocation"),
+        ("        run: bash tools/install-ci-runner-x64.sh --repair-labels",
+         "an unquoted invocation is an invocation"),
+        ("        run: python3 tools/mergify_config_guard.py --emit && echo done",
+         "a log line AFTER a real invocation must not exempt it"),
+    ]:
+        assert _gh_hazards([line], scripts), why
 
 
 def test_the_poolable_label_reader_sees_every_yaml_shape():
