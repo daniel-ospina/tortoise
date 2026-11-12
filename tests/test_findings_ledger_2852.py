@@ -2493,6 +2493,66 @@ def test_a_possessive_apostrophe_cannot_hide_a_second_tally(tmp_path, monkeypatc
     )
 
 
+def test_a_letter_added_to_either_tally_list_is_compared_in_every_spelling(
+    tmp_path, monkeypatch
+):
+    """FAILS if the letter COMPARISON reads only one of the spellings the gate accepts.
+
+    Two halves, both measured as fail-opens at `3cf42a2511`:
+
+    ⛔ The tally side preferred a parenthesised extraction and fell back to the plain
+    one with `or`. `set(findall(r"\\(([a-z]{1,2})\\)"))` matches the `(c)` INSIDE
+    `**(c)**`, so on the shipped sentence the fallback was DEAD: appending
+    `, and a, f too` (or `, and **a** too`) named two STILL-TRUE rows as overtaken and
+    left `--check` at rc 0. Only the parenthesised spelling was ever compared.
+
+    ⛔ The complement side read `\*\*\(([a-z])\)\*\*` alone, though the candidate gate
+    accepts four spellings, so `… **(j)**, also c still read as written` asserted that
+    a SUPERSEDED-BY-FIX row still read as written, at rc 0.
+
+    One extractor now serves both, over `[a-l]` (the page's own twelve rows), which is
+    what keeps ordinary prose out.
+    """
+    tally_edits = {
+        # a plain member appended to the real list
+        "and **(l)** are **DRIFTED**, and a, f too.": "were **DRIFTED**",
+        # a bolded member with no parentheses
+        "and **(l)** are **DRIFTED**, and **a** too.": "were **DRIFTED**",
+        # the parenthesised control — this one was already caught
+        "and **(l)** are **DRIFTED**, and (a) too.": "were **DRIFTED**",
+    }
+    for new, _marker in tally_edits.items():
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _n=new: t.replace("and **(l)** are **DRIFTED**.", _n, 1),
+            )
+            problems = _doc_problems()
+            assert any(
+                "as no longer reading as written" in p or "STILL-TRUE list names" in p
+                for p in problems
+            ), f"a letter added in any spelling must be compared: {new!r} -> {problems}"
+
+    complement_edits = {
+        "**(j)**, also c still read as written.": None,
+        "**(j)**, and **c** still read as written.": None,
+        "**(j)**, plus c still read as written.": None,
+        "**(j)**, also (c) still read as written.": None,
+    }
+    for new, _ in complement_edits.items():
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _n=new: t.replace("**(j)** still read as written.", _n, 1),
+            )
+            problems = _doc_problems()
+            assert any(
+                "STILL-TRUE list names" in p for p in problems
+            ), f"the complement list must be compared too: {new!r} -> {problems}"
+
+
 def test_a_second_still_read_as_written_sentence_is_refused(tmp_path, monkeypatch):
     """FAILS if the tally's COMPLEMENT list can be joined across sentences.
 
