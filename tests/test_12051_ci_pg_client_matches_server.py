@@ -1565,9 +1565,20 @@ def _unasserted_client_checks(code: str) -> list[int]:
         for match in FAIL_CLOSED_BRANCH_RE.finditer(code)
     ]
     check_lines: list[int] = []
-    for match in re.finditer(r"(?:--version|-V)\b", code):
+    for match in re.finditer(r"(--version|-V)\b", code):
         line_start = code.rfind("\n", 0, match.start()) + 1
-        if _command_word(code[line_start : match.start()]) in PRINTING_COMMANDS:
+        word = _command_word(code[line_start : match.start()])
+        if word in PRINTING_COMMANDS:
+            continue
+        # ⛔ THE SHORT FORM NEEDS ITS OWN TOOL FILTER HERE (#12069 review, measured
+        # at 452a9457). Unlike `_version_checked_tools`, this predicate credits ANY
+        # command word, and `-V` is ALSO the ordinary version-SORT flag: a
+        # `… | awk … | sort -V | tail -2` diagnostic added to the documented
+        # UNROLLED layout (one check + one armed branch per tool) read as "a
+        # version check that never asserts its major" — a false RED on a correct
+        # step. The LONG form keeps its historical breadth: a check spelled with a
+        # path (`/usr/lib/postgresql/16/bin/pg_dump --version`) must still count.
+        if match.group(1) == "-V" and word not in TOOLS and not word.startswith("$"):
             continue
         check_lines.append(code.count("\n", 0, match.start()))
     if not check_lines:
@@ -4090,6 +4101,20 @@ def test_the_armed_branch_is_inside_the_covering_loop(
 #: PER-TOOL half of the armed-branch row (#12069 review rounds 18-19).
 PER_TOOL_ASSERTION_POLARITY = [
     (
+        'version="$(pg_dump -V)"\nif [ "$major" != "16" ]; then\n  exit 1\nfi\n'
+        'version="$(pg_restore -V)"\nif [ "$major" != "16" ]; then\n  exit 1\nfi',
+        True,
+        "the SHORT form `-V` is the same check, one armed branch per tool",
+    ),
+    (
+        'version="$(pg_dump --version)"\nif [ "$major" != "16" ]; then\n  exit 1\nfi\n'
+        'version="$(pg_restore --version)"\nif [ "$major" != "16" ]; then\n  exit 1\nfi\n'
+        "dpkg -l 'postgresql-client-16' | awk '{print $3}' | sort -V | tail -2",
+        True,
+        "`sort -V` version-SORTS a diagnostic: it is not a client check (measured "
+        "false RED at 452a9457, the unrolled layout above)",
+    ),
+    (
         'version="$(pg_dump --version)"\nif [ "$major" != "16" ]; then\n  exit 1\nfi\n'
         'version="$(pg_restore --version)"\nif [ "$major" != "16" ]; then\n  exit 1\nfi',
         True,
@@ -5386,6 +5411,12 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
             PRESENT_STUB,
             f"if ! {spelling}; then echo '::error::absent'; exit 1; fi",
         )
+        # ⛔ The MATCHER must read the spelling too (#12069 review P3): the row
+        # otherwise exercises only the stub, and the comment's premise — "the
+        # matcher accepts this spelling" — would be asserted nowhere.
+        assert _IF_PRECONDITION_RE.search(
+            f"if ! {spelling}; then\n  echo '::error::x'\n  exit 1\nfi"
+        ), f"the accepted spelling {spelling!r} is not read by _IF_PRECONDITION_RE"
         assert probe.returncode == 0, (
             f"an equivalent probe spelling ({spelling!r}) stopped the step: the "
             "matcher accepts it, so the EXECUTION harness must too — otherwise a "
