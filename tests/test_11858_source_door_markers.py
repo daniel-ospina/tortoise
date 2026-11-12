@@ -109,14 +109,30 @@ def _source_count(sdk, url):
     return result.result_set[0][0]
 
 
+@pytest.mark.parametrize("beside_vector", [False, True],
+                         ids=["marker-alone", "marker-beside-a-vector"])
 @pytest.mark.parametrize("marker", sorted(MARKER_VALUES))
-def test_create_source_refuses_a_caller_embedding_marker(tmp_path, marker):
-    """Every key of the family is refused on the one door that bypassed intake."""
+def test_create_source_refuses_a_caller_embedding_marker(tmp_path, marker,
+                                                        beside_vector):
+    """Every key of the family is refused on the one door that bypassed intake —
+    and refused even when the caller also passes a vector.
+
+    ⛔ The `beside-a-vector` half is not padding, and its absence was measured: at
+    `32bed5ad2d` a mutant that skipped the guard when `ev["embedding"] is not
+    None` — "the caller supplied a vector, let them keep their width", a change
+    the door's own message ("pass `embedding=` and it declares the truth")
+    actively invites — left every row GREEN while `tortoise/api.py` asserts the
+    opposite ("refuses beside a vector too"). Passing a vector must never become
+    the way past the guard (#11858 review cycle 7, P3).
+    """
     sdk, _journal_path = _journal(tmp_path)
-    url = f"https://example.invalid/11858-{marker}"
+    url = f"https://example.invalid/11858-{marker}-{int(beside_vector)}"
+    kwargs = {marker: MARKER_VALUES[marker]}
+    if beside_vector:
+        kwargs["embedding"] = [0.5] * 4
     try:
         with pytest.raises(ValueError) as excinfo:
-            sdk.create_source(url, "web", **{marker: MARKER_VALUES[marker]})
+            sdk.create_source(url, "web", **kwargs)
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -251,8 +267,10 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
     ⛔ The list is the PUBLIC props doors, and the earlier versions did not drive
     it: four rows, then six, while this file's docstring claimed the WHOLE
     population (#11858 review cycles 2 and 3, P3). Measured now — ELEVEN doors
-    take `**props` (13 public methods do; `query` and `paginated_query` are
-    READS), and the split is EIGHT + ONE + TWO, not "nine at intake": eight
+    take a `**kwargs` literally named `props`; the only two other public methods
+    that take a `**kwargs` are `query` and `paginated_query`, whose it is named
+    `filters` and which are READS (13 public methods take one in total) — and the
+    split is EIGHT + ONE + TWO, not "nine at intake": eight
     refuse at INTAKE (`_sanitize_props`), `create_source` — the ninth — refuses
     over its assembled `ev` before the write (it bypasses intake entirely,
     `_skip_sanitize=True`), and `update` / `update_knowledge` refuse only on an
@@ -344,10 +362,13 @@ def test_the_sdk_and_api_spellings_agree():
     the extra name is an SDK placement, not an API gap.
 
     ⛔ NOT ASSERTED HERE, deliberately: `_forged_keys` is that set UNION a literal
-    of five NON-embedding names — `evidence_fold`, `extractedFromAll`,
-    `sourceVersion`, `sourceVersionTransit`, `sourceVersions`. Those are not
-    markers and are not in either embedding set, so comparing them against one
-    would assert a membership they do not have and do not need. They are refused
+    of six names, five of which are NON-embedding — `evidence_fold`,
+    `extractedFromAll`, `sourceVersion`, `sourceVersionTransit`,
+    `sourceVersions` — plus `embeddingText`, which is accounted for above and is
+    outside this comparison for the same reason it is outside the API's marker
+    constant. The five are not markers and are not in either embedding set, so
+    comparing them against one would assert a membership they do not have and do
+    not need. They are refused
     on the SDK side anyway, by their own guards — measured at this commit, all
     five raise out of `_sanitize_props` ("server-managed provenance fields" /
     "server-managed journal record flag"). An earlier draft of this docstring

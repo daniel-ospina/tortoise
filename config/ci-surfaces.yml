@@ -4441,21 +4441,25 @@ surfaces:
   # `test_a_verbatim_vector_is_never_narrowed` (the #5004 round-7 promise that a
   # caller-owned vector keeps its raw form).
   - test_11821_journal_vector_width.py
-  # #11858: DUAL-REGISTERED with `sdk` for the same reason the row above is
-  # dual-registered with `eval` — a named-surface match REPLACES the `core`
-  # fallback (#2938), so one row cannot cover a seam whose two halves are mapped
-  # to two different surfaces. THIS PR's guard lives in `tortoise/sdk.py` (the
-  # `create_source` door, the `sdk` row) but the file also pins the API-side
-  # spelling agreement (`api._SERVER_MANAGED_EMBEDDING_KEYS` must be a subset of
-  # the SDK family) and `tortoise/api.py`'s residual note — so on an
-  # `api.py`-only diff, with only the `sdk` row, the agreement pin would run in
-  # no lane exactly when it can break. Measured at `28b1b652ad` (review cycle 6,
-  # P1): the file landed with NO manifest row at all, so
-  # `tools/ci_selection.py --integrity` redded
-  # (`manifest drift: ['test_11858_source_door_markers.py']`) and
-  # `manifest-integrity` — which IS in `python-ci-gate.needs` — held the merge
-  # red while a `sdk.py` diff would have run the pins and an `api.py` diff would
-  # not.
+  # #11858: registered under BOTH `api` (here) and `sdk` (below), and the reason is
+  # narrower than the row above's. The sdk half is easy: this file's guard lives on
+  # `create_source`, so `tortoise/sdk.py` is the module it protects. The api half
+  # exists because `--register` put the file under `sdk` FIRST, and a NAMED-surface
+  # match does not get the `core` fallback — so a file registered ONLY under `sdk`
+  # loses every `core` selection it would otherwise have had. Measured at
+  # `32bed5ad2d` (review cycle 7, P3) by deleting one row at a time and running the
+  # real selector: with the `api` row alone, `tortoise/api.py` selects
+  # `['api','core']` and DOES run this file (so `api` is not strictly required on
+  # its own); with the `sdk` row alone, the same `api.py` diff runs it NOT AT ALL -
+  # which is the state `--register --surface sdk` produces by default, and it is
+  # exactly when the `api ⊆ sdk` spelling pin (`_SERVER_MANAGED_EMBEDDING_KEYS` vs
+  # the SDK family) and the `tortoise/api.py` residual note can break.
+  # ⛔ So do NOT "simplify" by deleting this row and relying on `sdk`: that is the
+  # silent-drop class, and `--integrity` stays green through it because the file IS
+  # classified — that gate answers a different question.
+  # The `sdk` row's own value is NOT `sdk.py` (a SHARED_MODULE selects `full`
+  # regardless); it is the other `sdk`-mapped paths, e.g. `tortoise/ids.py`, which
+  # select `['sdk']` with a named-surface match replacing `core`.
   - test_11858_source_door_markers.py
   - test_test_lane_tool.py
   # #11385 (review P1): the S4 re-emit tax's instrument (`tools/s4_reeemit_tax.py`)
