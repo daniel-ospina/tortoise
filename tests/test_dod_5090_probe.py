@@ -2356,7 +2356,8 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
     """The `#11455` CLAUSE, SCORED — one armed TEMPLATE must not complete row 1.
 
     ⛔ Fresh review of PR #12016 (P2): of the 35 `probe.score_rule_bullet()` call sites
-    in this file (`grep -c` measures the population; the count is not `31 + 1`), 31
+    in this file (count them, do not state `31 + 1` — and a bare `grep -c` returns 36,
+    because THIS sentence contains the string it greps for), 31
     feed a reading in which `shipped["on"]` and `shipped["deployment"]["on"]` AGREE —
     `_fake_shipped` sets both from one argument, and `_row_one_fixture` arms
     `docker-compose.yml`, which is both an any-surface and a deployment surface. The
