@@ -88,10 +88,13 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               (b) a WAITING PR-EVENT RUN's current-attempt age is unmeasurable
               (see QueuedRun.wait_age_seconds — not just its created_at); or (c) the
               RUNNING CENSUS IS UNWITNESSED — every run counted in ``pr_running``
-              was UNMEASURED, which spans THREE LAYERS: the callee's read routes (the
-              read did not happen, or did not PROVE the run idle — including an
-              all-``completed`` list whose stillness was never corroborated), the
-              caller's settle gate, and the probe budget. ⛔ NO ROUTE COUNT IS GIVEN:
+              was UNMEASURED, which spans THREE LAYERS, one instance each: the CALLEE's
+              read routes (``read_run_live_job``'s Returns block — a failed read, an
+              empty list, a malformed or status-less row, a payload for a DIFFERENT
+              attempt, or a list not PROVABLY complete); the CALLER's settle gate
+              (``read_health`` nulls a ``False`` whose ``updated_at`` has not been still
+              for ``JOB_SETTLE_SECONDS`` — it, not the callee, holds the run
+              projection); and the probe BUDGET. ⛔ NO ROUTE COUNT IS GIVEN:
               only the LAYER count is stable (see `pr_running_unmeasured`), so that
               count is the pre-#12037 status-string
               census and cannot certify health. Case (c) is about the CENSUS, not
@@ -1560,11 +1563,13 @@ def classify_queue(
         if verdict == OK and truncated and pr_running == 0:
             verdict = PR_UNWITNESSED
             reasons.append(
-                "PR-UNWITNESSED: a feed was cut at the page cap, and the feed is "
-                "NEWEST-FIRST, so its oldest runs were never read — the oldest "
-                "WAITING run (queued or pending) is the AGE clause's witness, and the "
-                "in-progress leg's oldest run feeds the running census; no PR-event run is "
-                "executing, "
+                "PR-UNWITNESSED: a feed was cut at the page cap (the queued or the "
+                "in-progress one — they share this flag), and either feed is "
+                "NEWEST-FIRST, so its OLDEST runs were never read: on the queued leg that "
+                "is the AGE clause's witness (the oldest WAITING run, queued or pending), "
+                "and on the in-progress leg it is part of the running census — "
+                "including the frozen runs the exclusion is about. No PR-event run was "
+                "READ as executing, "
                 "so starvation is neither witnessed nor disproved — not reported as OK"
             )
         # ⛔ AND THE SAME REFUSAL FOR THE `pending`/`requested` LEGS, FROM HERE RATHER
@@ -1572,7 +1577,7 @@ def classify_queue(
         # OLDEST runs, so the wait this reading is about to call healthy (or clear) may be
         # one it never saw — the same READ failure as an unparseable stamp, and the same
         # argument the queued leg gets four lines up. It used to be refused inside
-        # `healthy()`, which the `no PR-event run is waiting` clause never calls: MEASURED,
+        # `healthy()`, which the `not wait_runs` clause never calls: MEASURED,
         # a flood-shaped queue (6 runs of one non-PR workflow) with `pending_truncated=True`
         # and no PR run in any leg returned `OK` — a clean bill of health printed over a
         # leg the reading knows was cut, while `truncated=True` in the same shape returned
@@ -1711,7 +1716,7 @@ def classify_queue(
     def healthy() -> QueueHealth:
         """`OK` — but only when the PR wait was MEASURED and inside the budget.
 
-        Every `OK` EXCEPT the `no PR-event run is waiting` clause below returns through
+        Every `OK` EXCEPT the `not wait_runs` clause below returns through
         here. `OK` is a claim
         about the QUEUE, and "one PR run is executing" is not evidence that the
         queued PR runs are being served: with 2 executing and 20 queued, the tool
@@ -1723,7 +1728,8 @@ def classify_queue(
         The one `OK` that does NOT come through here is the `no PR-event run is
         waiting` clause below. For the VERDICT that is sound ONLY when every wait leg was
         read to completion — and that is enforced in `health()`, not here: a cut
-        `pending`/`requested` leg demotes the verdict before this seam is reached, because
+        `pending`/`requested` leg demotes the verdict at THIS seam's own return (the seam
+        is reached and runs; `health()` overrides the `OK` as it is returned), because
         "nothing was read" is not "nothing was waiting". Given that, with nothing waiting
         in any COMPLETELY READ leg there is no wait to be past a budget — but it is NOT
         sound for the
@@ -1765,7 +1771,7 @@ def classify_queue(
                 return health(PR_UNWITNESSED)
             # ⛔ NO `pending_truncated` CHECK HERE ANY MORE (review P1, round 16): it
             # lives in `health()` now, so it fires on THIS path and on the
-            # `no PR-event run is waiting` path. Leaving a copy here would be a second
+            # `not wait_runs` path. Leaving a copy here would be a second
             # owner of one refusal, and the copy is what made the other path miss it.
             return health(OK)
         # WHOSE QUEUE IS IT? (#9118 P2-2, recurring INSIDE this state.) This clause

@@ -1196,7 +1196,7 @@ def test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence():
 def test_an_ok_with_nothing_queued_cannot_certify_the_queue_clear():
     """⭐⭐ P1 (review): `OK(pr_queued=0)` is the clause that says it is NOT health.
 
-    `classify_queue`'s `no PR-event run is waiting` clause appends a reason line that
+    `classify_queue`'s `not wait_runs` clause appends a reason line that
     states the fact itself — *"starvation of PR CI was not witnessed (an idle fleet
     looks the same)"* — and still emits `OK`. A destructive gate may not read that as
     "the queue is clear": this module's feed is filtered at the API to `status=queued`
@@ -1211,7 +1211,7 @@ def test_an_ok_with_nothing_queued_cannot_certify_the_queue_clear():
     Discriminating power: this test reddens the moment `congests_pr` drops its
     `pr_wait_measured` clause — `OK and not truncated` alone answers `False`.
     """
-    # The explicit `no PR-event run is waiting` clause (offender at/over the dominance
+    # The explicit `not wait_runs` clause (offender at/over the dominance
     # floor, no PR run queued) ...
     quiet = classify(flood_queued(12))
     assert quiet.verdict == Q.OK
@@ -1291,7 +1291,7 @@ def test_a_PENDING_ONLY_wait_past_the_budget_cannot_clear_the_gate():
     """⭐⭐ P1 (review): the `pending` leg fed the AGES but never reached the CLAUSES.
 
     `oldest_pr_age` is a max over `wait_runs` (queued + pending), but `starved_wait`,
-    `backlogged_wait` and the `no PR-event run is waiting` clause all still required
+    `backlogged_wait` and the `not wait_runs` clause all still required
     `pr_queued_runs`. In the ONE shape where those populations differ — a NON-EMPTY
     `pending` leg with an EMPTY queued PR leg — the wait was measured, reported in
     `oldest_pr_queued_age_seconds` past `pr_wait_budget_seconds`, and then dropped
@@ -1669,7 +1669,7 @@ def test_a_cut_PENDING_leg_refuses_OK_even_with_no_PR_run_in_ANY_leg():
 
     A capped `pending`/`requested` read drops its OLDEST runs, so the wait this reading
     is about to call healthy — or CLEAR — may be one it never saw. It was refused
-    inside `healthy()`, which the `no PR-event run is waiting` clause does not call, so a
+    inside `healthy()`, which the `not wait_runs` clause does not call, so a
     flood-shaped queue (no PR run in any leg, a cut pending page) printed
     `OK(queued=6, pr_running=0, …)` over a leg this reading KNOWS was cut, while
     `truncated=True` in the same shape returned `PR-UNWITNESSED`.
