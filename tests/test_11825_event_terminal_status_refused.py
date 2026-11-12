@@ -275,7 +275,7 @@ class TestTheUpdateDoor:
         g.query("MATCH (p:Point {id:$p}) SET p:Object", params={"p": pid})
         before = self._state(sdk, pid)
         records_before = len(_journal_lines(sdk._test_log))
-        with pytest.raises(ValueError, match="taken-name|NameAlreadyHeld"):
+        with pytest.raises(ValueError, match=r"taken-name|NameAlreadyHeld"):
             sdk.update_entity(pid, status="live", name="taken-name")
         assert self._state(sdk, pid) == before, (
             "the status arm wrote before the rename guard refused")
@@ -394,8 +394,8 @@ class TestTheLifecycleDoors:
         node the door writes was a plain `:Point` and stayed `live` — a refusal
         justified by a node it could not reach.
         """
-        from tortoise.log import EventLog
         from tortoise.api import EventAPI
+        from tortoise.log import EventLog
 
         pid = sdk.create_point("statement", "SharedId")["id"]
         api = EventAPI(EventLog(os.path.join(sdk._test_root, "ev.jsonl")),
