@@ -33560,8 +33560,16 @@ class TortoiseSDK:
         # arithmetic: the block's `no_belief` is read from the graph AFTER this
         # pass, so it IS the uncovered count — "6 of 20" is
         # `belief_present` of `ep_reachable_claims`, and 14 uncovered is
-        # `no_belief`. `graph_ep_reachable` is reported as the denominator this
-        # pass ran against, with no cross-population sum.
+        # `no_belief`. ⛔ `graph_ep_reachable` is NOT this pass's denominator
+        # (#12138 §1): it is the GRAPH-scoped `ep_reachable_claims` — the whole
+        # graph's EP-reachable population — copied in beside the pass record so
+        # a reader sees both scopes at once. The pass's own denominator is the
+        # `window_reachable` already in the same dict (`_record_pass_reach`),
+        # and `dream()`'s `coverage` is `affected / window_reachable`. Dividing
+        # `affected` by `graph_ep_reachable` is WRONG: on a pass with
+        # affected=3, window_reachable=4, graph_ep_reachable=8 the record
+        # carries `coverage=0.75` while that division reads 0.375 for a pass
+        # that consumed its whole window.
         reachable = out.get("ep_reachable_claims")
         if reachable is not None:
             last["graph_ep_reachable"] = int(reachable)
@@ -33771,12 +33779,18 @@ class TortoiseSDK:
         # population (no IMPL|NAND edge at all) and `unclassified` is edged but
         # unreachable (#12116 C-P2). Equalities, not clamps.
         operator_less = graph_live - points_edged
-        # No clamp: the numbers are reported as measured. A future mixed
-        # population must show up as `no_belief < 0` / a `belief_coverage_pct`
-        # outside [0, 1] — a VISIBLE defect — rather than being silently
-        # corrected into a plausible "fully covered" (#12116 review C-P3: a
-        # clamp is the opposite of the asserted invariant the comment claimed).
-        # `tests/test_11823_*` asserts the ranges instead.
+        # No clamp: the numbers are reported as measured, rather than being
+        # silently corrected into a plausible "fully covered" (#12116 review
+        # C-P3: a clamp is the opposite of the asserted invariant the comment
+        # claimed). ⛔ #12138 §2 — only ONE direction is visible that way: a
+        # NARROWER (or label-blind) denominator lets the numerator exceed it,
+        # so `no_belief` goes negative or `belief_coverage_pct` exceeds 1. A
+        # WIDER denominator keeps BOTH in range (`belief_present` fixed over a
+        # larger denominator ⇒ the ratio falls and `no_belief` rises; measured:
+        # denominator +4 ⇒ pct 0.2, no_belief +4), so the ranges cannot see it.
+        # What reddens on an inflated denominator is the counts pinned against
+        # independent queries in `tests/test_11823_propagation_cap_signal.py`
+        # (`test_counts_match_an_independent_query`).
         no_belief = reachable - belief_present
         unclassified = points_edged - reachable
         return {
