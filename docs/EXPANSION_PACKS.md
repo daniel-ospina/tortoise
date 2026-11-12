@@ -426,11 +426,7 @@ kindDefs:
   `compile_value_brief(tenant_manifests=…)`, so a hosted tenant pack's declaration reaches its own
   graph's prompt. It is a prompt-facing declaration, not a catalog-index declaration.
 
-**What this declaration does NOT do yet.** It declares and renders; it stores nothing. The write
-path for a declared value field is #2782, and the shape's companion props (`currency`,
-`minorUnitExponent`, …) plus the reserved-name guard belong to the core property register
-(WS-A `POINT_PROPS` / WS-C D12), which is not in code yet. Declaring a shape is therefore necessary
-but not sufficient to make a value durable — see #2818's residuals.
+**What this declaration does NOT do yet.** It declares and renders; the DECLARED NAME still has no output slot — the prompt tells the model to state the value in `content`, under the declared field name. Since #11915 one of the five shapes is storable: `percent` has a real shape (`tortoise/percent.py` — `basisPoints` int 0–10000, plus `verbatim` only where the value came from prose), validated at the SDK's one props intake and at the journal-payload seam exactly as `money` is. So the shipped `targetPct` declaration is no longer a field nothing can hold. What is still missing, and is named here rather than implied done, is the binding in between: a declaration's NAME (`targetPct`) is a prompt-side semantic name, and mapping it onto the shape's canonical `basisPoints`, plus the S5 derivation that turns a sentence into a stored percentage, belong to the core property register (WS-A `POINT_PROPS` / WS-C D12), which is not in code yet. Declaring a shape is therefore necessary but not sufficient to make a value durable — see #2818's residuals. `money`'s companion props (`currency`, `minorUnitExponent`) are still register-side.
 
 ## Per-graph pack selection (#2728)
 

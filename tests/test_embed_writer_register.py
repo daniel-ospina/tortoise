@@ -932,6 +932,13 @@ LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
     # declaration is derived FROM is the iteration over the canonical constant
     # (the `SET n += $p` map-merge inside it is the store), so the variable is
     # not part of the claim and a rename is not a store move.
+    # The code site states the same thing in its own terms, and says why the rename
+    # cannot reach the write: the primary key is derived THROUGH
+    # `_entity_identity_probes()` and never by naming the binding, and the same
+    # rename once turned the guarded path into a `NameError` with every test green
+    # (`#11836`, VGATE round 13). So a guard that reds on the rename is measuring
+    # the rename, not the store — and its message ("the store moved") is a wrong
+    # diagnosis of a declaration that is still true.
     "tortoise.sdk::_update_entity": (
         "tortoise/sdk.py", "_update_entity",
         "in _CANONICAL_ENTITY_ID_PROPS:",

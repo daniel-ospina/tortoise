@@ -12161,8 +12161,8 @@ class HolderGateTests(unittest.TestCase):
 
     def test_a_board_that_does_not_stamp_its_open_issue_coverage_is_rebuilt(self):
         # ⛔ THE ABSENT FLAG IS THE UNSAFE READING, not the safe one. The writer
-        # this change replaces capped the same read at 800 while this repo has 989
-        # open issues, so an UNSTAMPED board's coverage is UNKNOWN — reading its
+        # this change replaces capped the same read at 800 while this repo then held
+        # 989 open issues, so an UNSTAMPED board's coverage is UNKNOWN — reading its
         # absent entry as a measured "nobody" is the fail-open. Such a board is
         # refused (and rebuilt) rather than served; a legacy board with no
         # `reconciliation` at all is refused for the same reason, one key up.
