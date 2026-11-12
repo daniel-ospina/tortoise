@@ -60,6 +60,7 @@ import threading
 from typing import NamedTuple
 
 from tortoise.live import _terminal_excluded
+from tortoise.entity_resolver import normalize_entity_name
 
 logger = logging.getLogger(__name__)
 
@@ -290,10 +291,16 @@ _holder_locks_guard = threading.Lock()
 
 
 def _holder_lock(label: str, name: str) -> threading.RLock:
+    # #12047: the lock key is the FOLDED name, not the raw spelling. Two spellings
+    # of one entity ("the owner" / "owner") resolve to the same holder, so they
+    # must serialise on the SAME lock — a raw-name key would let the two spellings
+    # pass the empty-holder check concurrently and each mint a carrier, reopening
+    # the very race the lock exists to close (#3590 review finding 1).
+    folded = normalize_entity_name(name)
     with _holder_locks_guard:
-        lock = _holder_locks.get((label, name))
+        lock = _holder_locks.get((label, folded))
         if lock is None:
-            lock = _holder_locks[(label, name)] = threading.RLock()
+            lock = _holder_locks[(label, folded)] = threading.RLock()
         return lock
 
 
@@ -349,6 +356,19 @@ def resolve_or_mint(g, label: str, name: str, *,
         return str(explicit_id), True
     with _holder_lock(label, name):
         holders = live_name_holder_ids(g, label, name)
+        if not holders:
+            # #12047: the FOLDED name is the second addressable spelling
+            # (`_NAME_PROPERTIES` already declares `canonical_name` as one, and
+            # `mining` writes it). Without this lookup a near-duplicate mints a
+            # twin: "the fresh-context code reviewer" and "fresh-context code
+            # reviewer" are one entity, and the leading article carries no
+            # identity. This is the DETERMINISTIC rung only — a similarity score
+            # never resolves here (#2730 §6.7: auto-link only on an asserted or
+            # unambiguous deterministic transform; the review queue owns the rest).
+            folded = normalize_entity_name(name)
+            if folded and folded != name:
+                holders = live_name_holder_ids(
+                    g, label, folded, name_props=("canonical_name",))
         # COUNT holders, REPORT holders (#9876 review, this head): the
         # earlier ``[h for h in holders if h]`` performed exactly the
         # filter `live_name_holder_ids` forbids, so a name held by one
@@ -366,7 +386,12 @@ def resolve_or_mint(g, label: str, name: str, *,
         # pre-flight probe (`refuse_ambiguous_create`) cannot disagree.
         refuse_if_ambiguous(label, name, holders)
         if holders and holders[0]:
-            return str(holders[0]), False
+            # #12047: a merged-away carrier (``resolved_from``) is not the entity
+            # any more — the merge recorded that this id and its survivor are ONE
+            # entity, and a write landing on the retired carrier would grow a
+            # third node the next time the merge is re-run. Hop to the survivor.
+            from .entity_resolver import follow_resolved_from
+            return follow_resolved_from(g, label, str(holders[0])), False
         from .ids import ulid
         if holders:
             # ONE LIVE holder, carrying NO id (a legacy / foreign / raw

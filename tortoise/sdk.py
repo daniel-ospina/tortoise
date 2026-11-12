@@ -5158,6 +5158,31 @@ def _drop_reserved_emit_props(props: dict) -> list[str]:
     return _dropped
 
 
+def _with_folded_entity_name(name: str, props: dict) -> dict:
+    """Add the FOLDED name key (``canonical_name``) to an entity create's props.
+
+    #12047: entity resolution's deterministic rung compares folded names. The
+    folded form is written at CREATE so the lookup is an indexed equality rather
+    than an O(n) Python scan per write — the 44k re-file the issue exists to
+    unblock would otherwise be quadratic. ``canonical_name`` is the slot
+    ``entity_identity._NAME_PROPERTIES`` already treats as an addressable name
+    spelling (“the SECOND spelling an Object may be addressed by (``mining``'s
+    reification writes it)”), and the #783 plan §4.1 defines it as exactly
+    “normalized entity name … for matching; display ``title`` preserves
+    original”. A caller-supplied value wins (``setdefault``).
+
+    The fold is NEVER an identity: it is a lookup key (#3590 — identity is the
+    opaque id), so a rename changes it without changing who the entity is.
+    """
+    from .entity_resolver import normalize_entity_name
+
+    out = dict(props)
+    folded = normalize_entity_name(name)
+    if folded:
+        out.setdefault("canonical_name", folded)
+    return out
+
+
 def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
     """The entity door's property bag, with an UNSENT discriminator left out.
 
@@ -23698,19 +23723,31 @@ class TortoiseSDK:
         candidate_type='content': pending (unreviewed) content candidates —
         draft decision Points flagged by the two-tier dedup, shaped as
         {id, content, pointKind, method, similarity, target_id, batch_id}.
-        candidate_type='entity': entity ambiguity pairs — the entity
-        resolver surface (#783) is not yet implemented; returns [] (the MCP
-        tool contract still holds).
+        candidate_type='entity': ambiguity pairs over live ``:Object``/``:Subject``
+        — the entity resolver chain's review band (``entity_resolver``), shaped as
+        {id, name, existing_id, existing_name, label, kind, method, similarity,
+        candidate_type, status, auto_mergeable}.
+
+        ⛔ **An empty entity queue is a MEASUREMENT, never a stub** (#12047). The
+        entity scan runs on every call; if it cannot run it RAISES
+        ``EntityScanUnavailable`` instead of returning ``[]``. The stub this
+        replaced answered ``[]`` unconditionally, so a caller had to read *"could
+        not answer"* as *"no duplicate entities"* — the fail-open shape
+        ``record-reconcile``'s exit 2 exists to prevent.
         """
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
-        proj = self._get_proj()
-        if candidate_type == "entity":
-            return []  # #783 partial — entity queue tracked for epic completion
-        if candidate_type not in ("content", "temporal"):
+        if candidate_type not in ("content", "temporal", "entity"):
             raise ValueError(
                 f"candidate_type must be 'content', 'temporal' or 'entity', "
                 f"got {candidate_type!r}")
+        proj = self._get_proj()
+        if candidate_type == "entity":
+            # #12047: real pairs or a loud failure. Never the ``[]`` stub.
+            from .entity_resolver import entity_candidates
+            pairs = entity_candidates(proj.g, limit=limit)
+            # A reviewed candidate is not re-surfaced (same contract as content).
+            return [p for p in pairs if not p.get("reviewed")]
         if candidate_type == "content":
             rows = proj.g.query(
                 "MATCH (n:Point) "
@@ -23761,20 +23798,48 @@ class TortoiseSDK:
         return out
 
     def approve_merge(self, candidate_id: str, action: str = "merge") -> dict:
-        """Review a content dedup candidate (plan §6.1, DE2E-3 Variants B/C).
+        """Review a dedup candidate — a content Point OR an entity (Object/Subject).
 
-        action='reject' → the candidate stays separate (dedup_reviewed=
-        'reject', reviewed=true, DedupeRejected event) and is no longer
-        surfaced by list_dedup_candidates.
+        action='reject' → the candidate stays separate (reviewed=true, a
+        DedupeRejected event) and is no longer surfaced by list_dedup_candidates.
         action='merge' → the "already decided" IMPL is wired now when the
         prior is DRAFT; when the prior is LIVE it is DEFERRED and wired at
         the candidate's promotion time (Variant C — promote_point wires the
         live→live link). Returns {candidate_id, action, wired,
         deferred_to_promotion, target_id}.
+
+        **Entities (#12047)** take the same contract but a NON-DESTRUCTIVE merge
+        (#783 J-2 edge case — a merge is a recorded link, never a destructive
+        collapse; #2730 §6.7.3 — record the alias, do not lose the surface form):
+
+        * ``merge`` → the survivor gains the candidate's folded name in
+          ``aliases`` (so a later write of the variant resolves instead of
+          minting a twin) and the candidate is stamped
+          ``resolved_from``/``dedup_reviewed='merge'``. **No node is deleted and
+          no edge is moved.** Returns ``{candidate_id, action, candidate_type:
+          'entity', survived_id, aliases, method, similarity}``.
+        * ``reject`` → ``dedup_reviewed='reject'``, ``reviewed=true``,
+          ``DedupeRejected``; nothing is written onto the survivor.
+
+        ⛔ The pair is RECOMPUTED (the queue is a read surface and stores no
+        pair), so a merge applies to the resolver's *current* best unambiguous
+        match. Two equally-good survivors REFUSE — a merge never picks one for
+        the reviewer (route-then-refuse, #3590 R8).
+
+        Idempotent per branch: a repeat of the SAME action on the same candidate
+        returns ``already_reviewed`` without a second event.
         """
         if action not in ("merge", "reject"):
             raise ValueError(f"action must be 'merge' or 'reject', got {action!r}")
         proj = self._get_proj()
+        # ── #12047: entity branch FIRST — an Object/Subject id is not a Point id.
+        ent_rows = proj.g.query(
+            "MATCH (n) WHERE n.id = $id AND (n:Object OR n:Subject) "
+            "RETURN labels(n), properties(n)",
+            params={"id": candidate_id},
+        ).result_set
+        if ent_rows:
+            return self._approve_entity_merge(candidate_id, action, ent_rows[0])
         rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN properties(n)",
             params={"id": candidate_id},
@@ -23851,6 +23916,69 @@ class TortoiseSDK:
         return {"candidate_id": candidate_id, "action": action,
                 "wired": wired, "deferred_to_promotion": deferred,
                 "target_id": target_id}
+
+    def _approve_entity_merge(self, candidate_id: str, action: str,
+                              row) -> dict:
+        """The entity half of :meth:`approve_merge` (#12047).
+
+        Split out so the content/temporal Point branch above keeps its exact
+        shape (three pinned suites read it) and this branch owns the entity
+        semantics: recompute the pair, refuse an ambiguous one, never delete.
+        """
+        from .entity_resolver import apply_entity_merge, entity_pair_for
+
+        labels, props = row
+        reviewed = str(props.get("dedup_reviewed") or "")
+        if reviewed == action:
+            return {"candidate_id": candidate_id, "action": action,
+                    "candidate_type": "entity", "already_reviewed": True,
+                    "survived_id": props.get("resolved_from"),
+                    "target_id": props.get("resolved_from")}
+        if reviewed:
+            # A verdict is a decision, not a toggle: flip-flopping one candidate
+            # between merge and reject would leave the survivor's alias written
+            # by the merge and the node rejected by the second call.
+            raise ValueError(
+                f"Entity {candidate_id!r} was already reviewed as {reviewed!r} — "
+                f"refusing to overwrite that verdict with {action!r}")
+        proj = self._get_proj()
+        if action == "reject":
+            # #783 plan sanctions the PROPERTY form of the rejection record
+            # ("DedupeRejected event type OR reviewed: true property"); the
+            # journaled EntityMutated carries it, so a rebuild keeps the verdict.
+            target_id = None
+            try:
+                target_id = (entity_pair_for(proj.g, candidate_id) or {}).get(
+                    "survivor_id")
+            except ValueError:
+                # An ambiguous candidate has no single survivor to record — the
+                # rejection still stands, it just names no target.
+                target_id = None
+            self.update_entity(candidate_id, dedup_reviewed="reject",
+                               reviewed=True,
+                               **({"dedup_target_id": target_id}
+                                  if target_id else {}))
+            return {"candidate_id": candidate_id, "action": "reject",
+                    "candidate_type": "entity", "wired": False,
+                    "deferred_to_promotion": False, "target_id": None}
+        pair = entity_pair_for(proj.g, candidate_id)
+        if pair is None:
+            raise ValueError(
+                f"Entity {candidate_id!r} has no ambiguity pair on the current "
+                f"graph — nothing to merge (re-list the queue to see the "
+                f"candidates that exist now)")
+        result = apply_entity_merge(
+            self, candidate_id, pair["survivor_id"],
+            method=pair["method"], similarity=pair["similarity"])
+        return {"candidate_id": candidate_id, "action": "merge",
+                "candidate_type": "entity", "wired": True,
+                "deferred_to_promotion": False,
+                "survived_id": pair["survivor_id"],
+                "target_id": pair["survivor_id"],
+                "aliases": result["aliases"],
+                "method": pair["method"],
+                "similarity": pair["similarity"]}
+
     # ── Operators ─────────────────────────────────────────────────
 
     @_declares_apply_first_write_lane("create_operator")
@@ -45310,6 +45438,17 @@ class TortoiseSDK:
                 type(_layer_exc).__name__, _layer_exc)
             _layer_note = None
         if t == "subject":
+            # #12047: a role Subject may DECLARE who holds it. The prop is a write
+            # SHORTHAND for the sanctioned ``holdsRole`` edge (ONTOLOGY §3.6 —
+            # deliberately distinct from ``memberOf``, ``:206``), following the
+            # ``authoredBy``/``ownedBy``/``managedBy`` prop convention. It is
+            # popped here so it never lands on the node as a bare property: the
+            # edge is the record. ``#12047`` measured ZERO ``holdsRole`` edges in
+            # both hosted graphs — the predicate was declared and read but never
+            # produced, so a role floated free of its holder.
+            _role_holder = props.pop("roleHolder", None)
+            if _role_holder is None:
+                _role_holder = props.pop("role_holder", None)
             # #1423 (review P1): `status` arrives through `**props` below, so this
             # surface is a SECOND door onto an undeclared Subject status.
             # Validate against ONTOLOGY §4.2's declared lifecycle and fail closed,
@@ -45335,12 +45474,25 @@ class TortoiseSDK:
             # (`_source_merge_locks` + `create_source`).
             from .entity_identity import entity_create_lock
             with entity_create_lock("Subject", name):
+                _subject_id = self._entity_identity_for(
+                    "Subject", name, explicit_id=_server_id)
                 node = self._create_entity(
                     "Subject",
-                    self._entity_identity_for("Subject", name,
-                                              explicit_id=_server_id),
-                    _entity_door_props("subjectKind", name, props),
+                    _subject_id,
+                    _entity_door_props(
+                        "subjectKind", name, _with_folded_entity_name(name, props)),
                     "SubjectAdded", is_episodic=is_episodic)
+            if _role_holder is not None:
+                # #12047: PRODUCE the edge. Declared, never inferred: the holder
+                # is a Subject id or name, and an unresolvable/ambiguous holder
+                # RAISES rather than wiring the role to a guess (#1370).
+                _kind = props.get("subjectKind")
+                if _kind != "role":
+                    raise ValueError(
+                        "roleHolder is only valid on a Subject of "
+                        f"subjectKind='role', got {_kind!r} for {name!r}")
+                from .entity_resolver import wire_holds_role
+                wire_holds_role(self, _role_holder, _subject_id)
         elif t == "object":
             from .entity_identity import entity_create_lock
             with entity_create_lock("Object", name):
@@ -45348,7 +45500,8 @@ class TortoiseSDK:
                     "Object",
                     self._entity_identity_for("Object", name,
                                               explicit_id=_server_id),
-                    _entity_door_props("objectKind", name, props),
+                    _entity_door_props(
+                        "objectKind", name, _with_folded_entity_name(name, props)),
                     "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
             # ⛔ #8398 (5th review P2-1): a CALLER PROP named ``event`` is
