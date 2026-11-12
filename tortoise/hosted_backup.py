@@ -1270,13 +1270,23 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
     # `dropped_vector_labels: ['<relationship:SUPPORTS>']`, measured). Both are derived from the sets
     # the strip loops themselves walk: every flagged node is created (so its vector IS popped), and a
     # flagged edge is stripped only when it is linkable.
+    # ⛔ The EDGE spelling comes from `cache_projection.relationship_target`, its ONE owner
+    # (`#12015` review): a format composed independently here and in the projection is how one
+    # of them moves and leaves the other's consumer classifying an edge as a record label.
+    # Imported at the POINT OF USE, which is this module's own convention for reaching out
+    # (`alert_channel`, `record_backup`, `backup_sweep`, `hosted_api` all import from here the
+    # same way) — a DR verb should not pull another subsystem's import graph in at module
+    # scope. There is no cycle here (`cache_projection` never imports `hosted_backup`), so
+    # module scope would also work; this is the lighter of two valid choices, not a constraint.
+    from tortoise.cache_projection import relationship_target
+
     dropped_vector_labels = sorted({
         label
         for dump_id, labels, _props in node_rows
         if dump_id in strip_vector_ids
         for label in (labels or ("<unlabelled>",))
     } | {
-        f"<relationship:{edge_rows[index][2]}>"
+        relationship_target(edge_rows[index][2])
         for index in strip_edge_vector_indexes
         if _linkable(edge_rows[index])
     })

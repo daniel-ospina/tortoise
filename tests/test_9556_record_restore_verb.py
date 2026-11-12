@@ -1357,6 +1357,14 @@ def test_the_human_line_names_the_DROPPED_vectors_and_denies_the_re_run():
     assert "1 vector(s) were DROPPED" in line, line
     assert "Session" in line, line
     assert "re-running cannot bring the vectors back" in line, line
+    # ⛔ The NODE-only branch was asserted nowhere (`#12015` review, finding D —
+    # MEASURED: rewriting it to "The edges are restored" red nothing, because the only
+    # assertion on this wording lives in the edge arm and asserts it ABSENT). A
+    # node-only drop telling an operator the EDGES survived is the same wrong-survivor
+    # misstatement this PR's edge arm exists to prevent, one branch over.
+    assert "The nodes are restored" in line, line
+    assert "The edges are restored" not in line, (
+        f"no edge's vector was dropped here: {line}")
     # The machine-readable contract carries it too, not just the human line.
     assert dropped.as_dict()["dropped_vectors"] == 1, dropped.as_dict()
     assert dropped.as_dict()["dropped_vector_labels"] == ["Session"]
@@ -1370,6 +1378,46 @@ def test_the_human_line_names_the_DROPPED_vectors_and_denies_the_re_run():
     )
     assert "DROPPED" not in clean.render(), (
         "a restore that withheld nothing must not print the drop clause")
+
+
+def test_the_human_line_distinguishes_a_DROPPED_EDGE_vector_from_a_node_one():
+    """`#12015` — the KEPT half differs, so the line must not call an edge a node.
+
+    An edge vector is dropped exactly as an unserved node's is, but what SURVIVES is
+    the EDGE (the relationship is restored, its `embedding` is not) — and its label in
+    the report is `<relationship:TYPE>`, not a record label. A line that says "the
+    nodes are restored" over an edge drop tells an operator the wrong object survived,
+    which is the same class of misstatement the clause was added to prevent.
+    """
+    edge = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_c",
+        record_nodes=2, record_relations=1, nodes_written=2,
+        relations_written=1, target_nodes_before=0,
+        nodes_selected=2, relations_selected=1, coverage="complete",
+        declared_keys=0, dropped_vectors=1,
+        dropped_vector_labels=("<relationship:IMPL>",),
+    )
+    line = edge.render()
+    assert "1 vector(s) were DROPPED" in line, line
+    assert "<relationship:IMPL>" in line, line
+    assert "unserved label(s)" not in line, (
+        f"a relationship type is not a label: {line}")
+    assert "The edges are restored" in line, line
+    assert "The nodes are restored" not in line, (
+        f"no node's vector was dropped here: {line}")
+    assert "re-running cannot bring the vectors back" in line, line
+
+    # Mixed: both objects kept, so the line names both.
+    mixed = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_c",
+        record_nodes=2, record_relations=1, nodes_written=2,
+        relations_written=1, target_nodes_before=0,
+        nodes_selected=2, relations_selected=1, coverage="complete",
+        declared_keys=0, dropped_vectors=2,
+        dropped_vector_labels=("Session", "<relationship:IMPL>"),
+    )
+    assert "The nodes and edges are restored" in mixed.render(), mixed.render()
+
 
 
 def test_the_report_carries_the_drop_from_the_projection_to_the_outcome():
