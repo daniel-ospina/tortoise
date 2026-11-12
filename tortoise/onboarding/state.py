@@ -785,9 +785,23 @@ def _read_subject_anchor(graph: Any, subject_id: str) -> dict[str, Any] | None:
 
 
 def _subject_anchor_name_taken(graph: Any, name: str) -> bool:
-    """Does this graph already hold a Subject under ``name``? (Any id.)"""
-    res = _run(graph, "MATCH (s:Subject {name: $name}) RETURN count(s)",
-               {"name": name})
+    """Does this graph already hold a Subject under ``name``? (Any id.)
+
+    ⛔ ANY status, over the WRITER's key space (#12120). The key space is the
+    folded union `create_subject` resolves on (`entity_identity.writer_name_arms`)
+    — a raw ``{name: $name}`` probe classified a fold-colliding anchor name
+    "free", the carry then MERGEs the node and rewrites its identity props, and
+    two orgs end up sharing one anchor whose ``org_id`` names only the second.
+    ANY status because the carry must not resurrect or re-key a terminal holder
+    either (the pre-#7951 anchor shapes this module already treats as identity).
+    """
+    from ..entity_identity import writer_name_predicate
+
+    predicate, params = writer_name_predicate(name)
+    if not predicate:  # no spelling to ask about — zero rows, never `WHERE ()`
+        return False
+    res = _run(graph, f"MATCH (n:Subject) WHERE {predicate} RETURN count(n)",
+               params)
     rows = res.result_set
     return bool(rows and rows[0] and rows[0][0])
 

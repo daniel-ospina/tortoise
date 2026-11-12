@@ -6026,9 +6026,22 @@ class _EntityHandlers:
             from tortoise.entity_identity import (
                 all_name_holder_ids,
                 live_name_holder_ids,
+                writer_name_arms,
             )
-            _held = all_name_holder_ids(self.g, "Object", name)
-            _live_holders = live_name_holder_ids(self.g, "Object", name)
+            # ⛔ #12120: the WRITER's union, not the raw name — but NOT its
+            # COLLAPSE (`_live_holders_same_entity`). These two probes ask a
+            # node-level EXISTENCE question ("is there any carrier at all?"), and
+            # the collapse drops a merged-away carrier whose survivor the merge
+            # then retired — so a journal naming that spelling would classify as
+            # "no carrier at all" and lose the bounded, exempt `no-live-holder`
+            # that this very block exists to grant. The raw-read HEAD had answered
+            # correctly here; widening the KEY SPACE must not also widen the
+            # collapse into an existence probe. The collapse belongs where the
+            # question is "which ONE entity", not "is there one".
+            _arms = writer_name_arms(name)
+            _held = all_name_holder_ids(self.g, "Object", name, **_arms)
+            _live_holders = live_name_holder_ids(self.g, "Object", name,
+                                                 **_arms)
             object_id = resolve_fold_name(
                 self.g, "Object", name, context="status fold object",
                 mention=bool(_held) and not _live_holders)

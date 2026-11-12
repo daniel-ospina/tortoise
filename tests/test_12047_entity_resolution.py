@@ -1664,3 +1664,246 @@ class TestThirdReviewRound:
             params={"id": oid}).result_set
         assert rows[0][0] == "my own key", (
             "a no-op re-write replaced a caller-supplied canonical_name")
+
+
+class TestNameUnionReaders:
+    """Pins for the round-four fresh-context review: the folded name UNION
+    (`name` · `canonical_name` · `aliases`, raw + folded spelling, merged carriers
+    collapsed onto their survivor) reached the WRITER, and four READERS still
+    asked the old raw-`name` question — so after a fold-resolved write they
+    described a different node than the write landed on (#12120)."""
+
+    # ── 1 (P1): the fold's own by-name resolver ─────────────────────────────
+
+    def test_a_journal_written_by_a_fold_resolved_spelling_replays(self, tmp_path):
+        """P1: `resolve_fold_name` read the raw `name` only.
+
+        `resolve_or_mint` folds a VARIANT spelling onto the node holding the
+        original raw name, and that node keeps its original `name` — so the fold's
+        by-name resolver missed the spelling the producer had just registered,
+        recorded the NON-exempt `unregistered-reference`, and `rebuild_all`
+        REFUSED a journal produced by public doors. On `main` the same journal
+        replays cleanly (the create minted a node literally named the variant), so
+        the exposure is created by the widening.
+        """
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        from tortoise.sdk import TortoiseSDK
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t.db"),
+                          event_log_path=str(events / "events.jsonl"),
+                          namespace=f"test_suite_{os.urandom(4).hex()}")
+        try:
+            proj = sdk._get_proj()
+            survivor = sdk.create_object("Acme Corp", "other")["id"]
+            # the PR's headline behaviour: the variant folds onto the survivor
+            assert sdk.create_object("The Acme Corp", "other")["id"] == survivor
+            api = EventAPI(EventLog(str(events / "events.jsonl")),
+                           initiated_by="extractor", projection=proj)
+            api.add_event("ev-fold", "github.issue.open",
+                          object_name="The Acme Corp", object_type="Object")
+            # the P1: pre-fix this raised NonFoldedEventsError (unregistered
+            # reference, non-exempt) over a journal of legitimate public writes.
+            proj.rebuild_all(str(events), confirm_destructive=True)
+            status = proj.g.query(
+                "MATCH (o:Object {id:$id}) RETURN o.status",
+                params={"id": survivor}).result_set
+            assert status[0][0] == "in_progress", (
+                "the fold-resolved spelling did not move the entity's state — "
+                "derived != replay(journal))")
+        finally:
+            sdk.close()
+
+    # ── 2 (P2): the docs miner's name probes ────────────────────────────────
+
+    def test_the_docs_miner_sees_a_fold_only_holder(self, sdk_factory):
+        """P2: `_ensure_entities` asked the raw name on both probes, so a
+        fold-only holder was invisible, the "minting is for a genuinely unheld
+        name" guard passed, and the miner minted a twin whose folded key equals
+        the existing entity's — create-poisoning the name."""
+        from tortoise.api import EventAPI
+        from tortoise.docs_miner import _ensure_entities
+
+        class _Log:
+            def __init__(self):
+                self.events = []
+
+            def append(self, event):  # pragma: no cover - shape only
+                self.events.append(event)
+
+        sdk = sdk_factory()
+        proj = sdk._get_proj()
+        api = EventAPI(_Log(), initiated_by="extractor", agent_id="test",
+                       projection=proj)
+        existing = sdk.create_object("Acme Corp", "other")["id"]
+        ids = _ensure_entities(api, proj, [{
+            "id": "obj-docsmined-1", "name": "acme corp",
+            "object_kind": "other", "externalId": "doc:acme"}])
+        assert ids == [existing], (
+            f"the miner minted a twin beside a fold-only holder: {ids!r}")
+        assert _count(sdk, "Object") == 1
+        # …and the name is not create-poisoned by the twin's folded key.
+        assert sdk.create_object("acme corp", "other")["id"] == existing
+
+    # ── 3 (P2): the onboarding anchor guards ────────────────────────────────
+
+    def test_the_onboarding_anchor_guards_see_a_fold_only_holder(self, sdk_factory):
+        """P2: both guards enumerated the old key space (`{name: $name}`), so a
+        fold-colliding anchor name was classified "safe to create" — and
+        `create_subject` then resolved onto the OTHER org's anchor and rewrote
+        its `org_id` through the ON MATCH lane."""
+        from tortoise.onboarding.seed import find_subject_by_name
+        from tortoise.onboarding.state import _subject_anchor_name_taken
+
+        sdk = sdk_factory()
+        proj = sdk._get_proj()
+        first = sdk.create_subject("Acme", subjectKind="org", org_id="org-1")["id"]
+
+        # the reader must see the fold-only holder ("acme corp" folds alike)
+        assert find_subject_by_name(proj, "ACME")["id"] == first, (
+            "the anchor reader missed the folded key its writer merges on")
+        assert _subject_anchor_name_taken(proj, "ACME") is True, (
+            "the anchor guard classified a fold-colliding name as free")
+
+    def test_a_fold_colliding_second_org_does_not_steal_the_first_anchors_org(
+            self, sdk_factory):
+        """…and the CONSEQUENCE the widening creates, at the guarded door.
+
+        Pre-PR the anchor guard's raw probe was exactly sufficient: a second org
+        with a fold-colliding anchor name minted its own node. Now the writer
+        resolves it onto the first org's anchor and the carry's MERGE rewrites
+        that node's identity — so the guard must DECLINE (``not_in_target``)
+        rather than let two orgs share one anchor whose ``org_id`` names only the
+        second.
+        """
+        from tortoise.onboarding.state import carry_onboards_edge
+
+        dst = sdk_factory()
+        src = sdk_factory()
+        anchor = dst.create_subject("Acme", subjectKind="org",
+                                    org_id="org-1")["id"]
+        carried = src.create_subject("ACME", subjectKind="org",
+                                     org_id="org-9")["id"]
+        verdict = carry_onboards_edge(src._get_proj(), dst._get_proj(),
+                                      "org-1", carried)
+        assert verdict == "not_in_target", (
+            f"the carry adopted a fold-colliding anchor: {verdict!r}")
+        g = dst._get_proj().g
+        assert _count(dst, "Subject") == 1, "a fold-colliding twin was written"
+        rows = g.query("MATCH (s:Subject {id:$id}) RETURN s.org_id",
+                       params={"id": anchor}).result_set
+        assert rows[0][0] == "org-1", (
+            "the carry overwrote the first org's ref")
+
+    # ── 4 (P3): the dual-labelled reject ────────────────────────────────────
+
+    def test_a_content_reject_on_a_dual_labelled_id_is_not_diverted(self, tmp_path):
+        """P3: `_approve_entity_merge`'s reject arm never returned the `None`
+        sentinel its own docstring defines, so a content verdict on an id carried
+        by BOTH a Point and an entity never reached the content branch: no
+        `DedupeRejected`, and `target_id` came back None instead of the Point's."""
+        from tortoise.log import EventLog
+        from tortoise.sdk import TortoiseSDK
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t.db"),
+                          event_log_path=str(events / "events.jsonl"),
+                          namespace=f"test_suite_{os.urandom(4).hex()}")
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (:Object {id:'obj-dual', name:'Acme', objectKind:'other', "
+                "status:'live'})")
+            g.query(
+                "CREATE (:Point {id:'obj-dual', content:'a claim', status:'draft', "
+                "dedup_candidate:true, dedup_target_id:'p-other'})")
+
+            out = sdk.approve_merge("obj-dual", action="reject")
+            # The content branch's own contract (it has no `candidate_type` key,
+            # unlike the temporal/entity arms), so the sentinel is visible as the
+            # absence of the entity shape and the presence of the Point's target.
+            assert out.get("candidate_type") != "entity", (
+                f"the content verdict was diverted into the entity branch: {out!r}")
+            assert out["target_id"] == "p-other", out
+            rows = g.query("MATCH (p:Point {id:'obj-dual'}) "
+                           "RETURN p.dedup_reviewed").result_set
+            assert rows[0][0] == "reject", "the content reject wrote no verdict"
+            journal = EventLog(str(events / "events.jsonl")).read_all()
+            assert any(e.get("type") == "DedupeRejected" for e in journal), (
+                "no DedupeRejected record was emitted for the content reject")
+        finally:
+            sdk.close()
+
+    # ── review round five: the union must not become an OVER-refusal ────────
+
+    def test_a_merged_carrier_whose_survivor_is_retired_is_still_a_carrier(
+            self, tmp_path):
+        """Review round 5, finding 1 (P1): the fold's miss-classification pair.
+
+        `_held`/`_live_holders` decide whether an unresolvable reference takes the
+        bounded, EXEMPT `no-live-holder` (carriers exist, none live) or the
+        NON-exempt `unregistered-reference` (nothing holds it at all). Widening
+        them to `_live_holders_same_entity` also brought its COLLAPSE, which drops
+        a merged-away carrier whose survivor the merge then retired — so the pair
+        read "no carrier at all" and `rebuild_all` refused a journal of legitimate
+        writes (the exact P1 class this diff removes, re-created one site over).
+        """
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        from tortoise.sdk import TortoiseSDK
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t.db"),
+                          event_log_path=str(events / "events.jsonl"),
+                          namespace=f"test_suite_{os.urandom(4).hex()}")
+        try:
+            proj = sdk._get_proj()
+            survivor = sdk.create_object("Acme Corp", "other")["id"]
+            carrier = sdk.create_object("Acme Corporaton", "other")["id"]
+            assert carrier != survivor
+            apply_entity_merge(sdk, candidate_id=carrier, survivor_id=survivor,
+                               method="fuzzy", similarity=0.9)
+            sdk.update_entity(carrier, status="superseded")
+            sdk.update_entity(survivor, status="superseded")
+            api = EventAPI(EventLog(str(events / "events.jsonl")),
+                           initiated_by="extractor", projection=proj)
+            api.add_event("ev-retired", "github.issue.open",
+                          object_name="Acme Corporaton", object_type="Object")
+            # the exemption's OWN bound: carriers exist, none live -> drop the
+            # link, record `no-live-holder`, and keep the journal replayable.
+            proj.rebuild_all(str(events), confirm_destructive=True)
+        finally:
+            sdk.close()
+
+    def test_the_anchor_reader_agrees_with_the_writer_after_a_merge(
+            self, sdk_factory):
+        """Review round 5, finding 2 (P2): union without the writer's COLLAPSE.
+
+        `apply_entity_merge` leaves the candidate live with a folded key, so the
+        union legitimately returns two rows for one entity. Counting rows made
+        `find_subject_by_name` raise `AmbiguousEntityName` (→ `SubjectCollision`)
+        for a name `create_subject` resolves to a single node — the reader/writer
+        disagreement again, in the other direction.
+        """
+        from tortoise.onboarding.seed import find_subject_by_name
+
+        sdk = sdk_factory()
+        proj = sdk._get_proj()
+        # the pre-#12047 damage shape: a second node carrying the SAME folded key
+        # under a different surface form (this is the population the queue merges)
+        subject = sdk.create_subject("Acme Corp", "org")["id"]
+        _create_raw(sdk, "Subject", "sub-legacy", "The Acme Corp", "subjectKind",
+                    "org", canonical_name="acme corp")
+        apply_entity_merge(sdk, candidate_id="sub-legacy", survivor_id=subject,
+                           method="exact", similarity=1.0)
+
+        props = find_subject_by_name(proj, "Acme Corp")
+        assert props is not None and props["id"] == subject, (
+            f"the reader refused a merged pair the writer collapses: {props!r}")
+        # …and the write path agrees on the same single node.
+        assert sdk.create_subject("The Acme Corp", "org")["id"] == subject
+        assert _count(sdk, "Subject") == 2, "the merge must not delete either node"

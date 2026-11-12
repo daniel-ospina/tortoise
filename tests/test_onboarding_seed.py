@@ -41,9 +41,17 @@ class _FakeSDK:
         self.edges: list[tuple] = []
 
     def query(self, cypher, **params):
-        name = params.get("name")
-        rows = [[dict(self.subjects[name])]] if name in self.subjects else []
-        return _FakeResult(rows)
+        # #12120: the anchor reader asks the WRITER's union, so the query carries
+        # several spelling params (raw form + fold) instead of one `name`. Answer
+        # every spelling and contribute each node once, or a union query reads as
+        # a miss against this fake and the test passes for the wrong reason.
+        spellings = [v for v in params.values() if isinstance(v, str)]
+        nodes: list[dict] = []
+        for spelling in spellings:
+            node = self.subjects.get(spelling)
+            if node is not None and node not in nodes:
+                nodes.append(node)
+        return _FakeResult([[dict(node)] for node in nodes])
 
     def _id_for(self, label, name):
         import hashlib

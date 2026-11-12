@@ -24027,7 +24027,24 @@ class TortoiseSDK:
                 # so a full window must not make the review surface's reject verb
                 # unavailable exactly when the queue is largest.
                 target_id = None
-            # ⛔ SET-VALUED (#12047 review F1): one scalar`dedup_target_id` slot
+            # ⛔ #12120 (P3): the MERGE arm below returns the `None` sentinel when
+            # there is no entity pair but a Point carries the same id, so a
+            # legitimate CONTENT verdict stays reachable. The reject arm had no
+            # such fall-through: it wrote an entity rejection onto a dual-labelled
+            # id, emitted no `DedupeRejected`, and answered `target_id: None`
+            # instead of the Point's `dedup_target_id`. Same probe, same sentinel —
+            # and the Point must actually BE a dedup/temporal candidate, or a
+            # plain entity reject would fall into the content branch's "not a
+            # dedup candidate" refusal instead of standing.
+            if target_id is None:
+                _point = proj.g.query(
+                    "MATCH (n:Point {id:$id}) "
+                    "RETURN n.dedup_candidate, n.temporal_candidate",
+                    params={"id": candidate_id},
+                ).result_set
+                if _point and (_point[0][0] or _point[0][1]):
+                    return None
+            # ⛔ SET-VALUED (#12047 review F1): one scalar `dedup_target_id` slot
             # could not hold two rejections, and overwriting it un-suppressed the
             # pair the reviewer had already answered. `dedup_rejected_targets` is
             # the authoritative list; the scalar is kept for readers written

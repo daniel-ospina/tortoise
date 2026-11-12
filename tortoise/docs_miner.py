@@ -83,6 +83,7 @@ from pathlib import Path
 from tortoise.entity_identity import (  # #3633 route-then-refuse
     all_name_holder_ids,
     resolve_entity_id,
+    writer_name_arms,
 )
 
 logger = logging.getLogger(__name__)
@@ -467,7 +468,11 @@ def _ensure_entities(api, proj, entities: list[dict]) -> list[str]:
     of N same-name carriers, so a name held by two live Objects would attach
     every claim to an arbitrary one; the resolver returns the single live id
     and REFUSES (:class:`~tortoise.entity_identity.AmbiguousEntityName`) on two
-    or more.
+    or more. ⛔ The NAME arm asks the WRITER's key space
+    (``entity_identity.writer_name_arms``: ``name`` · ``canonical_name`` ·
+    ``aliases``, raw + folded) — a raw-name probe missed a fold-only holder, the
+    "genuinely unheld name" guard below passed, and the miner minted a twin whose
+    folded key collided with the existing entity (#12120).
 
     MINTING IS FOR A GENUINELY UNHELD NAME ONLY. The resolver returns ``None``
     both for a name with NO holder and for one whose holder(s) are all
@@ -494,11 +499,20 @@ def _ensure_entities(api, proj, entities: list[dict]) -> list[str]:
         if rows:
             ids.append(rows[0][0])
             continue
-        resolved = resolve_entity_id(proj.g, "Object", name)
+        # ⛔ #12120: ask the WRITER's question — the folded union
+        # (`writer_name_arms`), not the raw name. A fold-only holder (this node's
+        # own writer folded "acme corp" onto "Acme Corp") was invisible to both
+        # probes below, so the "minting is for a genuinely unheld name only"
+        # guard PASSED and the miner minted a twin whose folded key equals the
+        # existing entity's — which then made every create of that name refuse
+        # `AmbiguousEntityName`. Both probes take the same arms: the resolver for
+        # the live holder, the ANY-status read for the terminal-only refusal.
+        arms = writer_name_arms(name)
+        resolved = resolve_entity_id(proj.g, "Object", name, **arms)
         if resolved is not None:
             ids.append(resolved)
             continue
-        if all_name_holder_ids(proj.g, "Object", name):
+        if all_name_holder_ids(proj.g, "Object", name, **arms):
             raise ValueError(
                 f"docs miner: Object {name!r} is held only by terminal "
                 f"node(s) — refusing to mint a name-keyed replacement that "

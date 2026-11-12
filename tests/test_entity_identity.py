@@ -514,14 +514,32 @@ class _Rows:
 
 
 class _FakeSeedHandle:
-    """Duck-typed seed handle: ``name`` -> the rows the graph would return."""
+    """Duck-typed seed handle: ``name`` -> the rows the graph would return.
+
+    #12120: the reader asks the WRITER's union, so the query carries several
+    spelling params (the raw form and its fold) instead of one ``name``. The fake
+    models the graph faithfully by answering EVERY spelling it is given and
+    contributing each node once — a fake that only read ``params['name']`` would
+    make a union query look like a miss.
+    """
 
     def __init__(self, by_name):
         self._by_name = by_name
 
     def query(self, cypher, **params):
-        name = params.get("name") or (params.get("params") or {}).get("name")
-        return _Rows([[dict(p)] for p in self._by_name.get(name, [])])
+        if isinstance(params.get("params"), dict):
+            params = params["params"]
+        spellings = [v for v in params.values() if isinstance(v, str)]
+        seen: set = set()
+        rows: list = []
+        for spelling in spellings:
+            for p in self._by_name.get(spelling, []):
+                key = (p.get("id"), p.get("name"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append([dict(p)])
+        return _Rows(rows)
 
 
 class TestFindSubjectByName:
@@ -900,28 +918,24 @@ _ALLOWED_KEYED = {
         'proj.g.query( "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) " "MERGE (p)-[:aboutObject]->(o)", params={"pid": pid, "name": name}, )': 1,
     },
     'tortoise/onboarding/state.py': {
-        # #10180's promote CARRY: does the TARGET graph already hold a Subject
-        # under this name (any id)? A COUNT-only existence probe guarding a
-        # name-keyed WRITE — `carry_onboards_edge` is about to MERGE a
-        # `(s:Subject {id:$sid})` that SETs `name`, so this must enumerate the
-        # key space the writer occupies (the same disposition, and the same
-        # reason, as `onboarding/seed.py`'s candidate enumeration below).
-        # ⛔ It cannot pick a carrier: it returns an aggregate COUNT, never a
-        # row, and the answer is used only to DECLINE the write
-        # (`not_in_target`) so a second same-name carrier is never minted —
-        # where `find_subject_by_name` would report two carriers as ambiguous
-        # and `_classify_anchor` would refuse. Routing it through
-        # `entity_identity.resolve_entity_id` would turn "decline" into a raise
-        # for the exact case this guard exists to handle. Owner: S3
-        # identity/resolver (a write key, migration-gated with the rest).
-        'res = _run(graph, "MATCH (s:Subject {name: $name}) RETURN count(s)", {"name": name})': 1,
+        # #12120: the raw-keyed COUNT this lane used to excuse is GONE. The
+        # probe now takes its predicate from the WRITER's own union
+        # (`entity_identity.writer_name_predicate`), so the sweep sees no
+        # name-keyed comparison here at all. The disposition it recorded still
+        # holds and is why this is a routing fix, not a bypass: it returns an
+        # aggregate COUNT, never a row, and the answer is used only to DECLINE
+        # the write (`not_in_target`), so a second same-name carrier is never
+        # minted — routing it through `resolve_entity_id` would turn "decline"
+        # into a raise for the exact case the guard exists to handle.
     },
     'tortoise/onboarding/seed.py': {
-        # B: candidate enumeration that refuses — single holder or
-        # AmbiguousEntityName, and NO status filter ON PURPOSE: it guards a
-        # name-keyed WRITE, so it must enumerate the key space its writer
-        # MERGEs on (a terminal holder would otherwise be silently adopted).
-        'res = _run(handle, "MATCH (s:Subject {name: $name}) RETURN properties(s)", {"name": name})': 1,
+        # #12120: the raw-keyed candidate enumeration this lane used to excuse is
+        # GONE — `find_subject_by_name` now takes `writer_name_predicate` (the
+        # same union `create_subject` merges on, raw + folded, name /
+        # canonical_name / aliases), so the sweep sees no name-keyed comparison.
+        # The behaviour is unchanged: single holder or AmbiguousEntityName, no
+        # status filter on purpose (a terminal holder must be counted, or the
+        # write silently adopts it).
     },
     'tortoise/projection/edges.py': {
         # #5509 A: `resolve_structural_target`'s name-keyed targets now read

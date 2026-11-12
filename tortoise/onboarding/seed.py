@@ -27,7 +27,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..entity_identity import AmbiguousEntityName, display_holder_ids, record_non_folded
+from ..entity_identity import (
+    AmbiguousEntityName,
+    display_holder_ids,
+    record_non_folded,
+    writer_name_predicate,
+)
 
 # ── ontology vocabulary (ONTOLOGY.md §4.2/§5, §3.6) ──────────
 
@@ -162,6 +167,70 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
         return handle.query(cypher, params=params)
 
 
+def _anchor_props_by_id(graph: Any, node_id: str) -> dict[str, Any]:
+    """One label-scoped id read for an anchor's props; ``{}`` when absent."""
+    if graph is None or not hasattr(graph, "query"):
+        return {}
+    res = _run(graph, "MATCH (n:Subject {id: $sid}) RETURN properties(n)",
+               {"sid": node_id})
+    rows = getattr(res, "result_set", None) or []
+    if not rows or not rows[0]:
+        return {}
+    raw = rows[0][0]
+    if isinstance(raw, dict):
+        return dict(raw)
+    props = getattr(raw, "properties", None)
+    return dict(props) if isinstance(props, dict) else {}
+
+
+def _collapse_anchor_rows(graph: Any, props: list[dict[str, Any]]) -> list[dict]:
+    """Collapse merged-away carriers onto their SURVIVOR — **any status**.
+
+    ⛔ The reader must agree with the WRITER (#12120). ``apply_entity_merge`` is
+    NON-destructive: the candidate stays live and keeps a folded key, so after a
+    merge the name union legitimately returns TWO rows for ONE entity — and
+    ``create_subject`` collapses them (``_live_holders_same_entity``). A reader
+    that counted rows raised ``AmbiguousEntityName`` (→ ``SubjectCollision``) for a
+    name the write resolves to a single node, so a re-seed of an org whose anchor
+    was ever merged failed at a door that worked before. Agreeing on the union but
+    not on the collapse is the same reader/writer disagreement, in the other
+    direction.
+
+    ANY status on purpose, and unlike the write path's collapse this one KEEPS a
+    terminal survivor instead of dropping the pair: the guard must see a terminal
+    holder (and refuse), never resurrect it.
+    """
+    by_id = {str(p["id"]): p for p in props if p.get("id")}
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for idx, p in enumerate(props):
+        pid = p.get("id")
+        if pid is None:
+            # An id-less legacy row carries no `resolved_from` evidence and is a
+            # holder in its own right, per-row (the write path's node-exactness).
+            key = f"id-less:{idx}"
+            if key not in seen:
+                seen.add(key)
+                out.append(p)
+            continue
+        current, cur = str(pid), p
+        chain = {str(pid)}
+        while True:
+            target = cur.get("resolved_from")
+            if not target or str(target) in chain:
+                break
+            current = str(target)
+            chain.add(current)
+            cur = by_id.get(current) or _anchor_props_by_id(graph, current)
+            if not cur:
+                break
+        if current in seen:
+            continue
+        seen.add(current)
+        out.append(cur or p)
+    return out
+
+
 def find_subject_by_name(handle: Any, name: str) -> dict[str, Any] | None:
     """The single Subject props holding ``name`` (None when absent).
 
@@ -180,11 +249,22 @@ def find_subject_by_name(handle: Any, name: str) -> dict[str, Any] | None:
     enumerate the key space its writer merges on, so a terminal same-name
     holder must be counted (and, with any other holder, refused).
 
+    ⛔ The KEY SPACE is the writer's, not ``name`` alone (#12120): `create_subject`
+    resolves on the folded union (`entity_identity.writer_name_arms` —
+    ``name`` · ``canonical_name`` · ``aliases``, raw + folded spelling), so a
+    reader that asked ``{name: $name}`` classified a fold-colliding anchor name
+    "safe to create" — and the write then resolved onto ANOTHER org's anchor and
+    rewrote its ``org_id`` through the ON MATCH lane. One definition, taken from
+    the writer itself.
+
     Subject-only: an Object/Statement with the same name is a different label
     and can never collide with an anchor (B1)."""
+    predicate, params = writer_name_predicate(name)
+    if not predicate:  # no spelling to ask about — zero rows, never `WHERE ()`
+        return None
     res = _run(handle,
-               "MATCH (s:Subject {name: $name}) RETURN properties(s)",
-               {"name": name})
+               f"MATCH (n:Subject) WHERE {predicate} RETURN properties(n)",
+               params)
     rows = getattr(res, "result_set", None)
     if rows is None:
         # Fail CLOSED: an unrecognized handle shape must never read as "the
@@ -203,14 +283,22 @@ def find_subject_by_name(handle: Any, name: str) -> dict[str, Any] | None:
         else:
             existing = getattr(raw, "properties", None)
             props.append(dict(existing) if isinstance(existing, dict) else {})
-    if len(props) > 1:
+    # ⛔ Collapse merged-away carriers BEFORE the 1-vs-2 decision (#12120): one
+    # entity reached through two rows (a non-destructive merge) is ONE holder,
+    # which is the same answer `create_subject` gives. Without it a re-seed of an
+    # org whose anchor was ever merged raised `SubjectCollision`.
+    graph = getattr(handle, "g", None)
+    if graph is None or not hasattr(graph, "query"):
+        graph = handle
+    holders = _collapse_anchor_rows(graph, props)
+    if len(holders) > 1:
         # Record the non-folded entry BEFORE refusing (the module's contract:
         # a refusal is always accompanied by its evidence), and keep the
         # id-less holder VISIBLE in that evidence.
-        holder_ids = display_holder_ids([p.get("id") for p in props])
+        holder_ids = display_holder_ids([p.get("id") for p in holders])
         record_non_folded("Subject", name, holder_ids)
         raise AmbiguousEntityName("Subject", name, holder_ids)
-    return props[0]
+    return holders[0]
 
 
 # ── two-Subject seed ─────────────────────────────────────────
