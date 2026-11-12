@@ -784,9 +784,12 @@ def _command_haystacks(line: str) -> list[str]:
         echo <(bash 'tools/ci_timing.py')
         echo >(python3 'tools/ci_timing.py')
 
-    Zero live instances exist in the 41 workflows (the tree's only `<(`/`>(` is
-    `python-ci.yml:1582`, `done < <(printf … | python3 -c …)`, which names no helper),
-    so this closes a latent hole rather than a red. Found by #12149's pins, not by a red.
+    Zero live instances exist in the 41 workflows (`python-ci.yml:1582` is the only
+    `<(`/`>(` any of them contains — `done < <(printf … | python3 -c …)` — and it names
+    no helper), so this closes a latent hole rather than a red. Measured across the
+    WORKFLOWS, which is the scope this reader scans; `.github/scripts/*.sh` carry 8 more
+    (3764 tree-wide), none of which names a gh-executing helper either.
+    Found by #12149's pins.
 
     Stated residuals, all over-reporting (the fail-closed direction for this gate): a
     `$( … )` inside SINGLE quotes is treated as executable though bash would not expand
@@ -800,8 +803,15 @@ def _command_haystacks(line: str) -> list[str]:
     live: list[str] = []  # …with its literal quoted prose blanked
     i, n = 0, len(line)
     quote = ""  # open top-level quote character, or ""
-    parens = 0  # `(`/`)` depth inside a substitution — a subshell's own parens count too
-    sub_quote = ""  # COUNTING-ONLY quote state INSIDE a substitution (see the walk)
+    # ⛔ ONE QUOTE SLOT PER OPEN SUBSTITUTION LEVEL — a STACK, not a single flag. bash
+    # parses each `$( … )`/`<( … )` body in its own quoting context and resumes the outer
+    # level's after the `)`, so `"$(basename "$(pwd)")"` has an empty slot at depth 1 and
+    # a `"` slot at depth 2. A single flag breaks exactly there: the `"` opened at depth 1
+    # would swallow the `)` that CLOSES depth 2, the depth would never fall back, and the
+    # rest of the message would stay substitution-verbatim — a FALSE HIT on ordinary
+    # operator prose, the defect class #12133 exists to remove (#12149 review cycle 2,
+    # P2). `len(sub_quotes)` IS the depth, so the depth and the quote state cannot drift.
+    sub_quotes: list[str] = []
     backtick = False  # inside a backtick substitution
 
     def flush() -> None:
@@ -816,40 +826,40 @@ def _command_haystacks(line: str) -> list[str]:
         ch = line[i]
         if ch == "\\" and i + 1 < n:
             raw.append(line[i : i + 2])
-            if parens or backtick or not quote:
+            if sub_quotes or backtick or not quote:
                 live.append(line[i : i + 2])
             i += 2
             continue
         # ── inside a substitution: verbatim in BOTH views, quotes do NOT blank ──
-        if parens or backtick:
+        if sub_quotes or backtick:
             if line.startswith("$(", i):
-                parens += 1
+                sub_quotes.append("")
                 raw.append("$(")
                 live.append("$(")
                 i += 2
                 continue
-            if parens:
-                # ⛔ COUNTING-ONLY quote state. A `)` inside a QUOTED span does not close
-                # the substitution, and the counter must know that or it ends the
-                # substitution early: `<(grep -E "xml)" f) ; bash 'tools/h.py'` closed at
-                # the `)` inside the quotes, the string's own closing `"` then OPENED a
-                # top-level quote, and the real invocation after `;` was blanked away —
-                # a MISS, i.e. a regression in the fail-open direction this gate exists
-                # to prevent (#12149 review, P1; the same class was already latent on
-                # `$( … )`). This state is for COUNTING only: the two haystack views stay
-                # verbatim here, so quoted text inside a substitution is still executable
-                # text as far as the name arm is concerned.
-                if sub_quote:
-                    if ch == sub_quote:
-                        sub_quote = ""
+            if sub_quotes:
+                # ⛔ COUNTING-ONLY quote state, ONE SLOT PER LEVEL. A `)` inside a QUOTED
+                # span does not close the substitution, and the counter must know that or
+                # it ends the substitution early: `<(grep -E "xml)" f) ; bash 'tools/h.py'`
+                # closed at the `)` inside the quotes, the string's own closing `"` then
+                # OPENED a top-level quote, and the real invocation after `;` was blanked
+                # away — a MISS, i.e. a regression in the fail-open direction this gate
+                # exists to prevent (#12149 review, P1). The nesting is equally load-bearing
+                # the other way (#12149 review cycle 2, P2), which is why this is a STACK:
+                # a `$(` opened while an outer quote is open must get its OWN empty slot, so
+                # its `)` still closes it. The state is for COUNTING only — the two haystack
+                # views stay verbatim here, so quoted text inside a substitution is still
+                # executable text as far as the name arm is concerned.
+                if sub_quotes[-1]:
+                    if ch == sub_quotes[-1]:
+                        sub_quotes[-1] = ""
                 elif ch in _QUOTE_CHARS:
-                    sub_quote = ch
+                    sub_quotes[-1] = ch
                 elif ch == "(":
-                    parens += 1
+                    sub_quotes.append("")
                 elif ch == ")":
-                    parens -= 1
-                    if not parens:
-                        sub_quote = ""
+                    sub_quotes.pop()
             elif ch == "`":
                 backtick = not backtick
             raw.append(ch)
@@ -859,7 +869,7 @@ def _command_haystacks(line: str) -> list[str]:
         # ── top level. An OPENER is recognised BEFORE the quote branch: bash expands
         #    `$( … )` and backticks inside double quotes, so a quote must not swallow it.
         if line.startswith("$(", i):
-            parens = 1
+            sub_quotes.append("")
             raw.append("$(")
             live.append("$(")
             i += 2
@@ -883,7 +893,7 @@ def _command_haystacks(line: str) -> list[str]:
         #    literal text (`echo "<( … )"` prints it) and must stay blanked. The body
         #    of a real one is a command, so it joins the verbatim claim above.
         if ch in "<>" and i + 1 < n and line[i + 1] == "(":
-            parens = 1
+            sub_quotes.append("")
             raw.append(line[i : i + 2])
             live.append(line[i : i + 2])
             i += 2
@@ -1166,7 +1176,7 @@ def test_every_printer_prefixed_shape_that_still_runs_a_command_is_a_hazard():
     printer whose helper sits QUOTED inside one was read as prose on `edcac493a5` (both
     spellings), while the unquoted spelling was caught — so the hole was exactly the
     quote-blanking of an executable body. Zero live instances exist in the 41 workflows
-    (measured: `python-ci.yml:1582` is the tree's only `<(`/`>(`, and it names no
+    (measured: `python-ci.yml:1582` is the only `<(`/`>(` they contain, and it names no
     helper), which is why it needs a pin rather than a red to keep it closed.
 
     WHY IT DOES NOT WEAKEN THE PROSE FIX: every shape here EXECUTES its helper, and the
@@ -1195,11 +1205,13 @@ def test_every_printer_prefixed_shape_that_still_runs_a_command_is_a_hazard():
         #    the closer. Without the counting-quote state the substitution ends at the
         #    `)` inside the quotes, the string's own closing quote OPENS a top-level
         #    quote, and the real invocation after `;` is blanked — a MISS, and a
-        #    REGRESSION vs `main`, which never entered substitution mode on `<(`
-        #    (ARMOR, and the two rows that pin this change's own first regression —
-        #    found in #12149's review, not by a red). ──
+        #    REGRESSION vs `main`, which never entered substitution mode on `<(`.
+        #    ARMOR, and the rows that pin THIS CHANGE's own first regression — found in
+        #    #12149's review, not by a red (restoring the pre-fix counter reds here). ──
         "        run: echo <(grep -E \"xml)\" /etc/hostname) ; bash 'tools/ci_timing.py'",
         "        run: echo <(sed -e 's/x)y/z/' /etc/hostname) ; bash \"tools/ci_timing.py\"",
+        # ── …and the same quoted `)` on `$( … )`, which `main` MISSES as well (latent
+        #    before this change): DISCRIMINATING. ──
         '        run: echo "$(bash -c "x)")" ; bash \'tools/ci_timing.py\'',
     ):
         assert _gh_hazards([chained], scripts), chained
@@ -1211,6 +1223,18 @@ def test_every_printer_prefixed_shape_that_still_runs_a_command_is_a_hazard():
         _gh_hazards(['        run: echo "a <(b: run tools/install-ci-runner-x64.sh) c"'], scripts)
         == []
     )
+    # …and a NESTED substitution inside an operator message is prose, not a hazard. This
+    # is the FAIL-CLOSED side of the counting-quote state, and it is why that state is a
+    # per-level STACK rather than one flag: with a single flag the `"` opened at depth 1
+    # swallowed the `)` closing the `$(pwd)` at depth 2, the depth never fell back, and
+    # the rest of the message stayed substitution-verbatim — a false hit on an ordinary
+    # idiom (measured: both lines below flagged before the stack, neither flags on
+    # `edcac493a5` or now). `bash` prints both literally. (#12149 cycle 2, P2.)
+    for nested_prose in (
+        '        run: echo "dir $(basename "$(pwd)") — repair with tools/install-ci-runner-x64.sh"',
+        '        run: echo "$(printf "%s" "$(date)") run tools/ci_timing.py by hand"',
+    ):
+        assert _gh_hazards([nested_prose], scripts) == [], nested_prose
 
 
 def test_a_script_named_only_in_an_operator_message_is_not_a_gh_hazard():
