@@ -1008,11 +1008,38 @@ def test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_
         "bare `delete` token survives the coherent inversion \"never DELETES a real writer at "
         "all\", measured: "
         f"{clause[:240]!r}…")
-    assert "never deletes" not in clause, (
-        "the seam-shadow clause inverts the measured direction — the shadow-aware builder arm was "
-        "reverted precisely because it DELETES a real writer (`{'tortoise.m::apply': ...}`, `w` "
-        "gone): "
+    # ⛔ THE BUILDER SENTENCE IS ITS OWN SLICE (`#12020` round 13 review, P2 + P3 — both measured).
+    # The slice above spans TWO residuals (the `global`-rebinding paragraph and the builder clause),
+    # so an absence assertion run over all of it reds TRUE sentences about either one — measured:
+    # the register's own `global` claim ("… never deletes a writer: the writer stays `gated` …")
+    # redded with a message asserting an inversion that never happened. And the WORD that carries
+    # the disposition was not pinned at all: flipping `shadow-BLIND` to `shadow-AWARE and pays that
+    # cost instead` left the whole battery green (`218 passed`) while the register then described a
+    # suppression the code deliberately does not do. So the presence pair and the exclusions are all
+    # scoped to the builder sentence, which is the sibling pin's own idiom.
+    b_start = clause.find("that shadow is not threaded for a clause builder")
+    b_stop = clause.find("over-credits instead")
+    assert b_start != -1 and b_stop > b_start, (
+        "the builder sentence is no longer locatable between \"that shadow is not threaded for a "
+        "clause builder\" and \"over-credits instead\" — re-anchor deliberately rather than "
+        "letting the pin cover nothing: "
         f"{clause[:240]!r}…")
+    builder_sentence = clause[b_start:b_stop]
+    assert "shadow-blind" in builder_sentence, (
+        "the builder sentence no longer says the arm is deliberately shadow-BLIND — that word IS "
+        "the disposition (a shadow-aware arm DELETES a real writer, measured), and flipping it to "
+        "`shadow-AWARE` used to leave the whole battery green: "
+        f"{builder_sentence[:240]!r}…")
+    assert "shadow-aware" not in builder_sentence, (
+        "the builder sentence describes the arm as shadow-AWARE — the arm is deliberately "
+        "shadow-BLIND; the shadow-aware form is what was measured deleting `w` "
+        "(`{'tortoise.m::apply': ...}`) and reverted in `74d7b854cb`: "
+        f"{builder_sentence[:240]!r}…")
+    assert "never deletes" not in builder_sentence, (
+        "the builder sentence inverts the measured direction — suppressing a shadowed call DELETES "
+        "a real writer (`{'tortoise.m::apply': ...}`, `w` gone), which is why the arm is "
+        "shadow-blind: "
+        f"{builder_sentence[:240]!r}…")
     assert "a builder alias escapes as an argument" in clause, (
         "the seam-shadow clause no longer points at the builder residual's OWN naming entry — "
         "`UNDECIDABLE_WRITE_SHAPES` \"… ESCAPES as an argument\" — so a reader who hits the "
