@@ -5629,9 +5629,12 @@ def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
     NIL/blank spelling, because a ``subjectKind='other'`` must not ride along
     onto a ``:WorkItem``).
 
-    ``declaredKind``/``declaredLayer`` are recorded on the node (R5) so an
-    override, a replay or a later audit can restore what the caller asked for —
-    a payload that only lives in one response is not durable.
+    ``declaredKind``/``declaredLayer``/``kindRedirectRule`` are recorded on the
+    node (R5) so an override, a replay or a later audit can restore what the
+    caller asked for AND attribute the change to the rule that made it — a
+    payload that only lives in one response is not durable, and a redirect
+    nobody can attribute is the PostgreSQL "surprising interpretation" failure
+    with better manners.
 
     Returns the decision unchanged when the guard only ABSTAINED or the caller
     OVERRODE it: in both cases the write must land exactly as declared.
@@ -5655,6 +5658,13 @@ def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
     if decision.declared_kind is not None:
         props.setdefault("declaredKind", decision.declared_kind)
     props.setdefault("declaredLayer", decision.declared_layer)
+    # The rule id rides the node, not only the reply: a redirect that lived only
+    # in one response would be a silent mutation whose cause nobody could name
+    # after the process that minted it is gone (the counters are in-process).
+    # This is what makes the record ATTRIBUTABLE and therefore reversible — see
+    # `kind_guards`' "What the external pass changed".
+    if decision.rule:
+        props.setdefault("kindRedirectRule", decision.rule)
     return decision.layer, decision
 
 

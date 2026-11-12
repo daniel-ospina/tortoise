@@ -2907,7 +2907,6 @@ class PackRegistry:
             WHEN_PREDICATES,
             core_kind_names,
             kind_forms,
-            kind_namespace,
         )
         from tortoise.kind_layers import LAYERS, SECTION_LAYERS, core_sections
 
@@ -2984,11 +2983,11 @@ class PackRegistry:
                     errors.append(
                         f"{where}.layer: '{kind_ref}' is declared on the "
                         f"{declared_layer} layer, not '{layer}'")
-            elif isinstance(kind_ref, str) and ":" not in kind_ref:
-                # A documentKinds entry lands here: a document is a `:Source`
-                # (D10), not an entity layer, so there is nothing to redirect.
-                if kind_ref.strip() in (ont.get("documentKinds") or []):
-                    errors.append(
+            elif (isinstance(kind_ref, str) and ":" not in kind_ref
+                    # A documentKinds entry lands here: a document is a `:Source`
+                    # (D10), not an entity layer, so there is nothing to redirect.
+                    and kind_ref.strip() in (ont.get("documentKinds") or [])):
+                errors.append(
                         f"{where}.layer: '{kind_ref}' is a documentKind (a "
                         f":Source genre, D10) — not a guardable entity layer")
 

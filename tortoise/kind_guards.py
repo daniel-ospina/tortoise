@@ -83,8 +83,10 @@ One shape everywhere, and one stable JSON field so a client never parses prose::
     kind_guard_overridden = {"rule": ..., "target": ..., "declaredKind": ...}
 
 `from` carries the caller's declaration, so an override / replay / an audit can
-restore it (R5); the redirect path ALSO records `declaredKind`/`declaredLayer`
-on the node, because a payload that only lives in one response is not durable.
+restore it (R5); the redirect path ALSO records `declaredKind`/`declaredLayer`/
+`kindRedirectRule` on the node, because a payload that only lives in one response
+is not durable — and a declaration with no attribution to the rule that changed
+it cannot answer "why is this node here?" once the process is gone.
 
 ## Cross-pack resolution (R1-R5)
 
@@ -111,7 +113,59 @@ so all five rules are enforced here or at install:
   literally true, and the second is the ladder's own step 1 (which necessarily
   changes the write to the fallback — that is the point of having one).
 * **R5 preserve the declaration** — `declaredKind`/`declaredLayer` on the node
-  and `from` in the payload.
+  and `from` in the payload. The node also carries the **rule id**
+  (`kindRedirectRule`), because a declaration with no attribution to the rule
+  that changed it is reversible in principle and unattributable in practice —
+  the PostgreSQL objection's second half (see "What the external pass changed").
+
+## What the external pass changed (and what it refused to change)
+
+The issue's own research basis was re-verified against its primary sources, and
+three things came back that are worth having on the record:
+
+1. ⛔ **One of its five citations is WRONG and is not used here.**
+   *OntoKG* (arXiv 2604.02618) classifies **properties** as intrinsic vs
+   relational and routes them into 94 schema modules; it does not do
+   "fixed-priority classification with automatic reclassification on a type
+   change", which is how the issue cites it. The convergent practice the issue
+   claims still holds on the OTHER four sources (SHACL severity-carrying
+   results, the Wikidata repair taxonomy, the PoolParty constraint+changeset
+   approach, ISWC 2023's ranking heuristics with minimal change among them) —
+   so the DESIGN is unaffected; the citation is simply not evidence for it.
+   Nothing here rests on OntoKG.
+
+2. **"Abstain, never reject" is convergent for a WRITE PATH, and this is a
+   write path.** Every system the pass found that rejects, rejects a different
+   object: OWL 2 rejects the *ontology load*, SHACL rejects the *validation run*
+   (an ill-formed shape yields "failure", explicitly not a violation), Jira
+   rejects the *automation action*. The systems that own a write path — Wikidata
+   (constraint violations are a diagnostic report; the statement is not
+   rejected), SKOS (a mapping target is never dereferenced), LinkML's generators
+   (unresolved reference → string + warning) — keep the data and surface an
+   advisory. ⚠️ The counter-evidence is real and is why the INSTALL gate exists
+   rather than being softened: **SHACL flags the DATA when `sh:class` names an
+   undeclared class**, and OWL 2 DL calls an undeclared entity a non-conforming
+   *ontology*. OWL's analogue for a bad reference is "that is a schema defect",
+   not "carry on silently" — and this module's table IS the schema, which is
+   exactly why `guard_table_problems()` runs as a check and `pack validate`
+   refuses a broken guard at INSTALL (R3). Runtime abstention is safe only
+   because the table itself is verified.
+
+3. ⚠️ **The strongest argument AGAINST this whole design is PostgreSQL's**, and
+   it is not dismissed here: 8.3 removed automatic casts to text because they
+   "too often caused surprising behavior", and the docs now warn that "an
+   overabundance of implicit casting paths" makes the system "choose surprising
+   interpretations of commands". The pass's conclusion was that the defence
+   holds only if two properties are ENFORCED rather than assumed: **(a) the
+   advisory is consumed or durably recorded, and (b) redirects are logged and
+   reversible.** Without (b) this converges on the PostgreSQL failure mode. Both
+   are therefore built in, not promised:
+     * ``kind_redirect`` is emitted on every redirect (a), and
+     * the node carries ``declaredKind`` + ``declaredLayer`` + ``kindRedirectRule``
+       (b) — what the caller asked for, and which rule changed it. A redirect
+       that lived only in one HTTP response would be a silent mutation; the
+       node's own record is what makes it reversible and attributable after the
+       process that minted it is gone (the counters are in-process only).
 
 ## Precedence: the guard runs AFTER the entity judgement (owner, #12060)
 
@@ -127,6 +181,18 @@ door (`TortoiseSDK.create_entity`), which is reached only by a caller that has
 already decided the row is an entity, and by the extractor's capture spine only
 after its own is-this-an-entity decision. It never runs on the claim path.
 
+The prior art agrees on the ORDER, and says why: NER types a mention *before*
+entity linking grounds it (spaCy's `entity_linker` documents that it
+disambiguates "textual mentions (tagged as named entities)"), and graph-building
+pipelines (Neo4j GraphRAG) extract typed nodes and then resolve/merge them. The
+useful part is the shape it reveals: the type produced at extraction is
+PROVISIONAL, and the identity-bearing kind is the writer's act, reconciled later.
+So `the owner → role` presupposes an entity exists while `the owner → mention`
+denies it, and kind-first could mint a node that referentiality would have
+refused — a node the resolver has no mandate to delete. Conversely this guard is
+deterministic, cheap and idempotent, so it is safe to run AGAIN after `#12047`
+merges (which is how NER's provisional type survives in those pipelines).
+
 And the case the owner named as the meeting point is why the role guard
 **abstains** rather than redirecting: `#12047` records that person→role linking
 (`holdsRole`) does not exist, so redirecting `the owner` to `core:role` today
@@ -140,8 +206,9 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any
 
 _logger = logging.getLogger(__name__)
 

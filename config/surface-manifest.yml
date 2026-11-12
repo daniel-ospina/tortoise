@@ -587,6 +587,43 @@ response_fields:
     names both ids instead of claiming nothing was lost (#2489: no repair path)'
   unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a write the door can source, so a sourced response
     stays byte-identical
+- response: tortoise_create_entity
+  field: kind_redirect
+  emitted_when: >-
+    a write whose NAME matches a declared common confusion in the per-kind guard table (#12060) —
+    {from: {kind, layer}, to: {kind, layer}, rule, reason, override, undo, degraded, message}. The node was
+    written at the redirected kind/layer, and the caller is told what changed, why (a stable rule id), the
+    exact override (`intent="as_declared"`) and how to undo — so a client branches on DATA and never on
+    English. A redirect whose target namespace is not installed in this graph degrades to the guard's
+    declared CORE fallback and reports `degraded: true` here, alongside `kind_redirect_skipped` naming the
+    target it could not use. Two sibling fields ride the same feature: `kind_redirect_skipped`
+    {rule, target, reason} when the guard ABSTAINED (the write is UNCHANGED — a write must never fail
+    because of which packs are installed), and `kind_guard_overridden` {rule, target, declaredKind,
+    declaredLayer} when the caller passed `intent="as_declared"` — the caller's intent is never silently
+    overruled, and a guard that is wrong becomes countable. A guard NEVER refuses a write (#1934
+    warn-not-block, and the feature's own defining rule: a guard may never refuse a case whose right home
+    is known).
+  unchanged_when_off: >-
+    n/a — not flag-gated; all three keys are ABSENT when no guard matched, so an unguarded write's response
+    is byte-identical to before
+- response: tortoise_create_subject
+  field: kind_redirect
+  emitted_when: >-
+    the same three keys on the alias door (#12060) — this door now surfaces them, where it used to unwrap
+    `result["node"]` and drop every top-level key (the same #8171 P2 the `advisories` row above records).
+    Additive; the node and every pre-existing property keep their value. A redirect can change the node
+    LABEL as well as the kind, so `issue:<repo>#<n>` written here without a kind lands as an `:Object`
+    (objectKind `core:WorkItem`) and reports the rule that did it.
+  unchanged_when_off: >-
+    n/a — not flag-gated; the keys are ABSENT when no guard matched
+- response: tortoise_create_object
+  field: kind_redirect
+  emitted_when: >-
+    the same three keys on the object alias door (#12060), including the kind-only case — a write that is
+    already on the right LAYER but names no kind (or the NIL `other`) can still be re-filed by a guard, and
+    the message then reads "Object kind (unnamed) → core:WorkItem" rather than a no-op arrow.
+  unchanged_when_off: >-
+    n/a — not flag-gated; the keys are ABSENT when no guard matched
 - response: tortoise_create_document
   field: advisories
   emitted_when: the same condition on the alias door — this door always materializes a declared extractedFrom as

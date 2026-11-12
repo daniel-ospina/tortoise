@@ -41,7 +41,6 @@ Runnable embedded:
 from __future__ import annotations
 
 import contextlib
-import json
 import os
 import subprocess
 import sys
@@ -212,6 +211,10 @@ class TestAcceptance1RedirectAndOverride:
         props = _node_props(sdk, r["id"])
         assert props["declaredKind"] == "core:naturalPerson"
         assert props["declaredLayer"] == "subject"
+        # …and WHICH RULE moved it, on the node: a redirect that lived only in
+        # one response would be a silent mutation nobody could attribute after
+        # the process that minted it is gone (the counters are in-process).
+        assert props["kindRedirectRule"] == "repo-slug-is-not-a-person"
 
     def test_the_guard_runs_before_the_kind_layer_router(self, sdk,
                                                          no_pack_guards):
@@ -482,8 +485,8 @@ class TestAcceptance4NoModelCalls:
                 names.update(a.name.split(".")[0] for a in node.names)
             elif node.module and node.level == 0:
                 names.add(node.module.split(".")[0])
-        assert names <= {"__future__", "logging", "re", "threading",
-                         "dataclasses", "typing"}, names
+        assert names <= {"__future__", "collections", "logging", "re",
+                         "threading", "dataclasses", "typing"}, names
 
 
 # ══ 5. measurement ════════════════════════════════════════════════════════
