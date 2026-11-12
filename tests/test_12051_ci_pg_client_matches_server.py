@@ -5483,54 +5483,75 @@ def _cleanup_trap(code: str) -> str:
 
 
 def test_the_cleanup_trap_owns_only_what_this_step_created(job: dict) -> None:
-    """⛔ AN UNCONDITIONAL `rm` DELETES STATE THIS JOB NEVER WROTE, ON ANY LATER FAILURE.
+    """⛔ THE TRAP MAY REMOVE ONLY FILES THIS STEP CREATED — AND MUST REMOVE ALL OF THEM.
 
-    The trap's paths are shared with an operator (or `postgresql-common`'s own keyring), and
-    this job is POOL-ELIGIBLE. MEASURED, review cycle 12: with PGDG configuration planted and
-    the key fetch forced to fail, an unconditional trap still removed both files — the step
-    then damages the box it was supposed to leave alone. The fix records pre-existence BEFORE
-    writing and the trap skips what it did not create, so the assertion is that the trap reads
-    those flags (the executed arm cannot: `rm` is stubbed, which is stated in its docstring).
+    The job is POOL-ELIGIBLE, so both halves fail: a trap that deletes an operator's apt state
+    damages the box, and one that leaves part of this step's own state turns the next job's
+    `apt-get update` into the soft failure the ORIGIN check exists to catch. MEASURED, review
+    cycle 12: an unconditional trap over the SHARED paths removed an operator's keyring.
+    MEASURED, review cycle 14: the pre-existence-flag fix for that produced the OPPOSITE
+    half-state — a box with an operator `sources.list.d/pgdg.list` and no keyring at the shared
+    path had its file REWRITTEN to point at a keyring the trap then deleted, leaving exactly
+    the unverifiable source this step says is worse than no source at all.
+
+    So the property is STEP-PRIVATE PATHS: the two files the trap removes are names this step
+    alone writes, which is what makes the removal unconditional and safe. A `had_*` flag is
+    REFUSED rather than required, because with private paths it can only recreate the
+    half-removed state.
     """
     _, pin = _pin_step(_steps(job))
     code = _run_code(pin)
     trap = [_cleanup_trap(code)]
-    # ⛔ THE FLAG'S VALUE MUST COME FROM THE REAL PATH, AND BE READ BEFORE THE WRITE.
-    # Asserting only that the NAME appears leaves both halves of the property unpinned:
-    # MEASURED, review cycle 13 — (i) turning each detection into a probe of a path that
-    # never exists keeps the suite GREEN while the trap goes back to deleting the
-    # operator's file, and (ii) moving the flag blocks BELOW the write makes them read 1 on
-    # the step's own file, so the trap removes nothing and a pool box keeps this step's
-    # source. The ordering is the fact, exactly as it is for the keyring directory above.
-    for flag, path in (
-        ("had_sources", "/etc/apt/sources.list.d/pgdg.list"),
-        ("had_keyring", "/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc"),
+    # ⛔ STEP-PRIVATE, NOT THE SHARED PGDG PATHS. `pgdg.list` / `apt.postgresql.org.asc` are
+    # where an operator's own configuration lives; this step's files must be its own names.
+    for ours in (
+        "/etc/apt/sources.list.d/tortoise-12051-pgdg.list",
+        "/etc/apt/keyrings/tortoise-12051-pgdg.asc",
     ):
-        assert f"if [ -e {path} ]; then {flag}=1; fi" in code, (
-            f"`{flag}` is not read from `{path}`, so the trap may delete a file this step "
-            f"did not create (or skip one it did): {code[:400]!r}"
+        assert ours in trap[0], (
+            f"the trap does not remove this step's own `{ours}`, so a pool box keeps apt "
+            f"state this job added: {trap[0]!r}"
         )
-        assert f'"${{{flag}:-0}}" = 0' in trap[0], (
-            f"the trap does not GUARD on `{flag}`, so it removes a path it may not own: {trap[0]!r}"
-        )
-    assert code.index("had_sources=1") < code.index("tee /etc/apt/sources.list.d/pgdg.list"), (
-        "the sources flag is recorded AFTER the sources line already truncated the file, so "
-        "it reads 1 on this step's own write and the trap never removes it"
+    assert "/etc/apt/sources.list.d/pgdg.list" not in trap[0], (
+        "the trap removes the SHARED `/etc/apt/sources.list.d/pgdg.list` — an operator file "
+        f"this step does not own: {trap[0]!r}"
     )
-    assert code.index("had_keyring=1") < code.index('install -m 0644 "$key_file"'), (
-        "the keyring flag is recorded AFTER this step wrote the key, so it reads 1 on its "
-        "own file and the trap never removes it"
+    assert "postgresql-common/pgdg" not in code, (
+        "the step still uses the SHARED `/usr/share/postgresql-common/pgdg` path for its "
+        "keyring, so its `tee` can point an operator sources file at a keyring the trap "
+        "removes — the half-removed state that leaves an unverifiable source behind"
     )
+    assert "had_sources" not in code and "had_keyring" not in code, (
+        "the trap is keyed on pre-existence again: with STEP-PRIVATE paths that flag can only "
+        "produce the half-removed state it was meant to avoid. Remove the flag, not the removal."
+    )
+    # ⛔ `errexit` IS IN FORCE INSIDE AN EXIT TRAP, so one failing removal reds a step that
+    # SUCCEEDED and skips the rest of the cleanup (MEASURED, review cycle 13: body `exit 0`
+    # + a failing `rm` -> rc 1). Every removal must be protected.
     for rm_line in trap[0].split(";"):
         if "rm -f" in rm_line:
-            assert "|| true" in rm_line or rm_line.rstrip().endswith("true"), (
+            assert "|| true" in rm_line, (
                 "a cleanup `rm` is not protected by `|| true`: `errexit` IS in force inside "
-                "an EXIT trap, so one failing removal reds a step that SUCCEEDED and skips "
-                f"the rest of the cleanup: {rm_line!r}"
+                f"an EXIT trap, so one failing removal reds a step that SUCCEEDED: {rm_line!r}"
             )
     assert "${key_file:-}" in trap[0], (
         "the trap does not clean up the temp key file (or does it unguarded, which aborts "
         f"under `set -u` before the mktemp call): {trap[0]!r}"
+    )
+    # ⛔ BEFORE THE FIRST WRITE, not merely before the sources line: a trap moved below the key
+    # fetch leaks the `mktemp`'d key, and one moved below the keyring install leaves a partial
+    # keyring. MEASURED: both mutants stayed GREEN under the sources-line-only pin.
+    assert code.index("trap ") < code.index('key_file="$(mktemp)"'), (
+        "the EXIT trap is registered AFTER the key file is created, so a failing fetch leaks "
+        "the `mktemp`'d key on the box"
+    )
+    assert code.index("trap ") < code.index("curl -fsSL"), (
+        "the EXIT trap is registered AFTER the key fetch, so a failed fetch leaves the temp "
+        "key file behind"
+    )
+    assert code.index("trap ") < code.index("install -m 0644"), (
+        "the EXIT trap is registered AFTER the keyring install, so an interrupted install "
+        "leaves a partial keyring at this step's own path on the box"
     )
 
 
@@ -5576,12 +5597,14 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     claiming hermeticity must not need. MEASURED: on a box without that file the
     absent arm dies at the source line and reports the guard as silent.
 
-    Seven arms over the step's FIVE named pre-install branches: the os-release
+    EIGHT arms over the step's FIVE named pre-install branches: the os-release
     SOURCE, the key fetch, the codename, `apt-get update`, and the ORIGIN check
     (THREE arms: an `apt-cache` that fails, an index that loaded but does not name
-    apt.postgresql.org, and the control that reaches past), because the step
-    carries SEVEN `::error::` pairs and a whole-output search is satisfied by any
-    of them (MEASURED, review cycle 9: two gutted `exit 1`s left the suite GREEN).
+    apt.postgresql.org, and the control that reaches past) — plus the STREAM-DRAIN
+    arm (`match_then_noise`: a producer that keeps writing after the match, the only
+    shape that can show the `grep -q` + `pipefail` SIGPIPE red). The step carries
+    SEVEN `::error::` pairs, so a whole-output search is satisfied by any of them
+    (MEASURED, review cycle 9: two gutted `exit 1`s left the suite GREEN).
     ⚠️ Which arms assert WHAT, stated rather than generalised: the key-fetch,
     `apt-get update`, os-release SOURCE and ORIGIN-fires arms name their own
     branch's text AND assert the next branch's is ABSENT; the `apt-cache`-fails
@@ -5665,7 +5688,7 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # (MEASURED, review cycle 9), which teaches the next lane to widen the guard
     # instead of trusting it.
     assert re.search(
-        r"install\b[^\n]*\"\$key_file\"[^\n]*apt\.postgresql\.org\.asc", code_only(prefix)
+        r"install\b[^\n]*\"\$key_file\"[^\n]*tortoise-12051-pgdg\.asc", code_only(prefix)
     ), (
         "the key file is not the one installed to the keyring path, so `signed-by` could "
         "point at a different (or absent) key than the fetch wrote"
@@ -5976,12 +5999,16 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     Read from `_run_code` (comment lines stripped, `${…}` INTACT — the suite name
     IS an expansion, so `_normalised_code` would erase the fact under test).
 
-    Mutations re-measured at this head (backed-up workflow, sha256-identical after
-    each restore): delete the sources line -> 1 failed (THIS row); delete the EXIT
-    trap -> 1 failed (THIS row); unguard the os-release source -> 2 failed (THIS row
-    and the executed arm); `-16` -> `-18` on the install -> 3 failed (the pin rows,
-    where the install major is asserted). Each mutant's own message was read, not
-    just the count — a red for the wrong reason is not evidence.
+    Mutations re-measured at this head (workflow copied aside, sha256-identical after
+    each restore): delete the sources line -> 1 failed (THIS row); delete the EXIT trap
+    -> 2 failed (THIS row and `test_the_cleanup_trap_owns_only_what_this_step_created`);
+    move the EXIT trap below the key fetch, or below the keyring install -> 2 failed (the
+    same pair); point the step back at the SHARED `sources.list.d/pgdg.list` /
+    `postgresql-common/pgdg` paths -> 3 failed (THIS row, the cleanup-trap row, and the
+    executed arm); unguard the os-release source -> 2 failed (THIS row and the executed
+    arm); `-16` -> `-18` on the install -> 3 failed (the pin rows, where the install major
+    is asserted). Each mutant's own message was read, not just the count — a red for the
+    wrong reason is not evidence.
     """
     _, pin = _pin_step(_steps(job))
     code = _run_code(pin)
@@ -6003,9 +6030,9 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
         "#12051 round 3's whole mechanism is that one line."
     )
     sources_line = sources[0]
-    assert "signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc" in sources_line, (
-        "the PGDG sources line does not bind the keyring it just installed, so apt "
-        f"would have to accept the repo unsigned (or refuse it): {sources_line!r}"
+    assert "signed-by=/etc/apt/keyrings/tortoise-12051-pgdg.asc" in sources_line, (
+        "the PGDG sources line does not bind the step-private keyring it installed, so "
+        f"apt would have to accept the repo unsigned (or refuse it): {sources_line!r}"
     )
     assert "${VERSION_CODENAME}-pgdg" in sources_line, (
         "the PGDG suite is not derived from the box's own codename, so the step would "
@@ -6024,15 +6051,15 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     # so every equivalent spelling is accepted (`install -d`, `install -d -m 0755`,
     # `mkdir -p`, and `install -D` which creates the leading components itself) —
     # pinning the spelling false-redded the `install -D` rewrite (measured, cycle 4).
-    key_install = re.search(r"install\s+[^\n]*apt\.postgresql\.org\.asc", code)
+    key_install = re.search(r"install\s+[^\n]*tortoise-12051-pgdg\.asc", code)
     assert key_install, (
-        "the PGDG keyring is never installed with `install … apt.postgresql.org.asc` — "
+        "the PGDG keyring is never installed with `install … tortoise-12051-pgdg.asc` — "
         "the `signed-by` on the sources line would point at nothing"
     )
     if not re.search(r"(?:^|\s)-[A-Za-z]*D", key_install.group(0)):
         mkdir = re.search(
             r"(?:install\b[^\n]*?-d\b[^\n]*|mkdir\b[^\n]*)"
-            r"/usr/share/postgresql-common/pgdg",
+            r"/etc/apt/keyrings",
             code,
         )
         assert mkdir, (
@@ -6137,13 +6164,18 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     # paid for once (#12069's continued-install P1).
     cleanup = _cleanup_trap(code)
     for artifact, why in (
-        ("/etc/apt/sources.list.d/pgdg.list", "the PGDG source it added"),
-        ("apt.postgresql.org.asc", "the keyring it installed"),
+        ("/etc/apt/sources.list.d/tortoise-12051-pgdg.list", "the PGDG source it added"),
+        ("/etc/apt/keyrings/tortoise-12051-pgdg.asc", "the keyring it installed"),
     ):
         assert artifact in cleanup, (
             f"the EXIT trap does not remove {artifact} ({why}), so a pool box keeps state "
             f"this step added: {cleanup!r}"
         )
+    assert "had_sources" not in code and "had_keyring" not in code, (
+        "the trap is keyed on pre-existence again: with STEP-PRIVATE paths that flag can only "
+        "produce the half-removed state (a rewritten file whose keyring is gone). Remove the "
+        "flag, not the removal."
+    )
     key_target = re.search(r"curl\s[^\n]*?(?:-o|--output)\s+\"?\$\{?(\w+)", code)
     assert key_target, (
         "the key fetch does not write to a variable (`curl -o \"$…\"`), so the EXIT trap "
@@ -6153,17 +6185,26 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
         "the EXIT trap does not remove the downloaded key file, so every run leaves a temp "
         f"file on the box: {cleanup!r}"
     )
-    assert cleanup.index("/etc/apt/sources.list.d/pgdg.list") < cleanup.index(
-        "apt.postgresql.org.asc"
+    assert cleanup.index("/etc/apt/sources.list.d/tortoise-12051-pgdg.list") < cleanup.index(
+        "/etc/apt/keyrings/tortoise-12051-pgdg.asc"
     ), (
         "the trap removes the keyring BEFORE the sources file that is signed by it, so "
         "there is a window in which the box advertises a source it cannot verify — a soft "
         f"`apt-get update` failure for the next job on the box: {cleanup!r}"
     )
-    assert code.index("trap ") < code.index("apt.postgresql.org/pub/repos/apt"), (
-        "the EXIT trap is registered AFTER the sources line, so any failure from there on "
-        "leaves the PGDG source on the box"
-    )
+    # ⛔ BEFORE THE FIRST WRITE, not merely before the sources line: a trap moved below the
+    # key fetch leaks the `mktemp`'d key, one moved below the keyring install leaves a
+    # partial keyring. MEASURED: both mutants stayed GREEN under the sources-only pin.
+    for first_write in (
+        'key_file="$(mktemp)"',
+        "curl -fsSL",
+        "install -m 0644",
+        "apt.postgresql.org/pub/repos/apt",
+    ):
+        assert code.index("trap ") < code.index(first_write), (
+            f"the EXIT trap is registered AFTER `{first_write}`, so any failure from there on "
+            "leaves part of what this step wrote on the box"
+        )
 
 
 def _precondition_line_re() -> re.Pattern[str]:
