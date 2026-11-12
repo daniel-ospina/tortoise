@@ -121,7 +121,8 @@ from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, UnaddressableEntityName, all_name_holder_ids,
-    entity_create_lock, resolve_document_target_id, resolve_entity_id)
+    entity_create_lock, resolve_document_target_id,
+    resolve_entity_id_same_entity)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
@@ -23488,8 +23489,7 @@ class TortoiseSDK:
         # coordinate to one live id and match the id: the identity decision
         # lives in the resolver, not here.
         try:
-            entity_id = resolve_entity_id(
-                proj.g, "Object", topic, name_props=("name", "canonical_name"))
+            entity_id = resolve_entity_id_same_entity(proj.g, "Object", topic)
             unaddressable = False
         except UnaddressableEntityName:
             # EXACTLY ONE live holder, and it carries no `id` property. The
@@ -30913,8 +30913,8 @@ class TortoiseSDK:
         # wired the raw coordinate. Resolve id-or-name to EXACTLY ONE live id
         # (>=2 -> AmbiguousEntityName) and rebind so every downstream write uses
         # the id, never the name.
-        resolved_approver = resolve_entity_id(proj.g, "Subject", approver_id,
-                                             addressing=ADDRESSING_SOURCE)
+        resolved_approver = resolve_entity_id_same_entity(
+            proj.g, "Subject", approver_id, addressing=ADDRESSING_SOURCE)
         if resolved_approver is None:
             raise ValueError(
                 f"Cannot file human approval: Subject {approver_id!r} does not exist"
@@ -31174,8 +31174,8 @@ class TortoiseSDK:
         # returned None for an id-valued author — AND took `rows[0]` with no
         # live filter, a silent pick over same-name carriers. Resolve id-first
         # then one live case-insensitive name (>=2 -> AmbiguousEntityName).
-        resolved = resolve_entity_id(proj.g, "Subject", author,
-                                    case_insensitive_name=True)
+        resolved = resolve_entity_id_same_entity(proj.g, "Subject", author,
+                                                case_insensitive_name=True)
         if resolved is None:
             return {**chain, "subject": None}
         rows = proj.g.query(
@@ -49826,7 +49826,8 @@ class TortoiseSDK:
         # outcomes into one score. The resolver now returns exactly one live id
         # (id match still wins) and REFUSES on >=2 same-name carriers; a dead
         # coordinate resolves to None and yields the vacuous posterior.
-        resolved_sid = resolve_entity_id(proj.g, "Subject", subject_id)
+        resolved_sid = resolve_entity_id_same_entity(
+            proj.g, "Subject", subject_id)
         if resolved_sid is None:
             return {"mean": 0.5, "total_events": 0, "impl_count": 0,
                     "nand_count": 0, "alpha": 1.0, "beta": 1.0,
@@ -50026,7 +50027,8 @@ class TortoiseSDK:
         # #3633 route-then-refuse: the `s.id = $sid OR s.name = $sid` start
         # unioned BOTH same-name carriers' owned entities. Resolve to exactly
         # one live id (>=2 -> AmbiguousEntityName), then traverse from that id.
-        resolved_sid = resolve_entity_id(proj.g, "Subject", subject_id)
+        resolved_sid = resolve_entity_id_same_entity(
+            proj.g, "Subject", subject_id)
         r = proj.g.query(
             # #6976: load-bearing `WITH s` — without it FalkorDB 6.0.0 drops the
             # id predicate at the re-binding MATCH below (foreign rows).

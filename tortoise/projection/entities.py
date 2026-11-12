@@ -6023,25 +6023,36 @@ class _EntityHandlers:
             # identity miss (`ambiguous-entity-name` for 2+, or
             # `unregistered-reference` for a live-but-id-less carrier), which
             # fails the run.
-            from tortoise.entity_identity import _name_holder_ids_same_entity
+            from tortoise.entity_identity import (
+                _live_holders_same_entity,
+                _name_holder_ids_same_entity,
+            )
             # #12120 finding 1: the mention / non-exempt classification must be
             # taken over the SAME key space `resolve_fold_name` resolves on (the
             # writer's folded union) — otherwise a fold-only TERMINAL carrier
             # read as "no holder at all", the miss was recorded NON-exempt, and
-            # `rebuild_all` failed a journal the union could have folded. The
-            # live/any-status split is unchanged: `mention=True` is still granted
-            # only to the terminal-only arm.
-            # ⛔ The UN-COLLAPSED read, deliberately (#12120 V-GATE finding 1):
-            # `_live_holders_same_entity` collapses merged-away carriers onto
-            # their survivor and re-applies a LIVE filter once it hops, so a
-            # TERMINAL survivor reached through a hop vanished and a held name
-            # read as unheld — flipping `mention` False and failing the run on
-            # the SDK's own journal. "Is the name held / is any incarnation live"
-            # is not "which entity does it land on".
+            # `rebuild_all` failed a journal the union could have folded.
+            #
+            # ⛔ TWO reads, because they answer TWO different questions, and the
+            # pair must agree with the resolver `mention` describes:
+            #   * `_held` — "is this name REGISTERED at all" — UN-COLLAPSED and
+            #     ANY-status. Collapsing drops a terminal survivor reached
+            #     through a `resolved_from` hop, which would make a held name
+            #     read as unheld (#12120 V-GATE finding 1).
+            #   * `_live_holders` — "can this name resolve to a LIVE entity" —
+            #     COLLAPSED, because that is exactly what `resolve_fold_name`
+            #     does. Judging it on raw nodes contradicts the resolver: a
+            #     merged-away carrier stays live while its survivor is retired,
+            #     so the raw read said "a live holder exists, fail" for a name
+            #     the resolver could not resolve to any live entity — recording
+            #     a NON-exempt miss and making the SDK's own journal
+            #     un-rebuildable (#12120 review round 1, P2). `mention=True` is
+            #     the bounded no-op for "registered, but no live incarnation may
+            #     be resurrected" (R5), and this shape is that case.
             _held = _name_holder_ids_same_entity(
                 self.g, "Object", name, any_status=True)
-            _live_holders = _name_holder_ids_same_entity(
-                self.g, "Object", name)
+            _live_holders = _live_holders_same_entity(
+                self.g, "Object", name)[0]
             object_id = resolve_fold_name(
                 self.g, "Object", name, context="status fold object",
                 mention=bool(_held) and not _live_holders)

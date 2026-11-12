@@ -1199,7 +1199,8 @@ def resolve_entity_id(g, label: str, value: str | None, *,
 
 def resolve_entity_id_same_entity(g, label: str, value: str | None, *,
                                   addressing: str | None = None,
-                                  record_misses: bool = True) -> str | None:
+                                  record_misses: bool = True,
+                                  case_insensitive_name: bool = False) -> str | None:
     """``resolve_entity_id`` over the WRITER's folded union — one call, one key space.
 
     #12120: the write path (:func:`resolve_or_mint`) resolves ``name`` ·
@@ -1216,9 +1217,11 @@ def resolve_entity_id_same_entity(g, label: str, value: str | None, *,
     folded = normalize_entity_name(value) if value else ""
     if not folded:
         return resolve_entity_id(g, label, value, addressing=addressing,
-                                 record_misses=record_misses)
+                                 record_misses=record_misses,
+                                 case_insensitive_name=case_insensitive_name)
     return resolve_entity_id(
         g, label, value, addressing=addressing, record_misses=record_misses,
+        case_insensitive_name=case_insensitive_name,
         name_props=("name", "canonical_name"), also=(folded,),
         alias_of=(folded,))
 

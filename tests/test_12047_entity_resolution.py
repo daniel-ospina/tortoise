@@ -1964,3 +1964,100 @@ class TestThe12120RejectSentinelIsDefinitive:
             "RETURN count(e)").result_set[0][0]
         assert after == before, (
             "a DedupeRejected was emitted about a Point the row was not about")
+
+
+class TestThe12120ReadersOutsideTheEntityModule:
+    """The by-name readers in the rest of the codebase.
+
+    The #3633 sweep only matches literal Cypher, so a *Python* `resolve_entity_id`
+    call asking the raw key space was invisible to it: the writer folds, the
+    reader does not, and the reader describes a different node (or no node).
+    Every one of those callers now goes through
+    `entity_identity.resolve_entity_id_same_entity`.
+    """
+
+    def test_a_retired_survivor_with_a_LIVE_carrier_still_takes_the_exemption(
+            self, tmp_path):
+        """The mirror error of the un-collapsed read.
+
+        `_held` must be un-collapsed ("is this name registered?"), but
+        `_live_holders` must be COLLAPSED, because that is what
+        `resolve_fold_name` actually answers ("can this name resolve to a live
+        entity?"). Judging liveness on raw nodes contradicts the resolver: a
+        merged-away carrier stays LIVE while its survivor is retired, so the raw
+        read reported "a live holder exists — fail" for a name the resolver could
+        not resolve to any live entity, recording a NON-exempt miss and making
+        `rebuild_all` refuse the SDK's own journal.
+        """
+        from tortoise.sdk import TortoiseSDK
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t.db"),
+                          event_log_path=str(events / "events.jsonl"),
+                          namespace=f"test_suite_{os.urandom(4).hex()}")
+        try:
+            survivor = sdk.create_object("Acme Corp", "document")["id"]
+            candidate = sdk.create_object("Acme Corporaton", "document")["id"]
+            assert candidate != survivor, "fixture drift: no merge to set up"
+            sdk.approve_merge(candidate, action="merge")
+            # ONLY the survivor is retired — the carrier stays live (the merge is
+            # non-destructive). This is the shape that used to fail.
+            sdk.update_entity(survivor, status="superseded")
+            carrier = sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) RETURN o.status, o.resolved_from",
+                params={"id": candidate}).result_set
+            assert carrier and carrier[0][1] == survivor, (
+                f"fixture drift: the carrier does not point at the survivor: {carrier}")
+            assert carrier[0][0] not in (
+                "superseded", "deprecated", "archived", "retracted"), (
+                f"fixture drift: the carrier is not LIVE: {carrier}")
+
+            sdk.create_event("ev-1", "github.issue.open",
+                             object="Acme Corporaton", objectType="Object")
+
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+            row = sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) RETURN o.status",
+                params={"id": survivor}).result_set
+            assert row and row[0][0] == "superseded", (
+                "the retired incarnation was resurrected by the fold")
+        finally:
+            sdk.close()
+
+    def test_belief_timeline_answers_for_a_fold_colliding_spelling(self, sdk_factory):
+        """`belief_timeline("the widget")` silently returned `[]` while
+        `belief_timeline("Widget")` answered — an empty list read as "no beliefs",
+        which is the exact class #12047 exists to remove."""
+        sdk = sdk_factory()
+        obj = sdk.create_object("Widget", "document")["id"]
+        point = sdk.create_point("decision", "the widget ships in Q3")["id"]
+        sdk.create_edge("aboutObject", point, obj)
+
+        named = sdk.belief_timeline("Widget")
+        folded = sdk.belief_timeline("the widget")
+        assert named, "fixture drift: the belief did not attach to the Object"
+        assert folded == named, (
+            "a fold-colliding spelling answered with a different chain "
+            f"({len(folded)} vs {len(named)} entries)")
+
+    def test_file_human_approval_accepts_a_fold_colliding_approver(self, sdk_factory):
+        """`file_human_approval` hard-refused a name the create door had accepted.
+
+        The coordinate is the FOLDED form, which exists in neither stored
+        property: `create_subject("Acme Corp")` stores `name='Acme Corp'` and
+        `canonical_name='acme corp'`, so the input `"the acme corp"` matches no
+        raw arm and only the union's folded spelling reaches the node. (Using the
+        surface form as the coordinate left this pin GREEN under the mutant — the
+        raw read hit `name` — measured.)
+        """
+        sdk = sdk_factory()
+        sdk.create_subject("Acme Corp", subjectKind="naturalPerson")
+        artifact = sdk.create_object("Spec", "document")["id"]
+        claim = sdk.create_point("statement", "the spec is approved")["id"]
+
+        out = sdk.file_human_approval(
+            approver_id="the acme corp", artifact_id=artifact, point_ids=[claim])
+        assert out["event_id"] and out["decision_point_id"], (
+            f"the approval was not recorded: {out}")
