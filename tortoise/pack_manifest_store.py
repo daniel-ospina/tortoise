@@ -331,58 +331,18 @@ def validate_manifest(
     # Acceptance is the signal the declaration will work, so refuse it here and
     # name the limitation rather than ship a guard that cannot fire.
     #
-    # ⛔ AND A NON-MAPPING `ontology` MUST STILL GET A VERDICT, NOT A RAISE
-    # (round-9 review P2, measured): `ontology:` (null) / `ontology: core` /
-    # `ontology: [1,2]` are plausible authoring mistakes, and a bare
-    # `raw.get("ontology", {}).get(...)` turns each into an `AttributeError` out
-    # of this function — an unhandled 500 on the REST pre-check
-    # (`hosted_api` calls `validate_manifest_for_tenant` with no try), where the
-    # registry-isolation path already returned a clean `ok=False`. The sibling
-    # `_tenant_fold_declarations` guards the same shape for the same reason.
+    # ⛔ THIS READ MUST NOT RAISE, AND THE SHAPE IS **NOT** CHECKED HERE.
+    # (round-9 review P2 measured the RAISE: `ontology:` null / `core` / `[1,2]`
+    # became an unhandled `AttributeError` out of a bare `.get(...)`, i.e. a 500
+    # on the REST pre-check, which `hosted_api` calls with no try.)
+    # (round-13 review P3 measured the DUPLICATION)
+    # (round-13 review P3): this route refused those shapes with its own wording
+    # while `PackRegistry._validate` — the shared validator both surfaces use —
+    # still answered some of them with a raw `AttributeError` string, which is two
+    # owners of one rule and, measured, a divergence (`ontology.extraction` was
+    # refused here and accepted there). The registry now names the field, so this
+    # route inherits the message through `reg.errors[ns]` below.
     _ont = raw.get("ontology")
-    # ⛔ AND A MEMBER OF `ontology`, not only `ontology` itself (round-11 review
-    # P3, measured): `objectKinds:` null returned `"'NoneType' object is not
-    # iterable"` and `relations: nope` returned `"'str' object has no attribute
-    # 'get'"` — `ok=False` both times, so not the 500 class, but the same "a
-    # verdict that names no field is a stack trace with a status code" defect one
-    # key over. Only the members this route READS are checked, so this cannot
-    # diverge from the registry's own schema validation beyond naming the field.
-    if isinstance(_ont, dict):
-        _LIST_MEMBERS = ("objectKinds", "documentKinds", "eventKinds",
-                         "pointKinds", "actionKinds", "relations", "chains",
-                         "hierarchies")
-        # ⛔ `extraction` IS NOT AN `ontology.` MEMBER (round-12 review P2): the
-        # registry reads `raw["extraction"]` (a TOP-LEVEL key), so listing it here
-        # made the hosted route refuse `ontology: {extraction: [a]}` while
-        # `pack validate` loaded the same manifest `✓` Clean — a NEW divergence
-        # between the two surfaces, in the very code that exists to keep them
-        # honest. Only members the registry reads from `ontology` are listed.
-        _MAP_MEMBERS = ("kindDefs", "subclassOf", "equivalentTo")
-        for _k in _LIST_MEMBERS:
-            if _k in _ont and not isinstance(_ont[_k], list):
-                return ManifestValidation(
-                    False, namespace=ns,
-                    errors=[f"ontology.{_k} must be a list — got "
-                            f"{type(_ont[_k]).__name__}"])
-        for _k in _MAP_MEMBERS:
-            if _k in _ont and not isinstance(_ont[_k], dict):
-                return ManifestValidation(
-                    False, namespace=ns,
-                    errors=[f"ontology.{_k} must be a mapping — got "
-                            f"{type(_ont[_k]).__name__}"])
-    # `ontology:` present-but-null is the same authoring mistake as `ontology:
-    # core`, so the test is the KEY, not the value (#12060 round-11).
-    if "ontology" in raw and not isinstance(_ont, dict):
-        # ⛔ ITS OWN MESSAGE, not the registry's internal `AttributeError` text
-        # (round-10 review P3, measured: `ontology:` null / `core` / `[1, 2]`
-        # returned `"'NoneType' object has no attribute 'get'"` as the whole
-        # diagnostic, while an `objectKinds` typo gets a precise sentence). A
-        # verdict that names no field is a stack trace with a status code.
-        return ManifestValidation(
-            False, namespace=ns,
-            errors=["ontology must be a mapping (extends / objectKinds / "
-                    "documentKinds / guards / …) — got "
-                    f"{type(_ont).__name__}"])
     if isinstance(_ont, dict) and _ont.get("guards"):
         return ManifestValidation(
             False, namespace=ns,

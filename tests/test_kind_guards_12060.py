@@ -2229,15 +2229,15 @@ depends_on: []
         assert core_lines[0].startswith("pack catalog: guard")
 
     def test_a_malformed_ontology_MEMBER_names_the_field(self):
-        """Round-11 review P3: `objectKinds:` null gave `'NoneType' object is not
-        iterable`, `relations: nope` gave `'str' object has no attribute 'get'` —
-        `ok=False` both times, but the message named no field.
+        """`objectKinds:` null gave `'NoneType' object is not iterable` (round-11
+        review P3); `relations: nope` gave `'str' object has no attribute 'get'`.
 
-        ⛔ AND `extraction` IS NOT ONE OF THESE (round-12 review P2): it is a
-        TOP-LEVEL key the registry reads from `raw`, so checking
-        `ontology.extraction` made the hosted route refuse a manifest that
-        `pack validate` loads `✓` Clean — a NEW divergence in the code that exists
-        to keep the two surfaces honest. The control below is that divergence.
+        ⛔ AND THE WORDING IS THE SHARED VALIDATOR'S, ON BOTH SURFACES (round-13
+        review P3): the hosted pre-check had grown its OWN copy of these checks
+        while `PackRegistry._validate` still answered some shapes with the raw
+        exception — two owners of one rule, and (measured) a divergence. The
+        registry names the field now and this route inherits the message, so the
+        assertions below are the registry's words, reached through both gates.
         """
         from tortoise.pack_manifest_store import validate_manifest
 
@@ -2261,10 +2261,68 @@ depends_on: []
             joined = " ".join(errors)
             assert wording in joined, (body, errors)
             assert type_name in joined, (body, errors)
-        # a valid ontology is still accepted, and `ontology.extraction` is not a
-        # thing this route refuses (it is the top level's key, not this block's)
-        assert validate_manifest(base.format(
-            body="  extends: core\n  objectKinds: [concept]")).ok is True
+        # ⛔ THE DIVERGENCE CONTROL, and the reason this test exists: `extraction`
+        # is a TOP-LEVEL key the registry reads from `raw`, NOT an `ontology.`
+        # member — so `ontology.extraction` must be ACCEPTED by both surfaces
+        # (round-12 review P2 found this route refusing it while `pack validate`
+        # loaded the same manifest `✓` Clean). Restoring it to the member list
+        # fails HERE, which is what the first version of this test did not do.
+        under_ontology = validate_manifest(base.format(
+            body="  extends: core\n  objectKinds: [concept]\n  extraction: [a]"))
+        assert under_ontology.ok is True, under_ontology.errors
+        assert not any("ontology.extraction" in e for e in under_ontology.errors)
+        # …and the TOP-LEVEL key is the one the registry validates
+        top = base.format(body="  extends: core\n  objectKinds: [concept]")
+        assert validate_manifest(top).ok is True
+        bad_top = top.replace("depends_on: []", "extraction: [a]\ndepends_on: []")
+        refused = validate_manifest(bad_top)
+        assert refused.ok is False, refused.errors
+        assert any("extraction must be a map" in e for e in refused.errors), (
+            refused.errors)
+
+    def test_the_registry_names_the_field_too_not_only_the_hosted_route(
+            self, tmp_path):
+        """The CLI gate is the one the guide names; it must name the field.
+
+        Round-13 review P3, measured: `PackRegistry(dir).load_all()` answered
+        `objectKinds:` null with `"'NoneType' object is not iterable"` and
+        `relations: nope` with `"'str' object has no attribute 'get'"` — the
+        stack-trace-with-a-status-code class, on the surface
+        `docs/EXPANSION_PACKS.md` tells authors to trust, while the hosted
+        pre-check named the field. Both now come from `_validate`.
+        """
+        from tortoise.pack_registry import PackRegistry
+
+        seen = {"n": 0}
+
+        def errors_for(body):
+            seen["n"] += 1
+            d = tmp_path / f"case{seen['n']}"
+            pack = d / "acme"
+            pack.mkdir(parents=True)
+            (pack / "manifest.yaml").write_text(
+                "namespace: acme\nname: Acme\nversion: \"0.1.0\"\ntier: free\n"
+                f"ontology:\n{body}\ndepends_on: []\n")
+            reg = PackRegistry(d)
+            reg.load_all()
+            return " ".join(reg.errors.get("acme") or [])
+
+        assert "ontology.objectKinds must be a list" in errors_for(
+            "  objectKinds:")
+        assert "ontology.relations must be a list" in errors_for(
+            "  extends: core\n  relations: nope")
+        assert "ontology.kindDefs must be a mapping" in errors_for(
+            "  extends: core\n  kindDefs: [1]")
+        # and a valid manifest still loads, so the refusals are shapes not packs
+        reg = PackRegistry(tmp_path / "clean")
+        (tmp_path / "clean" / "acme").mkdir(parents=True)
+        (tmp_path / "clean" / "acme" / "manifest.yaml").write_text(
+            "namespace: acme\nname: Acme\nversion: \"0.1.0\"\ntier: free\n"
+            "ontology:\n  extends: core\n  objectKinds: [concept]\n"
+            "depends_on: []\n")
+        reg.load_all()
+        assert reg.errors == {}, reg.errors
+        assert "acme" in reg.packs
 
     def test_a_fromKinds_scope_naming_no_CORE_kind_is_refused(self):
         """`core:WrokItem` is a typo the own-namespace arm cannot see.

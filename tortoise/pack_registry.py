@@ -2041,6 +2041,32 @@ class PackRegistry:
             errors.append("namespace must not contain whitespace")
 
         ont = raw.get("ontology", {})
+        # ⛔ A MALFORMED `ontology` OR MEMBER NAMES THE FIELD (round-13 review P3,
+        # measured): `objectKinds:` null surfaced `"'NoneType' object is not
+        # iterable"` and `relations: nope` surfaced `"'str' object has no
+        # attribute 'get'"` — a stack trace with a status code, on the CLI gate
+        # the guide tells authors to trust. The hosted pre-check had grown its own
+        # duplicate of these checks; the duplication is gone and this is the ONE
+        # place that refuses them, so the two surfaces cannot word it differently.
+        if not isinstance(ont, dict):
+            errors.append(
+                "ontology must be a mapping (extends / objectKinds / "
+                f"documentKinds / guards / …) — got {type(ont).__name__}")
+            return errors
+        for _kf in KIND_FIELDS:
+            if _kf in ont and not isinstance(ont[_kf], list):
+                errors.append(f"ontology.{_kf} must be a list — got "
+                              f"{type(ont[_kf]).__name__}")
+        for _kf in ("relations", "chains", "hierarchies"):
+            if _kf in ont and not isinstance(ont[_kf], list):
+                errors.append(f"ontology.{_kf} must be a list — got "
+                              f"{type(ont[_kf]).__name__}")
+        for _kf in ("kindDefs", "subclassOf", "equivalentTo"):
+            if _kf in ont and not isinstance(ont[_kf], dict):
+                errors.append(f"ontology.{_kf} must be a mapping — got "
+                              f"{type(ont[_kf]).__name__}")
+        if errors:
+            return errors
 
         # Collect all pack-declared kinds (used by relation + subclassOf +
         # kindDefs + extraction validation). Empty when ontology is absent.
