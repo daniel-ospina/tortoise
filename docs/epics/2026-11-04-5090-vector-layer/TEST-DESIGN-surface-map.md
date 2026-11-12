@@ -258,26 +258,33 @@ such a token, or whose rows are ragged, is not exempt and is graded instead — 
 unreadable (exit 2) or reding `R5 <label>` (exit 1), measured for each shape; and **rewording the
 crosswalk header** reds for the same reason (measured:
 `| plan section | seam / interface | surface names | note |` → `R5 plan section: names no surface`).
-**One hole is open and is not one of those exemptions:** a `|` line indented by 1–3 spaces belongs to no
-block at all — blocks are built from lines starting with `|` at column 0 — so it is never graded, and an
-invalid indented row grades `CLEAN` (measured; markdown still renders it as a row). A *required* row
-cannot hide that way (its seam token is then missing from the graded rows and R5 reds), but a row with
-no seam token can. Filed as #11415, with the fix direction (left-strip before the block test, and a
-self-test mutation that indents a blanked row).
+**The indentation hole this section used to record as OPEN is closed (#11415).** A `|` line indented by
+1–3 spaces used to belong to no block at all — blocks were built from lines starting with `|` at column 0
+— so it was never graded, and an invalid indented row graded `CLEAN` (measured; markdown still renders it
+as a row). A *required* row could not hide that way (its seam token was then missing from the graded rows
+and R5 red), but a row with no seam token could. ONE bound now decides what a row is —
+`MAX_TABLE_INDENT`, 0–3 leading spaces then `|` — applied by `_is_table_line` in the block builder, the
+seam discovery, the R5 presence arm **and the `--self-test` mutators** (`_line_matches`), and spelled
+into the §1/§3/§4 row regexes; the harness runs
+its whole population twice, on the shipped map and on a copy whose rows are all indented 2 spaces, so a
+mutator or an arm that can only reach column 0 is caught instead of silent. ⚠️ The 4+ boundary is
+relative to the containing block and the checker models document-column indentation only; the map's
+tables are top-level, so no row can be hidden that way here.
 A second table belongs in its own section.
 
 The `--self-test` arm exists because a checker that passes on everything is worse than no checker:
-it applies the **twenty-one** mutations an editor actually makes (remove a row, **remove a row and every
+it applies the **twenty-two** mutations an editor actually makes (remove a row, **remove a row and every
 mention of it**, blank a cell, blank a **crosswalk** row's surface cell, **split a blanked crosswalk row
 out of the table with an inserted separator**, **retype a crosswalk row's surface cell as the bare token
 `surface` so it impersonates the header**, **delete a crosswalk row's surface cell** (one column short),
 **rename a crosswalk row and blank its cell**, **add a crosswalk row with no `§` label and a blank cell**,
-**append an ordinary §5 table with a `surface` column and require it to STAY CLEAN**, restate a failure
-as a mechanism, retype a layer as a mechanism, retype a crosswalk surface as one that has no row,
-**splice a raw `|` into a cell**, **splice a `\\|` into a cell**, drop a child, drop a capability, forget
-a seam, destroy the section structure, **append a duplicate section-number decoy**) to an in-memory copy
-and **requires each mutation's stated outcome** — twenty must be caught, and one, a **NEGATIVE
-control**, must leave the verdict UNCHANGED. That is the same discipline the epic applies to its own probe
+**insert a blanked crosswalk row INDENTED one space** (#11415 — the shape the pre-fix harness could not
+express, which is why the hole survived it), **append an ordinary §5 table with a `surface` column and
+require it to STAY CLEAN**, restate a failure as a mechanism, retype a layer as a mechanism, retype a
+crosswalk surface as one that has no row, **splice a raw `|` into a cell**, **splice a `\\|` into a
+cell**, drop a child, drop a capability, forget a seam, destroy the section structure, **append a
+duplicate section-number decoy**) to an in-memory copy and **requires each mutation's stated outcome**
+— twenty-one must be caught, and one, a **NEGATIVE control**, must leave the verdict UNCHANGED. That is the same discipline the epic applies to its own probe
 — *an instrument that cannot fail is not an instrument.* "Every mention of it" is meant literally: the
 case deletes the mentions, because the first version of the case **renamed** them to `SF1` and so
 never built the consistent shrink its own label claimed.

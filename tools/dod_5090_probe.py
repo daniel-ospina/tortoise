@@ -1785,11 +1785,25 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #: ⛔ This is a READING of the six surfaces, not a removal from them: `#11455`
 #: forbids dropping `.env.example` from the walk, because a walk that skipped it
 #: would report `set ON in: none` over a tree that arms it.
+#:
+#: ⛔ **The reading is per FILE, not per surface root** (fresh review of PR #12016,
+#: P2). `Dockerfile` is a CLASS: this repo builds its two deployed images from
+#: `Dockerfile.hosted` (`deploy-hosted.yml` builds it) and `Dockerfile.selfhost`
+#: (`docker-compose.yml`'s `build.dockerfile`), and an exact-filename walk read
+#: NEITHER — the surface reported `ABSENT` while two image build files shipped,
+#: and `deployment["on"]` could read `True` off an armed compose file while the
+#: hosted image shipped the gate off: the `#11455` false PASS one surface-pair
+#: over, materialising the moment `#11086` arms the compose file.
 DEPLOYMENT_SURFACES: tuple[str, ...] = (
     "docker-compose.yml",
     "docker-compose.yaml",
     "Dockerfile",
 )
+
+#: The files the `Dockerfile` surface stands for. An `ENV` in any image build file
+#: reaches the running container's environment, so each variant is a deployment
+#: input of its own — a single armed variant must not stand in for the rest.
+IMAGE_BUILD_GLOB = "Dockerfile*"
 
 
 #: ⛔ There is deliberately NO truthy vocabulary in this module. The values a
@@ -1989,6 +2003,20 @@ def flag_in_shipped_configs(flag: str) -> dict:
     """
     from tortoise.env_truthy import is_truthy
 
+    def _candidates(rel: str) -> list[Path]:
+        """The files one `CONFIG_SURFACES` root stands for.
+
+        `Dockerfile` is a CLASS of file, not one filename (see
+        `DEPLOYMENT_SURFACES`): this repo ships `Dockerfile.hosted` and
+        `Dockerfile.selfhost` and no plain `Dockerfile`, so an exact match walked
+        none of the image build files while reporting the surface `ABSENT`.
+        """
+        if rel == "Dockerfile":
+            return sorted(p for p in REPO_ROOT.glob(IMAGE_BUILD_GLOB) if p.is_file())
+        target = REPO_ROOT / rel
+        return ([target] if target.is_file()
+                else sorted(target.rglob("*")) if target.is_dir() else [])
+
     hits: list[str] = []
     searched: list[str] = []
     mentions: list[str] = []
@@ -1997,12 +2025,12 @@ def flag_in_shipped_configs(flag: str) -> dict:
     per_surface: dict[str, dict] = {}
     for rel in CONFIG_SURFACES:
         target = REPO_ROOT / rel
-        present = target.exists()
-        candidates = ([target] if target.is_file()
-                      else sorted(target.rglob("*")) if target.is_dir() else [])
+        candidates = _candidates(rel)
+        present = bool(candidates) or target.exists()
         surface_hits: list[str] = []
         surface_searched: list[str] = []
         surface_unreadable: list[str] = []
+        surface_file_hits: dict[str, list[str]] = {}
         for path in candidates:
             if not path.is_file():
                 continue
@@ -2045,6 +2073,7 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     hit = f"{posix}: {line.strip()[:90]}"
                     hits.append(hit)
                     surface_hits.append(hit)
+                    surface_file_hits.setdefault(posix, []).append(hit)
         if not present:
             state = "ABSENT"
         elif surface_unreadable:
@@ -2054,24 +2083,44 @@ def flag_in_shipped_configs(flag: str) -> dict:
             state = "UNMEASURED"
         else:
             state = "ON" if surface_hits else "OFF"
+        # Per FILE, so one armed build file cannot hide a silent sibling: the
+        # deployment reading below is computed at this granularity, not at the
+        # surface root's.
+        file_states = {
+            posix: {"state": "ON" if surface_file_hits.get(posix) else "OFF",
+                    "hits": surface_file_hits.get(posix, [])}
+            for posix in surface_searched
+        }
+        for posix in surface_unreadable:
+            file_states[posix] = {"state": "UNMEASURED", "hits": []}
         per_surface[rel] = {"state": state, "hits": surface_hits,
+                            "files": file_states,
                             "searched": surface_searched,
                             "unreadable": surface_unreadable}
 
     def _rels(state: str, pool: tuple[str, ...]) -> list[str]:
         return [rel for rel in pool if per_surface[rel]["state"] == state]
 
-    deployment_present = [rel for rel in DEPLOYMENT_SURFACES
-                          if per_surface[rel]["state"] != "ABSENT"]
-    deployment_unmeasured = _rels("UNMEASURED", DEPLOYMENT_SURFACES)
+    # ⛔ The deployment population is the FILES, not the roots: `Dockerfile` reads
+    # two build files in this tree, and "every existing deployment surface armed"
+    # must mean every IMAGE and every compose file — not every filename literal.
+    deployment_files: dict[str, str] = {}
+    for rel in DEPLOYMENT_SURFACES:
+        for posix, entry in per_surface[rel]["files"].items():
+            deployment_files[posix] = entry["state"]
+    deployment_present = [posix for posix, state in deployment_files.items()
+                          if state != "ABSENT"]
+    deployment_unmeasured = [posix for posix in deployment_present
+                             if deployment_files[posix] == "UNMEASURED"]
     deployment = {
         "surfaces": list(DEPLOYMENT_SURFACES),
+        "files": deployment_files,
         "present": deployment_present,
-        "armed": _rels("ON", DEPLOYMENT_SURFACES),
-        "silent": _rels("OFF", DEPLOYMENT_SURFACES),
+        "armed": [p for p in deployment_present if deployment_files[p] == "ON"],
+        "silent": [p for p in deployment_present if deployment_files[p] == "OFF"],
         "absent": _rels("ABSENT", DEPLOYMENT_SURFACES),
         "unmeasured": deployment_unmeasured,
-        # MEASURED requires at least one deployment surface to EXIST and every
+        # MEASURED requires at least one deployment surface FILE to exist and every
         # existing one to be READABLE: a tree that ships no deployment config
         # cannot answer "what does a deployment get", and that is UNMEASURED —
         # never a pass, and never a `False` that blames the product.
@@ -2110,7 +2159,12 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
     `ambient` is REPORTED here and never folded into the value: a lane's exported
     flag is not a default (that is why `measure()` pins the switches OFF before
     scoring, `#10996`). The value is `shipped["deployment"]["on"]`, which is `True`
-    only when every EXISTING deployment surface arms the flag.
+    only when every EXISTING deployment FILE arms the flag.
+
+    ⛔ `ambient` is a PARAMETER, not a second `os.environ` read (fresh review of
+    PR #12016, P3): re-reading the environment here let the reported value disagree
+    with the `embed_gate_enabled()` read the caller scored, and made the argument
+    dead. The caller samples both from one place.
     """
     deployment = shipped["deployment"]
     on_by_default = deployment["on"]
@@ -2118,8 +2172,8 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
         f"{rel}={shipped['per_surface'][rel]['state']}" for rel in shipped["surfaces"]
     )
     deployment_surfaces_note = ", ".join(
-        f"{rel}={shipped['per_surface'][rel]['state']}" for rel in deployment["surfaces"]
-    )
+        f"{posix}={state}" for posix, state in deployment["files"].items()
+    ) or "none"
     if not deployment["measured"]:
         if not deployment["present"]:
             deployment_reading = (
@@ -2129,25 +2183,25 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
             )
         else:
             deployment_reading = (
-                f"UNMEASURED — unreadable deployment surface(s) "
+                f"UNMEASURED — unreadable deployment file(s) "
                 f"{deployment['unmeasured']}: an unread file could arm the gate, so "
                 "this is NOT a measurement of silence"
             )
     elif deployment["on"]:
         deployment_reading = (
-            f"every existing deployment surface is armed ({deployment['armed']})"
+            f"every existing deployment file is armed ({deployment['armed']})"
         )
     else:
         deployment_reading = (
-            f"UNARMED deployment surface(s) {deployment['silent']} — a deployment "
-            "built from those configs runs with the gate OFF. This condition is "
+            f"UNARMED deployment file(s) {deployment['silent']} — a deployment "
+            "built from them runs with the gate OFF. This condition is "
             "SCOPED to the surface(s) that arm it "
             f"({', '.join(shipped['armed']) or 'none'}) and is NOT a claim about a "
             "deployment built from the silent path(s)"
         )
     return (
         f"gate enabled by default: {on_by_default} (ambient "
-        f"{flag}={os.environ.get(flag, '')!r}; "
+        f"{flag}={ambient!r}; "
         f"shipped config surface walked: {len(shipped['surfaces'])} "
         f"({', '.join(shipped['surfaces'])}); per surface: {per_surface_note}; "
         f"armed: {shipped['armed'] or 'none'}; silent: {shipped['silent'] or 'none'}; "
@@ -2654,15 +2708,15 @@ def score_rule_bullet() -> Row:
         notes.append(
             "shipped default UNMEASURED (hold this row at PARTIAL — the deployment "
             "reading covers "
-            f"{deployment['surfaces']}: present {deployment['present'] or 'none'}, "
-            f"unreadable {deployment['unmeasured'] or 'none'}. A surface that could "
-            "not be read is not a surface that is silent, so the gate clause is "
+            f"{deployment['files']}: present {deployment['present'] or 'none'}, "
+            f"unreadable {deployment['unmeasured'] or 'none'}. A file that could "
+            "not be read is not a file that is silent, so the gate clause is "
             "UNMEASURED, never True and never 'the config sets nothing')"
         )
     elif not deployment["on"]:
         notes.append(
-            "shipped default NOT armed for every deployment surface (hold this row "
-            "at PARTIAL — silent deployment surface(s): "
+            "shipped default NOT armed for every deployment file (hold this row "
+            "at PARTIAL — silent deployment file(s): "
             f"{deployment['silent']} declare no gate, so a deployment built from "
             "them runs with the rule off; the surfaces that do arm it "
             f"({shipped['armed'] or 'none'}) do not deploy the container's "
