@@ -1068,26 +1068,31 @@ def test_product_route_blocked_on_company_host(page: Page) -> None:
 
     UNCONDITIONAL: the target is a constant, so this is safe on stale-DNS runs.
 
-    ⛔ BUT THE *SCHEME* IS NOT, ON A LOCAL PREVIEW. `wrangler pages dev` rewrites an
-    absolute `Location` whose host equals the REQUEST's host to the request's own
-    scheme — measured 2026-11-12 on the version `config/wrangler-version` pins
-    (4.127.0): an http preview answers `Location: http://premiselabs.co/tortoise`
-    for a middleware that emits `https://premiselabs.co/tortoise`, and the same
-    preview started `--local-protocol https` answers the https value verbatim. A
-    CROSS-host target is left alone, which is why the tortoise-host rows grade their
-    scheme fine on the same server. So this test grades what a live server can prove
-    — the 301, its HOST and its PATH — and the scheme is graded where no proxy sits
-    between the middleware and the assertion: offline in
-    `tests/test_middleware_host_consolidation.mjs` — wired into `ci.yml`'s
-    `welcome-e2e`, a `website`-GATED job, so it runs whenever that gate trips; the
-    gate names the harness file itself (`#12031` review, P2: without that entry an
-    edit to the harness alone ran no job that executes it) — and against the
-    deployed origin by this same test on a production run
-    (`ALLOW_PROD=1 BASE_URL=https://premiselabs.co`, `verify-legal`).
-    """
-    prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
+    ⛔ THE SCHEME IS ASSERTED ONLY WHERE THE DEPLOYMENT ANSWERS IT (#12052).
+    This is the ONE redirect in the map whose target is on the SAME host as the
+    request, and `wrangler pages dev` NORMALIZES a same-origin absolute
+    `Location` to the request's own scheme — measured on this job's own preview
+    at `origin/main` (`500242fac6`), Host-spoofed `premiselabs.co`:
+
+        GET /product     → Location: http://premiselabs.co/tortoise    (rewritten)
+        GET /signin      → Location: https://app.premiselabs.co/auth   (untouched)
+
+    The second row is why the cross-host assertions elsewhere in this file need
+    no such carve-out: only a SAME-origin absolute is rewritten, and only the
+    local preview's scheme (`http`) differs from production's. So the preview
+    pins the CONSOLIDATION TARGET (host + path, which is the property this test
+    exists for) and a real company-host run additionally pins the exact https
+    string. Asserting `== "https://…"` unconditionally reds `legal-e2e` on every
+    PR from a local preview while production answers correctly.
+
+    ⛔ The scheme is NOT left ungraded by that carve-out: the SAME redirect is
+    driven through the real `onRequest` in-process — no dev proxy in the path —
+    and pinned to the exact `https://premiselabs.co/tortoise` by
+    `tests/test_oauth_stray_code_refusal.py::test_a_company_host_product_request_is_REFUSED_not_404d`
+    (:309), on every PR. This test keeps what only a served deploy can answer."""
     b_host = urlsplit(BASE_URL).hostname or "premiselabs.co"
     b_spoof = b_host if b_host.endswith("premiselabs.co") else "premiselabs.co"
+    prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
     for path in ("/product", "/product.html"):
         r = page.request.get(BASE_URL + path, headers={"Host": b_spoof},
                              timeout=15_000, max_redirects=0)
@@ -1101,15 +1106,17 @@ def test_product_route_blocked_on_company_host(page: Page) -> None:
                 f"{path} redirects to {location!r}"
             )
             continue
-        # Local preview: the scheme above is the SERVER's, not the middleware's
-        # (see the docstring), so grade everything the wire still carries — the
-        # host and the exact canonical path, parsed rather than substring-matched
-        # so `https://premiselabs.co.evil/tortoise` cannot pass.
+        # Local preview: accept the dev-normalized absolute OR `_redirects`'
+        # same-origin relative form, and pin host+path either way — a bare
+        # `endswith("/tortoise")` would also accept any other host.
         parsed = urlsplit(location)
-        assert (parsed.hostname, parsed.path) == ("premiselabs.co", "/tortoise"), (
-            f"{path} redirects to {location!r} — expected the canonical product URL "
-            "on premiselabs.co/tortoise (the scheme is not graded here: a local "
-            "preview rewrites a same-host Location to its own scheme)"
+        target_path = parsed.path if parsed.netloc else location
+        assert (parsed.hostname in (None, "premiselabs.co")
+                and target_path == "/tortoise"
+                and not parsed.query), (
+            f"{path} redirects to {location!r} — expected one unit of "
+            "consolidation onto premiselabs.co/tortoise (a query string, a "
+            "second host, or an extra hop is a second URL)"
         )
 
 

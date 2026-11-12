@@ -221,6 +221,7 @@ from pathlib import Path
 from typing import Any
 
 from . import record_projection as _rp
+from . import vector_write as _vector_write
 from .residency import (
     COVERAGE_COMPLETE,
     COVERAGE_PARTIAL,
@@ -257,6 +258,7 @@ __all__ = [
     "PACKAGED_PLACEMENT_TABLE",
     "PLACEMENT_DOC",
     "RELATION_TABLE",
+    "UNSERVED_VECTOR_LABELS",
     "AmbiguousRecordColumn",
     "CacheProjectionError",
     "LifecycleEvent",
@@ -294,7 +296,9 @@ __all__ = [
     "record_plan",
     "relation_from_row",
     "relation_statement",
+    "served_vector_labels",
     "stored_vector_props",
+    "unserved_vector_declined_properties",
 ]
 
 #: label → record table (the layer tables `#7968` built).
@@ -306,6 +310,115 @@ NODE_TABLES: dict[str, str] = {
     "Source": "source",
     "Session": "session",
 }
+
+
+def served_vector_labels() -> frozenset[str]:
+    """The labels the VECTOR query leg can reach — DELEGATED to its ONE owner.
+
+    ⛔ `#11641`: there is exactly ONE owner of this set,
+    :func:`tortoise.vector_write.served_store_labels` — the module `sdk` and
+    `hosted_backup` already import as *"the ONE bound on WHERE a vector may be
+    stored"*. This function does NOT compute the set; it asks that owner. A
+    second derivation here (a cached snapshot of `VALID_ENTITY_TYPES` +
+    `entity_label`, which is what this function used to be) is a second
+    DECLARATION of where a vector can be found, and the two could disagree with
+    nothing going red: the failure mode `#5090` DoD row 2 scores. The `#11747`
+    review measured exactly that — this module's docstring stated the one-owner
+    rule and then broke it one paragraph later.
+
+    The SEAM survives the move (the name a probe or a parity rule depends on),
+    and so does the shape: a caller reads a callable here, never the owner's
+    module, exactly as :func:`stored_vector_props` does for the same reason
+    (#8615) — so the owner can change how it DERIVES the set without every
+    reader following it.
+
+    ⛔ DELEGATED THROUGH THE MODULE, not `from .vector_write import …`
+    (`#11747` round-3 review, finding 1): a from-import binds the function OBJECT
+    at import time, so a per-label exception or a narrowed bound added to the
+    owner later would still be read here as the OLD function's answer — the copy
+    the `#11641` rule forbids, one indirection deeper. Reading the attribute
+    every call means the owner's answer is the answer THIS SEAM gets.
+
+    ⚠️ WHAT IS LIVE AND WHAT IS NOT, stated plainly (`#11747` round-4 review):
+    this function delegates per call, but :data:`UNSERVED_VECTOR_LABELS` below is
+    an import-time SNAPSHOT of the owner's answer, and that constant — not this
+    seam — is what both production doors read (`node_from_row`, `node_statement`).
+    So a change to the owner lands here on the next call and in the drop decision
+    at the next import. Live re-derivation of the constant is not free (it is read
+    per node, and a widened set is a schema decision, not a runtime knob); what the
+    test pin holds is that the two cannot disagree at import.
+    """
+    return _vector_write.served_store_labels()
+
+
+#: ⛔ `#11747` — the labels this projection can be handed a vector for and MUST
+#: NOT store one on: the record tables it materialises, minus the labels the
+#: vector leg serves. **`Session` is the only member today**, and the reason is
+#: structural rather than incidental: `public.session` has NO `embedding` column
+#: (see its `CREATE TABLE`), so a `:Session` vector has no PRIMARY claim in the
+#: record at all — it can only arrive through the row's open-set `props` tail
+#: (whose CHECK is `NOT (props ?| ARRAY[]::text[])`, i.e. it constrains nothing),
+#: and it can then never be read: `run_vector_query` refuses `entity_type='session'`
+#: before it builds a query. A vector paid for and unreadable is precisely what
+#: `#5090` row 2 forbids, and storing one also made the cache richer than the
+#: record `#7968` declares.
+#:
+#: ⛔ DERIVED, not written down: a label added to :data:`NODE_TABLES` without a
+#: served query path lands here automatically, and a label that BECOMES served
+#: (a `#11901`/V3 index) leaves here automatically. This is deliberately NOT an
+#: index decision — which labels get a vector index is `#11901`'s, not this
+#: module's; this only states what may be WRITTEN.
+#:
+#: ⚠️ WHY THE DROP IS HERE AND NOT A REFUSAL. `record_plan` materialises a whole
+#: record view; raising on one row's stray `props` key would make a rebuild
+#: unable to complete over a single malformed tail — the same trade
+#: `tortoise.hosted_backup._require_served_restore_labels` makes in its
+#: `allow_unserved_vectors` repair-on-read path, and where it iterates the same
+#: decision from the other direction: keep the node, drop the vector, REPORT it.
+#: :func:`node_statement` carries the report on
+#: :attr:`Statement.dropped_vectors`, so the drop is nameable at runtime and
+#: never silent (this module's own rule for every column it declines).
+#:
+#: ⛔ AND IT IS DECLARED TO THE PARITY RULE (`#11747` review, finding 2 — a design
+#: decision, settled here in the open). The drop moves the RECORD ANSWER
+#: (:func:`node_from_row`, which `record_serve.read_node` answers from by
+#: contract), so a LEGACY cache node that still carries the vector is a pair
+#: `record_serve.parity_difference` must explain: without an arm it reports a
+#: PROJECTION GAP whose only sanctioned repair is a re-projection — which can no
+#: longer add the field, so the red would be permanent until a wipe-and-rebuild,
+#: and `record_reconcile` reports the same pair as `graph_only`. The arm lives in
+#: :func:`unserved_vector_declined_properties` so there is ONE declaration, and the
+#: decision recorded is: **the drop stays on the read door and the parity rule
+#: declares it.** The alternative — moving the drop off the read door — would let
+#: a record read advertise a vector the cache refuses, which is the "live ≠
+#: rebuild" divergence that read exists to prevent.
+UNSERVED_VECTOR_LABELS: frozenset[str] = frozenset(NODE_TABLES) - _vector_write.served_store_labels()
+
+
+def unserved_vector_declined_properties(label: str) -> frozenset[str]:
+    """The vector properties `label`'s RECORD ANSWER declines to carry — `#11747`.
+
+    Empty for a served label; :func:`stored_vector_props` for one in
+    :data:`UNSERVED_VECTOR_LABELS`. This is the ONE declaration behind two
+    readers: :func:`node_from_row` (which performs the drop, so the record read
+    and the rebuild agree) and
+    :func:`tortoise.record_serve.parity_difference` (which must EXPLAIN a legacy
+    cache node that still holds the name, or the pair reddens as a projection
+    gap that no re-projection can close).
+
+    ⚠️ Both DIRECTIONS of the parity comparison read it: the cache holding a
+    vector the record answer declines is declared (CACHE-HELD, not a gap), and a
+    raw record row that still carries it is declared too — the mirror the
+    §9.1/D1 decline already applies for the same reason.
+    """
+    return STORED_VECTOR_PROPS if label in UNSERVED_VECTOR_LABELS else frozenset()
+
+
+def _unserved_vector_reason(label: str) -> str:
+    """WHY a vector on ``label`` is refused — one spelling for both doors."""
+    return (f"{label} is not a label run_vector_query serves "
+            f"(served: {sorted(served_vector_labels())}) — a vector stored "
+            f"there has no query path")
 
 #: The relations table — every edge is a row (ONTOLOGY §8 reification).
 RELATION_TABLE = "relation"
@@ -1640,11 +1753,20 @@ def cache_forbidden_columns(table: str) -> frozenset[str]:
 
 @dataclass(frozen=True)
 class RecordNode:
-    """One record row, as the cache must materialize it."""
+    """One record row, as the cache must materialize it.
+
+    ``dropped_vectors`` is the DROP LOG (`#11747`): the vector properties the
+    RECORD IMAGE refused for this node's label, mapped to the reason. It lives
+    on the view rather than only on the statement because the view is what
+    `record_serve.read_node` answers from — a record read that returned a vector
+    the cache refuses would be the exact "live ≠ rebuild" divergence that read
+    exists to avoid.
+    """
 
     label: str
     key: str
     props: Mapping[str, Any] = field(default_factory=dict)
+    dropped_vectors: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1686,10 +1808,18 @@ class RecordView:
 
 @dataclass(frozen=True)
 class Statement:
-    """One parameterized Cypher statement."""
+    """One parameterized Cypher statement.
+
+    ``dropped_vectors`` is the DROP LOG (`#11747`): the vector properties this
+    statement REFUSED to store, mapped to the reason. It is empty on every
+    statement that stored what it was given, so a caller can assert the drop
+    happened without re-deriving why it should have — and an empty map is the
+    signal that nothing was withheld, never a claim that nothing could be.
+    """
 
     cypher: str
     params: Mapping[str, Any]
+    dropped_vectors: Mapping[str, str] = field(default_factory=dict)
 
 
 def _scalar(value: Any) -> Any:
@@ -2489,7 +2619,22 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     for prop, sources, value in DERIVED_FROM_RECORD.get(label, ()):
         if props.get(prop) is None and any(props.get(src) for src in sources):
             props[prop] = value
-    return RecordNode(label=label, key=raw, props=props)
+    # ⛔ `#11747`: a vector for a label no query leg serves is dropped HERE, in the
+    # row→property map BOTH directions read (`record_serve.read_node` answers from
+    # this same function, by contract). Dropping it only at the writer would leave
+    # the record read returning a vector the cache refuses — the divergence that
+    # read exists to prevent — and would make the plan's written set narrower than
+    # the view it was built from. `node_statement` keeps its OWN check for a
+    # directly-constructed `RecordNode` (nothing else may put a vector on an
+    # unserved label); the DECLARATION is single (:data:`UNSERVED_VECTOR_LABELS`),
+    # so the two cannot disagree about which labels are refused.
+    dropped: dict[str, str] = {}
+    if label in UNSERVED_VECTOR_LABELS:
+        for prop in sorted(STORED_VECTOR_PROPS):
+            if props.pop(prop, None) is None:
+                continue
+            dropped[prop] = _unserved_vector_reason(label)
+    return RecordNode(label=label, key=raw, props=props, dropped_vectors=dropped)
 
 
 def relation_from_row(row: Mapping[str, Any]) -> RecordRelation:
@@ -3141,7 +3286,8 @@ def apply_event_stream_folds(
             continue
         props = dict(node.props)
         props["status"] = status
-        out.append(RecordNode(label=node.label, key=node.key, props=props))
+        out.append(RecordNode(label=node.label, key=node.key, props=props,
+                              dropped_vectors=node.dropped_vectors))
     return tuple(out)
 
 
@@ -3289,6 +3435,12 @@ def node_statement(node: RecordNode) -> Statement:
     :mod:`tortoise.stored_form` — the one spelling this writer shares with the
     record↔cache check (#8615), so a widened or narrowed writer cannot leave
     the check comparing a form nobody writes.
+
+    ⛔ `#11747`: a vector is stored ONLY on a label the query leg serves
+    (:data:`UNSERVED_VECTOR_LABELS`). Writing one anywhere else stores bytes no
+    reader can reach — `run_vector_query` refuses an unserved `entity_type`
+    before it builds a query — so the vector is dropped and the drop is recorded
+    on :attr:`Statement.dropped_vectors`, never performed silently.
     """
     key_prop = KEY_PROPERTY[node.label]
     props = dict(node.props)
@@ -3296,22 +3448,39 @@ def node_statement(node: RecordNode) -> Statement:
     props.pop(VERBATIM_MARKER, None)
     cypher = f"MERGE (n:{node.label} {{{key_prop}:$key}}) SET n += $props"
     params: dict[str, Any] = {"key": node.key, "props": props}
+    dropped: dict[str, str] = dict(node.dropped_vectors)
     for prop in sorted(STORED_VECTOR_PROPS):
         vector = props.pop(prop, None)
         if vector is None:
             continue
+        if node.label in UNSERVED_VECTOR_LABELS:
+            # ⛔ #11747 — the label is one no query leg reaches, so the vector
+            # could never be read. Dropped, and REPORTED on the statement, never
+            # written silently (see :data:`UNSERVED_VECTOR_LABELS`).
+            dropped[prop] = _unserved_vector_reason(node.label)
+            continue
         form = f"${prop}" if verbatim else f"vecf32(${prop})"
         cypher += f", n.{prop} = {form}"
         params[prop] = vector
-    if verbatim:
+    if verbatim and not dropped:
         # The marker is PRIMARY and the graph writes it as its own clause
         # (`projection/entities.py`), so it is carried in BOTH branches — with
         # and without a vector. Dropping it here would make a record-sourced
         # cache POORER than the record, and the marker is the authority on the
         # storage FORM: a caller-owned float64 vector would lose its flag and
         # the next journaled re-emit would narrow it through `vecf32` (#5004).
+        #
+        # ⛔ `#11747` review — ``and not dropped`` is the exception, and it is
+        # not a narrowing of the rule above: when the vector itself was DROPPED
+        # (here, or upstream in :func:`node_from_row`, whose drop log this map
+        # is seeded from) there is no value left for the marker to describe. The
+        # measured bug was a `:Session` whose tail carried BOTH `embedding` and
+        # the marker: the node stored `embedding_verbatim: true` with no vector
+        # and no `n.embedding` clause — a property ASSERTING a storage form for
+        # a value the same statement withheld. A node that never had a vector
+        # (`dropped` empty) keeps the marker exactly as before.
         props[VERBATIM_MARKER] = True
-    return Statement(cypher=cypher, params=params)
+    return Statement(cypher=cypher, params=params, dropped_vectors=dropped)
 
 
 def relation_statement(rel: RecordRelation) -> Statement:
@@ -3372,6 +3541,25 @@ class ProjectionPlan:
     def node_keys(self) -> set[tuple[str, str]]:
         return {(n.label, n.key) for n in self.nodes}
 
+    def dropped_vectors(self) -> dict[str, int]:
+        """`{label: count}` of vector properties this plan REFUSES to store — `#11747`.
+
+        ⛔ Read from the STATEMENTS, not from the nodes: :func:`node_statement` is
+        the door that can refuse a directly-built :class:`RecordNode` (a caller may
+        build one and hand it to :func:`record_plan`), so a node-side read would
+        miss exactly the case the writer's own check exists for. The two tuples are
+        parallel by construction — :func:`record_plan` appends one node statement
+        per node and then the relation statements — and ``zip`` stops at
+        ``self.nodes``, so a relation statement can never be read as a node's.
+        """
+        counts: dict[str, int] = {}
+        for node, stmt in zip(self.nodes, self.statements, strict=False):
+            if not stmt.dropped_vectors:
+                continue
+            counts[node.label] = (counts.get(node.label, 0)
+                                  + len(stmt.dropped_vectors))
+        return counts
+
 
 def record_plan(nodes: Iterable[RecordNode],
                 relations: Iterable[RecordRelation] = ()) -> ProjectionPlan:
@@ -3397,6 +3585,14 @@ class ProjectionReport:
     coverage: str = COVERAGE_COMPLETE
     declaration_keys: int = 0
     scope: str = ""
+    #: `#11747` — vectors the plan REFUSED to store, and the labels they were on.
+    #: On the REPORT beside the write counts (the shape
+    #: :func:`tortoise.hosted_backup.restore_graph` already uses for the identical
+    #: drop), because the drop happens on a path an operator asked for: a rebuild
+    #: that deletes vectors a previous cache held would otherwise print the same
+    #: clean line as a rebuild that lost nothing.
+    dropped_vectors: int = 0
+    dropped_vector_labels: tuple[str, ...] = ()
 
     def render(self) -> str:
         return (
@@ -3404,6 +3600,9 @@ class ProjectionReport:
             f"{self.relations_written} relation(s) written; coverage="
             f"{self.coverage} over {self.declaration_keys} declared key(s)"
             + (f" (scope {self.scope})" if self.scope else "")
+            + (f"; {self.dropped_vectors} vector(s) DROPPED on unserved "
+               f"label(s) {list(self.dropped_vector_labels)} — a vector there "
+               f"has no query path" if self.dropped_vectors else "")
         )
 
 

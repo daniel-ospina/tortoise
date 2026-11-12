@@ -1333,3 +1333,70 @@ def test_the_human_line_names_the_refused_rows_and_denies_the_re_run():
     assert "REFUSED" not in clean.render(), (
         "a restore with no refused row must not print the refusal clause"
     )
+
+
+def test_the_human_line_names_the_DROPPED_vectors_and_denies_the_re_run():
+    """`#11747` review, finding 1 — a DROP is reported, never silent.
+
+    A vector on a label no query leg serves is refused by the projection
+    (`cache_projection.UNSERVED_VECTOR_LABELS`), so a restore over a record whose
+    rows carry one DELETES it from the cache — and pre-fix the run printed the same
+    clean line as a restore that lost nothing. The only carrier is the record row,
+    and that is what the drop was applied to, so a re-run cannot bring it back
+    either: the line has to say both things for an operator to read it correctly.
+    """
+    dropped = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_c",
+        record_nodes=2, record_relations=0, nodes_written=2,
+        relations_written=0, target_nodes_before=0,
+        nodes_selected=2, relations_selected=0, coverage="complete",
+        declared_keys=0, dropped_vectors=1,
+        dropped_vector_labels=("Session",),
+    )
+    line = dropped.render()
+    assert "1 vector(s) were DROPPED" in line, line
+    assert "Session" in line, line
+    assert "re-running cannot bring the vectors back" in line, line
+    # The machine-readable contract carries it too, not just the human line.
+    assert dropped.as_dict()["dropped_vectors"] == 1, dropped.as_dict()
+    assert dropped.as_dict()["dropped_vector_labels"] == ["Session"]
+
+    clean = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_c",
+        record_nodes=2, record_relations=0, nodes_written=2,
+        relations_written=0, target_nodes_before=0,
+        nodes_selected=2, relations_selected=0, coverage="complete",
+        declared_keys=0,
+    )
+    assert "DROPPED" not in clean.render(), (
+        "a restore that withheld nothing must not print the drop clause")
+
+
+def test_the_report_carries_the_drop_from_the_projection_to_the_outcome():
+    """The WIRING, not just the rendering: the projection's own report is the source.
+
+    `rebuild_from_record` reports `dropped_vectors` / `dropped_vector_labels`
+    (measured off the PLAN, so both writer doors are counted), and this verb must
+    carry them out — a report key nobody reads is the exact shape of the finding
+    (`Statement.dropped_vectors` had no production reader).
+    """
+    projection = _RecordingProjection(result={
+        "nodes_written": 2, "relations_written": 0, "statements": 0,
+        "record_nodes": 2, "record_relations": 0,
+        "coverage": "complete", "declared_keys": 2, "source": "record",
+        "dropped_vectors": 2, "dropped_vector_labels": ["Session"],
+    })
+    outcome = rrestore.restore_from_record_view(
+        _view(2), org_id="o", graph_id="g", cache_graph="test_x",
+        project=projection)
+    assert outcome.dropped_vectors == 2, outcome.render()
+    assert outcome.dropped_vector_labels == ("Session",), outcome.render()
+    assert "2 vector(s) were DROPPED" in outcome.render(), outcome.render()
+
+    # ⚠️ A seam that does not report the keys (the pre-#11747 shape) reads as 0,
+    # not as an UNKNOWN: `dropped_vectors` is an absence claim, and 0 is what a
+    # seam with no such measurement can honestly say.
+    silent = _RecordingProjection()
+    assert rrestore.restore_from_record_view(
+        _view(2), org_id="o", graph_id="g", cache_graph="test_x",
+        project=silent).dropped_vectors == 0

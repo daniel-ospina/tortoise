@@ -10800,8 +10800,8 @@ def _durations_rows_with_a_duplicated_chain_count(text: str):
     came to orphan a paren nobody counted.
 
     ⛔ A repeat is reported only when NOTHING DIFFERENT sits between the two
-    occurrences (in either direction, entry or mid-line) AND the two entries cite
-    no common issue number: this map records
+    occurrences (in either direction, entry or mid-line) OR the two entries cite a
+    common issue number: this map records
     count-REDUCING landings too (`#10452`'s lane dropped a duplicate arm), so both
     `-> 43`, `-> 42 once a duplicate arm was dropped`, `-> 43 once its replacement
     landed` and `-> 57`, `-> 58 once an arm landed`, `-> 57 once a duplicate arm was
@@ -10984,9 +10984,23 @@ def test_the_union_merge_prose_guards_are_not_vacuous():
         " this row: measured `58 passed, 2 warnings in 12.51s`, then `58 passed in"
         " 1m 12s`, and once `58 passed in 00:12` on the slow leg; a rerun printed"
         " `58 tests passed in 4.00 s` and one CI leg prints `58 PASSED in 12.5S`.\n"
+        # The LIVE shape: clause and quotes on CONTINUATION lines of a wrapped note
+        # (measured on the union of #11958's `1ae5cd37c4` into `e4703a286a` with
+        # `git merge-file --union`: in the `test_problem_map_2820.py` note the clause
+        # sits at offset 6803 and the quote `58 passed in 12.51s` at 7403 — ~600
+        # characters AFTER it, the same direction the guard's docstring records as
+        # "put back underneath it"). A helper that read only the row line would be
+        # blind to the clause, the quote, or both; this fixture is what notices.
+        "  test_clock_cont.py: 3.5  # #23: a prohibition stated on a continuation.\n"
+        "  # (`test_a`: the arm this row covers).\n"
+        "  # ⛔ No wall-clock seconds are quoted beside this row: measured"
+        " `58 passed in 12.51s` on the slow leg,\n"
+        "  # and re-measured `58 passed in 1m 12s` after the arm landed.\n"
         # A mid-line DECIMAL arrow must not become evidence of a change: without the
-        # `(?![\d.])` lookahead this reads 4.5 -> 4.0 as two moves and excuses the
-        # adjacent replay below (measured).
+        # `(?!\.\d)` lookahead this reads 4.5 -> 4.0 as two moves and excuses the
+        # adjacent replay below (measured). The superseded `(?![\d.])` spelling is
+        # history: it also swallowed a period-terminated `-> 57.`, which the block
+        # below (and its entry in the expected-offender list) asserts must count.
         # A sentence-ending PERIOD after the count must still be an entry: `-> 57.`
         # is a count, `-> 4.0` is not. A lookahead that rejects both hides this replay.
         # A MULTI-LINE union splice: the same landing token on both halves (the shape
@@ -10995,6 +11009,18 @@ def test_the_union_merge_prose_guards_are_not_vacuous():
         "  # -> 57 once #11904's pin landed\n"
         "  # -> 58 once #11800's arm landed\n"
         "  # -> 57 once #11904's re-cut control landed\n"
+        # …and a THREE-digit landing token. Latent, disclosed rather than claimed
+        # live: 0 three-digit tokens sit in any of the 1332 notes `_durations_row_
+        # comments` returns for `main` at `e991d8d3fe`, so nothing reds today — but
+        # this map is free to cite one, and a token pattern narrowed to 4–5 digits
+        # silently loses that splice. Every three-digit token in the file sits
+        # OUTSIDE a note the reader returns: `#669` :1522, `#331`/`#325` :2797,
+        # `#330` :3512, `#548` :4565 (all in `surfaces:`) and, in `durations:`,
+        # `#548` only inside the block the reader drops at :11881–:11889.
+        "  test_splice_3digit.py: 2.67  # #20: a three-digit landing splices twice.\n"
+        "  # -> 9 once #548's pin landed\n"
+        "  # -> 10 once an arm landed\n"
+        "  # -> 9 once #548's re-cut landed\n"
         "  test_period_entry.py: 2.65  # #15: an entry that ends a sentence.\n"
         "  # -> 57. The pin landed with the arm.\n"
         "  # -> 57 once the SAME pin was replayed\n"
@@ -11078,6 +11104,23 @@ def test_the_union_merge_prose_guards_are_not_vacuous():
         "  test_local_reading.py: 2.3  # #18: ⛔ A LOCAL wall-clock reading is"
         " deliberately NOT stated here; the leg's recorded history is"
         " `2 passed, 34 deselected in 12.82s`.\n"
+        # A block whose FIRST continuation OPENS a note is not this row's note: the
+        # reader drops it, and so must the guard. Both entries below are inside the
+        # dropped block, so a guard that kept reading would invent a replay.
+        "  test_cut.py: 3.3  # #21: a note opener follows.\n"
+        "  # The next block opens a new note and is not this row's.\n"
+        "  # -> 9 once #30 landed\n"
+        "  # -> 9 once #31 landed\n"
+        # …and COLUMN-0 prose between rows is the map's header/method text, never a
+        # row's note: attributing it is how one row's note became 122 lines of header.
+        "  test_col0.py: 3.4  # #22: column-0 prose follows.\n"
+        "# -> 9 once this method note belongs to no row\n"
+        "# -> 9 once neither does this one\n"
+        # A row that mentions wall clocks in a LOOSER phrasing while quoting one: the
+        # clause matcher must require its `no … are quoted` form, or this reds.
+        "  test_loose_clause.py: 3.6  # #24: wall-clock seconds are quoted by CI's own\n"
+        "  # junit, so this row repeats none; the leg's history is"
+        " `2 passed, 34 deselected in 12.82s`.\n"
         # per-ROW scoping: two different rows may each start a chain at the same
         # count. A helper that forgot to reset per row reds these and stays green on
         # `main` (whose chain entries all live in one row), so this pair is what pins
@@ -11089,14 +11132,15 @@ def test_the_union_merge_prose_guards_are_not_vacuous():
         "surfaces: []\n")
     assert _durations_rows_with_a_duplicated_chain_count(spliced) == [
         ("test_dup.py", 7), ("test_tail.py", 41), ("test_multiline_splice.py", 57),
-        ("test_period_entry.py", 57), ("test_decimal_midline.py", 57),
-        ("test_replay_after_drop.py", 7)]
+        ("test_splice_3digit.py", 9), ("test_period_entry.py", 57),
+        ("test_decimal_midline.py", 57), ("test_replay_after_drop.py", 7)]
     assert _durations_rows_with_a_duplicated_chain_count(healthy) == []
     assert _durations_rows_quoting_a_wall_clock_beside_its_own_prohibition(
         spliced) == [("test_clock.py", [
             "58 passed, 2 warnings in 12.51s", "58 passed in 1m 12s",
             "58 passed in 00:12", "58 tests passed in 4.00 s",
-            "58 PASSED in 12.5S"])]
+            "58 PASSED in 12.5S"]),
+            ("test_clock_cont.py", ["58 passed in 12.51s", "58 passed in 1m 12s"])]
     assert _durations_rows_quoting_a_wall_clock_beside_its_own_prohibition(
         healthy) == []
 
