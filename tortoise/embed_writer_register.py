@@ -826,37 +826,6 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
         ),
     ),
     (
-        "tortoise.api::_emit",
-        WriterClass(
-            EXEMPT,
-            "`tortoise/api.py::_emit` — the instrument's match is COMMENT PROSE (see the "
-            "probe's `WRITER_CENSUS` entry: the `#12000` round-10 transcript comment). Its "
-            "carrier role is the JOURNAL: it stamps the record through "
-            "`stamp_journal_embedding` and hands it to `write_live_record`, and the graph "
-            "STORE belongs to the fold that replays it. Same class as "
-            "`tortoise.sdk::_journal_event_raw_write` — a sanctioned replay carrier, "
-            "explicitly NOT 'no vector is reachable through it': `_point` stamps one into "
-            "this very record and a caller-supplied vector is carried verbatim under the "
-            "`#5004` contract",
-            "#10541",
-            stores=NO_LIVE_VECTOR,  # journals the record; the fold writes the graph
-        ),
-    ),
-    (
-        "tortoise.api::_verify_record_vector_width",
-        WriterClass(
-            EXEMPT,
-            "`tortoise/api.py::_verify_record_vector_width` — all three needle matches are PROSE "
-            "(the docstring's measured transcript plus two in-body comments that quote the "
-            "forbidden and the folded shape). The body verifies and returns: it re-derives the "
-            "declared width through `shortest_float32_vector` and raises on a disagreement. It "
-            "stores nothing — the writer it verifies for is `tortoise.api::_emit`, and the store "
-            "is the fold's",
-            "#10541",
-            stores=NO_LIVE_VECTOR,  # a verification helper; no store of any kind
-        ),
-    ),
-    (
         "tortoise.consistency::_graph_fingerprint",
         WriterClass(
             EXEMPT,
