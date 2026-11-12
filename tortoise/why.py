@@ -453,16 +453,17 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         if terminal:
             has_ep = False
         # #3276: explicit measurement state — see EpBreakdown. baseline_set
-        # (index 6) marks a LIVE prior-only claim (declared #2199 baseline, no
-        # EP measurement): its confidence_mean is the PRIOR mean (a readable
-        # `n.confidence` mirror, if present, LEADS it), never a measured one —
-        # and a declared prior that yields NO mean (a 0/0 pair, a half pair, a
-        # negative operand, or an operand this process cannot read) has no
-        # mean of its own, so with no readable `n.confidence` mirror beside it
-        # the row reads ``None`` + ``ep_state: "absent"`` — with one it serves
-        # the mirror's value (see the `baseline` note below).
-        # A TERMINAL row is neither measured nor prior-only (its 0.5 is the
-        # #2490 decayed posterior) — the terminal gate also clears `baseline`.
+        # (index 6) marks a declared #2199 baseline; it does NOT by itself mean
+        # "no EP measurement" — a claim can carry both, and then it is
+        # `measured`. That is why the prior-only FLAG below is DERIVED from it
+        # (AND NOT measured, NOT terminal, resolved state `baseline`). When it
+        # IS prior-only, its confidence_mean is the PRIOR mean — or the
+        # readable `n.confidence` MIRROR's value, which LEADS it (R1 in
+        # `search_engine`) — never a measured one.
+        # A TERMINAL row is neither measured nor prior-only: a terminalising
+        # write leaves the #2490 decayed posterior, and a BORN-terminal row
+        # never had one (it reads `absent` with no value) — the terminal gate
+        # also clears `baseline`.
         baseline_set = bool(row[6]) if len(row) > 6 else False
         measured = bool(has_ep)
         variance = _beta_variance(a, b)
@@ -539,14 +540,12 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
             # #11702 cycle 30: the flag follows the RESOLVED state, not
             # `baseline_set` alone — the same rule `annotate_ep_batch` applies.
             # A DECLARED but DEGENERATE prior (`set_point_baseline(claim, 0, 0)`)
-            # has no mean (0/0) and reads `absent` here UNLESS a readable
-            # `n.confidence` mirror sits beside it (then the row is `baseline`
-            # at the mirror's value), so claiming prior-only
+            # has no mean (0/0) and reads `absent` here, so claiming prior-only
             # would contradict `ep_state` beside it AND disagree with the `ep`
-            # block for the same claim. `baseline` is documented as the prior
-            # mean "unless a readable ``n.confidence`` mirror supplies the
-            # value, which LEADS both"; a consumer branching on the bare prior
-            # mean got `None`.
+            # block for the same claim. `baseline` is documented as
+            # "confidence_mean IS the declared prior mean — or the readable
+            # `n.confidence` mirror's value, which LEADS it"; a consumer
+            # branching on the unqualified form got `None`.
             "baseline": (baseline_set and not measured and not terminal
                          and state == EP_STATE_BASELINE),
         }

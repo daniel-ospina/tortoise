@@ -10,7 +10,7 @@ census has one command:
 
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
-    uv run python tools/hosted_api_cite_census.py --pivot 23466
+    uv run python tools/hosted_api_cite_census.py --pivot 23477
     uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
     uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
 
@@ -79,8 +79,18 @@ CITE_RE = r"hosted_api\.py:[0-9]+"
 #: which is exactly why it must be re-derived whenever an edit above the site
 #: moves it (#10226 forward-merge moved it 23128 -> 23131; #11795 moved it
 #: 23131 -> 23466, where it had sat stale while the notes it is a fallback for
-#: had already been re-derived by hand).
-DEFAULT_PIVOT = 23466
+#: had already been re-derived by hand; #11803 moved it 23466 -> 23477). Two
+#: distinct wrongnesses, with distinct start points — do not merge them:
+#:   • `pivot_is_the_lifetime_site(23466)` is FALSE from #11803 onward, because
+#:     the CALL moved while the note still cited 23466;
+#:   • the COUNT SPLIT beside it (`above 13`, `at the pivot 0`) only goes wrong
+#:     once a re-derivation moves the notes to 23477 and leaves this constant
+#:     behind — measured at #11950's first commit `5d35cd58f6`, over a correct
+#:     tree, where the whole triple read `at the pivot 0` / `above 13` /
+#:     `site: False` and nothing reddened.
+#: Because no shipped path reads it, nothing could see that, so it is now PINNED:
+#: `tests/test_demo_session_read_exclusion_8290.py` asserts it equals the site.
+DEFAULT_PIVOT = 23477
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"

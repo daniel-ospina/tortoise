@@ -23,6 +23,11 @@ from .kind_fallbacks import named_kind
 # `_sanitize_props`. `money` imports only `numeric_domain` (no cycle).
 from .money import refuse_malformed_money_in_payload
 
+# #11915: the percent shape's gate at the same seam — a payload walk with the
+# same engagement rule, so a ratio typed as a percentage cannot land ungraded
+# through a record-shaped door.
+from .percent import refuse_malformed_percent_in_payload
+
 # #7951 §17.1: the live-write scope the journal-first doors open around the fold.
 from .projection import _live_write_scope, fold
 
@@ -258,6 +263,10 @@ class EventAPI:
         # it has today AND a door added tomorrow" argument now holds for the
         # record-shaped doors too.
         refuse_malformed_money_in_payload(event, door=f"EventAPI.{type_}")
+        # #11915: the same walk for the percent shape — `add_point(...,
+        # basisPoints=20000)` must not land a 200% ratio on a node, for the same
+        # reason `amountMinor` without a currency must not land.
+        refuse_malformed_percent_in_payload(event, door=f"EventAPI.{type_}")
         # #9190: the append REPORTS the record's journal position, and that
         # number is the record's `journal_event.seq`. Dropping it here is what
         # kept layer 1 empty on live writes (the row was deferred with a

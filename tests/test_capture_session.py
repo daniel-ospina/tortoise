@@ -442,12 +442,22 @@ def _money_payload(content: str, *, quote: str = "",
 
 
 def _read_money_row(sdk, pid: str) -> list:
+    # #11827: `asOf` is retired — a value carries no temporal slot of its own,
+    # so the value columns are the FOUR shape fields and the instant is read off
+    # the carrier (`validFrom`) by `_read_point_date` below.
     return list(sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) "
-        "RETURN n.amountMinor, n.currency, n.minorUnitExponent, "
-        "n.verbatim, n.asOf",
+        "RETURN n.amountMinor, n.currency, n.minorUnitExponent, n.verbatim",
         params={"id": pid},
     ).result_set[0])
+
+
+def _read_point_date(sdk, pid: str):
+    """The node's stored `validFrom` — the carrier's valid-time start."""
+    return sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.validFrom",
+        params={"id": pid},
+    ).result_set[0][0]
 
 
 def test_capture_derives_the_money_value_onto_the_node(sdk, monkeypatch):
@@ -472,12 +482,14 @@ def test_capture_derives_the_money_value_onto_the_node(sdk, monkeypatch):
     res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     pid = res["points"][0]["id"]
-    amount, currency, exponent, verbatim, as_of = _read_money_row(sdk, pid)
-    assert amount == 80_000, (amount, currency, exponent, verbatim, as_of)
+    amount, currency, exponent, verbatim = _read_money_row(sdk, pid)
+    assert amount == 80_000, (amount, currency, exponent, verbatim)
     assert currency == "EUR"
     assert exponent == 2
     assert verbatim == "800"
-    assert as_of is None                      # no asserted date in the claim
+    # #11827: no asserted date in the claim, so no invented start either — the
+    # carrier's absent-start rule (§4.7), never a fabricated `now`.
+    assert _read_point_date(sdk, pid) is None
     assert verbatim in "The tranche released EUR 800 last week."
     # No response widening: the receipt still describes only the passthrough
     # subset, so a create (stores, does not advertise) and a dedup hit (writes
@@ -518,6 +530,74 @@ def test_capture_derives_money_from_content_not_the_200_char_quote(
     res = sdk._capture_session(CONV)
     assert res["ok"] is True, res
     assert _read_money_row(sdk, res["points"][0]["id"])[0] is None, res["points"]
+
+
+def test_capture_feeds_the_asserted_date_into_valid_from(sdk, monkeypatch):
+    """#11827 step 1, end to end: the asserted date becomes `validFrom`.
+
+    Measured BEFORE the change (`asOf` only, no `when`): the node's only date
+    was `asOf`, which the temporal read path never looks at, so a value
+    asserted on 2026-03-31 read as TRUE AT 2020-01-01 (an absent `validFrom` is
+    an open start). AFTER: the derivation is lifted out of the money path and
+    the seam writes it as the carrier's valid-time start, so the historical
+    read answers absent before the instant and found on/after it.
+    """
+    _install_fake_extract(monkeypatch, _money_payload(
+        "as of 2026-03-31, the tranche stood at EUR 800 committed",
+        pid="pt_11827_asof"))
+    res = sdk._capture_session(CONV)
+    assert res["ok"] is True, res
+    pid = res["points"][0]["id"]
+
+    # the date is on the CARRIER, and NOT on the value
+    assert _read_point_date(sdk, pid) == "2026-03-31"
+    node = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.asOf", params={"id": pid},
+    ).result_set[0][0]
+    assert node is None, "a value must carry no temporal slot of its own"
+
+    # the read path now answers from the data instead of from an open start
+    for instant, expected in (("2020-01-01", "absent"),
+                              ("2026-03-30", "absent"),
+                              ("2026-03-31", "found")):
+        got = sdk.get_historical_knowledge(pid, instant)
+        assert got["status"] == expected, (instant, got.get("status"))
+
+
+def test_a_model_when_is_never_overridden_by_the_derived_date(
+        sdk, monkeypatch):
+    """The derivation is a FALLBACK, not an override.
+
+    `when` is model-judged and names the occurrence time; the derivation is a
+    deterministic reading of the same sentence. When the model supplies one, it
+    wins — otherwise a claim about "on 2026-03-31 we committed X, effective
+    from Q3" would have its occurrence time silently replaced.
+    """
+    payload = _money_payload(
+        "as of 2026-03-31, the tranche stood at EUR 800 committed",
+        pid="pt_11827_model_when")
+    payload["points"][0]["when"] = "2026-03-15"
+    _install_fake_extract(monkeypatch, payload)
+    res = sdk._capture_session(CONV)
+    assert res["ok"] is True, res
+    assert _read_point_date(sdk, res["points"][0]["id"]) == "2026-03-15"
+
+
+def test_a_claim_naming_no_instant_invents_no_start(sdk, monkeypatch):
+    """§4.7's absent-start rule, stated in the approved clause: where a value
+    names no instant, the carrier records NO start — the write path reports it
+    rather than inventing one. No `now`, no clock, no borrow."""
+    _install_fake_extract(monkeypatch, _money_payload(
+        "the tranche released EUR 800 last week", pid="pt_11827_undated"))
+    res = sdk._capture_session(CONV)
+    assert res["ok"] is True, res
+    assert _read_point_date(sdk, res["points"][0]["id"]) is None
+    # …and REPORTS it (§4.7's own clause: "the write path reports it rather than
+    # inventing one"). The value is stored — a claim must not sink for want of a
+    # date — and the receipt says the start is absent, so "no start" is never
+    # indistinguishable from "nobody looked".
+    assert any("no validFrom recorded" in w for w in res["warnings"]), res[
+        "warnings"]
 
 
 def test_capture_keeps_the_claim_when_the_derived_amount_is_unstorable(

@@ -55,10 +55,19 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+#: The interpreter's own ceiling on int()/str conversion, or 0 for "no limit".
+#: The two padded-literal pins below can only FAIL while the ceiling exists: with
+#: `sys.set_int_max_str_digits(0)` the PRE-FIX body converts the same 4,300-digit
+#: token without raising, so every one of their assertions passes on unfixed code.
+#: Read at import (the repo convention — see `tests/test_worker_topology.py`) so
+#: the arms describe THIS box rather than a hard-coded 4300.
+_DIGIT_CONVERSION_LIMIT = sys.get_int_max_str_digits()
+
 # The HOSTED write verb's half of the `ep_updated` pin drives the real
 # `POST /v1/sessions` route, so it reuses `tests/test_hosted_api.py`'s
 # authenticated TestClient fixture — the established repo pattern (see
 # `tests/test_capture_phase_d_dedup.py`), not a second hand-rolled app harness.
+from tests.test_hosted_api import TEST_ORG_ID  # noqa: E402, RUF100
 from tests.test_hosted_api import client as client  # noqa: E402, RUF100, F401
 from tortoise import ranking as _ranking  # noqa: E402, RUF100
 from tortoise import search_engine as _se  # noqa: E402, RUF100
@@ -171,6 +180,174 @@ def test_ep_state_names_the_three_presence_states():
     # A legacy EP-flush mirror alone is still a persisted belief.
     assert ep_state(posterior_alpha=None, ep_alpha=None,
                     confidence=0.42) == EP_STATE_BASELINE
+
+
+# ── The derivation table is the contract, row by row ───────────────────────
+#
+# `search_engine.py` states the whole state contract as ONE table above
+# `ep_measured_cypher`, because the per-clause prose regressed three times on
+# this branch (#11894): a fix to one clause left its neighbour asserting the
+# opposite. Prose cannot be re-read by a machine, so the table is asserted here
+# row by row — a shape whose state, predicate or mean moves REDS this test, and
+# the table cannot drift away from the code without the code being fixed too.
+#
+# The `predicate` column is `ep_measurement_state` (the Python twin of the
+# `has_ep`/`measured` Cypher boolean): it answers "is an α column persisted",
+# NOT "is a belief readable", and the two diverge exactly where the table says.
+@pytest.mark.parametrize(
+    "shape, columns, predicate, expected_state, expected_mean",
+    [
+        ("nothing persisted", {}, "unmeasured", EP_STATE_ABSENT, None),
+        # ⛔ The mirror alone: NO α column, so has_ep/`measured` are False — and
+        # the state is `baseline`, NOT `absent`. This row is what forbids
+        # deriving the state from the two flags.
+        ("legacy n.confidence mirror only", {"confidence": 0.95},
+         "unmeasured", EP_STATE_BASELINE, 0.95),
+        # ⛔ The half pair, no mirror: an α IS persisted (predicate True) and
+        # there is still no mean — absent, not baseline.
+        ("half pair alpha=0.5, no mirror", {"posterior_alpha": 0.5},
+         "measured", EP_STATE_ABSENT, None),
+        # ⛔ The same half pair WITH a mirror: the mirror supplies the belief, so
+        # the state is `measured` and the mean is the mirror's. The unqualified
+        # "a half pair takes the absent arm" gloss is false here.
+        ("half pair alpha=0.5 + mirror 0.95",
+         {"posterior_alpha": 0.5, "confidence": 0.95},
+         "measured", EP_STATE_MEASURED, 0.95),
+        ("(0, 0) pair, no mirror", {"posterior_alpha": 0.0,
+                                    "posterior_beta": 0.0},
+         "measured", EP_STATE_ABSENT, None),
+        ("(0, 0) pair + mirror 0.95",
+         {"posterior_alpha": 0.0, "posterior_beta": 0.0,
+          "confidence": 0.95},
+         "measured", EP_STATE_MEASURED, 0.95),
+        ("unreadable operand 'abc', no mirror", {"posterior_alpha": "abc"},
+         "measured", EP_STATE_ABSENT, None),
+        ("unreadable operand 'abc' + mirror 0.95",
+         {"posterior_alpha": "abc", "confidence": 0.95},
+         "measured", EP_STATE_MEASURED, 0.95),
+        # A declared #2199 baseline: a VALUE (the prior mean), not a measurement.
+        ("declared baseline (ep_alpha=2, ep_beta=1)",
+         {"ep_alpha": 2.0, "ep_beta": 1.0, "baseline_set": True},
+         "baseline", EP_STATE_BASELINE, 2.0 / 3.0),
+        # ⛔ …but the mirror LEADS R1, so a declared baseline that also carries one
+        # reads `baseline` with the MIRROR's value — not the prior mean.
+        ("declared baseline (2, 1) + mirror 0.95",
+         {"ep_alpha": 2.0, "ep_beta": 1.0, "baseline_set": True,
+          "confidence": 0.95},
+         "baseline", EP_STATE_BASELINE, 0.95),
+        # ⛔ …and a DECLARED but DEGENERATE prior is `absent` WITHOUT a mirror:
+        # `set_point_baseline(c, 0, 0)` sets baseline_set with 0/0 operands, and
+        # 0/0 has no mean. "Declared baseline" is therefore not a synonym for the
+        # baseline token, and it is not "always absent" either — the next row.
+        ("declared but degenerate prior (ep_alpha=0, ep_beta=0)",
+         {"ep_alpha": 0.0, "ep_beta": 0.0, "baseline_set": True},
+         "baseline", EP_STATE_ABSENT, None),
+        ("declared but degenerate prior + mirror 0.95",
+         {"ep_alpha": 0.0, "ep_beta": 0.0, "baseline_set": True,
+          "confidence": 0.95},
+         "baseline", EP_STATE_BASELINE, 0.95),
+        # A β WITHOUT an α: no pair, so no mean — and the α predicate is FALSE, so
+        # the state is `baseline` when a mirror supplies the belief (it is not a
+        # "mirror-ONLY" claim in the literal sense, which is why that phrase was
+        # replaced by R1 in the field docs).
+        ("beta-only (no alpha)", {"posterior_beta": 3.0},
+         "unmeasured", EP_STATE_ABSENT, None),
+        ("beta-only (no alpha) + mirror 0.95",
+         {"posterior_beta": 3.0, "confidence": 0.95},
+         "unmeasured", EP_STATE_BASELINE, 0.95),
+        # A NEGATIVE operand is readable and refused as a belief — a distinct
+        # shape from "an operand this process cannot read".
+        ("negative pair (-1, 3)",
+         {"posterior_alpha": -1.0, "posterior_beta": 3.0},
+         "measured", EP_STATE_ABSENT, None),
+        ("measured pair (3, 1)", {"posterior_alpha": 3.0,
+                                  "posterior_beta": 1.0},
+         "measured", EP_STATE_MEASURED, 0.75),
+    ],
+)
+def test_the_state_derivation_table_is_the_contract(
+        shape, columns, predicate, expected_state, expected_mean):
+    """Every row of the table above ``ep_measured_cypher``, asserted."""
+    kw = {
+        "posterior_alpha": None,
+        "posterior_beta": None,
+        "ep_alpha": None,
+        "ep_beta": None,
+        "confidence": None,
+        "baseline_set": False,
+    }
+    kw.update(columns)
+    assert _se.ep_measurement_state(
+        posterior_alpha=kw["posterior_alpha"], ep_alpha=kw["ep_alpha"],
+        baseline_set=kw["baseline_set"]) == predicate, shape
+    assert ep_state(**kw) == expected_state, shape
+    # `belief_value` reads the same columns but takes no `baseline_set` — a flag
+    # is not a value source (see its docstring): the same reason a declared
+    # baseline's mean is the prior it declares — unless a readable mirror
+    # supplies the value, because the mirror leads R1.
+    value_kw = {k: v for k, v in kw.items() if k != "baseline_set"}
+    mean = _se.belief_value(**value_kw)
+    if expected_mean is None:
+        assert mean is None, f"{shape}: expected no belief, got {mean!r}"
+    else:
+        assert mean == pytest.approx(expected_mean), f"{shape}: got {mean!r}"
+    # The value and the state never disagree: `None` exactly on `absent`.
+    assert (mean is None) == (expected_state == EP_STATE_ABSENT), shape
+
+
+@pytest.mark.parametrize("state, measured, expected", [
+    # The #2490 fold, on both sides of the question (the table's TERMINAL row):
+    # a decayed posterior IS a stored value, so `measured` downgrades to
+    # `baseline` — and an ABSENT state stays ABSENT, because a terminal row that
+    # never held a belief has no decayed posterior to report.
+    (EP_STATE_MEASURED, False, EP_STATE_BASELINE),
+    (EP_STATE_ABSENT, False, EP_STATE_ABSENT),
+    (EP_STATE_BASELINE, False, EP_STATE_BASELINE),
+    (EP_STATE_MEASURED, True, EP_STATE_MEASURED),
+])
+def test_the_terminal_fold_moves_measured_only(state, measured, expected):
+    """`ep_state_resolve` must never turn `absent` into a number-bearing state."""
+    assert _se.ep_state_resolve(state, measured=measured) == expected
+
+
+def test_a_born_terminal_claim_has_no_decayed_posterior(sdk):
+    """A claim CREATED terminal never went through a terminalising write.
+
+    The #2490 fold maps `measured` → `baseline` because a terminalising WRITE
+    stamps the decayed 0.5/1.0/1.0. A born-terminal claim has no such write, so
+    there is no value to report: the state stays `absent` and the mean stays
+    `None`. Stated as a test because the prose claimed the opposite twice (a
+    terminal claim's state is "never absent", and "an absent state STAYS absent
+    because a terminal row never held a belief" — which is exactly this row, and
+    NOT the `retract` row the prose described).
+    """
+    pid = sdk.create_point("statement", "born-terminal claim",
+                           status="superseded")["id"]
+    eps = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
+    assert eps.ep_state == EP_STATE_ABSENT, eps
+    assert eps.confidence_mean is None, eps
+    assert eps.measured is False and eps.has_ep is False, eps
+
+
+def test_a_declared_baseline_with_a_mirror_reports_the_mirror_not_the_prior(sdk):
+    """`baseline=True` does NOT mean "the mean is the declared prior".
+
+    R1 leads with the `n.confidence` mirror, so a prior-only claim that also
+    carries one reports `baseline` with the MIRROR's value — measured here: the
+    prior mean is 2/3 and the reported mean is 0.95. The field's `baseline`
+    flag still says prior-only, which is why the two must not be read as one
+    statement.
+    """
+    pid = sdk.create_point("statement", "declared baseline with mirror",
+                           dedup=False, status="live")["id"]
+    sdk.set_point_baseline(pid, 2.0, 1.0)
+    sdk.update_point(pid, confidence=0.95)
+    eps = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
+    assert eps.ep_state == EP_STATE_BASELINE, eps
+    assert eps.baseline is True, eps
+    assert eps.confidence_mean == pytest.approx(0.95, abs=1e-4), (
+        f"the mirror leads R1, so the prior mean 0.667 is NOT the answer: {eps}")
+    assert eps.confidence_mean != pytest.approx(2.0 / 3.0, abs=1e-3)
 
 
 def test_ep_breakdown_default_reports_none_and_absent():
@@ -332,6 +509,14 @@ def test_a_degenerate_declared_baseline_is_absent_and_not_prior_only(sdk):
     assert why_ep.get("confidence_mean") is None, why_ep
 
 
+@pytest.mark.skipif(
+    not _DIGIT_CONVERSION_LIMIT,
+    reason=(
+        "this interpreter has no int()/str conversion limit "
+        "(sys.int_max_str_digits == 0), so the pre-fix body reads the padded "
+        "literal too and this pin cannot discriminate"
+    ),
+)
 def test_a_literal_past_the_int_str_digit_cap_reads_like_its_short_spelling():
     """Cycle 30 P2: `Fraction("<4301 digits>")` raises `ValueError` — CPython
     caps int↔str conversion — and the `exact is None` fallback then DISCARDED
@@ -388,39 +573,123 @@ def test_a_literal_past_the_int_str_digit_cap_reads_like_its_short_spelling():
                 short, numeric_operand(long), expected)
 
 
+@pytest.mark.skipif(
+    not _DIGIT_CONVERSION_LIMIT,
+    reason=(
+        "this interpreter has no int()/str conversion limit "
+        "(sys.int_max_str_digits == 0), so the pre-fix body reads the padded "
+        "literal too and this pin cannot discriminate"
+    ),
+)
 def test_a_padded_hex_exponent_cannot_empty_the_batch():
-    """Cycle 30 P2: the padding axis this cycle bounded had a CRASHING sibling.
+    """#11702: the padding axis this PR bounded had a CRASHING sibling.
 
-    The mantissa of a hex literal is reconstructed with `int(digits, 16)`, which
-    CPython's int↔str cap exempts — but the `p` exponent is base 10 and is NOT
-    exempt. A zero-padded exponent (`p-000…149`, the same cheap padding that
-    makes any stored operand arbitrarily long) raised `ValueError` inside
-    `int()`, and `annotate_ep_batch`'s blanket handler answered `{}` for the
-    whole batch: ONE legacy row made every claim in the response read
-    `ep_state: "absent"`, `confidence_mean: null`, `measured: false` — including
-    claims genuinely measured — and any belief floor then returned nothing.
+    The MANTISSA of a hex literal is reconstructed with `int(digits, 16)`, which
+    CPython's int↔str cap exempts (it applies to non-power-of-two bases only) —
+    but the `p` EXPONENT is base 10 and is NOT exempt. A zero-padded exponent
+    (`p-000…149`, the same cheap padding that makes any stored operand
+    arbitrarily long) raised `ValueError` inside `int()`, and
+    `annotate_ep_batch`'s blanket handler answered `{}` for the WHOLE batch: ONE
+    legacy row made every claim in the response read `ep_state: "absent"`,
+    `confidence_mean: null`, `measured: false` — including claims genuinely
+    measured — and any belief floor then returned nothing.
 
-    Pinned on the HELPER (the batch surface needs a live graph and the helper is
-    where the raise was), and on the shape that matters: the value must be the
-    literal's, not a discarded `None`.
+    Pinned on the HELPER (the batch surface needs a live graph, and the helper
+    is where the raise was), and on the shape that matters: a padded exponent is
+    the SAME exponent, so the value must be the literal's — never a discarded
+    `None`, and never a raise.
+    """
+    from fractions import Fraction
+
+    from tortoise.search_engine import _exact_literal_fraction, numeric_operand
+
+    # The same exponent, spelled with 4,300 zeros: the value, not None.
+    padded = "0x1p-" + "0" * 4300 + "149"
+    assert len(padded) > 4300
+    assert _exact_literal_fraction(padded) == Fraction(1, 2 ** 149), (
+        "a zero-padded exponent was not read as its own value")
+    assert numeric_operand(padded) == float.fromhex("0x1p-149"), (
+        numeric_operand(padded))
+    # …and a padded exponent that is genuinely OUT of bounds is still refused
+    # rather than converted: the strip cannot change the value, and the digit
+    # count short-circuits the conversion the cap would raise on.
+    assert _exact_literal_fraction("0x1p+" + "9" * 4400) is None
+    assert numeric_operand("0x1p+" + "9" * 4400) is None
+
+
+def test_the_hex_exponent_guard_is_value_shaped_not_length_shaped():
+    """⛔ The exponent guard must not be a DIGIT-LENGTH short-circuit.
+
+    A 4,300-character padded exponent has to be refused without being converted,
+    and the tempting way to do that is
+    ``len(exp_digits) > len(str(_EXACT_FRACTION_MAX_EXP))``. That bound is
+    GRAMMAR-shaped, not VALUE-shaped: it refuses a five-digit exponent by its
+    SPELLING even when the value's magnitude is inside the bound, because a long
+    mantissa's fractional zeros cancel it. `"0x0." + "0"*1476 + "1p10000"` has
+    magnitude_bits ``4*1 + 10000 - 4*1477 == 4096`` — exactly
+    `_EXACT_FRACTION_MAX_EXP` — so this helper's contract ("the literal's EXACT
+    value, or None") requires `2**4092`, and the length form answered `None`.
+
+    ⛔ That literal is NOT a measured-vs-absent witness and must not be quoted as
+    one: `2**4092` overflows a double, so `numeric_operand` answers `None` for it
+    and the store reads `absent` either way. The STORE-visible witness for
+    bounding MAGNITUDE is the cancelling spelling from #11897 — a float32 MAX
+    mantissa closed with `p-4204` — which an `abs(exponent)` bound refused while
+    every Cypher surface served it; pinned in
+    `test_a_cancelling_hex_exponent_reads_at_both_band_edges`.
+
+    The guard is therefore a `try: int(...) except ValueError`, so it refuses only
+    the conversion the int↔str cap would actually raise on.
     """
     from fractions import Fraction
 
     from tortoise.search_engine import _exact_literal_fraction
 
-    # A padded exponent is the SAME exponent: value must be unchanged, not None.
-    assert _exact_literal_fraction("0x1p-149") == Fraction(1, 2 ** 149)
-    padded = "0x1p-" + "0" * 4400 + "149"
-    assert len(padded) > 4300, len(padded)
-    assert _exact_literal_fraction(padded) == Fraction(1, 2 ** 149), (
-        f"a {len(padded)}-character exponent of the SAME value read "
-        f"{_exact_literal_fraction(padded)!r} instead of 2**-149 — the literal "
-        "was discarded, and one such row empties the whole batch")
-    assert _exact_literal_fraction("0x1p+1") == 2
-    assert _exact_literal_fraction("0x1p+" + "0" * 4400 + "1") == 2
-    # …and a genuinely out-of-bound exponent still declines, without raising.
-    assert _exact_literal_fraction("0x1p+9999") is None
-    assert _exact_literal_fraction("0x1p+" + "9" * 4400) is None
+    in_bounds = "0x0." + "0" * 1476 + "1p10000"
+    assert _exact_literal_fraction(in_bounds) == Fraction(2 ** 4092), (
+        "a five-digit exponent whose magnitude is inside the bound must be READ, "
+        f"not refused: {_exact_literal_fraction(in_bounds)!r}")
+    past_bound = "0x0." + "0" * 1476 + "1p11000"
+    assert _exact_literal_fraction(past_bound) is None, (
+        "the same mantissa with an out-of-bounds exponent must still be refused")
+
+
+def test_a_zero_literal_with_an_empty_integer_part_is_still_zero():
+    """`.0` is a literal whose EXACT value is 0, not an unreadable string.
+
+    Canonicalising the mantissa strips trailing fractional zeros, which empties
+    the integer part for `.0` / `+.00` / `-.0e5` / `.000E-7` — and `Decimal("")`
+    (or `Decimal("+")`) RAISES, so the helper answered `None` where the literal's
+    exact value is 0. Not reachable through `numeric_operand` (it
+    short-circuits `val == 0.0`), but this helper's contract is "the literal's
+    EXACT value, or None", and 0 is a value.
+    """
+    from fractions import Fraction
+
+    from tortoise.search_engine import _exact_literal_fraction
+
+    for lit in (".0", ".00", "+.00", "-.0", "-.0e5", ".000E-7", "+.000e+3"):
+        assert _exact_literal_fraction(lit) == Fraction(0), (
+            f"{lit!r} read {_exact_literal_fraction(lit)!r} instead of 0")
+    # A dot with no digits at all is not a number, and must still decline.
+    assert _exact_literal_fraction(".") is None
+
+
+def test_a_zero_spelling_with_stray_signs_is_not_a_value():
+    """`++.0` is not a number, so the zero-form guard must test the SIGN the
+    literal was WRITTEN with, not the rebuilt mantissa.
+
+    The guard's test was `not mantissa.strip("+-")` on the mantissa AFTER the
+    trailing-zero strip. For `++.0` the strip rebuilds that mantissa as `++`,
+    which passes that test — so an unparseable spelling answered `Fraction(0)`
+    where the contract says "the literal's EXACT value, or None". `++` is not a
+    sign, so the answer is None; the spelling is what has to be judged.
+    """
+    from tortoise.search_engine import _exact_literal_fraction
+
+    for lit in ("++.0", "--.0", "+-.0", "++0.0", "---.00e5"):
+        assert _exact_literal_fraction(lit) is None, (
+            f"{lit!r} read {_exact_literal_fraction(lit)!r} instead of None")
 
 
 # ── A hex exponent the mantissa CANCELS is not an unreadable literal ──────
@@ -660,29 +929,6 @@ def test_a_hex_magnitude_past_the_bound_is_refused_before_it_is_built(
     assert built, "the spy never fired — the refusals above prove nothing"
 
 
-def test_a_zero_literal_with_an_empty_integer_part_is_still_zero():
-    """Cycle 30 P3: the trailing-zero canonicalisation can EMPTY the integer
-    part, and `Decimal("")` raises — so `.0`, `+.00`, `-.0e5` returned `None`
-    where the literal's exact value is 0.
-
-    Latent rather than live — `numeric_operand` short-circuits `val == 0.0`
-    before the string path, so no served value changed — but this helper's
-    contract is "the literal's EXACT value, or None", and 0 is a value. A later
-    caller that reaches the helper directly would otherwise read "absent" for a
-    literal that is exactly zero.
-    """
-    from fractions import Fraction
-
-    from tortoise.search_engine import _exact_literal_fraction
-
-    for spelling in (".0", ".00", "+.0", "-.0", ".0e5", ".000E-7", "+.00e+0"):
-        assert _exact_literal_fraction(spelling) == Fraction(0), (
-            f"{spelling!r} read {_exact_literal_fraction(spelling)!r} — the "
-            "canonicalisation emptied the integer part and `Decimal` raised")
-    # A dot with no digits at all is not a number, and must still decline.
-    assert _exact_literal_fraction(".") is None
-
-
 # ── The property: an absent claim is not ORDERED as a 0.5 ──────────────────
 
 def test_absent_and_measured_symmetric_do_not_share_an_ordering_input(sdk):
@@ -846,6 +1092,18 @@ def test_the_subgraph_labels_a_terminal_claim_the_same_way_the_ep_block_does(sdk
     assert node["ep_state"] == ep.get("ep_state"), (
         f"the response contradicts itself: subgraph {node['ep_state']!r} vs "
         f"the ep block {ep.get('ep_state')!r}")
+    # …and the ROW the derivation table states for a terminal claim that HAD a
+    # posterior: `has_ep`/`baseline` are both False (the #2490 gate clears the
+    # first, the resolved state clears the second) and the value is the decayed
+    # posterior — 0.5 here, because (1.0, 1.0) IS Beta(1,1). Pinned here because
+    # those three columns are computed in `annotate_ep_batch` and no unit-level
+    # row can reach them.
+    eps = annotate_ep_batch(proj.g, [pid])[pid]
+    assert eps.ep_state == EP_STATE_BASELINE, eps
+    assert eps.has_ep is False and eps.measured is False, eps
+    assert eps.baseline is False, eps
+    assert eps.confidence_mean == pytest.approx(0.5, abs=1e-6), (
+        f"a terminal claim's decayed posterior is a VALUE (0.5 here): {eps}")
 
 
 def test_a_legacy_string_operand_outside_float32_is_absent_on_every_surface(sdk):
@@ -1375,6 +1633,12 @@ def test_mirror_only_claim_agrees_on_the_value_everywhere(sdk):
         [{"id": pid, "scores": {"rrf": 1.0}}])[0]["recall_ranking"]
 
     assert eps.ep_state == EP_STATE_BASELINE, eps.ep_state
+    # ⛔ NEITHER flag is a state, and this is the row that proves it: no α column
+    # exists at all, so `measured` is False beside `baseline` False — and the
+    # belief IS readable (`baseline`, 0.95). "measured=False, baseline=False ⇒
+    # absent, mean None" is false on this shape.
+    assert eps.measured is False and eps.baseline is False, (
+        f"mirror-only flags: measured={eps.measured} baseline={eps.baseline}")
     for name, value in (("ep block", eps.confidence_mean),
                         ("why block", why_ep["confidence_mean"]),
                         ("graph signal", sig["confidence"]),
@@ -2143,6 +2407,18 @@ def test_degenerate_baseline_writes_no_mirror(sdk):
     eps = annotate_ep_batch(sdk._get_proj().g, [pid])[pid]
     assert eps.ep_state == EP_STATE_ABSENT, eps
     assert eps.confidence_mean is None, eps
+    # ⛔ …and the α columns ARE persisted anyway, so "measured=False,
+    # baseline=False" is NOT "no α column": the state is `absent` WITH operands
+    # stored, and the flags are False for a second reason (the degenerate prior
+    # fails the mean rule, and `baseline` follows the RESOLVED state).
+    stored_alpha, stored_beta = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, n.ep_beta",
+        params={"id": pid}).result_set[0]
+    assert stored_alpha == 0.0 and stored_beta == 0.0, (
+        f"expected persisted 0/0: {stored_alpha!r}/{stored_beta!r}")
+    assert eps.measured is False and eps.baseline is False and eps.has_ep is False, (
+        f"degenerate-prior flags: measured={eps.measured} "
+        f"baseline={eps.baseline} has_ep={eps.has_ep}")
 
 
 def test_update_point_clearing_the_mirror_leaves_one_answer(sdk):
@@ -2783,7 +3059,25 @@ def test_write_verb_ep_updated_pins_the_hosted_mirror_only_claim(
     pid = body["points"][0]["id"]
 
     import tortoise.hosted_api as ha_mod
-    proj = ha_mod._make_sdk(namespace="team-001")._get_proj()
+    # The mirror belief lives in the graph the HOSTED write verb opens, which for
+    # an org with no promoted graph is keyed by the AUTHENTICATED team id
+    # (`_data_sdk` -> `_make_sdk(namespace=org_id)`) — so this
+    # handle must be built from the fixture's own `TEST_ORG_ID`, imported
+    # beside the `client` fixture above, not from a second hardcoded copy of
+    # the id. (That default is a POINTER that a promotion can move, #10180 —
+    # true of this fixture's unpromoted org, and a move would red the
+    # `ep_updated: True` arm rather than let it pass.) The form matters twice:
+    # `tests/test_markers.py`'s `test_namespace_literals_guard_passing_or_routed`
+    # reds on an un-routed non-test literal (#11905) and this scan cannot see a
+    # variable, so the construction needs no `ROUTED_NAMESPACES` declaration —
+    # do not re-add a `"team-001"` row for it, that is the rejected alternative
+    # and it becomes a whitelist once the literal is gone. And a `test_*`
+    # rename would open a DIFFERENT graph than the write verb writes, where
+    # `_clear_belief`'s `MATCH (n:Point {id:$id})` finds no node — it clears
+    # nothing, so the `ep_updated: True` arm below would fail loudly (the
+    # β-only arm after it can never be reached, so it is non-discriminating
+    # rather than merely vacuous).
+    proj = ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_proj()
     _clear_belief(proj, pid, mirror=0.95)
     payload = dict(payload, session_id="zq-ep-flag-http-b")
     r2 = client.post("/v1/sessions", json=payload)
@@ -5308,12 +5602,12 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 #
 # The defect class that survived six review rounds here is not behavioural: it
 # is a SENTENCE that restates the absence rule at one site while the code and
-# `EpBreakdown`'s canonical statement (`search_engine.py`:1396-1427 — the class
-# opens at 1396, so the old `1392` started inside `EpEvidence`) say
+# `EpBreakdown`'s canonical statement (the contract block above
+# `ep_measured_cypher`, cited by name because line numbers rot) say
 # something else. Each round fixed the sites that review named and left the
 # same class at a site nobody had looked at, because nothing checked the CLASS.
 #
-# Two shapes are pinned below.
+# Three shapes are pinned below.
 #
 # 1. A sentence asserting what a prior-only claim's `confidence_mean` IS must
 #    also name the `n.confidence` mirror, within the same sentence. The mirror
@@ -5322,43 +5616,21 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 #    "IS the declared PRIOR mean" is false for exactly the row
 #    `set_point_baseline(3.0, 1.0)` + `update_point(confidence=0.9)`: the
 #    declared prior mean is 0.75 and the field reads 0.9. That sentence stood
-#    at `search_engine.py`:347 while the precedence at `search_engine.py`:5539
-#    (`elif mirror is not None:`) said otherwise — 5,192 lines away, not the
-#    "nine hundred" an earlier revision of this note claimed. `origin/main`'s belief prose carried TEN unqualified matches
-#    (`search_engine.py` 6, `why.py` 2, `volunteer.py` 1, `sdk.py` 1 — the
-#    numbers this guard measures, not a count taken on trust), plus one
-#    `else ``None``` match below.
+#    at `search_engine.py`:345 while the code nine hundred lines away said
+#    otherwise, and five sibling copies of the same claim did too.
 # 2. The `… else the persisted prior mean (ep_alpha/beta), else ``None```
 #    claim must name the mirror as well, or it predicts `None`/absent for a
 #    mirror-only Point — which reads `baseline` at the mirror's value, not
-#    `None`. `sdk.py` states it in the SHORTER "else the persisted prior mean"
-#    form (the `tortoise_fts_query` description) and is scanned here. The same
-#    claim also stands unqualified in `mcp_server.py`, OUTSIDE this PR's
-#    declared five-module scope because that string is part of the FROZEN MCP
-#    surface (`tools/surface-guard.py` hashes it, so correcting it is a surface
-#    change needing owner approval, not a docs fix a lane may make).
-#    ⛔ TRACKED: daniel-ospina/tortoise#11930.
+#    `None` (its sibling copy in `sdk.py` carries the qualifier).
 #
 # The check is a PROXIMITY one on normalised prose: a qualifier must follow its
 # claim within the same sentence, so a paragraph that mentions the mirror for a
-# DIFFERENT shape does not satisfy it (that is how `:347` passed every earlier
-# review).
+# DIFFERENT shape does not satisfy it (that is how `:345` passed every earlier
+# review). It is a regression tripwire on the class, not a grammar proof.
 #
-# ⛔ WHAT THIS GUARD IS, STATED SO IT CANNOT OVER-PROMISE. It is a regression
-# tripwire over the WORDINGS the tree has actually used, in both directions:
-# it flags a claim whose sentence carries no affirmative mirror clause, and it
-# vetoes a claim whose sentence carries a negation, a restriction clause
-# ("only when…", "last", "ignored", "fallback") or a precedence verb attached to
-# the PAIR rather than the mirror. It is NOT a grammar proof and CANNOT be: a
-# paraphrase that states the rule wrongly without reusing any of these shapes
-# passes, and six review cycles each produced one. Its honest claim is "the
-# settled wordings do not invert silently", which is why `_EXPECTED_*_SITES` is
-# a FLOOR (a new site is covered, a vanished one fails) and why every failure
-# message quotes the offending sentence rather than asserting a verdict.
-#
-# Scope: the five modules that carry this contract. The architecture docs are
-# guarded by their own citation tests (`tests/test_extractor_v4_citation_rot.py`,
-# `tests/test_docs_citation_refs.py`) and are not duplicated here.
+# Scope: the five modules that carry this contract. The architecture doc is
+# guarded by `tests/test_extractor_v4_citation_scan`-class tests and is not
+# duplicated here.
 
 _BELIEF_PROSE = (
     "tortoise/search_engine.py",
@@ -5368,246 +5640,93 @@ _BELIEF_PROSE = (
     "tortoise/ranking.py",
 )
 
-#: How far after a claim its qualifier may sit for the SCAN to find it. This is
-#: not what enforces "same sentence": some sentences in these modules run past
-#: 300 characters once whitespace is collapsed (measured at this head, with this
-#: guard's own splitter: 334 of 1,489 `search_engine.py` sentences run past 300
-#: characters). A plain ``(?<=[.!?])\s+`` measures the SAME 334 of 1,489 — the
-#: two splitters agree, because `\s+` is greedy so the ``(?=\S)`` lookahead
-#: never moves a split point; an earlier revision of this note cited "390 of
-#: 1,022" and drew a contrast between the two that does not exist.
-#: ⚠️ MEASURED TWICE, IN BOTH DIRECTIONS, so the bound has to clear real prose
-#: AND refuse the rest:
-#:   • too NARROW is a FALSE PASS. A 353-character sentence whose restriction sits
-#:     at index 325 PASSED at 300 and BLOCKED at 10**7: the sentence cut happens
-#:     inside the slice, so a restriction or an inversion past the cut is
-#:     invisible and the claim is certified on its PREFIX.
-#:   • a hard cut with no escape is a FALSE BLOCK. With the refusal switched on at
-#:     300, three SHIPPED sentences this guard must accept — 603 characters in
-#:     `search_engine.py`, 475 in `why.py`, 796 in `sdk.py` — were reported
-#:     unqualified because the sentence RAN PAST the cut. (Without the refusal, 300
-#:     blocks none of them: every shipped qualifier sits inside it. So the refusal
-#:     is what surfaces them and the bound is what must clear them — neither half
-#:     works alone, which is why both changed together.)
-#: So the bound now EXCEEDS the longest real claim sentence (796 characters
-#: measured, in `sdk.py`), and `_qualified` additionally REFUSES any
-#: sentence whose slice stopped at EITHER window edge without punctuation — a
-#: sentence too long to read is reported, never certified. The remaining
-#: direction is a false BLOCK on prose no one has written yet, which a human
-#: reading the evidence can act on; a false pass cannot happen.
-#: ⚠️ BOTH EDGES — this paragraph said "the window edge" and the code checked
-#: only the FORWARD one, which was itself a false pass. A restriction placed
-#: past `_QUALIFIER_LOOKBEHIND` in the claim's own sentence was cut off while a
-#: post-claim mirror carried the qualifier: measured, `"Only when nothing else
-#: exists " + "x"*700 + " the n.confidence mirror leads it, so <claim>"` was
-#: CERTIFIED, i.e. the INVERSE of the shipped precedence passed the one gate
-#: built to refuse it. A sentence whose HEAD is cut is as much a prefix as one
-#: whose tail is, so both are refused now.
-_QUALIFIER_WINDOW = 2000
+#: A sentence terminator followed by whitespace, EXCLUDING the abbreviations the
+#: corpus writes (`e.g.` / `i.e.` / `cf.`): splitting on those tears a correct
+#: sentence in two and reports its claim fragment as a defect — a false positive
+#: that steers the next fixer to "correct" correct prose.
+_SENTENCE_END = re.compile(
+    r"(?<!\be\.g\.)(?<!\bi\.e\.)(?<!\bcf\.)(?<=[.!?])\s+")
 
 #: Sentences that ASSERT the value of a prior-only claim's mean. The verb is
 #: what distinguishes a CLAIM from a factual mention of a number ("Beta(3,1),
 #: prior mean 0.75" / "the 0.75 prior mean" assert nothing about the field).
 _PRIOR_MEAN_CLAIM_PATTERNS = (
-    # `\`\`confidence_mean\`\` is then the prior mean` — the `then` form is how
-    # `EpBreakdown`'s `has_ep` field doc states it, and the backticks are how
-    # every RST mention spells the field.
-    re.compile(r"confidence_mean`*\s+(is|IS)(\s+then)?\s+(the\s+)?(declared\s+)?PRIOR mean",
+    re.compile(r"confidence_mean\s+(is|IS)\s+(the\s+)?(declared\s+)?PRIOR mean",
                re.IGNORECASE),
     re.compile(r"reads its PRIOR mean", re.IGNORECASE),
-    # The canonical `EpBreakdown` field doc and `annotate_ep_batch`'s contract
-    # both say "else the persisted prior mean (ep_alpha/beta)" — the same false
-    # prediction for a mirror-bearing row. `tortoise/sdk.py` states it in the
-    # shorter "else the persisted prior mean" form with no parenthetical, so the
-    # parenthetical and its `the` are optional here. Without the optional parts
-    # that site matched NOTHING and the sentence read as covered.
-    re.compile(r"else (the )?persisted prior mean( \(ep_alpha/beta\))?",
-               re.IGNORECASE),
+    #: The POSTERIOR-mean spelling of the same claim (PR #11922 review, finding 1).
+    #: `volunteer.py`'s module docstring said *"the gate reads the canonical
+    #: persisted posterior mean"* with no mirror term — true before #2206 and
+    #: false after it, because `annotate_ep_batch` returns `round(mirror, 4)`
+    #: FIRST. The two patterns above could not see it: neither the `PRIOR mean`
+    #: noun nor `reads its` is present, so the sentence was invisible to a guard
+    #: whose whole purpose is this class. The verb `reads` is kept in the pattern
+    #: because it is what makes the sentence a CLAIM about the field rather than a
+    #: mention of a formula (`"the posterior mean α/(α+β)"` states no precedence).
+    re.compile(r"reads\s+(?:the\s+|its\s+)?(?:canonical\s+)?(?:persisted\s+)?"
+               r"posterior\s+mean", re.IGNORECASE),
 )
 
-#: The class-2 claim: "… else the persisted prior mean (ep_alpha/beta), else
-#: ``None``" — `None` for a mirror-only Point is the false prediction.
+#: The class-2 claim: the "prior mean … else None" prediction. The SENTENCE is
+#: the unit, so the intra-sentence clause bound is unnecessary and harmful — a
+#: literal punctuation anchor (`(ep_alpha/beta)`) plus a `{0,80}` clause missed
+#: every ordinary rewording (`of \`ep_alpha/beta\``, `(ep_alpha, ep_beta)`, a
+#: longer aside) AND the trailing-connective form ("prior mean …, ``None``
+#: otherwise"). The three tokens are therefore matched ORDER-INDEPENDENTLY
+#: inside one sentence. It is FALSE whenever a readable mirror exists, so a
+#: reader branching on it predicts `absent` for a mirror-only Point.
 _ABSENT_CLAIM = re.compile(
-    r"prior mean \(ep_alpha/beta\), else ``None``", re.IGNORECASE)
-
-#: A qualifier's SUBJECT: the mirror noun, required. A form list alone is
-#: subject-blind and object-blind — `unless a readable` matched "unless a
-#: readable cache exists" and the bare `\bLEADS it\b` matched "the evidence
-#: total LEADS it" (both measured on this file's own `_unqualified_claims`, so
-#: the guard passed while the prose stated something else).
-_MIRROR_NOUN = re.compile(r"\bmirror\b|\bn\.confidence\b", re.IGNORECASE)
-
-#: A qualifier's VERB, searched just AFTER the mirror noun — the position every
-#: real site puts it in ("mirror LEADS", "mirror, if present, LEADS it",
-#: "mirror's value, which LEADS", "mirror supplies the value").
-#: `re.IGNORECASE` rather than an enumerated case list: a bare `LEADS|leads|lead`
-#: flagged the TRUE "…the mirror Leads it" (measured), and "takes precedence" /
-#: "overrides" / "wins" are true statements of the same rule that no case list
-#: reaches. False-FLAGGING a true sentence is the safe direction (it blocks a
-#: rewrite rather than passing an inversion) but it is still friction.
-_QUALIFIER_VERB = re.compile(
-    r"\b(?:leads?|suppl(?:y|ies)|takes\s+precedence|overrides|wins)\b",
-    re.IGNORECASE,
-)
-
-#: How far after the mirror noun its verb may sit ("mirror, if present, LEADS
-#: it" is 28 characters).
-_QUALIFIER_VERB_WINDOW = 60
-
-#: How far BEFORE a claim its own sentence may begin. A qualifier may precede the
-#: claim it qualifies ("Because a readable ``n.confidence`` mirror leads it, a
-#: prior-only claim's confidence_mean IS the declared PRIOR mean only when no
-#: mirror is readable"), and a forward-only window reported that TRUE sentence as
-#: unqualified (measured).
-_QUALIFIER_LOOKBEHIND = 600
-
-#: Sentences that INVERT the rule outright, however many affirmative forms they
-#: also carry. The case the subject/verb pair cannot see is an AFFIRMATIVE
-#: clause followed by a LATER-clause inversion — "…unless a readable mirror
-#: supplies one; except that the mirror never LEADS it" — because each clause's
-#: mirror+verb pair is individually clean. Fail-closed on it.
-#: ⚠️ NAMED RESIDUAL — ONE DIRECTION. This is a tripwire on the class, not a
-#: parser: an inversion phrased around the shapes below is not detected. The
-#: guard's claim is "the settled wordings of the rule do not invert silently" —
-#: never "no English sentence can defeat it".
-#: (A qualifier placed BEFORE its claim is NO LONGER a false block: the scan
-#: reaches back `_QUALIFIER_LOOKBEHIND` characters and `_claim_sentence` cuts
-#: backward too, so "A readable mirror supplies the value; without one,
-#: confidence_mean IS the … PRIOR mean" is accepted — measured. An earlier
-#: revision of this note listed that as a residual and it had gone stale.)
-_MIRROR_INVERSIONS = re.compile(
-    r"mirror\s+(?:never|not|isn't|is\s+not|does\s*n[o']t|doesn't)\s+lead"
-    r"|suppl(?:y|ies)\s+(?:no|nothing)\b"
-    r"|mirror\s+is\s+(?:ignored|optional)"
-    r"|not\s+true\s+that\b"
-    r"|false\s+that\b",
-    re.IGNORECASE,
-)
-
-#: Words that INVERT a qualifier ("the mirror never leads it", "unless no
-#: readable mirror supplies one"). Scanned over the whole claim→verb span — the
-#: span STARTS AT THE CLAIM, not at the sentence start — because: (a) a
-#: 24-character lookbehind let `…; it is not true, as some claim, that a readable
-#: mirror leads it.` pass (measured), and (b) starting at the sentence start made
-#: a negation about a DIFFERENT shape false-block a true sentence ("Nothing
-#: persisted means no mean; a readable mirror leads it, so confidence_mean IS
-#: the declared PRIOR mean", measured).
-#: ⚠️ NAMED RESIDUAL, fail-closed: a negation inside the claim's OWN sentence
-#: that negates some other object still blocks the qualifier — `…IS the declared
-#: PRIOR mean — not the Beta(1,1) neutral 0.5 — and a readable mirror leads
-#: both` is TRUE and is still reported. That blocks a correct rewrite (a human
-#: then reads it); it never passes a false claim, which is the property that
-#: matters here.
-_QUALIFIER_NEGATIONS = re.compile(
-    r"\b(never|not|no longer|nothing|without|cannot|isn't|doesn't|"
-    r"no readable|no mirror|no case|fails? to|nor|can't)\b",
-    re.IGNORECASE,
-)
-
-#: A negation that does NOT invert — stripped before the negation test above,
-#: so a "not only … but … too" clause is not read as negating the qualifier.
-#: ⚠️ THIS DOES NOT MAKE THE "not only" SENTENCE ACCEPTED — an earlier revision
-#: of this note said it did, and that was false. `_MIRROR_RESTRICTIONS`'s bare
-#: `\bonly\b` vetoes the spelling anyway, so both placements are still REPORTED.
-#: That is deliberate and fail-CLOSED: exempting a spelling from a veto makes the
-#: veto weaker, and the exemption cannot tell an affirmation from a demotion —
-#: measured, "The mirror supplies the value not only when the pair is absent;
-#: the pair always leads otherwise, so <claim>" was CERTIFIED once the veto
-#: spared it, which is the inverse of the shipped precedence. A true "not only"
-#: sentence is therefore a false BLOCK a human reads, never a false pass.
-_QUALIFIER_NEGATION_OK = re.compile(r"\bnot only\b", re.IGNORECASE)
-
-#: Negated OBJECTS that follow a qualifier verb ("the mirror supplies nothing
-#: for these rows", "the mirror supplies no value"), and the judgement form
-#: that disowns the whole clause ("the claim that a mirror LEADS it is false").
-#: Checked just after the verb; deliberately narrower than
-#: `_QUALIFIER_NEGATIONS`, because a general after-window flags correct prose
-#: whose NEXT clause negates something else — measured on
-#: "…LEADS it), never a measured one", which is TRUE.
-_QUALIFIER_OBJECT_NEGATIONS = re.compile(
-    r"\b(nothing|none|no readable|no mirror|no value|no mean|no belief|"
-    r"no number)\b"
-    # The JUDGEMENT form only ("the claim that a mirror LEADS it is false").
-    # A bare `\bfalse\b` is not usable here: `has_ep`'s field doc opens "False =
-    # no α persisted…", and the literal value would veto a correctly qualified
-    # sentence — measured, and it flagged that doc the first time.
-    r"|\b(?:is|are|was|proves?)\s+(?:false|untrue)\b",
+    r"(?=.*\bprior mean\b)"
+    r"(?=.*\b(?:else|otherwise)\b)"
+    r"(?=.*[`\"]*(?:None|null)\b)",
     re.IGNORECASE)
 
+#: The class-3 claim: a gloss that reads `has_ep` / `ep_measured_cypher` as
+#: PROOF OF AN EP PASS. The predicate is `posterior_alpha IS NOT NULL OR
+#: (ep_alpha IS NOT NULL AND NOT baseline_set)` — a direct
+#: `update_point(posterior_alpha=…)` sets it with no EP pass anywhere, and the
+#: legacy `ep_alpha` arm is written by a prior stamp. Every surface below the
+#: contract says "not an EP receipt"; this pins that no gloss drifts back.
+#:
+#: The windows are 300 characters and CROSS sentence boundaries on purpose
+#: (PR #11933 review round 4, ISSUE 1). The contract block defines the flag in
+#: one sentence and lists what it is NOT in the next, so the flag and the
+#: phrase it denies sit a list item apart: the original 40-character,
+#: dot-excluding windows could not span them, matched NOTHING on this head or
+#: on `origin/main`, and so the corpus assertion stayed green even when the
+#: shipped denial was reverted into the gloss it exists to catch. This bound is
+#: a PROXIMITY bound, never a grammar proof — the clause-scoped denial check in
+#: `_ep_pass_claims` is what separates a denial from an assertion, and the
+#: control test mutates the shipped denial in place to prove this guard reddens.
+#: The LINK segment — the span between the verb and the phrase — is CAPTURED
+#: because the denial check is scoped to it (`_negates_its_verb` reads
+#: `group("link")` and nothing else; the span in FRONT of the verb is matched
+#: without capture, and no code reads it).
+_EP_PASS_CLAIM = re.compile(
+    r"(?:has_ep|ep_measured_cypher).{0,300}?"
+    r"(?:==|\bis\b|\bmeans?\b)(?P<link>.{0,300}?)"
+    r"[`\"]*(?P<pass>EP has MEASURED|EP measured this|EP MEASURED)",
+    re.IGNORECASE | re.DOTALL)
 
-#: Restriction clauses that demote the mirror to a FALLBACK — the inverse of the
-#: shipped precedence. Checked over the WHOLE claim sentence: English puts a
-#: restriction in a relative clause BEFORE the main verb ("the mirror, IGNORED
-#: whenever a pair exists, supplies the value"), which a post-verb window cannot
-#: see (measured — three such inversions were certified qualified).
-_MIRROR_RESTRICTIONS = re.compile(
-    # `(?<!-)only` is load-bearing: a bare `\bonly\b` matches "mirror-ONLY Point",
-    # which is the canonical TRUE wording. It is the ONLY exemption: a
-    # `(?<!not )` for "not only" was tried and REMOVED — it certified a demotion
-    # ("the mirror supplies the value not only when the pair is absent; the pair
-    # always leads otherwise", measured), because a spelling exemption cannot
-    # tell an affirmation from an inversion. See `_QUALIFIER_NEGATION_OK`.
-    r"(?<!-)\bonly\b"
-    r"|\bfallback\b"
-    r"|\bnothing else\b"
-    r"|\bwhen no\b"
-    r"|\bafter the pair\b"
-    r"|\blast\b"
-    r"|\bignored\b"
-    r"|\bnot consulted\b"
-    # DIRECTION-AMBIGUOUS verbs: "takes precedence"/"overrides"/"wins" appear on
-    # `_QUALIFIER_VERB` because they state the TRUE rule when the MIRROR is the
-    # subject — so the same words must be a veto when the PAIR is, or the guard
-    # treats the word as proof of the direction. Measured defeats:
-    # "…supplies the value — but the pair takes precedence" and
-    # "…which the α/β pair then OVERWRITES" both passed before this.
-    r"|(?:pair|posterior|α/β|alpha/beta|mean)\s+"
-    r"(?:then\s+|is\s+what\s+\w+\s+serves|actually\s+)?"
-    r"(?:takes\s+precedence|overwrites?|overrides|wins|supersedes)"
-    # …and the mirror as subject with a PRECEDENCE verb denied or reversed:
-    # "it never takes precedence OVER the pair", "the mirror is what the row
-    # actually serves" is not enough on its own, so both parties are named.
-    r"|(?:never|not)\s+takes?\s+precedence\s+over\s+the\s+"
-    r"(?:pair|posterior|α/β|alpha/beta|mean)"
-    r"|is\s+what\s+the\s+row\s+actually\s+serves",
-    re.IGNORECASE,
-)
+#: Negators of the gloss itself. `no` is excluded on purpose: "no mere flag" is
+#: a determiner, not a negation of the claim, and admitting it exempted a live
+#: gloss. `⛔` is excluded for the same reason, MEASURED: the PR #11933 review
+#: proved this guard inert with the mutant that reverts the shipped denial's
+#: `not` to `is` while the bullet keeps its `⛔` glyph — the glyph marks a
+#: bullet as load-bearing, it does not negate a proposition, so a gloss carrying
+#: only `⛔` still asserts the gloss.
+_NEGATED = re.compile(r"\b(?:not|never)\b|\bisn't\b", re.IGNORECASE)
 
-#: The OBJECT a qualifier verb must govern for the claim to be qualified: the
-#: mean/belief itself, not some other noun in the same sentence. See the call
-#: site — "leads the EVENT ordering" / "supplies the RANKING weight" are
-#: mirror+verb pairs that qualify nothing this guard is about.
-_QUALIFIER_OBJECT = re.compile(
-    r"\b(it|both|either|one|the\s+value|the\s+served\s+value|"
-    r"the\s+(?:declared\s+|prior\s+|persisted\s+)?mean|the\s+pair|"
-    r"confidence_mean|that\s+value)\b",
-    re.IGNORECASE,
-)
-
-#: Sites the scan MUST still find, per file. A tripwire that matches nothing
-#: passes vacuously — and this change's first draft already reworded
-#: `volunteer.py` out of its own arm (`reads its PRIOR mean` went from 1 match
-#: to 0) while both tests stayed green. Update these counts DELIBERATELY when
-#: prose is added or removed; a mismatch means the guard went blind, which is
-#: exactly what it exists to detect.
-_EXPECTED_PRIOR_MEAN_SITES = {
-    # 5, not 6: `annotate_ep_batch`'s `baseline=` comment now QUOTES
-    # `EpBreakdown`'s qualified wording instead of restating the bare claim (it
-    # is a `grep`-able quotation of the canonical text, not an independent
-    # claim). `EpBreakdown.has_ep`'s field doc is STILL an independent claim and
-    # IS one of these 5 — it was qualified, not removed. (An earlier revision of
-    # this comment said two sites left; exactly one did — 6→5 — and that is the
-    # count this pin tracks.)
-    "tortoise/search_engine.py": 5,
-    # 1, not 2: `why.py`'s second site is the same kind of verbatim quotation.
-    "tortoise/why.py": 1,
-    "tortoise/volunteer.py": 1,
-    # `sdk.py`'s "else the persisted prior mean" — the `tortoise_fts_query`
-    # description, the sentence an SDK consumer reads. It contributed 0 sites
-    # until the `(ep_alpha/beta)` parenthetical in the pattern became optional.
-    "tortoise/sdk.py": 1,
-}
-_EXPECTED_ABSENT_SITES = {"tortoise/search_engine.py": 1}
+#: A break inside the link segment: a denial in an EARLIER clause does not
+#: negate the verb ("is not a mere flag — it is EP MEASURED" asserts the
+#: gloss), while a denial in the FINAL clause does ("is no receipt — it does
+#: not prove ``EP MEASURED``"). Splitting on the last break and testing only
+#: its tail is what separates the two; testing the whole span admitted the
+#: first, and end-anchoring rejected the second. A SENTENCE end is a break too:
+#: with the wide window above, a `not` in a PREVIOUS sentence would otherwise
+#: land in the tail of a link that spans it and exempt a live gloss.
+_CLAUSE_BREAK = re.compile(
+    r"—|–|:|;|(?<=[.!?])\s|\bbut\b|\brather\b", re.IGNORECASE)
 
 
 def _belief_prose(rel: str) -> str:
@@ -5616,268 +5735,174 @@ def _belief_prose(rel: str) -> str:
     proximity window measures prose rather than line breaks."""
     root = Path(__file__).resolve().parent.parent
     text = (root / rel).read_text(encoding="utf-8")
-    # A `#` that opens an ISSUE reference (`#11702`) is prose, not a comment
-    # marker: the marker form is `#` followed by space/end-of-line. Stripping
-    # it blind left ` 11702` in the normalised string, and `_unqualified_claims`
-    # builds its failure message FROM that string — so a failing run handed the
-    # next lane a mangled evidence line with no issue reference.
-    without_markers = re.sub(r"[ \t]*(#|//)[ \t]*(?![0-9])", " ", text)
+    without_markers = re.sub(r"[ \t]*(#|//)[ \t]*", " ", text)
     return re.sub(r"\s+", " ", without_markers)
 
 
-def _claim_sites(patterns) -> dict[str, int]:
-    """How many claim sites the patterns find, per file."""
-    found: dict[str, int] = {}
-    for rel in _BELIEF_PROSE:
-        prose = _belief_prose(rel)
-        count = sum(1 for pattern in patterns for _ in pattern.finditer(prose))
-        if count:
-            found[rel] = count
-    return found
+def _sentences(rel: str) -> list[str]:
+    """The module's prose, one sentence at a time."""
+    return [s for s in _SENTENCE_END.split(_belief_prose(rel)) if s.strip()]
 
 
-def _claim_sentence(window: str, claim_at: int = 0) -> str:
-    """The claim's OWN sentence, cut FORWARD and BACKWARD from the claim.
-
-    A 300-character window alone spans several sentences in these modules, so a
-    qualifier parked in a FOLLOWING sentence about a different shape satisfied
-    it (measured: "…PRIOR mean. The legacy n.confidence mirror supplies the
-    served value for a measured claim." passed). The rule the tests document is
-    "same sentence", so the check must implement exactly that.
-
-    `claim_at` is the claim's offset inside `window` (the window may reach back
-    so a qualifier placed BEFORE its claim is visible). The cut MUST be relative
-    to the claim: splitting the whole window from its start bisected it in the
-    lookbehind region and discarded the claim's own sentence, which reported
-    every real site as unqualified (measured).
-
-    A break is punctuation followed by whitespace and then ANY non-space
-    character. Requiring a WORD start was too narrow twice over: it missed
-    lowercase sentence starts ("…PRIOR mean. the n.confidence mirror leads it
-    when EP has run") AND every bulleted/dashed/bold sentence start that these
-    files use heavily — "* ", "- ", "— ", "**The …**" — so a qualifier in the
-    NEXT bullet qualified a FALSE claim (measured: all four passed).
-
-    Erring toward a SHORTER window is the safe direction: it drops a qualifier
-    and reds a correct edit, which a human then reads. **An abbreviation is NOT a
-    sentence break** — see `_real_break`; treating "e.g." as one CREDITED a
-    restriction that sat before it (measured false PASS), so the safe direction
-    is now enforced by the boundary test instead of assumed.
-    """
-    return _claim_sentence_with_offset(window, claim_at)[0]
-
-
-#: A `.` that ends an ABBREVIATION, not a sentence. Without this, "e.g." is a
-#: sentence boundary — which cuts the claim's own sentence SHORT (so a
-#: restriction placed before it vanishes from the text the guard inspects) and
-#: also satisfies the head-edge probe (so the back-edge check stays silent).
-#: Both measured, and both a FALSE PASS:
-#:   "The n.confidence mirror, ignored e.g. whenever a pair exists, so <claim>,
-#:    and a readable mirror leads it"                                   CERTIFIED
-#:   the `head_truncated` counterexample in `_qualified` with an `e.g.`
-#:   inserted inside the lookbehind                                    CERTIFIED
-#: `e.g.` is common in exactly this prose (`volunteer.py`:88 and
-#: `search_engine.py`:1487 both carry "e.g. the decide-part system default").
-_ABBREVIATED = re.compile(
-    r"(?:\be\.g|\bi\.e|\bcf|\bvs|\betc|\bal|\bapprox|\bresp|\bFig|\bEq)\.$",
-    re.IGNORECASE)
-
-
-def _real_break(prose: str, at: int) -> bool:
-    """Whether `prose[at]` ends a SENTENCE — punctuation, space, then a non-space.
-
-    `at` must be the punctuation itself. An ABBREVIATION is punctuation followed
-    by a space and a word, which is exactly the shape a naive boundary test
-    reads as a sentence end — so it is named here rather than assumed.
-    """
-    if at + 1 >= len(prose) or prose[at] not in ".!?":
-        return False
-    if not prose[at + 1].isspace():
-        return False
-    k = at + 1
-    while k < len(prose) and prose[k].isspace():
-        k += 1
-    if k >= len(prose):
-        return True
-    return _ABBREVIATED.search(prose[:at + 1]) is None
-
-
-def _last_break_before(prose: str, at: int) -> int:
-    """Index just past the last REAL sentence break before `at` (0 if none)."""
-    for j in range(at - 1, -1, -1):
-        if _real_break(prose, j):
-            k = j + 1
-            while k < at and prose[k].isspace():
-                k += 1
-            return k
-    return 0
-
-
-def _first_break_at_or_after(prose: str, at: int) -> int:
-    """Index OF the first REAL sentence break at/after `at` (`len` if none)."""
-    for j in range(at, len(prose)):
-        if _real_break(prose, j):
-            return j
-    return len(prose)
-
-
-def _claim_sentence_with_offset(window: str, claim_at: int = 0) -> tuple[str, int]:
-    """`_claim_sentence` plus WHERE the claim starts inside the result.
-
-    The negation test must run over the claim→verb span, not over the whole
-    sentence: a negation BEFORE the claim ("Nothing persisted means no mean; a
-    readable mirror leads it, so confidence_mean IS the declared PRIOR mean") is
-    about the opposite shape and flagged a TRUE sentence (measured).
-
-    Both edges go through `_real_break`, so an abbreviation is not a sentence
-    end on either side — the two directions share one boundary test on purpose.
-    """
-    start = _last_break_before(window, claim_at)
-    end = _first_break_at_or_after(window, claim_at) + 1
-    return window[start:end], claim_at - start
-
-
-def _qualified(window: str, claim_at: int = 0, *, truncated: bool = False,
-               head_truncated: bool = False) -> bool:
-    """Whether the claim's own sentence carries an AFFIRMATIVE qualifier.
-
-    Requires all three: the MIRROR noun, a qualifying verb after it, and no
-    negation across the whole claim→verb span (bar an allowed "not only").
-
-    ⛔ FAIL CLOSED ON A TRUNCATED SENTENCE — AT EITHER EDGE. `window` is a
-    SLICE, and a partial sentence is not the sentence: a restriction ("…only
-    when nothing else does") or an inversion ("…the mirror never leads it")
-    placed past the cut is INVISIBLE, so the claim is certified on what survives.
-    Both edges are live and they fail differently:
-
-    * `truncated` — the slice stopped at `_QUALIFIER_WINDOW`. Measured: a
-      353-character sentence passed at a 300 window and blocked at 10**7. The
-      constructed sentence still ENDS in punctuation, so the end test below
-      catches it.
-    * `head_truncated` — the slice started at `_QUALIFIER_LOOKBEHIND`, not at a
-      sentence break, so the claim's own sentence began before the slice and its
-      HEAD is missing. Measured: with the restriction "only when nothing else
-      exists" pushed past the window and a post-claim mirror carrying the
-      qualifier, `"Only when nothing else exists " + "x"*700 + " the
-      n.confidence mirror leads it, so <claim>"` was CERTIFIED — the inverse of
-      the shipped precedence passing the one gate built to refuse it. It is
-      reported now, and deleting this check makes that assertion fail (measured
-      by mutation). The end test cannot see it (the sentence still ends in a
-      period), which is why it needs its own signal.
-
-    Certifying from a prefix is a false PASS; a fragment is reported unqualified
-    instead, which is the direction a human can act on.
-    """
-    sentence, claim_pos = _claim_sentence_with_offset(window, claim_at)
-    if head_truncated:
-        return False
-    if truncated and not re.search(r"[.!?]\s*$", sentence):
-        return False
-    # Fail-closed on an outright inversion ANYWHERE in the sentence, however
-    # many well-formed mirror+verb clauses it also carries.
-    if _MIRROR_INVERSIONS.search(sentence):
-        return False
-    for noun in _MIRROR_NOUN.finditer(sentence):
-        verb = _QUALIFIER_VERB.search(
-            sentence, noun.end(), noun.end() + _QUALIFIER_VERB_WINDOW)
-        if verb is None:
-            continue
-        span = sentence[claim_pos:verb.end()]
-        if _QUALIFIER_NEGATIONS.search(_QUALIFIER_NEGATION_OK.sub("", span)):
-            continue
-        after = sentence[verb.end():verb.end() + 16]
-        if _QUALIFIER_OBJECT_NEGATIONS.search(after):
-            continue
-        # The verb's OBJECT must be a MEAN/VALUE REFERENCE. Without this a
-        # mirror+verb pair that qualifies a DIFFERENT noun satisfies the claim:
-        # "…IS the declared PRIOR mean; a readable mirror leads the EVENT
-        # ordering." and "…the n.confidence mirror supplies the RANKING weight."
-        # both passed (measured) — a false PASS in the one gate whose job is to
-        # refuse this class. `it`/`both`/`one` cover the shipped wordings
-        # ("LEADS it", "LEADS both", "supplies one").
-        # ⚠️ ACCEPTED RESIDUAL, stated so no one reads this as airtight: these
-        # are REFERENTIAL alternatives, so a wrong object that reuses one of
-        # them still passes — measured, "…a readable mirror supplies one extra
-        # weight for the ranker." and "…supplies the value that the RANKING
-        # orders on." are both accepted. Closing that needs the object to be
-        # terminal to its clause, which is a rewriter's job, not a tripwire's;
-        # this guard is a regression net over the shipped wordings, not a
-        # grammar proof.
-        if not _QUALIFIER_OBJECT.search(sentence[verb.end():verb.end() + 60]):
-            continue
-        # A RESTRICTION clause demotes the mirror to a fallback, which is the
-        # inverse of `elif mirror is not None: value = round(mirror, 4)`:
-        # "supplies a value ONLY WHEN nothing else does", "…LAST, AFTER THE
-        # PAIR", "…but is IGNORED for a declared baseline". Each has a clean
-        # mirror+verb pair, so only a look past the verb sees it.
-        # ⚠️ `(?<!-)only` is load-bearing: a bare `\bonly\b` matches
-        # "mirror-ONLY Point", which is the canonical TRUE wording.
-        if _MIRROR_RESTRICTIONS.search(sentence):
-            continue
-        return True
-    return False
+def _unqualified_claims_on(sentence: str, patterns) -> list[str]:
+    """The mirror-guard's predicate on ONE sentence (the reusable core of
+    `_unqualified_claims`, so the control test exercises the real logic rather
+    than a regex object in isolation)."""
+    if "mirror" in sentence.lower():
+        return []
+    return [sentence] if any(p.search(sentence) for p in patterns) else []
 
 
 def _unqualified_claims(patterns) -> list[str]:
-    """Sites where a claim matches but no mirror qualifier follows it."""
+    """Sentences matching a claim pattern that never name the mirror.
+
+    Same-sentence, not window-based: a qualifier in the NEXT sentence does not
+    save the claim (that is how the old `:345` passed every review), and a
+    long legitimate aside inside the same sentence does not condemn it.
+    """
     problems = []
     for rel in _BELIEF_PROSE:
-        prose = _belief_prose(rel)
-        for pattern in patterns:
-            for match in pattern.finditer(prose):
-                # The window reaches BACK as well: a qualifier may precede the
-                # claim it qualifies.
-                start = max(0, match.start() - _QUALIFIER_LOOKBEHIND)
-                window = prose[start:match.start() + _QUALIFIER_WINDOW]
-                truncated = (match.start() + _QUALIFIER_WINDOW) < len(prose)
-                # …and the BACK edge is a slice too. The head is missing iff the
-                # claim's own sentence START lies before the window — computed in
-                # PROSE coordinates, not the window's: a window that happens to
-                # begin just after a real break is NOT a truncated head, and asking
-                # the window instead reported every such site (a false block).
-                # `_real_break` keeps an abbreviation from counting as a break here,
-                # which is what let an `e.g.` inside the lookbehind silence this
-                # check (measured false PASS).
-                head_truncated = (start > 0
-                                  and _last_break_before(prose, match.start()) < start)
-                if _qualified(window, match.start() - start,
-                              truncated=truncated,
-                              head_truncated=head_truncated):
-                    continue
-                problems.append(f"{rel}: …{prose[match.start():match.start() + 180]}…")
+        for sentence in _sentences(rel):
+            problems += [f"{rel}: …{hit[:180]}…"
+                         for hit in _unqualified_claims_on(sentence, patterns)]
     return problems
 
 
-def _assert_sites_survive(patterns, expected: dict[str, int]) -> None:
-    """Fail when the scan has stopped finding the sites it is meant to own.
+def _negates_its_verb(link: str) -> bool:
+    """True when the denial sits in the clause that carries the VERB.
 
-    The pin is a FLOOR, not an exact population: the failure this exists to
-    catch is a guard that has gone BLIND (it finds fewer sites than it owns, or
-    none at all). An ADDITION — a new claim sentence the scan correctly finds —
-    raises the count and is not a blind spot; gating on equality made a
-    fully-qualified sentence added by a future lane fail with a message saying
-    the guard "no longer finds the sites it exists to check", which is the
-    opposite of what happened (measured: inserting one qualified sentence gave
-    `found search_engine.py: 6` against an expected 5 and red-ed). A DROP is
-    always a failure.
+    Only the FINAL clause counts: a negator in an earlier clause — or in an
+    earlier SENTENCE — negates a different predicate and must not exempt a
+    live claim.
     """
-    found = _claim_sites(patterns)
-    blind = {
-        rel: (found.get(rel, 0), want)
-        for rel, want in expected.items()
-        if found.get(rel, 0) < want
-    }
-    assert not blind, (
-        "the belief-prose guard no longer finds the sites it exists to check "
-        f"(found/expected: {blind}). A tripwire that matches fewer sites than "
-        "it owns passes vacuously; if a sentence was deliberately removed or "
-        "reworded, update _EXPECTED_*_SITES in the same commit.")
+    return bool(_NEGATED.search(_CLAUSE_BREAK.split(link)[-1]))
 
 
-def test_the_prior_mean_guard_still_finds_its_sites():
-    """A guard that matches nothing must fail, not pass (its own blind spot)."""
-    _assert_sites_survive(_PRIOR_MEAN_CLAIM_PATTERNS, _EXPECTED_PRIOR_MEAN_SITES)
-    _assert_sites_survive((_ABSENT_CLAIM,), _EXPECTED_ABSENT_SITES)
+def _ep_pass_claims(text: str) -> list[str]:
+    """Matches that READ the flag as an EP receipt.
+
+    A denial IN THE VERB'S OWN CLAUSE means the sentence DENIES the gloss
+    ("three things it is NOT: … not ``EP has MEASURED this claim``", "does not
+    mean (and never has meant) ``EP has MEASURED this claim``"), so that clause
+    is where the negator is looked for. A `not` in an earlier clause belongs to
+    a different predicate — "`has_ep` is not a mere flag — it is EP MEASURED"
+    asserts the gloss, and searching the whole span exempted it.
+
+    The link window (300 chars) is what lets the check reach the contract's
+    list-item form; it does NOT widen what counts as a denial, which is still
+    "a worded negator in the phrase's own clause".
+    """
+    suspects = []
+    for match in _EP_PASS_CLAIM.finditer(text):
+        if _negates_its_verb(match.group("link")):
+            continue
+        suspects.append(match.group(0))
+    return suspects
+
+
+def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
+    """A guard that matches nothing pins nothing (reviewer B, cycle 1).
+
+    Each pattern is asserted against the sentence that actually shipped the
+    defect, so a later edit that makes a guard INERT (regex widened away from
+    the class, or narrowed to one phrasal literal nobody writes again) REDS
+    here instead of passing green over the class it was written for.
+    """
+    assert any(
+        p.search("its confidence_mean IS the declared PRIOR mean.")
+        for p in _PRIOR_MEAN_CLAIM_PATTERNS), "the prior-mean guard is INERT"
+    assert any(p.search("reads its PRIOR mean, so it clears the mean floor.")
+               for p in _PRIOR_MEAN_CLAIM_PATTERNS), \
+        "the prior-mean guard misses the `reads its PRIOR mean` spelling"
+    # …and the POSTERIOR-mean spelling (PR #11922 review, finding 1): the
+    # pre-fix `volunteer.py` module docstring, which names no mirror, must be
+    # caught — and a bare statement of the FORMULA must not be, or the guard
+    # would condemn every correct mention of α/(α+β).
+    assert any(
+        p.search("the gate reads the canonical persisted posterior mean "
+                 "(α/(α+β), single-node reads, never full propagation)")
+        for p in _PRIOR_MEAN_CLAIM_PATTERNS), \
+        "the prior-mean guard misses the `reads the … posterior mean` spelling"
+    assert not any(
+        p.search("Eligibility is `ep.confidence_mean` — the belief mean "
+                 "α/(α+β) of the persisted posterior.")
+        for p in _PRIOR_MEAN_CLAIM_PATTERNS), \
+        "the prior-mean guard condemns a correct statement of the formula"
+    # The SPLITTER is part of the guard: if it tears an abbreviation, a
+    # correctly qualified sentence is reported as a defect, and if it stops
+    # splitting at all then every module is one fragment that contains
+    # "mirror" — which makes BOTH of the mirror-guards vacuous. Assert both.
+    assert _SENTENCE_END.split("One. Two, i.e. three. Four.") == [
+        "One.", "Two, i.e. three.", "Four."], "the splitter tears `i.e.`"
+    assert _SENTENCE_END.split("A claim, e.g. a prior. A second one.") == [
+        "A claim, e.g. a prior.", "A second one."], \
+        "the splitter tears `e.g.`"
+    assert len(_sentences("tortoise/search_engine.py")) > 100, \
+        "the splitter has stopped splitting — the mirror-guards are vacuous"
+    # …and the mirror-guards must FIRE end-to-end on an unqualified sentence,
+    # not merely on a pattern object: one that never reports is not a guard.
+    assert _unqualified_claims_on(
+        "Its confidence_mean is the PRIOR mean, and it clears the floor.",
+        _PRIOR_MEAN_CLAIM_PATTERNS), \
+        "the mirror-guard never reports an unqualified sentence"
+    # The absent-claim guard must survive the REWORDINGS of the same false
+    # prediction, not just the one that shipped it.
+    for spelling in (
+            "prior mean (ep_alpha/beta), else ``None`` (#11702)",
+            "prior mean of `ep_alpha/beta`, else ``None``",
+            "prior mean (ep_alpha, ep_beta), else ``None``",
+            "prior mean (ep_alpha / ep_beta), otherwise null",
+            "prior mean (ep_alpha/beta), i.e. the coalesce, else ``None``",
+            "prior mean (ep_alpha/beta)" + " x" * 60 + ", else ``None``"):
+        assert _ABSENT_CLAIM.search("the " + spelling), (
+            f"the absent-claim guard misses a rewording: {spelling!r}")
+    # …and the EP-pass guard fires on a quoted gloss and beside an unrelated
+    # `not`/`no`, while a gloss the negator actually negates is a denial.
+    assert _ep_pass_claims('``has_ep`` must mean "EP has MEASURED this claim"'), \
+        "the EP-pass guard is INERT"
+    assert _ep_pass_claims('`has_ep` is no mere flag: `has_ep` is EP MEASURED this'), \
+        "a bare `no` must not exempt the gloss"
+    assert _ep_pass_claims('`has_ep` is not a mere flag — it is EP MEASURED'), \
+        "a `not` belonging to a different predicate must not exempt the gloss"
+    assert not _ep_pass_claims('`has_ep` is NOT "EP has MEASURED this claim"'), \
+        "a negated gloss is the correct wording, not a finding"
+    assert not _ep_pass_claims('`has_ep` is never "EP has MEASURED this claim"'), \
+        "`never` negates the gloss too"
+    assert not _ep_pass_claims(
+        '`has_ep` is no receipt — it does not prove ``EP MEASURED``'), \
+        "a denial verb between the negator and the phrase must still exempt"
+    assert not _ep_pass_claims(
+        '`has_ep` does not mean (and never has meant) ``EP has MEASURED this claim``'), \
+        "a parenthetical aside between the negator and the verb must still exempt"
+    # …and — the check that was MISSING, and whose absence let this guard pass
+    # on every tree it was ever run against (PR #11933 review round 4,
+    # ISSUE 1) — the guard must MATCH the denial the branch actually ships, and
+    # must RED when that denial is reverted. Matching nothing is not "clean".
+    denied = _belief_prose("tortoise/search_engine.py")
+    assert _EP_PASS_CLAIM.search(denied), (
+        "the EP-pass guard matches nothing in the corpus it ships on, so its "
+        "corpus assertion (:test_no_gloss_reads_has_ep_as_proof_of_an_ep_pass) "
+        "cannot fail — that is exactly how a reverted denial stayed green")
+    assert not _ep_pass_claims(denied), (
+        "the class-3 DENIAL this branch ships is itself read as a gloss: "
+        + repr(_ep_pass_claims(denied)[:1]))
+    shipped_denial = '⛔ not "EP has MEASURED this claim"'
+    reverted_denial = '⛔ is "EP has MEASURED this claim"'
+    mutants = []
+    if shipped_denial in denied:
+        # The reviewer's exact mutant: the denial's `not` reverted to `is`.
+        mutants.append((denied.replace(shipped_denial, reverted_denial),
+                        "`not` reverted to `is` (the reviewer's mutant)"))
+    # Generic fallback, so a REWORDED denial is still mutated rather than
+    # silently skipping the check: strip every negator from the span the guard
+    # matched, leaving the bare assertion.
+    mutants.append((_EP_PASS_CLAIM.sub(
+        lambda m: _NEGATED.sub("", m.group(0)), denied),
+        "every negator stripped from the gloss's own clause"))
+    for mutant, what in mutants:
+        assert _ep_pass_claims(mutant), (
+            f"the EP-pass guard stays GREEN on the reverted denial ({what}) — "
+            "it cannot fail on the tree it ships on")
 
 
 def test_a_prior_mean_claim_in_the_belief_prose_names_the_mirror():
@@ -5909,136 +5934,50 @@ def test_an_absent_claim_that_says_none_names_the_mirror():
         + "\n  ".join(problems))
 
 
-def test_the_prior_mean_guard_refuses_a_fragment_at_the_window_head(monkeypatch):
-    """A window is a SLICE: a claim certified on a fragment is a FALSE PASS.
+def test_no_gloss_reads_has_ep_as_proof_of_an_ep_pass():
+    """`has_ep` is a STORED-COLUMN predicate, never an EP receipt.
 
-    `_QUALIFIER_LOOKBEHIND` cuts the HEAD off the claim's own sentence, so a
-    restriction sitting there is invisible while the sentence still ends in a
-    period — the FORWARD edge's end test cannot see it, which is why the head
-    needs its own signal. Measured counterexample, run through
-    `_unqualified_claims` itself (`_belief_prose` patched, so the real scan path
-    runs), the restriction "only when nothing else exists" sitting outside the
-    600-character window and a post-claim mirror carrying the qualifier:
+    Three separate review rounds on this file found the same sentence class: a
+    gloss saying `has_ep` means "EP has MEASURED this claim". It is false —
+    `update_point(posterior_alpha=…)` sets the predicate with no EP pass, and
+    the legacy `ep_alpha` arm is written by a prior stamp — and each round
+    fixed only the site it was handed. This pins the class.
 
-    * with `if head_truncated: return False` in place  -> REPORTED
-    * with that line deleted (= the pre-fix guard)     -> CERTIFIED, i.e. the
-      inverse of the shipped precedence passed the one gate built to refuse it
-
-    ⚠️ The first version of this test was NON-DISCRIMINATING and survived
-    deletion of the fix (measured): its sentence also cut the MIRROR noun out of
-    the window, so it was reported by the no-mirror path and never reached the
-    truncation test at all. The controls below exist to keep that from recurring:
-    (b) is reported only because the restriction is VISIBLE, and (c) is certified
-    only because there is no restriction — so (a) cannot pass for either of those
-    reasons.
+    What this assertion IS: a regression tripwire over real prose, firing on a
+    gloss written in the CONTRACT'S OWN list-item form (the flag in one
+    sentence, the phrase it denies in the next). What it is NOT: a defect
+    catcher on `origin/main`, which writes the contract correctly at that site
+    — the glosses these rounds caught were introduced by the rewrite itself
+    and never committed. Its discriminating power is therefore proved by
+    mutating the shipped denial in place, in the control test
+    (`test_the_prose_guards_fire_on_the_wording_they_exist_to_catch`): before
+    this round the pattern's 40-character dot-excluding windows matched nothing
+    on any tree, so this assertion passed even on the reverted denial.
     """
-    import sys as _sys
-
-    module = _sys.modules[__name__]
-    claim = "a prior-only claim's ``confidence_mean`` IS the declared PRIOR mean"
-    restriction = "Only when nothing else exists "
-    real = {rel: "" for rel in _BELIEF_PROSE}
-
-    def scan(prose: str) -> list[str]:
-        real[_BELIEF_PROSE[0]] = prose
-        monkeypatch.setattr(module, "_belief_prose", lambda rel: real[rel])
-        return _unqualified_claims(_PRIOR_MEAN_CLAIM_PATTERNS)
-
-    def sentence(gap: int) -> str:
-        """The restriction `gap` characters before the qualifier's claim."""
-        return restriction + "x" * gap + " the n.confidence mirror leads it, so " + claim + ".\n"
-
-    # (a) THE FIX: the restriction is pushed past `_QUALIFIER_LOOKBEHIND`, so the
-    # claim is certified on the sentence's tail unless the head edge is checked.
-    assert scan(sentence(_QUALIFIER_LOOKBEHIND + 100)), (
-        "the guard certified a claim whose sentence HEAD was cut off by "
-        "`_QUALIFIER_LOOKBEHIND` — the restriction in the missing part is "
-        "invisible, which is a false PASS")
-
-    # (b) CONTROL — same sentence, restriction INSIDE the window: reported by the
-    # restriction itself, so (a) is not measuring "this sentence is always bad".
-    assert scan(sentence(10)), "a visible restriction must be reported"
-
-    # (c) CONTROL — no restriction at all: certified, so (a) and (b) cannot both
-    # pass by the guard reporting everything.
-    assert not scan("A readable ``n.confidence`` mirror LEADS it, so " + claim + ".\n"), (
-        "a correctly qualified sentence must NOT be reported")
-
-    # (d) FORWARD edge (the pre-existing end test, not this fix): a qualifier past
-    # `_QUALIFIER_WINDOW` leaves the slice ending mid-sentence, which must be
-    # refused rather than certified on its prefix.
-    tail_cut = ("A readable ``n.confidence`` mirror is what the row serves, "
-                + "x" * _QUALIFIER_WINDOW + " so " + claim + ".\n")
-    assert scan(tail_cut), (
-        "the guard certified a claim whose sentence TAIL was cut off by "
-        "`_QUALIFIER_WINDOW`")
-
-    # (e) ABBREVIATIONS are not sentence ends. Both directions measured as a
-    # FALSE PASS before `_real_break`: as a boundary it hides a restriction
-    # inside the claim's own sentence (i), and as a "break" it silenced the head
-    # check above (ii) — the second defeats (a) with the same trick it refuses.
-    assert scan("The ``n.confidence`` mirror, ignored e.g. whenever a pair exists, so "
-                + claim + ", and a readable mirror leads it.\n"), (
-        "`e.g.` was read as a sentence break, cutting a restriction out of the "
-        "claim's own sentence — a false PASS")
-    assert scan(sentence(_QUALIFIER_LOOKBEHIND).replace(
-                "x" * 200, "x" * 190 + " e.g. " + "x" * 10, 1)), (
-        "an `e.g.` inside the lookbehind silenced the head-edge check — a false "
-        "PASS on the very counterexample this test pins")
+    problems = []
+    for rel in _BELIEF_PROSE:
+        problems += [f"{rel}: …{suspect}…"
+                     for suspect in _ep_pass_claims(_belief_prose(rel))]
+    assert not problems, (
+        "a gloss reads `has_ep` / `ep_measured_cypher` as proof of an EP "
+        "pass; it is a stored-column predicate (a direct `update_point` sets "
+        "it, and a prior stamp sets the legacy arm):\n  "
+        + "\n  ".join(problems))
 
 
-def test_the_not_only_wording_flips_from_a_false_pass_to_a_false_block():
-    """`_QUALIFIER_NEGATION_OK` alone did NOT make "not only" accepted — and it must not.
-
-    Two rounds of measurement, recorded so neither is rediscovered:
-
-    1. The `_QUALIFIER_NEGATION_OK` note claimed the TRUE "not only does a
-       readable mirror lead it, but the pair does too" was accepted. It was not:
-       `_MIRROR_RESTRICTIONS`'s bare `\bonly\b` vetoed every such sentence, so
-       the note was false.
-    2. Sparing the `not only` SPELLING fixed that and opened a FALSE PASS: a
-       spelling exemption cannot tell an affirmation from a demotion, so
-       "The mirror supplies the value not only when the pair is absent; the pair
-       always leads otherwise" — the inverse of the shipped precedence — was
-       CERTIFIED (measured).
-
-    So the veto is restored and the result is fail-CLOSED: both placements of the
-    affirming wording, and the demotion, are REPORTED. That is a false BLOCK a
-    human reads, which is the direction this guard is allowed to err in.
-    """
-    claim = "a prior-only claim's ``confidence_mean`` IS the declared PRIOR mean"
-    reported = (
-        "Not only does a readable mirror lead it, but the pair does too: "
-        + claim + ".",
-        claim + "; not only does a readable mirror lead it, but the pair does too.",
-        "The n.confidence mirror supplies the value not only when the pair is "
-        "absent; the pair always leads otherwise, so " + claim + ".",
-    )
-    for sentence in reported:
-        assert not _qualified(sentence, sentence.index("confidence_mean")), (
-            "a `not only` clause cannot be told from a demotion by spelling, so "
-            "the restriction veto must refuse it (fail-closed). Sentence: " + sentence)
-    # …and the control: the mirror-ONLY canonical wording is NOT refused, so the
-    # veto above cannot pass by refusing everything that says "only".
-    canonical = ("A mirror-only Point carries no persisted pair, so "
-                 + claim.replace("a prior-only claim's", "its")
-                 + ", and the readable ``n.confidence`` mirror LEADS it.")
-    assert _qualified(canonical, canonical.index("confidence_mean")), (
-        "the guard must not refuse the canonical `mirror-only` wording")
-
-
-#: The credibility word's own result, stated as a mean. ANY sentence that makes
-#: the word yield `0.75` is false for every shape the word can reach: on the
-#: #2199 default it ADDS one weak body (Beta(3.1,1) = 0.7561), alone it is
-#: Beta(1.1,1) = 0.5238, and where it loses it does so to an EXPLICIT declared
-#: pair — which is the only shape `0.75` actually belongs to. This class SHIPPED
-#: once and survived a review cycle: "A declared pair WINS over the credibility
-#: word: the same Beta(3,1) plus ``credibility='low'`` still reads 0.75,
-#: measured" — false for the shape its own preceding clause named (the #2199
-#: system default), and left standing ten lines above this module's note saying
-#: 0.7561. Like the guards above this is a tripwire over wordings the tree has
-#: used, not a grammar proof; it errs toward REFUSING a true sentence (a human
-#: then reads it), never toward passing a false one.
+# ── the CREDIBILITY-WORD prose guard, and the numbers behind it ─────────────
+#
+# `volunteer.py`'s note states what the author `credibility=` word does to the
+# served mean. That note has now been wrong in BOTH directions on this branch:
+# first it said the word yields 0.75 (it does not — it ADDS to the #2199
+# default), then a "correction" said the 0.7561 figure described a shape
+# "nothing produces" (it does — the born-live decide part). Neither version was
+# caught, because no test in any of the six review rounds read the sentence or
+# measured the shapes it names. Both are pinned here.
+#
+# The prose half is a tripwire over wordings the tree has used, not a grammar
+# proof: it errs toward REFUSING a true sentence (a human then reads it), never
+# toward passing a false one.
 _CRED_WORD_YIELDS_075 = re.compile(
     r"credibility[^.;]{0,60}?\b(?:is|reads|lands\s+at|equals)\b"
     r"[^.;]{0,25}?0\.75(?!\d)",
@@ -6047,12 +5986,20 @@ _CRED_WORD_YIELDS_075 = re.compile(
 
 
 def test_the_credibility_note_never_hands_the_word_the_defaults_075():
-    """`0.75` is the DEFAULT's mean and the EXPLICIT pair's — never the word's."""
+    """`0.75` is the DEFAULT's mean and the EXPLICIT pair's — never the word's.
+
+    Measured on this tree (`test_the_credibility_word_adds_to_the_default_but_
+    loses_to_a_pair`, below): on the #2199 system default the word ADDS one
+    weak body (Beta(3.1,1) = 0.7561), with no system default it is the whole
+    baseline (Beta(1.1,1) = 0.5238), and it loses ONLY to an EXPLICIT declared
+    pair — the one shape `0.75` belongs to. So a sentence reading "the word …
+    reads 0.75" is false for every shape the word can reach.
+    """
     problems = []
     for rel in _BELIEF_PROSE:
-        for sentence in re.split(r"(?<=[.!?])\s+(?=\S)", _belief_prose(rel)):
+        for sentence in _SENTENCE_END.split(_belief_prose(rel)):
             if _CRED_WORD_YIELDS_075.search(sentence):
-                problems.append(f"{rel}: {sentence[:240]}")
+                problems.append(f"{rel}: …{sentence.strip()[:240]}…")
     assert not problems, (
         "a belief-prose sentence makes the `credibility` word yield 0.75. "
         "Measured: the word ADDS to the #2199 default (Beta(3.1,1) = 0.7561), "
@@ -6060,17 +6007,42 @@ def test_the_credibility_note_never_hands_the_word_the_defaults_075():
         + "\n  ".join(problems))
 
 
+def test_the_credibility_guard_fires_on_the_wording_it_exists_to_catch():
+    """Non-vacuity for the guard above: the sentence that SHIPPED is caught.
+
+    The guard is only worth having if the exact wording it was written for
+    reddens it. Both spellings below stood in `volunteer.py`'s note on this
+    branch (the second was introduced by a commit whose stated purpose was
+    correcting the first).
+    """
+    for shipped in (
+            "A declared pair WINS over the credibility word: the same "
+            "Beta(3,1) plus ``credibility='low'`` still reads 0.75, measured.",
+            "``credibility='low'`` lands at 0.75 against the system default."):
+        assert _CRED_WORD_YIELDS_075.search(shipped), (
+            f"the credibility guard misses the wording it exists to catch: "
+            f"{shipped!r}")
+    # …and the TRUE sentences it must not condemn: the word is stated as
+    # ADDING, or as the weak baseline alone, or as losing to an explicit pair.
+    for true_sentence in (
+            "The word ADDS one weak body on top of the #2199 default: "
+            "Beta(3.1,1) reads 0.7561.",
+            "With no #2199 default the word is the whole baseline — "
+            "Beta(1.1,1) = 0.5238.",
+            "Against an EXPLICIT pair the word is DROPPED, so the served mean "
+            "stays the pair's."):
+        assert not _CRED_WORD_YIELDS_075.search(true_sentence), (
+            f"the credibility guard refuses a true sentence: {true_sentence!r}")
+
+
 def test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair(sdk):
     """The shapes `volunteer.py`'s note names, MEASURED on this tree.
 
-    A later commit replaced the note's "0.7561 for that default plus an author
-    word" with "the same Beta(3,1) plus ``credibility='low'`` still reads 0.75",
-    calling 0.7561 a number nothing produces. That correction is itself false:
-    `sdk.create_point` ADDS the word's weak body to the #2199 provision
-    (`sdk.py`:14649-14660), so the born-live decide part reads Beta(3.1,1) =
-    0.7561 — the number `ep.py`:2368-2372 states and `tests/test_sdk_dedup.py`
-    pins on the dedup path. `0.75` belongs to the #2199 default with NO word,
-    and to an EXPLICIT pair, which the word never overwrites.
+    This is the only new assertion in the class that executes product code
+    (DB-backed `create_point` / `set_point_baseline` / `annotate_ep_batch`), so
+    it is the half of the class that a prose guard cannot cover: the note's
+    numbers are checked against the code that produces them, not against
+    another sentence.
     """
     default = sdk.create_point("option", "cred word: default alone")["id"]
     plus_word = sdk.create_point(

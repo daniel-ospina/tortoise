@@ -35,8 +35,9 @@ Contract invariants honored here (plan §3.2.3 / §5.4 / §5.6 / §6.8):
   excludes terminal statuses; a superseded predecessor may surface ONLY
   flagged ``superseded`` (status + "see what changed" dig-deeper pointer).
 * **EP confidence + contentiousness participate in the gate** — the gate
-  reads the canonical persisted posterior mean (α/(α+β), single-node reads,
-  never full propagation); contested-but-relevant states get a bounded boost
+  reads R1's value (a readable ``n.confidence`` mirror LEADS; else the canonical
+  persisted posterior mean α/(α+β), single-node reads, never full propagation);
+  contested-but-relevant states get a bounded boost
   (documented on ``_eligible``); contested flags ride flag-first on output.
 * **Zero LLM on the hot path** — graph reads only; no provider key required.
 * **Stateless + deterministic** — pure function of the window/args; the same
@@ -82,9 +83,8 @@ BLOCK_MAX_BYTES = 8 * 1024
 #     ``n.confidence`` mirror beside it — answers ``confidence_mean: None``
 #     with ``ep_state: "absent"``;
 #   * a #2199 DECLARED baseline is ALSO unmeasured
-#     (``measured = bool(has_ep)``, search_engine.py:5503 — the line number moves
-#     with this branch's own insertions above it, so re-measure it rather than
-#     trust it) yet answers its OWN
+#     (``measured = bool(has_ep)`` in `annotate_ep_batch` — cited by SYMBOL, not
+#     by line: this exact number rotted twice on this branch) yet answers its OWN
 #     declared prior mean — 0.75 for the Beta(3,1) system default, 0.7561 for
 #     that default PLUS an author ``credibility='low'`` word (the word ADDS one
 #     weak body on top of the provision: Beta(3.1,1), measured), 0.5238 for the
@@ -424,10 +424,10 @@ def _eligible(block: dict, *, min_confidence: float,
               conflict_relevant: bool) -> bool:
     """Canonical stage 4 — the confidence gate (EP + contentiousness).
 
-    Eligibility is the canonical persisted posterior mean (α/(α+β), from the
-    why-block's dedicated ep read — post-#2206 identical to the search
-    path's ep.confidence_mean, which reads the same coalesce of
-    posterior_alpha/ep_alpha).
+    Eligibility is `ep.confidence_mean` from the why-block's dedicated ep read
+    — R1's value, so a readable `n.confidence` MIRROR leads and the α/(α+β)
+    mean (the coalesce of posterior_alpha/ep_alpha) is the fallback when there
+    is none. Post-#2206 it is identical to the search path's field.
     UNMEASURED points (nothing that yields a mean — no persisted belief, a half
     pair, a 0/0 pair, a negative operand, an unreadable operand — and no
     readable mirror supplying one) carry NO mean —
@@ -437,10 +437,10 @@ def _eligible(block: dict, *, min_confidence: float,
     neutral-0.5 statement is NO LONGER true of every unmeasured point — a
     #2199 DECLARED baseline (``baseline=True``, e.g. the decide-part system
     default Beta(3,1) mean 0.75, or an author ``credibility=`` prior) is
-    prior-only yet reads its PRIOR mean — unless a readable
-    ``n.confidence`` mirror supplies the value, which LEADS it — so it clears
-    the mean floor (at ``min_confidence=0.8`` a declared Beta(3,1) beside a
-    stored 0.9 clears it because of the mirror, not the 0.75 prior mean). That is
+    prior-only yet reads its PRIOR mean — or the readable ``n.confidence``
+    mirror's value, which LEADS it — so it clears the mean floor (worked
+    example: at ``min_confidence=0.8`` a declared Beta(3,1) beside a stored
+    ``0.9`` clears it because of the mirror, not the 0.75 prior mean). That is
     deliberate: #2199 treats a baseline as the author's stated starting
     belief ("set-by-author") and the mean floor is a NOTABILITY gate, not a
     measurement claim. The why-block discloses the state honestly: every entry
