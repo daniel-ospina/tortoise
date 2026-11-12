@@ -1321,8 +1321,8 @@ def test_a_4_3_change_must_be_quoted_verbatim_by_some_changelog_block() -> None:
         "changed it — the approval is of exact text")
 
 
-def test_the_newest_block_discharges_its_approval_with_a_comment_id() -> None:
-    """An approval asserted with no readable home is the artifact grading itself.
+def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
+    """A §4.3-recording release must name a comment, in one of the fleet's forms.
 
     The file's CRITICAL RULE names a PERSON, so the entry has to name where that
     person's answer lives. The sibling entries do it by comment id —
@@ -1337,6 +1337,17 @@ def test_the_newest_block_discharges_its_approval_with_a_comment_id() -> None:
 
     Pinned as a SHAPE, not as that id: a later entry cites its own relay, and a
     shape is what stays true.
+
+    ⛔ WHAT THIS PIN ENFORCES IS NARROWER THAN "the approval is discharged", which
+    is why the name says "cites a comment id" and not "discharges its approval".
+    It requires a comment reference in one of the forms the fleet writes; it does
+    **not** verify that the referenced comment is an approval. Measured at this
+    head: a block reading *"No approval is recorded anywhere; the only comment
+    999999 is unrelated"* passes, and so does one that cites the id only to
+    disclaim it. (An issue number, a "comments <n>" form and a bare parenthesised
+    number do not — that arm is closed above.) Closing the rest needs the
+    comment's own text, an API read this pin cannot make, so the residual is
+    tracked in #12068 rather than grown here.
 
     ⛔ SCOPED TO A RELEASE THAT RECORDS §4.3, because the unconditional form was
     measured to false-block. Demanding a comment id in EVERY newest block reds
