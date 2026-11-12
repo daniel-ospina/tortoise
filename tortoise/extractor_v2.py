@@ -1758,7 +1758,14 @@ OUTPUT_CONTRACT = """{
               "supersedes": "existing-id|content|null",  # replaces a prior-session point found in search (CORRECTS fold; omit = none)
               "source_turn_id": int|null}],  # {index}: turn in the SOURCE TRANSCRIPT (E3)
   "operators": [
-    {"src": str, "dst": str, "op_type": "IMPL|NAND"},
+    # ⛔ src/dst ORDER IS PART OF THE MEANING for all three mechanisms and is NOT
+    # interchangeable (#12067): IMPL = src SUPPORTS dst; NAND = src REFUTES dst;
+    # coherence = src is the NECESSARY CONDITION and dst the DEPENDENT — an unmet
+    # src drags dst DOWN, a met src never lifts it, so the loss flows src→dst
+    # ONLY. Emit the condition as `src`. Nothing downstream can detect an
+    # inversion (the direction is fixed `unidirectional`), and an inverted pair
+    # prices as an ordinary update in the wrong direction.
+    {"src": str, "dst": str, "op_type": "IMPL|NAND|coherence"},
     {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
   ],
   "relations": [{"src": str, "dst": str, "predicate": "IMPL|NAND|addresses|supports|refutes|causes|produces|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy", "semantics": "addresses|supports|refutes|causes|produces|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy|null"}],  # S5 Job 1 (#10999): an ENTITY↔ENTITY relation the NARRATIVE itself states (e.g. "the retry storm causes the deadline slip"). src/dst are entity NAMES that must ALSO appear in entities[] above — spell one exactly as emitted (a case/whitespace/Unicode-fold-only variant resolves to the emitted spelling); an endpoint is never invented here, and one this emission does not produce is DROPPED. `predicate` is an ALLOWLIST spelled out in full above: those verbs are accepted verbatim, plus any verb a loaded pack declares as a relation. An invented verb is DROPPED. `semantics` is the optional Layer-2 meaning (ONTOLOGY §8) — same vocabulary; a token outside it is dropped from the RECORD (the relation survives). Emit only what the story asserts: a per-item aggregate of coincidences is not a relation.
@@ -9927,6 +9934,27 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
     return kept, dropped
 
 
+#: The mechanisms that can already be on a MITIGATES target's pair — the CLOSED
+#: SET's three (`Operator.op_type` admits NAND, so `emitted_edges` can carry it).
+#: The DECLARATION leg is narrower and is the SCHEMA's: `OperatorTarget.op_type`
+#: is `Literal["IMPL", "coherence"]`, and `coherence` shares `:IMPL` with IMPL.
+_MITIGATABLE_MECHANISMS = ("coherence", "IMPL", "NAND")
+
+
+def _target_emitted(t_src, t_dst, emitted_edges) -> bool:
+    """Has this extraction already emitted an operator over the target pair?
+
+    ⛔ MECHANISM-AWARE (#12067 review round 4, P2). `emitted_edges` carries the
+    operator's MECHANISM, so asking only for `(src, dst, "IMPL")` answers "no"
+    for a pair the same pass emitted as `coherence` — and the #2552 arm then
+    minted an **IMPL twin over that pair**, which the closed set refuses at the
+    commit door. The mitigation was consequently dropped with two warnings that
+    both blamed a missing IMPL edge, when the real cause was the twin.
+    """
+    return any((t_src, t_dst, m) in emitted_edges
+               for m in _MITIGATABLE_MECHANISMS)
+
+
 def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   story_arc: str = "", summary: str = "",
                   extractor_version: str = "value@0.5.0+v2",
@@ -11187,7 +11215,10 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not isinstance(_op, dict):
             continue
         _op_type = str(_op.get("op_type", "")).upper()
-        if _op_type not in ("IMPL", "NAND", "MITIGATES"):
+        # #12067: `coherence` is the third mechanism. The emission contract is
+        # case-insensitive (`.upper()` below), so the check admits the upper
+        # spelling and the payload maps back to the canonical lower-case value.
+        if _op_type not in ("IMPL", "NAND", "COHERENCE", "MITIGATES"):
             continue
         for _side in ("src", "dst"):
             _ref = str(_op.get(_side, "") or "")
@@ -11347,7 +11378,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             continue
         o = dict(op)
         op_type = str(o.get("op_type", "")).upper()
-        if op_type not in ("IMPL", "NAND", "MITIGATES"):
+        if op_type not in ("IMPL", "NAND", "COHERENCE", "MITIGATES"):
             warnings.append(f"operator with unknown op_type {op_type!r} dropped")
             continue
         src = _resolve(str(o.get("src", "")))
@@ -11356,7 +11387,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             warnings.append(f"operator dropped: src/dst did not resolve to an "
                             f"emitted point/event ({o.get('src')!r} → {o.get('dst')!r})")
             continue
-        if op_type in ("IMPL", "NAND"):
+        if op_type in ("IMPL", "NAND", "COHERENCE"):
             if op_type == "NAND":
                 # #2552 (op_02): canonicalize the NAND direction so the
                 # newer counter-claim is src (new-claim-attacks-existing,
@@ -11370,10 +11401,17 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                         f"swapped so the newer counter-claim is src "
                         f"({src[:60]!r} ↔ {dst[:60]!r})")
                     src, dst = canon
+            # #12067: `coherence` is spelled lower-case everywhere else
+            # (`op_type`, `CORE_PREDICATES`); the emission contract is
+            # case-insensitive, so map back before the payload leaves. Without
+            # this the reclassified `dependsOn`/`hasPart` meanings are
+            # UNREACHABLE from extraction — the registry says `coherence` and
+            # the model can only emit `IMPL|NAND`.
+            mech = "coherence" if op_type == "COHERENCE" else op_type
             payload_operators.append({
-                "src": src, "dst": dst, "op_type": op_type,
+                "src": src, "dst": dst, "op_type": mech,
                 "direction": "unidirectional"})
-            emitted_edges.add((src, dst, op_type))
+            emitted_edges.add((src, dst, mech))
             continue
         # MITIGATES — relevance attack on an edge (deferred to pass 2)
         mitigates_pending.append({**o, "_src": src, "_dst": dst})
@@ -11400,9 +11438,23 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                             f"'{_clip(o.get('dst', ''), 40)}') "
                             "clamped")
             strength = min(0.50, max(0.10, strength))
+        # ⛔ THE TARGET IDENTITY IS MECHANISM-AWARE (#12067 review round 4, P2).
+        # `emitted_edges` now carries the MECHANISM (`(src, dst, 'coherence')`),
+        # but this pass looked only for `(t_src, t_dst, "IMPL")` — so a
+        # MITIGATES aimed at a pair the extractor had just emitted as
+        # `coherence` looked MISSING, and the #2552 mint-before-wire arm
+        # materialized an **IMPL twin over the same pair**. With the closed set
+        # in force that twin can never land: measured end-to-end, the commit
+        # warned "operator write REFUSED by the closed mechanism set", then the
+        # mitigation died on the IMPL-only fallback with "MITIGATES target edge
+        # (…) not found — mitigation dropped", i.e. TWO warnings that both blame
+        # a missing IMPL edge for a twin this function had just invented.
+        _target_mech = (
+            "coherence" if (t_src, t_dst, "coherence") in emitted_edges
+            else "IMPL")
         declared_target_missing = (
             bool(t_src and t_dst) and t_src != t_dst
-            and (t_src, t_dst, "IMPL") not in emitted_edges)
+            and not _target_emitted(t_src, t_dst, emitted_edges))
         if declared_target_missing:
             # #2552 mint-before-wire (the IMPL pair): the OUTPUT_CONTRACT
             # declares a MITIGATES as ONE operator entry carrying its
@@ -11416,18 +11468,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "src": t_src, "dst": t_dst, "op_type": "IMPL",
                 "direction": "unidirectional"})
             emitted_edges.add((t_src, t_dst, "IMPL"))
+            _target_mech = "IMPL"
             warnings.append(
                 "MITIGATES target edge materialized (#2552 mint-before-"
                 f"wire): the declared target IMPL ({t_src[:40]!r} → "
                 f"{t_dst[:40]!r}) was not emitted as its own operator "
                 "— added so the dampener has its target")
-        if not (t_src and t_dst and (t_src, t_dst, "IMPL") in emitted_edges):
-            warnings.append(f"MITIGATES target edge not emitted ({t_src!r}→{t_dst!r} "
-                            "IMPL) — dropped")
+        # a pair carrying a mechanism a target cannot DECLARE is dropped here too
+        if _w := _mitigation_target_warning(t_src, t_dst, _target_mech, emitted_edges):
+            warnings.append(_w)
             continue
         payload_operators.append({
             "src": src, "dst": dst, "op_type": "MITIGATES",
-            "target": {"src": t_src, "dst": t_dst, "op_type": "IMPL"},
+            "target": {"src": t_src, "dst": t_dst,
+                       "op_type": _target_mech},
             "strength": round(strength, 2)})
 
     # ── minted-endpoint prune (#2552 code-review P2) ──────────────────────
@@ -13578,7 +13632,7 @@ def _candidate_item_is_content(section: str, item: Mapping) -> bool:
 
     ⛔ **NOT ``name or content`` FOR OPERATORS** (#11554 review, P1). The
     operator contract in ``_OUTPUT_SCHEMA`` is
-    ``{"src": str, "dst": str, "op_type": "IMPL|NAND"}`` — no ``name``, no
+    ``{"src": str, "dst": str, "op_type": "IMPL|NAND|coherence"}`` — no ``name``, no
     ``content`` — so a name-or-content predicate counts a CONTRACT-SHAPED
     operator as absent, and the false zero this counter exists to remove comes
     straight back one layer down: measured, a model returning
@@ -18170,3 +18224,36 @@ def _gap_fill_sees_candidates(embed_list: object) -> bool:
         return bool(_vet_gate.check_batch(embed_list, "").get("candidates"))
     except Exception:  # noqa: BLE001, RUF100 — a detector that raises must not arm a call
         return False
+
+
+def _mitigation_target_warning(t_src, t_dst, target_mech,
+                              emitted_edges) -> str | None:
+    """The warning when the pair carries a mechanism a target cannot DECLARE.
+
+    ⛔ `_target_mech` can only be `coherence` or `IMPL`
+    (`commit_schema.OperatorTarget.op_type` is `Literal["IMPL", "coherence"]`,
+    so a NAND target cannot even be STATED), while :func:`_target_emitted` reads
+    the WIDER closed set. A pair emitted as NAND therefore passes the emitted
+    check and ships a payload whose target declares `IMPL` over a `:NAND`
+    operator: the commit-side bridge probe finds no IMPL edge and reports
+    "target edge (…,IMPL) not found — mitigation dropped", blaming a missing
+    IMPL edge for a pair that EXISTS and carries NAND (#12067 review round 14,
+    P1; measured at the commit layer as `created: []`, no `mitigated_by`). The
+    producer drops it here instead, with the real cause. Returns ``None`` when
+    the declared mechanism is on the pair (the normal case).
+    """
+    if not (t_src and t_dst):
+        return (f"MITIGATES target edge not emitted ({t_src!r}→{t_dst!r} "
+                "IMPL|coherence) — dropped")
+    if (t_src, t_dst, target_mech) in emitted_edges:
+        return None
+    carried = next((m for m in _MITIGATABLE_MECHANISMS
+                    if (t_src, t_dst, m) in emitted_edges), None)
+    if carried is None:
+        return (f"MITIGATES target edge not emitted ({t_src!r}→{t_dst!r} "
+                "IMPL|coherence) — dropped")
+    return (
+        f"MITIGATES dropped: the target pair ({t_src!r}→{t_dst!r}) carries "
+        f"{carried!r}, which a mitigation target cannot DECLARE "
+        f"(OperatorTarget.op_type is IMPL|coherence) — no bridge of the "
+        f"declared mechanism ({target_mech!r}) exists to attach to")
