@@ -4615,11 +4615,12 @@ jobs:
     #     3 installs from apt.postgresql.org), so a supported release needs no
     #     fail-closed branch. The artifact contract is held by the in-step
     #     `pg_dump --version` / `pg_restore --version` assertion, which is
-    #     box-independent. What still fails closed — and names the RUNNER, not
-    #     just the image: `RUNNER_*` is set on BOTH classes while
-    #     `ImageOS`/`ImageVersion` are hosted-only — is a release PGDG does not
-    #     publish (the named `apt-get update` guard), or one whose os-release
-    #     carries no codename. #10289: a `=on` x64 box can carry this label.
+    #     box-independent. What still fails closed is AMONG: a release PGDG does
+    #     not publish (the named `apt-get update` guard), one whose os-release
+    #     carries no codename, a suite that resolves without this major, and the
+    #     install itself — and each of those names the RUNNER, not just the image
+    #     (`RUNNER_*` is set on BOTH classes while `ImageOS`/`ImageVersion` are
+    #     hosted-only). #10289: a `=on` x64 box can carry this label.
     runs-on: ubuntu-24.04
     # Measured on the lane where this was built: 63 passed / 0 skipped in 70–73s
     # against a warm database, and ~100s when the container first applies the
@@ -4753,14 +4754,14 @@ jobs:
           if [ -n "${ImageOS:-}" ]; then
             identity="$identity hosted-image=${ImageOS}/${ImageVersion:-unknown}"
           fi
-          # ⛔ FIVE NAMED FAILURE CLASSES. This is an enumeration OF THE GUARDS, not a claim
-          # that nothing else can fail: the keyring WRITES above and `. /etc/os-release` are
-          # left to `set -e`, because each of them fails CLOSED already and re-wrapping every
-          # write would be ceremony rather than a better diagnostic (a `No space left on
-          # device` on the keyring write, or a `sudo` needing a password on a pool box, still
-          # exits non-zero — it is just not named). What IS named below is every class where
-          # the underlying cause is the ARTIFACT'S CONTRACT rather than the box's health, since
-          # those are the ones that read as a typo in this step:
+          # ⛔ FIVE NAMED INSTALL-PATH FAILURE CLASSES. This is an enumeration OF THESE
+          # GUARDS, not a claim that nothing else can fail: the keyring WRITES BELOW and
+          # `. /etc/os-release` are left to `set -e`, because each of them fails CLOSED already
+          # and re-wrapping every write would be ceremony rather than a better diagnostic (a
+          # `No space left on device` on the keyring write, or a `sudo` needing a password on
+          # a pool box, still exits non-zero — it is just not named). What IS named here is
+          # every class that would otherwise surface as apt's or curl's OWN text, since those
+          # are the ones that read as a typo in this step:
           #   1. the signing key cannot be FETCHED (egress/DNS/503) — guarded at the fetch;
           #   2. the box carries no VERSION_CODENAME, so there is no suite to name — guarded below;
           #   3. the repo does not RESOLVE once added (suite name, key, archive) — `apt-get update`;
@@ -4773,6 +4774,9 @@ jobs:
           # ⚠️ The key fetch, the `apt-get update` and the install are ALL fatal on purpose:
           # swallowing any of them would let the step fall back to the DISTRO archive, which
           # carries whatever major the release ships and is the mechanism #12051 round 1 died on.
+          # ⚠️ A SIXTH named failure sits AFTER all of these — the client-major assertion on
+          # `pg_dump`/`pg_restore`. It is deliberately outside this list: this list is about
+          # GETTING a client onto the leg, that one is about the client it GOT.
           if ! curl -fsSL -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc; then
             echo "::error::could not FETCH the PGDG signing key (ACCC4CF8.asc) [$identity] — the client this drill needs comes from apt.postgresql.org, so without the key nothing can be installed and BOTH provisioned servers are pg16 (#12051). Check network egress from this runner to www.postgresql.org."
             exit 1

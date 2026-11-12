@@ -267,9 +267,9 @@ def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
 #: invariant is the in-step `pg_dump`/`pg_restore` assertion (major == the two
 #: `pgvector/pgvector:pg16` servers'), which no image can quietly change.
 #: ⛔ Do not read this table as "the archive supplies the client, so the PGDG
-#: block is redundant": it is not, and deleting it leaves this file GREEN on
-#: `ubuntu-24.04` (whose archive happens to carry 16) while reverting the fix —
-#: `test_the_client_comes_from_pgdg_not_the_distro_archive` exists to red that.
+#: block is redundant": it is not. Before `test_the_client_comes_from_pgdg_not_the_distro_archive`
+#: existed, deleting that block left this file GREEN on `ubuntu-24.04` (whose archive
+#: happens to carry 16) while reverting the fix — that guard is what reds it now.
 #: Which client a release's archive carries IS #12051 round 2: `ubuntu-latest`
 #: moved to `ubuntu-26.04`, whose archive ships `postgresql-client-18` and NO 16,
 #: so the pin died `E: Unable to locate package` before a single test ran. A new
