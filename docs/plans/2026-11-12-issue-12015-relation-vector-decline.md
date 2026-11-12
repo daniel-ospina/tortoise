@@ -162,7 +162,8 @@ uv run python tools/test_lane.py run -- tests/test_cache_projection_live.py \
 ```
 
 ⛔ Both figures are readings of a TREE, not properties of this change, so each is bound to the
-head beside it: block 1's `317 / 1` and block 2's `338 / 3` were re-measured at `6a0f08cd2d`
-(the rebase onto `origin/main` `edcac493a5`). Block 2 read `324 / 3` before that rebase and main
-has added 14 tests under it since — re-derive at the head you are reading rather than carrying
-either number forward. `uv run ruff check` is green at the same head.
+base it was taken on: block 1's `317 / 1` and block 2's `338 / 3` were re-measured on `origin/main`
+`1f28d107cf`, and both are UNCHANGED from the previous reading on `edcac493a5` (block 2 read
+`324 / 3` before THAT base). `main` gains tests under these files over time, so re-derive at the
+head you are reading rather than carrying any number forward. `uv run ruff check` is green at the
+same head.
