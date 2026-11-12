@@ -907,8 +907,47 @@ def _gh_executing_scripts() -> frozenset[str]:
     return frozenset(out)
 
 
-def _jobs(path: Path) -> list[tuple[str, list[str]]]:
-    """(job name, its lines) for every job in a workflow file.
+def _yaml_jobs(text: str) -> list[tuple[str, list[str], list[str]]] | None:
+    """(job name, body lines, its `run:` values as YAML resolves them), by POSITION.
+
+    ⛔ THE JOB -> BODY -> `run:` MAPPING COMES FROM ONE PLACE, and that is the whole point.
+    A previous cut enumerated the jobs textually and then looked the composer's answers up BY
+    NAME, so the fix was delivered through the enumeration it was meant to replace: a job id
+    the text reader spelled differently (`"bu\\u0069ld":`, which YAML decodes to `build`) was
+    enumerated under one name and the resolved `run:` values arrived under the other, so a
+    folded step that really executed a helper landed on NO job — a regression the parent cut
+    did not have (#12167 review, pass 5). `start_mark`/`end_mark` carry the line span, so a
+    body is SLICED, never matched, and the two cannot disagree.
+
+    `None` when the file does not parse at all, so the caller can fall back to the textual
+    reader rather than lose every job in the file.
+    """
+    try:
+        root = yaml.compose(text)
+    except yaml.YAMLError:
+        return None
+    jobs = _mapping_entry(root, "jobs")
+    if not isinstance(jobs, yaml.MappingNode):
+        return None
+    lines = text.splitlines()
+    out: list[tuple[str, list[str], list[str]]] = []
+    for key, job in jobs.value:
+        if not isinstance(key, yaml.ScalarNode):
+            continue
+        body = lines[key.start_mark.line : job.end_mark.line + 1]
+        runs: list[str] = []
+        steps = _mapping_entry(job, "steps")
+        if isinstance(steps, yaml.SequenceNode):
+            for step in steps.value:
+                run = _mapping_entry(step, "run")
+                if isinstance(run, yaml.ScalarNode) and run.value.strip():
+                    runs.append(run.value)
+        out.append((key.value, body, runs))
+    return out
+
+
+def _textual_jobs(text: str) -> list[tuple[str, list[str], list[str]]]:
+    """The FALLBACK reader, for a file YAML cannot parse at all.
 
     ⛔ BOUNDED TO THE `jobs:` BLOCK, and that bound is load-bearing rather than tidy. An
     earlier version collected EVERY two-space key in the file, which included the children
@@ -916,16 +955,13 @@ def _jobs(path: Path) -> list[tuple[str, list[str]]]:
     (measured: 171 entries for 92 real jobs across the 41 workflows). A trigger block is a
     silently-scanned pseudo-job carrying a `paths:` list, which really does name workflow
     and helper-script paths, so the name arm flagged `welcome-e2e-monitor.yml::push` as a
-    `gh` hazard. That was harmless only because a trigger block has no `runs-on` and the
-    coverage scan skips it — a coincidence, not a guarantee.
+    `gh` hazard (the unbounded collector and its false hit are pinned as REMOVED).
 
-    The `jobs:` bound closes that, and with it a latent FAIL-OPEN the unbounded version
-    also had: a job header written with a trailing comment (`  build:  # note`) or a quoted
-    id (`  "build":`) did not match, so the job was invisible — and if it was the first
-    two-space key in its file, its whole body was dropped from the scan. Tolerating both
-    spellings is enough; nothing in the tree uses either today.
+    This runs only when `yaml.compose` refuses the file, where the job names and bodies are
+    all that can be recovered — the folded reading is unavailable, which is the ADDITIVE
+    direction: a malformed file loses the join, never the physical lines.
     """
-    lines = path.read_text().splitlines()
+    lines = text.splitlines()
     header = re.compile(r'^  (?:"([^"]+)"|\'([^\']+)\'|([A-Za-z0-9_.-]+)):\s*(?:#.*)?$')
     start = next((i for i, line in enumerate(lines) if re.match(r"^jobs:\s*(?:#.*)?$", line)), None)
     if start is None:
@@ -939,16 +975,29 @@ def _jobs(path: Path) -> list[tuple[str, list[str]]]:
         if m:
             starts.append((i, next(g for g in m.groups() if g is not None)))
     out = []
-    resolved = _yaml_run_scalars(path.read_text())
     for n, (at, name) in enumerate(starts):
         end = starts[n + 1][0] if n + 1 < len(starts) else len(lines)
-        body = lines[at:end]
-        # Each `run:` value AS YAML RESOLVED IT, added to the body and never in place of it:
-        # the scan is allowed to see more, never less. A value already present is skipped, so
-        # a literal block (`run: |`), whose resolved lines ARE its physical lines, adds
-        # nothing — and neither does the ordinary single-line `run: <cmd>`, whose resolved
-        # value is the command WITHOUT the `run: ` prefix. Comparing the raw line alone would
-        # add every one of those a second time and report each hazard twice (#12167 review).
+        out.append((name, lines[at:end], []))
+    return out
+
+
+def _jobs(path: Path) -> list[tuple[str, list[str]]]:
+    """(job name, its lines) for every job in a workflow file.
+
+    Each `run:` value AS YAML RESOLVED IT is ADDED to its job's body and never substituted for
+    the physical lines: the scan is allowed to see more, never less, and the physical lines are
+    still what a message or a comment is read from. A value already present is skipped, so a
+    literal block (`run: |`), whose resolved lines ARE its physical lines, adds nothing — and
+    neither does the ordinary single-line `run: <cmd>`, whose resolved value is that command
+    WITHOUT the `run: ` prefix. Comparing raw lines alone would add every one of those twice
+    and report each hazard twice (measured: 10 duplicated hits across 7 workflows).
+    """
+    text = path.read_text()
+    parsed = _yaml_jobs(text)
+    if parsed is None:
+        parsed = _textual_jobs(text)
+    out = []
+    for name, body, runs in parsed:
         present = {line.strip() for line in body}
         present |= {re.sub(r"^-\s+run:\s*|^run:\s*", "", line.strip()) for line in body}
         out.append(
@@ -957,7 +1006,7 @@ def _jobs(path: Path) -> list[tuple[str, list[str]]]:
                 body
                 + [
                     "      " + folded
-                    for value in resolved.get(name, [])
+                    for value in runs
                     for folded in value.splitlines()
                     if folded.strip() and folded.strip() not in present
                 ],
@@ -974,57 +1023,6 @@ def _mapping_entry(node: object, name: str) -> object | None:
         if isinstance(key, yaml.ScalarNode) and key.value == name:
             return value
     return None
-
-
-def _yaml_run_scalars(text: str) -> dict[str, list[str]]:
-    """Each job's `run:` values exactly as YAML RESOLVES them (#12167 review).
-
-    ⛔ WHY A LOADER AND NOT A PATTERN — this function exists because a pattern cannot do
-    this job. Four review passes closed a fold hole by naming MORE spellings YAML accepts
-    (`>` with a chomping or indentation indicator; a quoted or space-separated key; an
-    anchor; a tag in each of its spellings; the indicator on the next line), and every
-    pass was beaten by the next spelling — the fourth found that the "stop enumerating"
-    fix had reintroduced two enumerations of its own (a bare `!` tag, the explicit-key
-    `? run` form). A pattern is a re-implementation of the grammar, so it loses to the
-    grammar, and the losing is silent: each miss is a fail-open in a fail-open gate.
-
-    PyYAML already knows the answer. `compose` returns the node tree WITH POSITIONS, so
-    the textual scan can still attribute a hit to a job, and a folded block scalar arrives
-    ALREADY JOINED into the single string the runner will execute:
-
-        - run: >
-            echo 'bash tools/h.sh'
-            | bash
-
-    is `echo 'bash tools/h.sh' | bash`, which is the hazard — and so is every other
-    spelling of it, including a PLAIN multi-line scalar, which `origin/main` misses too.
-    Nothing here enumerates a spelling; the composer folds, and this just reads it.
-
-    A file YAML cannot parse returns `{}`: the textual scan is unaffected, exactly as a
-    scanner that never heard of this function would be.
-    """
-    try:
-        root = yaml.compose(text)
-    except yaml.YAMLError:
-        return {}
-    jobs = _mapping_entry(root, "jobs")
-    if not isinstance(jobs, yaml.MappingNode):
-        return {}
-    out: dict[str, list[str]] = {}
-    for key, job in jobs.value:
-        if not isinstance(key, yaml.ScalarNode):
-            continue
-        steps = _mapping_entry(job, "steps")
-        if not isinstance(steps, yaml.SequenceNode):
-            continue
-        runs = []
-        for step in steps.value:
-            run = _mapping_entry(step, "run")
-            if isinstance(run, yaml.ScalarNode) and run.value.strip():
-                runs.append(run.value)
-        if runs:
-            out[key.value] = runs
-    return out
 
 
 def _code_only(line: str) -> str:
@@ -1747,6 +1745,23 @@ def test_the_job_splitter_returns_exactly_the_jobs_yaml_declares(tmp_path):
         "scanned as jobs"
     )
 
+    # …and the SAME bound in the FALLBACK reader, which is the only reader a file YAML cannot
+    # parse gets. It is reachable code with no live instance (every workflow parses), so
+    # without this row deleting its `break` leaves the whole suite green — measured.
+    malformed = (
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    steps: [ { run: 'unbalanced }\n"  # unparseable on purpose
+        "env:\n"
+        "  DEPLOY_ENV:\n"
+        "    descends from a top-level key, not a job\n"
+    )
+    assert _yaml_jobs(malformed) is None, "this file is supposed to be unparseable"
+    assert [name for name, _, _ in _textual_jobs(malformed)] == ["build"], (
+        "the fallback reader leaked a top-level key into the job list"
+    )
+
 
 def test_the_gh_script_derivation_has_no_visible_blind_spot():
     """Re-measure the idiom claim against the tree — do not trust its docstring."""
@@ -2403,6 +2418,37 @@ def test_a_folded_block_scalar_is_one_command_not_two(tmp_path):
         )
         shaped_body = dict(_jobs(spelled))["folded"]
         assert _gh_hazards(shaped_body, scripts), f"{shape!r} was not folded: {shaped_body}"
+
+    # ⛔ AND THE FOLD MUST REACH ITS OWN JOB, whatever the job id or indentation is spelled
+    # like. A cut that enumerated the jobs textually and then looked the composer's answers up
+    # BY NAME delivered the fix through the enumeration it replaced: `"bu\u0069ld":` decodes to
+    # `build`, so the job was enumerated under one name and its resolved `run:` arrived under
+    # the other, and a folded step that really ran a helper landed on NO job — a REGRESSION the
+    # parent cut did not have. Bodies are sliced by node position now, so the two cannot
+    # disagree (#12167 review, pass 5).
+    for header, child_indent in (
+        ('  "bu\\u0069ld":', "    "),
+        ("  build:", "      "),  # 4-space children: block indentation is relative
+        ("  'build' :", "    "),  # a space before the colon
+        ("  build:  # the job", "    "),
+    ):
+        renamed = tmp_path / "renamed.yml"
+        renamed.write_text(
+            "jobs:\n"
+            f"{header}\n"
+            f"{child_indent}runs-on: ubuntu-24.04\n"
+            f"{child_indent}steps:\n"
+            f"{child_indent}  - run: >\n"
+            f"{child_indent}      echo 'bash tools/{helper}'\n"
+            f"{child_indent}      | bash\n"
+        )
+        renamed_jobs = _jobs(renamed)
+        assert len(renamed_jobs) == 1, (
+            f"{header!r} enumerated {len(renamed_jobs)} jobs: {renamed_jobs}"
+        )
+        assert _gh_hazards(renamed_jobs[0][1], scripts), (
+            f"the fold did not reach the job spelled {header!r}: {renamed_jobs[0]}"
+        )
 
     # …and a PLAIN multi-line scalar, which is not a block scalar at all: YAML joins its lines
     # exactly like a `>`, so it is the same hazard with no indicator in sight. `origin/main`
