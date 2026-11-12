@@ -4608,8 +4608,9 @@ jobs:
     #   · a hosted outage CAN still be absorbed by the pool here;
     #   · on a pool box that is not noble, the archive has no PG16 client — so
     #     the in-step `apt-cache show` precondition below is what fails closed,
-    #     NAMING the image instead of dying with exit 100. #10289 is the open
-    #     routing drift: a `=on` non-noble x64 box can carry this label.
+    #     naming the RUNNER, not just the image — `RUNNER_*` is set on BOTH
+    #     classes while `ImageOS`/`ImageVersion` are hosted-only. #10289: a `=on`
+    #     non-noble x64 box can carry this label.
     runs-on: ubuntu-24.04
     # Measured on the lane where this was built: 63 passed / 0 skipped in 70–73s
     # against a warm database, and ~100s when the container first applies the
@@ -4728,7 +4729,16 @@ jobs:
           # under a drill whose artifact depends on the client's major. That is
           # exactly what happened on 2026-11-12 when the label moved to 26.04.
           if ! apt-cache show postgresql-client-16 >/dev/null 2>&1; then
-            echo "::error::no postgresql-client-16 in this image's archive (${ImageOS:-unknown} ${ImageVersion:-}) — BOTH provisioned servers are pg16 and the drill's client major is part of the artifact's contract (#12051), so it cannot run here. Pin the job to a release that carries the servers' major."
+            # Identity must survive BOTH runner classes: `ImageOS`/`ImageVersion` are set ONLY
+            # on GitHub-hosted runners, so naming them alone reports `unknown` on a self-hosted
+            # box — and a self-hosted box is exactly the #10289 path this message exists for.
+            # `RUNNER_*` is set by the agent on both, and `RUNNER_ENVIRONMENT` says which remedy
+            # applies. A remedy that is already the state ("pin the job") is not a remedy there.
+            identity="${RUNNER_ENVIRONMENT:-unknown} ${RUNNER_NAME:-unknown} ${RUNNER_OS:-unknown}"
+            if [ -n "${ImageOS:-}" ]; then
+              identity="$identity hosted-image=${ImageOS}/${ImageVersion:-unknown}"
+            fi
+            echo "::error::no postgresql-client-16 in this image's archive [$identity] — BOTH provisioned servers are pg16 and the drill's client major is part of the artifact's contract (#12051), so it cannot run here. HOSTED runner: this release no longer carries the servers' major — pin the job to one that does. SELF-HOSTED runner: the box is not the pinned release, so this is the label-routing drift — run --repair-labels (#10289)."
             exit 1
           fi
           sudo apt-get install -y --no-install-recommends postgresql-client-16
