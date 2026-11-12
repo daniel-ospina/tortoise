@@ -7,8 +7,11 @@ they are different questions:
    tree as committed (manifest ↔ files ↔ index ↔ live surface);
 2. **each detector is discriminating** — a synthetic surface that carries an archived
    symbol is REPORTED. A gate nobody has seen fire is indistinguishable from one that
-   cannot fire, so every violation class this module can report is exercised at least once
-   with a positive control.
+   cannot fire, so every violation class this module reports has a positive control, AND the
+   ones `check()` reaches through an integration point (the anchor arm, the surface arms) are
+   driven THROUGH that point — a unit test of a helper leaves the call site deletable, which
+   was measured in review (removing the anchor call from `file_violations` left the suite
+   green).
 
 The properties being protected are the brief's own (`archive/README.md`): an archived
 symbol is not importable from the product package, is not served, and a test fails if it
@@ -109,10 +112,15 @@ def tree(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (tmp_path / "tortoise" / "sdk.py").write_text(
+        "def _declares_apply_first_write_lane(name):\n"
+        "    return lambda fn: fn\n"
+        "\n"
+        "\n"
         "class TortoiseSDK:\n"
         "    def list_namespaces(self, limit: int = 10) -> list[str]:\n"
         "        return []\n"
         "\n"
+        "    @_declares_apply_first_write_lane('get_entity')\n"
         "    def get_entity(self, entity_id: str):\n"
         "        return None\n",
         encoding="utf-8",
@@ -252,6 +260,30 @@ def test_archiving_an_sdk_method_freezes_the_method_body(tree: Path) -> None:
     text = (tree / entry["file"]).read_text(encoding="utf-8")
     assert "def list_namespaces(self, limit: int = 10)" in text
     assert "def get_entity" not in text
+    assert arch.file_violations([entry], tree / "archive", tree) == []
+
+
+def test_a_frozen_method_keeps_its_decorator_and_its_indentation(tree: Path) -> None:
+    """The block must be the source that WAS there — decorators included, indentation kept.
+
+    `ast.get_source_segment` starts at the `def` line, so a decorated method lost its decorator
+    (a load-bearing `@_declares_apply_first_write_lane(...)` declaration) and its first line was
+    dedented — which, copied back into the class, would have ended the class body. Computing the
+    digest over the same truncated text meant no arm of the gate could see it (review cycle 4,
+    P0). This pins both halves against the source file.
+    """
+    entry = arch.archive_symbol(
+        arch.SDK_METHOD, "get_entity", "batch-a", "r", root=tree
+    )
+    frozen = (tree / entry["file"]).read_text(encoding="utf-8")
+    assert "    @_declares_apply_first_write_lane('get_entity')" in frozen, (
+        "the decorator is part of the source that was removed"
+    )
+    assert "\n    def get_entity(self, entity_id: str):" in frozen, (
+        "the block keeps its original indentation, so copying it back lands inside the class"
+    )
+    # …and the archived file still parses: only the HEADER has to be a valid module, because the
+    # blocks are verbatim source in their original indentation (a class method keeps its 4 spaces).
     assert arch.file_violations([entry], tree / "archive", tree) == []
 
 
@@ -558,18 +590,44 @@ def test_a_package_find_pattern_that_matches_the_archive_is_reported(tree: Path)
     )
 
 
-def test_a_resolvable_tortoise_archive_module_is_reported(tree: Path) -> None:
-    """The import arm, with the import stubbed: the detector must FIRE, not merely be present."""
-    fake = type("Spec", (), {"name": "tortoise.archive"})()
-    real = arch.importlib.util.find_spec
-    arch.importlib.util.find_spec = (  # type: ignore[assignment]
-        lambda name, *a, **k: fake if name == "tortoise.archive" else real(name, *a, **k)
+def test_a_tortoise_archive_stub_module_is_reported(tree: Path) -> None:
+    """A `.pyi` stub under `tortoise/` is importable surface too (the `.py`-only scan missed it)."""
+    (tree / "tortoise" / "archived").mkdir()
+    (tree / "tortoise" / "archived" / "legacy.pyi").write_text("def old(q): ...\n", encoding="utf-8")
+    problems = arch.surface_violations(
+        [_entry(arch.MODULE, "tortoise.archived.legacy")],
+        _surface(modules={"tortoise/archived/legacy.pyi"}),
     )
-    try:
-        problems = arch.package_violations(tree)
-    finally:
-        arch.importlib.util.find_spec = real  # type: ignore[assignment]
-    assert any("import tortoise.archive` resolves" in problem for problem in problems)
+    assert any("REAPPEARED as an importable module" in problem for problem in problems)
+
+
+def test_the_live_module_scan_sees_pyi_stubs() -> None:
+    surf = arch.live_surface(arch.ROOT)
+    assert isinstance(surf["modules"], set)
+    assert all(p.endswith((".py", ".pyi")) for p in surf["modules"]), (
+        "a `.py`-only scan cannot see a stub, so the `module` detector's `.pyi` candidate is "
+        "unreachable by construction"
+    )
+
+
+def test_ci_proves_the_anchors_on_a_full_history_checkout() -> None:
+    """The strict verb must be INVOKED by CI, or an un-fetched anchor is green forever.
+
+    Measured in review cycle 4: nothing in the repo invoked `--anchors`, so the depth-1 `test`
+    job reported UNPROVEN and proved nothing. A gate that runs only where it cannot answer is a
+    no-op gate — deleting this step must red a test, not read as a cleanup.
+    """
+    workflow = (arch.ROOT / ".github" / "workflows" / "python-ci.yml").read_text(encoding="utf-8")
+    assert "tools/archive_surface.py verify-anchors" in workflow, (
+        "no workflow runs the strict anchor proof"
+    )
+    index = workflow.index("verify-anchors")
+    job = workflow.rfind("\n  surface-guard:", 0, index)
+    assert job != -1, "the strict anchor step must live in a job that checks out full history"
+    assert "fetch-depth: 0" in workflow[job:index], (
+        "the job running verify-anchors must check out at fetch-depth: 0, or the anchor is "
+        "UNPROVEN by construction and the step proves nothing"
+    )
 
 
 # ── 9. the restore anchor is a CITATION, not a number ────────────────────────
@@ -604,9 +662,48 @@ def test_an_unreadable_anchor_is_UNPROVEN_not_silently_green(tree: Path) -> None
     entry["archived_at"] = "e5a5611f4" + "0" * 31
     arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
     assert arch.anchor_unverified(tree), "an anchor this clone cannot read must be reported"
-    assert arch.anchor_unverified(arch.ROOT) == [], (
-        "the real archive's anchors are readable here, so the strict verb must be quiet"
+    # ⛔ NOT `assert anchor_unverified(ROOT) == []`: `actions/checkout` defaults to fetch-depth 1,
+    # and the anchor is an ANCESTOR of the head, so on CI the object is legitimately absent. The
+    # real archive must be quiet only where the commit is actually readable (finding from review
+    # cycle 4: the unconditional form reds the required `test` job on a correct archive).
+    real = arch.load_manifest(arch.ROOT / "archive" / "MANIFEST.json")["entries"]
+    if all(arch._git_has_commit(arch.ROOT, str(e.get("archived_at") or "")) for e in real):
+        assert arch.anchor_unverified(arch.ROOT) == [], (
+            "every anchor IS readable here, so the strict verb must be quiet"
+        )
+
+
+def test_a_re_anchored_entry_is_caught_by_check_not_just_by_the_helper(tree: Path) -> None:
+    """The arm must be exercised through `file_violations` — the only place `check` calls it.
+
+    Measured in review cycle 4: deleting the call site left the whole suite green, because the
+    only test that covered the arm called `_anchor_violations` directly.
+    """
+    entry = arch.archive_symbol(
+        arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree
     )
+    root_commit = subprocess.run(
+        ["git", "rev-list", "--max-parents=0", "HEAD"],
+        cwd=tree, check=True, capture_output=True, text=True,
+    ).stdout.strip().splitlines()[0]
+    path, body = arch.frozen_blocks((tree / entry["file"]).read_text(encoding="utf-8"))[0]
+    # Re-render the file AND the manifest under the wrong anchor, so every other arm agrees:
+    # this is what a repair or a re-cut looks like, and only the anchor arm can see it.
+    text, frozen = arch.render_archive_file(
+        entry["kind"], entry["symbol"], entry["batch"], entry["reason"],
+        entry["archived_from"], root_commit, [(path, body)],
+    )
+    (tree / entry["file"]).write_text(text, encoding="utf-8")
+    forged = dict(entry, archived_at=root_commit, blocks=frozen)
+    problems = arch.file_violations([forged], tree / "archive", tree)
+    assert any("NOT hold" in problem for problem in problems), problems
+
+
+def test_a_manifest_row_with_no_file_is_reported(tree: Path) -> None:
+    entry = _entry(arch.MCP_TOOL, "tortoise_search")
+    entry.pop("file")
+    problems = arch.file_violations([entry], tree / "archive", tree)
+    assert any("carries no `file`" in problem for problem in problems)
 
 
 def test_two_module_symbols_cannot_share_one_archived_file(tree: Path) -> None:

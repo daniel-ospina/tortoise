@@ -4272,6 +4272,18 @@ jobs:
       # residual: the base copy of a tool cannot yet contain the rule being added).
       - name: The baseline's recorded cut commit resolves
         run: python3 tools/surface_manifest.py check --provenance-strict
+      # ── THE ARCHIVE'S RESTORE ANCHORS MUST BE PROVABLE (#11609) ─────────────────
+      # `archive/` keeps removed code so a removal can be undone, and every entry cites
+      # the commit it was frozen from. The ordinary `archive_surface.py check` runs in the
+      # `test` job, which checks out at `fetch-depth: 1` — where the anchored commit is an
+      # absent ancestor by construction, so the anchor arm reports UNPROVEN and proves
+      # nothing. That is the #9075/#11057 shape exactly: a gate that runs only where it
+      # cannot answer is a no-op gate, and before this step NO workflow invoked the strict
+      # form at all (measured: `rg -- '--anchors'` outside the tool → no match).
+      # This job already pays for `fetch-depth: 0` and a real install, so the proof is free
+      # here; `verify-anchors` imports no `tortoise`, so it needs neither.
+      - name: The archive's restore anchors resolve and hold their frozen bodies
+        run: python3 tools/archive_surface.py verify-anchors
       # ── PIN THE TOOLING TO THE BASE REF (#4606) ───────────────────────────
       # The step below would otherwise run the CHECKOUT'S OWN copy, so a PR
       # could add a surface tool and stub the gate out in the same commit: the

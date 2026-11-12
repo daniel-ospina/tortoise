@@ -75,7 +75,7 @@ ruling, not this one.
 |---|---|
 | `MANIFEST.json` | the machine-readable record — one row per archived symbol (kind, symbol, batch, reason, file, source, commit) |
 | `INDEX.md` | **generated** view of the manifest, for a human reader. Regenerate with `tools/archive_surface.py index`; `check` fails when it drifts |
-| `mcp-tools/<batch>/<tool>.py` | a frozen `ToolDefinition` literal plus the `mcp_server.py` handler(s) that implement the tool — matched by NAME (`def tortoise_<tool>`) or by the name appearing in the body |
+| `mcp-tools/<batch>/<tool>.py` | a frozen `ToolDefinition` literal plus every `mcp_server.py` function whose **code** names the tool — matched by NAME (`def tortoise_<tool>`) or by the name appearing as a string (a mention in a DOCSTRING is prose and is not captured). ⚠ A shared helper carrying a tool-specific branch (e.g. `if name == "tortoise_delete": …`) IS captured: that branch is the tool's behaviour |
 | `sdk-methods/<batch>/<method>.py` | a frozen `TortoiseSDK` method, verbatim |
 | `modules/<batch>/<dotted/path>.py` | a whole module frozen from `tortoise/`, verbatim, at the **mirrored** dotted path (`tortoise.archived.legacy` → `modules/<batch>/tortoise/archived/legacy.py`) so two module symbols can never collide on one file |
 
@@ -128,11 +128,12 @@ uv run python tools/test_lane.py run -- tests/test_archive.py -q
 #    (a bare `pytest` refuses without TORTOISE_DB_URI — epic #1647 P4 — so use the lane runner
 #     even though this file is hermetic)
 
-# Optional, and STRICTER: also require every `archived_at` commit to be readable in this clone
-# and to actually hold the frozen body. Plain `check` skips the arm when the object is absent
-# (`actions/checkout` defaults to fetch-depth: 1), so an un-fetched anchor is not silently green
-# forever — it is UNPROVEN, and this verb says so.
-uv run python tools/archive_surface.py check --anchors
+# STRICTER, and proven in CI: every `archived_at` commit must be readable in this clone AND
+# hold its frozen block exactly. Plain `check` skips that arm when the object is absent (the
+# `test` job checks out at fetch-depth: 1, where an ancestor is missing by construction), so
+# `check` alone never proves an anchor. This verb is what the `surface-guard` job runs, on a
+# depth-0 clone — that is what makes the anchor a proof rather than a claim.
+uv run python tools/archive_surface.py verify-anchors
 ```
 
 ## Restoring a removed symbol
@@ -143,6 +144,10 @@ uv run python tools/archive_surface.py check --anchors
    verbatim block back into the file named in **its own** `verbatim from <path>` banner — one
    symbol can span more than one file (an MCP tool's `ToolDefinition` lives in
    `tool_registry.py` while its handler lives in `mcp_server.py`);
+   ⚠ **A block whose function is still LIVE is a branch, not a paste.** When the archived block is
+   a shared helper that survived the removal (only a tool-specific branch of it was archived),
+   merge that branch back into the existing function — pasting the block adds a second definition
+   of a live function;
 2. re-add the registry/declaration row and re-cut the manifest (`tools/surface_manifest.py cut`);
 3. delete the manifest row and the archived file, then `tools/archive_surface.py index`;
 4. `tools/archive_surface.py check` must be clean.

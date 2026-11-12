@@ -56,10 +56,15 @@ WHAT IS ENFORCED (both `check` and `tests/test_archive.py`)
     · each archived module's `ARCHIVED_*` constants match its manifest row, and every
       frozen block's **sha256** matches the manifest (the copy is the source that was
       removed — not a stub, and not something a later edit drifted);
-    · `archive/` is not reachable through the PRODUCT package: no `tortoise/archive`
-      path, `importlib.util.find_spec("tortoise.archive") is None`, no `__init__.py`
-      anywhere under `archive/`, and `packages.find` does not match it (so it is not in
-      the wheel);
+    · the block is the source its anchor CITES: `verify-anchors` re-extracts the symbol from
+      the recorded commit and compares byte-for-byte (exactness, not containment — see
+      `_anchor_violations`). It is a separate verb because it cannot answer on a
+      fetch-depth-1 clone, and a proof that only runs where it cannot answer is no proof;
+    · `archive/` is not reachable through the PRODUCT package: no `tortoise/archive` path,
+      no `__init__.py` anywhere under `archive/`, and `packages.find` does not match it (so
+      it is not in the wheel). There is deliberately no `find_spec` arm: it would answer
+      about the AMBIENT interpreter rather than `root` (see `package_violations`), and
+      `live_surface(root)` already refuses when `import tortoise` is not inside `root`;
     · `archive/INDEX.md` is a regenerated view of `MANIFEST.json` — a stale index is a
       violation.
 
@@ -90,7 +95,6 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
-import importlib.util
 import json
 import re
 import subprocess
@@ -146,7 +150,10 @@ _BATCH_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 #: One segment of a mirrored archive path. A symbol is a dotted path of these, so
 #: `..`, `-x`, `.hidden` and `` are all refused before a path is ever built.
-_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+#: Kept as a name for the traversal guard's readability; the test is `str.isidentifier()`, so a
+#: legal non-ASCII module name (`tortoise.café`) can still be archived — a regex over ASCII
+#: refused it, leaving that module with no archive path in a mechanism that has exactly one.
+_NAME_RE = re.compile(r"^[^\W\d]\w*$")
 #: The header banner every archived module must carry for each frozen source block. Its
 #: presence is what distinguishes a real archive from a file that merely repeats the
 #: metadata (a body lost in a merge reads green otherwise — measured).
@@ -231,9 +238,13 @@ def live_surface(root: Path | None = None) -> dict:
         # Every module the package tree carries (`tortoise/**/*.py`), repo-relative. An
         # archived `module` symbol must not appear here: a file under `tortoise/` is
         # importable and ships in the wheel.
+        # `*.py*` and not `*.py`: a `.pyi` stub under `tortoise/` is importable surface too, and
+        # the `module` detector's `.pyi` candidate could never match a `*.py` scan (measured in
+        # review — the arm was unreachable by construction).
         "modules": {
             path.relative_to(root).as_posix()
-            for path in (root / "tortoise").rglob("*.py")
+            for path in (root / "tortoise").rglob("*.py*")
+            if path.suffix in (".py", ".pyi")
         },
     }
 
@@ -245,8 +256,16 @@ def _anchor_violations(
 
     The sha256 arm proves file ↔ manifest; both come from the same renderer, so it cannot tell
     "the source that was removed" from "a body re-rendered under a different anchor". This arm
-    reads the anchored commit and requires the block to be IN it (containment, not equality: a
-    block is a segment — one function, one registry literal — of a larger file).
+    reads the anchored commit and re-extracts the symbol from it with the SAME extractor, then
+    compares byte-for-byte.
+
+    ⚠ EXACT, not containment. Containment ("this text appears somewhere in the blob") is
+    satisfied by a different symbol's text in the same file — a module constant, a docstring,
+    a neighbouring method — so an entry whose body was replaced with any substring of the
+    source passed the arm it exists for (measured in review). Only a byte comparison binds a
+    body to its symbol. Where the extractor cannot name the symbol (MCP handlers are found by
+    a name scan, and a dispatch-style helper's segment is not keyed by the tool), the arm falls
+    back to containment — the weaker question, on the blocks that have no exact key.
 
     ⚠ THREE-VALUED ON PURPOSE. A clone that does not hold the object cannot distinguish a
     forged anchor from an un-fetched one, and turning that absence into a refusal would red the
@@ -268,6 +287,15 @@ def _anchor_violations(
             "NOT hold — the commit IS present in this clone, so its absence is not a fetch gap: "
             "the anchor names a commit that never contained this code"
         ]
+    expected = expected_block(str(entry.get("kind") or ""), symbol, source_path, blob)
+    if expected is not None:
+        if expected.rstrip() != body.strip("\n"):
+            return [
+                f"{symbol}: {rel}'s block from {source_path} is not what {sha}:{source_path} "
+                "holds at that symbol — the anchored commit does not describe this body, so "
+                "restoring it would not restore what the manifest cites"
+            ]
+        return []
     if body.strip("\n") not in blob:
         return [
             f"{symbol}: {rel}'s block from {source_path} is NOT in {sha}:{source_path} — the "
@@ -275,6 +303,52 @@ def _anchor_violations(
             "what the manifest cites"
         ]
     return []
+
+
+def expected_block(kind: str, symbol: str, source_path: str, source: str) -> str | None:
+    """The block *symbol* WOULD extract from *source*, or None when it has no exact key.
+
+    The same extractors the writer uses, applied to a blob instead of the working tree — one
+    rule for "what this symbol is", so the gate cannot drift from the writer. Returning None
+    is deliberate and narrow (see `_anchor_violations`): a block the extractor cannot key has
+    only the containment question available.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:  # pragma: no cover - a blob that does not parse is reported elsewhere
+        return None
+    if kind == MODULE:
+        return source.rstrip()
+    if kind == SDK_METHOD:
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == "TortoiseSDK":
+                for child in node.body:
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+                        child.name == symbol
+                    ):
+                        return _segment(source, child)
+        return None
+    if kind == MCP_TOOL:
+        if source_path == SOURCE_OF[MCP_TOOL]:
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if not (isinstance(func, ast.Name) and func.id == "ToolDefinition"):
+                    continue
+                for keyword in node.keywords:
+                    if (
+                        keyword.arg == "name"
+                        and isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value == symbol
+                    ):
+                        return _segment(source, node)
+            return None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == symbol:
+                return _segment(source, node)
+        return None
+    return None
 
 
 @cache
@@ -399,11 +473,21 @@ def surface_violations(entries: list[dict], surface: dict) -> list[str]:
 # ── violations: the files half ─────────────────────────────────────────────────
 
 def _module_metadata(path: Path) -> dict:
-    """The `ARCHIVED_*` module-level constants of an archived module."""
+    """The `ARCHIVED_*` module-level constants of an archived module.
+
+    Parses only the HEADER — everything before the first verbatim banner. The frozen blocks
+    below it are verbatim source in their ORIGINAL indentation (a class method keeps its four
+    spaces, decorators included), so parsing the file as one module would raise
+    `IndentationError` on the very thing the archive exists to preserve.
+    """
     try:
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        text = path.read_text(encoding="utf-8")
+        header = text.split(VERBATIM_BANNER, 1)[0]
+        tree = ast.parse(header, filename=str(path))
     except (OSError, SyntaxError) as exc:
-        raise ArchiveRefused(f"{path} does not parse as Python: {exc}") from exc
+        raise ArchiveRefused(
+            f"{path} does not parse as Python — the ARCHIVED_* header must be valid: {exc}"
+        ) from exc
     found: dict = {}
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
@@ -562,8 +646,15 @@ def package_violations(root: Path | None = None) -> list[str]:
             "shipped package and therefore importable. Archived code belongs in the top-level "
             "`archive/` tree (`archive/README.md`); migrate the module and delete the directory"
         )
-    if importlib.util.find_spec("tortoise.archive") is not None:
-        out.append("`import tortoise.archive` resolves — archived code must not be importable")
+    # ⛔ NO `find_spec("tortoise.archive")` ARM HERE, deliberately. Every other arm of this
+    # function reads a path under `root`; an import probe answers about whatever the AMBIENT
+    # interpreter resolves, so with any other tree it grades a different package than the one it
+    # was asked about — the same mistake `live_surface(root)` was fixed for, one layer down
+    # (review cycle 4). It is also redundant once that fix is in place: `live_surface(root)`
+    # refuses unless `import tortoise` lives inside `root`, so a resolvable `tortoise.archive`
+    # implies `tortoise/archive` exists, which the first arm already reports. The real-repo
+    # property ("no importable tortoise.archive") is asserted directly by
+    # `tests/test_archive.py::test_the_archive_is_not_importable_from_the_product_package`.
     try:
         pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:  # pragma: no cover - config fault
@@ -715,6 +806,26 @@ def _head_sha(root: Path) -> str:
     return sha
 
 
+def _segment(source: str, node: ast.AST) -> str:
+    """The VERBATIM source of *node*, decorators included, in its ORIGINAL indentation.
+
+    `ast.get_source_segment` starts at `node.lineno`, which for a decorated function is the
+    `def` line — the decorators above it are silently dropped — and it dedents that first line
+    while leaving the rest at its original column. Both are wrong for an archive whose whole
+    promise is "copying this back restores what was removed": a decorated SDK method lost its
+    `@_declares_apply_first_write_lane(...)` declaration, and copying the dedented body into
+    the class ended it at column 0 (measured in review, P0 — the gate could not see it, because
+    the digest is computed over the same truncated text).
+
+    Hand-rolled slicing rather than `padded=True` for the same reason: `padded` fixes the
+    first line's indentation but still starts at the `def`.
+    """
+    start = node.lineno
+    for decorator in getattr(node, "decorator_list", ()) or ():
+        start = min(start, decorator.lineno)
+    return "\n".join(source.splitlines()[start - 1:node.end_lineno])
+
+
 def _mcp_source(root: Path, tool: str) -> list[tuple[str, str]]:
     """The `ToolDefinition` literal for *tool*, plus any handler that names it.
 
@@ -736,14 +847,24 @@ def _mcp_source(root: Path, tool: str) -> list[tuple[str, str]]:
                 and isinstance(keyword.value, ast.Constant)
                 and keyword.value.value == tool
             ):
-                segment = ast.get_source_segment(registry, node)
-                if segment is None:  # pragma: no cover - ast invariant
-                    raise ArchiveRefused(f"could not extract the ToolDefinition for {tool}")
-                return [("tortoise/tool_registry.py", segment)]
+                return [("tortoise/tool_registry.py", _segment(registry, node))]
     raise ArchiveRefused(
         f"{tool} has no `ToolDefinition` in tortoise/tool_registry.py — nothing to archive. "
         "Retired-forward entries live in RETIRED_USE_INSTEAD and are NOT archived."
     )
+
+
+def _code_without_docstring(node: ast.AST) -> list[ast.stmt]:
+    """A function body with its docstring dropped — prose is not behaviour."""
+    body = list(getattr(node, "body", []))
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        return body[1:]
+    return body
 
 
 def _mcp_handlers(root: Path, tool: str) -> list[tuple[str, str]]:
@@ -760,6 +881,20 @@ def _mcp_handlers(root: Path, tool: str) -> list[tuple[str, str]]:
     captured an unrelated helper (`tortoise_delete` -> `_arguments_say_preview`) while
     missing `def tortoise_delete` entirely (measured, review cycle 1). A name match is the
     primary rule; the string scan stays for the dispatch-style handlers.
+
+    ⛔ And the string scan reads CODE, not prose: a DOCSTRING naming a tool is a comment about
+    it, not a dispatch of it. `_arguments_say_preview` names `tortoise_create_point` in its
+    docstring and dispatches nothing, so it was captured into `tortoise_delete`'s archive
+    alongside a live helper that would be duplicated by "copy the block back" (measured in
+    review cycle 4). The docstring is the one `Expr/Constant` a function starts with, and it is
+    skipped here.
+
+    ⚠ A SHARED helper that carries a tool-specific branch IS captured, and that is deliberate:
+    `_arguments_say_preview` contains `if name == "tortoise_delete": return …` — the delete's
+    preview contract — so dropping it would archive the registry row and lose what the tool
+    actually DID. The consequence belongs to the restore recipe, not to the extraction: such a
+    block is merged back INTO the existing function, never pasted as a second definition
+    (`archive/README.md`).
     """
     path = root / "tortoise" / "mcp_server.py"
     if not path.exists():  # pragma: no cover - layout invariant
@@ -771,11 +906,10 @@ def _mcp_handlers(root: Path, tool: str) -> list[tuple[str, str]]:
             continue
         if node.name == tool or any(
             isinstance(child, ast.Constant) and child.value == tool
-            for child in ast.walk(node)
+            for statement in _code_without_docstring(node)
+            for child in ast.walk(statement)
         ):
-            segment = ast.get_source_segment(source, node)
-            if segment:
-                found.append(("tortoise/mcp_server.py", segment))
+            found.append(("tortoise/mcp_server.py", _segment(source, node)))
     return found
 
 
@@ -806,10 +940,7 @@ def _sdk_source(root: Path, method: str) -> list[tuple[str, str]]:
             continue
         for child in node.body:
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method:
-                segment = ast.get_source_segment(source, child)
-                if segment is None:  # pragma: no cover - ast invariant
-                    raise ArchiveRefused(f"could not extract {method} from tortoise/sdk.py")
-                return [(str(path.relative_to(root)), segment)]
+                return [(str(path.relative_to(root)), _segment(source, child))]
     raise ArchiveRefused(
         f"{method} is not a method of TortoiseSDK in tortoise/sdk.py — nothing to archive"
     )
@@ -946,7 +1077,10 @@ def archive_symbol(
     # The real traversal guard: every segment of the mirrored path must be a plain identifier.
     # (The previous check compared `part == ".."`, already excluded one line above, so it could
     # never fire while reading as the guard — the containment check below is what actually ran.)
-    if any(not _NAME_RE.match(part) for part in symbol.replace(".", "/").split("/")):
+    if any(
+        not (part.isidentifier() and _NAME_RE.match(part))
+        for part in symbol.replace(".", "/").split("/")
+    ):
         raise ArchiveRefused(
             f"symbol {symbol!r} is not a dotted path of plain identifiers — a segment becomes a "
             "path component under archive/"
@@ -1030,6 +1164,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
 
+    sub.add_parser(
+        "verify-anchors",
+        help=(
+            "PROVE every restore anchor: each `archived_at` commit must be readable in this "
+            "clone AND hold its frozen block exactly (no `tortoise` import — usable in a "
+            "full-history CI job that installs nothing)"
+        ),
+    )
+
     index_parser = sub.add_parser("index", help="regenerate archive/INDEX.md")
     index_parser.add_argument("--check", action="store_true", help="assert it is current")
 
@@ -1058,6 +1201,21 @@ def main(argv: list[str] | None = None) -> int:
                 for kind in KINDS
             )
             print(f"OK — archive consistent: {len(entries)} entries ({counts}).")
+            return 0
+        if args.cmd == "verify-anchors":
+            # The strict verb, and the only one that turns "this clone cannot answer" into a
+            # failure. It runs in the `surface-guard` job, which checks out at depth 0 — the
+            # same job and the same reason as `surface_manifest.py check --provenance-strict`
+            # (#11057): a gate that runs only where it cannot answer is a NO-OP gate, and
+            # before this step nothing in the repo invoked `--anchors` at all (review cycle 4).
+            entries = load_manifest()["entries"]
+            problems = file_violations(entries) + anchor_unverified()
+            if problems:
+                print(f"ANCHORS NOT PROVEN — {len(problems)} violation(s):")
+                for problem in problems:
+                    print(f"  ✗ {problem}")
+                return 1
+            print(f"OK — {len(entries)} entr(ies): every restore anchor resolves and holds its block.")
             return 0
         if args.cmd == "index":
             if args.check:
