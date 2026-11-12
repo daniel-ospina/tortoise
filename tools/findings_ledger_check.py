@@ -1410,9 +1410,18 @@ def check_verdict_tally(text: str) -> list[str]:
     # paragraph's own text removes the offset dependence entirely: what remains is by
     # construction everything that is NOT the subject.
     remainder = section_prose.replace(re.sub(r"\s+", " ", paragraph), " ")
+    # ⛔ MASK QUOTED FULL STOPS BEFORE THE SPLIT, exactly as the paragraph path does
+    # (#11902 review, round 10). Splitting `remainder` raw cut a QUOTED sentence at its
+    # own full stop, so the fragment asserting nothing was reported as a second tally:
+    # measured, inserting `They wrote "seven of the twelve rows no longer read as
+    # written. It is wrong." verbatim.` after the takeaway paragraph reds rc 1 — the
+    # false-accusation class this arm's own comment says is exempt, on a REQUIRED job.
     stray_tallies = [
         s
-        for s in re.split(r"(?<=\.)\s+", remainder)
+        for s in re.split(
+            r"(?<=\.)\s+",
+            quoted.sub(lambda m: m.group(0).replace(".", "\u2024"), remainder),
+        )
         if "still read as written" in quoted.sub(" ", s)
         or "no longer read as written" in quoted.sub(" ", s)
     ]

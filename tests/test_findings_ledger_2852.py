@@ -3881,6 +3881,22 @@ def test_a_second_tally_cannot_hide_one_blank_line_away(tmp_path, monkeypatch):
         assert not any("OUTSIDE the takeaway paragraph" in p for p in problems), (
             f"a QUOTED phrase asserts nothing and must stay CLEAN: {problems}"
         )
+    # ⛔ AND A QUOTATION WITH A SENTENCE BREAK INSIDE IT (#11902 review, round 10). The
+    # control above has no internal full stop, so it could not see that `remainder` was
+    # split RAW: a quoted `… no longer read as written. It is wrong.` was cut at its own
+    # full stop and the fragment — which asserts nothing — was reported as a second tally.
+    for q in (
+        '\n\nThey wrote "seven of the twelve rows no longer read as written. '
+        'It is wrong." verbatim.',
+        "\n\nThey wrote 'seven of the twelve rows no longer read as written. "
+        "It is wrong.' verbatim.",
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(tmp_path, patch, lambda t, s=q: t.replace(anchor, f"{anchor}{s}", 1))
+            problems = _doc_problems()
+            assert not any("OUTSIDE the takeaway paragraph" in p for p in problems), (
+                f"a quotation with an internal full stop asserts nothing: {problems}"
+            )
     # ⛔ AND THE LEGITIMATE-PAGE DIRECTION (#11902 review, round 9). The first version of
     # this arm compared sentence-CHUNKS, and the paragraph subject starts at the MARKER
     # TEXT while the section stream inherits whatever precedes it — so a terminator other
