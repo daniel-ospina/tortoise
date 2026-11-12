@@ -2703,6 +2703,28 @@ def test_an_id_less_flowing_row_also_routes_the_destination(sdk):
     assert "onto that successor" not in fix, fix
 
 
+def test_an_id_less_direct_row_is_called_an_edge_not_an_input(sdk):
+    """The id-less arm's noun must follow the LANE, as `_triage`'s already does.
+
+    A direct edge has no operator input slot, and every other direct arm in
+    `_active_edge_fix` says "edge" / "write the equivalent edge" — the id-less arm
+    said "re-point this IMPL input" on both lanes (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == "PolicyV1").fix
+    assert "No id-keyed repair is possible" in fix, fix
+    assert "re-point this IMPL input" not in fix, (
+        "a DIRECT edge has no operator input slot: " + fix)
+    assert "re-point this IMPL edge onto" in fix, fix
+
+
 def test_a_terminal_successor_does_not_get_the_carry_disposition(sdk):
     """§3.1's triage must agree with the withdrawn destination.
 
@@ -2745,6 +2767,46 @@ def test_a_terminal_successor_does_not_get_the_carry_disposition(sdk):
     draft_fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
                      if i.node_id == w1["id"]).fix
     assert "promote" in draft_fix.lower(), draft_fix
+
+
+def test_a_direct_draft_successor_states_the_direct_mechanism(sdk):
+    """The draft arm's mechanism must split by lane, as `_chain_tail` already does.
+
+    One emitted string said "EP EXCLUDES from a direct edge before evaluation — no
+    factor, no skipped-factor record" (`_chain_tail`) AND "EP instead drops that input
+    and re-scores over whatever remains (the arity ladder stated above)" (`_triage`) on
+    the SAME direct row — the second sentence is the OPERATOR lane's, and a direct row
+    has neither an input nor an arity ladder. Measured per lane: the direct lane's
+    ``skipped_factors`` is ``None`` at every step (2 confidences live → 0 at the draft
+    → 0 after the un-promoted carry → 2 after the promotion), while the operator lane
+    reports ``['degenerate']`` while the successor is a draft (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status=DRAFT_TIER)
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "ONCE PROMOTED" in fix, fix
+    assert "drops that input and re-scores" not in fix, (
+        "a DIRECT edge has no input and no arity ladder: " + fix)
+    assert "arity ladder" not in fix, fix
+    assert "EXCLUDES from a direct edge before evaluation" in fix, fix
+
+    # ⛔ …and the OPERATOR lane KEEPS the ladder, so the split cannot collapse back to
+    # one lane's wording.
+    q = sdk.create_point("statement", "the second policy")
+    w1 = _obj(sdk, "DraftV1")
+    w2 = _obj(sdk, "DraftV2")
+    sdk.create_operator("IMPL", q["id"], [w1["id"]])
+    _supersede_object(sdk, "DraftV1", "DraftV2")
+    sdk.update_entity(w2["id"], status=DRAFT_TIER)
+    op_fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                  if i.node_id == w1["id"]).fix
+    assert "arity ladder stated above" in op_fix, op_fix
 
 
 def test_an_all_dead_ambiguous_name_warns_the_reader(sdk):
@@ -3180,3 +3242,125 @@ def test_the_draft_strings_state_the_arity_ladder(sdk):
     assert "promotion alone leaves the stale edge where it is (measured: ``confidences {}``)" \
         not in fix, (
         "the measured outcome at this arity is not an empty confidence set: " + fix)
+
+
+def test_a_neither_arm_draft_row_states_the_three_way_mechanism(sdk):
+    """Round-2 findings: the draft row's mechanism must be THREE-way, not two.
+
+    Measured: promoting the draft and moving the edge while the endpoint still carries
+    the shape builds no factor (``confidences {}``, ``iterations 0``); both steps
+    restore it (``effective_n 2.5255``). So on a neither-arm row "``confidences {}``
+    while it is a draft and TWO ONCE IT IS LIVE" contradicted the ``_shape_too`` clause
+    appended right after it in the same string, and the DETAIL prescribed the
+    readable-endpoint repair (promotion + re-point, ``2.9296``) that measures nothing
+    there (#12210 review round 2, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_entity(v2["id"], status=DRAFT_TIER)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix, detail = issue.fix, issue.detail
+    assert "ONCE PROMOTED" in fix, fix
+    assert "PRECONDITION" in fix, fix
+    assert "two once it is live" not in fix, (
+        "the promotion alone restores nothing while the endpoint is still shaped: "
+        + fix)
+    # …and the DETAIL must not prescribe the readable-endpoint repair either.
+    assert "PRECONDITION" in detail, detail
+    assert "effective_n 2.9296" not in detail, (
+        "a readable-endpoint measurement on a neither-arm row: " + detail)
+
+
+def test_a_neutral_neither_arm_row_does_not_offer_a_dead_write(sdk):
+    """A neutral row may still offer "make the edge flow" — onto a READABLE successor.
+
+    The successor-state clause is suppressed on a neutral row (it is re-point advice),
+    so the flowing alternative used to be offered with no statement that the successor
+    must be live and readable: a write onto a draft/terminal/shaped one builds no
+    factor, the old edge is gone, and the finding goes QUIET — the false CLEAN this
+    check exists to prevent (#12210 review round 2, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
+    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_entity(v2["id"], status=DRAFT_TIER)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "DELETE it instead — §3.1's disposition here is DROP" in fix, fix
+    if "FLOWING" in fix:
+        assert "live and readable FIRST" in fix, (
+            "the flowing alternative writes onto the successor, so it must state "
+            "that the successor has to be readable: " + fix)
+        assert "builds no factor" in fix, fix
+
+
+def test_a_dangling_successor_on_a_direct_row_is_not_called_an_input(sdk):
+    """The zero-carrier arm keyed its noun on ``neutral``, not on the LANE.
+
+    A flowing DIRECT row with a dangling successor name emitted "there is no Object to
+    re-point this IMPL input onto … re-point the input onto it" and then "this is a
+    DIRECT edge, so there is no factor to re-point" — two mechanisms in one string
+    (#12210 review round 2, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='NopeNothingCarriesThis'", {"i": v1["id"]})
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == v1["id"]).fix
+    assert "No :Object answers the successor name" in fix, fix
+    assert "re-point this IMPL input" not in fix, (
+        "a DIRECT edge has no operator input slot: " + fix)
+    assert "re-point the input onto it" not in fix, fix
+    assert "re-point this IMPL edge onto" in fix, fix
+
+
+def test_the_id_less_arm_separates_the_tail_and_puts_the_prefix_first(sdk):
+    """Round-2 P3s: a glued ``tail``+archive clause, and a mid-sentence prefix.
+
+    ``_chain_tail`` arms end without punctuation and ``_archive_clause`` opens with
+    "Archiving it instead", so a bare concatenation emitted
+    "…only onto a live claimArchiving it instead …"; and the ambiguity prefix
+    ("FIRST name the successor meant") was spliced after a conjunction, so its own
+    ordering claim came after two instructions (#12210 review round 2, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    sdk.update_entity(v2["id"], status=DRAFT_TIER)
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+
+    fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+               if i.node_id == "PolicyV1").fix
+    at = fix.index("Archiving it instead")
+    assert fix[at - 1] == " ", (
+        "the archive clause is glued to the chain tail: " + fix[at - 40:at + 25])
+
+    # …and the ambiguity prefix comes FIRST, as its own `FIRST` demands.
+    q = sdk.create_point("statement", "the second policy")
+    w1 = _obj(sdk, "TwinV1")
+    _obj(sdk, "TwinV2")
+    sdk.create_direct_edge("IMPL", q["id"], w1["id"])
+    _q(sdk, "CREATE (:Object {id:'twin-TwinV2', name:'TwinV2', "
+            "objectKind:'other', status:'live'})", {})
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='TwinV2' REMOVE o.id", {"i": w1["id"]})
+    twin_fix = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                    if i.node_id == "TwinV1").fix
+    assert twin_fix.startswith("FIRST name the successor meant"), twin_fix
+    assert "and FIRST name" not in twin_fix, twin_fix
+    assert ". Delete the edge into the old endpoint" in twin_fix, twin_fix
