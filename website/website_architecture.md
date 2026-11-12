@@ -382,12 +382,22 @@ Rules:
   its own 200 copy of the index until #11766; pinned by
   `tests/test_middleware_host_consolidation.mjs`, which drives the real `onRequest`.
   **Residual (measured 2026-11-12):** the retired host still answers **200** for `/contact` —
-  a company page no branch here owns. `/index` and `/index.html` are 301'd (they are the
-  company homepage's raw duplicates); `/contact` is not, deliberately: adding company pages
+  a company page no branch here owns. `/index` and `/index.html` are 301'd on the retired host
+  (they are the company homepage's raw duplicates); `/contact` is not, deliberately: adding company pages
   to this map one at a time is the hand-kept-list decay #11766 exists to undo, and the page
   carries `<link rel="canonical" href="https://premiselabs.co/contact">`, so the duplicate is
   consolidated rather than competing. If a second company page starts answering there, the
   fix is a PRINCIPLE (every non-product root asset hands off), not another member.
+  **The company host's own `/index` is the same duplicate and is ALSO still 200** — the surviving
+  twin of the paragraph above (measured: `_redirects` carries only `/index.html`). It is left as a
+  recorded residual rather than fixed here, because the one-line fix is not one line: adding
+  `/index  /  301` makes `_in_scope_pages()` DROP `website/index.html` from the blog guard's pinned
+  page set (`test_blog_guard_covers_every_served_indexable_page` reds with
+  `missing=['index.html']`), since that derivation reads served-ness off the `/index` route while
+  `index.html` is really served at `/`. The redirect would therefore NARROW a different guard's
+  coverage — the silent-shrink class that pin exists to catch. The fix is to teach
+  `_in_scope_pages()` that `index.html` lives at `/` FIRST, then add the row. Recorded so the next
+  lane does not rediscover it as a fresh finding.
 - **Search Console submission:** submit `https://premiselabs.co/sitemap.xml` — the index names the
   three same-host children, so they are submitted with it. The app origin's sitemap stays submitted
   from its own property, as it always was — the marketing index no longer names it (#11766).

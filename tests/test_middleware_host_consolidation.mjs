@@ -334,11 +334,19 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
     expectLocation: `https://${COMPANY}/sitemap.xml`,
   });
 
-  // ⛔ `/index` IS THE SAME ASSET AS `/index.html`. Pages' pretty-URL resolution serves
-  // `website/index.html` for it, so leaving it out answered a 200 copy of the COMPANY
-  // homepage on the retired host while `/index.html` 301'd — measured (#11766 round 4).
-  // One-hop row rather than a member of the canonical loop below, because the target is
-  // the product root, not a `/tortoise/<page>`.
+  // ⛔ `/index` IS THE SAME ASSET AS `/index.html` ON THE RETIRED HOST, and is 301'd there.
+  // Pages' pretty-URL resolution serves `website/index.html` for `/index`, so leaving it out
+  // answered a 200 copy of the COMPANY homepage on the retired host while `/index.html` 301'd
+  // — measured (#11766 round 4). One-hop row rather than a member of the canonical loop below,
+  // because the target is the product root, not a `/tortoise/<page>`.
+  //
+  // ⛔ The COMPANY host's `/index` is the surviving twin and is a RECORDED RESIDUAL, not a fix
+  // here: redirecting it makes `_in_scope_pages()` drop `website/index.html` from the blog
+  // guard's pinned page set (measured — `test_blog_guard_covers_every_served_indexable_page`
+  // reds `missing=['index.html']`), because that derivation reads served-ness off the `/index`
+  // route while `index.html` is really served at `/`. Fixing it means teaching that derivation
+  // first; see `website/website_architecture.md` §6.5. Asserting it here without the rule would
+  // be a red no author could clear.
   await assertOneHop(`https://${PRODUCT}/index`, {
     expectLocation: `https://${COMPANY}/tortoise`,
   });
