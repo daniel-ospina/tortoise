@@ -227,17 +227,67 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # ONE regex over the WHOLE command: the versioned dir must be the value
     # WRITTEN TO `$GITHUB_PATH`. A bare `CLIENT_PATH_RE`/`"GITHUB_PATH" in text`
     # pair is satisfiable by two different lines and by an inert `export`.
-    prepend = GITHUB_PATH_PREPEND_RE.search(_run_commands(pin))
-    assert prepend, (
+    prepends = list(GITHUB_PATH_PREPEND_RE.finditer(_run_commands(pin)))
+    assert prepends, (
         "the pin step never writes a `/usr/lib/postgresql/<major>/bin` entry to "
         "`$GITHUB_PATH`; a prepend that only exists as an `export` inside this "
         "step cannot reach the pytest leg, so the leg would resolve `pg_dump` "
         f"from the runner image instead (step text: {text!r})"
     )
-    assert int(prepend.group("major")) == server_major, (
-        f"the `$GITHUB_PATH` prepend names major {prepend.group('major')} but the "
-        f"provisioned servers are pg{server_major} — the versioned binaries "
-        "would lose to the runner image's own client, which is #12051"
+    # ⛔ EVERY write, not just the first (#12051 review round 5). `search()`
+    # returns the FIRST match, so a SECOND append naming another major was
+    # invisible: measured, `/usr/lib/postgresql/16/bin` followed by
+    # `/usr/lib/postgresql/17/bin` left all four rows GREEN while the leg ran on
+    # pg17 — the #12051 defect, restored. The runner reads the file in ORDER and
+    # does `PrependPath.RemoveAll(x => x == line); PrependPath.Add(line);` per
+    # line (actions/runner `FileCommandManager.AddPathFileCommand.
+    # ProcessCommand`), so the LAST line is the one that wins on PATH.
+    wrong = [m.group("major") for m in prepends if int(m.group("major")) != server_major]
+    assert not wrong, (
+        f"the pin step writes pg{', pg'.join(wrong)} to `$GITHUB_PATH` alongside "
+        f"its pg{server_major} entry — the runner adds each line in file order, "
+        "so the LAST one wins on the leg and the versioned binaries lose to "
+        "another major (measured, round 5: a second append naming pg17 left all "
+        "four rows green; this is how #12051 came back)"
+    )
+
+
+def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
+    """The pin's prepend must be the ONLY postgres bin dir this job puts on PATH.
+
+    `$GITHUB_PATH` is JOB-scoped and last-writer-wins, so a LATER step appending
+    `/usr/lib/postgresql/<other>/bin` neutralises the pin completely while every
+    other row here stays green — measured, round 5: a step inserted between the
+    pin and the leg that appends pg17 left all four rows PASS while `pg_dump` on
+    the leg resolved from pg17, i.e. exactly the artifact #12051 shipped. The
+    pin step's own write is asserted above; this asserts nobody else undoes it.
+
+    Read through `_run_commands()` for the same reason as every other search
+    here: a commented-out line is inert shell that reads identically to the live
+    one.
+    """
+    steps = _steps(job)
+    server_major = _postgres_image_majors(job)[0]
+
+    writes = [
+        (index, match)
+        for index, step in enumerate(steps)
+        for match in GITHUB_PATH_PREPEND_RE.finditer(_run_commands(step))
+    ]
+    assert writes, (
+        "no step in this job writes a `/usr/lib/postgresql/<major>/bin` entry to "
+        "`$GITHUB_PATH` — see the pin-step assertion above"
+    )
+
+    offenders = sorted(
+        {f"step {index} (major {match.group('major')})" for index, match in writes
+         if int(match.group("major")) != server_major}
+    )
+    assert not offenders, (
+        "a `$GITHUB_PATH` write outside the pin puts a client major other than "
+        f"pg{server_major} on the job's PATH: {', '.join(offenders)}. The runner "
+        "adds each line in file order, so a later write WINS and the pin becomes "
+        "inert — the leg would run on that client instead (#12051)"
     )
 
 
