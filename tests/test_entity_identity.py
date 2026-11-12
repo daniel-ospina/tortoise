@@ -519,20 +519,27 @@ class _FakeSeedHandle:
     #12120: the seed asks the FOLDED UNION (``name`` · ``canonical_name`` · the
     folded spelling) through ``entity_identity._name_key_predicate``, so the
     spelling arrives as ``n0``/``n1``… beside any ``name`` param. The fake
-    answers whichever spelling it actually holds rows for, and ``[]`` otherwise —
-    which is also the assertion that the probe did not fall back to a raw read
-    the fake would have answered.
+    answers whichever spelling it actually holds rows for, and ``[]`` otherwise.
+
+    ⛔ It also ASSERTS the query is the union read (#12047 round-4 finding 4).
+    The earlier version of this docstring claimed that "``[]`` otherwise" proved
+    the probe had not fallen back to a raw read — it did not: the fake answered
+    ``merged["name"]`` too, so a hand-rolled ``MATCH (s:Subject {name: $name})``
+    was answered identically and every pin below passed under that revert
+    (measured). The assertion is the guard the comment claimed to be.
     """
 
     def __init__(self, by_name):
         self._by_name = by_name
 
     def query(self, cypher, **params):
+        # A raw keyed read must fail LOUDLY here: the union's first arm is always
+        # `$n0`, so its absence means this probe is not the writer's key space.
+        assert "$n0" in cypher, f"not the folded union read: {cypher}"
         merged = dict(params.get("params") or {})
         merged.update({k: v for k, v in params.items() if k != "params"})
-        candidates = [merged.get("name")]
-        candidates += [merged[f"n{i}"] for i in range(len(merged))
-                       if f"n{i}" in merged]
+        candidates = [merged[f"n{i}"] for i in range(len(merged))
+                      if f"n{i}" in merged]
         for cand in candidates:
             if cand in self._by_name:
                 return _Rows([[dict(p)] for p in self._by_name[cand]])

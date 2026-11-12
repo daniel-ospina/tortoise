@@ -27032,13 +27032,23 @@ class TortoiseSDK:
         # prevent. It also refused legitimate bundles after an EXACT-TWIN merge,
         # whose two carriers both keep the raw name. `_live_holders_same_entity`
         # IS that predicate, so the guard and the writer cannot disagree.
-        from .entity_identity import _live_holders_same_entity
+        from .entity_identity import (
+            _live_holders_same_entity,
+            _name_holder_ids_same_entity,
+        )
         holders, _ = _live_holders_same_entity(proj.g, label, name)
         if not holders:
             # No LIVE carrier. `exists_by_name` still gates the #7925 terminal
             # refusal, so a TERMINAL-only reference keeps answering True — but
-            # through the SAME union, not a raw-name probe.
-            any_holders, _ = _live_holders_same_entity(
+            # through the SAME union, not a raw-name probe. ⛔ The ANY-STATUS
+            # question must NOT collapse (#12047 round-4 finding 3):
+            # `_collapse_resolved_holders` re-applies a LIVE filter the moment it
+            # follows a `resolved_from` hop, so a TERMINAL survivor vanished and
+            # `exists_by_name` answered False for a name held by two nodes
+            # (measured: un-collapsed ANY `[carrier, survivor]`, collapsed `[]`).
+            # The docstring above promises the opposite. The LIVE probe keeps
+            # collapsing — that one must agree with `resolve_or_mint`.
+            any_holders = _name_holder_ids_same_entity(
                 proj.g, label, name, any_status=True)
             if not any_holders:
                 return False, None, None, None, 0, False, None

@@ -885,38 +885,43 @@ def resolve_role_holder(sdk, holder: str, *, required: bool = True) -> str | Non
     (*"no subject > wrong subject"*) refuses — ``resolve_entity_id`` performs that
     refusal itself, so it is not this function's to downgrade.
 
-    ⛔ This is a CONSUMER of :func:`entity_identity.resolve_entity_id` — the one
-    route-then-refuse authority (#3633), which is what the source-level sweep in
-    ``tests/test_entity_identity.py`` enforces: a hand-written name-keyed identity
-    read is a second resolver, and a second resolver is how two surfaces start
-    answering one question differently. Its ``name_props`` arm carries the folded
-    spelling so a Subject written before #12047 (no ``canonical_name``) and one
-    written after are both addressable.
+    ⛔ This is a CONSUMER of :func:`entity_identity.resolve_entity_id_same_entity`
+    — :func:`entity_identity.resolve_entity_id`'s route-then-refuse authority
+    (#3633) taken over the WRITER's folded union, which is what the source-level
+    sweep in ``tests/test_entity_identity.py`` enforces: a hand-written
+    name-keyed identity read is a second resolver, and a second resolver is how
+    two surfaces start answering one question differently. The union carries the
+    folded spelling (so a Subject written before #12047 — no ``canonical_name`` —
+    and one written after are both addressable) AND the variant spellings a
+    non-destructive merge records in ``aliases`` (review round 4 P2: the
+    raw-then-folded retry over ``name``/``canonical_name`` could not see those, so
+    this door refused a holder the write door resolved).
 
     Split from :func:`wire_holds_role` so the CALLER can run it **before** it
     writes the role (#12047 review F5): a refused create must leave nothing
     behind, and a check after the write would journal a node the caller was told
     did not happen.
     """
-    from .entity_identity import resolve_entity_id
+    from .entity_identity import resolve_entity_id_same_entity
 
     if not holder:
         raise ValueError("holdsRole needs a holder (a Subject id or name)")
     g = sdk._get_proj().g
-    usable = ("name", "canonical_name")
-    # `record_misses=False` on the first, speculative attempt (review N6): the
-    # folded second call is the retry, and a success there must not leave a
-    # phantom `no-live-holder` refusal in the R8 record.
-    entity_id = resolve_entity_id(g, "Subject", holder, name_props=usable,
-                                  record_misses=False)
-    if entity_id is None:
-        # The raw spelling may not be the stored one; try the folded key over the
-        # SAME props before concluding "no such Subject" (never a second query
-        # shape — `resolve_entity_id` answers, this only supplies its input).
-        entity_id = resolve_entity_id(
-            g, "Subject", normalize_entity_name(holder)
-            if normalize_entity_name(holder) != holder else None,
-            name_props=usable)
+    # ⛔ ONE call over the WRITER's key space (#12047 review round 4 P2). The
+    # raw-then-folded RETRY that used to live here passed `name_props=("name",
+    # "canonical_name")` and no `alias_of`, so it covered the folded spelling of
+    # those two props and NOT the variant spelling a non-destructive merge
+    # records — `apply_entity_merge` puts the folded variant in the SURVIVOR's
+    # `aliases` (see :func:`apply_entity_merge`). Measured consequence: after
+    # merge+retire, `create_subject("Acme Corporaton")` lands on the survivor
+    # while `create_entity(..., roleHolder="Acme Corporaton")` refused with "no
+    # live :Subject" AND recorded a non-folded refusal for a name the write door
+    # resolves — the exact #12120 reader/writer disagreement, one site short of
+    # the nine adopted readers. `resolve_entity_id_same_entity` IS the writer's
+    # key space (name · canonical_name · aliases, raw and folded), so the two
+    # doors cannot disagree; it records a miss only when nothing resolved, so the
+    # speculative-probe concern (review N6) is satisfied by one call.
+    entity_id = resolve_entity_id_same_entity(g, "Subject", holder)
     if entity_id is None:
         if not required:
             return None

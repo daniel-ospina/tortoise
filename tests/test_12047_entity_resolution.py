@@ -1851,7 +1851,15 @@ class TestThe12120CollapseIsNotTheHeldQuestion:
         return survivor, candidate
 
     def test_a_retired_survivor_of_a_merge_keeps_the_bounded_exemption(self, tmp_path):
-        """The exact regression: collapsing `_held` made a retired survivor vanish."""
+        """The exact regression: collapsing `_held` made a retired survivor vanish.
+
+        ⚠️ Scope (round-4 finding 2): this is a MUTANT pin, not a pre-fix pin — with
+        BOTH incarnations retired the pre-fix probes also answered
+        `held=[candidate] live=[] -> mention=True`, so it is green on
+        `e0fdf8df2b`. It catches the collapsing-`_held` mistake (the mutant), which
+        is the regression it was written for; the shape the raw probe got WRONG is
+        pinned by ``test_a_fold_only_terminal_holder_is_refused_not_minted``.
+        """
         from tortoise.sdk import TortoiseSDK
 
         events = tmp_path / "events"
@@ -1881,7 +1889,15 @@ class TestThe12120CollapseIsNotTheHeldQuestion:
 
     def test_the_docs_miner_refuses_a_terminal_holder_reached_through_a_hop(
             self, sdk_factory):
-        """The same blind spot in the miner's D2 refusal: it would MINT."""
+        """The miner's D2 refusal must survive the COLLAPSE: the holder is reachable
+        only by hopping a merged-away carrier.
+
+        ⚠️ Scope (round-4 finding 2): this pin is about the collapsing read losing
+        a terminal survivor — **not** about the pre-fix raw probe. For this fixture
+        the pre-fix miner also refused (its raw `{name: $name}` read finds the
+        merged-away carrier and raises the same `terminal` message), so a docstring
+        claiming "it would MINT" here would be false. The MINTING shape is pinned by
+        :meth:`test_a_fold_only_terminal_holder_is_refused_not_minted`."""
         from tortoise.api import EventAPI
         from tortoise.docs_miner import _ensure_entities
 
@@ -1916,6 +1932,47 @@ class TestThe12120CollapseIsNotTheHeldQuestion:
             f"the refusal did not name the terminal holder: {exc.value}")
         assert _count(sdk, "Object") == before, (
             "the miner minted a name-keyed Object beside a terminal holder")
+
+    def test_a_fold_only_terminal_holder_is_refused_not_minted(self, sdk_factory):
+        """The shape the PRE-FIX miner actually minted a twin on (round-4 finding 2).
+
+        One Object, retired, addressed by the FOLDED spelling only: the pre-fix
+        probe read the raw `name` (stored as "Acme Corp"), so the folded spelling
+        "acme corp" found no holder, the guard passed, and `add_object` wrote a
+        second node under the same folded key — the create-poisoning #12120 exists
+        to remove. Measured on the pre-fix tree (`e0fdf8df2b`): `resolve -> None`,
+        `holders -> []`; post-fix the same probe refuses. This pin is therefore RED
+        on the pre-fix tree, which the merged-pair pin above is not.
+        """
+        from tortoise.api import EventAPI
+        from tortoise.docs_miner import _ensure_entities
+
+        class _Log:
+            def __init__(self):
+                self.events = []
+
+            def append(self, event):
+                self.events.append(event)
+
+        sdk = sdk_factory()
+        proj = sdk._get_proj()
+        api = EventAPI(_Log(), initiated_by="extractor", agent_id="test",
+                       projection=proj)
+        holder = sdk.create_object("Acme Corp", "document")["id"]
+        sdk.update_entity(holder, status="superseded")
+        before = _count(sdk, "Object")
+
+        with pytest.raises(ValueError) as exc:
+            _ensure_entities(api, proj, [{
+                # ⛔ The FOLD-ONLY spelling, deliberately: `name` holds "Acme
+                # Corp", so nothing matches on the raw column.
+                "name": "acme corp", "object_kind": "document",
+                "externalId": "docs:acme3", "id": "mined-acme3"}])
+        assert "terminal" in str(exc.value), (
+            f"the refusal did not name the terminal holder: {exc.value}")
+        assert _count(sdk, "Object") == before, (
+            "the miner minted a name-keyed Object beside a fold-only terminal "
+            "holder — the create-poisoning of an already-held folded key")
 
 
 class TestThe12120RejectSentinelIsDefinitive:
@@ -2115,3 +2172,76 @@ class TestThe12120AnchorReaderCollapsesToo:
             "subjectKind:'org', status:'live', canonical_name:'acme corp'})")
         with pytest.raises(AmbiguousEntityName):
             find_subject_by_name(proj, "Acme Corp")
+
+
+class TestThe12120FourthRoundReaders:
+    """Round-4 review of the #12120 reader set — the two sites the sweep missed.
+
+    Every pin here is RED on the tree before its own fix (measured with the
+    reviewer's probes): the class exists because "the readers fold too" was true of
+    nine sites and false of two.
+    """
+
+    def test_the_role_door_resolves_the_name_a_merge_recorded(self, sdk_factory):
+        """P2: `resolve_role_holder` retried the folded spelling over
+        `name`/`canonical_name` but never over the merge's `aliases`.
+
+        `apply_entity_merge` records the variant's folded key in the SURVIVOR's
+        `aliases`, so the retry could not see it: `create_subject("Acme
+        Corporaton")` landed on the survivor while
+        `create_entity(..., roleHolder="Acme Corporaton")` refused with "no live
+        :Subject" AND recorded a non-folded refusal for a name the write door
+        resolves — the #12120 reader/writer disagreement, one site short of the
+        nine adopted readers.
+        """
+        from tortoise.entity_identity import (
+            clear_non_folded_entries,
+            non_folded_entries,
+        )
+
+        sdk = sdk_factory()
+        survivor = sdk.create_subject("Acme Corp", "organization")["id"]
+        candidate = sdk.create_subject("Acme Corporaton", "organization")["id"]
+        assert candidate != survivor, "fixture drift: nothing to merge"
+        sdk.approve_merge(candidate, action="merge")
+        # The retired CARRIER only: the survivor stays live, which is the state a
+        # re-review of the pair leaves behind (the merge is non-destructive).
+        sdk.update_entity(candidate, status="superseded")
+        clear_non_folded_entries()
+
+        role = sdk.create_subject("the admin role", "role",
+                                  roleHolder="Acme Corporaton")
+        assert role["id"], "the role's own write failed"
+        wired = sdk._get_proj().g.query(
+            "MATCH (:Subject {id:$sid})-[r:holdsRole]->(:Subject) "
+            "RETURN count(r)", params={"sid": survivor}).result_set[0][0]
+        assert wired >= 1, (
+            "roleHolder did not resolve the merged-away spelling onto its "
+            "survivor — the role door and the write door disagree")
+        assert [e for e in non_folded_entries()
+                if e.name == "Acme Corporaton"] == [], (
+            "a name the SDK resolves was recorded as an identity miss")
+
+    def test_the_bundle_guard_answers_held_for_a_terminal_survivor(
+            self, sdk_factory):
+        """P3: the ANY-status arm of `_entity_name_holders` used the COLLAPSING read.
+
+        `_collapse_resolved_holders` re-applies a LIVE filter once it follows a
+        `resolved_from` hop, so a TERMINAL survivor reached through a merged-away
+        carrier vanished and `exists_by_name` answered **False** for a name held
+        by two nodes — contradicting the function's own docstring ("a
+        TERMINAL-only reference keeps answering True") two lines above the call.
+        """
+        sdk = sdk_factory()
+        survivor = sdk.create_object("Acme Corp", "document")["id"]
+        candidate = sdk.create_object("Acme Corporaton", "document")["id"]
+        assert candidate != survivor, "fixture drift: nothing to merge"
+        sdk.approve_merge(candidate, action="merge")
+        sdk.update_entity(survivor, status="superseded")
+        sdk.update_entity(candidate, status="superseded")
+
+        (exists, _terminal, _op, _unevaluable, live, _merges,
+         _target) = sdk._entity_name_holders("Object", "Acme Corporaton")
+        assert exists is True, (
+            "a held name read as UNHELD through the collapsed ANY-status arm")
+        assert live == 0, f"fixture drift: a live carrier appeared ({live})"
