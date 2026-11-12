@@ -4586,8 +4586,8 @@ jobs:
     # (`apt-cache search '^postgresql-client-[0-9]+$'` → `postgresql-client-18`
     # only). The pin step below therefore died
     # `E: Unable to locate package postgresql-client-16` (exit 100) BEFORE its
-    # version assertion could run, so both servers were provisioned in vain and
-    # every leg below skipped (`no junit XML … #9551`).
+    # version assertion could run, so NEITHER server was provisioned — both provisioning
+    # steps are `skipped` (MEASURED, job `131022562781` steps 7-8) and no record leg ran.
     #
     # 24.04 is noble, whose archive carries the major: measured on the image
     # itself, `postgresql-client-16` candidate `16.15-0ubuntu0.24.04.1`. It is an

@@ -195,7 +195,13 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     `"::error::" in text and "exit 1" in text` cannot tell an ARMED branch from
     a disarmed one: measured, `if [ "$major" != "16" ]; then` → `if false; then`
     left all four tests green while the job would never fail closed. The
-    comparison literal is therefore pinned to the servers' major.
+    comparison literal is therefore pinned to the servers' major, and the fail
+    ACTION is read from that branch's own BODY (`_version_branch`) rather than
+    from the step: this PR's package precondition carries `::error::`/`exit 1`
+    too, so a whole-step search is satisfied by the precondition alone
+    (measured 2026-11-12 on `eb8e4d7268` — gutting the branch body to `:` left
+    all six tests in this file green, and a client-major mismatch then reached
+    the record leg: the exact silent-unrestorable-artifact failure #12051 is).
 
     STATED LIMIT: this is a hermetic text guard, so it cannot prove the
     version-EXTRACTION arithmetic — a `sed` rewritten to a constant (`s/.*/16/`)
@@ -208,10 +214,19 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     text = _run_text(pin)
     server_major = _postgres_image_majors(job)[0]
 
-    assert "::error::" in text and "exit 1" in text, (
-        "the client pin asserts nothing about the version it actually got — it "
-        "must `echo \"::error::…\"` and `exit 1` on a mismatch, so a runner "
-        "image change surfaces as this step, not as an unrestorable artifact"
+    branch = _version_branch(_normalised_code(text), server_major)
+    assert "::error::" in branch, (
+        "the client pin's VERSION BRANCH asserts nothing about the version it "
+        "actually got — the branch's own body must `echo \"::error::…\"`, so a "
+        "runner image change surfaces as this step, not as an unrestorable "
+        "artifact. Read from the BRANCH, not the step: the package precondition "
+        "above it carries a `::error::` of its own"
+    )
+    assert re.search(r"\bexit\s+1\s*(?:;|\}|\)|$)", branch), (
+        "the version branch does not `exit 1`: a named error with no exit status "
+        "lets the mismatch carry on into the record leg, which is the silent "
+        "unrestorable artifact #12051 exists to prevent. Any separator is "
+        "accepted — the fact is the exit status, not the punctuation after it"
     )
     assert f'"$major" != "{server_major}"' in text, (
         "the pin never COMPARES the client's major with the servers' "
@@ -328,6 +343,44 @@ def _precondition(code: str) -> re.Match[str]:
         "because a substring pin is satisfied by commenting the body out."
     )
     return match
+
+
+#: The version branch as a BLOCK, for the same reason `_precondition` is a block:
+#: a substring pin cannot tell an ARMED branch from a gutted one. The step now
+#: contains TWO `::error::`/`exit 1` pairs — the package precondition and this
+#: branch — so a whole-step search is satisfied by the precondition alone.
+#: MEASURED 2026-11-12 (fresh review of `eb8e4d7268`): the assertion this replaces
+#: stayed green with `if [ "$major" != "16" ]; then :; fi`. FACTS only: the
+#: comparison is on `$major`, against a literal, inside `then … fi`.
+_VERSION_BRANCH_RE = re.compile(
+    r"^[ \t]*if\s+\[\s*\"?\$major\"?\s*!=\s*\"?(?P<major>\d+)\"?\s*\]\s*;\s*then"
+    r"(?P<body>.*?)^[ \t]*fi[ \t]*$",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+def _version_branch(code: str, server_major: int) -> str:
+    """The `if [ "$major" != "<server_major>" ]; then … fi` BODY.
+
+    The fail action is read from this body and never from the step as a whole:
+    the package precondition above it also emits `::error::` and exits 1, so a
+    whole-step search reports a gutted branch as armed. Reachability of the
+    branch itself is still text-only — the same stated limit as
+    `test_the_client_pin_fails_closed_on_a_mismatch`'s docstring records.
+    """
+    match = _VERSION_BRANCH_RE.search(code)
+    assert match, (
+        "the pin has no `if [ \"$major\" != \"<major>\" ]; then … fi` block — a "
+        "branch that cannot be FOUND is the same symptom as no branch at all: "
+        "the job would carry on with a client whose major differs from the "
+        f"servers' ({server_major}) and the artifact would be unrestorable"
+    )
+    assert int(match.group("major")) == server_major, (
+        "the version branch compares the client's major with "
+        f"{match.group('major')}, but BOTH provisioned servers are "
+        f"{server_major} — a branch pinned to any other major can never fire"
+    )
+    return match.group("body")
 
 
 def _runs_on_labels(job: dict) -> list[str]:
