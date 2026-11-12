@@ -314,15 +314,19 @@ jobs:
             # step stays green (#10264 review P1, measured; the repo's own
             # `::error::` diagnostics in ci-timing.yml escape the same way, and
             # tests/test_ci_queue_health.py pins the class over EVERY annotation).
-            echo "::warning::${state} — PR CI IS executing, but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. ${cancel_lead}; this state reaches no trim either — it requires \`pr_running > 0\`, and the governor's block sits below that clause, so THIS READING does not reach the governor. The lever is capacity, not the governor."
+            echo "::warning::${state} — PR CI IS executing (or is only REPORTED executing on an unmeasured census — see the reason line), but the backlog is past the wait budget: the REQUIRED checks cannot answer inside that wait. ${cancel_lead}; this state reaches no trim either — it requires \`pr_running > 0\`, and the governor's block sits below that clause, so THIS READING does not reach the governor. The lever is capacity, not the governor."
           elif [ "$verdict" = "PR-UNWITNESSED" ]; then
-            # ⛔ THE CAUSE IS READ FROM THE PAYLOAD, NOT ASSUMED. `PR-UNWITNESSED` has three
-            # causes on different dimensions and they take different levers; telling an
-            # operator to raise --max-pages for a census that is unwitnessed sends them at
-            # the wrong end of the reading (#12037 review round 4).
-            unmeasured_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured') or 0)" 2>/dev/null || echo 0)"
-            pr_running_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running') or 0)" 2>/dev/null || echo 0)"
-            if [ "${pr_running_n:-0}" -gt 0 ] && [ "${unmeasured_n:-0}" -eq "${pr_running_n:-1}" ]; then
+            # ⛔ THE CAUSE IS READ FROM THE PAYLOAD'S OWN FLAG, NOT RE-DERIVED FROM COUNTS.
+            # `PR-UNWITNESSED` has three causes on different dimensions and they take
+            # different levers. Round 4 keyed this on `pr_running == pr_running_unmeasured >
+            # 0`, which is wrong on the OVERLAP: a reading whose WAIT was not witnessed (a
+            # queued PR run with no readable `created_at`) can ALSO have a fully unmeasured
+            # census, and the numbers cannot tell which cause produced the verdict — so the
+            # annotation prescribed the census lever (frozen runs / --max-job-probes) for a
+            # wait defect, dropping the lever that fixes it (#12037 review round 5). The
+            # tool emits `pr_running_census_unwitnessed`, set by the clause that degrades.
+            census_n="$(python3 -c "import json; print(1 if json.load(open('/tmp/ci-queue-health.json')).get('pr_running_census_unwitnessed') else 0)" 2>/dev/null || echo 0)"
+            if [ "${census_n:-0}" -eq 1 ]; then
               echo "::warning::${state} — the RUNNING CENSUS was not witnessed: every run counted as executing was unmeasured, so the count is the pre-#12037 status-string census and PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here. The lever is the frozen runs (repair them) or the probe budget (--max-job-probes), NOT --max-pages; see the step summary for the dimension that was not measured."
             else
               echo "::warning::${state} — the PR wait was not witnessed (the queued feed was cut at the page cap, or the queued PR runs carry no readable timestamp), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; for a truncated feed raise --max-pages to read further back, and see the step summary for the dimension that was not measured."

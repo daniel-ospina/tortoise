@@ -618,6 +618,15 @@ class QueueHealth:
     #: jobs surface from manufacturing `PR-STARVED` — a `STARVING_VERDICT` that authorises
     #: a destructive cancel-then-rerun. Reported so the abstention is visible.
     pr_running_unmeasured: int = 0
+    #: DID `pr_running` DEGRADE TO `PR-UNWITNESSED` FOR LACK OF MEASUREMENT? (#12037
+    #: review round 5) `PR-UNWITNESSED` has three causes on three different dimensions —
+    #: a page-capped feed, an unreadable `created_at`, and this one — and they take
+    #: different levers. A consumer that re-derives the cause from
+    #: `pr_running == pr_running_unmeasured > 0` gets the OVERLAP wrong: a reading whose
+    #: WAIT was not witnessed can also have a fully unmeasured census, and the census
+    #: lever would then be prescribed for a wait defect. This flag is set by the clause
+    #: that degrades, so it is about the census by construction.
+    pr_running_census_unwitnessed: bool = False
     #: Why the verdict is what it is, in one clause per clause of the rule, so a
     #: reader can check the decision instead of trusting it.
     reasons: tuple[str, ...] = ()
@@ -931,6 +940,9 @@ class QueueHealth:
             # manufacturing a `STARVING_VERDICT`).
             "pr_running_excluded": list(self.pr_running_excluded),
             "pr_running_unmeasured": self.pr_running_unmeasured,
+            # Whether that abstention is what DEGRADED the verdict, so a consumer reads
+            # the cause instead of inferring it from the two counts above.
+            "pr_running_census_unwitnessed": self.pr_running_census_unwitnessed,
             "pr_queued": self.pr_queued,
             # The other leg of the wait population, emitted so a consumer can see that
             # the clearance was not taken from the `status=queued` feed alone (#10641
@@ -1268,12 +1280,13 @@ def classify_queue(
         # `read_health` knows whether it spent the budget, so only it can answer — hence a
         # declared parameter rather than a derivation, and a default of `False` that keeps
         # every existing (non-probing) caller's contract intact.
-        if (
+        census_unwitnessed = bool(
             verdict == OK
             and probe_attempted
             and pr_running > 0
             and pr_running == pr_running_unmeasured
-        ):
+        )
+        if census_unwitnessed:
             verdict = PR_UNWITNESSED
             reasons.append(
                 f"PR-UNWITNESSED: all {pr_running} run(s) counted in pr_running were UNMEASURED "
@@ -1299,6 +1312,20 @@ def classify_queue(
             # unread jobs surface can never manufacture a starvation verdict).
             "pr_running_excluded": pr_running_excluded,
             "pr_running_unmeasured": pr_running_unmeasured,
+            # ⛔ THE DEGRADATION ITSELF, EMITTED AS A NAMED FACT (#12037 review round 5).
+            # (It is stated ONCE. An earlier revision of this patch emitted it above the
+            # comment too, and a duplicated key in a dict literal is legal Python — the
+            # later value silently wins, so a mutation of the first copy tested nothing.)
+            # `PR-UNWITNESSED` has THREE causes on different dimensions — a page-capped
+            # feed, an unreadable `created_at`, and this one (an unwitnessed RUNNING
+            # CENSUS) — and they take different levers. A consumer that re-derives the
+            # cause from the numbers gets it wrong on the OVERLAP: a reading with an
+            # unreadable timestamp AND a fully unmeasured census has
+            # `pr_running == pr_running_unmeasured > 0` while its wait — not its census —
+            # is what was not witnessed, so a numeric selector prescribes the census
+            # lever for a wait defect. This flag is True only when the clause above
+            # actually fired, i.e. it is about the CENSUS by construction.
+            "pr_running_census_unwitnessed": census_unwitnessed,
             "pr_queued": len(pr_queued_runs),
             # The OTHER leg of the wait population: queued-adjacent PR runs the
             # `status=queued` feed cannot contain, read separately and counted so the
@@ -1416,8 +1443,23 @@ def classify_queue(
         # pre-action FLOOD candidates before this reading was taken, and `main()`
         # reports those in `cancelled` — so an invocation-scoped "nothing was
         # cancelled" here would contradict the payload it is printed in.
+        # ⛔ AND IT MUST NOT ASSERT AN EXECUTION FACT THAT WAS NEVER MEASURED (#12037
+        # review round 5). This clause is reached whenever `pr_running > 0`, and that
+        # count may be made entirely of runs whose jobs could not be read — the very
+        # census the `OK`-gated degradation above refuses to certify. The verdict STAYS
+        # (the direction is fail-closed: `congests_pr is True`, no destructive
+        # authorisation), but the sentence the fleet quotes has to say which of the two
+        # it is resting on instead of asserting the stronger one.
+        if pr_running == pr_running_unmeasured:
+            executing_claim = (
+                f"PR-BACKLOGGED: PR CI is REPORTED executing ({pr_running} run(s)) — "
+                f"⚠️ NONE of them was measured: every job probe abstained, so this is the "
+                f"pre-#12037 status-string census, not a job-level proof"
+            )
+        else:
+            executing_claim = f"PR-BACKLOGGED: PR CI IS executing ({pr_running} run(s))"
         reasons.append(
-            f"PR-BACKLOGGED: PR CI IS executing ({pr_running} run(s)), but the oldest "
+            f"{executing_claim}, but the oldest "
             f"waiting PR-event run (queued/pending/requested) has waited "
             f"{backlogged_wait:.0f}s "
             f"(> max_pr_wait_seconds={max_pr_wait_seconds:.0f}s), so the REQUIRED "
@@ -1802,20 +1844,22 @@ def read_health(
     would let one transient 5xx turn a readable queue into `UNKNOWN`/exit 2 for every
     consumer of this module.
     """
-    queued, queued_truncated = read_runs(repo, "queued", max_pages)
-    # ⛔ THE BUDGET IS VALIDATED, NOT ASSUMED. `main()` catches only `MeasureError`, so a
-    # non-int here would surface as a bare `TypeError` from the slice at the last line of this
-    # function and kill the reading with NO state line — the failure mode the budget's own
+    # ⛔ THE BUDGET IS VALIDATED FIRST — BEFORE ANY API READ. `main()` catches only
+    # `MeasureError`, so a non-int here would surface as a bare `TypeError` from the slice
+    # below and kill the reading with NO state line — the failure mode the budget's own
     # comment exists to prevent. Turning it into `MeasureError` gives exit 2 and a message.
     # STRICT, and floor 1: `type(...) is int` so a float is not silently truncated, and a
     # budget of 0 is REFUSED rather than clamped, because "probe nothing" is precisely the
     # pre-#12037 mode — reachable today by a typo like `--max-job-probes -1` — and a silent
     # switch back to the defect is the one thing this tool must not offer.
+    # It is checked BEFORE the first read so a refused argument spends no API budget
+    # (#12037 review round 5); an argument error should not cost two request-quota reads.
     if type(max_job_probes) is not int or max_job_probes < 1:
         raise MeasureError(
             f"max_job_probes must be an integer >= 1, got {max_job_probes!r}"
         )
     probes = max_job_probes
+    queued, queued_truncated = read_runs(repo, "queued", max_pages)
     running, running_truncated = read_runs(repo, "in_progress", max_pages)
     # ⛔ THE IN-PROGRESS LEG IS PROBED AT JOB LEVEL, NOT TRUSTED FROM `status` (#12037).
     # `pr_running` is a census of EXECUTING work — every clause keyed on it treats it as

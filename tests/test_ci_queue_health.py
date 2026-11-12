@@ -2726,20 +2726,34 @@ def test_a_census_of_only_unmeasured_runs_cannot_certify_health():
 def test_one_proved_executing_run_keeps_the_reading_usable():
     """The counter-arm: a MEASURED executing run means `pr_running > 0` is a measurement.
 
-    Without this the degradation would swallow `PR-BACKLOGGED` — the state that says PR CI IS
-    being served and the backlog behind it is too deep, which is the honest verdict when some
-    probe actually saw a live job.
+    ⛔ THIS TEST WAS INERT TWICE OVER (round-5 P2, and the mutation proved it: `==` -> `>=` in
+    the degradation's scope term survived the whole suite). It called `classify` WITHOUT
+    `probe_attempted` (so the clause could not fire) and asserted `PR-BACKLOGGED` (6000 s >
+    5400 s) — a verdict the clause excludes by `verdict == OK`. Round 4 recorded exactly this
+    lesson for the sibling test below and did not apply it here. Now it probes, and the wait is
+    INSIDE the budget so `OK` is reachable and the scope term is the only thing deciding.
+
+    The scope is the point: `pr_running == pr_running_unmeasured` (EVERY counted run
+    unmeasured) is very different from `>=` (true whenever ANY run is unmeasured, because
+    unmeasured is a subset of running). Under `>=`, `OK` would become unreachable for every
+    queue with a probed executing PR run.
     """
-    queued = [run(1, "python-ci", event="pull_request", age_seconds=6000)]
+    queued = [run(1, "python-ci", event="pull_request", age_seconds=1000)]
     measured = [
-        *_frozen(9, probed=8),
+        *_frozen(2, probed=1),   # 1 proved idle, 1 unmeasured -> pr_running == 1
         Q.QueuedRun(id=9999, name="Python CI", event="pull_request",
                     created_at=(NOW - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     has_live_job=True),
     ]
-    health = classify(queued, in_progress=measured)
-    assert health.pr_running == 2          # one proved executing + one unmeasured
-    assert health.verdict == Q.PR_BACKLOGGED, "the 6000 s wait is past the 5400 s budget"
+    health = classify(queued, in_progress=measured, probe_attempted=True)
+    assert health.pr_running == 2               # one proved executing + one unmeasured
+    assert health.pr_running_unmeasured == 1
+    assert health.verdict == Q.OK, (
+        "a census containing a PROVED executing run is a measurement; only an ALL-unmeasured "
+        "census degrades"
+    )
+    assert health.congests_pr is False
+    assert health.pr_running_census_unwitnessed is False
 
 
 def test_a_reading_where_nothing_was_probed_keeps_the_pre_fix_contract():
@@ -2874,6 +2888,11 @@ def test_a_legacy_caller_and_an_abstained_probe_are_DIFFERENT():
     `classify_queue` is documented as pure and its reading for a caller that never probes must
     be unchanged, which is why the flag is a PARAMETER rather than a proof of "nothing was
     measured". Same inputs, two answers, one declared difference.
+
+    (Its earlier docstring claimed that without this scope "the degradation would swallow
+    `PR-BACKLOGGED`", which is unachievable as written: the clause is gated on `verdict == OK`,
+    so it can never touch `PR-BACKLOGGED`. The real risk the scope protects is the opposite one
+    — degrading a perfectly good `OK` for every legacy caller — and that is what is asserted.)
     """
     queued = [run(1, "python-ci", event="pull_request", age_seconds=1000)]
     unmeasured = [run(2, "Python CI", event="pull_request", age_seconds=30)]
@@ -2887,3 +2906,127 @@ def test_a_legacy_caller_and_an_abstained_probe_are_DIFFERENT():
     assert legacy.verdict == Q.OK
     assert modern.verdict == Q.PR_UNWITNESSED
     assert legacy.congests_pr is False and modern.congests_pr is None
+
+
+def test_read_health_WIRES_the_probe_timeout_and_the_budget_arithmetic_holds(monkeypatch):
+    """⭐ ROUND-5 P2: the probe timeout was unproven at BOTH its wiring and its value.
+
+    Two mutants survived the whole suite: dropping `timeout=JOB_PROBE_TIMEOUT_SECONDS` (the
+    probes then fall back to `_gh`'s 120 s default) and raising the constant to 120. Yet the
+    constant is what justifies `DEFAULT_MAX_JOB_PROBES = 8` — its own docstring says the worst
+    case is "2 x 8 x 15 s = 240 s of a 600 s job budget". At the fallback the same arithmetic
+    gives 2 x 8 x 120 = 1920 s against `timeout-minutes: 10`, so the job dies with no state
+    line, which is the failure the budget exists to prevent. Same class as round 3's P2
+    (proven as a FUNCTION, unproven as a WIRING).
+    """
+    seen: list[float | None] = []
+    rows = [{"id": 601, "name": "python-ci", "event": "pull_request",
+             "created_at": "2026-10-19T03:00:00Z"}]
+
+    def fake_json(args, timeout=None):
+        seen.append(timeout)
+        return {"total_count": 1, "jobs": [{"status": "completed", "run_attempt": 1}]}
+
+    monkeypatch.setattr(
+        Q, "read_runs", lambda repo, status, max_pages=5: (rows if status == "in_progress" else [], False)
+    )
+    monkeypatch.setattr(Q, "gh_json", fake_json)
+    Q.read_health("o/r", NOW, max_job_probes=1)
+
+    assert seen == [Q.JOB_PROBE_TIMEOUT_SECONDS], (
+        "the probe must pass the constant explicitly; without it `_gh`'s 120 s default applies "
+        "and the budget arithmetic is off by 8x"
+    )
+    # ... and the arithmetic must still fit the job's own budget with room to spare, so a
+    # future bump of either number reds here instead of in a killed CI job.
+    worst_case = 2 * Q.DEFAULT_MAX_JOB_PROBES * Q.JOB_PROBE_TIMEOUT_SECONDS
+    assert worst_case <= 300, (
+        f"2 x {Q.DEFAULT_MAX_JOB_PROBES} probes x {Q.JOB_PROBE_TIMEOUT_SECONDS}s = {worst_case}s "
+        "does not fit comfortably inside the 600 s job budget"
+    )
+
+
+def test_the_census_cause_is_a_NAMED_flag_so_the_overlap_cannot_misattribute_it():
+    """⭐ ROUND-5 P2: the workflow re-derived the cause from COUNTS and got the overlap wrong.
+
+    `PR-UNWITNESSED` has three causes on different dimensions. Round 4 keyed the annotation on
+    `pr_running == pr_running_unmeasured > 0`, which is ALSO true when the real cause is (b) —
+    a queued PR run with no readable `created_at` — while the census happens to be entirely
+    unmeasured (the likeliest probe outcome under load). The annotation then prescribed the
+    census lever (frozen runs / --max-job-probes) and dropped the lever that fixes the reading.
+
+    A number cannot carry that distinction; a flag set by the clause that degrades can.
+    """
+    # (c) present: the degradation is what produced the verdict.
+    census = classify(
+        [run(1, "python-ci", event="pull_request", age_seconds=1000)],
+        in_progress=[run(2, "Python CI", event="pull_request", age_seconds=30)],
+        probe_attempted=True,
+    )
+    assert census.verdict == Q.PR_UNWITNESSED
+    assert census.pr_running_census_unwitnessed is True
+
+    # (b) present and the census ALSO fully unmeasured: the same counts, a DIFFERENT cause.
+    overlap = classify(
+        # `run(...)` falls back to a valid stamp for a FALSY `created_at`, so the unreadable
+        # one has to be non-empty garbage — the earlier version of this line passed an empty
+        # string and silently tested nothing.
+        [run(1, "python-ci", event="pull_request", created_at="not-a-timestamp")],
+        in_progress=[run(2, "Python CI", event="pull_request", age_seconds=30)],
+        probe_attempted=True,
+    )
+    assert overlap.verdict == Q.PR_UNWITNESSED
+    assert (overlap.pr_running, overlap.pr_running_unmeasured) == (
+        census.pr_running, census.pr_running_unmeasured
+    ), "the COUNTS are identical, which is exactly why they cannot select the cause"
+    assert overlap.pr_running_census_unwitnessed is False, (
+        "the wait was the unwitnessed dimension here, not the census"
+    )
+    # ⛔ AND THE EMISSION IS PINNED SEPARATELY, BECAUSE THAT IS WHAT THE CONSUMER READS. The
+    # workflow greps this key out of `--json`; an attribute that is right while the payload
+    # says `true` is a green suite over a misattributed annotation (measured: mutating only
+    # the `to_dict` line survived every attribute-level assertion).
+    assert overlap.to_dict()["pr_running_census_unwitnessed"] is False
+    assert census.to_dict()["pr_running_census_unwitnessed"] is True
+
+    # ... and it is FALSE on every verdict the degradation never touched.
+    assert classify([], in_progress=[], probe_attempted=True).pr_running_census_unwitnessed is False
+    healthy = classify(
+        [run(1, "python-ci", event="pull_request", age_seconds=1000)],
+        in_progress=[Q.QueuedRun(id=9, name="Python CI", event="pull_request",
+                                created_at=(NOW - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                has_live_job=True)],
+        probe_attempted=True,
+    )
+    assert healthy.verdict == Q.OK and healthy.pr_running_census_unwitnessed is False
+
+
+def test_backlogged_does_not_assert_execution_it_never_measured():
+    """⭐ ROUND-5 P2: `PR-BACKLOGGED` said "PR CI IS executing" off an unmeasured census.
+
+    The degradation is gated on `verdict == OK`, so this arm keeps its verdict (the direction
+    is fail-closed: `congests_pr is True`, no destructive authorisation) — but the sentence the
+    fleet quotes must say which of the two it rests on. It is the one line operators read.
+    """
+    queued = [run(1, "python-ci", event="pull_request", age_seconds=6000)]
+    unmeasured = classify(
+        queued, in_progress=[run(2, "Python CI", event="pull_request", age_seconds=30)],
+        probe_attempted=True,
+    )
+    assert unmeasured.verdict == Q.PR_BACKLOGGED
+    assert unmeasured.congests_pr is True, "still fail-closed: this is a reporting defect only"
+    claim = next(r for r in unmeasured.reasons if r.startswith("PR-BACKLOGGED"))
+    assert "is REPORTED executing" in claim and "NONE of them was measured" in claim
+    assert "PR CI IS executing" not in claim
+
+    measured = classify(
+        queued,
+        in_progress=[Q.QueuedRun(id=8, name="Python CI", event="pull_request",
+                                 created_at=(NOW - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                 has_live_job=True)],
+        probe_attempted=True,
+    )
+    assert measured.verdict == Q.PR_BACKLOGGED
+    assert "PR CI IS executing (1 run(s))" in next(
+        r for r in measured.reasons if r.startswith("PR-BACKLOGGED")
+    )
