@@ -5046,6 +5046,13 @@ _EPIC_CITE_DOCS = {
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
     "03-test-design.md":
         _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+    # `docs/evidence/11083/README.md` cites the SAME `relation_write.py` call the
+    # RECONCILE row below pins, and was read by nothing at all until #12112: the
+    # call moved 631 -> 695 -> 700 across two commits of that PR and this file
+    # pointed at `declared=None,` the whole time. A cite no reader keeps is a cite
+    # a change moves, which is the rule this dict exists to enforce.
+    "11083/README.md":
+        _REPO / "docs/evidence/11083/README.md",
 }
 _EPIC_CITE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
@@ -5056,6 +5063,14 @@ _EPIC_CITE_SOURCES = {
     # while the document went on naming 9548, which is the row above — a cite a
     # change moves is exactly the cite no hand-recheck keeps.
     "ci_surfaces": _REPO / "config/ci-surfaces.yml",
+    # ⛔ `relation_write.py`'s `plan_hierarchy_edges` call is cited by two documents
+    # (and by an artifact row that talks about the same seam) and by NOTHING else in
+    # this file. Measured across #12112: the call sat at `:631` on `origin/main`, at
+    # `:695` after the branch's own first fix, and at `:700` after round 15's — three
+    # numbers in three commits, with every document still naming the previous one and
+    # `:631` reading `declared=None,` (a kwarg) rather than the call. That is a cite
+    # whose only possible reader was a human re-deriving it by hand.
+    "relation_write": _REPO / "tortoise/relation_write.py",
 }
 
 
@@ -5152,15 +5167,29 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         # and the section bounds
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # At this head (rebase onto main `edcac493a5`): entry 9906, `carve_out:`
-        # opens 9780, `uri_requiring:` 10104 — so 9906 is inside the section, and
-        # the identical text also sits at 6056 and 8422, which is what the 5th
-        # element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8188) of `surfaces:`, so the resolver's
-        # nearest-column-zero-key rule reports the PARENT: a cite onto 8422 refuses
+        # At this head (#12112's forward merge onto main `eb27f96d3e`): entry 9917,
+        # `carve_out:` opens 9791, `uri_requiring:` 10122 — so 9917 is inside the
+        # section, and the identical text also sits at 6056 and 8433, which is what the
+        # 5th element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
+        # (`core:` 2235, `sdk:` 8199) of `surfaces:`, so the resolver's
+        # nearest-column-zero-key rule reports the PARENT: a cite onto 8433 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
+        # The `plan_hierarchy_edges` CALL, in the two documents that name it, keyed
+        # by the sentence rather than by the number: #12112 moved this line three
+        # times (`631` on main, `695`, `700`) and each move left a document behind.
+        # ⛔ Three rows, not one, because a row scopes to ONE document + ONE source
+        # and the 11083 record is a different file that no sweep reads at all.
+        ("RECONCILE-A1-A2-A5.md", "one of them the **call**", (
+            ("700", "planned = plan_hierarchy_edges("),
+        ), "relation_write"),
+        ("RECONCILE-A1-A2-A5.md", "of `plan_hierarchy_edges`**, at", (
+            ("700", "planned = plan_hierarchy_edges("),
+        ), "relation_write"),
+        ("11083/README.md", "calls `pack_hierarchy.plan_hierarchy_edges`", (
+            ("700", "planned = plan_hierarchy_edges("),
+        ), "relation_write"),
         ("03-test-design.md", "`carve_out:` holds **one**", (
             ("9917", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),

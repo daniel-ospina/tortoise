@@ -104,7 +104,7 @@ taken on this merge:
   `relation_write.py:7`, `sdk.py:18308`), against the *"that comment and no consumer at all"* this
   record was written with.
 - `git grep -n 'plan_hierarchy_edges' -- tortoise/` → **8** lines, four of them in `relation_write.py`
-  and one of them the **call** (`:695`): a declared hierarchy over a pair the story *states* is routed
+  and one of them the **call** (`:700`): a declared hierarchy over a pair the story *states* is routed
   through `plan_hierarchy_edges` and written as the **declared** structural predicate through
   `sdk.link_entities` → `create_edge` — the seam `#11001` documented and nothing called, now called.
   (`tests/` gains two hits as well, `test_relation_write_11237.py`, so *"all in the same test file"* is
@@ -166,7 +166,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `:459` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
    `pack validate` reads `declared_hierarchy`/`hierarchy_diagnostics`, not the planner).
    ⛔ **Superseded in the merged tree — but only for the PLANNER: `#11548` added a production caller
-   of `plan_hierarchy_edges`**, at `relation_write.py:695` (`planned = plan_hierarchy_edges(…)`) — see
+   of `plan_hierarchy_edges`**, at `relation_write.py:700` (`planned = plan_hierarchy_edges(…)`) — see
    the fifth-landing amendment in §0. It did **not** add a caller of the WRITER: `apply_hierarchy_edges`
    still has zero production callers (`git grep apply_hierarchy_edges -- tortoise/` → **two** hits,
    the `__all__` entry and the `def`, i.e. no call at all), so this item's
@@ -684,7 +684,7 @@ git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :948
 # A1 (§1) — the declaration reads, and a production caller outside its own module now writes it
 # ⛔ This header read "…and nothing production writes it" until #11548/#11237 landed
 # `relation_write.py` — `plan_hierarchy_edges` IS called from production at
-# `tortoise/relation_write.py:695` (`pack_hierarchy.py:459` is the same module's own internal
+# `tortoise/relation_write.py:700` (`pack_hierarchy.py:459` is the same module's own internal
 # call, which is why it is not a second consumer). §0 above records the change; do not argue A1
 # from the retired premise (that is the "second producer the epic forbids" argument).
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
@@ -702,7 +702,7 @@ git grep -n plan_hierarchy_edges -- tortoise/ tests/      # 22 lines on this mer
                                                           # test files, `:59/:78/:365/:459` in
                                                           # pack_hierarchy.py, and — the part this line
                                                           # used to omit — 4 in relation_write.py
-                                                          # (`:53 :653 :695 :700`), `:695` being the CALL
+                                                          # (`:53 :658 :700 :705`), `:700` being the CALL
                                                           # ⚠️ unscoped this command returns 37, because 13
                                                           # docs lines match too — 7 of them in THIS
                                                           # record, the self-match trap §1 names
