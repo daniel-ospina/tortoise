@@ -936,6 +936,16 @@ def test_the_never_run_call_entry_NAMES_every_spelling_it_was_measured_on():
         "pre-empts the write predicate, so `gated` can also mean a LIVE ungated reach was MASKED; "
         "say that in this clause instead of claiming the writer reaches nothing: "
         f"{summary_clause[:240]!r}…")
+    # ⛔ A PRESENCE check alone is satisfiable by an incidental token: measured, restoring the
+    # round-9 narrow sentence verbatim and leaving a stray "`ungated` class" mention in the same
+    # slice kept the pin GREEN. So the narrow FORMS are excluded from the same slice as well, and
+    # because the exclusion is clause-scoped it does not red the legitimate negation ("`gated` does
+    # not mean the writer is reaching nothing, because…"), which sits outside it.
+    for narrow_form in ("while reaching nothing", "they do not actually make"):
+        assert narrow_form not in summary_clause, (
+            f"the register's `gated` summary carries the narrow form {narrow_form!r} — the "
+            f"`SEAM_CALL` branch pre-empts the write predicate, so `gated` can also mean a LIVE "
+            f"ungated reach was MASKED; state that instead: {summary_clause[:240]!r}…")
 
 
 def test_the_seam_CALL_population_is_the_one_the_register_names():
