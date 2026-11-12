@@ -1040,8 +1040,15 @@ def test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_
     # forbids the house style inside the one sentence that explains the decision. This matches an
     # assertive ATTRIBUTION instead, and is measured GREEN on both honest negations and RED on all
     # four flip spellings.
+    # ⛔ NO free-floating `arm` alternative (`#12020` round 15 review, P3 — measured). The first cut
+    # carried `shadow-aware\s+(?:arm|and)\b`, which cannot tell an ATTRIBUTION to this arm from a
+    # reference to the REVERTED shadow-aware arm — and naming the rejected arm is this repo's house
+    # idiom, documented two lines up (the probe says "REVERTED a shadow-aware arm for deleting
+    # writers"). Measured: that TRUE sentence redded with "ATTRIBUTES shadow-awareness to the arm",
+    # i.e. the very false-red class round 14 removed. A determinate attribution
+    # ("is the shadow-aware arm") is still caught by the copula form.
     shadow_aware_claim = re.compile(
-        r"(?:is|are)\s+(?:deliberately\s+)?shadow-aware|shadow-aware\s+(?:arm|and)\b")
+        r"(?:is|are)\s+(?:deliberately\s+)?(?:the\s+)?shadow-aware\b|shadow-aware\s+and\b")
     assert not shadow_aware_claim.search(builder_sentence), (
         "the builder sentence ATTRIBUTES shadow-awareness to the arm — the arm is deliberately "
         "shadow-BLIND; the shadow-aware form is what was measured deleting `w` "
