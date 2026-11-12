@@ -2925,22 +2925,28 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
          "disproved. FOUR causes, ONE bucket — and the causes span three layers"),
         # ⛔ AND THE TWO SHIPPED CAUSE-NAMING COMMENTS (review rounds 18-21). Content-checked
         # without the discriminator for the same reason as the count claims: the retraction is
-        # that the CAUSE is mis-named, which no stillness qualifier repairs. Clause-level, NOT
-        # sentence-prefixed: a re-typed form that inserts a qualifier before the wrong cause
-        # (measured — review round 20's own falsification) must still match. ⛔ SCOPED TO THE
-        # RETRACTED COUPLING: the bare clause "the count is the old status-string census" alone
-        # reds CORRECT prose at `tools/ci_queue_health.py:1626`, which scopes that census to the
-        # BUDGET surplus (measured, review round 21 — a re-typing of a correct sentence).
-        ("the count is the old status-string census and cannot certify health",
+        # that the CAUSE is mis-named, which no stillness qualifier repairs. ⛔ NARROWED TO THE
+        # SHIPPED LEAD-IN, and this leg's RESIDUAL is stated rather than chased (review round
+        # 22, the same lesson round 4 learned for `retracted`): ANY contiguous span can be
+        # embedded by a correct rewrite, so (i) the bare clause reds a correct re-typing of the
+        # BUDGET-surplus scoping at `tools/ci_queue_health.py:1626` (measured), and (ii) a
+        # comment that quotes the retracted sentence IN ORDER TO REJECT IT also reds, because
+        # this leg has no discriminator to tell assertion from quotation. The lead-in form
+        # closes both measured false positives; a re-typing that drops the lead-in is NOT
+        # caught, and that residual is accepted — a needle that cannot be embedded at all is
+        # not achievable here, and pretending otherwise is what produced the false positives.
+        ("unmeasured, the count is the old status-string census and cannot certify health",
          "unmeasured, the count is the old status-string census and cannot certify health"),
-        ("is set by `read_health` inside its `verdict == OK`-gated clause",
+        ("`pr_running_census_unwitnessed` is set by `read_health` inside its",
          "`pr_running_census_unwitnessed` is set by `read_health` inside its "
          "`verdict == OK`-gated clause"),
         # ⛔ AND THE SHIPPED `state_line` CLAIM ITSELF (review P2, round 21). The presence pin
         # beside it sits on the META-sentence describing the correction, so restoring the claim
-        # verbatim left both sentences in the block and the suite green. This pins the CLAIM, so
-        # the claim's return is what reds. Absent from correct prose in every scanned surface.
-        ("PR runs ARE executing but carry no readable timestamp",
+        # verbatim left both sentences in the block and the suite green. Pinned as the WHOLE
+        # shipped sentence, not its clause: the corrected comment quotes the clause in order to
+        # reject it, so the clause alone reds correct prose (measured, review round 22).
+        ("the second cause of this state is a queue whose PR runs ARE executing but carry "
+         "no readable timestamp",
          "the second cause of this state is a queue whose PR runs ARE executing but carry "
          "no readable timestamp"),
     ]
