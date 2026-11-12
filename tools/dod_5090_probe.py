@@ -1801,7 +1801,8 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #:
 #: * `fly.toml`'s `[env]` table and `entrypoint.sh`'s `export`s DO shape the Tortoise
 #:   process's environment and are OUTSIDE `CONFIG_SURFACES` (measured:
-#:   `fly.toml:211` carries `TORTOISE_LOOP_STALL_HARD_EXIT_S`, `entrypoint.sh:355-876`
+#:   `fly.toml:244` carries `TORTOISE_LOOP_STALL_HARD_EXIT_S` (inside the `[env]`
+#:   table that starts at `:211`), `entrypoint.sh:355-876`
 #:   exports runtime defaults). Latent today — all three walked files are silent, so
 #:   row 1 holds either way — and tracked by `#12022`, whose scope is the missing
 #:   channels; adding them here would change the declared surface set `#11455` and
