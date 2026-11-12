@@ -81,6 +81,27 @@ jobs:
       SWEEP_TIMEOUT_S: ${{ vars.SWEEP_TIMEOUT_S }}
     steps:
       - uses: actions/checkout@v4
+      # #12135: the driver's ONLY external dependency, declared instead of inherited.
+      # Every R2 operation in `.github/scripts/registry-cron.sh` shells out to `aws`
+      # (`s3api head-bucket / list-objects-v2 / head-object / get-object /
+      # put-object --if-none-match / delete-object`). Nothing installed it: the
+      # design assumed the runner image carried it — true for GitHub-hosted
+      # `ubuntu-latest`, false for this fleet's self-hosted pool, which advertises
+      # the `ubuntu-latest` label WITHOUT the CLI (measured: run 43208529968 on
+      # pi-runner-cmux-x64-5 — `aws: command not found`, every incident filing
+      # refused, job red after a 20-minute sweep).
+      # The step is a no-op when a working `aws` is already present (no network on
+      # GitHub-hosted runners) and installs a pinned, sha256-verified build for the
+      # runner's architecture otherwise, cached in $RUNNER_TOOL_CACHE per host.
+      # ⛔ `continue-on-error` is LOAD-BEARING, not politeness (review P1): a failed
+      # install (no egress, a withdrawn pin, a runner without `unzip`) must NOT cost
+      # the hour's sweep. This step runs BEFORE the driver, so an ordinary failure
+      # here would skip the only hourly backup trigger — the exact durability
+      # regression the driver-side change exists to prevent. With it, the driver
+      # still runs, reds, and names the missing CLI (its own dependency preflight).
+      - name: Ensure the AWS CLI (the backup driver's only R2 dependency)
+        continue-on-error: true
+        run: bash .github/scripts/ensure-aws-cli.sh
       - name: Run backup driver
         run: bash .github/scripts/registry-cron.sh
         env:

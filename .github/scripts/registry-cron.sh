@@ -60,6 +60,30 @@ export AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID:-}"
 export AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY:-}"
 export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-auto}"
 
+# ── RUNTIME DEPENDENCY: the `aws` CLI (#12135) ─────────────────────────────
+# EVERY R2 operation in this driver shells out to `aws s3api` — the create-once
+# dedup object, the direct freshness listings, and every head/get/put/delete.
+# That dependency is DECLARED in one place (.github/workflows/
+# registry-backup-cron.yml, the "Ensure the AWS CLI" step) and VERIFIED here.
+#
+# It used to be inherited from the runner image, and the plan that chose it said
+# so: "the `aws` CLI (preinstalled on ubuntu runners)"
+# (docs/plans/2026-08-08-596-plan.md:229). That holds for GitHub-hosted
+# `ubuntu-latest` and NOT for this fleet's self-hosted pool, which advertises the
+# `ubuntu-latest` label without the CLI — measured run 43208529968 on
+# pi-runner-cmux-x64-5: `aws: command not found` at r2_put_once, so the R2_DOWN
+# filing could not write its dedup object and EVERY filing was refused while the
+# run went on to sweep for 20 minutes. An undeclared, image-inherited dependency
+# is invisible until a runner that lacks it takes the job.
+#
+# What happens when it is absent is deliberate (see the preflight below): the run
+# is RED and says why ONCE, at the top; the R2 legs are skipped rather than
+# attempted (an attempt only produces a misleading "conditional write rejected");
+# and the SWEEP STILL RUNS, because this hourly job is the only hourly backup
+# trigger there is and trading it for a nicer error would be a durability
+# regression in the middle of a durability incident.
+AWS_CLI_MISSING=0
+
 log() { echo "[backup-driver] $*"; }
 fail() { echo "[backup-driver] ERROR: $*" >&2; }
 # #2796 (review guidance P2-3): the job must be RED whenever the pipeline is
@@ -154,6 +178,16 @@ if [ -z "$GH_TOKEN" ]; then
   # look green. Fail closed.
   fail "GITHUB_TOKEN not set — DR incidents cannot be filed or closed; refusing to run blind"
   exit 1
+fi
+# ── runtime dependency preflight (#12135) ──────────────────────────────────
+# `command -v` alone is not enough: a shim that exists and cannot EXECUTE fails
+# the same way one step later, so probe the binary itself.
+if ! command -v aws >/dev/null 2>&1 || ! aws --version >/dev/null 2>&1; then
+  AWS_CLI_MISSING=1
+  # LOUD records the DETECTION, so this run is RED even though the filing that
+  # the same missing binary would have carried is refused below.
+  LOUD=1
+  fail "the aws CLI is NOT installed on this runner — every R2 leg is unavailable (create-once dedup, direct freshness listings, head/get/put/delete), so NO incident can be filed or resolved this run. The R2 state is UNKNOWN, not healthy, and it is NOT evidence that R2 is down. Continuing so the hourly sweep still runs; this run exits RED. Install step: '.github/workflows/registry-backup-cron.yml' -> 'Ensure the AWS CLI' (bash .github/scripts/ensure-aws-cli.sh). See #12135."
 fi
 
 # ── dedup helpers (R2 create-once + GH-search fallback) ─────────────────────
@@ -368,6 +402,10 @@ alert_streak_get() { # kind id -> the highest healthy_streak across spellings
 }
 alert_streak_set() { # kind id n -> 0 when a count WAS persisted, 1 when none could be
   local kind="$1" id="${2:-}" n="$3" k body tmp wrote=1
+  # #12135: same undeclared dependency, and the same rule — do not shell out to a
+  # binary we already know is absent. "1" is the honest answer (no count could be
+  # persisted); callers already treat it as unenforceable, never as a zero.
+  if [ "${AWS_CLI_MISSING:-0}" = "1" ]; then return 1; fi
   while IFS= read -r k; do
     body="$(r2_get "$k")"
     # Never fabricate a count on an object that cannot carry one: a placeholder
@@ -689,6 +727,17 @@ gh_close() { # number comment kind id -> 0 ONLY when the close was CONFIRMED 2xx
 }
 resolve_global() { # kind comment — close an open global incident (no-op if none)
   local kind="$1" comment="$2" num="" owner="" window="" next_streak=0
+  # #12135 review P1: without the aws CLI a close cannot finish its own job —
+  # delete-to-resolve cannot dispose of the incident's R2 sentinel (it would
+  # strand an object pointing at a CLOSED issue) and the recovery window cannot be
+  # persisted (so the #3146 hysteresis would be silently bypassed and a flapping
+  # condition would close on ONE reading). Defer the close to a CLI-present run:
+  # leaving the incident OPEN is the truthful state when nothing could be
+  # deduped, and it is what this run's terminal message claims.
+  if [ "${AWS_CLI_MISSING:-0}" = "1" ]; then
+    log "self-heal: leaving ${kind} unchanged — the aws CLI is missing, so a close could not delete its dedup sentinel or persist the recovery window (#12135); a CLI-present run resolves it"
+    return 0
+  fi
   # #3127: refuse to clear a kind this driver has no evidence for. Without this
   # the driver's generic sweep-completed self-heal would close incidents the
   # driver never observed recovering.
@@ -837,6 +886,16 @@ gh_create_issue() { # <title> <body> -> issue number on stdout, "" when UNFILED
 file_alert() { # kind title body dedup_id
   local kind="$1" title="$2" body="$3" id="$4" num="" tmp="" issue_num="" key="" filed=0 rc=0
   LOUD=1
+  # #12135: the dedup object is created with `aws s3api put-object`. Without the
+  # CLI this used to reach r2_put_once, fail there, and report "conditional write
+  # rejected … aws: command not found" — a message that names the WRONG fault and
+  # sends the operator after Cloudflare/IfNoneMatch. Refuse HERE, in the dependency's
+  # own words, and never attempt a search-only dedup (the #3032 rule: a dedup that
+  # cannot be verified must not degrade to a title search).
+  if [ "${AWS_CLI_MISSING:-0}" = "1" ]; then
+    fail "${kind} DETECTED but NOT FILED — the dedup object needs the aws CLI, which is missing on this runner (#12135). The condition is real and this run is RED; re-run once the CLI is installed."
+    return 0
+  fi
   tmp="$(mktemp)"
   key="$(alert_key "$kind" "$id")"
   # #2844: another writer (the server-side AlertStore, or this driver pre-#2844)
@@ -1000,7 +1059,15 @@ STALE_TEAMS=""     # the same teams, one `- <org> — <age>m` line each
 R2_LIST_OK=0
 # Bucket-scoped probe (head-bucket) — R2's S3 API does not reliably support
 # the account-level ListBuckets call from an object-scoped access key.
-if ! aws s3api head-bucket --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" >/dev/null 2>&1; then
+if [ "$AWS_CLI_MISSING" = "1" ]; then
+  # #12135: R2 reachability was NEVER PROBED. A missing client is not a down
+  # bucket, and filing R2_DOWN from it would publish a reachability verdict this
+  # run did not measure (and could not dedup anyway). R2_OK stays 0 so every
+  # listing leg below is skipped, and R2_LIST_OK stays 0 so nothing reads as a
+  # measured-empty pool. The missing CLI is already RED + named at the top.
+  R2_OK=0
+  log "R2 preflight SKIPPED — the aws CLI is missing, so R2 was never probed (state UNKNOWN; no R2_DOWN filed, because a missing client is not a missing bucket)"
+elif ! aws s3api head-bucket --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" >/dev/null 2>&1; then
   R2_OK=0
   log "R2 preflight failed — filing R2_DOWN"
   file_alert R2_DOWN "[DR] R2_DOWN — backup storage unreachable" \
@@ -2141,6 +2208,15 @@ if [ "$RUN_STATUS" = "backed_up" ] || [ "$RUN_STATUS" = "degraded" ]; then
   log "self-heal: closed open incidents for a healthy run"
 fi
 
+# #12135: the undeclared-dependency arm reports FIRST among the terminal arms,
+# because a missing CLI is the CAUSE of every other leg being unverifiable this
+# run (nothing could be filed or resolved), and `finish()` would only say "a
+# broken pipeline was detected". The other terminal arms below still run in their
+# own right when this is not the cause.
+if [ "$AWS_CLI_MISSING" = "1" ]; then
+  fail "RED: the aws CLI is missing on this runner, so this run could not measure R2, dedup, file or resolve any incident (#12135). The sweep leg still ran (see the outcome line above) — backups are NOT the part that failed. Fix: install the CLI (the workflow's 'Ensure the AWS CLI' step does it idempotently), then re-run."
+  exit 1
+fi
 if [ "$PURGE_FAILED" = "1" ]; then
   fail "purge ride-along failed — erasure UNVERIFIED this run (see the PURGE_FAILED incident)"
   exit 1

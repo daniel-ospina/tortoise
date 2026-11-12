@@ -235,6 +235,15 @@
 #  117. #9361 review P2: an app-controlled status string is REDACTED before it
 #      is published (the file's contract for every app-derived value), and the
 #      20-char secret rule does not swallow legitimate long status names
+#  118. #12135: the `aws` CLI is an UNDECLARED runtime dependency. With no `aws`
+#      on PATH (the actual state of a self-hosted pool runner) the run is RED and
+#      names the CLI at the TOP, does not probe R2 or publish an R2_DOWN it never
+#      measured, attempts no filing (so no "conditional write rejected" — the
+#      message that sent the operator after Cloudflare instead of a missing
+#      binary), and STILL RUNS THE SWEEP, which is the only hourly backup trigger
+#  119. #12135: the declaration side — the workflow's ensure-aws-cli.sh is a
+#      strict no-op when a working `aws` is present (no network on GitHub-hosted
+#      runners) and carries a well-formed pinned version + 64-hex digests
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -558,6 +567,9 @@ exit 0
 CURL_EOF
 
 chmod +x "$BIN/aws" "$BIN/date" "$BIN/curl"
+# The REAL PATH, captured before the stub dir is prepended: case 118 has to run
+# the driver on a PATH where `aws` genuinely does not exist.
+BASE_PATH="$PATH"
 export PATH="$BIN:$PATH"
 export STUB_LOG="$LOG"
 
@@ -3337,6 +3349,134 @@ assert_not_contains "$(cat "$LOG")" "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" \
   "117. no credential shape reaches the filed issue body"
 assert_not_contains "$OUT" "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" \
   "117. no credential shape reaches the public Actions log"
+
+# ── 118. #12135: the aws CLI is an UNDECLARED runtime dependency ───────────
+# The driver shells out to `aws s3api` for EVERY R2 operation, and nothing used to
+# install it — the design inherited it from the runner image. On the fleet's
+# self-hosted pool (which advertises the `ubuntu-latest` label without the CLI)
+# the first R2 call died with `aws: command not found` INSIDE the dedup error
+# ("conditional write rejected"), every incident filing that hour was refused,
+# and the run still swept for 20 minutes before going red (run 43208529968).
+# This case runs the driver with no `aws` on PATH and pins the corrected
+# behaviour end to end.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"backed_up","graph_totals":{"attempted":1,"backed_up":1}}'
+# ⛔ The PATH must be CONTROLLED, not inherited (review P1): filtering only by
+# PREPENDING a directory still resolves a real `aws` from the caller's PATH, so on
+# a GitHub-hosted runner (which ships the CLI) this case asserted the opposite of
+# reality and red the harness. Build a directory that contains every tool the
+# driver needs EXCEPT `aws`, and run the driver on THAT PATH alone — the case is
+# then a property of the diff on any host, and the suite stays self-contained.
+mkdir -p "$FIX/noaws"
+for d in "$BIN" /usr/local/bin /usr/bin /bin; do
+  for f in "$d"/*; do
+    [ -e "$f" ] || continue
+    b="$(basename "$f")"
+    case "$b" in aws|aws.*) continue ;; esac
+    [ -e "$FIX/noaws/$b" ] || ln -s "$f" "$FIX/noaws/$b"
+  done
+done
+if PATH="$FIX/noaws" command -v aws >/dev/null 2>&1; then
+  bad "118. the aws-free PATH still resolves an aws (case premise broken)"
+fi
+# An OPEN incident the self-heal would otherwise close: with the CLI missing it
+# must stay open (review P1 — a close could not dispose of its sentinel or
+# persist the recovery window).
+export GH_ISSUE_APP_DOWN=4242
+set +e
+OUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+RC=$?
+set -e
+assert_eq "$RC" 1 "118. missing aws CLI exits RED (1)"
+assert_contains "$OUT" "the aws CLI is NOT installed on this runner" \
+  "118. the missing dependency is named at the TOP of the run"
+assert_contains "$OUT" "Ensure the AWS CLI" "118. the install step that fixes it is named too"
+assert_contains "$OUT" "R2 preflight SKIPPED" "118. R2 is not probed by a client that cannot run"
+assert_not_contains "$OUT" "filing R2_DOWN" \
+  "118. a missing client never publishes an R2_DOWN reachability claim"
+assert_not_contains "$OUT" "conditional write rejected" \
+  "118. the dedup error no longer blames the conditional write"
+assert_not_contains "$OUT" "command not found" \
+  "118. no raw shell-level failure leaks from any aws call site"
+assert_not_match "$(cat "$LOG")" 'GH POST .*/issues' \
+  "118. no filing is attempted (its dedup object cannot be written)"
+assert_contains "$OUT" "sweep status: backed_up" \
+  "118. the SWEEP still ran — losing it would be a durability regression"
+assert_not_match "$(cat "$LOG")" 'GH PATCH .*/issues/4242' \
+  "118. no incident is CLOSED either — its R2 sentinel and recovery window are unmanageable"
+assert_contains "$OUT" "leaving APP_DOWN unchanged" \
+  "118. … and the driver says it left it open, instead of claiming a resolve"
+assert_contains "$OUT" "RED: the aws CLI is missing" \
+  "118. the terminal line names the cause, not just 'a broken pipeline'"
+
+# ── 119. #12135: the declaration side is honest about both runner families ─
+# ensure-aws-cli.sh is the half that PREVENTS case 118 in production, so its
+# no-op branch is the one that has to be exact: GitHub-hosted runners already
+# have the CLI and must pay nothing (no network, no download). The pin is
+# asserted because this runs inside an hourly DR cron — an unverified download
+# would put third-party bytes on the path that decides whether backups and DR
+# alerts work.
+ENSURE="$SCRIPT_DIR/ensure-aws-cli.sh"
+mkdir -p "$FIX/awsok"
+cat > "$FIX/awsok/aws" <<'AWSOK_EOF'
+#!/usr/bin/env bash
+echo "aws-cli/2.31.27 Python/3.11.9 Linux/exe/x86_64"
+AWSOK_EOF
+chmod +x "$FIX/awsok/aws"
+set +e
+# NOTE: invoked DIRECTLY (it carries a shebang + exec bit), never `bash <path>`:
+# the worktree guard reads a `bash <script>` invocation as unverifiable script
+# indirection and blocks it (`run_driver` above carries the same note).
+EOUT="$(PATH="$FIX/awsok:$BASE_PATH" GITHUB_PATH="" "$ENSURE" 2>&1)"
+ERC=$?
+set -e
+assert_eq "$ERC" 0 "119. a runner that already has the CLI is a no-op (exit 0)"
+assert_contains "$EOUT" "already installed" "119. … and says so instead of reinstalling"
+assert_not_contains "$EOUT" "downloading" \
+  "119. … with no download, so GitHub-hosted runners pay nothing"
+assert_match "$(grep -E '^PIN_VERSION=' "$ENSURE")" '="[0-9]+\.[0-9]+\.[0-9]+"' \
+  "119. the CLI version is pinned to an exact release"
+for v in PIN_SHA256_X86_64 PIN_SHA256_AARCH64; do
+  assert_match "$(grep -E "^$v=" "$ENSURE")" '="[0-9a-f]{64}"' "119. $v is a 64-hex digest"
+done
+assert_file_match "$ENSURE" 'sha256sum --check --status' \
+  "119. the installer source carries a digest check"
+# The digest check must FAIL CLOSED on a tampered/incomplete archive, and it must
+# fail BEFORE anything lands on PATH (review P2: a source grep cannot tell that
+# ordering, and one stray commented line satisfies it). Drive the real code path
+# with a `curl` that serves junk — no network, no 62 MB download.
+mkdir -p "$FIX/tamper"
+cat > "$FIX/tamper/curl" <<'TAMPER_EOF'
+#!/usr/bin/env bash
+# Stands in for a download: write junk to the -o/--output target and succeed, so
+# the only thing standing between a tampered archive and an installed CLI is the
+# digest. Both spellings are handled — the installer uses `--output`, and a stub
+# that matched only `-o` wrote to an EMPTY path, which made the script die at the
+# curl step and would have passed the "nothing installed" assertion for the
+# wrong reason.
+out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--output) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -z "$out" ]; then echo "tamper-curl: no --output given" >&2; exit 2; fi
+printf 'not-a-real-awscli-archive' > "$out"
+TAMPER_EOF
+chmod +x "$FIX/tamper/curl"
+set +e
+TOUT="$(PATH="$FIX/tamper:$FIX/noaws" GITHUB_PATH="" RUNNER_TOOL_CACHE="$FIX/toolcache" \
+  "$ENSURE" 2>&1)"
+TRC=$?
+set -e
+assert_eq "$TRC" 1 "119. a tampered archive exits non-zero (fail closed)"
+assert_contains "$TOUT" "sha256 MISMATCH" "119. … naming the digest failure"
+assert_eq "$([ -e "$FIX/toolcache/aws-cli-2.31.27-x86_64/bin/aws" ] && echo present || echo absent)" "absent" \
+  "119. … and installs NOTHING (no aws on PATH from a rejected archive)"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
