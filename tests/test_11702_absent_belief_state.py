@@ -5641,9 +5641,10 @@ _BELIEF_PROSE = (
 )
 
 #: A sentence terminator followed by whitespace, EXCLUDING the abbreviations the
-#: corpus writes (`e.g.` / `i.e.` / `cf.`): splitting on those tears a correct
+#: corpus writes (`e.g.` / `i.e.`): splitting on those tears a correct
 #: sentence in two and reports its claim fragment as a defect — a false positive
 #: that steers the next fixer to "correct" correct prose.
+#:
 #: The abbreviations to exempt. Defined ONCE and composed into both splitters
 #: below: a fourth abbreviation added here reaches both, whereas a copy-pasted
 #: second list would let an addition re-open the aperture closed by
@@ -6065,6 +6066,15 @@ def _mirror_refusal_reason(sentence: str) -> str:
     always the correct fix). A message reading "does not name the mirror" for
     all causes sends the fixer to add a mirror clause the guard then refuses
     again.
+
+    ⚠️ That last point is reachable on the FIRST branch: a sentence naming no
+    mirror gets "names no mirror at all", and the clause the fixer then adds can
+    itself land in a negated clause and be refused (`…it is never a plain prior
+    value, so the mirror's value leads it` — measured). The two-cause wording
+    below covers a sentence that ALREADY carries a mention; it cannot make the
+    no-mention advice complete in one shot, because what the fixer writes next is
+    not known to this function. Stated rather than papered over: the remedy is
+    correct, not sufficient.
     """
     if "mirror" not in sentence.lower():
         return "names no `n.confidence` mirror at all"
@@ -6890,10 +6900,18 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             f"the missing-shape leg must be named too: {both_causes!r}")
     # …while a sentence with NO negator at all is missing the shape and nothing
     # else — the denial leg must stay silent, or every missing-shape red tells
-    # the fixer to hunt a denial that is not there. This row also pins the TIGHT
-    # verb alternation: it is `can supply`, not `supplies`, so it must not match
-    # `_MIRROR_SOURCE`; admitting bare `supply` there would match it and this row
-    # would report a denial the sentence does not contain (review, measured).
+    # the fixer to hunt a denial that is not there.
+    #
+    # ⚠️ WHAT THIS ROW DOES *NOT* PIN, stated because an earlier comment here
+    # claimed it did (review, measured): it does NOT pin the tightness of
+    # `_MIRROR_SOURCE`'s verb alternation. This sentence is `can supply`, and
+    # `\bmirror\b\s+(?:suppl(?:ies|ying))\b` cannot match it either way — `\s+`
+    # will not span `can ` — so admitting bare `supply` to the alternation
+    # leaves this row green. Making the alternation admit FILLER would match it
+    # and red the row; the bare-`supply` addition alone cannot reach it. The
+    # `unpinnable alternative` argument in `_MIRROR_SOURCE`'s docstring
+    # therefore stands on its own reasoning (bare `supply` is ungrammatical with
+    # `mirror` as subject, so no correct sentence writes it), NOT on this row.
     assert "NEGATED clause" not in _mirror_refusal_reason(
         "its confidence_mean IS the declared PRIOR mean — the mirror can "
         "supply the value."), \
