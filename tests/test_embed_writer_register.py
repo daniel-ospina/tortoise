@@ -939,6 +939,16 @@ LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
     # (`#11836`, VGATE round 13). So a guard that reds on the rename is measuring
     # the rename, not the store — and its message ("the store moved") is a wrong
     # diagnosis of a declaration that is still true.
+    # ⛔ `#11954`: and the needle is only the SEARCH KEY, never the proof. `#11936`
+    # shortened it to `"in _CANONICAL_ENTITY_ID_PROPS:"`, which is a SUBSTRING:
+    # it said the text occurs in the body, not which statement carries it, so a
+    # re-targeted loop plus one surviving `if label in _CANONICAL_ENTITY_ID_PROPS:`
+    # kept this row green with the store moved (the issue carries the run). The
+    # row is therefore also a STRUCTURAL claim, declared in `ITERATED_STORE_CLAIM`
+    # and proved on the AST: a `for` whose ITERABLE is that constant, whose body
+    # stores, and whose binding the store clause is built from. Both arms must
+    # hold — the statement arm (`_carrying_statements`) and the iterated one —
+    # which is what a rename of the binding still passes and a re-target cannot.
     "tortoise.sdk::_update_entity": (
         "tortoise/sdk.py", "_update_entity",
         "in _CANONICAL_ENTITY_ID_PROPS:",
@@ -976,6 +986,34 @@ LABEL_CONSTANTS: dict[str, tuple[str, str, frozenset[str]]] = {
 }
 
 
+#: Rows whose needle is a SEAM THAT BOUNDS the label set rather than a store clause, because the
+#: store is deliberately un-nameable in their own body (`restore_graph` interpolates its labels,
+#: `_event_raw_write_door` executes its caller's). Their COMPLETENESS therefore rests on a constant,
+#: so every member here must also appear in `LABEL_CONSTANTS` — asserted, not implied.
+BOUND_LABEL_EVIDENCE = frozenset({
+    "tortoise.hosted_backup::restore_graph",
+    "tortoise.sdk::_event_raw_write_door",
+})
+
+#: Rows whose store clause is ASSEMBLED across neighbouring statements rather than issued in the one
+#: that names the label (`_rebuild_all_replay` names `:Point` in the query statement while
+#: `clear_then_set_prefix` / `set_embedding_clause` build the `SET` fragment one statement earlier).
+#: Their claim is therefore "the label statement and a store are the same BLOCK's" — walked up from
+#: the carrier, NEVER out of the cited symbol, so a store in another function cannot satisfy it.
+ASSEMBLED_LABEL_EVIDENCE = frozenset({
+    "tortoise.projection::_rebuild_all_replay",
+})
+
+#: Rows whose claim is STRUCTURAL, not textual: the constant the writer's own loop ITERATES, and
+#: whose binding the store is built from (`#11954`). A needle cannot carry this claim — a membership
+#: test on the same constant is one good-faith refactor away and reads identically to a substring —
+#: so the row is proved on the AST (`_iterated_store_problem`): a `for` over this `Name` whose body
+#: stores through the loop's target.
+ITERATED_STORE_CLAIM: dict[str, str] = {
+    "tortoise.sdk::_update_entity": "_CANONICAL_ENTITY_ID_PROPS",
+}
+
+
 def test_every_declared_label_re_derives_at_this_head() -> None:
     """`#11492`: a declared LABEL is re-derived at HEAD — the `CENSUS_EVIDENCE` discipline.
 
@@ -1008,33 +1046,25 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
         path = REPO_ROOT / rel
         assert path.is_file(), (key, rel)
         source = path.read_text(encoding="utf-8")
-        lines = source.splitlines()
-        tree = ast.parse(source)
-        # A store clause can live in a module-level CONSTANT the writer executes
-        # (`_TURN_WRITE_CYPHER`), so a cited body is the writer's own source PLUS every module-level
-        # constant it names — one hop, which is what a reader following the clause does.
-        constants: dict[str, str] = {}
-        for node in tree.body:
-            if isinstance(node, ast.Assign):
-                text = "\n".join(lines[node.lineno - 1:node.end_lineno])
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        constants[target.id] = text
-            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-                constants[node.target.id] = "\n".join(
-                    lines[node.lineno - 1:node.end_lineno])
-        bodies: list[str] = []
-        for node in ast.walk(tree):
-            if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and node.name == symbol):
-                own = _without_comments("\n".join(lines[node.lineno - 1:node.end_lineno]))
-                bodies.append(own + "\n" + "\n".join(
-                    _without_comments(text) for text in _constants_named_by(node, constants)
-                ))
-        assert bodies, f"{key} cites {rel}::{symbol}, which that file does not define"
-        assert any(needle in body for body in bodies), (
-            f"{key} declares stores={declared} but {rel}::{symbol} no longer carries {needle!r} — "
-            "the store moved, so the declaration is stale"
+        # ⛔ `#11954`: the STATEMENT that carries the claim, not "this text occurs". A substring
+        # proves the needle is somewhere in the body, so a re-targeted loop plus one surviving
+        # membership test kept this row green while the store had moved (the issue reproduced it,
+        # and `test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row` drives both directions).
+        violation = _evidence_violation(
+            source, symbol, needle, declared, iterated=ITERATED_STORE_CLAIM.get(key),
+            claim=("bound" if key in BOUND_LABEL_EVIDENCE
+                   else "assembly" if key in ASSEMBLED_LABEL_EVIDENCE else "store"))
+        if key in BOUND_LABEL_EVIDENCE:
+            # A bound row's completeness IS the constant's label set, so the constant arm below has
+            # to exist for it — otherwise "the writer is bounded" is a claim with no derivation.
+            assert key in LABEL_CONSTANTS, (
+                f"{key} declares its labels from a BOUND, so its label set is re-derived by "
+                "LABEL_CONSTANTS — and it is absent there, leaving the declaration unowned"
+            )
+        assert violation is None, (
+            f"{key} declares stores={declared} but {rel}::{symbol} no longer carries {needle!r} "
+            f"as a statement that stores — {violation}; the store moved, so the declaration is "
+            "stale"
         )
     # …and the label CONSTANTS those clauses are built from must still name EXACTLY the same
     # labels — in BOTH directions. ⛔ The one-directional form ("each declared label still
@@ -1084,6 +1114,93 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
             f"the constant means the declaration names a store the code no longer has "
             f"{sorted(set(labels) - identified)}"
         )
+
+
+def test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row():
+    """`#11954`'s falsifier, DRIVEN: the mutation the substring arm passed must now RED.
+
+    The defect this closes is precise, and it is not "the needle is wrong": it is that a needle
+    proves **the text occurs somewhere in the body**, never **which statement carries it**. So a
+    refactor that re-targets the loop and leaves the same text in any other statement kept the row
+    green while the store it declares had moved away — reproduced on `origin/main` + `#11936` with
+    the whole module green (`#11954` carries the run).
+
+    Each arm below is a SOURCE MUTATION of the real `tortoise/sdk.py`, applied in memory, because a
+    guard that can only be checked against the tree's current content cannot be checked at all once
+    the content is right. The control (the unmutated source) must pass, and it is asserted FIRST so a
+    mutation that quietly stopped applying cannot pass as a red.
+    """
+    key = "tortoise.sdk::_update_entity"
+    rel, symbol, needle, _labels = LABEL_EVIDENCE[key]
+    declared = EMBED_WRITER_CLASSES[key].stores
+    source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+    iterated = ITERATED_STORE_CLAIM[key]
+
+    def violation(text: str) -> str | None:
+        return _evidence_violation(text, symbol, needle, declared, iterated=iterated)
+
+    # CONTROL — the tree as it stands carries the claim, both arms.
+    assert violation(source) is None, violation(source)
+    # …and the claim really is in this source, so every mutation below starts from a green row.
+    assert source.count(needle) >= 1, needle
+
+    loop = "            for label, _prop in _CANONICAL_ENTITY_ID_PROPS:\n"
+    assert source.count(loop) == 1, "the cited loop is no longer in this shape — re-derive the pin"
+
+    # (1) `#11954`'s reproduction, verbatim: the loop re-targeted, the needle preserved in an
+    # unrelated `if`. ⛔ The old substring arm reads this as GREEN — asserted, so this test carries
+    # the regression direction rather than describing it.
+    retargeted = source.replace(
+        loop,
+        "            if label in _CANONICAL_ENTITY_ID_PROPS:\n"
+        "                pass\n"
+        "            for label, _prop in _SOME_OTHER_PROPS:\n",
+        1,
+    )
+    assert retargeted != source
+    old_body = _without_comments(
+        "\n".join(retargeted.splitlines()[44935:45010]))
+    assert needle in _without_comments(retargeted), (
+        "the mutation did not preserve the needle — the arm below would red for the wrong reason")
+    assert violation(retargeted) is not None, (
+        "a RE-TARGETED loop still satisfies the row: this is the #11954 defect, unfixed")
+
+    # (2) A GENUINE store move: the loop still iterates the canonical constant, and the map-merges
+    # the declaration is derived from are no longer inside it. Nothing about the needle changed —
+    # the row was never about the needle, which is why a substring could not see this either.
+    moved = source.replace(
+        'SET n += $p "', 'RETURN count(n) "', 1).replace(
+        '{{{match_prop}:$id}}) SET n += $props "',
+        '{{{match_prop}:$id}}) RETURN count(n) "', 1)
+    assert moved != source
+    assert needle in moved
+    assert violation(moved) is not None, (
+        "the store the declaration is derived from was removed and the row still passes")
+
+    # (3) A BINDING RENAME is not a store move (#11836/#11936): the variable is not part of the
+    # claim, so the structural arm must not red on it — otherwise the cheapest repair is to edit the
+    # declaration that is still true, the trap `#11089`'s capstone finding names.
+    renamed = source.replace(
+        "for label, _prop in _CANONICAL_ENTITY_ID_PROPS:",
+        "for label, prop in _CANONICAL_ENTITY_ID_PROPS:", 1)
+    assert renamed != source
+    assert violation(renamed) is None, (
+        f"a rename of an unused loop binding reds the row: {violation(renamed)}")
+
+    # (4) PROSE IS NOT A STATEMENT: the needle left in a bare string statement carries no store,
+    # even when the loop is re-targeted around it.
+    prose = source.replace(
+        loop,
+        "            for label, _prop in _SOME_OTHER_PROPS:\n"
+        '                "in _CANONICAL_ENTITY_ID_PROPS:"\n',
+        1,)
+    assert prose != source
+    assert violation(prose) is not None, (
+        "a needle left in a docstring/bare string satisfied the row — prose is not a store")
+
+    # (5) NO VACUOUS PASS: a source that does not define the symbol cannot be checked, and must RED
+    # rather than answer by an empty `any(...)`.
+    assert violation("def _other() -> None:\n    pass\n") is not None
 
 
 #: The clauses that name a store by ALIAS — the only ones this rule can attribute to a label.
@@ -1528,6 +1645,12 @@ def _without_comments(text: str) -> str:
         line for line in text.splitlines() if not line.lstrip().startswith("#"))
 
 
+def _constant_names_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:
+    """The NAMES of the module-level constants `node` actually names, in `constants` order."""
+    named = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+    return [name for name in constants if name in named]
+
+
 def _constants_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:
     """The module-level constants `node` actually NAMES, resolved through the AST.
 
@@ -1544,6 +1667,229 @@ def _constants_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:
     """
     named = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
     return [text for name, text in constants.items() if name in named]
+
+
+#: Text that MARKS a store inside the statement that carries it. The three clause forms are
+#: `_STORE_ALIAS`'s own (`set_embedding_clause`, `clear_then_set_prefix`, a literal `.embedding =` —
+#: never the `NULL` wipe, which removes the property), plus the map-merge (`SET n += $p`) the generic
+#: update door stores through: no alias rule can attribute that one, but it is unambiguously a
+#: store, and it is the shape `tortoise.sdk::_update_entity` declares its labels from.
+_STORE_CARRIER = re.compile(
+    r"set_embedding_clause\(|clear_then_set_prefix\("
+    r"|\b\w+\.embedding\s*=(?!\s*NULL)|\bSET\s+\w+\s*\+="
+)
+
+
+def _slice(lines: list[str], node: ast.AST) -> str:
+    """The source of `node` by LINE RANGE, comment-stripped."""
+    return _without_comments("\n".join(lines[node.lineno - 1:node.end_lineno]))
+
+
+def _module_constants(tree: ast.Module, lines: list[str]) -> dict[str, tuple[str, ast.stmt]]:
+    """Module-level ``NAME = <expr>`` / ``NAME: T = <expr>``: name -> (source, statement).
+
+    Both statement shapes on purpose, for the reason the `LABEL_CONSTANTS` arm below states: a
+    constant that only DROPS its type annotation is the SAME constant.
+    """
+    found: dict[str, tuple[str, ast.stmt]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    found[target.id] = (_slice(lines, node), node)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            found[node.target.id] = (_slice(lines, node), node)
+    return found
+
+
+def _carrying_statements(universe: list[ast.AST], lines: list[str],
+                         needle: str) -> list[tuple[ast.stmt, str]]:
+    """The SMALLEST enclosing STATEMENTS of `universe` whose own source carries `needle`.
+
+    ⛔ This is the shape of `#11954`'s fix, and it replaces `assert any(needle in body …)`. A
+    substring proves the text occurs **somewhere** in the cited symbol; it does not say **which
+    statement carries it**, so a re-targeted loop leaves the row green while the store it describes
+    has moved (the issue carries the reproduction). Returning the STATEMENTS, not a bool, is what
+    makes that mutation observable: the arm below then asks the *carrying* statement — not the whole
+    body — whether it also carries a store.
+
+    Only the MINIMAL statement is returned (a statement whose own descendant statement also carries
+    the needle is replaced by that descendant), so a needle in a loop HEAD is attributed to the loop
+    and a needle in a loop BODY to the body statement that holds it.
+
+    ⛔ A bare string statement (the docstring shape) is not a carrier. Prose quoting a clause is not
+    a claim about what the code executes — the same distinction `_without_comments` draws for whole
+    line comments. The residual that remains is a TRAILING comment, which this cannot strip without
+    cutting a `#` inside a Cypher string.
+    """
+    hits: list[tuple[ast.stmt, str]] = []
+    for root in universe:
+        for node in ast.walk(root):
+            if not isinstance(node, ast.stmt):
+                continue
+            if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+                    and isinstance(node.value.value, str)):
+                continue  # a docstring is prose, not a statement that stores
+            text = _slice(lines, node)
+            if needle in text:
+                hits.append((node, text))
+    minimal: list[tuple[ast.stmt, str]] = []
+    for node, text in hits:
+        deeper = any(
+            other is not node
+            and any(child is other for child in ast.walk(node))
+            for other, _ in hits
+        )
+        if not deeper:
+            minimal.append((node, text))
+    return minimal
+
+
+def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> str | None:
+    """Why `node` no longer has a loop over `constant` whose TARGET drives a store, or None.
+
+    ⛔ This is the structural half of the `#11954` row, and the half a substring can never close:
+    the claim `tortoise.sdk::_update_entity` makes is not that the NAME
+    `_CANONICAL_ENTITY_ID_PROPS` occurs, it is that the per-label loop **iterates** it and the
+    loop's binding is what the store is built from (`MATCH (n:{label}) … SET n += $p`). Asserted on
+    the AST: a `for` (or comprehension) whose ITERABLE is that `Name`, whose body carries a store
+    marker, and whose target name the store statement actually mentions. A membership test on the
+    same constant — the natural, good-faith refactor the issue describes — satisfies none of the
+    three.
+    """
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.For):
+            iterable, body = sub.iter, [sub]
+        elif isinstance(sub, _COMPREHENSION_LIKE) and len(sub.generators) == 1:
+            iterable, body = sub.generators[0].iter, [sub]
+        else:
+            continue
+        if not (isinstance(iterable, ast.Name) and iterable.id == constant):
+            continue
+        targets = [n.id for n in ast.walk(sub) if isinstance(n, ast.Name)
+                   and isinstance(n.ctx, ast.Store)]
+        stores = [n for outer in body for n in ast.walk(outer)
+                  if isinstance(n, ast.stmt) and _STORE_CARRIER.search(_slice(lines, n))]
+        if not stores:
+            continue
+        # …and the TARGET drives it: the store statement must name the loop's binding, otherwise the
+        # loop is beside the store rather than the thing that produces it.
+        if any(any(f"{{{t}" in _slice(lines, s) for t in targets) for s in stores):
+            return None
+    return (
+        f"no `for … in {constant}` drives a store — the iterable is not that constant, or its "
+        "binding is not what the store clause is built from"
+    )
+
+
+#: The comprehension forms, for the loop half of `_iterated_store_problem`.
+_COMPREHENSION_LIKE = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _parent_map(root: ast.AST) -> dict[int, ast.AST]:
+    """`id(child) -> child`'s parent, for every node under `root`."""
+    parents: dict[int, ast.AST] = {}
+    for node in ast.walk(root):
+        for child in ast.iter_child_nodes(node):
+            parents[id(child)] = node
+    return parents
+
+
+def _enclosing_statements(statement: ast.stmt, parents: dict[int, ast.AST],
+                          stop: ast.AST) -> list[ast.stmt]:
+    """`statement`'s enclosing statements, innermost first, stopping BELOW `stop`.
+
+    `stop` is the cited symbol: ancestry is bounded there on purpose, so a store in a caller or in a
+    sibling function cannot satisfy this writer's claim."""
+    found: list[ast.stmt] = []
+    node: ast.AST | None = parents.get(id(statement))
+    while node is not None and node is not stop:
+        if isinstance(node, ast.stmt):
+            found.append(node)
+        node = parents.get(id(node))
+    return found
+
+
+def _evidence_violation(source: str, symbol: str, needle: str, declared,
+                        *, iterated: str | None = None,
+                        claim: str = "store") -> str | None:
+    """Why `source` no longer carries the claim its `LABEL_EVIDENCE` row makes, or None.
+
+    Two arms, and BOTH must hold for at least one definition of `symbol`:
+
+    1. **The statement arm** (`#11954`): the needle must be carried by a STATEMENT, and that
+       statement's own subtree must also carry a store — i.e. the claim and the store are the same
+       statement's, not two facts in one body. ⛔ The substring form this replaces (`needle in
+       body`) passed a source whose loop had been re-targeted with the needle preserved in an
+       unrelated `if` (measured on the module at `#11954`'s head); this one does not.
+       `claim="bound"` is for the two rows whose needle is a SEAM THAT BOUNDS the label set rather
+       than a store clause (`restore_graph` interpolates its labels, `_event_raw_write_door`
+       executes its caller's statement): the store is deliberately un-nameable there, so the arm
+       asks only that the claim is carried by a real statement — and the COMPLETENESS of those two
+       rests on `LABEL_CONSTANTS`, which the pin below re-derives in both directions and which this
+       function therefore requires to exist for every bound row.
+    2. **The iterated-store arm**, for a row that names the constant its loop iterates: a `for` over
+       that constant whose target drives the store (`_iterated_store_problem`).
+
+    Split out of the pin so a MUTATION can drive it: a guard that can only be checked against the
+    tree's current content cannot be checked at all once the content is right (the same reason
+    `register.load` is public).
+    """
+    lines = source.splitlines()
+    tree = ast.parse(source)
+    constants = _module_constants(tree, lines)
+    constant_text = {name: text for name, (text, _node) in constants.items()}
+    definitions = [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == symbol
+    ]
+    if not definitions:
+        # ⛔ NO VACUOUS PASS. A symbol that cannot be read is a claim that cannot be checked, and
+        # `any(...)` over an empty list of bodies answers False only by accident of the generator.
+        return f"{symbol} is not defined in this source, so the claim cannot be re-derived"
+    problems: list[str] = []
+    for node in definitions:
+        universe: list[ast.AST] = [node]
+        universe += [constants[name][1]
+                     for name in _constant_names_named_by(node, constant_text)]
+        carriers = _carrying_statements(universe, lines, needle)
+        if not carriers:
+            problems.append(
+                f"no STATEMENT in {symbol} carries {needle!r} — a docstring or a comment is not a "
+                "store, and the claim has to be carried by code")
+            continue
+        parents = _parent_map(node)
+        carried = []
+        for statement, text in carriers:
+            view = text + "\n" + "\n".join(
+                constant_text[name] for name in _constant_names_named_by(statement, constant_text)
+            )
+            if claim == "bound" or _STORE_CARRIER.search(view):
+                carried.append(text)
+            elif claim == "assembly":
+                # The store clause is ASSEMBLED across neighbouring statements (the label in the
+                # statement that issues the query, the clause built one statement earlier), so the
+                # claim this row makes is "the label statement and a store are the same BLOCK's".
+                # Walked up from the carrier to the cited symbol, never out of it — a store in
+                # another function cannot satisfy it.
+                for ancestor in _enclosing_statements(statement, parents, node):
+                    if _STORE_CARRIER.search(_slice(lines, ancestor)):
+                        carried.append(text)
+                        break
+        if not carried:
+            problems.append(
+                f"{needle!r} is carried by {len(carriers)} statement(s) in {symbol}, and none of "
+                "them stores anything — the claim and the store have come apart, which is what a "
+                "re-targeted loop looks like to a substring test")
+            continue
+        if iterated is None:
+            return None
+        problem = _iterated_store_problem(node, iterated, lines)
+        if problem is None:
+            return None
+        problems.append(f"{symbol}: {problem}")
+    return "; ".join(problems)
+
 
 
 def _declared_symbol_bodies(key: str) -> list[str]:
