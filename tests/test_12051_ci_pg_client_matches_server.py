@@ -5463,10 +5463,10 @@ def _shell_function_body(code: str, name: str) -> str | None:
 def _flag_comes_from_a_positive_probe(code: str, path: str, flag: str) -> bool:
     """`code` sets `flag=1` under a POSITIVE `-e <path>` test that GATES it.
 
-    Reads the construct, not a spelling. Accepted: `[ -e P ]` and `test -e P`, gated
-    by `then` or `&&`, with the assignment on the same line or in the construct's
-    body. Refused, because each INVERTS the fact and makes the trap delete a path it
-    does not own:
+    Reads the construct, not a spelling. Accepted: `[ -e P ]`, `[[ -e P ]]` and
+    `test -e P`, gated by `then` or `&&`, with the assignment on the same line or in
+    the construct's body. Refused, because each INVERTS the fact and makes the trap
+    delete a path it does not own:
 
       · `[ -e P ] || F=1` — P present ⇒ test succeeds ⇒ `F` stays 0 ⇒ the trap
         removes the operator's file; P absent ⇒ `F=1` ⇒ the step's own source is left
@@ -5474,31 +5474,81 @@ def _flag_comes_from_a_positive_probe(code: str, path: str, flag: str) -> bool:
         `[^\n]*?` window this replaces (review cycle 16).
       · `[ -e P ]; F=1` — no gate at all, so the flag is 1 unconditionally.
       · `[ ! -e P ] && F=1` — the negated test does not match here at all.
+      · `if [ -e P ]; then :; else F=1; fi` — the assignment is in the ELSE arm, so
+        the flag is 1 exactly when the path was ABSENT: the inversion by another
+        spelling. MEASURED GREEN under the first cut of this reader (review cycle 17).
+      · `if [ -e P ]; then :; fi` followed by `F=1` on the next line — the same
+        gutted gate as `[ -e P ]; F=1`, reached by letting the window cross the `fi`.
 
     ⛔ WHY NOT A WINDOW. A `[^\n]*?` between the test and the assignment is satisfied
     by the CONSTRUCT UNLESS the construct is the thing read: MEASURED (review cycle 16),
     the trap is ONE line carrying both flags, so a window after `"${had_sources…}"`
     reached `"${had_keyring:-0}" = 0` and accepted `= 1`, `!= 0` and `-n` — a
     fail-open in the very row that exists to stop the trap deleting an operator's file.
-    The bound is the construct, and the negated gate is refused explicitly.
+    The bound is the construct: the credited text is the **then**-arm (or the `&&`
+    operand) ONLY, terminated at `fi`/`else`/`elif`, so neither an `else`-arm
+    assignment nor one after the construct can be credited.
     """
+    p, f = re.escape(path), re.escape(flag)
     for test in re.finditer(
-        rf"(?:\[\s*-e\s+{re.escape(path)}\s*\]|test\s+-e\s+{re.escape(path)})",
+        rf"(?:\[\[\s*-e\s+{p}\s*\]\]|\[\s*-e\s+{p}\s*\]|test\s+-e\s+{p})",
         code,
     ):
         window = code[test.end():]
-        gate = re.match(r"\s*;\s*then\b|\s*&&", window)
-        if gate is None:
-            continue
-        body = window[gate.end():]
-        closing = re.search(r"\n\s*fi\b", body)
-        body = body[: closing.start()] if closing else "\n".join(body.splitlines()[:2])
-        assignment = re.search(rf"(?<![\w.]){re.escape(flag)}=1\b", body)
+        # ⛔ THE ARM, NOT A LINE COUNT. The earlier cut bounded the body with a
+        # newline-`fi` search plus a two-line fallback, which (a) let an assignment in
+        # the construct's `else` arm be credited and (b) walked past a `fi` that shares
+        # the construct's line — and the REAL probe is exactly that one-line shape
+        # (`if [ -e P ]; then F=1; fi`), so both escapes were reachable (review cycle 17).
+        then_gate = re.match(r"\s*;?\s*then\b", window)
+        if then_gate is not None:
+            arm = window[then_gate.end():]
+            stop = re.search(r";\s*fi\b|\n\s*fi\b|;\s*else\b|\n\s*else\b|\belif\b", arm)
+            if stop is not None:
+                arm = arm[: stop.start()]
+            else:
+                arm = arm.splitlines()[0] if arm.splitlines() else ""
+        else:
+            and_gate = re.match(r"\s*&&", window)
+            if and_gate is None:
+                continue
+            arm = window[and_gate.end():]
+            stop = re.search(r"[;\n]", arm)
+            arm = arm[: stop.start()] if stop else arm
+        assignment = re.search(rf"(?<![\w.]){f}=1\b", arm)
         if assignment is None:
             continue
-        if re.search(r"\|\|", body[: assignment.start()]):
+        if "||" in arm[: assignment.start()]:
             continue
         return True
+    return False
+
+
+def _guard_owns_path(trap: str, flag: str, path: str) -> bool:
+    """The `rm -f <path>` sits inside the clause guarded by THIS flag's own `= 0` test.
+
+    ⛔ ONE CLAUSE, NOT TWO SEPARATE FACTS. Checking the guard per flag and the removal
+    per path independently is satisfied by a trap whose two guards are SWAPPED: with
+    an operator's sources file present, the sources `rm` gated on `had_keyring` deletes
+    a path it does not own — the exact harm this row names — and the suite stayed GREEN
+    (MEASURED, review cycle 17). The association is the assertion.
+    """
+    f, p = re.escape(flag), re.escape(path)
+    for opener in re.finditer(r"\bif\b", trap):
+        clause = trap[opener.end():]
+        stop = re.search(r";\s*fi\b|\n\s*fi\b|\bfi\b", clause)
+        if stop is None:
+            continue
+        clause = clause[: stop.start()]
+        test = re.search(
+            rf"(?:\[|\[\[)\s*\"?\$\{{?{f}\b(?:[:-][^}}\n]*)?\}}?\"?\s*"
+            rf"(?:==|=|-eq)\s*[\"']?0[\"']?\s*(?:\]|\]\])",
+            clause,
+        )
+        if test is None:
+            continue
+        if re.search(rf"rm\s+-f\s+\S*{p}", clause[test.end():]) is not None:
+            return True
     return False
 
 
@@ -5563,12 +5613,12 @@ def test_the_cleanup_trap_owns_only_what_this_step_created(job: dict) -> None:
         # `had_sources` test all left the suite GREEN because the trap is one line and
         # the walk reached `"${had_keyring:-0}" = 0`. That is a fail-open in the one row
         # that stops the trap deleting an operator's pre-existing PGDG config.
-        assert re.search(
-            rf"(?:\[|\[\[)\s*\"?\$\{{?{flag}[:-][^}}\n]*\}}?\"?\s*"
-            rf"(?:==|=|-eq)\s*[\"\']?0[\"\']?\s*(?:\]|\]\])",
-            trap[0],
-        ), (
-            f"the trap does not GUARD on `{flag}`, so it removes a path it may not own: {trap[0]!r}"
+        # ⛔ AND TO THIS FLAG'S OWN PATH: reading guard and removal SEPARATELY is
+        # satisfied by SWAPPED guards — the sources `rm` gated on `had_keyring` deletes
+        # a path it does not own while the suite stays GREEN (MEASURED, review cycle 17).
+        assert _guard_owns_path(trap[0], flag, path), (
+            f"the trap does not GUARD `{path}` on `{flag}`, so it removes a path it may "
+            f"not own: {trap[0]!r}"
         )
     assert code.index("had_sources=1") < code.index("tee /etc/apt/sources.list.d/pgdg.list"), (
         "the sources flag is recorded AFTER the sources line already truncated the file, so "
