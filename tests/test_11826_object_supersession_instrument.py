@@ -649,7 +649,11 @@ def test_a_shaped_and_neutral_endpoint_gets_the_shape_clause_not_the_neutral_one
     assert "in EITHER arm" in fix, (
         "the shape clause is the one that explains this row: " + fix)
     assert "clearing the shape alone restores nothing" in fix, fix
-    assert "EP never reaches the direction test for this endpoint" in fix, fix
+    # ⛔ The parenthetical this used to pin was FALSE on the path the same string
+    # prescribes: clearing the shape makes EP reach the direction test, and a `-`
+    # edge then transfers nothing (measured — a bare prior after the move, versus a
+    # real transfer on the flowing control). #12210 review, P3.
+    assert "A neutral direction DOES matter once the shape is cleared" in fix, fix
     # ⛔ The needle must be the text the NEUTRAL arm actually emits, or the
     # assertion cannot fail (it pinned a phrasing no arm ever produced; measured on
     # a genuinely neutral row, where the neutral clause IS emitted and the old
@@ -2527,3 +2531,57 @@ def test_an_id_less_neutral_row_is_told_to_delete(sdk):
     assert "re-point this IMPL input onto that successor" not in fix, (
         "a neutral edge transfers nothing, so the instruction is DELETE: " + fix)
     assert "delete this edge: §3.1's disposition here is DROP" in fix, fix
+
+
+def test_a_shaped_neutral_row_is_not_told_to_move_the_edge(sdk):
+    """The resolvable SHAPE arm needs the neutral guard too.
+
+    Clearing the active endpoint's shape leaves the edge ending at the superseded
+    Object, so the string pairs it with a move — but a `direction='-'` edge transfers
+    nothing after the move either (measured: clearing alone restored NO belief, and
+    the re-pointed neutral edge carried none: bare prior, `effective_n 2.0`, versus a
+    real transfer on the flowing control). So the instruction must be DELETE, not a
+    move (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "No edge rewrite ALONE repairs this" in fix, fix
+    assert "move this IMPL edge off" not in fix, (
+        "a neutral edge transfers nothing even after the move: " + fix)
+    assert "DELETE it instead — §3.1's disposition here is DROP" in fix, fix
+    assert "EP never reaches the direction test for this endpoint" not in fix, (
+        "once the shape is cleared EP DOES reach the direction test: " + fix)
+
+
+def test_a_shaped_row_does_not_name_a_refused_successor(sdk):
+    """The shape arm used to return BEFORE the destination routing.
+
+    Measured on a flowing direct edge with a shaped active endpoint and an
+    operator-shaped successor: the same string said "move this edge onto the
+    successor ('PolicyV2')" and "the re-point moves no belief either way … target a
+    CLAIM successor", and performing it left ``confidences {}`` with the row quiet —
+    the false CLEAN the routing exists to prevent (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2", is_operator=True)
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "No edge rewrite ALONE repairs this" in fix, fix
+    assert "onto the successor ('PolicyV2')" not in fix, (
+        "the named successor is refused by EP, so it cannot be the destination: "
+        + fix)
+    assert "NOT the one it names ('PolicyV2')" in fix, fix

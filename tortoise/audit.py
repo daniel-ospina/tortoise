@@ -1573,8 +1573,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "over a claim whose support was never there — and the claim's "
                 "support has to be wired through a :Point operator regardless: "
                 "clearing the shape alone restores nothing while this edge still "
-                "ends at the superseded Object. (A neutral direction does not change "
-                "this: EP never reaches the direction test for this endpoint)")
+                "ends at the superseded Object. (A neutral direction DOES matter "
+                "once the shape is cleared: EP then reaches the direction test and "
+                "a `-` edge transfers nothing, so the moved edge must also flow)")
         if not (fwd or bwd):
             return lead + (
                 "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: this edge is "
@@ -1774,6 +1775,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                       "by ID. ")
         successor = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "its successor"
         tail = _chain_tail(s)
+        # ⛔ ONE place that decides the DESTINATION, above EVERY arm. The shape arm
+        # used to return before this routing, so on a row whose successor EP refuses
+        # it still said "move this edge onto the successor ('X')" while the same
+        # string said the re-point moves no belief — performing it measured
+        # ``confidences {}`` and a CLEAN re-audit, the false CLEAN the routing exists
+        # to prevent (#12210 review, P2).
+        refused = s["carrier_count"] == 1 and _succ_refused(s)
+        dest = (f"a CLAIM successor — NOT the one it names ({successor}), which EP "
+                f"refuses as a factor input" if refused
+                else f"the successor ({successor})")
+        neutral = s["neutral_row"]
         if s["shape"] and not s["is_operator"]:
             # ⛔ NEITHER arm: "write the equivalent edge" would change nothing, so the
             # repair is to clear the SHAPE **and** move the edge — measured: clearing
@@ -1785,36 +1797,31 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # anchor ``q`` (``active_id`` differs by construction: the anchor is
             # ``status='superseded'`` while ``active`` must be live), so a call on
             # ``q`` would set the flag on a node that never carried it.
+            # ⛔ …AND the NEUTRAL guard, for the same reason its siblings carry it:
+            # a neutral edge transfers nothing (``ep.py`` returns before any pair
+            # math), so "move this edge onto the successor" is HALF a repair that
+            # restores no belief — measured on a ``direction='-'`` direct edge with a
+            # shaped active endpoint: clearing the shape alone restored NO belief and
+            # the re-pointed neutral edge carried none either (bare prior,
+            # ``effective_n 2.0``, versus a real transfer on the flowing control).
             return prefix + (
                 "No edge rewrite ALONE repairs this: EP builds NO factor in either "
                 "arm (the operator arm needs the :Point LABEL and "
                 "(``is_operator = true`` or an ``op_type``), the direct-edge arm "
                 "refuses an operator-shaped endpoint). The flag is only HALF the "
-                f"repair — {_shape_repair} AND move this "
-                f"{s['edge_type']} edge off {q} onto the successor ({successor}) — "
-                "or wire the claim through a :Point operator: clearing the FLAG "
-                "alone restores nothing while the edge still ends at the "
-                "superseded Object (measured: ``confidences {}``, and the row comes "
-                "back exactly as it was where the shape came from ``op_type``, "
-                "because the flag was already false)" + tail)
-        # ⛔ WHERE THE REPAIR SENDS THE EDGE, and the one place it must not: a
-        # successor EP REFUSES is named by the row's own `fix` as the destination
-        # while the same string says the belief is NOT moved and the §3.1 triage
-        # says DROP — performing the leading instruction produced exactly the false
-        # CLEAN this check exists to prevent (measured: re-pointing onto the shaped
-        # successor leaves ``confidences {}`` and the row quiet; review round 17,
-        # #12111). So the destination is a CLAIM successor and the named one is
-        # explicitly withdrawn.
-        # ⛔ SINGLE CARRIER ONLY: with N≥2 Objects carrying the name the row cannot
-        # say WHICH one EP refuses (``carrier_is_operator`` is ``head(collect(...))``
-        # — one arbitrary row), so asserting a refusal there can be false of the
-        # intended successor and withdraws a carry the check itself declines to
-        # arbitrate. Measured: an ambiguous name with one plain and one shaped
-        # carrier flipped its verdict with the MINT ORDER (round 19, #12111).
-        refused = s["carrier_count"] == 1 and _succ_refused(s)
-        dest = (f"a CLAIM successor — NOT the one it names ({successor}), which EP "
-                f"refuses as a factor input" if refused
-                else f"the successor ({successor})")
+                f"repair — {_shape_repair} AND "
+                + ("this edge is "
+                   f"{_quoted(s['direction'])} (neutral), so a moved edge would "
+                   "transfer nothing either: DELETE it instead — §3.1's disposition "
+                   "here is DROP — after clearing the shape, or give the edge a "
+                   "direction that flows before writing it"
+                   if neutral else
+                   f"move this {s['edge_type']} edge off {q} onto {dest}")
+                + " — or wire the claim through a :Point operator: clearing the "
+                  "FLAG alone restores nothing while the edge still ends at the "
+                  "superseded Object (measured: ``confidences {}``, and the row "
+                  "comes back exactly as it was where the shape came from "
+                  "``op_type``, because the flag was already false)" + tail)
         if not s["is_operator"]:
             # ⛔ The NEUTRAL test belongs HERE too, not only below: it used to sit
             # after this branch, so a `-` direct edge got "re-point it onto the
