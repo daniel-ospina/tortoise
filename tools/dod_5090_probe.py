@@ -703,20 +703,19 @@ def _scope_bound_names(root: ast.AST) -> set[str]:
     return _own_scope_bindings(root)
 
 
-def _import_aliases(*roots: ast.AST, own_scope_only: bool) -> dict[str, str]:
+def _import_aliases(*roots: ast.AST) -> dict[str, str]:
     """Local name -> the name it was IMPORTED AS, for the seams and clause builders (`#11274`).
 
     Both scopes a writer can import in: the MODULE (`from … import X as Y` at module level) and the
-    WRITER'S OWN SCOPE (a function-level import). ⛔ `own_scope_only` is what keeps those two apart
+    WRITER'S OWN SCOPE (a function-level import). ⛔ OWN-SCOPE ONLY is what keeps those two apart
     from every OTHER scope in the file: an import in a SIBLING function is not this writer's reach,
     and crediting it classed a writer `gated` while it never reached the gate (#12020 round 4).
-    ⛔ `own_scope_only` is REQUIRED — it has no default on purpose. It carried `= False` for one
-    round, which is the fail-open mode this docstring describes: a caller that forgot the argument
-    silently re-created the whole-module walk (measured — that is the shape round 4 removed). Both
-    call sites pass `True`; making the argument mandatory means a THIRD caller cannot re-open it by
-    omission, which is the only way it stays closed (`#12020` review round 5, Finding 5).
-    Callers pass `own_scope_only=True` for both the module pass and the writer pass, which leaves
-    the writer `unresolved_write` in the ambiguous cases — the direction that OWES a declaration.
+    ⛔ There is deliberately NO parameter that can widen this to the whole module: `own_scope_only`
+    carried a `= False` default for one round, and a caller that forgot the argument silently
+    re-created that whole-module walk (measured — the shape round 4 removed); it then survived as a
+    `if own_scope_only else ast.walk(root)` arm no caller passed `False` to, which one keyword would
+    have re-opened. A mandatory kwarg is a guard, an unreachable branch is a footgun (`#12020`
+    round 7 review P3), so the branch is gone rather than documented.
 
     Only names in `WRITE_CLAUSE_BUILDERS`, `SEAM_CALL` and `UNGATED_CALLS` are resolved, and ONLY
     when the import's module is that name's real home (`_ALIAS_HOMES`): an alias of anything else
@@ -725,13 +724,15 @@ def _import_aliases(*roots: ast.AST, own_scope_only: bool) -> dict[str, str]:
     argued the widening could "only credit a reach, which is the fail-closed direction". That was
     wrong, and `#12020` round 3 measured it: crediting `SEAM_CALL` sets `kind="gated"`, and `gated`
     is OUTSIDE `NEEDS_A_DECLARATION` — so an over-credit HIDES the writer instead of exposing it.
-    Under-crediting is the safe direction here (it leaves the writer `unresolved_write`, which owes
-    a declaration) and over-crediting is the dangerous one.
+    ⛔ For a GATE spelling, under-crediting is the safe direction (the writer stays
+    `unresolved_write`, which owes a declaration) and over-crediting is the dangerous one — but that
+    sentence is NOT general: for a CLAUSE BUILDER the alias is the only discovery signal, so
+    dropping it DELETES the writer instead of demoting it (`_keep_shadowed_aliases` carries the
+    split and the measurements).
     """
     found: dict[str, str] = {}
     for root in roots:
-        walker = _walk_own_scope(root) if own_scope_only else ast.walk(root)
-        for sub in walker:
+        for sub in _walk_own_scope(root):
             if not isinstance(sub, ast.ImportFrom):
                 continue
             module = sub.module or ""
@@ -755,15 +756,42 @@ def _import_aliases(*roots: ast.AST, own_scope_only: bool) -> dict[str, str]:
     return found
 
 
+def _keep_shadowed_aliases(aliases: dict[str, str], shadowed: set[str]) -> dict[str, str]:
+    """Drop the aliases `shadowed` rebinds — EXCEPT the clause builders (`#12020` round 7).
+
+    ⛔ The split is `_accepted_homes`', and it is measured in both directions:
+
+    * `SEAM_CALL` / `UNGATED_CALLS` — dropping the shadowed alias is the SAFE direction: the writer
+      falls to `unresolved_write`, which OWES a declaration, while keeping it classes the writer
+      `gated`, which is OUTSIDE `NEEDS_A_DECLARATION` — an over-credit that HIDES it (`#12020`
+      round 3, measured: a writer-local `_enc = lambda p: p` still credited `encode_for_row`).
+    * `WRITE_CLAUSE_BUILDERS` — dropping it is the DANGEROUS direction: `_EMBED_WRITE` cannot see
+      `SET y += $p`, so the alias is the ONLY discovery signal, and dropping it does not demote the
+      writer, it DELETES it (measured `{}` for three idiomatic module-level rebindings that still
+      reach the builder: a `try/except ImportError` fallback, a `functools.partial` wrapper, and an
+      `if False:` assignment). Over-crediting a builder only ADDS a writer that owes a declaration.
+
+    ⛔ The shadow set is scope-wide ON PURPOSE (a rebinding anywhere in the module makes a bare
+    name ambiguous for a GATE spelling); the builder arm is the one place where that ambiguity costs
+    more than it buys.
+    """
+    return {k: v for k, v in aliases.items()
+            if v in WRITE_CLAUSE_BUILDERS or k not in shadowed}
+
+
 def _locally_bound(node) -> set[str]:
     """Names ``node`` (a writer definition) binds in ITS OWN SCOPE — shadowed import aliases.
 
     Any binding in the writer's own scope counts — assignment, annotated/augmented assignment,
     `for`/`with`/`except` target, a nested `def`/`class` NAME (the name binds here; its body is a
     different scope), a parameter, a walrus. The question is only "does this name, inside this
-    writer, still mean the imported object?", and the conservative answer is the safe one:
-    dropping an alias leaves the writer `unresolved_write`, which OWES a declaration, while keeping
-    a shadowed one can class it `gated` and make it owe nothing (`#12020` round 3).
+    writer, still mean the imported object?", and there is no single safe answer: it is
+    `_keep_shadowed_aliases`' split, i.e. `_accepted_homes`'. For a `SEAM_CALL`/`UNGATED_CALLS`
+    alias, dropping it leaves the writer `unresolved_write`, which OWES a declaration, while keeping
+    a shadowed one can class it `gated` and make it owe nothing (`#12020` round 3). For a CLAUSE
+    BUILDER, dropping it is the DANGEROUS direction — the alias is the only discovery signal, so the
+    writer vanishes instead of owning anything. This function only answers "which names does this
+    scope bind"; the builder arm skips the DELETION, never the question.
 
     ⛔ OWN SCOPE ONLY, and that is not symmetry with the module pass — it is a measured fail-open
     (`#12020` round 5). `ast.walk(node)` descends into a NESTED `def`, so a nested function's
@@ -1481,11 +1509,11 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
         # `_import_aliases(tree)` descended into every function body, so a SIBLING's import became
         # this writer's alias and a sibling's `encode_for_row` classed it `gated` — outside
         # `NEEDS_A_DECLARATION`, i.e. the writer stopped owing a declaration.
-        module_aliases = _import_aliases(tree, own_scope_only=True)
-        module_shadowed = _scope_bound_names(tree)
-        if module_shadowed:
-            module_aliases = {k: v for k, v in module_aliases.items()
-                              if k not in module_shadowed}
+        module_aliases = _import_aliases(tree)
+        # ⛔ `#12020` round 7: the module-scope shadow filter is `_keep_shadowed_aliases`', NOT a
+        # blanket drop — a blanket drop deleted a real clause-builder writer from the population
+        # (the `#11274` fail-open) for three idiomatic rebindings that still reach the builder.
+        module_aliases = _keep_shadowed_aliases(module_aliases, _scope_bound_names(tree))
         file_src = path.read_text(encoding="utf-8")
         lines = file_src.splitlines()
         for node in ast.walk(tree):
@@ -1496,15 +1524,17 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             # aliased `encode_for_row` reds the population as an unresolved producer (a false
             # declaration owed) and an aliased clause builder is a SILENT MISS (a false `bypass`
             # answer, the direction that matters).
-            aliases = {**module_aliases, **_import_aliases(node, own_scope_only=True)}
+            aliases = {**module_aliases, **_import_aliases(node)}
             # ⛔ `#12020` round 3: an alias the writer REBINDS is not that reach. Measured —
             # `from … import encode_for_row as _enc` followed by a writer-local `_enc = lambda p: p`
             # still credited `encode_for_row`, classing a writer that never reaches the gate as
             # `gated` (a declaration owed by nobody) where it had been `unresolved_write`. Dropping
-            # a shadowed alias is the under-credit direction, which is the safe one here.
+            # a shadowed alias is the under-credit direction, which is the safe one for a GATE
+            # spelling — and the wrong one for a clause builder, which is why the same split lives
+            # in `_keep_shadowed_aliases` (`#12020` round 7).
             shadowed = _locally_bound(node)
             if shadowed:
-                aliases = {k: v for k, v in aliases.items() if k not in shadowed}
+                aliases = _keep_shadowed_aliases(aliases, shadowed)
             # …and only a BARE-`Name` call can bind an import alias (`client._enc(x)` cannot).
             called = _callees(node) | {aliases[name] for name in _named_callees(node)
                                        if name in aliases}
@@ -4312,10 +4342,15 @@ def _sdk_methods_on_vector_leg(
     # own target name: the target binds in the comprehension's own scope, so such
     # a `Load` is the comprehension's binding, not the enclosing method's
     # (#11389 review, P3).)
-    # ⛔ `#11397` CLOSED the scope model in `_shadowed_names`: `*args`/`**kwargs`,
-    # lambda parameters, a nested `def`/`class` NAME, `match` patterns and `del`
-    # all bind a name in this scope, so a later mention of it is not a reach. What
-    # is STILL not modelled, and named rather than implied: `global`/`nonlocal`
+    # ⛔ `#11397` CLOSED the scope model in `_shadowed_names`: `*args`/`**kwargs`, a nested
+    # `def`/`class` NAME, `match` patterns and `del` all bind a name in this scope, so a later
+    # mention of it is not a reach. ⛔ NOT a lambda parameter — it binds inside the lambda only,
+    # and `_shadowed_names` deliberately refuses it (its own docstring carries the reason and the
+    # measurement: seeded here, a genuine mention of the same name ELSEWHERE in the method is
+    # suppressed — the silent-short-list direction). A lambda parameter is modelled where it
+    # belongs, in the mention walk (`lam_bound`), and `lambda_param_does_not_shade_the_body` pins
+    # the difference — this sentence said "lambda parameters" and asserted the suppression the
+    # code refuses (`#12020` round 7 review P3). What is STILL not modelled, and named rather than
     # (they rebind a name whose scope this walk does not track) — those produce a
     # spurious entry rather than a missed one. The UNDER-report half was closed in
     # `_in_module_receiver`: `cls.<name>`, `<Class>.<name>`, `self.__class__.<name>`

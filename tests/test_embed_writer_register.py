@@ -3887,6 +3887,57 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         "a MODULE-level rebinding shadows the import for every writer in the file — the round-3 "
         "shadow check only inspected the writer's subtree and could not see it",
     ),
+    # ⛔ `#12020` round 7 — the SAME shadow rule, one axis over, where dropping the alias is the
+    # DANGEROUS direction. For a GATE spelling a shadowed alias demotes the writer to
+    # `unresolved_write`; for a CLAUSE BUILDER the alias is the ONLY discovery signal, so the
+    # blanket module-scope drop DELETED the writer (`{}`) — the `#11274` fail-open, re-created. All
+    # three shapes below are idiomatic and all three still reach the builder.
+    "builder_alias_rebound_by_a_try_except_ImportError_fallback": (
+        "try:\n"
+        "    from tortoise.vector_write import set_embedding_clause as _set\n"
+        "except ImportError:\n"
+        "    _set = None\n"
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": _set("y")})\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the try/except fallback binds `_set` at MODULE scope, so the blanket shadow filter dropped "
+        "the alias — and with it the writer (`{}`), which is the fail-open, not the safe direction",
+    ),
+    "builder_alias_wrapped_in_a_functools_partial": (
+        "import functools\n"
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        '\n_set = functools.partial(_set, "n")\n'
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": _set()})\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "partial-application is a wrapper AROUND the builder, not a different function — dropping "
+        "the alias deleted a writer that really writes",
+    ),
+    "builder_alias_rebound_inside_an_if_False": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "if False:\n"
+        "    _set = None\n"
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": _set("y")})\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the shadow set is control-flow-blind by design, which is right for a GATE spelling and "
+        "wrong for a builder: `if False:` cannot unbind anything at run time",
+    ),
+    "builder_alias_rebound_in_the_WRITER_scope": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj):\n"
+        "    for _set in ():\n"
+        "        pass\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": _set("y")})\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the WRITER-scope half of the same split (`_locally_bound` → `_keep_shadowed_aliases`): a "
+        "shadowed builder alias must demote to `unresolved_write`, never delete the writer",
+    ),
     "alias_on_a_foreign_receiver": (
         "from tortoise.embeddings import encode_for_row as _enc\n"
         "from tortoise.vector_write import set_embedding_clause\n"
