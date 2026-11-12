@@ -189,10 +189,10 @@ _UNCALLERABLE_RECORD_KEYS = frozenset({
 })
 
 #: The record facts a DOOR MINTS into the positional record it hands `_emit`
-#: — the one exemption from the set above, and it is a MINT signal rather than a
-#: channel name (#11996 review round 9, measured). `_emit` cannot tell a record
-#: `add_point` built from one a caller built: both arrive as `record[0]`. Scoping
-#: the exemption by CHANNEL therefore made it forgeable by any direct `_emit`
+#: — the ONE key that is not simply refused on this channel (#11996 review
+#: rounds 9 and 14, each measured). `_emit` cannot tell a record `add_point`
+#: built from one a caller built: both arrive as `record[0]`. Scoping the
+#: exemption by CHANNEL therefore made it forgeable by any direct `_emit`
 #: caller:
 #:
 #:     _emit("PointAdded", {"id": "p1", "content": "c",
@@ -201,8 +201,12 @@ _UNCALLERABLE_RECORD_KEYS = frozenset({
 #:          `:Source` read-version anchor, which is the harm the set gives for
 #:          `sourceVersion` / `sourceVersions`
 #:
-#: So the exemption is now explicit: the door that mints it says so, and `_emit`
-#: refuses the key from everyone else on BOTH channels.
+#: ⛔ AND SO DID EVERY "MINT SIGNAL" IDEA — a flag on the call (`seam_mints=True`)
+#: is a keyword the caller can just pass. What ships is not a signal at all: on
+#: the RECORD channel the value is DERIVED and compared (see `_emit`'s derive
+#: arm), so a caller can only supply the truth, and on EVERY OTHER channel the
+#: key is refused outright. This set is the key-name half of that arm; there is
+#: no door-supplied proof to look for.
 _DERIVE_ON_RECORD = frozenset({"sourceVersionTransit"})
 
 #: The envelope's RECORD-SHAPED payload keys — the shape a record door BUILDS
@@ -350,7 +354,7 @@ def _refuse_non_str_keys(fields, channel: str) -> None:
 
 
 def _named_from_caller(keys, forbidden) -> list[str]:
-    """The names in `keys` this funnel owns — matched by VALUE and exact TYPE.
+    """The names in `keys` this funnel owns — by VALUE, or by a non-exact TYPE.
 
     ⛔ NOT A MEMBERSHIP TEST ALONE (#11996 review round 8, measured). Every guard
     here used `set(keys) & forbidden` or `k in frozenset(...)`, which is a HASH
@@ -691,9 +695,17 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         from .embeddings import _is_shortest_f32_text, shortest_float32_vector
     except Exception:  # noqa: BLE001, RUF100 — #5148
         return
-    declared = record.get(_KEY)
-    if declared is None:
+    # ⛔ ABSENT IS NOT "PRESENT AND `None`" (#11996 review round 14, measured):
+    # `record.get(_KEY)` read an explicit `embedding_width: None` as no
+    # declaration at all, so the one value that is neither of the two widths got
+    # past the closed enumeration below and was journalled as
+    # `"embedding_width": null` — a durable width the seam can never mint (it
+    # POPS the key when there is no vector, and `stamp_journal_embedding` writes
+    # only `f32` / `f64`). Only a MISSING key is the legacy shape this guard has
+    # to keep accepting.
+    if _KEY not in record:
         return
+    declared = record[_KEY]
     # ⛔ THE SEAM'S OWN ENUMERATION (#11948 review): a width the seam cannot mint
     # is not a claim to verify — it is a claim nothing here can produce, so it
     # is refused rather than carried into the journal. The `isinstance` arm is a
@@ -751,6 +763,40 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
             f"record carries no `embedding` and neither does its envelope, and "
             f"a width without a vector is a state the journal contract says "
             f"cannot exist (the seam POPS the key when there is no vector).")
+    # ⛔ A ONE-SHOT ITERABLE IS READ ONCE (#11996 review round 14, measured).
+    # Every arm below ASKS THE SEAM, and the seam reads with `list(raw)`
+    # (`embeddings.py`); the STAMP further down then asks it a SECOND time. A
+    # generator is exhausted by the first read, so the second saw an empty
+    # vector — a write that LANDED on `main` became a refusal:
+    #
+    #     _emit("PointAdded", {… KEY: "f64"}, embedding=(x for x in [0.1, 0.2]))
+    #       -> on `main`: journalled `f64` over [0.1, 0.2] (the `f64` arm returned
+    #          early, so nothing consumed it before the stamp)
+    #       -> with the `f64` seam probe but no materialisation: a
+    #          "dropping an unusable embedding … (empty)" log line, then
+    #          "declared over NO vector" from the post-stamp belt
+    #
+    # So the seam's own reading is materialised ONCE here and handed to every
+    # arm; when the ENVELOPE carries the vector it is written back onto it, since
+    # the stamp covers the envelope's top-level `embedding` only and would
+    # otherwise read the exhausted iterator.
+    # ⛔ THE ELEMENT ARM KEEPS THE RAW OBJECT ON PURPOSE: materialising would put
+    # a numpy array's `np.float64` elements in front of a check that refuses
+    # everything but an exact `int`/`float`, turning the stated residual (a
+    # non-`list` iterable rides the seam arms below) into an over-block.
+    seam_values = values
+    if not isinstance(values, (list, tuple, str, bytes, dict)):
+        try:
+            seam_values = list(values)
+        except TypeError:  # not iterable at all: the seam's DROP still decides
+            seam_values = values
+        else:
+            # ⛔ WRITTEN BACK ONLY WHEN THE ENVELOPE IS WHAT CARRIED IT: the
+            # merged view lets the RECORD win, so a record-carried vector must
+            # not overwrite the envelope's — the stamp covers the envelope's
+            # top-level `embedding`, and replacing it would change what lands.
+            if payload.get("embedding") is values:
+                payload["embedding"] = seam_values
     # ⛔ EVERY ELEMENT IS READ BY TWO DIFFERENT PATHS, so neither arm below can
     # verify an element that is not an EXACT `int` / `float` (#11996 review
     # rounds 6 and 7, each measured). This guard asks the SEAM, and the seam
@@ -907,7 +953,7 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         # inside the import's `try` and that row reads `TypeError`, not
         # `ValueError` (measured).
         try:
-            probe = stamp_journal_embedding({"embedding": values},
+            probe = stamp_journal_embedding({"embedding": seam_values},
                                            creating=False)
             dropped = probe.get("embedding") is None
         except Exception:  # noqa: BLE001, RUF100 — the seam cannot describe it
@@ -928,7 +974,7 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
                 f"not a licence to carry a non-vector.")
         return
     try:
-        truthful = _is_shortest_f32_text(values)
+        truthful = _is_shortest_f32_text(seam_values)
     except Exception:  # noqa: BLE001, RUF100 — a raise is a REFUSAL, not an abstention
         # ⛔ THE SAME ABSTENTION HOLE AS THE `f64` ARM (#11996 review round 5,
         # measured): `_is_shortest_f32_text` reads its argument as
@@ -991,7 +1037,7 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
             truthful = False
         else:
             try:
-                truthful = shortest_float32_vector(values) is not None
+                truthful = shortest_float32_vector(seam_values) is not None
             except Exception:  # noqa: BLE001, RUF100
                 truthful = False
     if not truthful:
@@ -1024,7 +1070,7 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     # measured shape; an over-long one stays a stated residual.
     if record.get("embedding") is not None:
         try:
-            empty = len(values) == 0
+            empty = len(seam_values) == 0
         except TypeError:  # a vector with no length is not an empty one
             empty = False
         if empty:
@@ -1097,9 +1143,10 @@ def _refuse_caller_named_markers(keys, door: str) -> None:
     ONE placement: this function, called by every passthrough door
     (`_refuse_caller_named_funnel_keys`) BEFORE its own best-effort arm. There is
     no second copy to keep in step — an earlier version of this docstring said
-    "two placements" and there is one call site (`grep -n
-    '_refuse_caller_named_markers('` in this module), which is exactly the kind
-    of claim this PR removes (#11996 review round 12).
+    "two placements" and there is one call site, in
+    `_refuse_caller_named_funnel_keys` (#11996 review round 14: the evidence
+    offered here used to be a `grep` for `'_refuse_caller_named_markers('`, which
+    returns this docstring as well as the call, so the command refuted itself).
     """
     named = _named_from_caller(keys, _SERVER_MANAGED_EMBEDDING_KEYS)
     if named:
@@ -1723,13 +1770,16 @@ class EventAPI:
         BEFORE the arm that swallows I/O, wherever the gate is PURE enough to
         run here: the record-shaped, envelope, marker, money, percent and
         uncallerable-record-fact families, and the invisible-character half of
-        the kind gate. Every one of those FIVE arrived the same way — a gate
-        `_emit` got and this door did not — so the list is checked against
-        `_emit` rather than trusted. The SIXTH (the uncallerable record facts)
-        is a different shape: #11948 wired it into this very call, so there was
-        never a state in which `_emit` was armed and this door was not. (The
-        list read "five" until that commit; the count is the very staleness this
-        paragraph exists to prevent, so it is left with its own history.)
+        the kind gate. SIX of those seven items arrived the same way — a gate
+        `_emit` got and this door did not: the five older families and the kind
+        gate's invisible half (the block below finds it `one family over AGAIN`).
+        So the list is checked against `_emit` rather than trusted. The SEVENTH,
+        the uncallerable record facts, is a different shape: #11948 wired it into
+        this very call, so there was never a state in which `_emit` was armed and
+        this door was not. (This paragraph said "those FIVE" over its own list of
+        seven until #11996 review round 14 — the count is the very staleness it
+        exists to prevent, so the correction is left visible rather than
+        overwritten.)
 
         ⛔ THE APPROVAL half of the kind gate is the ONE exception, and it is
         not a hole: it needs a whole-graph READ, and that read RAISES on a
@@ -2024,7 +2074,15 @@ class EventAPI:
             # caller value is refused at this seam too.
             "evidence_fold",
         }
-        _forged = sorted(set(fields) & _forged_keys)
+        # ⛔ `_named_from_caller`, NOT a hash membership test (#11996 review
+        # round 14): `set(fields) & _forged_keys` misses a `str` SUBCLASS whose
+        # `__hash__` differs from `str`'s, so a carrier the caller passes is
+        # journalled under the name it claims. Safe here today only because
+        # `_emit`'s positional-record arm catches the carrier downstream — and
+        # a key added to this set but not to `_UNCALLERABLE_RECORD_KEYS` (the
+        # identity triple is exactly such a key) would be a live forge through
+        # this door with no second line of defence.
+        _forged = _named_from_caller(fields, _forged_keys)
         if _forged:
             raise ValueError(
                 f"{_forged} are server-managed journal fields (embedding "
