@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.33"
+title: "Tortoise — Canonical Ontology v3.34"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-11-11
+updated: 2026-11-12
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.33
+# Tortoise — Canonical Ontology v3.34
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -444,7 +444,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `name` | string | ✅ | `schema:name` | Human-readable name (`_upsert_object` writes `title`; `name` aliased) |
 | `objectKind` | string | ✅ | — | The §5 object-kind vocabulary (Project, WorkItem, Problem, tag, user, skill, tool, agent, workflow, agreement, standard, other, strategy, plan, goal, target) + pack objectKinds |
 | `title` | string | — | `dc:title` | Display title (what `_upsert_object` actually stores) |
-| `status` | string | — | `pav:status` | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy` + `supersededAt`; built-in connector work-item events→in_progress/completed; **pack-declared `kindDefs[].statuses`/`folds` for the pack's own kinds — #2729**, dispatched on the namespaced kind and suppressed for built-in folds once a kind declares a lifecycle) — **the event stream is the reconstruction source for `Object.status` (§11 cache doctrine); the property is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved)**. **Core Object types accept `draft`, `live`, `superseded`, `deprecated`, `archived`, `in_progress`, `completed`; `superseded` requires the successor in the same write, and a removal with no successor is `archived`. `outdated` and `retracted` are not Object lifecycle words (read-only, retained for legacy data). Pack-declared kinds validate against their own declared words.** |
+| `status` | string | — | `pav:status` | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy` + `supersededAt`; built-in connector work-item events→in_progress/completed; **pack-declared `kindDefs[].statuses`/`folds` for the pack's own kinds — #2729**, dispatched on the namespaced kind and suppressed for built-in folds once a kind declares a lifecycle) — **the event stream is the reconstruction source for `Object.status` (§11 cache doctrine); the property is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved)**. **Core Object types accept `draft`, `live`, `superseded`, `deprecated`, `archived`, `in_progress`, `completed`; an Object created without a status stores none and reads as `live` (#9974 R1 — never a fabricated `live` write). `superseded` means replaced: it names the successor; a retirement with no successor is `archived`; `deprecated` is an independent terminal state and needs no successor. A journal rebuild is unchanged and still restores a supersession recorded without a successor. `outdated` and `retracted` are not Object lifecycle words (read-only, retained for legacy data). Pack-declared kinds validate against their own declared words.** |
 | `supersededAt` | ISO8601 | — | — | The fold TIMESTAMP written by the supersession fold (`apply_supersessions` / `ObjectSuperseded` projection, pinned after the fold via `SET o.supersededAt` for byte-reproducible state headers). R17 P3-1 (#2165): `supersededAt` is the connected-assembly state-header's date source — **byte-golden renders depend on it being a pinned story date, never a wall-clock fold time** (Task-1 fixture pins `2026-09-01T00:00:00Z`). Absent on non-superseded Objects. A separate fact from `expiredAt` — "replaced by a successor" and "our record stopped being current" are independent, and both can apply (§4.7). |
 | `supersededBy` | string | — | — | Successor name written by the supersession fold (see `status`); the connected-assembly successor probe verifies a VISIBLE (non-recall-excluded) Object exists before rendering a full supersession clause — a never-created / excluded / empty successor renders a NAME-ONLY annotation, never a fabricated link (R12/C6, #2165 Task 5). |
 | `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | Valid-time window — when the Object held in the world (declared §4.7, #3642) |

@@ -125,7 +125,7 @@ def _invite(client, reg, *, org_id="team-f", email="bob@example.com",
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.setenv("RESEND_API_KEY", "re_test_secret_key_123")
-    monkeypatch.setenv("EMAIL_LINK_BASE_URL", "https://tortoise.premiselabs.co")
+    monkeypatch.setenv("EMAIL_LINK_BASE_URL", "https://app.premiselabs.co")
     email_notify._skip_logged.clear()
     yield
 

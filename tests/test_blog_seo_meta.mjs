@@ -2145,30 +2145,25 @@ console.log("no rendered blog page names the retired host (#11765)");
   assert(!RETIRED_SITE_HOSTS.includes(new URL(SITE_URL).hostname),
     "the canonical host is NOT in the retired list — that would make the normaliser a no-op or a loop");
 
-  // ⛔ THE ONE ALLOWLIST. `navHtml`'s three PRODUCT links stay absolute on the
-  // product host deliberately: `/docs`, `/#pricing` and `/auth` do not exist on the
-  // company host until child 2 (#11764) creates them, so a relative rewrite today
-  // would 404 the blog's own navigation. They are a DESTINATION question, not an
-  // origin one, and #11764 owns the moment to repoint them. So the guard's claim is
-  // precise and falsifiable: the retired host appears ONLY in those three hrefs, and
-  // nowhere else on any rendered surface. A new leak anywhere else fails, and the day
-  // #11764 repoints them the occurrences drop to zero and this stays green.
-  const NAV_PRODUCT_HREFS = [
-    "https://tortoise.premiselabs.co/docs",
-    "https://tortoise.premiselabs.co/#pricing",
-    "https://tortoise.premiselabs.co/auth",
-  ];
+  // ⛔ THE ALLOWLIST IS GONE, because the repoint it was waiting for LANDED.
+  // Until #11767 the three PRODUCT links in `navHtml` stayed absolute on the
+  // retired host, and this file allowed exactly those three. That allowance is
+  // now a FALSE PASS: the hrefs are canonical, so a revert of `navHtml` would
+  // re-introduce the retired host and this file would still be green (`unexpected`
+  // was filtered against the three, and `3 <= 3` held). #11767 removed the
+  // occurrences and removed the exemption with them, so the claim is now the
+  // strongest form of the original one: the retired host appears NOWHERE on any
+  // rendered surface, and any occurrence anywhere fails here.
 
   // Every occurrence, as the URL text it sits in — so a failure names the value
   // instead of a character offset.
   const RETIRED_URL_RE = /https?:\/\/tortoise\.premiselabs\.co[^\s"'<>)]*/g;
-  const assertNoRetiredHost = (label, doc, { allowNav = false } = {}) => {
+  const assertNoRetiredHost = (label, doc) => {
     const found = [...new Set([...doc.matchAll(RETIRED_URL_RE)].map((m) => m[0]))];
-    const unexpected = found.filter((u) => !(allowNav && NAV_PRODUCT_HREFS.includes(u)));
+    const unexpected = found;
     assert(
       unexpected.length === 0,
       `${label}: no absolute URL on the retired host` +
-        (allowNav ? " (outside the three nav product links #11764 owns)" : "") +
         (unexpected.length ? `\n      found: ${JSON.stringify(unexpected)}` : ""),
     );
   };
@@ -2226,7 +2221,7 @@ console.log("no rendered blog page names the retired host (#11765)");
 
   // ── the article page: head + byline + JSON-LD + nav, one document ──
   const article = await render(blogGet, "/blog/retired-host-check", { path: ["retired-host-check"] });
-  assertNoRetiredHost("a rendered article", article, { allowNav: true });
+  assertNoRetiredHost("a rendered article", article);
   // The positive half: the stored avatar and cover RENDERED, on the canonical host,
   // with their paths intact — a guard that passes because the values vanished is not
   // a guard. Path preservation is the whole contract of the normaliser.
@@ -2246,7 +2241,7 @@ console.log("no rendered blog page names the retired host (#11765)");
   // ── the index: its cards put the cover straight into a CSS url(...), which is the
   // route no head helper sees — the reason the normalisation sits at the row source.
   const index2 = await render(blogGet, "/blog", { path: [] });
-  assertNoRetiredHost("a rendered blog index", index2, { allowNav: true });
+  assertNoRetiredHost("a rendered blog index", index2);
   assert(index2.includes(`background-image:url('${SITE_URL}/assets/og-tortoise.jpg')`),
     "the index card's cover is normalised too (it never passes through headHtml)");
   assert(index2.includes(`<link rel="canonical" href="${SITE_URL}/blog">`),
@@ -2277,20 +2272,19 @@ console.log("no rendered blog page names the retired host (#11765)");
     [...`<a href="https://tortoise.premiselabs.co/blog/x">x</a>`.matchAll(RETIRED_URL_RE)].length === 1,
     "the guard's own matcher detects a retired-host URL (it is not a regex that matches nothing)",
   );
-  assertNoRetiredHost("the nav alone", navHtml("blog"), { allowNav: true });
-  // ⛔ AN UPPER BOUND, never an equality (#11976 review F1). The claim this row
-  // carries is "no FOURTH retired-host href appeared" — it must NOT also claim
-  // "all three are still retired", because the comment above says the plan is for
-  // #11764 to repoint them. With `===` the count would fall to 0 while the
-  // allowlist stayed at 3, so `0 === 3` reds the whole suite on the CORRECT next
-  // step — in a file #11764's lane has no reason to open. `<=` keeps the invariant
-  // and survives the repoint; the "no fourth" property is separately carried by
-  // the `unexpected.length === 0` filter above, which names any href outside the
-  // allowlist wherever the count lands.
+  assertNoRetiredHost("the nav alone", navHtml("blog"));
+  // ⛔ NOW AN EQUALITY, and the flip from `<=` is the point (#11767). #11976
+  // review F1 made this an UPPER BOUND so the suite would not red on the CORRECT
+  // next step — the repoint of the three hrefs. That step has LANDED: #11767
+  // emits the canonical forms, so the correct count is 0 and `<= 3` would now
+  // accept any one or two retired hrefs coming back. The bound was provisional
+  // for exactly as long as the deferral lived; an exemption outliving the thing it
+  // excused is a FALSE PASS, which is the defect class this whole block exists to
+  // refuse.
   const navRetired = [...new Set([...navHtml("blog").matchAll(RETIRED_URL_RE)].map((m) => m[0]))];
   assert(
-    navRetired.length <= NAV_PRODUCT_HREFS.length,
-    "the nav carries AT MOST the three retired-host product links #11764 owns — no fourth appeared " +
+    navRetired.length === 0,
+    "the nav names NO retired-host URL (#11767 repointed all three to the canonical forms) " +
       `(found ${navRetired.length}: ${JSON.stringify(navRetired)})`,
   );
 
