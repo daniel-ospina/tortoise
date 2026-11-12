@@ -189,6 +189,20 @@ class TestAcceptance1RedirectAndOverride:
         assert [x["outcome"] for x in rows] == ["overridden"]
         assert rows[0]["rule"] == "issue-identifier-is-work-item"
 
+    def test_the_override_is_reachable_through_the_props_passthrough(
+            self, sdk, no_pack_guards):
+        """The AX block tells the caller to pass `intent="as_declared"` — so the
+        remedy must be reachable from EVERY door, or it is advice nobody can
+        take. The MCP tools forward their `props` dict straight into the SDK
+        door (`mcp_server.tortoise_create_subject` does
+        `create_subject(name, subjectKind, **(props or {}))`), and `intent` is a
+        declared keyword there, so the override travels that channel with NO
+        tool-parameter change (the #12060 out-of-scope rule: no MCP surface
+        change without the owner)."""
+        r = sdk.create_subject(ISSUE_NAME, **{"intent": INTENT_AS_DECLARED})
+        assert _labels_kinds(sdk, r["id"])[0] == ["Subject"]
+        assert r["kind_guard_overridden"]["rule"] == "issue-identifier-is-work-item"
+
     def test_a_non_string_intent_is_a_caller_error(self, sdk, no_pack_guards):
         with pytest.raises(ValueError):
             sdk.create_subject(ISSUE_NAME, intent=1)
