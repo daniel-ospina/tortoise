@@ -253,9 +253,11 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 41, (
-        "this line RECORDS the population (41 arms); removing one means editing the "
-        "floor here too, which is the second place a shrink has to touch"
+    assert flc.MIN_SELF_TEST_MUTATIONS == 43, (
+        "this line RECORDS the population (43 arms); removing one means editing the "
+        "floor here too, which is the second place a shrink has to touch. The two arms "
+        "added for #11902's last review round pin the §3 OVERTAKEN letter list and an "
+        "underscore-spelled contradictory letter"
     )
 
 
@@ -399,7 +401,7 @@ def test_a_thirteenth_correction_row_cannot_hide_behind_label_shape(tmp_path, mo
         monkeypatch,
         lambda t: t.replace(
             "| **l** |",
-            "| **M** | An undeclared claim | **False** | **FIXED-IT** | `tortoise/pipeline.py:16` |\n| **l** |",
+            "| **M** | An undeclared claim | **False** | **FIXED-IT** | `tortoise/pipeline.py:16-17` |\n| **l** |",
             1,
         ),
     )
@@ -501,7 +503,7 @@ def test_a_leading_dot_citation_is_measured_not_skipped(tmp_path, monkeypatch):
         tmp_path,
         monkeypatch,
         lambda t: t.replace(
-            "`tortoise/pipeline.py:16`", "`.github/workflows/ci.yml:999999`", 1
+            "`tortoise/pipeline.py:16-17`", "`.github/workflows/ci.yml:999999`", 1
         ),
     )
     problems = _doc_problems()
@@ -518,7 +520,7 @@ def test_a_non_python_extension_citation_is_measured_not_skipped(tmp_path, monke
     _mutated(
         tmp_path,
         monkeypatch,
-        lambda t: t.replace("`tortoise/pipeline.py:16`", "`notes/thing.txt:16`", 1),
+        lambda t: t.replace("`tortoise/pipeline.py:16-17`", "`notes/thing.txt:16`", 1),
     )
     problems = _doc_problems()
     assert any("does not exist in the tree" in p for p in problems), problems
@@ -535,7 +537,7 @@ def test_a_citation_with_a_space_in_its_path_is_refused(tmp_path, monkeypatch):
     _mutated(
         tmp_path,
         monkeypatch,
-        lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/pipeline .py:16`", 1),
+        lambda t: t.replace("`tortoise/pipeline.py:16-17`", "`tortoise/pipeline .py:16`", 1),
     )
     problems = _doc_problems()
     assert any("not a recognised citation" in p for p in problems), problems
@@ -574,7 +576,7 @@ def test_a_host_and_port_in_prose_is_not_resolved_as_a_path(tmp_path, monkeypatc
     _mutated(
         tmp_path,
         monkeypatch,
-        lambda t: t.replace("`tortoise/pipeline.py:16`", "`localhost:6379`", 1),
+        lambda t: t.replace("`tortoise/pipeline.py:16-17`", "`localhost:6379`", 1),
     )
     problems = _doc_problems()
     assert not any("citation" in p for p in problems), problems
@@ -593,7 +595,7 @@ def test_a_citation_with_a_trailing_character_is_refused(tmp_path, monkeypatch):
     """
     for old, new in (
         ("`tortoise/sdk.py:36215-36218`", "`tortoise/sdk.py:36215-36218 `"),
-        ("`tortoise/pipeline.py:16`", "`tortoise/pipeline.py:16 `"),
+        ("`tortoise/pipeline.py:16-17`", "`tortoise/pipeline.py:16 `"),
     ):
         _mutated(tmp_path, monkeypatch, lambda t, o=old, n=new: t.replace(o, n, 1))
         problems = _doc_problems()
@@ -622,7 +624,7 @@ def test_a_citation_embedded_in_a_longer_span_is_refused(tmp_path, monkeypatch):
         _mutated(
             tmp_path,
             monkeypatch,
-            lambda t, n=new: t.replace("`tortoise/pipeline.py:16`", n, 1),
+            lambda t, n=new: t.replace("`tortoise/pipeline.py:16-17`", n, 1),
         )
         problems = _doc_problems()
         assert any("not a recognised citation" in p for p in problems), (new, problems)
@@ -639,7 +641,7 @@ def test_an_absolute_path_outside_the_tree_is_refused(tmp_path, monkeypatch):
         tmp_path,
         monkeypatch,
         lambda t: t.replace(
-            "`tortoise/pipeline.py:16`", "`/nope/tortoise/pipeline.py:16`", 1
+            "`tortoise/pipeline.py:16-17`", "`/nope/tortoise/pipeline.py:16`", 1
         ),
     )
     problems = _doc_problems()
@@ -694,7 +696,7 @@ def test_a_tilde_rooted_citation_is_refused_in_both_spellings(tmp_path, monkeypa
             _mutated(
                 tmp_path,
                 patch,
-                lambda t, _n=needle: t.replace("`tortoise/pipeline.py:16`", _n, 1),
+                lambda t, _n=needle: t.replace("`tortoise/pipeline.py:16-17`", _n, 1),
             )
             problems = _doc_problems()
             assert any(expected in p for p in problems), (needle, problems)
@@ -1065,7 +1067,7 @@ def test_a_citation_separated_by_whitespace_is_refused(tmp_path, monkeypatch):
                 tmp_path,
                 patch,
                 lambda t, _s=spelling: t.replace(
-                    "`tortoise/pipeline.py:16`", f"`{_s}`", 1
+                    "`tortoise/pipeline.py:16-17`", f"`{_s}`", 1
                 ),
             )
             problems = _doc_problems()
@@ -1085,7 +1087,7 @@ def test_a_citation_separated_by_whitespace_is_refused(tmp_path, monkeypatch):
                 tmp_path,
                 patch,
                 lambda t, _s=not_a_citation: t.replace(
-                    "`tortoise/pipeline.py:16`", f"`{_s}`", 1
+                    "`tortoise/pipeline.py:16-17`", f"`{_s}`", 1
                 ),
             )
             assert not any(
@@ -1252,7 +1254,7 @@ def test_the_s8_citation_carve_outs_stay_skippable(tmp_path, monkeypatch):
                 tmp_path,
                 patch,
                 lambda t, _s=spelling: t.replace(
-                    "`tortoise/pipeline.py:16`", f"`{_s}`", 1
+                    "`tortoise/pipeline.py:16-17`", f"`{_s}`", 1
                 ),
             )
             assert any(
@@ -1275,7 +1277,7 @@ def test_the_s8_citation_carve_outs_stay_skippable(tmp_path, monkeypatch):
                 tmp_path,
                 patch,
                 lambda t, _s=carve_out: t.replace(
-                    "`tortoise/pipeline.py:16`", f"`{_s}`", 1
+                    "`tortoise/pipeline.py:16-17`", f"`{_s}`", 1
                 ),
             )
             assert not any(
@@ -1342,7 +1344,7 @@ def test_a_host_port_is_not_a_citation(tmp_path, monkeypatch):
     `127.0.0.1:6379`, `0.0.0.0:8000`, `api.example.com:443` and `db.internal:5432`
     (bare `localhost:6379` was already green because it has no dot). The carve-out is
     a dotted HOST plus a port, which is why it cannot swallow
-    `tortoise/pipeline.py:16`; removing `_is_host_port` from the resolver reds this.
+    `tortoise/pipeline.py:16-17`; removing `_is_host_port` from the resolver reds this.
     """
     for host_port in (
         "127.0.0.1:6379",
@@ -1355,7 +1357,7 @@ def test_a_host_port_is_not_a_citation(tmp_path, monkeypatch):
                 tmp_path,
                 patch,
                 lambda t, _s=host_port: t.replace(
-                    "`tortoise/pipeline.py:16`", f"`{_s}`", 1
+                    "`tortoise/pipeline.py:16-17`", f"`{_s}`", 1
                 ),
             )
             assert not any(
@@ -1412,7 +1414,7 @@ def test_citation_to_missing_file_is_rejected(tmp_path, monkeypatch):
     _mutated(
         tmp_path,
         monkeypatch,
-        lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/no_such_module.py:16`", 1),
+        lambda t: t.replace("`tortoise/pipeline.py:16-17`", "`tortoise/no_such_module.py:16`", 1),
     )
     problems = _doc_problems()
     assert any("does not exist in the tree" in p for p in problems), problems
@@ -1427,7 +1429,7 @@ def test_citation_past_end_of_file_is_rejected(tmp_path, monkeypatch):
     _mutated(
         tmp_path,
         monkeypatch,
-        lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/pipeline.py:999999`", 1),
+        lambda t: t.replace("`tortoise/pipeline.py:16-17`", "`tortoise/pipeline.py:999999`", 1),
     )
     problems = _doc_problems()
     assert any("out of range" in p for p in problems), problems
@@ -1981,7 +1983,7 @@ def test_main_exit_one_on_drift(tmp_path, monkeypatch, capsys):
     _mutated(
         tmp_path,
         monkeypatch,
-        lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/no_such_module.py:16`", 1),
+        lambda t: t.replace("`tortoise/pipeline.py:16-17`", "`tortoise/no_such_module.py:16`", 1),
     )
     monkeypatch.setattr(flc, "check_measured_commit", lambda *a, **k: [])
     assert flc.main(["--check", "--root", str(REPO)]) == 1
@@ -2209,7 +2211,7 @@ def test_a_tilde_citation_outside_the_swarm_tree_is_refused(tmp_path, monkeypatc
                 tmp_path,
                 patch,
                 lambda t, _s=spelling: t.replace(
-                    "`tortoise/pipeline.py:16`", f"`{_s}`", 1
+                    "`tortoise/pipeline.py:16-17`", f"`{_s}`", 1
                 ),
             )
             problems = _doc_problems()
@@ -2236,7 +2238,7 @@ def test_a_tilde_citation_into_the_lost_swarm_tree_is_refused(tmp_path, monkeypa
             tmp_path,
             patch,
             lambda t: t.replace(
-                "`tortoise/pipeline.py:16`",
+                "`tortoise/pipeline.py:16-17`",
                 "`~/.swarm/issue-triage-2026-09-09.md:3`",
                 1,
             ),
@@ -2617,6 +2619,98 @@ def test_a_code_or_italic_letter_is_read_like_every_other_markup(
             ), f"the complement must count every markup too: {new!r} -> {problems}"
 
 
+def test_the_overtaken_sentences_letter_list_is_compared_to_the_table(
+    tmp_path, monkeypatch
+):
+    """FAILS if only the 'N of the M were' FIGURE is derived and its letters are not.
+
+    The figure was re-derived and the parenthetical beside it was not, so at
+    `59091ce255` this edit — naming ALL FOUR STILL-TRUE rows as the ones *overtaken by
+    the very fixes they motivated* — left `--check` reporting "agrees with the tree" at
+    rc 0. The count stayed right while the NAMES were inverted, which is worse than a
+    wrong count: §1 tells a reader `Do not re-derive it` for an overtaken row and `Rely
+    on it` for a STILL-TRUE one, so the page sent a lane to the opposite action.
+    """
+    with monkeypatch.context() as patch:
+        _mutated(
+            tmp_path,
+            patch,
+            lambda t: t.replace(
+                "— (c), (d), (e) and (g); the other",
+                "— (a), (f), (h) and (i); the other",
+                1,
+            ),
+        )
+        problems = _doc_problems()
+    assert any("were overtaken' sentence names" in p for p in problems), problems
+
+
+def test_ordinary_prose_inside_the_tally_paragraph_is_not_a_letter_list(
+    tmp_path, monkeypatch
+):
+    """FAILS if a bare letter cued by a separator ALONE counts as a list member.
+
+    The bare member used to be matched by its separator (`,\s*` / `and\s+`) anywhere, so
+    appending `, a rule of thumb` to the tally sentence returned rc 1 with "the
+    paragraph names ['a','b',…] as no longer reading as written" — a false accusation,
+    and the expensive kind: a lane is told to fix a tally that was never wrong. A bare
+    letter now counts only inside a run of two or more joined by a separator, which is
+    what "a list" means; the honest spellings in the sibling tests must stay RED so this
+    cannot be satisfied by going blind.
+    """
+    for tail in (
+        ", a rule of thumb.",
+        ", and a rule of thumb.",
+        ", or a similar row.",
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _tail=tail: t.replace(
+                    "and **(l)** are **DRIFTED**.",
+                    "and **(l)** are **DRIFTED**" + _tail,
+                    1,
+                ),
+            )
+            problems = _doc_problems()
+        # The fixture writes the copy outside `docs/`, so the index-registration arm fires on
+        # the temp path for EVERY case here; what this pin is about is the §3 tally arms.
+        tally = [p for p in problems if "§3 tally" in p]
+        assert tally == [], f"prose was counted as a letter list: {tail!r} -> {tally}"
+
+
+def test_a_letter_in_underscore_or_html_emphasis_is_counted(
+    tmp_path, monkeypatch
+):
+    """FAILS if the emphasis spelling decides red-versus-green.
+
+    §8 on the page promises a letter may be written "bare, bold, code or italic", but
+    only the markdown `*`/`**` and code spellings were read. Measured at `59091ce255`,
+    `, and _a_ too`, `, and __a__ too`, `, and <i>a</i> too` and a code span with spaces
+    inside its ticks all left `--check` at rc 0 on the tally arm, and `_c_` / `<i>c</i>`
+    did the same on the complement arm (naming a SUPERSEDED-BY-FIX row as still-true).
+    Underscore and HTML emphasis are the same two levels written another way, so they are
+    normalised rather than enumerated branch by branch.
+    """
+    for markup in ("_a_", "__a__", "<i>a</i>", "<em>a</em>", "` a `"):
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _m=markup: t.replace(
+                    "and **(l)** are **DRIFTED**.",
+                    f"and **(l)** are **DRIFTED**, and {_m} too.",
+                    1,
+                ),
+            )
+            problems = _doc_problems()
+        assert any(
+            "as no longer reading as written" in p or "STILL-TRUE list names" in p
+            for p in problems
+        ), f"emphasis spelling {markup!r} was not counted -> {problems}"
+
+
 def test_a_second_still_read_as_written_sentence_is_refused(tmp_path, monkeypatch):
     """FAILS if the tally's COMPLEMENT list can be joined across sentences.
 
@@ -2698,7 +2792,7 @@ def test_a_bare_shorthand_does_not_satisfy_the_evidence_floor(tmp_path, monkeypa
         tmp_path,
         monkeypatch,
         lambda t: t.replace(
-            "the code names the separation | `tortoise/pipeline.py:16`", "the code names the separation | `:5`", 1
+            "the code names the separation | `tortoise/pipeline.py:16-17`", "the code names the separation | `:5`", 1
         ),
     )
     problems = _doc_problems()

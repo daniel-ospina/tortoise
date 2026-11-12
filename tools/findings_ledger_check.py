@@ -361,7 +361,7 @@ VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
 #: (`a falsified §3 count beside a list-free decoy`, `a falsified overtaken figure
 #: beside a compliant decoy`), which closed the paragraph-scoped presence test. Bump
 #: it with any arm added or removed — the population is what the pin compares.
-MIN_SELF_TEST_MUTATIONS = 41
+MIN_SELF_TEST_MUTATIONS = 43
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -679,34 +679,90 @@ def _verdicts_by_label(text: str) -> dict[str, str]:
 #: STILL-TRUE row as overtaken, and `**(j)**, and `c` still read as written` did the
 #: same on the complement arm. §8 of the page says a letter may be written "bold, code,
 #: italic or bare", so the doc promised a comparison the code did not make.
-_NAMED_LETTER_RE = re.compile(
+#: HTML emphasis is CONVERTED to the markdown spelling its level means, never deleted:
+#: deleting it turned `<i>a</i>` into a NAKED letter, which the bare pass refuses unless it
+#: sits in a list run — measured, `**(l)** are **DRIFTED**, and <i>a</i> too` stayed rc 0
+#: while every markdown spelling of the same claim reded. Converting keeps the letter
+#: a MARKED member, which is what `<i>a</i>` is.
+_HTML_EMPHASIS_MAP = (
+    (re.compile(r"<(strong|b)\b[^>]*>(.*?)</\1\s*>", re.IGNORECASE | re.DOTALL), r"**\2**"),
+    (re.compile(r"<(em|i)\b[^>]*>(.*?)</\1\s*>", re.IGNORECASE | re.DOTALL), r"*\2*"),
+)
+#: Any emphasis tag left over after the pairs above (an unclosed one) carries no letter.
+_EMPHASIS_TAG_RE = re.compile(r"</?(?:i|em|b|strong)\b[^>]*>", re.IGNORECASE)
+#: A code span padded with spaces inside the ticks: `` ` a ` `` — still that letter.
+_CODE_SPAN_PAD_RE = re.compile(r"`\s*([a-l]{1,2})\s*`", re.IGNORECASE)
+#: Markup that carries no letter, removed before the BARE pass so that a member written
+#: in any emphasis still sits adjacent to its separator (`**(j)**, also c` -> `j, also c`).
+_MARKUP_ONLY_RE = re.compile(r"[_*`()]|<[^>]*>")
+
+
+#: A MARKED letter is always a member — `**(a)**` alone names one row, which the
+#: letter/attribution arms must read, so adjacency is not required for these.
+_MARKED_LETTER_RE = re.compile(
     r"\*\*\(([a-l]{1,2})\)\*\*"  # **(a)**
     r"|\*\*([a-l]{1,2})\*\*"  # **a**
     r"|`\(?([a-l]{1,2})\)?`"  # `a` / `(a)`
     r"|\*\(([a-l]{1,2})\)\*"  # *(a)*
     r"|\*([a-l]{1,2})\*"  # *a*
-    r"|\(([a-l]{1,2})\)"  # (a) / (a), (b)
-    r"|(?:,\s*|\b(?:and|or|also|plus|&)\s+|&\s+|,\s*also\s+)([a-l])\b"  # ", f" / "and f" / "also f" / "& f"
-    # ⛔ THE HEAD OF A PLAIN LIST. Matching a member only by its SEPARATOR (`, f` /
-    # `and f`) never reads the FIRST member, so an honest `Only a, f, h, i and j still
-    # read as written.` was compared as `['f','h','i','j']` — a false accusation that
-    # names the wrong set, which §8 declares is an accepted spelling (#11902 review,
-    # round 4). The head rule pairs the first member with the separator after it, and
-    # letters are read case-insensitively, because `**(A)**` is the same claim.
-    r"|\b([a-l])\b\s*(?:,\s*(?:also\s+)?|(?:,?\s+)(?:and|or|also|plus|&)\s*)\b([a-l])\b"
-    , re.IGNORECASE
+    r"|\(([a-l]{1,2})\)",  # (a) / (a), (b)
+    re.IGNORECASE,
 )
+
+#: ⛔ A BARE letter is a member only inside a RUN OF TWO OR MORE, each joined to the next
+#: by a separator. Cueing a bare member on its separator ALONE (`, f` / `and f`) made
+#: ordinary prose red the arm: measured, appending `, a rule of thumb` to the tally
+#: sentence returned rc 1 with `the paragraph names ['a','b',…] as no longer reading as
+#: written` — a lane sent to fix a tally that was never wrong. Requiring list CONTEXT
+#: (`a, f`, `a and f`, `a, also f`, `a & f`, and — because markup is stripped first —
+#: `**(j)**, also c`) keeps that prose out while still reaching a one-letter tail.
+_BARE_SEP = (
+    r"(?:"
+    r",\s*(?:(?:and|or|also|plus|&)\s+)?(?:also\s+)?"  # ", " / ", and " / ", also "
+    r"|\s+(?:and|or|also|plus|&)\s+(?:also\s+)?"  # " and " / " and also " / " also "
+    r")"
+)
+_BARE_RUN_RE = re.compile(
+    rf"\b([a-l])\b(?:{_BARE_SEP}\b([a-l])\b)+",
+    re.IGNORECASE,
+)
+_LETTER_IN_RUN_RE = re.compile(r"\b([a-l])\b", re.IGNORECASE)
+
+
+def _normalize_markup(sentence: str) -> str:
+    """Fold the emphasis spellings markdown and HTML both allow onto one grammar.
+
+    §8 promises a letter may be written "bare, bold, code or italic". `_x_` / `__x__`
+    and `<i>x</i>` are the same two emphasis levels written the other ways markdown and
+    HTML spell them, and a code span may be padded (`` ` a ` ``). None was read, and
+    every one of them was measured CLEAN on both tally arms at `59091ce255` — e.g.
+    `**(j)**, and _c_ still read as written` named a SUPERSEDED-BY-FIX row as still-true
+    at rc 0. Normalising is cheaper and safer than enumerating a branch per shape, and
+    it means a NEW spelling only has to reach the normaliser.
+    """
+    s = sentence
+    for pattern, replacement in _HTML_EMPHASIS_MAP:
+        s = pattern.sub(replacement, s)
+    s = _EMPHASIS_TAG_RE.sub("", s)
+    s = s.replace("__", "**").replace("_", "*")
+    return _CODE_SPAN_PAD_RE.sub(lambda m: "`" + m.group(1) + "`", s)
 
 
 def _named_letters(sentence: str) -> set[str]:
     """The letters a sentence names as list members, in any accepted spelling."""
-    # ⛔ EVERY GROUP, NOT THE FIRST: the plain head rule is ONE match that carries BOTH
-    # members (`j or a`), so taking only the first non-empty group read a two-member
-    # list as one member and the candidacy gate (`>= 2 named letters`) never fired —
-    # measured, `Note: j or a no longer read as written.` left `--check` at rc 0.
+    # ⛔ EVERY GROUP, NOT THE FIRST: a match can carry TWO members (`j or a`), so taking
+    # only the first non-empty group read a two-member list as one member and the
+    # candidacy gate (`>= 2 named letters`) never fired — measured, `Note: j or a no
+    # longer read as written.` left `--check` at rc 0.
+    s = _normalize_markup(sentence)
     out: set[str] = set()
-    for m in _NAMED_LETTER_RE.finditer(sentence):
+    for m in _MARKED_LETTER_RE.finditer(s):
         out.update(g.lower() for g in m.groups() if g)
+    # The bare pass runs on markup-stripped text so that a member written in any emphasis
+    # still sits adjacent to its separator; a single bare letter is never collected.
+    bare = _MARKUP_ONLY_RE.sub("", s)
+    for m in _BARE_RUN_RE.finditer(bare):
+        out.update(x.lower() for x in _LETTER_IN_RUN_RE.findall(m.group(0)))
     return out
 
 
@@ -1119,6 +1175,26 @@ def check_verdict_tally(text: str) -> list[str]:
             f"{len(overtaken)} row(s) are SUPERSEDED-BY-FIX/ADOPTED "
             f"({', '.join(overtaken)})"
         )
+    # ⛔ AND THE LETTERS, NOT ONLY THE FIGURE. Re-deriving `Four of the seven` left the
+    # LIST beside it unguarded: measured at `59091ce255`, rewriting the parenthetical
+    # `— (c), (d), (e) and (g)` to `— (a), (f), (h) and (i)` — i.e. naming ALL FOUR
+    # STILL-TRUE rows as the ones *overtaken by the very fixes they motivated* — left
+    # `--check` reporting "agrees with the tree" at rc 0. The count was right and the
+    # names were inverted, which is the worst shape of the failure because §1 tells the
+    # reader `Do not re-derive it` for an overtaken row and `Rely on it` for a
+    # STILL-TRUE one: the page would send a lane to the opposite action. The letters the
+    # sentence names are therefore compared with the rows carrying those verdicts.
+    if len(overtaken_sentences) == 1:
+        named_overtaken = _named_letters(overtaken_sentences[0])
+        if named_overtaken != set(overtaken):
+            problems.append(
+                f"§3 tally: the 'N of the M were overtaken' sentence names "
+                f"{sorted(named_overtaken) or '(none)'}, but the table's "
+                f"SUPERSEDED-BY-FIX/ADOPTED rows are {overtaken} — §1 says 'Do not "
+                f"re-derive it' for an overtaken row and 'Rely on it' for a STILL-TRUE "
+                f"one, so naming a STILL-TRUE row here sends the reader to the wrong "
+                f"action"
+            )
     return problems
 
 
@@ -1912,17 +1988,17 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     ),
     (
         "a citation separated from its line by a space",
-        lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/pipeline.py 16`", 1),
+        lambda t: t.replace("`tortoise/pipeline.py:16-17`", "`tortoise/pipeline.py 16`", 1),
         "not a recognised citation",
     ),
     (
         "a citation pointing at a file that does not exist",
-        lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/no_such_module.py:16`", 1),
+        lambda t: t.replace("`tortoise/pipeline.py:16-17`", "`tortoise/no_such_module.py:16`", 1),
         "does not exist",
     ),
     (
         "a citation line past the end of its file",
-        lambda t: t.replace("`tortoise/pipeline.py:16`", "`tortoise/pipeline.py:999999`", 1),
+        lambda t: t.replace("`tortoise/pipeline.py:16-17`", "`tortoise/pipeline.py:999999`", 1),
         "out of range",
     ),
     (
@@ -1994,6 +2070,26 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         "'N of the M were' overtaken figure",
     ),
     (
+        # ⛔ The FIGURE was re-derived and the LIST beside it was not: measured at
+        # `59091ce255`, rewriting `— (c), (d), (e) and (g)` to name all four STILL-TRUE
+        # rows left `--check` agreeing with the tree at rc 0. The count stayed right and
+        # the names were inverted, which inverts the ACTION §1 prescribes.
+        "a §3 overtaken list that names the wrong rows",
+        lambda t: t.replace(
+            "— (c), (d), (e) and (g); the other", "— (a), (f), (h) and (i); the other", 1
+        ),
+        "names",
+    ),
+    (
+        # ⛔ Markup must never be the difference between red and green: `_a_` is the
+        # same claim as `**(a)**`, and it read CLEAN on both arms before the normaliser.
+        "a contradictory tally letter written in underscore emphasis",
+        lambda t: t.replace(
+            "and **(l)** are **DRIFTED**.", "and **(l)** are **DRIFTED**, and _a_ too.", 1
+        ),
+        "as no longer reading as written",
+    ),
+    (
         "a shorthand citation pointing past the end of its anchor's file",
         # ⛔ The literal tracks the DOCUMENT: `main`'s `43db5c0f55` shifted
         # `_persist_extra_props`'s call site by 16 lines, so row (c)'s shorthand
@@ -2051,14 +2147,14 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     (
         "a citation with a space inserted into its path",
         lambda t: t.replace(
-            "`tortoise/pipeline.py:16`", "`tortoise/pipeline .py:16`", 1
+            "`tortoise/pipeline.py:16-17`", "`tortoise/pipeline .py:16`", 1
         ),
         "not a recognised citation",
     ),
     (
         "a citation carrying a trailing space",
         lambda t: t.replace(
-            "`tortoise/pipeline.py:16`", "`tortoise/pipeline.py:16 `", 1
+            "`tortoise/pipeline.py:16-17`", "`tortoise/pipeline.py:16 `", 1
         ),
         "not a recognised citation",
     ),
@@ -2125,14 +2221,14 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     (
         "a citation embedded in a longer span",
         lambda t: t.replace(
-            "`tortoise/pipeline.py:16`", "`tortoise/pipeline.py:999999 (dead)`", 1
+            "`tortoise/pipeline.py:16-17`", "`tortoise/pipeline.py:999999 (dead)`", 1
         ),
         "is not a recognised citation",
     ),
     (
         "an absolute-path citation outside the tree",
         lambda t: t.replace(
-            "`tortoise/pipeline.py:16`", "`/nope/tortoise/pipeline.py:16`", 1
+            "`tortoise/pipeline.py:16-17`", "`/nope/tortoise/pipeline.py:16`", 1
         ),
         "absolute path outside",
     ),
@@ -2167,7 +2263,7 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         # proves those rules still fire" rests on.
         "a citation written as a GitHub permalink",
         lambda t: t.replace(
-            "`tortoise/pipeline.py:16`", "`tortoise/pipeline.py#L999999`", 1
+            "`tortoise/pipeline.py:16-17`", "`tortoise/pipeline.py#L999999`", 1
         ),
         "not a recognised citation",
     ),
@@ -2178,7 +2274,7 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         # PASS while only the pytest boundary test noticed (found by review).
         "a citation separated from its line by a pipe",
         lambda t: t.replace(
-            "`tortoise/pipeline.py:16`", "`tortoise/pipeline.py|999999`", 1
+            "`tortoise/pipeline.py:16-17`", "`tortoise/pipeline.py|999999`", 1
         ),
         "not a recognised citation",
     ),
@@ -2189,7 +2285,7 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         # measured). This arm fails if the deferral ever goes back to per-span.
         "an exempt permalink hiding a refused one in the same span",
         lambda t: t.replace(
-            "`tortoise/pipeline.py:16`",
+            "`tortoise/pipeline.py:16-17`",
             "`~/.swarm/x.md#L1 and tortoise/pipeline.py#L999999`",
             1,
         ),
@@ -2218,7 +2314,7 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         # nothing real. This arm fails if `~` starts defusing the resolver again.
         "a `~`-rooted citation",
         lambda t: t.replace(
-            "`tortoise/pipeline.py:16`", "`~tortoise/pipeline.py:999999`", 1
+            "`tortoise/pipeline.py:16-17`", "`~tortoise/pipeline.py:999999`", 1
         ),
         "does not exist in the tree",
     ),
@@ -2283,7 +2379,7 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         # ever go back to `search()`'s first.
         "an exempt HTTP status hiding a citation to a missing file in the same span",
         lambda t: t.replace(
-            "`tortoise/pipeline.py:16`",
+            "`tortoise/pipeline.py:16-17`",
             "`docs/index.html 200 tortoise/no_such_module.py 16`",
             1,
         ),

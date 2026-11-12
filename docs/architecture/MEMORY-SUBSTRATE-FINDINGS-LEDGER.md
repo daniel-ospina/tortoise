@@ -78,7 +78,7 @@ Pattern 4 is the one the review got **most wrong when it was written**, and the
 correction is worth keeping visible: the review's initial instinct was to treat
 "fixed vs flexible" as an unresolved *argument*. It was instead an unresolved
 *design*, and the two-tier answer (canonical meanings in core, tenant-owned
-labels/order in the graph) is what shipped — `tortoise/pipeline.py:16` is that
+labels/order in the graph) is what shipped — `tortoise/pipeline.py:4-14` is that
 decision in code. See correction **(e)**.
 
 ---
@@ -95,7 +95,7 @@ this re-cut keeps them *and* records which ones the tree has since overtaken.
 | **b** | `CommitEvent` has 8 fields; `Point` has 15; `Entity` has 3 | Counts corrected to 10 / 15 / 3 — the prep #1418/#1533 additions were missed | **DRIFTED** — `Entity` 3 ✓, `CommitEvent` 10 ✓, **`Point` is now 18** (+`id`, `mentions`, `span_start`/`span_end` moved on) | `.venv/bin/python -c "from tortoise.commit_schema import Entity, Point, CommitEvent; print([len(c.model_fields) for c in (Entity, Point, CommitEvent)])"` → `[3, 18, 10]`; classes at `tortoise/commit_schema.py:395`, `:792`, `:1002` (the old `:429-438` cite now lands in `ParticipantSlots`) |
 | **c** | "Props are not durable by construction" | **Too broad.** The journal carries them; only the **Point** fold dropped them. Subject/Object/Event/Document/Source extras survived rebuild. | **SUPERSEDED-BY-FIX** — the Point fold now persists and restores extras, so *no* label drops them | `tortoise/projection/entities.py:2679` (`_upsert_point_props`) calls `_persist_extra_props` at `:3162` and returns `persisted_extra_keys`; #2795 CLOSED |
 | **d** | Route all doors through `sdk.ingest` and the loss class cannot recur | **`sdk.ingest` itself lost Point extras on replay** — the canonical bundle contract inherited #2795 | **SUPERSEDED-BY-FIX** — replay restores Point extras; `content_hash` is now recomputed from replayed content, so a rebuild is self-healing | `tortoise/sdk.py:36215-36218` states the rebuild case is "NOT … any more — `projection/entities.py::_upsert_point_props` (#2795 D2) now RECOMPUTES `content_hash`"; pin `tests/test_ingest_rebuild_durability.py` |
-| **e** | The terminal outcome set `{won, lost, withdrawn, completed}` is fine | **Narrowed** — split the **outcome axis** from the **completion axis** (#2826 C9/C14) | **ADOPTED** — both axes are shipped properties, and the code names the separation | `tortoise/pipeline.py:16` carries the props (`pipelineStageId` / `pipelineSlot` / `pipelineOutcome`), and `:27` is where the separation #2826's C14 recommends is stated; `:66` holds both axes in `STAGE_PROPS`; #2792 CLOSED COMPLETED 2026-10-15 |
+| **e** | The terminal outcome set `{won, lost, withdrawn, completed}` is fine | **Narrowed** — split the **outcome axis** from the **completion axis** (#2826 C9/C14) | **ADOPTED** — both axes are shipped properties, and the code names the separation | `tortoise/pipeline.py:16-17` carries the props (`pipelineStageId` / `pipelineSlot` / `pipelineOutcome`), and `:27` is where the separation #2826's C14 recommends is stated; `:66` holds both axes in `STAGE_PROPS`; #2792 CLOSED COMPLETED 2026-10-15 |
 | **f** | `tortoise/semantic_extractor.py` exists | **False** — verified absent | **STILL-TRUE** | `ls tortoise/semantic_extractor.py` → *No such file or directory* at `f70d884b7` |
 | **g** | #2795's prop loss is a **journal** gap | **False.** The journal carries the full snapshot; the loss was the **replay fold** (`_upsert_point_props` never called `_persist_extra_props`). Fix = one code path. | **SUPERSEDED-BY-FIX** — that one code path was added | same evidence as **(c)**: `tortoise/projection/entities.py:3162` |
 | **h** | The write-path benchmark exercises the **eval** lane, so it cannot see this class | **False.** It runs the **product** lane (`sdk.capture_session` → `_extract_session_v2`); it was blind because its graded vocabulary never asserted those props exist | **STILL-TRUE** (citation relocated — the 2026-09-10 `runner.py` line citation no longer resolves at this head) | `tests/eval/write_path/test_write_path_relation_lane.py:9` ("**capture commit** (`sdk.capture_session` → `_extract_session_v2`)") |
@@ -378,16 +378,20 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   **complement** list ("still read as written"), which was joined across sentences and compared as a
   set-union: a second complement sentence could assert a STILL-TRUE letter the real sentence does not,
   so the page could say *seven of the twelve no longer read as written* beside *only `**(a)**` still
-  read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). Both arms count only a
-  sentence that carries a **letter LIST** of two or more single letters — comma-joined
-  (`b, c, d`) or a pair (`b and c`), each letter written bare, bold, code or italic, every form
-  bounded to the twelve letters §3's table can name. Markup around the PARENTHESES does not
-  decide candidacy (`**(c)**` and `(c)` are the same item), which is what stops a `**` from being
-  the difference between a red and a green; the two paren-less spellings this page and repo also use
-  (code, italic) are read as items too. The letter EXTRACTOR additionally reads a member its own
-  separator introduces (`and`, `or`, `also`, `plus`), which is what reaches `… **(j)**, also c`.
-  A single parenthetical letter in prose is **not** a list — `row (c) still read as written` is a
-  sentence, not a tally — and a
+  read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). Both arms read every
+  letter a sentence **names as a list member**, and they match each other exactly because one
+  extractor serves both: a **marked** letter (`**(a)**`, `**a**`, `` `a` ``, `*a*`, `(a)`) is always a
+  member, and a **bare** letter counts only inside a run of two or more joined by a separator
+  (comma, `and`, `or`, `also`, `plus`, `&`), so `a, f`, `a and f`, `a, also f` and `… **(j)**, also c`
+  all read while `a rule of thumb` does not — a bare letter cued by its separator ALONE red the arm
+  on ordinary prose (measured, `, a rule of thumb` returned rc 1 naming the wrong set). The four
+  emphasis families are normalised to one grammar before matching, because the difference between
+  red and green must never be the markup: `_a_` / `__a__` (underscore), `<i>` / `<em>` / `<b>` /
+  `<strong>` (HTML), a code span with spaces inside its ticks, and any casing (`**(A)**`) are the
+  same claim as `**(a)**`, and each was measured CLEAN at `59091ce255` before the normaliser
+  existed. Every form is bounded to the twelve letters §3's table can name, and
+  a single parenthetical letter in prose is still **not** a list — `row (c) still read as written`
+  is a sentence, not a tally — and a
   sentence that merely QUOTES the phrase has no list to disagree with the table, so counting it reded
   a clarifying edit (measured) — the false-accusation class the neighbouring citation arms exist to
   avoid. Requiring **markup** rather than a list was itself fail-open, measured: a de-bolded stale
