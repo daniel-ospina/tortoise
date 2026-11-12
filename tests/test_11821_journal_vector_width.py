@@ -1481,19 +1481,6 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     with pytest.raises(ValueError, match="not an exact `str`"):
         api.add_event("ev-key", "something_happened",
                       **{_K("sourceVersionTransit"): {"src:1": "x"}})
-    # ⛔ AND `add_point`'s OWN door arm matches by VALUE **and exact TYPE** too
-    # (#11996 review round 14, measured). Its `_forged_keys` test used
-    # `set(fields) & _forged_keys`, a HASH lookup, so a `str` SUBCLASS naming a key
-    # the funnel leaves to this door — the identity triple — was not refused HERE
-    # (nothing refuses it by value on the record channel either: a creating `_point`
-    # legitimately stamps it). The write still failed closed through `_emit`'s
-    # non-`str`-key arm, so this row pins the MESSAGE rather than the refusal: the
-    # door owns it, and the caller therefore reads the reason for the door it
-    # actually used. Falsifier: restore `sorted(set(fields) & _forged_keys)` and
-    # this row reads `_emit`'s carrier message instead (measured).
-    with pytest.raises(ValueError, match="server-managed journal fields"):
-        api.add_point("p-carrier", provenance("src:1", [0, 3], "q"),
-                      **{_K("embedding_model"): "forged"})
     # ⛔ AND THE RECORD CHANNEL IS NOT EXEMPT FROM THE TRANSIT REFUSAL UNLESS THE
     # DOOR SAYS IT MINTED IT (#11996 review round 9, measured). Scoping the
     # exemption by CHANNEL NAME left it forgeable by any direct `_emit` caller,
@@ -2436,6 +2423,36 @@ def test_a_declared_width_the_seam_never_mints_is_refused_not_ignored(tmp_path):
         "a record that declares no width must land without the guard adding "
         "one — `embedding_width` is the seam's to mint, not this guard's")
 
+    # 5. ⛔ THE MERGED VIEW DECLARES THE WIDTH, not the record alone (#11996
+    #    review round 15, measured). The READER takes `{**ev, **ev["point"]}`,
+    #    so when the ENVELOPE carries the width (which is where the seam mints
+    #    it) and the RECORD carries the vector, reading only the record's
+    #    declaration abstained on the pair the fold actually sees:
+    #
+    #      _emit("PointAdded", {"id": "h", "content": "c",
+    #                           "embedding": [0.1234567890123, 1/3]},
+    #            embedding=[0.5, 0.25])   -> journalled `f32` over the OFF-GRID
+    #                                        record vector the fold then reads
+    #
+    #    Falsifier: restore `declared = record.get(KEY)` and this row lands.
+    before = len([ln for ln in
+                  journal.read_text(encoding="utf-8").splitlines() if ln.strip()])
+    with pytest.raises(ValueError, match="is not what the values say"):
+        api._emit("PointAdded", {"id": "p-merged-lie", "content": "c",
+                                 "embedding": [0.1234567890123, 1 / 3]},
+                  embedding=[0.5, 0.25])
+    assert len([ln for ln in
+                journal.read_text(encoding="utf-8").splitlines() if ln.strip()]) == before, (
+        "the merged-pair refusal must precede the append")
+    # …and the TRUTHFUL version of the same shape still lands, so the row above
+    # is a refusal of the lie rather than of the shape.
+    api._emit("PointAdded", {"id": "p-merged-truth", "content": "c",
+                             "embedding": [0.5, 0.25]},
+              embedding=[0.25, 0.5])
+    merged = [json.loads(ln) for ln in
+              journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert merged[-1]["point"]["id"] == "p-merged-truth"
+
 
 def test_a_declared_width_reads_a_one_shot_iterable_exactly_once(tmp_path):
     """#11996 round 14: the guard's seam probe must not EAT the caller's vector.
@@ -2455,11 +2472,14 @@ def test_a_declared_width_reads_a_one_shot_iterable_exactly_once(tmp_path):
     probes reading `values`) and this row reds with that belt refusal, because the
     stamp consumed the generator before the belt ran (measured).
 
-    ⛔ It is the KEYWORD channel's vector, deliberately: the stamp covers the
-    envelope's top-level `embedding` only, so a RECORD-carried generator could
-    never have landed (it dies at the JSON encoder either way) and is not pinned
-    here. The residual — a non-`list`/`tuple` iterable of a type this arm cannot
-    enumerate still rides the seam arms — is unchanged and is NOT what this pins.
+    ⛔ It is the KEYWORD channel's vector, deliberately. A RECORD-carried
+    generator is not pinned here: it cannot land on any tree (`main` raised
+    `TypeError` at the encoder; this head refuses it in the post-stamp belt with
+    "the seam can only DROP", measured — the pre-stamp call materialises the
+    record's iterator and does not write it back, so the belt re-reads it empty),
+    so there is no behaviour to pin. The residual — a non-`list`/`tuple` iterable
+    of a type this arm cannot enumerate still rides the seam arms — is unchanged
+    and is NOT what this row pins.
     """
     from tortoise.api import EventAPI
     from tortoise.log import EventLog

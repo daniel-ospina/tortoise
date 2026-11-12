@@ -189,11 +189,11 @@ _UNCALLERABLE_RECORD_KEYS = frozenset({
 })
 
 #: The record facts a DOOR MINTS into the positional record it hands `_emit`
-#: — the ONE key that is not simply refused on this channel (#11996 review
-#: rounds 9 and 14, each measured). `_emit` cannot tell a record `add_point`
-#: built from one a caller built: both arrive as `record[0]`. Scoping the
-#: exemption by CHANNEL therefore made it forgeable by any direct `_emit`
-#: caller:
+#: — the one EXEMPTION FROM `_UNCALLERABLE_RECORD_KEYS` above, and it is neither
+#: a channel name nor a signal from the door (#11996 review rounds 9 and 15,
+#: each measured). `_emit` cannot tell a record `add_point` built from one a
+#: caller built: both arrive as `record[0]`. Scoping the exemption by CHANNEL
+#: therefore made it forgeable by any direct `_emit` caller:
 #:
 #:     _emit("PointAdded", {"id": "p1", "content": "c",
 #:                          "sourceVersionTransit": [["src:1", "h-forged"]]})
@@ -695,17 +695,30 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         from .embeddings import _is_shortest_f32_text, shortest_float32_vector
     except Exception:  # noqa: BLE001, RUF100 — #5148
         return
-    # ⛔ ABSENT IS NOT "PRESENT AND `None`" (#11996 review round 14, measured):
+    # ⛔ THE MERGED VIEW DECLARES THE WIDTH, not the record alone (#11996 review
+    # round 15, measured). The READER takes `{**ev, **ev["point"]}` (see the
+    # "merged view" note below), so when the width rides the ENVELOPE — which is
+    # what `stamp_journal_embedding` mints — and the vector rides the RECORD,
+    # reading only `record.get(KEY)` abstained on the pair the fold actually
+    # reads, and a caller could journal `width: f32` over an off-grid record
+    # vector:
+    #
+    #     _emit("PointAdded", {"id": "h", "content": "c",
+    #                          "embedding": [0.1234567890123, 1/3]},
+    #           embedding=[0.5, 0.25])        # -> the envelope's width is `f32`
+    #       -> LANDED, and `_norm` reads `f32` over [0.1234567890123, 0.3333…]
+    #
+    # ⛔ AND ABSENT IS NOT "PRESENT AND `None`" (#11996 review round 14):
     # `record.get(_KEY)` read an explicit `embedding_width: None` as no
     # declaration at all, so the one value that is neither of the two widths got
     # past the closed enumeration below and was journalled as
     # `"embedding_width": null` — a durable width the seam can never mint (it
     # POPS the key when there is no vector, and `stamp_journal_embedding` writes
-    # only `f32` / `f64`). Only a MISSING key is the legacy shape this guard has
-    # to keep accepting.
-    if _KEY not in record:
+    # only `f32` / `f64`). Only a MISSING key on BOTH channels is the legacy
+    # shape this guard has to keep accepting.
+    if _KEY not in record and _KEY not in payload:
         return
-    declared = record[_KEY]
+    declared = record.get(_KEY, payload.get(_KEY))
     # ⛔ THE SEAM'S OWN ENUMERATION (#11948 review): a width the seam cannot mint
     # is not a claim to verify — it is a claim nothing here can produce, so it
     # is refused rather than carried into the journal. The `isinstance` arm is a
@@ -1770,16 +1783,13 @@ class EventAPI:
         BEFORE the arm that swallows I/O, wherever the gate is PURE enough to
         run here: the record-shaped, envelope, marker, money, percent and
         uncallerable-record-fact families, and the invisible-character half of
-        the kind gate. SIX of those seven items arrived the same way — a gate
-        `_emit` got and this door did not: the five older families and the kind
-        gate's invisible half (the block below finds it `one family over AGAIN`).
-        So the list is checked against `_emit` rather than trusted. The SEVENTH,
-        the uncallerable record facts, is a different shape: #11948 wired it into
-        this very call, so there was never a state in which `_emit` was armed and
-        this door was not. (This paragraph said "those FIVE" over its own list of
-        seven until #11996 review round 14 — the count is the very staleness it
-        exists to prevent, so the correction is left visible rather than
-        overwritten.)
+        the kind gate. Every one of those arrived the same way — a gate `_emit`
+        got and this door did not — EXCEPT the uncallerable record facts, which
+        are a different shape: #11948 wired them into this very call, so there
+        was never a state in which `_emit` was armed and this door was not. (This
+        paragraph used to count "FIVE" over its own list of seven; it is written
+        without a count now, because both earlier counts disagreed with the list
+        they sat under.)
 
         ⛔ THE APPROVAL half of the kind gate is the ONE exception, and it is
         not a hole: it needs a whole-graph READ, and that read RAISES on a
@@ -2074,15 +2084,16 @@ class EventAPI:
             # caller value is refused at this seam too.
             "evidence_fold",
         }
-        # ⛔ `_named_from_caller`, NOT a hash membership test (#11996 review
-        # round 14): `set(fields) & _forged_keys` misses a `str` SUBCLASS whose
-        # `__hash__` differs from `str`'s, so a carrier the caller passes is
-        # journalled under the name it claims. Safe here today only because
-        # `_emit`'s positional-record arm catches the carrier downstream — and
-        # a key added to this set but not to `_UNCALLERABLE_RECORD_KEYS` (the
-        # identity triple is exactly such a key) would be a live forge through
-        # this door with no second line of defence.
-        _forged = _named_from_caller(fields, _forged_keys)
+        # ⛔ `_forged_keys` IS DELIBERATELY LEFT AS A HASH TEST (#11996 review
+        # round 15). It was converted to `_named_from_caller` and REVERTED: a
+        # carrier (a `str` SUBCLASS whose `__hash__` differs) is refused by
+        # `_refuse_non_str_keys` on `_emit`'s record channel, name-independently
+        # and before every family guard, so this arm cannot be the only line of
+        # defence and does not need to be. Converting it bought nothing and COST
+        # the diagnosis: `_named_from_caller` reports every non-`str` key as one
+        # of THIS set's, so `add_point(**{K("myCustomProp"): 1})` was told that
+        # `myCustomProp` is a server-managed journal field, which is false.
+        _forged = sorted(set(fields) & _forged_keys)
         if _forged:
             raise ValueError(
                 f"{_forged} are server-managed journal fields (embedding "
