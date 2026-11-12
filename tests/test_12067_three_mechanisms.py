@@ -1522,3 +1522,46 @@ def test_a_mitigation_targets_a_COHERENCE_bridge_too(sdk):
     assert len(impostor) == 1, (
         "a MITIGATES declaring IMPL attached to a coherence bridge — the probe "
         f"is not reading the declared target mechanism: {impostor}")
+
+
+def test_the_PROMOTION_door_reports_a_refused_temporal_NAND(sdk):
+    """⛔ The promotion door's temporal NAND is the FIFTH swallow (review round 9,
+    P2 — measured).
+
+    `promote_point` wires a temporal NAND to its live prior and caught EVERY
+    `ValueError` as a lost race, so a pair that already carried another mechanism
+    dropped the wire and returned `promoted: True` with no `temporal_wired` and no
+    refusal field — indistinguishable from a deletion race, and the same
+    fail-open SKIP the `supersede_skipped` arm above exists for (#5365: "the
+    caller must be able to SEE that, not just find a log line").
+
+    The pair here carries a plain `IMPL` (not the `alreadyDecided` cross-guard
+    shape, which legitimately skips), so the closure is what refuses the NAND.
+    """
+    prior = sdk.create_point("decision", "we decided to use port 16379",
+                             status="live")["id"]
+    cid = sdk.create_point("decision", "we decided to revert port 16379",
+                           status="draft")["id"]
+    # The IMPL is written WITHOUT promoting its source, so the candidate stays a
+    # draft and `promote_point` still accepts it.
+    sdk.create_operator("IMPL", cid, [prior], promote_source=False)
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        # A MERGE verdict (not a replacement): the promotion wires a temporal
+        # NAND instead of superseding, which is the arm that swallowed the
+        # closure refusal.
+        "SET n.temporal_candidate = true, n.temporal_reviewed = 'merge', "
+        "n.temporal_target_ids = [$prior]",
+        params={"id": cid, "prior": prior})
+
+    res = sdk.promote_point(cid)
+    assert res["promoted"] is True, res
+    assert "temporal_wired" not in res, res
+    assert res.get("temporal_nand_refused_count") == 1, res
+    assert res["temporal_nand_refused"][0]["target"] == prior, res
+    # The NAND really was not written.
+    nand = sdk._get_proj().g.query(
+        "MATCH (:Point {id:$c})-[:NAND]->(:Point {id:$p}) RETURN count(*)",
+        params={"c": cid, "p": prior}).result_set[0][0]
+    assert nand == 0, nand
+

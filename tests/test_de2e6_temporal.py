@@ -332,15 +332,24 @@ class TestDe2e6ReviewFixes:
         exactly ONE NAND operator (was: wired twice, doubling the EP
         penalty).
 
-        ⛔ #12067 UPDATE, and the reason the old expectation is now false: the
+        ⛔ #12067 UPDATE, and the reason the old expectation is now false: this
         pair already carries an IMPL from the SAME mining pass, and the CLOSED
-        MECHANISM SET refuses a second mechanism on one pair — so the NAND is not
-        written at all (measured at the PR head: 0 NAND, 1 IMPL, 1 failed here).
-        The "wired twice" defect is now structurally impossible rather than
-        deduped, which is a STRONGER guarantee for this test's own concern, and
-        the refusal is named in the mining report instead of unwinding as a bare
-        `ValueError` into a logged traceback. Asserted as the truth: the pair
-        carries exactly ONE mechanism, and the drop is reported.
+        MECHANISM SET refuses a DIFFERENT mechanism on one pair — so the NAND is
+        not written at all (measured: 0 NAND, 1 IMPL) and the refusal is NAMED in
+        the mining report (`temporal_nand_refused`) instead of escaping
+        `_temporal_wire` into `mine`'s `except Exception`, which used to abandon
+        the whole temporal pass for the batch and zero every temporal key.
+
+        ⛔ WHAT THIS TEST DOES **NOT** PROVE, stated so a later lane cannot read
+        it as cover (review round 9, P3 — measured): the closure refuses only a
+        DIFFERENT mechanism on the pair (`_mechanism_conflicts_for_pairs` skips
+        `otype == mechanism`), so a SECOND NAND over one pair is still accepted.
+        The "wired twice" defect this test is titled for is therefore still
+        prevented by `wired_pairs` in `_temporal_wire`, NOT by the closure — and
+        this fixture cannot tell them apart, because the IMPL is already on the
+        pair, so both arms produce 0 NAND either way. Do not delete
+        `wired_pairs` on the strength of this test; the same-mechanism duplicate
+        needs its own pin.
         """
         report = _mine(
             sdk,

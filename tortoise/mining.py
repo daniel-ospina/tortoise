@@ -589,14 +589,17 @@ class ConversationMiner:
                         # ⛔ #12067: the pair may ALREADY carry a mechanism (an IMPL
                         # from the same mining pass, or a pre-closure graph), and
                         # the closed set refuses a second one. The refusal is a
-                        # `ValueError` — before this arm it unwound out of
-                        # `mine_conversation` (measured: the call site is bare, and
-                        # the failure surfaced only as a logged traceback while the
-                        # report still said `wired_nand: 0`), which reads exactly
-                        # like "there was no contradiction to wire". Counted and
-                        # named instead, so the drop is visible in the report; a
-                        # non-closure `ValueError` still propagates exactly as
-                        # before.
+                        # `ValueError`, and before this arm it escaped
+                        # `_temporal_wire` into `mine`'s own `except Exception`
+                        # (mining.py:344-348), so the WHOLE temporal pass was
+                        # abandoned for that batch: every remaining point lost its
+                        # validFrom stamp and its candidate queueing, and EVERY
+                        # temporal key in the report read 0 (`temporal_wired`,
+                        # `temporal_candidates`, `temporal_replacements`) — which
+                        # reads exactly like "there was no contradiction to wire".
+                        # Counted and named instead, so the drop is visible in the
+                        # report; a non-closure `ValueError` still propagates
+                        # exactly as before.
                         try:
                             sdk.create_operator("NAND", pid, [prior_id],
                                                 promote_source=False)

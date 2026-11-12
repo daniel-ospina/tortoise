@@ -23457,6 +23457,10 @@ class TortoiseSDK:
         # #5365: unapplied supersessions during this promotion — see the
         # temporal_replacement loop below.
         supersede_skipped: list[dict] = []
+        # #12067: temporal NANDs the CLOSED MECHANISM SET refused — the pair
+        # already carried another mechanism, so the wire was dropped. Named in
+        # the result below rather than left in a log line (see the `except`).
+        temporal_nand_refused: list[dict] = []
         temporal_targets = point.get("temporal_target_ids") or []
         if point.get("temporal_target_id") and point.get("temporal_target_id") not in temporal_targets:
             temporal_targets.append(point["temporal_target_id"])
@@ -23542,6 +23546,17 @@ class TortoiseSDK:
                     _logger.warning(
                         "promote_point: NAND wiring to %s failed for %s: %s",
                         tgt, point_id, exc)
+                    # ⛔ EXCEPT THE CLOSED-SET REFUSAL, WHICH IS NOT A LOST
+                    # RACE. The point is live and the temporal NAND was
+                    # DROPPED, so a caller reading only `temporal_wired` cannot
+                    # tell it from a race — the same fail-open SKIP the
+                    # `supersede_skipped` arm eight lines above exists for
+                    # (#5365: "the caller must be able to SEE that, not just
+                    # find a log line"). Reported as a counted, listed field;
+                    # the promotion still succeeds.
+                    if "mechanism set is CLOSED" in str(exc):
+                        temporal_nand_refused.append({"candidate": point_id,
+                                                      "target": tgt})
 
         # R16 zombie-operator prevention: promote incident draft operators
         # once ALL their endpoint Points are live.
@@ -23565,6 +23580,14 @@ class TortoiseSDK:
             # hidden).
             result["supersede_skipped"] = supersede_skipped
             result["supersede_skipped_count"] = len(supersede_skipped)
+        if temporal_nand_refused:
+            # #12067: the temporal NAND the CLOSED MECHANISM SET refused (the
+            # pair already carries another mechanism). Same contract as
+            # `supersede_skipped` above and the same key name the mining report
+            # uses, so a caller reading `temporal_wired` absent can tell a drop
+            # from a race; the promotion itself stands (#1080).
+            result["temporal_nand_refused"] = temporal_nand_refused
+            result["temporal_nand_refused_count"] = len(temporal_nand_refused)
         if race_detected:
             result["race_detected"] = True
             result["race_warning"] = (
