@@ -449,8 +449,11 @@ same step with the same tail is the investigation.
   - the RUNNING CENSUS is unwitnessed — every run counted in `pr_running` was unmeasured,
     because the jobs probe could not read it or the probe budget did not reach it (#12037:
     frozen `in_progress` runs GitHub has stopped driving, whose jobs are all `completed`). This
-    shows on the state line as `census=unmeasured`, and its lever is repairing those runs or
-    raising `--max-job-probes`, **NOT `--max-pages`**.
+    shows on the state line as `census=unmeasured`. Its lever depends on WHY those runs went
+    unmeasured, and the reason line says which: runs the budget never **reached** are reached by
+    raising `--max-job-probes`; runs whose **jobs read itself failed** need the reading retried,
+    since a larger budget only probes more runs that fail the same way; and runs GitHub has
+    stopped driving are repaired on the API side. It is **NOT `--max-pages`**.
 
   In every case an unmeasured dimension is not a measured-healthy one.
 - **It does not reduce jobs per run.** A `python-ci` run is 22 jobs (max 30) by construction; with
