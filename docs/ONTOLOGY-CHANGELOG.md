@@ -128,7 +128,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > `archived` **and** `superseded` both leave retrieval and belief (`TERMINAL_STATUS_VALUES` → `TERMINAL_EXCLUDED_STATUSES`), so a
 > third terminal word changes nothing a reader or a retriever would act on. ⚠️ That argument does not rest on terminal being
 > frozen: it is not — `update_entity`'s Point arms carry no lifecycle guard, so a `retracted` Point can be flipped to `live`
-> (`docs/ONTOLOGY.md:1177`, tracked as #9649), and the `:Object` write path carries no status vocabulary guard at all, so an
+> (`docs/ONTOLOGY.md:1177`, `#9649` — OPEN, and reopened after a docs-only PR's merge text *mentioned* closing it), and the `:Object` write path carries no status vocabulary guard at all, so an
 > `archived` Object can be given `status='live'` (`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md:1076`, tracked as #10371 — a
 > Point-arm fix cannot close it). Policy B therefore stays
 > **unimplemented**, and when it is built it needs a word *then*, with a producer and a revival path that respects both — its own
