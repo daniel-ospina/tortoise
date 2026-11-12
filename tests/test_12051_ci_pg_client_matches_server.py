@@ -56,7 +56,7 @@ JOB = "test-record-postgres"
 #: extension (#11642), so a plain `postgres:NN` pin cannot substitute for one of
 #: these — but reading BOTH forms keeps this guard's message about the major
 #: rather than about the spelling.
-IMAGE_RE = re.compile(r":(?:pg)?(\d+)$")
+IMAGE_RE = re.compile(r":(?:pg)?(\d+)(?:@sha256:[0-9a-fA-F]{64})?$")
 
 #: The INSTALL line specifically, ANCHORED at its own line. Two facts pulled it
 #: apart from a mere mention of the package: the precondition's probe above it
@@ -68,8 +68,21 @@ IMAGE_RE = re.compile(r":(?:pg)?(\d+)$")
 #: and failed all six assertions with "a second installer" over a step that
 #: installs nothing).
 CLIENT_INSTALL_RE = re.compile(
-    r"^[ \t]*(?:sudo[ \t]+)?apt(?:-get)?[ \t]+install[^\n]*?"
+    # `sudo` may carry its OWN flags (`sudo -E apt-get install …`), and a line
+    # continued with `\` is the same command — `_code_only` joins continuations,
+    # so only the flag cluster needs spelling here (MEASURED, review of
+    # `3726d2f400`: both spellings reported "found 0 installers" and red 5 of 6).
+    r"^[ \t]*(?:sudo[ \t]+(?:-[A-Za-z]+[ \t]+)*)?apt(?:-get)?[ \t]+install[^\n]*?"
     r"\bpostgresql-client-(?P<major>\d+)\b",
+    re.MULTILINE,
+)
+
+#: Where the INSTALL COMMAND STARTS, for truncating the executed prefix. Separate
+#: from `CLIENT_INSTALL_RE` because a continued command puts the package on its
+#: SECOND line — the prefix must stop at the command, and the raw lines here are
+#: never joined (they are executed verbatim).
+_INSTALL_CMD_RE = re.compile(
+    r"^[ \t]*(?:sudo[ \t]+(?:-[A-Za-z]+[ \t]+)*)?apt(?:-get)?[ \t]+install\b",
     re.MULTILINE,
 )
 
@@ -83,6 +96,23 @@ CLIENT_INSTALL_RE = re.compile(
 #: can produce. Anchoring at the start also refuses a spoof in a message string
 #: (`echo "::error::… exit 1 …"` is preceded by a space, not a separator).
 _EXIT_1_RE = re.compile(r"(?:^|;|&&|\|\||\{|\()[ \t]*exit[ \t]+1\b", re.MULTILINE)
+
+
+def _has_exit_1(text: str) -> bool:
+    """`_EXIT_1_RE`, refusing a hit whose line prefix sits INSIDE a quote.
+
+    A separator inside a message string is not a statement boundary: without this,
+    `echo "::error::major mismatch; exit 1"` answered as a fail action and the
+    version branch — which no test executes — stayed green with no fail action at
+    all (MEASURED, review of `3726d2f400`). Quote parity per line is the whole
+    test; the residual is an escaped `\\"`, which no step in this workflow uses.
+    """
+    for line in text.splitlines():
+        for match in _EXIT_1_RE.finditer(line):
+            prefix = line[: match.start()]
+            if prefix.count('"') % 2 == 0 and prefix.count("'") % 2 == 0:
+                return True
+    return False
 
 #: The `$GITHUB_PATH` write as ONE unit: the versioned dir IS the value written.
 #: `echo <dir> >> "$GITHUB_PATH"` — read the major from the
@@ -204,9 +234,16 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     _, pin = _pin_step(steps)
     text = _run_text(pin)
 
-    assert "if" not in pin, (
-        f"the pin step is CONDITIONAL (`if: {pin.get('if')!r}`): the client may "
-        "never be pinned, and every assertion below would still be green over a "
+    # The pin may not be SWITCHED OFF. Normalised and read as a VALUE, like the
+    # job's own `if:`: `if: ${{ true }}` / `if: always()` are conditions that
+    # ALWAYS run the step (strictly safer), so refusing the bare KEY was the same
+    # spelling over-refusal this file keeps removing (MEASURED, review of
+    # `3726d2f400`). ⚠️ STATED LIMIT: an expression that evaluates false is out of
+    # a text guard's reach; the constant spellings are caught here.
+    pin_if = re.sub(r"^\s*\$\{\{\s*|\s*\}\}\s*$", "", str(pin.get("if")))
+    assert pin_if.strip().lower() not in ("false", "0"), (
+        f"the pin step is switched OFF (`if: {pin.get('if')!r}`): the client is "
+        "never pinned, and every assertion below would still be green over a "
         "step that never ran"
     )
     assert pin.get("continue-on-error") in (None, False), (
@@ -304,7 +341,7 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
         "artifact. Read from the BRANCH, not the step: the package precondition "
         "above it carries a `::error::` of its own"
     )
-    assert _EXIT_1_RE.search(branch), (
+    assert _has_exit_1(branch), (
         "the version branch does not `exit 1`: a named error with no exit status "
         "lets the mismatch carry on into the record leg, which is the silent "
         "unrestorable artifact #12051 exists to prevent. Read at the STATEMENT's "
@@ -371,9 +408,16 @@ _COMMENT_ONLY_RE = re.compile(r"^\s*#")
 
 
 def _code_only(text: str) -> str:
-    """The step's shell with comment-only lines dropped."""
+    """The step's shell with comment-only lines dropped and continuations joined.
+
+    A line continued with `\\` is the SAME command, so `sudo apt-get install -y \\\n
+    --no-install-recommends postgresql-client-16` must read as one install line —
+    joining here keeps every matcher spelling-independent instead of teaching each
+    one about continuations (MEASURED, review of `3726d2f400`).
+    """
+    joined = text.replace("\\\n", " ")
     return "\n".join(
-        line for line in text.splitlines() if not _COMMENT_ONLY_RE.match(line)
+        line for line in joined.splitlines() if not _COMMENT_ONLY_RE.match(line)
     )
 
 
@@ -401,12 +445,16 @@ _IF_PRECONDITION_RE = re.compile(
 _OR_PRECONDITION_RE = re.compile(
     r"(?:sudo\s+)?apt-cache\s+(?:show|policy)\s+['\"]?"
     r"postgresql-client-(?P<major>\d+)['\"]?[^|\n]*\|\|\s*[({][ \t]*\n"
-    # The failing branch runs to the GROUP's OWN closing line, never to a
+    # The failing branch runs to the FIRST bare `}`/`)` line, never to a
     # line-count window: a 5-line window truncated the shipped body (7 lines deep)
     # and reported "does not `exit 1`" over a group that exits 1 (MEASURED, review
     # of `7dc1da573a`). The closer is LINE-ANCHORED, so the `{…}`/`(…)` characters
     # INSIDE the shipped message still cannot close it early — which is what the
-    # window was protecting against.
+    # window was protecting against. ⚠️ STATED LIMIT: a nested group inside the
+    # failing branch, or a message line that is a bare bracket, closes the body
+    # early and reds as "does not `exit 1`" over a group that exits 1 (MEASURED,
+    # review of `3726d2f400`). Counting nesting needs a shell parser; refusing the
+    # shape is the wrong direction (it is armed), so the limit is named instead.
     r"(?P<body>(?:(?!^[ \t]*[})][ \t]*(?:#.*)?$).)*)"
     r"^[ \t]*[})][ \t]*(?:#.*)?$",
     re.DOTALL | re.MULTILINE,
@@ -608,7 +656,7 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
         "the precondition fails silently: an absent package must be reported as "
         "its OWN named failure, not as the archive's opaque apt error"
     )
-    assert _EXIT_1_RE.search(body), (
+    assert _has_exit_1(body), (
         "the precondition does not `exit 1`, so a missing client would fall "
         "through to the install and surface as exit 100 again. Read at the "
         "STATEMENT's start, so a nested or commented fail action is still the "
@@ -634,7 +682,6 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
     # install-major claim by reading the PROBE (measured: switching the install
     # to -18 stayed green under the old read).
     install = _install_at
-    assert install, "the pin never runs `apt-get install postgresql-client-<major>`"
     assert int(install.group("major")) == server_major, (
         f"the pin INSTALLS postgresql-client-{install.group('major')} while the "
         f"servers are pg{server_major}: the versioned PATH prepend would then "
@@ -678,7 +725,7 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # `7dc1da573a`).
     masked = ["" if _COMMENT_ONLY_RE.match(line) else line for line in lines]
     install_at = next(
-        (i for i, line in enumerate(masked) if CLIENT_INSTALL_RE.search(line)),
+        (i for i, line in enumerate(masked) if _INSTALL_CMD_RE.search(line)),
         None,
     )
     assert install_at is not None, "the pin has no `apt-get install` line to run up to"
