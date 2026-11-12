@@ -2110,11 +2110,28 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str],
         # applies on the probe side. Counting it red'd a legitimate refactor (measured: a source
         # whose loop is otherwise unchanged plus `_ = [x for label in rows]` returned "RE-BOUND",
         # so the arm failed a writer that still derives every label it stores).
+        # ⛔ …BUT ONLY WHEN THAT COMPREHENSION DOES NOT ITSELF STORE (`#12020` round 6). Excluding
+        # every comprehension target was too wide and turned the false red into a fresh false GREEN:
+        # `_ = [proj.g.query(f"MATCH (n:{label}) SET n += $p") for label in ("C",)]` — the loop's
+        # only store, made from the comprehension's own LITERAL binding — held the row (measured),
+        # i.e. the labels came from `("C",)` and not from the constant at all. A comprehension that
+        # stores keeps its targets in `rebound`: same defect as `label = "Point"` as the loop body's
+        # first statement, one nesting level down. (The merge carrier counts too when this row is
+        # allowed to claim it — the exclusion is about WHICH binding the store is built from.)
+        storing_comprehensions = {
+            id(sub)
+            for b in body_nodes
+            for sub in _walk_own_scope(b)
+            if isinstance(sub, _COMPREHENSION_LIKE)
+            and (_STORE_CARRIER.search(_slice_own_scope(lines, sub))
+                 or (merge_store
+                     and _MERGE_STORE_CARRIER.search(_slice_own_scope(lines, sub))))
+        }
         comprehension_targets = {
             id(elt)
             for b in body_nodes
             for sub in _walk_own_scope(b)
-            if isinstance(sub, _COMPREHENSION_LIKE)
+            if isinstance(sub, _COMPREHENSION_LIKE) and id(sub) not in storing_comprehensions
             for gen in sub.generators
             for elt in ast.walk(gen.target)
         }
@@ -2373,6 +2390,17 @@ def test_the_iterated_arm_does_not_credit_a_store_in_a_NESTED_scope() -> None:
     assert comprehension is None, (
         "a comprehension's OWN target counted as a re-binding of the loop variable — `[x for label "
         "in rows]` binds in the comprehension's scope, so this reds correct code")
+
+    # ⛔ …but the exclusion must NOT reach a comprehension that itself STORES (`#12020` round 6).
+    # Excluding every comprehension target turned the false red above into a fresh false GREEN: here
+    # the loop's ONLY store is made from the comprehension's own LITERAL binding, so the labels come
+    # from `("C",)` and not from `_KEYS` at all — measured `None` (holds) with the too-wide version.
+    # It is the same defect as `label = "Point"` as the loop body's first statement, one level down.
+    shadowing_store = problem(
+        '        _ = [proj.g.query(f"MATCH (n:{label}) SET n += $p") for label in ("C",)]\n')
+    assert shadowing_store is not None, (
+        "a comprehension that STORES and rebinds the loop variable satisfies the iterated arm — the "
+        "store's label is the comprehension's own literal, not the iterated value")
 
 
 def test_the_iterated_arm_finds_its_loop_in_the_WRITERS_own_scope() -> None:
