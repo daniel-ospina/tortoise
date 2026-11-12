@@ -5978,7 +5978,17 @@ _MIRROR_CLAUSE_BREAK = re.compile(
 #: sibling control row reds. The cost is a disclosed residual: `no reading of
 #: the field comes from the mirror's value` is not refused.
 _MIRROR_NEGATED = re.compile(
-    r"\b(?:not|never|cannot|neither|nor)\b|\bno\s+longer\b|n['’]t\b",
+    r"\b(?:not|never|cannot|neither|nor)\b|\bno\s+longer\b|n['’]t\b"
+    # NEGATIVE PREPOSITIONS — a denial that sits inside the mention's own clause
+    # with no negator WORD. Without these, `…the pair mean instead of the
+    # mirror's value` and `…without the mirror's value` CERTIFIED (measured).
+    # `instead of` closes at zero corpus cost; `without` costs one deliberate
+    # false block (residual 1), which is the trade this guard is built on.
+    # `rather than` is NOT closable here: `_MIRROR_CLAUSE_BREAK` treats
+    # `\brather\b` as a break, so the mention is severed from the denial before
+    # this list is consulted (measured: adding `rather` changes nothing) — it is
+    # NAMED as residual 3d rather than left as a silent hole.
+    r"|\binstead\s+of\b|\bwithout\b",
     re.IGNORECASE,
 )
 
@@ -5994,7 +6004,10 @@ _MIRROR_NEGATED = re.compile(
 #: n.confidence mirrors` was never scanned while an unrelated singular
 #: possessive certified the sentence; `\bmirrors?\b` left `mirrored` /
 #: `mirroring` equally invisible to the scan, and the corpus writes those 39
-#: times across 38 sentences, so the wording is IN-TREE for the next claim
+#: times across 38 (module, sentence) pairs — 37 distinct sentence STRINGS, one
+#: of which appears in two modules (measured; both figures are right under their
+#: own convention, so the unit is stated rather than a figure "corrected") — so
+#: the wording is IN-TREE for the next claim
 #: sentence (measured: widening changes 0 corpus verdicts — every corpus claim
 #: sentence uses the singular possessive). A plural POSSESSIVE (`mirrors'
 #: value`) still matches no source shape; that false block is residual 1 and is
@@ -6146,7 +6159,10 @@ def _mirror_sources_the_value(sentence: str) -> bool:
          possessive, verb not adjacent), `the mirror …, which leads` (a
          relative clause, which cannot be bound without a parser), and `the
          mirror, which is not unreadable, leads the mean` (a negation of a
-         DIFFERENT word sitting in the mirror's clause). All are pinned as
+         DIFFERENT word sitting in the mirror's clause), and `…the mirror's
+         value, which applies without qualification` (same class — carrying
+         `without` to close a real inversion also refuses this correct
+         sentence). All are pinned as
          control rows so the behaviour is intentional rather than a surprise.
       2. FALSE PASS, unclosable by clause scope (pinned as a disclosure): a
          denial in a `_MIRROR_CLAUSE_BREAK`-separated clause that carries NO
@@ -6671,6 +6687,15 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             "value is neither the served one nor the pair's.",
             "Its confidence_mean IS the declared PRIOR mean — the mirror's "
             "value is no longer the served one.",
+            # NEGATIVE PREPOSITIONS: a denial with no negator WORD, sitting
+            # inside the mention's own clause. Both CERTIFIED before
+            # `_MIRROR_NEGATED` carried them (measured). `rather than` is the
+            # same class but is NOT closable this way — the clause-breaker
+            # severs it — and is residual 3d.
+            "Its confidence_mean IS the declared PRIOR mean — the field reads "
+            "the pair mean instead of the mirror's value.",
+            "Its confidence_mean IS the declared PRIOR mean — the field reads "
+            "the pair mean without the mirror's value.",
             # a denial on a BARE mention in an EARLIER clause, laundered by a
             # break: the construct-scoped scan saw nothing wrong, because the
             # denied mention carries no construct of its own (review, measured).
@@ -6791,7 +6816,16 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             # dodge the row above by inserting one ordinary noun (review,
             # measured).
             "its confidence_mean IS the declared PRIOR mean — the mirror "
-            "value, which leads the mean."):
+            "value, which leads the mean.",
+            # the price of carrying `without` (residual 1's class, measured):
+            # this sentence names the mirror as the source and negates a
+            # DIFFERENT word (`qualification`), so it is correct prose and is
+            # refused anyway. Accepted because `the pair mean without the
+            # mirror's value` is a real inversion in the identical position and
+            # the guard cannot tell them apart without a parser — err toward
+            # the red a human reads.
+            "its confidence_mean IS the declared PRIOR mean — or the mirror's "
+            "value, which applies without qualification."):
         assert _unqualified_claims_on(
             refused_by_design, _PRIOR_MEAN_CLAIM_PATTERNS), (
             "a source phrase outside `_MIRROR_SOURCE` is expected to be "
@@ -6971,8 +7005,12 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             # row would pin only itself.
             "Its confidence_mean IS the declared PRIOR mean — the pair leads "
             "rather than the mirror's value.",
-            "Its confidence_mean IS the declared PRIOR mean — the pair leads, "
-            "instead of the mirror's value.",
+            # ⛔ `instead of` was a row HERE until it was closed: it is now
+            # carried by `_MIRROR_NEGATED` and asserted REFUSED in the inversion
+            # block above. This disclosure says so rather than dropping the word
+            # silently, so a later narrowing of the denial list has to come back
+            # here deliberately. `unlike` / `whereas` stay: they are neither
+            # negators nor prepositions a list can own.
             "Its confidence_mean IS the declared PRIOR mean — unlike the "
             "mirror's value, the pair leads.",
             "Its confidence_mean IS the declared PRIOR mean — the pair leads "
