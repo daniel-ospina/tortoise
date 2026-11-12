@@ -203,14 +203,45 @@ RETIRED_HOST_ALLOWLIST = {
         "host. Deferred with invite-accept.html (#11764)."),
     "website/apps/dashboard/functions/blog/api/[[path]].ts": (
         1,
-        "#11767 item 4 — DEFAULT_BLOG_ORIGIN is still the retired host "
-        "(301 -> premiselabs.co/tortoise). Moving the blog origin is the blog "
-        "child's surface (#11764/#11765): the canonical blog lives at "
-        "premiselabs.co/blog and its Function routing moves with it."),
+        "#11767 item 4 — DEFAULT_BLOG_ORIGIN is still the retired host. ⛔ The "
+        "hop lands on premiselabs.co/blog (301, measured 2026-11-12) — the blog's "
+        "OWN canonical origin, NOT the premiselabs.co/tortoise product page an "
+        "earlier revision of this note named. Moving the origin is the blog "
+        "child's surface (#11764/#11765): premiselabs.co/blog is where it goes."),
     "website/apps/blog-admin/src/lib/blog-api.ts": (
         1,
         "#11767 item 4 — the admin client's blog origin; same deferral as the "
         "blog Function above (301 measured on the retired host)."),
+    # ⛔ The blog origin's ACTUAL source, missed by the first pass at this map: it
+    # named the admin client and the dashboard Function but not `SITE_URL` in the
+    # blog Function's own `_lib.ts`, which is what its canonicals, OG tags,
+    # JSON-LD, sitemap and feed are built from. A sweep of item 4 that moved every
+    # file BELOW while missing this one would leave the blog emitting the retired
+    # origin everywhere it matters, with this guard green.
+    "website/functions/blog/_lib.ts": (
+        4,
+        "#11767 item 4 — `SITE_URL`: the ONE constant the blog's canonical/OG/"
+        "JSON-LD/sitemap output and three nav links (`/docs`, `/#pricing`, `/auth`) "
+        "are built from; imported by `blog/[[path]].ts`, `blog/feed.xml.ts` and "
+        "`blog/sitemap.xml.ts`. `/blog` on the retired host 301s to "
+        "premiselabs.co/blog (measured 2026-11-12). Re-aiming item 4 is not "
+        "complete without this file."),
+    "website/apps/dashboard/functions/admin/[[path]].ts": (
+        1,
+        "#11767 item 4 — blog-admin API origin; deferred with the blog sweep "
+        "(#11764). Measured 2026-11-12."),
+    "website/apps/blog-admin/src/App.tsx": (
+        1,
+        "#11767 item 4 — blog-admin UI origin; deferred with the blog sweep "
+        "(#11764). Measured 2026-11-12."),
+    "website/apps/blog-admin/src/pages/PostEditor.tsx": (
+        3,
+        "#11767 item 4 — blog-admin author-image preview URLs; deferred with the "
+        "blog sweep (#11764). Measured 2026-11-12."),
+    "website/apps/blog-admin/src/pages/PostsList.tsx": (
+        1,
+        "#11767 item 4 — blog-admin author-image thumbnail; deferred with the blog "
+        "sweep (#11764). Measured 2026-11-12."),
     "website/apps/dashboard/src/wizardPrompts.js": (
         3,
         "#11767 item 5-adjacent — the copy-pasteable wizard prompts still hand the "
@@ -243,15 +274,32 @@ RETIRED_HOST_ALLOWLIST = {
 #: follow) — a PROSE comment that merely names the host is not counted, which is
 #: why `[[path]].ts` is 1 and not 2 (line 12 is a comment, line 49 emits):
 #:   website/apps/dashboard/functions/blog/api/[[path]].ts   1  DEFAULT_BLOG_ORIGIN
+#:   website/functions/blog/_lib.ts                          4  SITE_URL (canonical/OG/JSON-LD/feed + nav)
 #:   website/apps/blog-admin/src/lib/blog-api.ts             1  author-image URL
+#:   website/apps/dashboard/functions/admin/[[path]].ts      1  blog-admin API origin
+#:   website/apps/blog-admin/src/App.tsx                     1  blog-admin UI origin
+#:   website/apps/blog-admin/src/pages/PostEditor.tsx        3  author-image preview
+#:   website/apps/blog-admin/src/pages/PostsList.tsx          1  author-image thumbnail
 #:   website/apps/dashboard/public/invite-accept.html        3  nav /docs + footer /tos + /privacy
 #:   website/apps/dashboard/public/welcome.html              1  nav /
 #:   website/apps/dashboard/public/signup.html               2  canonical /auth + nav /
+#:   website/apps/dashboard/src/wizardPrompts.js             3  copy-pasteable prompts
+#:   website/apps/dashboard/src/harnesses.js                 1  DOCS_ORIGIN
+#:   website/apps/dashboard/src/overviewEmptyAction.js       2  SDK_DOCS_HREF + ONBOARDING_FUNNEL_HREF
+#:   website/apps/dashboard/src/billingCta.js                1  COMPARE_PLANS_URL
 #: None is a broken link (every one still 301s onto the canonical host); they are
-#: a SCOPE deferral — `BLOG_ORIGIN` is outside this child's brief — and the sweep
-#: belongs to #11764/#12049. They are deliberately NOT added to
-#: `RETIRED_HOST_ALLOWLIST`: that map's contract is "to keep an occurrence, add it
-#: with its reason", and blessing these would turn a deferral into a decision.
+#: a SCOPE deferral — the blog origin and the dashboard deep links are outside this
+#: child's brief — and the sweep belongs to #11764/#12049.
+#:
+#: ⛔ ALL FOURTEEN ARE IN `RETIRED_HOST_ALLOWLIST` ABOVE, with their exact counts,
+#: their measured 301 and the child that owns the re-aim. An earlier revision of
+#: this paragraph said the OPPOSITE — that they were "deliberately NOT added",
+#: because blessing them "would turn a deferral into a decision" — while the map
+#: eleven lines up already carried them. Left standing, that instruction tells the
+#: next maintainer to delete the very entries that make this guard able to fail,
+#: and the count check then reds on entries nobody can explain. The map's contract
+#: is "to keep an occurrence, record WHY and who re-aims it" — which is exactly
+#: what a deferral with an owner is.
 RUNTIME_FILES = (
     "tortoise/email_notify.py",
     "tortoise/abuse.py",
@@ -274,6 +322,11 @@ RUNTIME_FILES = (
     "website/apps/dashboard/src/harnesses.js",
     "website/apps/dashboard/src/overviewEmptyAction.js",
     "website/apps/dashboard/src/billingCta.js",
+    "website/functions/blog/_lib.ts",
+    "website/apps/dashboard/functions/admin/[[path]].ts",
+    "website/apps/blog-admin/src/App.tsx",
+    "website/apps/blog-admin/src/pages/PostEditor.tsx",
+    "website/apps/blog-admin/src/pages/PostsList.tsx",
 )
 
 
