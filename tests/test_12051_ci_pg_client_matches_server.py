@@ -5716,14 +5716,17 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     claiming hermeticity must not need. MEASURED: on a box without that file the
     absent arm dies at the source line and reports the guard as silent.
 
-    EIGHT arms over the step's FIVE named pre-install branches: the os-release
+    NINE arms over the step's FIVE named pre-install branches: the os-release
     SOURCE, the key fetch, the codename, `apt-get update`, and the ORIGIN check
     (THREE arms: an `apt-cache` that fails, an index that loaded but does not name
     apt.postgresql.org, and the control that reaches past) — plus the STREAM-DRAIN
     arm (`match_then_noise`: a producer that keeps writing after the match, the only
-    shape that can show the `grep -q` + `pipefail` SIGPIPE red). The step carries
-    SEVEN `::error::` pairs, so a whole-output search is satisfied by any of them
-    (MEASURED, review cycle 9: two gutted `exit 1`s left the suite GREEN).
+    shape that can show the `grep -q` + `pipefail` SIGPIPE red) and the REUSE arm
+    (`already`: an operator PGDG stanza is present and the key host is unreachable,
+    so the step must neither add a second stanza nor fetch a key it will not use).
+    The step carries SEVEN `::error::` pairs, so a whole-output search is satisfied
+    by any of them (MEASURED, review cycle 9: two gutted `exit 1`s left the suite
+    GREEN).
     ⚠️ Which arms assert WHAT, stated rather than generalised: the key-fetch,
     `apt-get update`, os-release SOURCE and ORIGIN-fires arms name their own
     branch's text AND assert the next branch's is ABSENT; the `apt-cache`-fails
@@ -5813,14 +5816,52 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "point at a different (or absent) key than the fetch wrote"
     )
 
+    # ⛔ AND THE "IS PGDG ALREADY CONFIGURED" PROBE IS THE SAME CLASS ONE STEP FURTHER. The
+    # step now greps the box's apt sources before adding its own stanza; run verbatim that
+    # reads the HOST's apt configuration — the one thing a suite claiming hermeticity must
+    # not need, and on a host that DOES configure PGDG the arms would silently take the
+    # reuse branch and never exercise the guards at all. The probe is substituted with
+    # fixtures under `tmp_path` and the substitution is count-asserted, so a rewrite reds
+    # here instead of restoring the host dependency.
+    probe = (
+        "grep -rqs 'apt\\.postgresql\\.org' /etc/apt/sources.list "
+        "/etc/apt/sources.list.d/ 2>/dev/null"
+    )
+    probe_sites = code_only(prefix).count(probe)
+    assert probe_sites == 1, (
+        "the PGDG-presence probe is expected exactly once in the prefix's CODE; found "
+        f"{probe_sites}. Re-derive the substitution rather than letting the arm read the "
+        "HOST's apt sources"
+    )
+    apt_sources = tmp_path / "host-sources.list"
+    apt_sources_dir = tmp_path / "host-sources.list.d"
+    prefix = prefix.replace(
+        probe,
+        "grep -rqs 'apt\\.postgresql\\.org' "
+        f"{apt_sources} {apt_sources_dir}/ 2>/dev/null",
+    )
+
     def run_with(
         stub: str,
         apt_get: str = "apt-get() { return 0; }",
         curl_stub: str = "curl() { return 0; }",
         codename: str = "noble",
         os_release_present: bool = True,
+        existing_pgdg: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         script = tmp_path / "precondition.sh"
+        # The host-sources fixtures the probe substitution points at. Empty by default (no
+        # PGDG on the box -> the step adds its own stanza); `existing_pgdg` plants an
+        # operator stanza so the REUSE branch is exercised.
+        apt_sources.write_text("", encoding="utf-8")
+        apt_sources_dir.mkdir(parents=True, exist_ok=True)
+        for stale in apt_sources_dir.glob("*.list"):
+            stale.unlink()
+        if existing_pgdg:
+            (apt_sources_dir / "pgdg.list").write_text(
+                "deb https://apt.postgresql.org/pub/repos/apt noble-pgdg main\n",
+                encoding="utf-8",
+            )
         if os_release_present:
             os_release.write_text(
                 "ID=ubuntu\n" + (f"VERSION_CODENAME={codename}\n" if codename else ""),
@@ -5882,6 +5923,39 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     assert "REACHED_PAST_PRECONDITION" in present.stdout, (
         "the script never reached the line after the precondition even when the "
         "package resolved — the block is unconditional"
+    )
+
+    # ⛔ AND A BOX THAT ALREADY CONFIGURES PGDG IS LEFT ALONE — THE REGRESSION THIS ROW
+    # EXISTS FOR. Adding a SECOND stanza for the same URI+suite with a different
+    # `Signed-By` makes apt refuse the WHOLE source list ("E: Conflicting values set for
+    # option Signed-By regarding source … <codename>-pgdg"), so `apt-get update` exits 100
+    # and the guard below reds a CORRECT box — MEASURED on ubuntu-24.04 (apt 2.8.4) against
+    # an operator `pgdg.list` with no `signed-by` (PGDG's legacy `trusted.gpg.d` install).
+    # The arm plants an operator stanza AND makes the key host unreachable: the step must
+    # not fetch a key it is not going to use, and must not stop.
+    already = run_with(
+        'apt-cache() { echo "Candidate: 16.15-1.pgdg24.04+2"; '
+        'echo "     500 https://apt.postgresql.org/pub/repos/apt noble-pgdg/main amd64 Packages"; }',
+        curl_stub='curl() { echo "curl: (22) unreachable" >&2; return 22; }',
+        existing_pgdg=True,
+    )
+    already_combined = already.stdout + already.stderr
+    assert already.returncode == 0, (
+        "the step RED on a box that already configures apt.postgresql.org — it either added a "
+        "second stanza for the same suite (apt then refuses the whole source list) or fetched "
+        "a key it does not need: " + repr(already_combined)
+    )
+    assert "REACHED_PAST_PRECONDITION" in already.stdout, (
+        "the step did not get past the repo setup on a box that already has a PGDG stanza: "
+        + repr(already_combined)
+    )
+    assert "already configured on this box" in already_combined, (
+        "the step did not report that it is REUSING the box's own PGDG stanza, so a reader "
+        "cannot tell whether it added one: " + repr(already_combined)
+    )
+    assert "could not FETCH" not in already_combined, (
+        "the step still fetched the signing key on a box it was not going to configure: "
+        + repr(already_combined)
     )
 
     # ⛔ AND THE PRODUCER'S OWN EXIT IS NOT PART OF THIS GUARD (#12051 review, P1).
@@ -6124,10 +6198,13 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     move the EXIT trap below the key fetch, or below the keyring install -> 2 failed (the
     same pair); point the step back at the SHARED `sources.list.d/pgdg.list` /
     `postgresql-common/pgdg` paths -> 3 failed (THIS row, the cleanup-trap row, and the
-    executed arm); unguard the os-release source -> 2 failed (THIS row and the executed
-    arm); `-16` -> `-18` on the install -> 3 failed (the pin rows, where the install major
-    is asserted). Each mutant's own message was read, not just the count — a red for the
-    wrong reason is not evidence.
+    executed arm); remove the PGDG-PRESENCE GATE so the step always adds its own stanza ->
+    2 failed (THIS row and the executed arm's reuse arm, which needs the fetch to be
+    skipped); reintroduce a `had_*` pre-existence flag -> 2 failed (both trap rows);
+    unguard the os-release source -> 2 failed (THIS row and the executed arm); `-16` -> `-18`
+    on the install -> 3 failed (the pin rows, where the install major is asserted). Each
+    mutant's own message was read, not just the count — a red for the wrong reason is not
+    evidence.
     """
     _, pin = _pin_step(_steps(job))
     code = _run_code(pin)
@@ -6153,6 +6230,21 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
         "the PGDG sources line does not bind the step-private keyring it installed, so "
         f"apt would have to accept the repo unsigned (or refuse it): {sources_line!r}"
     )
+    # ⛔ THE WRITE IS GATED ON THE BOX NOT ALREADY CONFIGURING PGDG. Adding a second
+    # stanza for the same URI+suite with a different `Signed-By` makes apt refuse the whole
+    # source list and `apt-get update` exit 100 — a CORRECT box red (MEASURED, apt 2.8.4).
+    assert "grep -rqs 'apt\\.postgresql\\.org'" in code, (
+        "the step does not check whether apt.postgresql.org is ALREADY configured, so on a "
+        "pool box that carries an operator `pgdg.list` it adds a second stanza for the same "
+        "suite — apt then refuses the whole source list and this step reds a correct box"
+    )
+    assert code.index("grep -rqs 'apt\\.postgresql\\") < code.index(
+        "apt.postgresql.org/pub/repos/apt"
+    ), (
+        "the presence check runs AFTER the sources line, so the second stanza is already "
+        "written — the check would always pass"
+    )
+
     assert "${VERSION_CODENAME}-pgdg" in sources_line, (
         "the PGDG suite is not derived from the box's own codename, so the step would "
         f"pin one release's suite and die on every other one: {sources_line!r}"
