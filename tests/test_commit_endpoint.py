@@ -5833,3 +5833,82 @@ class TestThe12120HostedAboutObjectAnchor:
         assert rows and rows[0][0] == 0, (
             "a fold-only spelling of a subject-kind name wrote the un-gated "
             f"aboutObject edge: {rows}")
+
+    def test_an_exact_name_carrier_resolves_to_its_survivor(self, client):
+        """Round 13: the exact-only arm must ask the resolver's THIRD question.
+
+        `resolve_fold_name` runs `_collapse_resolved_holders`, so a merged-away
+        carrier resolves to its SURVIVOR and an entity whose survivor is terminal
+        resolves to NOTHING. The exact-only arm asked only the node-level liveness
+        question, so it attached the Event's edge to the CARRIER — a node the
+        writer's own merge retired — and, once that survivor was retired, wrote a
+        NEW edge where the folded arm refuses. Measured pre-fix on a lane graph:
+        live survivor -> folded `surv`, exact `carrier`; survivor superseded ->
+        folded `None`, exact `carrier`.
+        """
+        g = _team_sdk()._get_proj().g
+        g.query(
+            "CREATE (:Object {id:'obj-r13-surv', name:'Acme Holdings', "
+            "objectKind:'organization', status:'live', "
+            "canonical_name:'acme holdings'}) "
+            "CREATE (:Object {id:'obj-r13-carrier', name:'the team', "
+            "objectKind:'organization', status:'live', "
+            "canonical_name:'team', resolved_from:'obj-r13-surv'})")
+        eid = "ev_" + "2" * 62
+        raw = _raw_payload(
+            1, session_id="s12120-ev-collapse-1",
+            entities=[{"name": "The Team", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the team", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[])],
+            events=[{"id": eid, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": ["the team"]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        carrier_edges = g.query(
+            "MATCH (:Event)-[:aboutObject]->(o:Object {id:'obj-r13-carrier'}) "
+            "RETURN count(o)").result_set
+        assert carrier_edges and carrier_edges[0][0] == 0, (
+            "the exact-only arm attached the edge to the merged-away CARRIER "
+            f"instead of its survivor: {carrier_edges}")
+        survivor_edges = g.query(
+            "MATCH (:Event)-[:aboutObject]->(o:Object {id:'obj-r13-surv'}) "
+            "RETURN count(o)").result_set
+        assert survivor_edges and survivor_edges[0][0] >= 1, (
+            "the exact-only arm dropped the edge the folded arm would have "
+            f"written on the SURVIVOR: {survivor_edges}")
+
+        # Part 2: the entity is retired, so the folded arm resolves to nothing —
+        # the exact-only arm must refuse on the same evidence, not attach to the
+        # still-live carrier.
+        g.query("MATCH (o:Object {id:'obj-r13-surv'}) "
+                "SET o.status = 'superseded'")
+        eid2 = "ev_" + "3" * 62
+        raw2 = _raw_payload(
+            1, session_id="s12120-ev-collapse-2",
+            entities=[{"name": "The Team", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the team", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[])],
+            events=[{"id": eid2, "eventKind": "decision",
+                     "content": "e1", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": ["the team"]}])
+        resp2 = _commit(client, raw2)
+        assert resp2.status_code == 200, resp2.text[:800]
+        # The writer mints a NEW incarnation for the name here (a retired
+        # survivor is not a live holder), and that incarnation is a legitimately
+        # distinct entity — what must NOT happen is an edge on the merged-away
+        # CARRIER, which the folded arm's collapse refuses.
+        after = g.query(
+            "MATCH (:Event {eventId:$eid})-[:aboutObject]->(o:Object {id:$cid}) "
+            "RETURN count(o)",
+            params={"eid": eid2, "cid": "obj-r13-carrier"}).result_set
+        assert after and after[0][0] == 0, (
+            "the exact-only arm wrote a NEW edge onto a carrier of a RETIRED "
+            f"entity where the folded arm refuses: {after}")

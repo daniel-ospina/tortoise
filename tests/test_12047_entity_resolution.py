@@ -3707,3 +3707,135 @@ class TestThe12120Finding2CollapsesMergedCarriersFirst:
                 f"the OBJECT twin was superseded instead: {objs}")
         finally:
             sdk.close()
+
+
+class TestThe12120ReviewRound13:
+    """The three defects review round 13 found in the round-12 fix itself.
+
+    Each is a guard whose WRITTEN invariant was true only of the rows the probe
+    happened to return: the duplicate-id pre-pass counted claimants among those
+    rows while the hop reads the whole graph, the family defer tested exactness on
+    the COLLAPSED representatives instead of the arm, and the supersession fold's
+    one unreported refusal was the one outcome a caller can never re-derive.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r13",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_a_duplicate_id_outside_the_probe_does_not_decide_the_entity(
+            self, sdk_factory):
+        """The claimant count is the GRAPH's, not the probe's rows.
+
+        `_entity_rows` keeps a duplicate-id entity apart BEFORE the
+        `resolved_from` hop because `follow_resolved_from` reads ONE node's
+        pointer for an id. Round 12 counted the claimants among `rows`, so a
+        duplicate the probe did not return left the count at 1: the hop then read
+        the OTHER claimant's pointer and the fold addressed a survivor no probe
+        had returned — while the opposite creation order addressed the probed row.
+        Measured pre-fix: the same logical graph grouped onto the survivor in one
+        order and onto the row's own id in the other (#2164 P2-2).
+        """
+        from tortoise.commit_ops import _SUCCESSOR_PROJECTION, _entity_rows
+
+        pointer = ("CREATE (:Object {id:'dup-r13', name:'Other', "
+                   "objectKind:'thing', status:'live', "
+                   "resolved_from:'surv-r13'})")
+        probed = ("CREATE (:Object {id:'dup-r13', name:'Widget', "
+                  "objectKind:'thing', status:'live'})")
+        survivor = ("CREATE (:Object {id:'surv-r13', name:'Survivor', "
+                    "objectKind:'thing', status:'live'})")
+        for order in ((survivor, pointer, probed), (probed, survivor, pointer)):
+            sdk = sdk_factory()
+            try:
+                g = sdk._get_proj().g
+                for stmt in order:
+                    g.query(stmt)
+                rows = g.query(
+                    "MATCH (o:Object) WHERE o.name = 'Widget' "
+                    "RETURN o.id, o.name, o.status").result_set
+                assert len(rows) == 1, rows
+                out = _entity_rows(g, "Object", [tuple(r) for r in rows],
+                                   id_idx=0, projection=_SUCCESSOR_PROJECTION,
+                                   with_groups=True)
+                assert [r[0][0] for r in out] == ["dup-r13"], (
+                    "the probed row was collapsed onto a survivor no probe "
+                    "returned — the duplicate-id pre-pass missed a claimant "
+                    f"outside `rows` (order {order[1][:40]!r}): {out}")
+            finally:
+                sdk.close()
+
+    def test_an_exact_name_carrier_keeps_the_object_lane(self, sdk_factory):
+        """The family defer asks exactness of the ARM, not of the representatives.
+
+        Round 12 tested `str(_row[2]) == ref` over `_entity_rows` output — one row
+        per ENTITY, and that row is the SURVIVOR's. An Object whose OWN name is the
+        ref but which a merge collapsed onto a differently-named survivor then read
+        as "not exact", the defer fired, and the record superseded an exactly-named
+        Subject while the exact-name Object entity stayed live — inverting the
+        Object-first precedence the branch exists to keep.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_subject("Acme Corp", "organization")
+            sdk.create_subject("New Corp", "organization")
+            sdk.create_object("New Corp", "document")
+            g.query(
+                "CREATE (s:Object {id:'obj-r13-surv', name:'Acme Holdings', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'acme holdings'}) "
+                "CREATE (c:Object {id:'obj-r13-carrier', name:'Acme Corp', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'acme corp', resolved_from:'obj-r13-surv'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Acme Corp", "supersedes_by": "New Corp",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            subj = g.query(
+                "MATCH (s:Subject {name:'Acme Corp'}) RETURN s.status").result_set
+            assert subj and subj[0][0] != "superseded", (
+                f"an exact-name Object carrier was read as non-exact and the "
+                f"SUBJECT took the fold: {subj}")
+            obj = g.query(
+                "MATCH (o:Object {id:'obj-r13-surv'}) RETURN o.status").result_set
+            assert obj and obj[0][0] == "superseded", (
+                f"the exact-name Object entity did not take its own fold: {obj}")
+        finally:
+            sdk.close()
+
+    def test_a_fold_that_matches_nothing_is_reported(
+            self, sdk_factory, monkeypatch):
+        """The last unapplied-record outcome must reach `skipped` (#5365).
+
+        `apply_supersessions` promises one `{ref, successor, reason}` entry for
+        every record it did not apply, and the sibling branches in this same loop
+        all report. The `folded == 0` outcome (a fold-miss, and the concurrent-race
+        loser) warned only — and it is the one outcome a caller can never
+        re-derive, because the fold's own result is not in any other channel.
+        """
+        sdk = sdk_factory()
+        try:
+            proj = sdk._get_proj()
+            sdk.create_object("Widget", "document")
+            sdk.create_object("New Widget", "document")
+            monkeypatch.setattr(proj.__class__, "_fold_object_superseded",
+                                lambda self, ev, *, cas=False: (0, 0))
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Widget", "supersedes_by": "New Widget",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert any("fold matched no object" in str(s.get("reason") or "")
+                       for s in skips), (
+                "a record the fold did not apply never reached the caller's "
+                f"skipped list: {skips!r} (warnings: {msgs!r})")
+        finally:
+            sdk.close()

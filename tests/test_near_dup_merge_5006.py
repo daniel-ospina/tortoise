@@ -1290,3 +1290,30 @@ class TestThe12120MergeAttachmentAsksTheWritersKeySpace:
             "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object) RETURN o.id",
             params={"pid": pt["id"]}).result_set
         assert [r[0] for r in rows] == [obj["id"]], rows
+
+    def test_a_fold_variant_no_object_holds_is_still_unresolved(self, sdk):
+        """`_fold_only` is a property of the REFERENCE, not of the graph.
+
+        Round 12 reported every fold-only empty lookup as `skipped_subject` on the
+        strength of the reference folding to a declared subject-kind name — but
+        `rows` is empty both when the narrowing suppressed a real fold-equal
+        carrier AND when nothing holds the name in ANY spelling. Only the first is
+        the subject channel's; the second satisfies `unresolved`'s documented
+        meaning ("no Object holds that name in the key space the write resolves
+        on"), and reporting it as a skip told capture's own message
+        ("the binder owns the gated edge") a claim no binder can act on — a merge
+        runs no binder.
+        """
+        from tortoise.near_dup_merge import apply_merge_union
+
+        pt = sdk.create_point("statement", "a claim about nobody")
+        sdk._get_proj().g.query(
+            "CREATE (s:Session {id:$sid})", params={"sid": "s_12120_r13"})
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["the acme"]},
+            session_id="s_12120_r13", sdk=sdk, subject_names={"Acme"})
+        assert res["unresolved"] == ["the acme"], (
+            "a name no Object holds in any spelling was reported as a "
+            f"subject-channel skip: {res}")
+        assert res["skipped_subject"] == [], res

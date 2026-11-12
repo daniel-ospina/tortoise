@@ -21858,6 +21858,17 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             #     narrows with `AND o.name = $exact` and MERGEs per matching row) —
             #     otherwise one payload with two exact carriers yields N Point
             #     edges and ZERO Event edges, a family split no rule asks for.
+            #   • THE MERGE COLLAPSE, which is the resolver's THIRD answer and the
+            #     one this arm was missing (review round 13): `resolve_fold_name`
+            #     runs `_collapse_resolved_holders`, so a merged-away carrier
+            #     resolves to its SURVIVOR and an entity whose survivor is terminal
+            #     resolves to NOTHING. Asking only the live question attached the
+            #     edge to the CARRIER (a node the writer's own merge retired) and,
+            #     once that survivor was superseded, wrote a NEW edge where the
+            #     folded arm refuses. Measured on a lane graph: folded -> survivor,
+            #     exact -> carrier; survivor superseded -> folded None, exact
+            #     carrier. Attach-to-every-carrier still holds for DISTINCT
+            #     carriers — the collapse dedupes per ENTITY, never per spelling.
             # No ambiguity record is owed here: nothing is chosen between
             # carriers (the pre-fix `_refuse` fired because a FOLD-WIDE resolver
             # would have had to pick one, which is exactly what this arm avoids).
@@ -21865,7 +21876,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 "MATCH (o:Object) WHERE o.name = $n AND "
                 f"{_terminal_excluded('o.status')} RETURN o.id",
                 params={"n": _name}).result_set
-            _targets = [r[0] for r in _exact_rows if r and r[0]]
+            from tortoise.entity_identity import _collapse_resolved_holders
+            _targets = [str(_tid) for _tid in _collapse_resolved_holders(
+                proj.g, "Object", [r[0] for r in _exact_rows if r and r[0]])
+                if _tid]
         else:
             _one = resolve_fold_name(proj.g, "Object", _name,
                                      context="session-commit aboutObject",

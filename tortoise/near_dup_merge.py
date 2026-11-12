@@ -458,7 +458,11 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
         # lookup could not reach.
         _fold_only = _ndm_fold(_n) in subject_skip_folded
         try:
-            _space, _space_params = name_key_space_same_entity("o", _n)
+            # The WIDE space is kept beside the narrowed one: the reporting branch
+            # below has to tell "a fold-equal carrier exists but was not narrowed in"
+            # from "nothing holds this name in any spelling" (review round 13).
+            _wide_space, _wide_params = name_key_space_same_entity("o", _n)
+            _space, _space_params = _wide_space, _wide_params
             if _fold_only and _space:
                 _space = f"({_space}) AND o.name = $exact"
                 _space_params = {**_space_params, "exact": _n}
@@ -522,7 +526,32 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
                 # it", which can never happen here). The narrowing dropped it on
                 # purpose, so report it where the exact skip reports: as a
                 # subject-channel skip.
-                out["skipped_subject"].append(_n)
+                #
+                # ⛔ `_fold_only` is a property of the REFERENCE, not evidence that
+                # a fold-equal carrier exists (review round 13): `rows` is empty
+                # both when the narrowing suppressed a real carrier AND when no
+                # Object holds the name in ANY spelling, and only the first is a
+                # subject-channel skip. Reporting the second as one told the
+                # caller's own message (`"the binder owns the gated edge"`) a
+                # claim no binder can act on, while this module's docstring
+                # records that a merge runs no binder — and it dropped the name
+                # from `unresolved`, the one channel documented to carry it. Ask
+                # the WIDE space; a failed read asserts neither.
+                try:
+                    _carrier_exists = bool(
+                        _wide_space and proj.g.query(
+                            f"MATCH (o:Object) WHERE {_wide_space} "
+                            "RETURN o.id LIMIT 1",
+                            params=_wide_params).result_set)
+                except Exception as e:  # noqa: BLE001, RUF100
+                    out["warnings"].append(
+                        f"merge attachment key-space recheck failed for {_n!r} "
+                        f"({type(e).__name__}: {e})")
+                    continue
+                if _carrier_exists:
+                    out["skipped_subject"].append(_n)
+                else:
+                    out["unresolved"].append(_n)
             else:
                 out["unresolved"].append(_n)
     return out

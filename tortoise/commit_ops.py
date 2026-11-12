@@ -858,6 +858,32 @@ def _one_successor_spelling(names, default: str) -> str:
     return min(spellings)
 
 
+def _id_claimant_counts(g, label: str, rows, id_idx: int) -> dict:
+    """How many NODES claim each logical id — counted in the GRAPH, not in ``rows``.
+
+    #12120 (review round 13): :func:`_entity_rows` keeps a duplicate-id entity APART
+    before the merge hop, because ``follow_resolved_from`` reads ONE node's
+    ``resolved_from`` for an id (``entity_resolver.follow_resolved_from`` — a single
+    ``MATCH (n:<label> {id:$id})``). Counting the claimants among ``rows`` was not
+    enough: the probe's result set is a SUBSET of the graph, so a duplicate the probe
+    did not return left the count at 1, the hop then read the OTHER claimant's
+    pointer, and the fold addressed a survivor that no probe had returned — while the
+    opposite creation order addressed the probed row instead. Measured: the same
+    logical graph grouped onto ``surv`` in one order and onto the row's own id in the
+    other, which is the backend-order dependence #2164 P2-2 forbids.
+
+    One query for the whole probe (the property is indexed-free here, so batching
+    matters), returning ``{}`` when no row carries an id.
+    """
+    ids = sorted({str(row[id_idx]) for row in rows
+                  if id_idx < len(row) and row[id_idx]})
+    if not ids:
+        return {}
+    return {str(r[0]): int(r[1]) for r in g.query(
+        f"MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id, count(*)",
+        params={"ids": ids}).result_set}
+
+
 def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
                  projection: str | None = None, with_groups: bool = False):
     """One representative row per ENTITY — a merged-away carrier is not a second one.
@@ -926,16 +952,16 @@ def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
     # `row:`, and prefix-testing would then skip the survivor fetch and hand back
     # a retired CARRIER (review round 3).
     per_row_keys: set[str] = set()
-    # An id claimed by MORE THAN ONE row is the duplicate-id corruption. Such rows
-    # are kept apart BEFORE the merge hop: `follow_resolved_from` reads one row's
+    # An id claimed by MORE THAN ONE NODE is the duplicate-id corruption. Such rows
+    # are kept apart BEFORE the merge hop: `follow_resolved_from` reads one node's
     # `resolved_from` for the id, so the group key — and therefore whether the
     # caller's never-guess fires at all — would depend on backend row order when
-    # only one of the duplicates carries a pointer (review round 6).
-    _own_counts: dict = {}
-    for row in rows:
-        _own = row[id_idx] if id_idx < len(row) else None
-        if _own:
-            _own_counts[str(_own)] = _own_counts.get(str(_own), 0) + 1
+    # only one of the claimants carries a pointer (review rounds 2 and 6).
+    # ⛔ The claimant count is taken in the GRAPH (see `_id_claimant_counts`), never
+    # from `rows`: a duplicate outside the probe's result set is still corruption,
+    # and counting only the probed rows let the hop read the OTHER claimant's
+    # pointer and address a survivor no probe returned (review round 13).
+    _claimants = _id_claimant_counts(g, label, rows, id_idx)
     for row in rows:
         own = row[id_idx] if id_idx < len(row) else None
         own = str(own) if own else None
@@ -943,7 +969,7 @@ def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
         # pointer, so this is the survivor's id for a carrier and the row's own
         # id otherwise; an id-less row cannot be keyed on an id at all.
         hop = None
-        if own and _own_counts.get(own, 0) <= 1:
+        if own and _claimants.get(own, 0) <= 1:
             hop = follow_resolved_from(g, label, own)
         if hop:
             key = str(hop)
@@ -1651,7 +1677,17 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # Object-first precedence (the successor probe chose it), and a Subject
         # that holds the ref EXACTLY is the only case where the Object lane was
         # demonstrably the wrong family.
-        if not rows and not any(str(_row[2]) == ref for _row in _name_arm_rows):
+        # ⛔ The exactness test reads the UNGROUPED arm (`_name_rows`), not the
+        # collapsed representatives: `_name_arm_rows` holds one row per ENTITY and
+        # that row is the SURVIVOR's, so an Object whose OWN name IS `ref` but which
+        # a merge collapsed onto a differently-named survivor would read as
+        # "not exact" and hand the record to the Subject lane — superseding a
+        # Subject while the exact-name Object carrier stayed live, inverting the
+        # precedence this branch exists to keep (review round 13).
+        _exact_object_hold = any(
+            str(_row[2]) == ref for _row in _name_rows
+            if _row[0] not in _id_node_keys)
+        if not rows and not _exact_object_hold:
             _subj_ref_space, _subj_ref_params = name_key_space_same_entity(
                 "s", ref)
             _subj_exact_ref = proj.g.query(
@@ -1993,11 +2029,21 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                     warn(f"ObjectSuperseded emitted for {obj_name!r} but the "
                          f"fold matched no Object — event stays journaled "
                          f"(rebuild retains the truth)")
+                    # #5365 (review round 13): this record was NOT applied and
+                    # `apply_supersessions` promises one `skipped` entry for every
+                    # such record — the sibling branches in this same loop report
+                    # (`ambiguous object id/name`, `id-less object target`,
+                    # `terminal object target`), so ending the enumeration one
+                    # branch short left the one outcome a caller can never
+                    # re-derive (the fold's own result) invisible.
+                    _skip(ref, supersedes_by, "fold matched no object")
                 else:
                     warn(f"ObjectSuperseded emitted for {obj_name!r} but the "
                          f"fold lost a concurrent race — the Object is "
                          f"already superseded (keep-first); event stays "
                          f"journaled (rebuild retains the truth)")
+                    _skip(ref, supersedes_by,
+                          "fold lost a concurrent race")
             else:
                 applied += 1
         except Exception as exc:
