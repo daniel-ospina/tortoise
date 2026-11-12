@@ -1983,6 +1983,28 @@ def _carrying_statements(universe: list[ast.AST], lines: list[str],
     return minimal
 
 
+def _slice_own_scope(lines: list[str], statement: ast.stmt) -> str:
+    """`_slice`, with the line ranges of NESTED SCOPE DEFINITIONS blanked out.
+
+    ⛔ Skipping a nested scope in the walk is not enough on its own: a compound statement SPANS its
+    body, so the `for`'s own line range still contains the text of the nested def it encloses —
+    measured, and it is why the first version of round 4's fix still credited a store inside a
+    never-called nested function (the `for` itself matched `SET n += $p` from that function's body).
+    The claim is about what this scope executes, so the nested scope's lines are not evidence here.
+    """
+    if not isinstance(statement, ast.stmt):
+        return _slice(lines, statement)
+    keep = list(lines[statement.lineno - 1:statement.end_lineno])
+    base = statement.lineno
+    for sub in ast.walk(statement):
+        if sub is statement or not isinstance(sub, _SCOPE_LIKE) or not hasattr(sub, "lineno"):
+            continue
+        for offset in range(sub.lineno - base, sub.end_lineno - base + 1):
+            if 0 <= offset < len(keep):
+                keep[offset] = ""
+    return _without_comments("\n".join(keep))
+
+
 def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> str | None:
     """Why `node` no longer has a loop over `constant` whose TARGET drives a store, or None.
 
@@ -2020,7 +2042,7 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> s
         # …and a RE-BINDING of that name inside the loop body means the store is no longer built
         # from the ITERATED value. This is the half that sees the mutation above: the binding stops
         # holding what the loop produced, so the claim `the labels come from <constant>` is false.
-        rebound = {n.id for b in body_nodes for n in ast.walk(b)
+        rebound = {n.id for b in body_nodes for n in _walk_own_scope(b)
                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
                    and n.id in bound}
         if rebound:
@@ -2028,8 +2050,13 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> s
                 f"`{'`, `'.join(sorted(rebound))}` is RE-BOUND inside the loop over {constant}, so "
                 "the store is no longer built from the iterated value — the labels are no longer "
                 "derived from that constant")
-        hits = [n for outer in body for n in ast.walk(outer)
-                if isinstance(n, ast.stmt) and _STORE_CARRIER.search(_slice(lines, n))]
+        # ⛔ `#12020` round 4: the store must execute in the LOOP's OWN scope. `ast.walk` descends
+        # into a nested `def`/`class`/`lambda`, so the same defect round 2 fixed in
+        # `_carrying_statements` was still open here: a store moved into a nested function the loop
+        # never calls — or one whose PARAMETER shadows the loop binding, or a class-body string —
+        # satisfied the row while nothing stored per iteration (measured: all three GREEN).
+        hits = [n for outer in body for n in _walk_own_scope(outer)
+                if isinstance(n, ast.stmt) and _STORE_CARRIER.search(_slice_own_scope(lines, n))]
         # ⛔ The MINIMAL store statements: without this, the enclosing `for` itself matches (its text
         # contains every store in its body) and any mention of the binding anywhere inside would
         # satisfy the target check — i.e. the arm would degrade to "something in the loop names it".
@@ -2041,7 +2068,7 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> s
             continue
         # …and the TARGET drives it: the store statement must name the loop's binding, otherwise the
         # loop is beside the store rather than the thing that produces it.
-        if any(any(f"{{{t}" in _slice(lines, s) for t in bound) for s in stores):
+        if any(any(f"{{{t}" in _slice_own_scope(lines, s) for t in bound) for s in stores):
             return None
     return (
         f"no `for … in {constant}` drives a store — the iterable is not that constant, or its "
@@ -2051,6 +2078,26 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> s
 
 #: The comprehension forms, for the loop half of `_iterated_store_problem`.
 _COMPREHENSION_LIKE = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+#: Node types that open a NEW SCOPE: a statement inside one executes in that scope, not the
+#: enclosing one, so a claim about the enclosing scope must not be satisfied through it.
+_SCOPE_LIKE = (*_SCOPE_NODES, ast.Lambda)
+
+
+def _walk_own_scope(node: ast.AST):
+    """`ast.walk(node)`, but never crossing into a nested `def`/`class`/`lambda`.
+
+    ⛔ The same rule `_carrying_statements` applies (`#12020` rounds 1-2), in walk form so the
+    sibling arm added by this PR can apply it too rather than each helper growing its own copy of
+    "stop at a scope boundary". Round 4 measured the cost of not having it: `_iterated_store_problem`
+    credited a store inside a nested, never-called function, which is a row that cannot fail.
+    """
+    stack: list[ast.AST] = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        stack.extend(child for child in ast.iter_child_nodes(current)
+                     if not isinstance(child, _SCOPE_LIKE))
 
 
 def _parent_map(root: ast.AST) -> dict[int, ast.AST]:
@@ -2167,6 +2214,58 @@ def _function_of(source: str, name: str) -> ast.FunctionDef:
     """The single `def name` in `source` — the direct input to `_carrying_statements`."""
     return next(n for n in ast.walk(ast.parse(source))
                 if isinstance(n, ast.FunctionDef) and n.name == name)
+
+
+def test_the_iterated_arm_does_not_credit_a_store_in_a_NESTED_scope() -> None:
+    """`#12020` round 4: the iterated arm must see a store in the LOOP's own scope, no deeper.
+
+    The rule was established in `_carrying_statements` (rounds 1-2) and the sibling arm this same
+    PR added never got it — so `ast.walk` descended into nested scopes and three shapes measured
+    GREEN on the reviewed head while nothing stored per iteration:
+
+    * a store moved into a nested function the loop NEVER CALLS;
+    * a store in a nested function whose PARAMETER shadows the loop binding (so the interpolation is
+      that parameter, not the iterated value);
+    * a store shape inside a nested CLASS BODY.
+
+    Synthetic sources rather than `sdk.py` mutations, because the point is the helper's scope rule
+    and a 12-line fixture states it without three `replace()` calls that could silently no-op —
+    the defect rounds 2 and 3 each had to fix. The real tree is covered by the row pin.
+    """
+
+    def problem(body: str) -> str | None:
+        source = ('_KEYS = ("A", "B")\n\n\ndef w(proj):\n'
+                  '    for label, _prop in _KEYS:\n' + body)
+        tree = ast.parse(source)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "w")
+        return _iterated_store_problem(fn, "_KEYS", source.splitlines())
+
+    # CONTROL — the store in the loop's own body holds, so the arms below red for the SCOPE and not
+    # because the helper has become always-red.
+    assert problem('        proj.g.query(f"MATCH (n:{label}) SET n += $p")\n') is None, (
+        "the control no longer holds — every arm below would pass for the wrong reason")
+
+    never_called = problem(
+        '        def _helper():\n'
+        '            proj.g.query(f"MATCH (n:{label}) SET n += $p")\n')
+    assert never_called is not None, (
+        "a store inside a nested function the loop never calls satisfies the iterated arm — "
+        "nothing stores per iteration")
+
+    shadowing_param = problem(
+        '        def _helper(label):\n'
+        '            proj.g.query(f"MATCH (n:{label}) SET n += $p")\n')
+    assert shadowing_param is not None, (
+        "a nested function whose PARAMETER shadows the loop binding satisfies the iterated arm — "
+        "the store is built from the parameter, not from the iterated value")
+
+    nested_class = problem(
+        '        class _K:\n'
+        '            q = f"MATCH (n:{label}) SET n += $p"\n')
+    assert nested_class is not None, (
+        "a nested CLASS BODY satisfies the iterated arm — a class attribute is not a per-iteration "
+        "store")
 
 
 def test_the_store_carrier_does_not_credit_a_comparison_or_a_wipe() -> None:
@@ -2779,6 +2878,47 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         {"tortoise.m::w": "unresolved_write"},
         "a DIFFERENT function that merely shares the name: only the real home module makes an "
         "alias the seam, or any library could silence the row by naming a function encode_for_row",
+    ),
+    # ⛔ `#12020` round 4 — the SCOPE axis of the same fail-open. An import in a scope that is not
+    # the writer's is not the writer's reach, and `gated` is outside `NEEDS_A_DECLARATION`.
+    "alias_imported_in_a_SIBLING_function": (
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def other():\n"
+        "    from tortoise.embeddings import encode_for_row as _enc\n"
+        "    return _enc\n"
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")}) or _enc(1)\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "an alias bound in ANOTHER function is not this writer's reach — the module pass walked "
+        "every scope, so one sibling's import classed an unrelated writer `gated`",
+    ),
+    "alias_imported_in_a_nested_def_of_the_writer": (
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj):\n"
+        "    def _inner():\n"
+        "        from tortoise.embeddings import encode_for_row as _enc\n"
+        "        return _enc\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n'
+        "    return _enc(1)\n",
+        {"tortoise.m::w": "unresolved_write"},
+        "the alias is bound inside a NESTED def, so a bare call in the writer's own body cannot "
+        "reach it — resolving across scopes credited a reach the writer does not have",
+    ),
+    "alias_rebound_at_MODULE_level": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "_enc = lambda text, n: text\n"
+        "\n"
+        "def w(proj, text):\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n'
+        "    return _enc(text, 384)\n",
+        {"tortoise.m::w": "unresolved_write"},
+        "a MODULE-level rebinding shadows the import for every writer in the file — the round-3 "
+        "shadow check only inspected the writer's subtree and could not see it",
     ),
     "alias_on_a_foreign_receiver": (
         "from tortoise.embeddings import encode_for_row as _enc\n"
