@@ -2373,7 +2373,7 @@ def test_read_health_probes_only_pr_event_runs(monkeypatch):
 
     monkeypatch.setattr(Q, "read_runs", fake_read_runs)
     monkeypatch.setattr(
-        Q, "read_run_live_job", lambda repo, rid: (probed.append(rid), False)[1]
+        Q, "read_run_live_job", lambda repo, rid, attempt=None: (probed.append(rid), False)[1]
     )
     health = Q.read_health("o/r", NOW)
     assert probed == [11]
@@ -2479,8 +2479,8 @@ def test_the_probe_budget_is_bounded_and_spent_oldest_first(monkeypatch):
     # Feed order is newest-first, and ids are deliberately ANTI-CORRELATED with age — the
     # OLDEST run carries the HIGHEST id — so "oldest-first" and "lowest-id-first" cannot
     # produce the same answer. An id-ordered (or feed-ordered) implementation must fail.
-    #   i=0 -> age 600 s, id 20 (oldest, highest id)
-    #   i=5 -> age   0 s, id 15 (newest, lowest id)
+    #   i=0 -> age 600 s, id 20 (oldest, highest id)  [ages span 600 s .. 300 s]
+    #   i=5 -> age 300 s, id 15 (newest, lowest id)
     runs = [
         {"id": 20 - i, "name": "python-ci", "event": "pull_request",
          "created_at": (NOW - timedelta(seconds=(10 - i) * 60)).strftime("%Y-%m-%dT%H:%M:%SZ")}
@@ -2496,7 +2496,7 @@ def test_the_probe_budget_is_bounded_and_spent_oldest_first(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        Q, "read_run_live_job", lambda repo, rid: (probed.append(rid), None)[1]
+        Q, "read_run_live_job", lambda repo, rid, attempt=None: (probed.append(rid), None)[1]
     )
 
     health = Q.read_health("o/r", NOW, max_job_probes=3)
@@ -2524,7 +2524,7 @@ def test_a_capped_probe_never_subtracts_a_run(monkeypatch):
             False,
         ),
     )
-    monkeypatch.setattr(Q, "read_run_live_job", lambda repo, rid: False)
+    monkeypatch.setattr(Q, "read_run_live_job", lambda repo, rid, attempt=None: False)
 
     # Budget 0 = probe nothing: the run keeps has_live_job=None and still counts.
     health = Q.read_health("o/r", NOW, max_job_probes=0)
@@ -2577,3 +2577,88 @@ def test_live_job_false_when_an_int_total_count_equals_a_full_page(monkeypatch):
     payload = {"total_count": Q.PER_PAGE, "jobs": [{"status": "completed"}] * Q.PER_PAGE}
     monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None, p=payload: p)
     assert Q.read_run_live_job("o/r", 1) is False
+
+
+def test_an_offset_less_timestamp_cannot_crash_the_probe_ordering(monkeypatch):
+    """Review finding (round 2): the ordering key must normalise tz AWARENESS, not just parse.
+
+    `_parse_time` returns whatever `datetime.fromisoformat` produced — NAIVE for a stamp with
+    no offset — while the "unparseable" sentinel is AWARE. Comparing them raises `TypeError`,
+    and `main()` catches only `MeasureError`, so the reading died with no state line at all —
+    the observer going dark, which is exactly the failure the probe budget exists to avoid.
+    """
+    rows = [
+        {"id": 1, "name": "python-ci", "event": "pull_request",
+         "created_at": "2026-10-19T03:00:00Z"},        # aware
+        {"id": 2, "name": "python-ci", "event": "pull_request",
+         "created_at": "2026-10-19T03:05:00"},         # NAIVE — used to raise TypeError
+        {"id": 3, "name": "python-ci", "event": "pull_request",
+         "created_at": "not-a-timestamp"},             # unparseable -> sorts last
+    ]
+    monkeypatch.setattr(
+        Q,
+        "read_runs",
+        lambda repo, status, max_pages=5: (
+            rows if status == "in_progress" else [],
+            False,
+        ),
+    )
+    monkeypatch.setattr(Q, "read_run_live_job", lambda repo, rid, attempt=None: None)
+
+    health = Q.read_health("o/r", NOW)          # must not raise
+    assert health.in_progress_total == 3
+
+
+def test_live_job_abstains_when_the_jobs_belong_to_another_attempt(monkeypatch):
+    """Attempt mixing is closed from the PAYLOAD, not only from the query string.
+
+    GitHub's `Job` schema carries `run_attempt`, so the probe can prove which attempt it is
+    looking at instead of trusting `filter=latest` — a parameter whose rationale has already
+    been stated wrongly twice in this file's history. Without this, a payload carrying the
+    PREVIOUS attempt's completed jobs answers `False` for a run that is about to execute,
+    which subtracts it from `pr_running` and can make `PR-STARVED` reachable on a served queue.
+    """
+    previous_attempt = {
+        "total_count": 2,
+        "jobs": [{"status": "completed", "run_attempt": 2},
+                 {"status": "completed", "run_attempt": 2}],
+    }
+    monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None, p=previous_attempt: p)
+    # The run is on attempt 3: these jobs are stale evidence.
+    assert Q.read_run_live_job("o/r", 1, attempt=3) is None
+    # The same payload IS the current attempt's evidence when the numbers agree.
+    assert Q.read_run_live_job("o/r", 1, attempt=2) is False
+
+
+def test_live_job_abstains_when_a_job_carries_no_run_attempt(monkeypatch):
+    """A row that cannot be matched to the attempt proves nothing."""
+    payload = {"total_count": 1, "jobs": [{"status": "completed"}]}
+    monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None, p=payload: p)
+    assert Q.read_run_live_job("o/r", 1, attempt=1) is None
+
+
+def test_a_live_job_from_another_attempt_still_does_not_prove_execution(monkeypatch):
+    """The counter-arm: mixing is refused in BOTH directions, not just the `False` one."""
+    payload = {"total_count": 1, "jobs": [{"status": "in_progress", "run_attempt": 1}]}
+    monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None, p=payload: p)
+    assert Q.read_run_live_job("o/r", 1, attempt=2) is None
+
+
+def test_the_probe_url_is_capped_at_the_endpoint_page_size(monkeypatch):
+    """`per_page` is clamped: a value above 100 would make a FULL page look SHORT.
+
+    The completeness rule accepts a page short of `per_page` as a complete read. A caller
+    passing `per_page=500` would therefore read a real 100-job page as "short" and answer
+    `False` while `total_count` was absent — re-opening the round-1 hole by configuration.
+    """
+    seen: list[list[str]] = []
+
+    def fake_gh_json(args, timeout=None):
+        seen.append(args)
+        return {"total_count": Q.PER_PAGE, "jobs": [{"status": "completed"}] * Q.PER_PAGE}
+
+    monkeypatch.setattr(Q, "gh_json", fake_gh_json)
+    assert Q.read_run_live_job("o/r", 1, per_page=500) is False
+    url = " ".join(seen[0])
+    assert f"per_page={Q.PER_PAGE}" in url, url
+    assert "per_page=500" not in url

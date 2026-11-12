@@ -327,11 +327,19 @@ REPO_DEFAULT = "daniel-ospina/tortoise"
 GH_BIN = os.environ.get("GH_BIN") or shutil.which("gh") or "gh"
 
 #: The events GitHub creates for pull-request work. A run with one of these
-#: events is never a trim candidate, and it is what `pr_running` counts: an
-#: in-progress run of ANY workflow that a PR event created is PR work being
-#: served, whatever the workflow is called. Resolved from the run, never from a
-#: workflow name or a `paths:` list — a name-keyed set would mis-classify a
-#: renamed workflow silently, which is the drift class this repo keeps removing.
+#: events is never a trim candidate, and it defines the population `pr_running` is
+#: counted over: an in-progress run of ANY workflow that a PR event created, whatever
+#: the workflow is called. Resolved from the run, never from a workflow name or a
+#: `paths:` list — a name-keyed set would mis-classify a renamed workflow silently,
+#: which is the drift class this repo keeps removing.
+#:
+#: ⛔ EVENT MEMBERSHIP IS NOT EVIDENCE OF SERVICE (#12037). This comment used to end the
+#: sentence above with "is PR work being served", which is now false by construction: a
+#: PR-event run that is `in_progress` but has no non-terminal job is counted by
+#: `pr_running` as NOTHING, because the run `status` string is not reconciled with the
+#: jobs. `PR_EVENTS` decides WHICH runs are candidates, and job-level evidence decides
+#: whether a candidate is executing; "serving" is the proposition these states exist to
+#: distinguish from "everything is fine".
 PR_EVENTS = frozenset({"pull_request", "pull_request_target", "merge_group"})
 
 #: NOTE: there is deliberately NO queued-status vocabulary in this module. The
@@ -381,26 +389,34 @@ PER_PAGE = 100
 
 #: How many PR-event `in_progress` runs one reading may PROBE at job level (#12037).
 #:
-#: A budget, not a correctness knob: each probe is one API call, the workflow that runs
-#: this tool has a 10-minute step timeout, `main()` re-measures when it acts, and the
-#: population being probed is the one that ACCUMULATES — a run frozen at `in_progress`
-#: never leaves the feed (three have sat here since 2026-11-05 and no endpoint can clear
-#: them), so an unbounded probe grows forever on exactly the runs it exists to find, and
-#: the failure mode is the step being killed with no state line written at all. At that
-#: point the observer goes dark precisely when the queue is degraded.
+#: A budget, not a correctness knob. Each probe is one API call; the workflow that runs this
+#: tool gives the JOB `timeout-minutes: 10` (no per-step timeout exists), and `main()` takes a
+#: SECOND reading when it acts. Worst case here is therefore 2 × 8 × 15 s = 240 s of a 600 s
+#: job budget — the numbers are chosen to fit that arithmetic rather than asserted to.
 #:
-#: What a capped-out run costs: it keeps `has_live_job = None`, i.e. it ABSTAINS toward
-#: executing and is reported in `pr_running_unmeasured`. That is the safe direction —
-#: under-counting is what manufactures a destructive ``PR-STARVED`` — so hitting the
-#: budget degrades detection, never the safety property. 12 is comfortably above the
-#: measured live population (`in_progress` has been 5-10 on this repo) and bounded well
-#: inside the step budget.
-DEFAULT_MAX_JOB_PROBES = 12
+#: Why bound it at all: a frozen run does not leave the feed on its own (three have sat at
+#: `in_progress` here since 2026-11-05 and no endpoint accepts a repair), so the probed
+#: population only grows and an unbounded probe grows with it — on exactly the runs it exists
+#: to find. The failure mode is the job dying with no state line written, i.e. the observer
+#: going dark precisely when the queue is degraded.
+#:
+#: ⛔ WHAT A CAPPED-OUT RUN COSTS IS NOT "NOTHING UNSAFE". A run left unprobed keeps
+#: `has_live_job = None`, so it is still counted in `pr_running` — i.e. the reading reverts to
+#: the pre-#12037 status-string census FOR THAT RUN. On the starvation axis that is the safe
+#: direction (an unprobed run can never help manufacture `PR-STARVED`). On the CONGESTION axis
+#: it is not neutral: an inflated `pr_running` is what makes ``OK`` reachable at 5400 s and
+#: hands ``congests_pr is False`` to a destructive caller (#10237). So the honest statement is
+#: that the budget degrades DETECTION IN BOTH DIRECTIONS, and the abstention is only
+#: fail-closed for the verdict that cancels runs. The budget is set above the measured live
+#: PR-event population (3-5 on this repo, `in_progress` total 5-10) so it does not bind in
+#: practice; when it does bind, the OLDEST runs are the probed ones, which is the population a
+#: long-standing frozen run lives in.
+DEFAULT_MAX_JOB_PROBES = 8
 
-#: Timeout for ONE jobs probe. Much shorter than `_gh`'s 120 s default on purpose: a
-#: stalled jobs read should cost a fraction of a step's budget and then ABSTAIN, rather
-#: than spend the whole budget and take the reading down with it.
-JOB_PROBE_TIMEOUT_SECONDS = 30
+#: Timeout for ONE jobs probe. Much shorter than `_gh`'s 120 s default on purpose: a stalled
+#: jobs read should cost a fraction of the job's budget and then ABSTAIN, rather than spend
+#: the whole budget and take the reading down with it.
+JOB_PROBE_TIMEOUT_SECONDS = 15
 
 
 class MeasureError(RuntimeError):
@@ -455,10 +471,12 @@ class QueuedRun:
     #:     is running nothing, whatever its `status` says. Only a positive observation
     #:     may downgrade a run.
     #:   * ``True`` — at least one non-terminal job. Executing.
-    #:   * ``None`` — NOT MEASURED: a failed jobs read, an empty jobs list, or a list
-    #:     whose `total_count` exceeds what one page returned. Abstains toward
-    #:     EXECUTING, i.e. toward the pre-#12037 status-string reading that every caller
-    #:     constructing a `QueuedRun` without this field still gets.
+    #:   * ``None`` — NOT MEASURED: a failed jobs read, an empty jobs list, a malformed or
+    #:     status-less job row, a payload whose jobs belong to a DIFFERENT attempt, a list
+    #:     that is not provably complete, or a run the probe BUDGET
+    #:     (`DEFAULT_MAX_JOB_PROBES`) never reached. Abstains toward EXECUTING, i.e. toward
+    #:     the pre-#12037 status-string reading that every caller constructing a `QueuedRun`
+    #:     without this field still gets.
     #:
     #: The abstention is the fail-closed direction and it is deliberate: UNDER-counting
     #: `pr_running` manufactures `PR-STARVED`, a member of `STARVING_VERDICTS` that is
@@ -610,7 +628,10 @@ class QueueHealth:
         The population the age clauses compare is `queued + pending + requested`
         (`wait_runs`), so `PR-STARVED` / `PR-BACKLOGGED` / `PR-UNWITNESSED` are all
         reachable with `pr_queued=0` — measured, pending-only @5700 s:
-        `CI: PR-STARVED(queued=0, pr_running=0, pr_queued=0, oldest=5700s)`. That line
+        `CI: PR-STARVED(queued=0, pr_running=0, pr_queued=0, pr_pending=1, oldest=5700s)`.
+        (The `pr_pending=1` field was missing from this quoted line until #12037's review:
+        the emitted branch prints it unconditionally, so the old quote showed a line this
+        code cannot produce — and for the reading it claims to quote, an impossible one.) That line
         says "PR CI is starved" and "zero PR runs are queued" in the same breath,
         which is a verdict with no visible witness in the ONE string the fleet
         samples — the defect ("a leg named but never fetched would make every
@@ -1554,7 +1575,13 @@ def read_runs(repo: str, status: str, max_pages: int = DEFAULT_MAX_PAGES) -> tup
     return collected, total > len(collected)
 
 
-def read_run_live_job(repo: str, run_id: int, *, per_page: int = PER_PAGE) -> bool | None:
+def read_run_live_job(
+    repo: str,
+    run_id: int,
+    *,
+    attempt: int | None = None,
+    per_page: int = PER_PAGE,
+) -> bool | None:
     """Does run ``run_id`` still have a job that has not COMPLETED? (#12037)
 
     The evidence a run's `status` string cannot give. A run whose every job is
@@ -1575,8 +1602,12 @@ def read_run_live_job(repo: str, run_id: int, *, per_page: int = PER_PAGE) -> bo
         declared, not silent;
       * the jobs list is EMPTY — no evidence either way, and a run between status
         transitions may legitimately have created none yet;
-      * the list was PAGE-CAPPED (``total_count`` exceeds what one page returned) and
-        every job on the page had completed — the unseen pages could hold a live one.
+      * a job row is MALFORMED or carries no ``status`` — it could be the live one;
+      * ``attempt`` was supplied and a job's ``run_attempt`` does not match it (or is
+        missing) — the payload is speaking about a different attempt;
+      * the list is NOT PROVABLY COMPLETE while every job on it had completed: either
+        ``total_count`` says there is more than this page returned, or there is no usable
+        ``total_count`` and the page is FULL (see the completeness rule below).
 
     A non-terminal job on the page is enough to answer ``True`` regardless of paging,
     which is why paging cannot make this abstain in the direction that matters.
@@ -1602,7 +1633,21 @@ def read_run_live_job(repo: str, run_id: int, *, per_page: int = PER_PAGE) -> bo
     ``docs/ops/ci-wall-clock.md`` spells that form for step history) turns a fresh re-run
     into ``has_live_job=False``, subtracts it from `pr_running`, and can make ``PR-STARVED``
     reachable on a queue that IS being served — the destructive direction.
+
+    ⛔ AND THE ATTEMPT IS CHECKED FROM THE PAYLOAD, NOT TRUSTED FROM THE QUERY STRING.
+    GitHub's `Job` schema carries ``run_attempt`` ("Attempt number of the associated
+    workflow run, 1 for first attempt and higher if the workflow was re-run"), so when
+    ``attempt`` is supplied every job must belong to it. A payload mixing attempts abstains
+    (``None``) instead of concluding anything — the same hazard ``filter=latest`` guards,
+    closed from EVIDENCE rather than from query semantics, which matters because that
+    parameter's rationale has already been stated wrongly twice above. A job row with no
+    ``run_attempt`` also abstains, since it cannot be matched.
+
+    ``per_page`` is clamped to ``PER_PAGE``: the endpoint never returns more than 100, so a
+    larger value would make a genuinely FULL page look SHORT and let the completeness rule
+    below accept it as a complete read.
     """
+    per_page = max(1, min(per_page, PER_PAGE))
     try:
         data = gh_json(
             [
@@ -1625,6 +1670,12 @@ def read_run_live_job(repo: str, run_id: int, *, per_page: int = PER_PAGE) -> bo
         # run we never actually read, which is the one direction this probe must not
         # take: it would hide the frozen-run exclusion behind a malformed payload.)
         return None
+    if attempt is not None:
+        job_attempts = [job.get("run_attempt") for job in jobs if isinstance(job, Mapping)]
+        if any(not isinstance(a, int) or a != attempt for a in job_attempts):
+            # Jobs from another attempt (or rows that cannot be matched): this payload
+            # cannot speak for the CURRENT attempt, so it proves nothing either way.
+            return None
     if any(status != "completed" for status in statuses):
         return True
     # ⛔ ONLY A PROVABLY COMPLETE LIST MAY PROVE NON-EXECUTION. The two answers are not
@@ -1700,12 +1751,30 @@ def read_health(
     # exists to find. A run left unprobed abstains toward executing (safe) and is reported
     # as `pr_running_unmeasured` (visible).
     projected = _project(running)
+
+    def _probe_order_key(run: QueuedRun) -> datetime:
+        """Oldest first, and CRASH-FREE on a stamp that will not parse.
+
+        ⛔ THE AWARENESS IS NORMALISED HERE, not just the parse. `_parse_time` returns
+        whatever `datetime.fromisoformat` produced, which is NAIVE for a stamp with no
+        offset, while the sentinel below is AWARE — so comparing them raises `TypeError`,
+        which `main()` does not catch (it catches `MeasureError` only) and the reading dies
+        with no state line at all. `age_seconds` normalises for exactly this reason; this key
+        follows the same rule instead of inventing a second one. GitHub's `date-time` is
+        always `Z`, so this needs drift to trigger — which is what makes it worth pinning
+        rather than trusting.
+        """
+        stamp = _parse_time(run.created_at)
+        if stamp is None:
+            return datetime.max.replace(tzinfo=UTC)
+        return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=UTC)
+
     probe_order = sorted(
         (run for run in projected if run.is_pr),
-        key=lambda run: _parse_time(run.created_at) or datetime.max.replace(tzinfo=UTC),
+        key=_probe_order_key,
     )
     probed = {
-        run.id: read_run_live_job(repo, run.id)
+        run.id: read_run_live_job(repo, run.id, attempt=run.run_attempt)
         for run in probe_order[: max(0, max_job_probes)]
     }
     running = [
@@ -1793,6 +1862,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--keep", type=int, default=5, help="newest queued runs of the offender to keep")
     parser.add_argument("--max-cancel", type=int, default=20, help="cap on cancellations per invocation")
+    parser.add_argument(
+        "--max-job-probes",
+        type=int,
+        default=DEFAULT_MAX_JOB_PROBES,
+        help=(
+            "how many PR-event in-progress runs one reading may probe at job level "
+            "(default derived from the job's own budget — see DEFAULT_MAX_JOB_PROBES). "
+            "Unprobed runs are counted as executing and reported in "
+            "pr_running_unmeasured"
+        ),
+    )
     parser.add_argument("--max-pages", type=int, default=DEFAULT_MAX_PAGES)
     return parser
 
@@ -1806,6 +1886,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "max_cancel": args.max_cancel,
         "max_pages": args.max_pages,
         "max_pr_wait_seconds": args.max_pr_wait_seconds,
+        "max_job_probes": args.max_job_probes,
     }
     try:
         health = read_health(args.repo, **measure_kwargs)
