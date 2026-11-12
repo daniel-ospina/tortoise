@@ -4796,16 +4796,19 @@ jobs:
           # ⚠️ A SEVENTH named failure sits AFTER all of these — the client-major assertion on
           # `pg_dump`/`pg_restore`. It is deliberately outside this list: this list is about
           # GETTING a client onto the leg, that one is about the client it GOT.
-          #
           # ⛔ THE BOX IS POOL-ELIGIBLE, SO WHAT THIS STEP ADDS TO APT IS REMOVED AGAIN.
           # /etc/apt/sources.list.d/pgdg.list changes apt resolution for EVERY later job on the
           # same box, and a leftover sources file is worse than none once this step's keyring is
           # gone: an unverifiable key turns the next job's `apt-get update` into exactly the SOFT
           # failure the ORIGIN check below exists to catch. Registered BEFORE the first write so a
           # failure anywhere later still cleans up, and the SOURCE is removed FIRST so there is no
-          # window in which it outlives the key that signs it.
-          trap 'sudo rm -f /etc/apt/sources.list.d/pgdg.list /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc /tmp/pgdg.asc || true' EXIT
-          if ! curl -fsSL -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc; then
+          # window in which it outlives the key that signs it. `${key_file:-}` because the trap can
+          # fire before that mktemp call, where `set -u` in the trap would itself abort.
+          trap 'sudo rm -f /etc/apt/sources.list.d/pgdg.list /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc "${key_file:-}" || true' EXIT
+          # ⚠️ `mktemp`, not a fixed `/tmp/pgdg.asc`: this job is pool-eligible and `curl -o`
+          # FOLLOWS symlinks, so a co-tenant could pre-create that path and redirect this write.
+          key_file="$(mktemp)"
+          if ! curl -fsSL -o "$key_file" https://www.postgresql.org/media/keys/ACCC4CF8.asc; then
             echo "::error::could not FETCH the PGDG signing key (ACCC4CF8.asc) [$identity] — the client this drill needs comes from apt.postgresql.org, so without the key nothing can be installed and BOTH provisioned servers are pg16 (#12051). Either this runner cannot reach www.postgresql.org (egress/DNS/503), or curl/ca-certificates are not installed on it — test with 'command -v curl' before chasing the firewall."
             exit 1
           fi
@@ -4813,7 +4816,7 @@ jobs:
           # `postgresql-common`, which a bare runner image does not carry, so `install -m 0644`
           # below would fail `No such file or directory` — unnamed, one line before the guard.
           sudo install -d /usr/share/postgresql-common/pgdg
-          sudo install -m 0644 /tmp/pgdg.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          sudo install -m 0644 "$key_file" /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
           # ⛔ THE SOURCE IS GUARDED, not just the variable it sets. `.` on a box with no
           # readable /etc/os-release aborts under `set -e` with bash's own text (`No such file
           # or directory`) and NO `::error::` — the unnamed-abort class every other line here
@@ -4848,8 +4851,9 @@ jobs:
           # is the MAJOR, enforced by the pg_dump/pg_restore assertion below — so scoping this
           # to apt's `Candidate:` row would red the job on a correct tree. Do not "strengthen"
           # it without moving that contract. Both causes share one guard, because they read
-          # identically from here: the index fetch failed, or the suite carries no such
-          # package. The policy file is `mktemp`, not a fixed `/tmp` path: this job is
+          # identically from here: no usable index arrived (the fetch failed, and a failed
+          # fetch leaves the PREVIOUS lists in place, so what the grep sees may be stale), or
+          # the suite carries no such package. The policy file is `mktemp`, not a fixed `/tmp` path: this job is
           # pool-eligible, and a shared box can pre-create that path as a symlink.
           # THIS BRANCH'S REMEDY IS NAMED FROM ITS OWN CAUSE, not from release
           # drift: a release PGDG does not publish (no suite) fails HARD at `apt-get update`,
@@ -4857,7 +4861,7 @@ jobs:
           # could not change apt's answer.
           policy_file="$(mktemp)"
           if ! apt-cache policy postgresql-client-16 > "$policy_file" 2>/dev/null || ! grep -qF 'apt.postgresql.org' "$policy_file"; then
-            echo "::error::apt.postgresql.org did not SUPPLY postgresql-client-16 for this codename [$identity] — either its index never LOADED (apt-get update only WARNS and exits 0 on a DNS/egress/5xx failure; look for 'W: Some index files failed to download' above) or the suite '${VERSION_CODENAME:-unknown}-pgdg' carries no such package. BOTH provisioned servers are pg16 and the client major is part of the artifact's contract (#12051), so this drill cannot fall back to the image's own archive client. Check 'apt-cache policy postgresql-client-16': apt.postgresql.org must list this major."
+            echo "::error::apt.postgresql.org did not SUPPLY postgresql-client-16 for this codename [$identity] — either its index never LOADED (apt-get update only WARNS and exits 0 on a DNS/egress/5xx failure, and a failed fetch leaves the PREVIOUS lists in place — so a row can still appear from a STALE index; look for 'W: Some index files failed to download' above) or the suite '${VERSION_CODENAME:-unknown}-pgdg' carries no such package. BOTH provisioned servers are pg16 and the client major is part of the artifact's contract (#12051), so this drill cannot fall back to the image's own archive client. Check 'apt-cache policy postgresql-client-16': apt.postgresql.org must list this major."
             exit 1
           fi
           if ! sudo apt-get install -y --no-install-recommends postgresql-client-16; then

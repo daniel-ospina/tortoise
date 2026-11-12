@@ -1250,7 +1250,7 @@ looks unhealthy **or the hosted queue is deep enough to stall work** (owner ruli
 `scripts/ci_runner_gate.sh`), so it is not a hosted-only class; a `self-hosted` class in either form
 removes the GitHub-hosted half of the race, so a **pool-side** stall — an outage on the box, or a
 contended box — holds the fold's required legs PENDING with nothing to answer them, the exposure
-`docs/ops/ci-runner-x64.md` records for every pool-only departure (`:792-798`); and the pool is
+`docs/ops/ci-runner-x64.md` records for every pool-only departure (`:801-807`); and the pool is
 MEASURABLY slower than hosted, in both of its architectures. On the x64 box, `test-slow (a)` over the
 same 365 nodeids took **1352.5 s against 246.5 s hosted — 5.49×** (`docs/ops/ci-runner-x64.md:208`); the
 ARM64 VMs resolve `ubuntu-latest` to a **~2× slower** class (`python-ci.yml:2105`) and one of them
@@ -1274,7 +1274,7 @@ hosted label precisely because the producer's artifacts feed the canary streak, 
 comparison of TESTS across runs. Moving the producer onto another class would turn it into a
 comparison of runner classes — the failure measured 2026-10-27..30, when run `40986603502` (head
 `5a2ae6aa1`) had `test (i)`, the canary, taken by `pi-runner-vm-5` (ARM64) and killed at 32m12s of a
-30m budget (`docs/ops/ci-runner-x64.md:866`, `:907`). A fold gets priority on the legs that carry the
+30m budget (`docs/ops/ci-runner-x64.md:875`, `:916`). A fold gets priority on the legs that carry the
 wall; the producer stays where the streak expects it.
 
 ⛔ **The class does not buy PARALLEL legs.** `strategy.max-parallel: 3` (#6744) is a bare literal on

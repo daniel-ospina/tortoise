@@ -488,14 +488,14 @@ def _runs_on_labels(job: dict) -> list[str]:
 
 
 def _has_live_substitution(text: str) -> bool:
-    """True when `text` runs a command substitution rather than printing the span.
+    r"""True when `text` runs a command substitution rather than printing the span.
 
     ⛔ `\\$(` IS LIVE, and this is why a substring test for `\\$(` is wrong: bash
-    consumes one backslash, prints one, and then executes the substitution.
-    Only an ODD number of preceding backslashes escapes it. MEASURED, review
-    cycle 8: `echo "value: \\$(uname -s)"` stayed GREEN under the substring
-    version of this guard while bash executed `uname -s` and printed its output.
-    The run is counted, so `$(` (0), `\\$(` (2) are live and `\\$(` (1) is not.
+    consumes one backslash, prints one, and then executes the substitution. Only an
+    ODD number of preceding backslashes escapes it. MEASURED, review cycle 8:
+    `echo "value: \\$(uname -s)"` stayed GREEN under the substring version of this
+    guard while bash executed `uname -s` and printed its output. The run is counted,
+    so `$(` (0) and `\\$(` (2) are LIVE, while `\$(` (1) is not.
     """
     index = 0
     while True:
@@ -511,7 +511,7 @@ def _has_live_substitution(text: str) -> bool:
 
 
 def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> None:
-    """⛔ A BACKTICK INSIDE `echo "…"` IS COMMAND SUBSTITUTION, WHICH SILENTLY EDITS THE MESSAGE.
+    r"""⛔ A BACKTICK INSIDE `echo "…"` IS COMMAND SUBSTITUTION, WHICH SILENTLY EDITS THE MESSAGE.
 
     MEASURED TWICE WHILE BUILDING #12051 — cycle 1 and again in cycle 5. A message like
     ``echo "::error::… via `/etc/os-release`'s …"`` does not print the filename: bash RUNS
@@ -532,18 +532,22 @@ def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> 
         substitution whose output is wanted — the opposite case, and the first cut of this
         test false-redded exactly that line (measured, cycle 6).
       · DELIBERATELY CONSERVATIVE, and said so here so it reads as a choice rather than a
-        bug: an ESCAPED `\\$(…)` (an ODD run of backslashes) prints literally and is
-        exempted — `\\$(…)` is NOT, because bash consumes one backslash and then runs it
+      · DELIBERATELY CONSERVATIVE, and said so here so it reads as a choice rather than a
+        bug: an ESCAPED `\$(` (an ODD run of backslashes) prints literally and is
+        exempted — `\\$(` is NOT, because bash consumes one backslash, prints it, and then
+        runs the substitution
         (MEASURED, review cycle 8) — and a TRAILING COMMENT is not scanned at all
-        (`_strip_trailing_comment`), because a comment is never printed. Two limits are
-        stated rather than implied: the comment splitter is quote-aware, not a parser (a
-        `#` inside an undetectable quoting form would be read as a comment), and a
-        substitution LAUNDERED THROUGH A VARIABLE — `who="$(hostname)"; echo "… $who"` —
-        is invisible to ANY text scan (MEASURED, review cycle 8: that shape passed 8
-        passed). The variable half is unreachable without executing the step, so it is
-        recorded here rather than half-guarded; the concrete half (a literal `$(` or a
-        backtick in a printed message) is what this test refuses. A future lane that
-        needs a literal one should move the message to a single-quoted string instead of
+        (`_strip_trailing_comment`, quote-aware), because a comment is never printed
+        (MEASURED false block, review cycle 8: a `# …` note on a printing line red the step).
+        Two limits are stated rather than implied: the splitter is quote-aware, not a parser
+        (a `#` inside an undetectable quoting form reads as a comment), and a substitution
+        LAUNDERED THROUGH A VARIABLE — `who="$(hostname)"; echo "… $who"` — is invisible
+        to ANY text scan (MEASURED, review cycle 8: that shape passed `8 passed`). The
+        variable half is unreachable without executing the step, so it is recorded here
+        rather than half-guarded; the concrete half (a literal `$(` or a backtick in a
+        printed message) is what this test refuses. A future lane that needs one should move
+        the message to a single-quoted string instead of
+        widening this guard.
         widening this guard.
 
     ⛔ A LINE-INITIAL `echo` SCAN IS NOT ENOUGH, and that is a correction this test needed: an
@@ -786,15 +790,28 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
         "gone if the keyring is cleaned up separately"
     )
     cleanup = traps[0]
+    # The downloaded key's path is a `mktemp` VARIABLE (a fixed `/tmp` path is pre-creatable on
+    # a shared box), so the trap must remove whatever variable `curl -o` wrote to — pinning the
+    # spelling `key_file` would red a correct rename, and pinning the old fixed path would
+    # outlive the very change that removed it.
+    key_target = re.search(r"curl\s[^\n]*?-o\s+\"?\$\{?(\w+)", code)
+    assert key_target, (
+        "the key fetch does not write to a variable (`curl -o \"$…\"`), so the EXIT trap "
+        "has no path to remove — a fixed path is pre-creatable on a pool box"
+    )
+    key_var = key_target.group(1)
     for artifact, why in (
         ("/etc/apt/sources.list.d/pgdg.list", "the PGDG source it added"),
         ("apt.postgresql.org.asc", "the keyring it installed"),
-        ("/tmp/pgdg.asc", "the downloaded key"),
     ):
         assert artifact in cleanup, (
             f"the EXIT trap does not remove {artifact} ({why}), so a pool box keeps "
             f"state this step added: {cleanup!r}"
         )
+    assert re.search(rf"\$\{{?{key_var}\b", cleanup), (
+        f"the EXIT trap does not remove the downloaded key (`${key_var}`), so every run "
+        f"leaves a temp file on the box: {cleanup!r}"
+    )
     assert cleanup.index("/etc/apt/sources.list.d/pgdg.list") < cleanup.index(
         "apt.postgresql.org.asc"
     ), (
@@ -971,7 +988,7 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     written the HOST's apt sources and fetched from the network — which is why
     the stubs below are part of the contract this test claims, not decoration.
     `rm` joined that set for the same reason once the step grew its EXIT trap: an
-    unstubbed trap deletes the HOST's `/tmp/pgdg.asc` as this arm exits.
+    unstubbed trap removes the HOST's apt source and keyring as this arm exits.
 
     ⛔ AND THE HOST's `/etc/os-release` IS THE SAME CLASS ONE STEP FURTHER. The
     prefix contains `. /etc/os-release` (the PGDG suite is derived from the box's
@@ -1038,6 +1055,22 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "fall back to reading the HOST's file"
     )
     prefix = prefix.replace(". /etc/os-release", f". {os_release}")
+
+    # The key file is `mktemp` too (a shared box can pre-create a FIXED `/tmp` path as a
+    # symlink and `curl -o` follows symlinks), so that call is substituted the same way.
+    key_file = tmp_path / "pgdg.asc"
+    key_sites = _code_only(prefix).count('key_file="$(mktemp)"')
+    assert key_sites == 1, (
+        "the key file is expected to be created by exactly one `key_file=\"$(mktemp)\"` in "
+        f"the prefix's CODE; found {key_sites}. Re-derive the substitution rather than letting "
+        "the arm write the HOST's temp dir"
+    )
+    prefix = prefix.replace('key_file="$(mktemp)"', f'key_file="{key_file}"')
+    for use in ('-o "$key_file"', 'install -m 0644 "$key_file"'):
+        assert use in _code_only(prefix), (
+            f"expected `{use}` in the committed step — the key file must be the one `curl` "
+            "wrote and the one `install` copies"
+        )
 
     policy_file = tmp_path / "pgdg-policy.txt"
     mktemp_sites = _code_only(prefix).count('policy_file="$(mktemp)"')

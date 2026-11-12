@@ -285,14 +285,23 @@ only leg whose pin is about speed, and the mitigation buys it nothing (above):
   installs the client from PGDG (`16.15-1.pgdg24.04+2` measured on noble), and asserts that
   apt.postgresql.org LISTS this major — because `apt-get update` only WARNS (exit 0) when a repo cannot
   be fetched, so without that origin check an egress failure would quietly fall back to the image's
-  archive. ⚠️ It proves the index loaded and carries the major, not that PGDG's build is the one
+  archive. ⚠️ It proves apt KNOWS apt.postgresql.org and carries the major — not that this run
+  FETCHED that index (a failed fetch keeps the previous lists), and not that PGDG's build is the one
   installed: on a release whose own archive carries a higher revision of the same major, apt takes the
   archive's build — a valid state, since the contract is the major (held by the in-step assertion). ⛔ It does NOT fail closed on a release that is not the one the label names: MEASURED, the step exits 0 on `ubuntu-26.04` (`16.15-1.pgdg26.04+2`), because PGDG publishes PG16 for every supported release, so a supported box simply RUNS (that is the fix).
   What still fails closed with a NAMED `::error::` is AMONG: a key fetch that fails (egress/DNS/503, or
-  no `curl`), a release PGDG does not publish (a HARD `apt-get update` failure), an index that never
-  loaded (a SOFT failure, which the update's own exit status cannot see — the ORIGIN check catches
-  it), an os-release with no codename, and a suite that resolves without this major — the `=on`
-  routing drift that can put an unexpected box here is #10289.
+  no `curl`), an `/etc/os-release` that cannot be READ or carries no codename (two states, two
+  messages — the SOURCE itself is guarded, because `.` on a box without the file aborts with bash's
+  own text and no `::error::`), a release PGDG does not publish (a HARD `apt-get update` failure), an
+  index that never loaded (a SOFT failure, which the update's own exit status cannot see — the ORIGIN
+  check catches it), and a suite that resolves without this major — the `=on` routing drift that can
+  put an unexpected box here is #10289.
+
+  The step also leaves the box as it found it: an `EXIT` trap removes
+  `/etc/apt/sources.list.d/pgdg.list`, its keyring and the `mktemp`'d key file. That is not hygiene —
+  the job is POOL-ELIGIBLE, and a leftover sources file changes apt resolution for every later job on
+  the same box; outliving its keyring, it would turn the next job's `apt-get update` into the very
+  soft failure the ORIGIN check exists to catch.
 
 These are **accepted costs of the temporary mitigation, stated as costs**, and all nine revert with
 it. If the mitigation becomes permanent, the scoping fix is to put the starved required legs on a
@@ -967,7 +976,7 @@ job itself:
   self-hosted runner lost communication with the server"*. The zero-step count is the
   discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
   investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
-  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5237`) buys no landing:
+  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5259`) buys no landing:
   the rail blocks on any red on the PR's tree, so this one costs a re-run.
 
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to ONE job whose red costs a
