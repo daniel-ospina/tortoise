@@ -218,7 +218,11 @@ class TestCreateOperator:
         a, b = _make_point(sdk), _make_point(sdk)
         op_bi = sdk.create_operator("IMPL", a["id"], [b["id"]], direction="bidirectional")
         assert op_bi.get("direction") == "bidirectional"
-        op_uni = sdk.create_operator("NAND", a["id"], [b["id"]], direction="unidirectional")
+        # #12067: the mechanism set is CLOSED and a pair carries at most one, so
+        # the NAND probe is its own pair — the direction gate is what this test
+        # is about, and reusing (a, b) would measure the closure instead.
+        c, d = _make_point(sdk), _make_point(sdk)
+        op_uni = sdk.create_operator("NAND", c["id"], [d["id"]], direction="unidirectional")
         assert op_uni.get("direction") == "unidirectional"
 
     def test_direction_default_bidirectional(self, sdk):

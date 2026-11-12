@@ -367,12 +367,16 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_audit",
         id="surface.audit",
-        description="Audit graph wiring quality — 8 checks: missing sourceKind "
+        description="Audit graph wiring quality — 11 checks: missing sourceKind "
                     "(point-level legacy + Source-level canonical), missing sourceDate, "
                     "superseded points without a CORRECTS edge, live IMPL/NAND edges "
-                    "into superseded points, naive-IMPL contradiction heuristic, "
-                    "low-confidence operators without mitigation, and legacy 'mitigates' "
-                    "edges. Returns structured JSON: per-check counts (uncapped) + "
+                    "into superseded points, live IMPL/NAND edges into superseded "
+                    "Objects (that lane moves no edges, so a survivor there is LOST "
+                    "BELIEF — #11826), a superseded Object whose supersededBy name "
+                    "resolves to no node, naive-IMPL contradiction heuristic, "
+                    "low-confidence operators without mitigation, legacy 'mitigates' "
+                    "edges, and inverted validity windows. Returns structured JSON: "
+                    "per-check counts (uncapped) + "
                     "capped samples + summary + exit_code (0 clean, 1 issues). "
                     "point_kinds: optional pointKind list to scope the audit.",
         risk="read",
@@ -711,7 +715,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_create_operator",
         id="surface.create_operator",
         description="Create an operator connecting Points. "
-                    "op_type: IMPL, NAND, composedOf, decomposesInto, contains, wraps. "
+                    "op_type: IMPL, NAND, coherence, composedOf, decomposesInto, contains, wraps. "
                     "semantics: the Layer-2 meaning (addresses, supports, refutes, "
                     "mutuallyExclusive, hasPart, related, …) — it resolves the direction.",
         risk="write",

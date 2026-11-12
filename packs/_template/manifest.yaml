@@ -231,7 +231,20 @@ ontology:
   # New format (preferred): { predicate, fromKind, toKind, mechanism, semantics?, nearMisses?, cardinality?, declarationOnly? }
   #   - predicate: domain verb — "addresses", "competesWith", "implements"
   #   - fromKind/toKind: prefixed pack kinds — "myapp:concept" or core PascalCase kinds
-  #   - mechanism: IMPL (A supports B) or NAND (A contradicts B)
+  #   - mechanism: IMPL (A supports B) or NAND (A contradicts B).
+  #     ⛔ `coherence` (A is a NECESSARY CONDITION for B) is a valid mechanism
+  #     since #12067, but a relation declared HERE writes an operator-LESS bare
+  #     edge, whose mechanism IS its edge type — and there are two. So declaring
+  #     `coherence` here is REFUSED when the pack loads (the manifest does not
+  #     validate), and a catalog that reaches the write leg anyway is handled by
+  #     its own arm: a verb with no other write path is DROPPED with a reason
+  #     naming this limit, rather than re-spelled IMPL; a verb that ALSO has a
+  #     structural path (`dependsOn`, `hasPart`) keeps its own bare edge — and
+  #     the `coherence` declaration is then SILENTLY not carried on it, because
+  #     that edge's mechanism slot is its rel type and nothing prices a
+  #     structural edge. Neither arm ever re-spells it IMPL (#12067's open
+  #     follow-up — carriage on the bare-edge leg). Reach necessity as an
+  #     OPERATOR (`create_operator(op_type="coherence")`) instead.
   #     ⤷ a declared `mechanism` is what BINDS this verb to the operator write
   #       path (#2766): it is the op_type a caller passes
   #       (`create_operator(op_type=mechanism, label=predicate)`, the path
@@ -373,6 +386,8 @@ extraction:
 #                        predicate:        the domain verb
 #                        mechanism:        IMPL | NAND — the same pair
 #                                          `ontology.relations` accepts.
+#                                          (`coherence` is refused here: not
+#                                          carriable on a bare edge — #12067.)
 #                                          ⛔ NOT MITIGATES: it was RETIRED from
 #                                          the operator menu by the F1 ruling
 #                                          (#4937 / #2552) and

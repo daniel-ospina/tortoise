@@ -67,10 +67,10 @@ claim nothing supports. **The seam has since LANDED (#9116), so this module no
 longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:14586-14592`` and
-``result["vet"]`` at ``:14596-14600``) while the meta fold dropped them with
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:14640-14646`` and
+``result["vet"]`` at ``:14650-14654``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:18348``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:18613``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -276,9 +276,9 @@ ANCHOR_OUT = ("extractedFrom",)
 
 #: The relationship type that points AT a derived node: ``(Source)-[:references]
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
-#: (``tortoise/projection/edges.py:3021-3046``, ``MERGE (s)-[r:references]->(e)
+#: (``tortoise/projection/edges.py:3032-3057``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:18746`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:19011`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -293,7 +293,7 @@ E3_RULE = (
     "interchangeable: extractedFrom points FROM the derived node at its source "
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
-    "tortoise/projection/edges.py:3021-3046 link_source_to_event, reached from "
+    "tortoise/projection/edges.py:3032-3057 link_source_to_event, reached from "
     f"the capture path at {LINK_SOURCE_CITE} "
     "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
     "property of the "
@@ -1789,27 +1789,27 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:13766, the "
-        "flag; :13770, the early return; :13801, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:16779), "
-        "`if vet_enabled and complete_list:` (:14350) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:13820, the "
+        "flag; :13824, the early return; :13855, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:16833), "
+        "`if vet_enabled and complete_list:` (:14404) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
-        "returns {} on its fail-open path, :13495-13498)."
+        "returns {} on its fail-open path, :13549 and :13552)."
     ),
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
-        "tortoise/extractor_v2.py:13735 (and set False when its classifier cannot "
-        "be constructed, :13760), the `if not edus:` early return emits "
+        "tortoise/extractor_v2.py:13789 (and set False when its classifier cannot "
+        "be constructed, :13814), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
-        "'restamp_overrides': 0, 'slot_rekeys': 0} (:13797-13800), and each "
+        "'restamp_overrides': 0, 'slot_rekeys': 0} (:13851-13854), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
-        "`if classify_later and embed_list:` (:14219) around `if items:` "
-        "(:14222), `if classify_later and complete_list:` (:14365) around "
-        "`if items:` (:14375) — so a block that says enabled=true proves the "
+        "`if classify_later and embed_list:` (:14273) around `if items:` "
+        "(:14276), `if classify_later and complete_list:` (:14419) around "
+        "`if items:` (:14429) — so a block that says enabled=true proves the "
         "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
-        "empty stats (its fail-open `except` at :14235 / :14386)."
+        "empty stats (its fail-open `except` at :14289 / :14440)."
     ),
 }
 
@@ -1821,26 +1821,26 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:13797-13800, :13801, :14586-14592, :14596-14600) — so an acceptance test of "a non-empty dict"
+    {}}`` (:13851-13854, :13855, :14640-14646, :14650-14654) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
-    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:13766`` and
-    ``edus = _edus_from_conversation(...)`` follows at ``:13769``, whose
-    ``if not edus:`` early return (``:13770``) emits literally ``"vet": {"enabled":
-    vet_enabled, "s2": {}, "union": {}}`` (``:13801``) — with the flag ON. The
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:13820`` and
+    ``edus = _edus_from_conversation(...)`` follows at ``:13823``, whose
+    ``if not edus:`` early return (``:13824``) emits literally ``"vet": {"enabled":
+    vet_enabled, "s2": {}, "union": {}}`` (``:13855``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:16779``) and ``if vet_enabled and complete_list:``
-    (``:14350``). So a session whose conversation produced no list emits
+    embed_list:`` (``:16833``) and ``if vet_enabled and complete_list:``
+    (``:14404``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
-    exception path (``extractor_v2.py:13495-13498``). ``enabled: true`` therefore
+    exception path (``extractor_v2.py:13549-13552``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at `:13735`, its own early-return
+    is different code (``classify_later`` at `:13789`, its own early-return
     block, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one
@@ -3222,7 +3222,7 @@ def _a4_writer_attribution(projection) -> dict:
     not a stored fact and the census must not pretend otherwise. What IS mechanical at this head:
 
     * `extractor_v2` CANNOT be the source of a typed claim. Its write gate repairs every point kind
-      outside the master vocabulary to `statement` (`extractor_v2.py:10419-10422`; `:10413` is the
+      outside the master vocabulary to `statement` (`extractor_v2.py:10447-10450`; `:10441` is the
       EMPTY-kind default only), so a claim carrying `decision`/`plan`/… did not come from that lane.
     * `extractor.py::_classify_point_kind` is a PURE keyword classifier over the claim's own
       content, so its answer is REPRODUCIBLE for any node: apply it and compare.
@@ -3314,7 +3314,7 @@ def _a4_pointkind(projection) -> dict:
 
     ⛔ Two further folds that would have manufactured that same win (#10982 review, finding 4):
     a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
-    with no kind — `tortoise/projection/__init__.py:14255-14257`, `# Ensure pointKind is present
+    with no kind — `tortoise/projection/__init__.py:14265-14267`, `# Ensure pointKind is present
     (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
     `projection/entities.py:2950`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are

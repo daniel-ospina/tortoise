@@ -1226,6 +1226,65 @@ A relationship operates on **three layers** — **mechanism + direction** (how i
 it runs), **semantics** (the meaning vocabulary), and **predicate + tags** (the specific verb, plus
 optional free data). It carries an operator **only when it needs one**.
 
+### The three epistemic mechanisms — support, attack, coherence
+
+Every epistemic relation between two beliefs is exactly one of three mechanisms. The set is
+**closed**, and a pair carries **at most one**.
+
+| mechanism | asserts | behaviour | one-way | two-way |
+|---|---|---|---|---|
+| **support** | this is evidence for that | raises the other where it sits above it, and **lowers it where it sits below** (difference coupling — the one documented case where a SUPPORT edge lowers a belief, see below) | A is evidence for B | each is evidence for the other |
+| **attack** | this counts against that | lowers the other, **never raises it** | A counts against B | mutually exclusive |
+| **coherence** | A is a necessary condition for B | an unmet condition propagates **loss** to the dependent; a met one never raises either side | A is necessary for B (A falls ⇒ B falls) | both directions of necessity, priced in the stated order |
+
+`IMPL` and `NAND` are the first two. **Coherence is the third**, and it is what a necessity
+meaning (`dependsOn`, `hasPart`) is asking for. Both are still written as `IMPL` on the
+operator-less direct-edge leg, because a bare edge carries its mechanism as its EDGE TYPE and
+there are two (`IMPL`, `NAND`); coherence is reachable there as an **operator**
+(`create_operator(op_type="coherence")`, which is what extraction mints). Teaching the bare-edge
+leg to carry it is the open follow-up on #12067.
+
+⛔ **Coherence is not "they move together".** Moving together is indistinguishable from support
+and is what the old prose said: on `phi_coherence` the dependent never rises because of this
+factor — only a necessary condition failing drags it down, which is the directed asymmetry that
+makes the third mechanism worth having.
+
+⛔ **Support can lower, and that is not a bug.** `phi_impl` couples the two beliefs by their
+difference, so a source sitting BELOW its target pulls the target down. The direction flag decides
+WHO receives a message, never the sign of the transfer, so "support only raises" was never true of
+the shipped potential — it is recorded here rather than restated as an acceptance property
+(`test_support_LOWERS_when_the_source_sits_BELOW_the_target` pins it).
+
+**Direction is the only flag:** it says how far an assertion reaches, not what it means. Two-way
+attack *is* mutual exclusivity; for coherence it selects which input is the necessary condition
+(`->` = first, `<-` = second).
+
+**Why closed.** Support and coherence agree while everything rises and diverge elsewhere: mutual
+support inflates a well-evidenced pair (two reports of ONE fact are not two pieces of evidence),
+coherence does not. Both on one pair silently over-states confidence, and the over-statement is
+invisible because it looks like strong support. The set is closed so that state is unwritable:
+`create_operator` and `create_direct_edge` each refuse a MIXED pair — an operator beside a bare edge of
+the other mechanism, in either write order — through one shared reader, over live AND draft operators
+(a draft is promoted, and the promotion re-checks nothing).
+
+⛔ **The residual, stated rather than implied:** two BARE edges of different types on one pair
+(`:IMPL` beside `:NAND`) are still writable. They do NOT share a message slot — a slot is keyed to an
+actual edge (`(src, tgt, rel_type)`), so every shape here occupies its own — and the cost of leaving
+them writable is the SAME one the refusal above exists to prevent: two factors pricing one pair with
+different functional forms, i.e. an over-statement that looks like strong support. They are retained
+only because refusing them changes a shape the engine has always allowed, so this table does not
+claim they are refused and does not claim they are harmless. That shape needs the operator-less
+`relation` route: a connection that carries `operator` writes an OPERATOR on every route, and an
+operator that shares a **PRICED PAIR** with any existing mechanism — bare or operator — is refused,
+including through `ingest`, whose Phase 1 reports the refusal as a `violations` entry instead of
+raising mid-bundle (#12067). "Priced pair" is the unit the FACTOR prices, not the endpoint set
+(`TortoiseEP._factor_pairs`, read by `sdk._priced_pairs`): `IMPL` is a STAR — `inputs[0]` → every
+other input — so its TARGETS never price each other, and an n-ary `IMPL` does not conflict with a
+mechanism on a pair BETWEEN two of its targets. A `NAND` or `coherence` whose direction flows both
+ways prices a clique, so there the two units coincide. Not
+covered here at all: `EventAPI.add_operator` (which accepts `IMPL`/`NAND` only, so the third
+mechanism is unreachable there) and the projection's own edge fold (`#10306`).
+
 ### Reification rule — when an edge gets an operator
 
 **An edge carries an operator iff it needs mitigation, or is an epistemic
@@ -1289,7 +1348,7 @@ Operator:      (op-123)                                   ← mitigation anchor
 
 | Layer | Where | What |
 |-------|-------|------|
-| **Mechanism + direction** | operator (`IMPL`/`NAND`) + the recorded direction | How it acts, and which way it runs: `->` `<-` `<->` `-` |
+| **Mechanism + direction** | operator (`IMPL`/`NAND`/`coherence`) + the recorded direction | How it acts, and which way it runs: `->` `<-` `<->` `-` |
 | **Semantics** | `semantics` field | The meaning: `addresses`, `supports`, `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `produces`, `hasPart`, `dependsOn`, `transacts`, `related`, `ownedBy`, `managedBy` |
 | **Predicate + tags** | `operator.label` | The specific verb: `fixes`, `implements`, `deploysTo`, `bearsOn`… plus an optional free tag/note |
 | Epistemic | IMPL/NAND edges | Confidence via EP (0-1 continuum) |
@@ -1309,10 +1368,10 @@ and the answer is the direction the relation records.
 | `refutes` | NAND | `->` | Negative evidence, one way — the directed attack: the attacker's truth penalizes the target, with no back-pressure (#753) |
 | `mutuallySupportive` | IMPL | `<->` | Each end reinforces the other |
 | `mutuallyExclusive` | NAND | `<->` | They rule each other out — a mutual restatement |
-| `hasPart` | IMPL | `<->` | Composition — a part reinforces the whole and the whole the part |
+| `hasPart` | IMPL | `<->` | Composition — the whole REQUIRES its parts, so a part failing should lower the whole and a part being present must not inflate it. ⛔ The mechanism column says `IMPL` because that is the mechanism this table's map DECLARES and the bare-edge leg WRITES, and a bare edge carries its mechanism as its edge TYPE (`IMPL`/`NAND` only). The mechanism that prices necessity is `coherence` and it exists as an OPERATOR (`op_type="coherence"`); carrying it on a bare edge is the #12067 follow-up. ⚠️ Do not pair `semantics="hasPart"` with a `coherence` operator and expect silence: the #9963 disclosure compares the write against THIS map and will (correctly, about the map) report the mismatch |
 | `causes` | IMPL | `->` | *A brought B about* — **untyped, any kind to any kind, no restriction.** ⛔ Not the same assertion as `produces` (next row) and not its replacement: W3C PROV states that generation does **not** assert a general causal relation. `causes` is the Layer-3-preferred spelling for a happening → the artifact it created, aligned to `schema:result` / `prov:wasGeneratedBy` (§3.8's structural Event→Object `produces` is a separate layer and does not conflict) |
 | `produces` | IMPL | `<-` | **Production, entity → entity** — *the TARGET brought the source into existence.* Direction `<-` because the declared edge is `asset → program` while production runs producer → product, so `->` would assert the asset caused the program. Restored as a Layer-2 meaning by #11083 (owner 2026-11-05, cites `#7848`'s `OVERRIDES:`); the pre-#11083 mapping onto `causes` changed the meaning **and** inverted the direction. ⛔ Not a rename of `causes`: a produced thing may be unrelated to the producer causally, and a cause need not produce anything. |
-| `dependsOn` | IMPL | `->` | A precondition — the condition bears on the dependent, one way |
+| `dependsOn` | IMPL | `->` | A precondition — the condition bears on the dependent, one way; the dependent falls when the precondition is absent and is **not** raised by its presence, which is what `coherence` prices. ⛔ This map declares `IMPL` for the same reason the `hasPart` row does (bare-edge carriage), and the same caveat about pairing the meaning with a `coherence` operator applies (#12067) |
 | `transacts` | — | `-` | A trade or exchange — association only; no confidence either way |
 | `related` | — | `-` | The deliberately ambiguous generic association, kept rare. **OVERRIDES:** the common practice of typing every association — a deliberate owner ruling, not an accident; no belief path reads it |
 | `ownedBy` / `managedBy` | — | `->` | The core structural rows (§3.6) a pack may name as a relation's meaning. ⚠️ `ownedBy`'s `->` is only the DEFAULT: with its target left open (Subject **or** Object) a declaration carries the sense per edge — see §3.6 |
