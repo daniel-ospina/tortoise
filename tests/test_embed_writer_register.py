@@ -977,9 +977,10 @@ def test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_
     threaded per scope — it is, for the SEAM spelling only — and round 11 measured that reverting
     BOTH hunks left this whole file GREEN (47 passed). The sibling clauses of the same bullet are
     pinned (the never-run clause and the `gated` summary above); this one was not, so a later
-    cleanup could restore the false universality silently. Pinned by SLICE + PRESENCE, the idiom
-    those pins use, rather than by asserting a phrase is ABSENT across the whole docstring — an
-    absence check reds correct negations and is satisfied by a paraphrase.
+    cleanup could restore the false universality silently. Pinned by SLICE + PHRASES: the clause is
+    located between two anchors and must carry the scoping operator, the measured DIRECTION and the
+    naming-entry pointer. ⛔ Not bare tokens — round 12 inverted the direction with a coherent
+    sentence (`never DELETES a real writer at all`) and a token check passed the whole file.
     """
     doc = re.sub(r"\s+", " ", (register.__doc__ or "").lower())
     start = doc.find("for the seam spelling the shadow is threaded")
@@ -989,16 +990,30 @@ def test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_
         "SEAM spelling the shadow is threaded\" and \"this bullet is the SEAM's\", so re-anchor "
         "it deliberately rather than letting the pin cover nothing")
     clause = doc[start:stop]
-    assert "clause builder" in clause, (
-        "the seam-shadow clause no longer says the shadow is scoped to the SEAM by naming the "
-        "clause BUILDER as the exception — without it the sentence reads as universal again: "
+    # ⛔ PHRASES, not bare TOKENS (`#12020` round 12 review, P2 — measured). The first cut of this
+    # pin asserted `"clause builder"` / `"delete"` / `"escapes as an argument"`, and a COHERENT
+    # INVERSION of the paragraph — `so suppressing a shadowed call never DELETES a real writer at
+    # all` — left the WHOLE register file green (48 passed), i.e. the pin held a false statement that
+    # argued the deletion direction does not exist. Dropping the `NOT` from the scoping line was
+    # likewise green. The sibling pin 12 lines above already measured this weakness and repaired it
+    # with clause-scoped exclusions; the phrases below do the same job without needing them.
+    assert "not threaded for a clause builder" in clause, (
+        "the seam-shadow clause no longer SCOPES itself — it must say the shadow is not threaded "
+        "for a clause builder (a bare `clause builder` token survives deleting the operator, "
+        "measured): "
         f"{clause[:240]!r}…")
-    assert "delete" in clause, (
-        "the seam-shadow clause no longer states the DIRECTION of the builder exception — "
-        "suppressing a shadowed builder call DELETES a real writer instead of demoting it, which "
-        "is the measurement the shadow-aware arm was reverted on (`74d7b854cb`): "
+    assert "deletes a real writer instead of demoting it" in clause, (
+        "the seam-shadow clause no longer states the DIRECTION of the builder exception — it must "
+        "say suppressing a shadowed builder call DELETES a real writer INSTEAD OF demoting it; a "
+        "bare `delete` token survives the coherent inversion \"never DELETES a real writer at "
+        "all\", measured: "
         f"{clause[:240]!r}…")
-    assert "escapes as an argument" in clause, (
+    assert "never deletes" not in clause, (
+        "the seam-shadow clause inverts the measured direction — the shadow-aware builder arm was "
+        "reverted precisely because it DELETES a real writer (`{'tortoise.m::apply': ...}`, `w` "
+        "gone): "
+        f"{clause[:240]!r}…")
+    assert "a builder alias escapes as an argument" in clause, (
         "the seam-shadow clause no longer points at the builder residual's OWN naming entry — "
         "`UNDECIDABLE_WRITE_SHAPES` \"… ESCAPES as an argument\" — so a reader who hits the "
         "exception has no named residual to follow: "
