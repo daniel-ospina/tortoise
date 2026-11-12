@@ -7714,8 +7714,8 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # DELTA on purpose, not as an absolute split: the split moves with the
     # interpreter and the LANE — the docstring of
     # `test_the_census_doc_collects_what_the_file_collects` (below) says so
-    # itself — so an absolute figure here is the same rot this row exists to
-    # forbid. The reason was
+    # itself — so an absolute MUTATED split here is the same rot this row exists
+    # to forbid. The reason was
     # honest and unstated:
     # the row-set test above performs the same assertion on the real doc, so the
     # residual stays protected while the DORMANCY does not — a one-line refactor
