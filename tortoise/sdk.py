@@ -23835,11 +23835,19 @@ class TortoiseSDK:
             raise ValueError(f"action must be 'merge' or 'reject', got {action!r}")
         proj = self._get_proj()
         # ── #12047: entity branch FIRST — an Object/Subject id is not a Point id.
-        ent_rows = proj.g.query(
-            "MATCH (n) WHERE n.id = $id AND (n:Object OR n:Subject) "
-            "RETURN labels(n), properties(n)",
-            params={"id": candidate_id},
-        ).result_set
+        # ⛔ LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id AND
+        # (n:Object OR n:Subject)` (#3590 review round 5, finding 2): FalkorDB
+        # indexes are label-scoped, so an unlabelled pattern can use no label's
+        # `id` index and degrades to a whole-node scan — and every content/temporal
+        # verdict would pay it (review F11).
+        ent_rows = []
+        for _label in ("Object", "Subject"):
+            ent_rows = proj.g.query(
+                f"MATCH (n:{_label} {{id: $id}}) RETURN labels(n), properties(n)",
+                params={"id": candidate_id},
+            ).result_set
+            if ent_rows:
+                break
         if ent_rows:
             return self._approve_entity_merge(candidate_id, action, ent_rows[0])
         rows = proj.g.query(
@@ -23979,7 +23987,11 @@ class TortoiseSDK:
                 "target_id": pair["survivor_id"],
                 "aliases": result["aliases"],
                 "method": pair["method"],
-                "similarity": pair["similarity"]}
+                "similarity": pair["similarity"],
+                # The queue refuses to call a mismatched-kind pair
+                # `auto_mergeable`; a human verdict may still merge it, but the
+                # caller is told what it decided (review F13).
+                "kind_mismatch": pair.get("kind_mismatch", False)}
 
     # ── Operators ─────────────────────────────────────────────────
 
@@ -45467,6 +45479,15 @@ class TortoiseSDK:
                     f"Must be one of: "
                     f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
                 )
+            if _role_holder is not None:
+                # #12047 review F5: pre-flight, so a refusal writes nothing.
+                _kind = props.get("subjectKind")
+                if _kind != "role":
+                    raise ValueError(
+                        "roleHolder is only valid on a Subject of "
+                        f"subjectKind='role', got {_kind!r} for {name!r}")
+                from .entity_resolver import resolve_role_holder
+                resolve_role_holder(self, _role_holder, required=True)
             # ⛔ #3590 review (finding 1): resolve AND write under ONE lock.
             # `resolve_or_mint` only closes the check-then-act window if the
             # write that makes the holder visible happens before the lock is
@@ -45488,11 +45509,11 @@ class TortoiseSDK:
                 # #12047: PRODUCE the edge. Declared, never inferred: the holder
                 # is a Subject id or name, and an unresolvable/ambiguous holder
                 # RAISES rather than wiring the role to a guess (#1370).
-                _kind = props.get("subjectKind")
-                if _kind != "role":
-                    raise ValueError(
-                        "roleHolder is only valid on a Subject of "
-                        f"subjectKind='role', got {_kind!r} for {name!r}")
+                # ⛔ Every refusal above was checked BEFORE the write (review F5):
+                # `_role_holder_id` runs first, so a bad holder or a non-role kind
+                # cannot leave a node + a `SubjectAdded` journal line behind while
+                # telling the caller the call failed — the atomicity rule
+                # `_update_entity` states for its own status change.
                 from .entity_resolver import wire_holds_role
                 wire_holds_role(self, _role_holder, _subject_id)
         elif t == "object":

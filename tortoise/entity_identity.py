@@ -221,7 +221,8 @@ def live_name_holder_ids(g, label: str, name: str, *,
                             name_props=name_props)
 
 
-def _adopt_idless_holder(g, label: str, name: str, node_id: str) -> None:
+def _adopt_idless_holder(g, label: str, name: str, node_id: str, *,
+                         name_props: tuple = ("name",)) -> None:
     """Stamp a freshly minted ``node_id`` onto the single id-less LIVE holder.
 
     #3590 review F2: ``MERGE (o:Object {name:$name})`` (a legacy / raw /
@@ -244,9 +245,13 @@ def _adopt_idless_holder(g, label: str, name: str, node_id: str) -> None:
     concurrent create re-mints the very second carrier this prevents.
     """
     _require_identity_label(label)
+    # #12047 review F4: match on the SAME spelling that resolved. A folded
+    # lookup that found an id-less holder via `canonical_name` used to hand
+    # `_adopt_idless_holder` the folded VALUE but let it match `name` — so it
+    # adopted nothing and the create minted a twin beside the legacy row.
     g.query(
         f"MATCH (n:{label}) "
-        f"WHERE {_name_predicate(False)} "
+        f"WHERE {_name_predicate(False, name_props)} "
         f"AND {_terminal_excluded('n.status')} "
         "AND n.id IS NULL "
         "SET n.id = $id",
@@ -321,6 +326,39 @@ def entity_create_lock(label: str, name: str):
         yield
 
 
+def _live_holders_same_entity(g, label: str, name: str) -> tuple[list, tuple]:
+    """The holders of ``name`` including the FOLDED spelling — and which props found them.
+
+    #12047 review F1: the +hosted+ pre-flight probe
+    (:func:`refuse_ambiguous_create`) and the write (:func:`resolve_or_mint`) must
+    answer the same question. They did not: only the write consulted
+    ``canonical_name``, so a name held twice by folded spelling passed the probe
+    (everything before it had already been journaled) and then RAISED at the
+    write — a half-written commit and a retry-forever 500, which is precisely
+    what that probe exists to prevent.
+
+    Returns ``(holders, name_props)`` where ``name_props`` names the spelling that
+    FOUND them — :func:`_adopt_idless_holder` must match on the key that resolved
+    (review F4), or an id-less legacy row found via ``canonical_name`` is never
+    adopted and the create mints a twin beside it.
+    """
+    holders = live_name_holder_ids(g, label, name)
+    if holders:
+        return holders, ("name",)
+    folded = normalize_entity_name(name)
+    if not folded:
+        return [], ("name",)
+    # ⛔ NOT guarded on ``folded != name``: creating "owner" after "the owner"
+    # was written must find the holder whose FOLDED key is "owner" and whose name
+    # is "the owner" — the exact pair #12047 measured on the hosted graphs.
+    # ONE query over BOTH addressable spellings: a holder whose `name` is
+    # already the folded form ("owner") and a holder whose `canonical_name` is
+    # ("the owner" → "owner") are the same answer to the same question.
+    props = ("name", "canonical_name")
+    holders = live_name_holder_ids(g, label, folded, name_props=props)
+    return holders, props
+
+
 def resolve_or_mint(g, label: str, name: str, *,
                     explicit_id: str | None = None) -> tuple[str, bool]:
     """The CREATE-side resolver: ``(id, created)``. Never derives from the name.
@@ -356,6 +394,7 @@ def resolve_or_mint(g, label: str, name: str, *,
         return str(explicit_id), True
     with _holder_lock(label, name):
         holders = live_name_holder_ids(g, label, name)
+        _props: tuple = ("name",)
         if not holders:
             # #12047: the FOLDED name is the second addressable spelling
             # (`_NAME_PROPERTIES` already declares `canonical_name` as one, and
@@ -370,10 +409,7 @@ def resolve_or_mint(g, label: str, name: str, *,
             # "owner" and whose name is "the owner" — the exact pair #12047
             # measured on the hosted graphs. That guard made this branch inert
             # for every already-folded spelling, which is the common case.
-            folded = normalize_entity_name(name)
-            if folded:
-                holders = live_name_holder_ids(
-                    g, label, folded, name_props=("canonical_name",))
+            holders, _props = _live_holders_same_entity(g, label, name)
         # COUNT holders, REPORT holders (#9876 review, this head): the
         # earlier ``[h for h in holders if h]`` performed exactly the
         # filter `live_name_holder_ids` forbids, so a name held by one
@@ -410,7 +446,10 @@ def resolve_or_mint(g, label: str, name: str, *,
             # registration of its own: the caller's journal line is what makes
             # the adopted id replayable.
             adopted = ulid()
-            _adopt_idless_holder(g, label, name, adopted)
+            _adopt_idless_holder(g, label,
+                                 name if _props == ("name",)
+                                 else normalize_entity_name(name),
+                                 adopted, name_props=_props)
             return adopted, True
         # Zero live holders: mint an opaque id. The returned id is only half of
         # the contract: the WRITE that makes it visible must happen before this
@@ -730,7 +769,11 @@ def refuse_ambiguous_create(g, label: str, name: str) -> None:
     returns ``None`` when the create would proceed (0 or 1 live holder — a
     terminal holder does not block a create, R5).
     """
-    refuse_if_ambiguous(label, name, live_name_holder_ids(g, label, name))
+    # ⛔ The FOLDED spelling is part of the question (review F1) — the write
+    # consults it, so the probe must too or the two disagree. Same helper, same
+    # evidence, one answer.
+    holders, _props = _live_holders_same_entity(g, label, name)
+    refuse_if_ambiguous(label, name, holders)
 
 
 class UnaddressableEntityName(ValueError):

@@ -13,7 +13,11 @@ filed as roles — with no queue to review even by hand.
 
 The one thing this module must never do is answer an empty list it did not
 measure. A scan that cannot run raises :class:`EntityScanUnavailable`; it never
-degrades to ``[]``.
+degrades to ``[]``. ⚠️ Precisely: that holds for the ENTITY READ. A similarity
+rung that cannot run (no numpy, no encoder, a short row count) degrades to the
+rungs below it and logs — a missing model must not make the queue refuse, and
+the exact rung still measures. A semantic-only pair is therefore invisible on a
+degraded box, which is the declared cost of the degrade chain.
 
 Identity — what is recorded, and what is refused
 ------------------------------------------------
@@ -176,6 +180,12 @@ def similarity(a: str, b: str) -> float:
 _ENTITY_READ = (
     "MATCH (n:{label}) "
     "WHERE n.id IS NOT NULL "
+    # A merge records that this id and its survivor are ONE entity
+    # (`resolved_from`), so the retired carrier must not be elected as a
+    # SURVIVOR or re-offered as a duplicate — otherwise a re-run writes the
+    # alias onto a node the system itself says is no longer the entity, and the
+    # real survivor never learns the variant (review F3).
+    "AND n.resolved_from IS NULL "
     "AND (n.status IS NULL OR NOT n.status IN ['superseded','deprecated',"
     "     'archived','retracted']) "
     "RETURN n.id, n.name, n.canonical_name, n.{kind}, n.createdAt, "
@@ -198,6 +208,10 @@ def _pair_reviewed(survivor: dict, candidate: dict) -> bool:
         return True
     if verdict == "reject":
         target = candidate.get("dedup_target_id")
+        # A rejection that recorded NO target was decided against an ambiguous
+        # set (`approve_merge` cannot name one survivor), so it suppresses the
+        # candidate outright — re-offering it against a different survivor would
+        # re-ask a question the reviewer already answered.
         return target is None or str(target) == str(survivor.get("id"))
     return False
 
@@ -235,7 +249,9 @@ def _read_entities(graph, label: str) -> list[dict]:
 def scan_entities(graph, *, labels=ENTITY_LABELS) -> list[dict]:
     """Every live entity the resolver can compare, across ``labels``."""
     if not labels:
-        return []
+        raise ValueError(
+            "entity scan needs at least one label — an empty label set would "
+            "report an empty queue that never read the graph (#12047)")
     entities: list[dict] = []
     for label in labels:
         if label not in ENTITY_LABELS:
@@ -249,7 +265,12 @@ def _semantic_matrix(entities: list[dict], encode_fn) -> dict:
     """Cosine similarity per (id, id) over the FOLDED names — bounded, degrade-safe.
 
     The rung is not a second identity authority: it only proposes pairs the
-    deterministic + fuzzy rungs could not see. The threshold it compares against
+    deterministic + fuzzy rungs could not see. ⚠️ It is scoped by the SAME block
+    as every other rung — a semantically-close pair whose folded names share no
+    3-character prefix is not proposed. That is deliberate: cross-block
+    all-pairs is the pair explosion the ladder forbids, and a bounded rung that
+    says so is better than an unbounded one. (The semantic test therefore places
+    its pair inside one block.) The threshold it compares against
     is ``embeddings.DEFAULT_THRESHOLD`` — reused, never re-invented (#2730 §5: a
     second similarity constant was REFUSED).
 
@@ -427,7 +448,9 @@ def entity_candidates(graph, *, limit: int = 50,
         rows = sorted(best.values(),
                       key=lambda p: (-p["similarity"], p["candidate_id"]))
         return rows[:limit]
-    except EntityScanUnavailable:
+    except (EntityScanUnavailable, ValueError):
+        # A caller error (an empty label set) is not a scan failure and must not
+        # be relabelled as one — nor swallowed into an empty queue.
         raise
     except Exception as exc:
         raise EntityScanUnavailable(
@@ -470,8 +493,21 @@ def follow_resolved_from(graph, label: str, node_id: str) -> str:
         seen.add(current)
 
 
-def find_live_holder(graph, label: str, folded: str) -> list[str]:
-    """Live ``label`` entity ids whose folded name (or recorded alias) == ``folded``."""
+def find_live_holder(graph, label: str, folded: str) -> list[tuple[str, str]]:
+    """Live ``label`` entities matching ``folded`` — as ``(id, rung)`` pairs.
+
+    ``rung`` is ``"exact"`` when the folded key is the entity's own
+    ``canonical_name`` and ``"alias"`` when it was recorded by an approved merge
+    (``aliases[]``). Both resolve deterministically; the caller reports which
+    rung fired.
+
+    ⛔ A merged-away carrier is followed to its survivor **before**
+    de-duplication (review F8). The candidate keeps its own ``canonical_name``
+    (its surface form is evidence), so a merged variant matches BOTH the
+    survivor's alias and the retired carrier's key — reporting that as
+    ``ambiguous`` would make "these are one entity" turn the read surface into
+    "there are two", inviting a review of a settled merge.
+    """
     try:
         rows = graph.query(
             f"MATCH (n:{label}) "
@@ -479,14 +515,24 @@ def find_live_holder(graph, label: str, folded: str) -> list[str]:
             "AND (n.status IS NULL OR NOT n.status IN ['superseded','deprecated',"
             "     'archived','retracted']) "
             "AND (n.canonical_name = $k OR $k IN coalesce(n.aliases, [])) "
-            "RETURN n.id",
+            "RETURN n.id, (n.canonical_name = $k)",
             params={"k": folded},
         ).result_set
     except Exception as exc:
         raise EntityScanUnavailable(
             f"entity resolution could not read :{label} — refusing to guess "
             f"({type(exc).__name__}: {exc})") from exc
-    return [str(r[0]) for r in rows if r[0]]
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for node_id, is_canonical in rows:
+        if not node_id:
+            continue
+        resolved = follow_resolved_from(graph, label, str(node_id))
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        out.append((resolved, "exact" if is_canonical else "alias"))
+    return out
 
 
 def resolve_entity_name(graph, label: str, name: str, *,
@@ -508,14 +554,15 @@ def resolve_entity_name(graph, label: str, name: str, *,
     folded = normalize_entity_name(name)
     holders = find_live_holder(graph, label, folded)
     if len(holders) == 1:
+        entity_id, rung = holders[0]
         return {"name": name, "folded": folded, "label": label,
-                "resolution": "exact", "entity_id": holders[0],
+                "resolution": rung, "entity_id": entity_id,
                 "similarity": 1.0, "requires_review": False, "candidates": []}
     if len(holders) > 1:
         return {"name": name, "folded": folded, "label": label,
                 "resolution": "ambiguous", "entity_id": None,
                 "similarity": 1.0, "requires_review": True,
-                "candidates": holders}
+                "candidates": [h[0] for h in holders]}
 
     entities = scan_entities(graph, labels=(label,))
     scored = []
@@ -612,51 +659,88 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
 
 def entity_pair_for(graph, candidate_id: str, *,
                     review_threshold: float = REVIEW_THRESHOLD) -> dict | None:
-    """Recompute the reviewed pair for ``candidate_id`` — or refuse to guess.
+    """The pair ``approve_merge`` applies — **the same row the queue showed**.
 
     ``list_dedup_candidates`` is a READ surface (``risk="read"``), so it cannot
-    persist the pair it showed. ``approve_merge`` therefore re-runs the same
-    deterministic scan (the scan is deterministic precisely so this is sound).
-    If the graph moved and the candidate now has NO pair, ``None`` says so; if it
-    has two equally-good survivors, :class:`ValueError` says so — a merge must
-    never pick one for the reviewer (route-then-refuse, #3590 R8).
+    persist the pair it displayed; the verdict therefore re-derives it. That is
+    only sound if re-derivation is the SAME selection — so this function is a
+    consumer of :func:`entity_candidates`, never a second scanner (review F2).
+
+    A second implementation was measurably wrong: it had no blocking, no
+    ``createdAt`` ordering and no reviewed-pair filter, so it elected a different
+    survivor than the queue had shown — a verdict on (C into A) could fold C into
+    a newer node the reviewer never saw.
+
+    ``None`` when the candidate has no pair on the current graph. An AMBIGUOUS
+    pair (two equally-good survivors) RAISES: a merge must never pick one for
+    the reviewer (route-then-refuse, #3590 R8).
     """
-    entities = scan_entities(graph)
-    by_id = {e["id"]: e for e in entities}
-    me = by_id.get(candidate_id)
-    if me is None:
+    rows = entity_candidates(graph, limit=1000, include_semantic=False,
+                             review_threshold=review_threshold)
+    mine = [r for r in rows if r["candidate_id"] == candidate_id]
+    if not mine:
         return None
-    scored = []
-    for eid, ent in by_id.items():
-        if eid == candidate_id or ent["label"] != me["label"]:
-            continue
-        sim = (1.0 if ent["folded"] == me["folded"]
-               else similarity(me["folded"], ent["folded"]))
-        if sim >= review_threshold:
-            scored.append((sim, ent))
-    if not scored:
-        return None
-    scored.sort(key=lambda s: (-s[0], s[1]["id"]))
-    top_sim = scored[0][0]
-    tied = [e for s, e in scored if abs(s - top_sim) < 1e-9]
-    if len(tied) > 1:
+    top = mine[0]
+    if top.get("ambiguous"):
+        tied = [top["existing_id"], *(top.get("tied_with") or [])]
         raise ValueError(
             f"entity {candidate_id!r} matches {len(tied)} survivors at "
-            f"similarity {top_sim:.4f} ({[e['id'] for e in tied]}) — refusing "
-            f"to guess which one to merge into")
-    survivor = scored[0][1]
-    kind_mismatch = bool(me["kind"] and survivor["kind"]
-                         and me["kind"] != survivor["kind"])
-    return {
-        "candidate_id": candidate_id,
-        "survivor_id": survivor["id"],
-        "method": "exact" if top_sim >= 1.0 else "fuzzy",
-        "similarity": round(float(top_sim), 4),
-        "kind_mismatch": kind_mismatch,
-    }
+            f"similarity {top['similarity']:.4f} ({tied}) — refusing to guess "
+            f"which one to merge into")
+    return {"candidate_id": candidate_id,
+            "survivor_id": top["existing_id"],
+            "method": top["method"],
+            "similarity": top["similarity"],
+            "kind_mismatch": bool(top.get("kind_mismatch"))}
 
 
 # ── holdsRole production (person → role) ─────────────────────────────────
+
+
+def resolve_role_holder(sdk, holder: str, *, required: bool = True) -> str | None:
+    """Resolve a DECLARED role holder to exactly one live ``:Subject`` id.
+
+    ``holder`` is an id or a name, tried in that order. Exactly one match is
+    required: an unresolvable or ambiguous holder RAISES (when ``required``)
+    rather than wiring an edge to a guess (#1370 — *"no subject > wrong subject"*).
+
+    ⛔ This is a CONSUMER of :func:`entity_identity.resolve_entity_id` — the one
+    route-then-refuse authority (#3633), which is what the source-level sweep in
+    ``tests/test_entity_identity.py`` enforces: a hand-written name-keyed identity
+    read is a second resolver, and a second resolver is how two surfaces start
+    answering one question differently. Its ``name_props`` arm carries the folded
+    spelling so a Subject written before #12047 (no ``canonical_name``) and one
+    written after are both addressable.
+
+    Split from :func:`wire_holds_role` so the CALLER can run it **before** it
+    writes the role (#12047 review F5): a refused create must leave nothing
+    behind, and a check after the write would journal a node the caller was told
+    did not happen.
+    """
+    from .entity_identity import resolve_entity_id
+
+    if not holder:
+        raise ValueError("holdsRole needs a holder (a Subject id or name)")
+    g = sdk._get_proj().g
+    usable = ("name", "canonical_name")
+    entity_id = resolve_entity_id(g, "Subject", holder, name_props=usable)
+    if entity_id is None:
+        # The raw spelling may not be the stored one; try the folded key over the
+        # SAME props before concluding "no such Subject" (never a second query
+        # shape — `resolve_entity_id` answers, this only supplies its input).
+        entity_id = resolve_entity_id(
+            g, "Subject", normalize_entity_name(holder)
+            if normalize_entity_name(holder) != holder else None,
+            name_props=usable)
+    if entity_id is None:
+        if not required:
+            return None
+        raise ValueError(
+            f"holdsRole holder {holder!r} matches no live :Subject — refusing to "
+            f"wire the role to a guess")
+    # A merged-away carrier is not the holder any more (same rule as the write
+    # path): hop to the entity the merge recorded.
+    return follow_resolved_from(g, "Subject", entity_id)
 
 
 def wire_holds_role(sdk, holder: str, role_id: str) -> dict:
@@ -665,40 +749,9 @@ def wire_holds_role(sdk, holder: str, role_id: str) -> dict:
     ``#12047`` measured **zero** ``holdsRole`` edges in both hosted graphs: the
     predicate is declared (ONTOLOGY §3.6, sanctioned and deliberately distinct
     from ``memberOf`` — ``:206``) and read (``sdk._holds_role_available``), but
-    nothing PRODUCES it. A role Subject therefore floats free of the person who
-    holds it.
-
-    ``holder`` is an id or a name, resolved against LIVE ``:Subject`` nodes in
-    that order. Exactly one match is required: an unresolvable or ambiguous
-    holder RAISES rather than wiring an edge to a guess (#1370 — *"no subject >
-    wrong subject"*). This is the declared channel only; nothing here infers a
-    holder from a name pattern.
+    nothing PRODUCED it. A role Subject therefore floated free of the person who
+    holds it. ``heldRole`` is never inferred from a name pattern — the holder is
+    DECLARED by the caller (``create_subject(..., roleHolder=…)``).
     """
-    from .entity_identity import AmbiguousEntityName  # local: avoids the cycle
-
-    if not holder:
-        raise ValueError("holdsRole needs a holder (a Subject id or name)")
-    row = sdk._get_proj().g.query(
-        "MATCH (s:Subject) WHERE s.id = $h "
-        "AND (s.status IS NULL OR NOT s.status IN ['superseded','deprecated',"
-        "     'archived','retracted']) "
-        "RETURN s.id, s.name",
-        params={"h": holder},
-    ).result_set
-    if not row:
-        folded = normalize_entity_name(holder)
-        row = sdk._get_proj().g.query(
-            "MATCH (s:Subject) WHERE s.canonical_name = $k "
-            "AND (s.status IS NULL OR NOT s.status IN ['superseded','deprecated',"
-            "     'archived','retracted']) "
-            "RETURN s.id, s.name",
-            params={"k": folded},
-        ).result_set
-    ids = [str(r[0]) for r in row if r[0]]
-    if not ids:
-        raise ValueError(
-            f"holdsRole holder {holder!r} matches no live :Subject — refusing to "
-            f"wire the role to a guess")
-    if len(ids) > 1:
-        raise AmbiguousEntityName("Subject", holder, ids)
-    return sdk.create_edge("holdsRole", ids[0], role_id)
+    holder_id = resolve_role_holder(sdk, holder)
+    return sdk.create_edge("holdsRole", holder_id, role_id)

@@ -417,6 +417,115 @@ class TestMergeIsDurable:
             sdk.close()
 
 
+class TestReviewFixes:
+    """Regression pins for the first review round (all were measured defects)."""
+
+    def test_the_queue_row_and_the_merge_apply_the_SAME_survivor(self, sdk_factory):
+        """F2: `entity_pair_for` was a second scanner with different rules.
+
+        The queue elects the OLDER node as survivor and reports one row per
+        duplicate; the merge re-derived the pair with max-similarity/lowest-id
+        and no reviewed filter — so a verdict on (C into A) could fold C into a
+        newer node the reviewer never saw.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-1", "alpha beta gamma", "subjectKind", "other")
+        _create_raw(sdk, "Subject", "sub-2", "alpha beta gammas", "subjectKind", "other")
+        _create_raw(sdk, "Subject", "sub-3", "alpha beta gammaa", "subjectKind", "other")
+        g = sdk._get_proj().g
+        rows = {r["candidate_id"]: r for r in sdk.list_dedup_candidates(candidate_type="entity")}
+        for cid, row in rows.items():
+            if row.get("ambiguous"):
+                continue
+            pair = entity_pair_for(g, cid)
+            assert pair is not None, f"{cid} is in the queue but has no pair"
+            assert pair["survivor_id"] == row["existing_id"], (
+                f"the queue showed {cid}→{row['existing_id']} but the merge would "
+                f"apply {cid}→{pair['survivor_id']}")
+
+    def test_a_merged_carrier_is_never_elected_as_a_survivor(self, sdk_factory):
+        """F3: a retired carrier received the alias, so the chain grew per re-run."""
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "alpha gamma", "subjectKind", "other")
+        _create_raw(sdk, "Subject", "sub-b", "alpha gammas", "subjectKind", "other")
+        row = sdk.list_dedup_candidates(candidate_type="entity")[0]
+        sdk.approve_merge(row["candidate_id"], action="merge")
+        survivor = row["existing_id"]
+        # A fresh exact twin of the MERGED-AWAY name appears.
+        _create_raw(sdk, "Subject", "sub-d", row["name"], "subjectKind", "other")
+        rows = sdk.list_dedup_candidates(candidate_type="entity")
+        for r in rows:
+            assert r["existing_id"] != row["candidate_id"], (
+                "the merge target is a retired carrier (resolved_from set)")
+        # And the alias landed on the real survivor, once.
+        aliases = sdk._get_proj().g.query(
+            "MATCH (s:Subject {id:$id}) RETURN s.aliases",
+            params={"id": survivor}).result_set[0][0]
+        assert normalize_entity_name(row["name"]) in aliases
+
+    def test_the_preflight_probe_and_the_write_agree_on_the_folded_key(self, sdk_factory):
+        """F1: a probe that passes where the write raises leaves a half write."""
+        from tortoise.entity_identity import AmbiguousEntityName, refuse_ambiguous_create
+        sdk = sdk_factory()
+        # The two carriers are written with the folded key the SDK writes, so the
+        # collision is the #12047 shape (same folded name, different spellings).
+        for nid, raw in (("sub-1", "the owner"), ("sub-2", "an owner")):
+            sdk._get_proj().g.query(
+                "CREATE (n:Subject {id:$id, name:$raw, canonical_name:$k, "
+                "subjectKind:'naturalPerson', status:'live'})",
+                params={"id": nid, "raw": raw,
+                        "k": normalize_entity_name(raw)})
+        g = sdk._get_proj().g
+        with pytest.raises(AmbiguousEntityName):
+            refuse_ambiguous_create(g, "Subject", "owner")
+        with pytest.raises(AmbiguousEntityName):
+            sdk.create_subject("owner", "naturalPerson")
+
+    def test_a_refused_role_holder_leaves_nothing_behind(self, sdk_factory):
+        """F5: the refusal ran AFTER the node and its journal line were written."""
+        sdk = sdk_factory()
+        sdk.create_subject("Daniel", "naturalPerson")
+        before = _count(sdk, "Subject")
+        with pytest.raises(ValueError, match="matches no live"):
+            sdk.create_subject("owner", "role", roleHolder="nobody at all")
+        assert _count(sdk, "Subject") == before, (
+            "a refused create wrote a Subject — the caller was told it failed")
+        with pytest.raises(ValueError, match="subjectKind='role'"):
+            sdk.create_subject("an org", "organization", roleHolder="Daniel")
+        assert _count(sdk, "Subject") == before
+
+    def test_a_merged_variant_resolves_by_the_alias_rung_not_as_ambiguous(
+            self, sdk_factory):
+        """F8: recording "these are one entity" turned the read into "there are two"."""
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "alpha gamma", "subjectKind", "other")
+        _create_raw(sdk, "Subject", "sub-b", "alpha gammas", "subjectKind", "other")
+        row = sdk.list_dedup_candidates(candidate_type="entity")[0]
+        sdk.approve_merge(row["candidate_id"], action="merge")
+        got = resolve_entity_name(sdk._get_proj().g, "Subject", row["name"])
+        assert got["resolution"] in ("exact", "alias"), got
+        assert got["entity_id"] == row["existing_id"]
+        assert got["requires_review"] is False
+
+    def test_a_kind_mismatch_is_reported_on_the_verdict(self, sdk_factory):
+        """F13: the queue refuses to call it auto-mergeable; the verdict must say so."""
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-1", "alpha gamma", "subjectKind", "role")
+        _create_raw(sdk, "Subject", "sub-2", "alpha gammas", "subjectKind", "naturalPerson")
+        row = sdk.list_dedup_candidates(candidate_type="entity")[0]
+        assert row["kind_mismatch"] is True
+        verdict = sdk.approve_merge(row["candidate_id"], action="merge")
+        assert verdict["kind_mismatch"] is True
+
+    def test_an_empty_label_set_refuses_rather_than_reporting_empty(self):
+        """F10: the primitive must not answer [] without reading the graph."""
+        class _Untouched:
+            def query(self, *_a, **_kw):
+                raise AssertionError("the scan must not answer without reading")
+        with pytest.raises(ValueError, match="at least one label"):
+            entity_candidates(_Untouched(), labels=())
+
+
 # ── holdsRole production (person → role) ──────────────────────────────────
 
 
