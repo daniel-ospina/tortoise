@@ -500,57 +500,299 @@ def _job_block(path: Path, job: str) -> str:
 
 
 @pytest.mark.parametrize(("workflow", "job"), [(w, j) for w, js in GH_JOBS.items() for j in js])
+def _contract_violations(block: str, scripts: frozenset[str]) -> list[str]:
+    """Why `block` breaks the ordering contract — `[]` when it complies.
+
+    ⛔ EXTRACTED SO IT CAN BE PINNED, and that is not tidiness. While this logic lived
+    inline in the parametrised test, a FAITHFUL revert of its pre-contract arm to
+    `origin/main`'s hardcoded text list left all 42 tests green (measured with a mutant
+    built from the artifact): the sibling test pinned `_gh_hazards`' COMPONENTS, never the
+    job-level arm, so the arm was correct but unexercised and a rebase could reinstate the
+    defect silently. `test_the_precontract_arm_is_load_bearing` pins it on a synthetic
+    block instead.
+
+    Checks, in order: the step is present; it is bound as a step's own `run:` in COMMAND
+    POSITION (see `_CONTRACT_RUN_RE`); nothing before it uses `gh`; and — new — the step is
+    not guarded, because `ensure gh` is Linux-only and `if: runner.os == 'Linux'` is the
+    natural spelling a future author would reach for. A guarded step satisfies every
+    textual check while being able to never run, which is this file's definition of a
+    silent fail-open.
+    """
+    if CONTRACT_STEP not in block:
+        return [
+            f"does not run `{CONTRACT_STEP}` — a pool runner without it fails with "
+            "exit 127, which reads as a test failure (#9018)"
+        ]
+    lines = block.splitlines()
+    at = next((i for i, line in enumerate(lines) if _CONTRACT_RUN_RE.match(line)), None)
+    if at is None:
+        return [
+            f"has no `run:` in command position that is `{CONTRACT_STEP}` — the step may "
+            "be commented out, printed rather than executed, or spelled in a form this "
+            "reader does not model (a `run: |` block, `./`, an `env` prefix)"
+        ]
+    out = []
+    early = _gh_hazards(lines[:at], scripts)
+    if early:
+        out.append(
+            f"a step BEFORE the contract step uses `gh` — directly or through one of "
+            f"the derived helpers — so it can still die with 127: {early}. "
+            f"`{CONTRACT_STEP}` must come first (#9018)"
+        )
+    step_start = 0
+    for i in range(at - 1, -1, -1):
+        if re.match(r"^      - ", lines[i]):
+            step_start = i
+            break
+    for line in lines[step_start:at]:
+        key = line.strip().split(":")[0]
+        if key in ("if", "continue-on-error"):
+            out.append(
+                f"the contract step carries a `{key}:`, so it may never run and the "
+                "job can reach `gh` with no runner-tool contract at all (#9018)"
+            )
+    return out
+
+
+def test_the_precontract_arm_is_load_bearing():
+    """The pre-contract arm must FLAG a job, not merely be correct in isolation.
+
+    ⛔ MEASURED GAP THIS CLOSES. With the arm reverted to `origin/main`'s hardcoded text
+    list — a faithful revert, not a strawman — all 42 tests stayed green, because the
+    parametrised pin above only fed it blocks that have NO pre-contract `gh` call. The arm
+    was right and nothing exercised it, so a rebase could reinstate the defect silently.
+    These two rows red on that revert: `check-required-set.py` and `gh secret` are among the
+    names the old list omitted, and both are real pre-contract hazards.
+    """
+    scripts = _gh_executing_scripts()
+    clean = (
+        "  job:\n"
+        "    steps:\n"
+        "      - name: contract\n"
+        f"        run: bash .github/scripts/{CONTRACT_STEP}\n"
+    )
+    assert _contract_violations(clean, scripts) == [], "a compliant block was flagged"
+
+    # A DERIVED HELPER that the old text list did not name, BEFORE the contract step.
+    helper = (
+        "  job:\n"
+        "    steps:\n"
+        "      - name: check\n"
+        "        run: python3 .github/scripts/check-required-set.py\n"
+        "      - name: contract\n"
+        f"        run: bash .github/scripts/{CONTRACT_STEP}\n"
+    )
+    got = _contract_violations(helper, scripts)
+    assert got and "check-required-set.py" in got[0], got
+
+    # A `gh` SUBCOMMAND the old list did not name.
+    sub = (
+        "  job:\n"
+        "    steps:\n"
+        "      - name: peek\n"
+        "        run: gh secret list\n"
+        "      - name: contract\n"
+        f"        run: bash .github/scripts/{CONTRACT_STEP}\n"
+    )
+    got = _contract_violations(sub, scripts)
+    assert got and "gh secret list" in got[0], got
+
+
+def test_a_guarded_contract_step_is_not_compliant():
+    """A step that satisfies every textual check but may never run is the silent failure.
+
+    `ensure gh` provisions a Linux pool runner, so `if: runner.os == 'Linux'` is the shape a
+    future author reaches for — and it made this file's own definition of fail-open true:
+    the job reaches `gh` with no contract, exit 127, and every textual check still passes.
+    Also pins that the step must be in COMMAND POSITION, so a commented-out or merely
+    printed step is not mistaken for the real one.
+    """
+    scripts = _gh_executing_scripts()
+    body = f"        run: bash .github/scripts/{CONTRACT_STEP}\n"
+
+    guarded = (
+        "  job:\n    steps:\n      - name: contract\n        if: runner.os == 'Linux'\n" + body
+    )
+    got = _contract_violations(guarded, scripts)
+    assert got and "`if:`" in got[0], got
+
+    tolerant = (
+        "  job:\n    steps:\n      - name: contract\n        continue-on-error: true\n" + body
+    )
+    got = _contract_violations(tolerant, scripts)
+    assert got and "`continue-on-error:`" in got[0], got
+
+    for shape, why in (
+        (f"        # run: bash .github/scripts/{CONTRACT_STEP}", "commented out"),
+        (f'        run: echo "run .github/scripts/{CONTRACT_STEP} by hand"', "printed"),
+        (f"        run: |\n          bash .github/scripts/{CONTRACT_STEP}", "a block scalar"),
+        (f"          bash .github/scripts/{CONTRACT_STEP}", "a continuation line"),
+    ):
+        got = _contract_violations(
+            "  job:\n    steps:\n      - name: contract\n" + shape + "\n", scripts
+        )
+        assert got and "command position" in got[0], (why, got)
+
+
+def test_the_command_spelling_variants_are_hazards():
+    """The spellings bash accepts for the SAME invocation must all be hazards.
+
+    Three were measured as misses and each is now a row: a MODULE invocation
+    (`python3 -m tools.ci_timing` — really runs `tools/ci_timing.py`, proven with a stub
+    module that touched a marker), a GLOBAL FLAG before the subcommand
+    (`gh -R owner/repo pr list`, verified against the real gh as `exit=0`), and the
+    subcommands the old closed list omitted. The PATH-QUALIFIED binary stays a MISS and is
+    declared in `_gh_hazards` — every live invocation spells the bare name, and the same
+    lookbehind that keeps filenames out is what keeps paths out.
+    """
+    scripts = _gh_executing_scripts()
+    for shape in (
+        "        run: python3 -m tools.ci_timing --refresh-durations",
+        "        run: python3 -m tools.ci_queue_health",
+        "        run: gh cache delete --all",
+        "        run: gh -R owner/repo pr list --limit 5",
+        "        run: gh --repo owner/repo issue list",
+        "        run: gh org list",
+        "        run: gh project list",
+    ):
+        assert _gh_hazards([shape], scripts), shape
+    # …and it must not have become a prose matcher.
+    for prose in ("        run: gh is a tool", "        run: gh foo bar"):
+        assert not _gh_hazards([prose], scripts), prose
+
+
+def test_the_derivation_covers_the_operations_harness_home():
+    """`_SCRIPT_GLOBS` must include the homes that really hold gh-executing helpers.
+
+    `operations/orchestrator-harness/` was outside the tuple, so `merge-one.sh` (7 `gh`
+    invocations) and `merged-not-closed.sh` (6) were invisible to the derivation while the
+    comment above it claimed "everywhere". The SDK under `tortoise/` is excluded ON PURPOSE
+    and the exclusion is named there, so this pins the half that must be covered.
+    """
+    names = _gh_executing_scripts()
+    for name in ("merge-one.sh", "merged-not-closed.sh"):
+        assert name in names, f"{name} is not derived — {_SCRIPT_GLOBS} does not reach it"
+
+
+def test_every_gh_subcommand_is_recognised():
+    """`_GH_CMD`'s closed list must not be narrower than the installed `gh`.
+
+    This is the pin that keeps the list honest: the enumeration named 12 of the 28
+    subcommands `gh --help` publishes, so eight real invocations (`gh cache delete`,
+    `gh gist create`, `gh attestation verify`, `gh ruleset list`, `gh alias set`,
+    `gh extension install`, `gh org list`, `gh ssh-key list`) were all really executed and
+    all read CLEAN. Each was confirmed real by `gh <name> --help` exiting 0.
+    """
+    live = subprocess.run(["gh", "--help"], capture_output=True, text=True)
+    if live.returncode != 0:
+        pytest.skip("`gh` is not on PATH, so the installed command set cannot be read")
+    # ⛔ ONLY THE `… COMMANDS` SECTIONS ARE SUBCOMMANDS. A flat `^  ([a-z-]+)` scan also
+    # harvests HELP TOPICS (`accessibility`, `environment`, `exit-codes`, `reference`,
+    # `mintty`, …) and FLAGS, which are not commands — and `gh` itself. The sections are
+    # CORE / GITHUB ACTIONS / ALIAS / ADDITIONAL COMMANDS, each an all-caps header.
+    published: set[str] = set()
+    in_commands = False
+    for line in live.stdout.splitlines():
+        header = line.strip()
+        if re.fullmatch(r"[A-Z][A-Z ]*COMMANDS", header):
+            # ⛔ ALIAS COMMANDS ARE THIS MACHINE'S, NOT `gh`'s. The section lists whatever
+            # the local user defined (`co` here), so folding it into a closed built-in list
+            # would make the pin depend on who ran it — and the list would then acquire an
+            # entry that no other box has.
+            in_commands = "ALIAS" not in header
+            continue
+        if re.fullmatch(r"[A-Z][A-Z ]+", line.strip()):
+            in_commands = False
+            continue
+        if in_commands:
+            m = re.match(r"^  ([a-z][a-z-]+)\b", line)
+            if m:
+                published.add(m.group(1))
+    assert published, "could not parse `gh --help`; this pin would otherwise pass vacuously"
+    missing = sorted(published - set(_GH_SUBCOMMANDS))
+    assert not missing, (
+        f"`gh` publishes {missing} and `_GH_SUBCOMMANDS` does not list it/them — an "
+        "invocation of any of these reads CLEAN in a workflow scan"
+    )
+    for name in _GH_SUBCOMMANDS:
+        assert _gh_hazards(["        run: gh " + name + " x"], _gh_executing_scripts()), name
+
+
+@pytest.mark.parametrize(
+    ("workflow", "job"),
+    [(wf, job) for wf, jobs in GH_JOBS.items() for job in jobs],
+)
 def test_every_gh_using_pool_job_carries_the_contract_step(workflow, job):
     """If a job that calls `gh` can land on the pool, it must provide it first.
 
     The step must be the FIRST shell step in the job: a `gh` call that precedes it
     still dies with 127, and the ordering cannot be seen from the exit code.
     """
-    block = _job_block(WORKFLOWS / workflow, job)
-    assert CONTRACT_STEP in block, (
-        f"{workflow}::{job} calls `gh` but does not run `{CONTRACT_STEP}` — a pool "
-        "runner without it fails with exit 127, which reads as a test failure (#9018)"
-    )
-    lines = block.splitlines()
-    # ⛔ THE CONTRACT STEP IS BOUND BY THE SAME STRICT PREDICATE AS THE FINAL ASSERT, and
-    # that is not tidiness. `contract_at = next(… if CONTRACT_STEP in line)` matched ANY
-    # line, including a `run:` that merely PRINTS the remedy — and this repo's step bodies
-    # deliberately print such remedies (the whole #12133/#12149 subject). A decoy advice
-    # line before the real step set `contract_at` there, the loop `break`s immediately, and
-    # the whole ORDERING check silently disabled itself while the final assert still matched
-    # because its own pattern is greedy (`^        run: .*<CONTRACT_STEP>`). Measured on a
-    # synthetic job (advice step, then a real `gh pr view`, then the contract step): the pin
-    # PASSED. There is exactly one matching line in every `GH_JOBS` entry today, so binding
-    # both ends is free.
-    contract_re = _CONTRACT_RUN_RE
-    contract_at = next(i for i, line in enumerate(lines) if contract_re.match(line))
-    # ⛔ THE HAZARD ARM IS DERIVED, NOT A TEXT LIST, and the text list was the file's own
-    # documented mistake one arm down ("A text list of script names was the first attempt
-    # and it under-counted", `_GH_EXEC`). Measured, the old list named 5 of the 49 derived
-    # helpers and 8 of `_GH_CMD`'s subcommands, so 44 helpers and `repo`/`auth`/`secret`/
-    # `variable` were invisible BEFORE the contract step: a synthetic job with
-    # `check-required-set.py` or `gh secret` ahead of the step PASSED this pin while
-    # `_gh_hazards` flagged the very same lines. No live leak (0 across the 18 entries), so
-    # this closes a hole without moving a verdict.
-    early = _gh_hazards(lines[:contract_at], _gh_executing_scripts())
-    assert not early, (
-        f"{workflow}::{job}: a step BEFORE the contract step uses `gh` — directly or "
-        f"through one of the derived helpers — so it can still die with 127: {early}. "
-        f"`{CONTRACT_STEP}` must come first (#9018)"
-    )
-    # And the contract step must still exist and carry a `run:` (the step is the
-    # shell invocation; a `name:` alone provisions nothing).
-    assert contract_re.match(lines[contract_at]), (
-        f"{workflow}::{job}: the contract step's `run:` is not `{CONTRACT_STEP}`"
-    )
+    problems = _contract_violations(_job_block(WORKFLOWS / workflow, job), _gh_executing_scripts())
+    assert not problems, f"{workflow}::{job} " + "; ".join(problems)
 
 
 # ── the scan: a NEW gh-using job must be declared, not silently uncovered ────
 
 #: `gh` at COMMAND position. Deliberately narrow: it must not fire on `GH_TOKEN`,
 #: on a filename, or on prose (`gh` inside a comment is skipped by the caller).
+#:
+#: ⛔ THE LIST IS THE WHOLE COMMAND SET, and that is a correction. It named 12 of the 28
+#: subcommands `gh --help` publishes, so `gh cache delete --all`, `gh gist create`,
+#: `gh attestation verify`, `gh ruleset list`, `gh alias set`, `gh extension install`,
+#: `gh org list` and `gh ssh-key list` were all really executed and all read CLEAN
+#: (execution proven by a stub `gh` on PATH, and each name confirmed real by
+#: `gh <name> --help` exiting 0). `test_every_gh_subcommand_is_recognised` re-derives the
+#: set from the installed `gh` so a NEW subcommand cannot silently join the blind spot.
+#:
+#: ⛔ AND THE TRAILING BOUNDARY IS A WIDENING, NOT A NARROWING. The old pattern had none,
+#: so `gh project` matched on `pr` and `gh organization` would have matched on `org`. Adding
+#: `(?![-\w])` without `project`/`org` in the list would have NARROWED it — the one
+#: direction this file must never drift — which is why the list carries both.
+#:
+#: A GLOBAL FLAG may sit between the binary and the subcommand (`gh -R owner/repo pr list`,
+#: verified against the real gh as `exit=0`); without allowing it the whole invocation was
+#: invisible. A PATH-QUALIFIED binary (`/usr/bin/gh …`) is still a MISS and is declared in
+#: `_gh_hazards` rather than guessed at: the lookbehind that keeps filenames out is the same
+#: one that keeps paths out, and every live invocation spells the bare name.
+_GH_SUBCOMMANDS = (
+    "agent-task",
+    "alias",
+    "api",
+    "attestation",
+    "auth",
+    "browse",
+    "cache",
+    "codespace",
+    "completion",
+    "config",
+    "copilot",
+    "discussion",
+    "extension",
+    "gist",
+    "gpg-key",
+    "issue",
+    "label",
+    "licenses",
+    "org",
+    "pr",
+    "preview",
+    "project",
+    "release",
+    "repo",
+    "ruleset",
+    "run",
+    "search",
+    "secret",
+    "skill",
+    "ssh-key",
+    "status",
+    "variable",
+    "workflow",
+)
 _GH_CMD = re.compile(
-    r"(?<![\w./-])gh\s+(api|run|pr|issue|search|workflow|label|release|repo|auth|secret|variable)"
+    r"(?<![\w./-])gh\s+(?:-{1,2}[A-Za-z][\w-]*\s+(?:[^\s-]\S*\s+)*)?"
+    r"(?:" + "|".join(_GH_SUBCOMMANDS) + r")(?![-\w])"
 )
 #: `gh` at an EXECUTION site, used to DERIVE which helper scripts carry the hazard.
 #: A text list of script names was the first attempt and it under-counted: five
@@ -581,14 +823,30 @@ _GH_EXEC = (
 #: predicate excludes, so the number is measured, not remembered). They are excluded by
 #: NAME, not by which glob they came from, so the exclusion cannot drift with the directory.
 _NOT_A_HARNESS = re.compile(r"\.test\.|^test_")
-#: Everywhere a script that shells out to `gh` can live. `graph-scripts/` was missing and
-#: is a real home for one (`e2e_live_reconcile.py` runs in `e2e-live-reconcile`).
+#: Everywhere a CI HELPER that shells out to `gh` can live. Two corrections are recorded
+#: here because the sentence above used to claim more than the tuple delivered:
+#: `operations/orchestrator-harness/` was missing and is where two real ones live
+#: (`merge-one.sh` — 7 `gh` invocations, `merged-not-closed.sh` — 6), and the claim
+#: "everywhere" was measured false against the tree: 5 files outside this tuple matched
+#: `_GH_EXEC`, of which 4 really execute `gh`.
+#:
+#: ⛔ `tortoise/` IS EXCLUDED DELIBERATELY, and the exclusion is NAMED rather than implied.
+#: It is the SDK — a library, not a CI helper a workflow step invokes — and the three
+#: modules in it that do execute `gh` (`gates.py` via `["gh","api",path]`,
+#: `connectors/github.py` via `["gh","issue","list"]`/`["gh","pr","list"]`,
+#: `scripts/manifest.py` as a prose match only) are reached through Python imports, never
+#: as a `run:` command, so deriving their basenames would add three names to every
+#: workflow scan for no coverage. Measured: 0 workflows reference any of them, and
+#: widening the tuple to `tortoise/**/*.py` moved the live verdict not at all
+#: (22/92 before and after) while reading 285 more files per derivation.
 _SCRIPT_GLOBS = (
     ".github/scripts/*.sh",
     ".github/scripts/*.py",
     "tools/*.py",
     "tools/*.sh",
     "graph-scripts/*.py",
+    "operations/*.sh",
+    "operations/orchestrator-harness/*.sh",
 )
 #: Labels the fallback pool has been observed to serve. Not `ubuntu-latest` only:
 #: the 2026-10-24 measurement shows the pool serving `ubuntu-24.04` as well.
@@ -1146,6 +1404,15 @@ def _message_line_is_inert(line: str) -> bool:
     return _INERT_MESSAGE.match(_blank_quoted(line[: _comment_cut(line)])) is not None
 
 
+#: A `python -m` DOTTED MODULE reference expanded into the path it names, so
+#: `python3 -m tools.ci_timing` and `tools/ci_timing.py` are matched by ONE predicate.
+#: ⛔ THE DIRECTION MATTERS: the dotted form carries no `.py`, so rewriting paths INTO dots
+#: matches nothing — the expansion has to be dots -> slashes + `.py`. Restricted to at least
+#: one dot so it cannot invent a path from a bare word, and applied to the already-blanked
+#: views so a version number in a comment is never the thing that gets expanded.
+_DOTTED_MODULE = re.compile(r"(?<![\w.])(?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*(?![\w.])")
+
+
 def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
     hits = []
     # ⛔ BOUNDARY-MATCHED, not `name in code`. A substring test made
@@ -1218,11 +1485,128 @@ def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
             name_views: tuple[str, ...] = (code,)
         else:
             name_views = (line, _UNQUOTED.sub("", line), _UNESCAPED.sub(r"\1", line))
+            # ⛔ AND A MODULE INVOCATION SPELLS THE NAME WITH DOTS. `python3 -m tools.ci_timing`
+            # really runs `tools/ci_timing.py` (proven with a stub module that touched a
+            # marker), but `script_ref` matches a contiguous `tools/ci_timing.py` path, so the
+            # dotted spelling read CLEAN. Added as a fourth view so the two syntaxes are
+            # matched by one predicate; `tools/` is a package (`tools/__init__.py` exists),
+            # which is why the form works at all.
+            name_views = name_views + tuple(
+                _DOTTED_MODULE.sub(lambda m: m.group(0).replace(".", "/") + ".py", v)
+                for v in name_views
+            )
         if _GH_CMD.search(code) or (
             script_ref is not None and any(script_ref.search(v) for v in name_views)
         ):
             hits.append(stripped)
     return hits
+
+
+def _undeclared_gh_jobs(
+    workflows: Path,
+    scripts: frozenset[str],
+    wired: set[tuple[str, str]],
+    declared_gaps: set[tuple[str, str]],
+) -> list[str]:
+    """`workflow::job` for every poolable gh-using job that carries no contract step.
+
+    ⛔ EXTRACTED SO THE COVERAGE ARM CAN BE PINNED, for the same reason
+    `_contract_violations` was. While this lived inline, reverting its cover test to the
+    loose `CONTRACT_STEP in text` left every test green (measured): the arm was right and
+    nothing exercised it, so a rebase could reinstate a scan that goes green on a job whose
+    contract step is commented out. `test_a_commented_out_or_printed_step_is_not_coverage`
+    pins it on a synthetic workflow, where a brand-new job is exactly what this exists to
+    catch.
+    """
+    undeclared: list[str] = []
+    for path in sorted(workflows.glob("*.yml")):
+        for job, body in _jobs(path):
+            text = "\n".join(body)
+            if not _poolable_label(text):
+                continue
+            if not _gh_hazards(body, scripts):
+                continue
+            # Covered = carries the step (the property that matters) OR is declared.
+            # `GH_JOBS` is the separate POSITION pin, not the coverage record.
+            #
+            # ⛔ THE SAME STRICT PREDICATE AS THE ORDERING PIN, and it used to be the loose
+            # substring test one arm up. `CONTRACT_STEP in text` matched a COMMENTED-OUT step
+            # (`# run: bash .github/scripts/…`) and a prose one
+            # (`echo "if this 404s, run … ensure gh by hand"`) — so `_gh_hazards` correctly
+            # reported a `gh`-using job that had NO contract step, and THIS arm then
+            # suppressed the finding and the scan went GREEN. Measured on a synthetic
+            # workflow with an empty `GH_JOBS`/`KNOWN_UNCOVERED` (i.e. a brand-new job, which
+            # is exactly what this scan exists to catch): both shapes passed. Loose == strict
+            # across all 41 workflows / 92 jobs today (0 divergence), so this moves no live
+            # verdict — and it is the `#12133` prose these very steps carry.
+            if any(_CONTRACT_RUN_RE.match(line) for line in body):
+                continue
+            if (path.name, job) in wired or (path.name, job) in declared_gaps:
+                continue
+            undeclared.append(f"{path.name}::{job}")
+    return undeclared
+
+
+def test_a_commented_out_or_printed_step_is_not_coverage(tmp_path):
+    """The coverage arm must not accept a step that only MENTIONS the remedy.
+
+    ⛔ FINDING #1 OF REVIEW ROUND 5, PINNED. Round 5 bound the ordering pin to a strict
+    predicate and left this sibling arm on `CONTRACT_STEP in text`. That substring test
+    matches a commented-out step and a printed one, so `_gh_hazards` correctly reported a
+    `gh`-using job with NO contract step and this arm then SUPPRESSED it: the scan went
+    green. Measured on a synthetic workflow with empty `GH_JOBS`/`KNOWN_UNCOVERED` — i.e. a
+    brand-new job, which is precisely what the scan exists to catch — both shapes passed.
+    Loose == strict across all 41 real workflows today (0 divergence), so this pin is the
+    only thing standing between the two.
+    """
+
+    def synthetic(body: str) -> str:
+        return (
+            "name: synth\n"
+            "on: push\n"
+            "jobs:\n"
+            "  newjob:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n" + body
+        )
+
+    (tmp_path / "synthetic.yml").write_text(
+        synthetic(
+            "      - name: peek\n"
+            "        run: gh pr view 1 --json number\n"
+            "      - name: contract (disabled)\n"
+            "        # run: bash .github/scripts/" + CONTRACT_STEP + "\n"
+        )
+    )
+    got = _undeclared_gh_jobs(tmp_path, _gh_executing_scripts(), set(), set())
+    assert got == ["synthetic.yml::newjob"], (
+        "a job whose contract step is COMMENTED OUT reported no violation — the coverage "
+        f"arm accepted prose as coverage ({got!r})"
+    )
+
+    (tmp_path / "synthetic.yml").write_text(
+        synthetic(
+            "      - name: peek\n"
+            "        run: gh pr view 1 --json number\n"
+            "      - name: advise\n"
+            '        run: echo "if this 404s, run .github/scripts/' + CONTRACT_STEP + ' by hand"\n'
+        )
+    )
+    got = _undeclared_gh_jobs(tmp_path, _gh_executing_scripts(), set(), set())
+    assert got == ["synthetic.yml::newjob"], (
+        f"a job that only PRINTS the remedy reported no violation ({got!r})"
+    )
+
+    # …and the control: the real step IS coverage, so the pin is not passing by flagging
+    # everything.
+    (tmp_path / "synthetic.yml").write_text(
+        synthetic(
+            "      - name: contract\n        run: bash .github/scripts/" + CONTRACT_STEP + "\n"
+        )
+    )
+    assert _undeclared_gh_jobs(tmp_path, _gh_executing_scripts(), set(), set()) == [], (
+        "a compliant synthetic job was reported as undeclared"
+    )
 
 
 def test_every_pool_eligible_gh_job_is_declared():
@@ -1237,22 +1621,7 @@ def test_every_pool_eligible_gh_job_is_declared():
     """
     wired = {(wf, job) for wf, jobs in GH_JOBS.items() for job in jobs}
     declared_gaps = {(wf, job) for wf, jobs in KNOWN_UNCOVERED.items() for job in jobs}
-    scripts = _gh_executing_scripts()
-    undeclared = []
-    for path in sorted(WORKFLOWS.glob("*.yml")):
-        for job, body in _jobs(path):
-            text = "\n".join(body)
-            if not _poolable_label(text):
-                continue
-            if not _gh_hazards(body, scripts):
-                continue
-            # Covered = carries the step (the property that matters) OR is declared.
-            # `GH_JOBS` is the separate POSITION pin, not the coverage record.
-            if CONTRACT_STEP in text:
-                continue
-            if (path.name, job) in wired or (path.name, job) in declared_gaps:
-                continue
-            undeclared.append(f"{path.name}::{job}")
+    undeclared = _undeclared_gh_jobs(WORKFLOWS, _gh_executing_scripts(), wired, declared_gaps)
     assert not undeclared, (
         "these jobs use `gh` and ask for a label the fallback pool has served, but are "
         f"neither covered nor declared as a gap: {undeclared}. Add the job to GH_JOBS and "
@@ -2081,7 +2450,8 @@ def test_an_expression_valued_runs_on_keeps_its_job_in_the_scan():
     Why this is the shape that matters: under the `CI_SHARD_ROUTING=pool-split` opt-in
     `test` routes its odd legs to an explicit `["self-hosted", "self-hosted-x64"]`
     pin, i.e. the one job whose legs can reach a minimal-`PATH` pool runner BY NAME —
-    and it is the largest job in the tree (25 steps). Dropping it out of this scan is
+    and it is the largest job in the tree (28 steps; next largest is 19), so it is the
+    the one whose dropping-out this rule exists to notice. Dropping it out of this scan is
     silent: the scan can only red on jobs it looks at, so a `gh`-using step added to
     `test` later would join the #9018 gap with the suite green. It is `gh`-free today,
     which is why nothing reds now and why the arm has to be a pin instead of a fix to
