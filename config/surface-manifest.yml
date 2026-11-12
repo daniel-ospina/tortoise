@@ -364,6 +364,23 @@ response_fields:
   emitted_when: 'the same condition as end_state_unknown, always alongside it — the ids of the covering candidates
     whose end is un-datable (#2350, #9202)'
   unchanged_when_off: yes — absent when no covering candidate has an unknown end
+- response: sdk:get_historical_knowledge
+  field: current.status / current.terminal
+  emitted_when: '#11826 — ALWAYS, on every reply that has a chain (both keys sit in the `current` block, which is
+    the CHAIN HEAD: the point the walk STARTED from, which for a superseded predecessor IS that predecessor).
+    `current.status` is the STORED status rendered as every other read surface renders it (an absent status reads
+    `live` — live.status_as_reported, #9974 R1); `current.terminal` is live.is_terminal_status (the terminal
+    vocabulary OR the legacy outdated=true flag), i.e. the predicate EP itself applies. Before #11826 the block
+    carried only id + content, so a superseded predecessor was served as the current claim with nothing a consumer
+    could branch on'
+  unchanged_when_off: 'NO — not flag-gated. Every reply that reaches the chain gains both keys, so no pre-#11826
+    reply that carried `current` is byte-identical (the keys are always present, never omitted). The other reply
+    branches (a missing asked point) return BEFORE the chain is built and carry no `current` at all, unchanged.
+    ⛔ `current.status` and the reply-level `status` are DIFFERENT closed vocabularies in one payload (lifecycle
+    word vs found|ambiguous|absent) — never mirror the handling of the reply-level one onto the nested one. The
+    pair can also disagree BY DESIGN: a legacy `outdated=true` point with no stored status reads
+    `status="live"` beside `terminal=true`, because `status` is the stored word (the #9974 R1 rendering rule)
+    and `terminal` is the predicate.'
 # ⛔ FOUR rows stood here until #4282 deleted their carriers (2026-10-27), and they are recorded
 # here rather than dropped silently, because each named a REAL emitted field:
 #   • `sdk:capture_session` / `graph_ops` (#3561) — the capture's measured graph-operation count.

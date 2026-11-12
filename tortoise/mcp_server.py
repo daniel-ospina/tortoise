@@ -3987,7 +3987,7 @@ def tortoise_validate_domain(domain: str) -> dict:
 
 
 def tortoise_audit(point_kinds: list[str] | None = None) -> dict:
-    """Audit graph wiring quality — 8 checks (epic #348).
+    """Audit graph wiring quality — 11 checks (epic #348).
 
     Returns structured JSON: per-check counts (uncapped) + capped samples +
     summary + exit_code (0 clean, 1 issues). Same surface as the
