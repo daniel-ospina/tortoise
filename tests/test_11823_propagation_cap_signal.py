@@ -752,9 +752,12 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     (measured: dropping the conjunct stays GREEN). The edge-less `is_operator`
     shape exists and is one public call away (`create_point(...,
     is_operator=True)`; `create_operator` always wires an edge), and it has
-    **NO pin**: no test that OBSERVES the trivial-stamp population carries one
-    (measured: adding such a node here leaves the count at 2), so WIDENING the
-    conjunct is silent. What IS pinned is the opposite edge — NARROWING
+    **NO pin** today: no test that OBSERVES the trivial-stamp population carries
+    one, so WIDENING the conjunct is silent here (measured: dropping the
+    conjunct leaves the count at 2). ⛔ A fixture gap, not an unfixable
+    residual — one edge-less operator node keeps the count at 2 as written and
+    moves it 2→3 under the widened conjunct (measured), so a single node pins
+    it. What IS pinned is the opposite edge — NARROWING
     `= false` to `IS NULL` drops every `is_operator: false` claim, and the
     passes that must trivially stamp an isolated claim redden
     (`tests/test_epic903_freshness.py`); that mutation says nothing about an
