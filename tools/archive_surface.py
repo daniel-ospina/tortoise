@@ -245,6 +245,33 @@ def live_surface(root: Path | None = None) -> dict:
     }
 
 
+def _imports_of_archive(root: Path) -> list[tuple[str, str]]:
+    """Every product module that imports `archive` (or a submodule of it).
+
+    Returns (repo-relative path, the imported module name). `import archive.x` /
+    `from archive.x import y` / `from archive import x` are all hits; `import tortoise.archive`
+    is a different (and separately reported) problem.
+    """
+    out: list[tuple[str, str]] = []
+    for path in sorted((root / "tortoise").rglob("*.py*")):
+        if path.suffix not in (".py", ".pyi"):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (OSError, SyntaxError):  # pragma: no cover - reported elsewhere
+            continue
+        rel = path.relative_to(root).as_posix()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                out += [(rel, alias.name) for alias in node.names
+                        if alias.name == "archive" or alias.name.startswith("archive.")]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                module = node.module or ""
+                if module == "archive" or module.startswith("archive."):
+                    out.append((rel, module))
+    return out
+
+
 def _forward_names(root: Path) -> set[str]:
     """The `RETIRED_USE_INSTEAD` keys, read from the tree rather than imported.
 
@@ -742,6 +769,17 @@ def package_violations(root: Path | None = None) -> list[str]:
             "tortoise/archived exists — this is the PRE-MECHANISM archive location, inside the "
             "shipped package and therefore importable. Archived code belongs in the top-level "
             "`archive/` tree (`archive/README.md`); migrate the module and delete the directory"
+        )
+    # ⛔ The OTHER direction: removed BEHAVIOUR must not re-enter the product. `archive` is a
+    # PEP 420 namespace package reachable from a repo checkout, so `from archive.… import x` in a
+    # live module WORKS at runtime — and the suite runs from the repo root, so every other gate
+    # stayed green while a live method called archived code (measured, review round 9). Parsed,
+    # not grepped: a mention in prose is not an import (the rule `_mcp_handlers` already applies
+    # to docstrings).
+    for rel, name in sorted(_imports_of_archive(root)):
+        out.append(
+            f"{rel} imports `{name}` — archived code must not be reachable from the product; "
+            "that is the difference between 'removed' and 'still running'"
         )
     # ⛔ NO `find_spec("tortoise.archive")` ARM HERE, deliberately. Every other arm of this
     # function reads a path under `root`; an import probe answers about whatever the AMBIENT

@@ -178,15 +178,17 @@ def test_the_committed_rows_cite_the_commit_the_writer_would_record() -> None:
                 arch.frozen_blocks(body), entry["blocks"], strict=True
             )
         ]
-        expected, _ref = arch.anchor_sha(
-            arch.ROOT,
-            entry["sources"],
-            arch.block_holds(arch.ROOT, entry["kind"], entry["symbol"], blocks),
-        )
-        assert entry["archived_at"] == expected, (
-            f"{entry['symbol']} cites {entry['archived_at']}, but the writer now records "
-            f"{expected} — re-anchor it (see archive/README.md), or the citation drifts from "
-            "the rule"
+        # ⛔ The GATE's question, not the writer's newest-commit rule: `_anchor_violations`
+        # accepts ANY commit that holds the blocks, while `anchor_sha` returns the NEWEST such
+        # commit — so a commit landing on main that touches the file without touching this block
+        # makes a strictly-newer answer "correct", and asserting equality called a still-valid
+        # row drift, with a remedy that refuses to run (`already archived`) and no procedure to
+        # follow (measured, review round 9).
+        assert arch.block_holds(
+            arch.ROOT, entry["kind"], entry["symbol"], blocks
+        )(entry["archived_at"]), (
+            f"{entry['symbol']} cites {entry['archived_at']}, which does not hold its frozen "
+            "block — the citation does not describe the code"
         )
 
 
@@ -1015,6 +1017,33 @@ def test_the_writer_refuses_a_still_served_retired_forward_name(tree: Path) -> N
     _commit(tree, "tortoise/tool_registry.py")
     with pytest.raises(arch.ArchiveRefused, match="still SERVED"):
         arch.archive_symbol(arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree)
+
+
+def test_a_product_module_that_imports_the_archive_is_reported(tree: Path) -> None:
+    """The archive's promise, reversed: removed behaviour must not re-enter the product.
+
+    `archive` is a namespace package reachable from a checkout, so this import RUNS — and the
+    suite runs from the repo root, so every other gate stayed green while a live method called
+    archived code (measured, review round 9). Nothing read the product's import graph before.
+    """
+    (tree / "tortoise" / "live.py").write_text(
+        "from archive.modules.b1.tortoise.memory_scope import MemoryScope\n"
+        "\n"
+        "def f():\n"
+        "    return MemoryScope\n",
+        encoding="utf-8",
+    )
+    problems = arch.package_violations(tree)
+    assert any("imports `archive.modules.b1.tortoise.memory_scope`" in problem for problem in problems), (
+        problems
+    )
+
+    # …and a MENTION in prose is not an import: the scan parses, it does not grep.
+    (tree / "tortoise" / "live.py").write_text(
+        'def f():\n    """Restored from archive.modules.b1.tortoise.memory_scope."""\n    return 1\n',
+        encoding="utf-8",
+    )
+    assert not any("imports `archive" in problem for problem in arch.package_violations(tree))
 
 
 def test_two_module_symbols_cannot_share_one_archived_file(tree: Path) -> None:

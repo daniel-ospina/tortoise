@@ -44,13 +44,14 @@ An archived symbol is:
 
 ⚠️ **What is and is not enforced about importability.** The enforced property is "not importable
 **from the product package**": nothing under `tortoise/`, nothing in the wheel. From a repo
-checkout, `import archive` and `import archive.modules` **do** resolve as PEP 420 namespace
-packages (verified: `find_spec("archive").submodule_search_locations` is the tree). The chain stops
-one level down: every batch directory is hyphen- or dot-named (`mcp-tools`, `sdk-methods`,
-`pre-mechanism-legacy-search`) and a hyphen is not a valid module segment, so
-`import archive.<batch>.<file>` does not resolve. **Reading** a frozen file is the supported path;
-**importing** one is not supported (the files are frozen source, not maintained modules) and
-nothing in the product ever does it.
+checkout, archived code **is importable**: `import archive` and `import archive.modules` resolve
+as PEP 420 namespace packages, and `importlib.import_module("archive.modules.<batch>.<path>")`
+resolves and EXECUTES any frozen module regardless of the batch slug (measured — a hyphen stops the
+`import …` *statement*'s grammar, not the import machinery). **Reading** a frozen file is the
+supported path; **importing** one is not supported, and `check` fails closed on the direction that
+matters: no module under `tortoise/` may import `archive` (parsed with `ast`, so a mention in prose
+is not an import). The product-facing property is the shipped package and the wheel — nothing under
+`tortoise/`, nothing in `packages.find`, no `__init__.py` anywhere under `archive/`.
 
 `tools/archive_surface.py check` enforces every one of those, and
 `tests/test_archive.py` proves the detectors **fire** (a gate nobody has seen fire is
@@ -110,7 +111,7 @@ existed is moved out. `tortoise/archived/` is refused by the gate for that reaso
 
 ```bash
 # 1. Freeze the code. Run BEFORE deleting: it reads the source from the working tree and records
-#    the commit on the DEFAULT BRANCH that last held it — not this branch's HEAD, because a
+#    a commit on the DEFAULT BRANCH that holds the code — not this branch's HEAD, because a
 #    squash merge never lands that commit on `main` and the citation would then be unreadable.
 uv run python tools/archive_surface.py archive mcp-tool tortoise_search \
     --batch mcp-read-duplicates --reason 'no per-tool destination; removed (#11609)'
