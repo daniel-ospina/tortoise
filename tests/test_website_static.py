@@ -6762,7 +6762,17 @@ class TestProductSetIsServedUnderTheOneHost:
     # `/docs` on `premiselabs.co/contact` is the retired path and now takes a hop. Leaving
     # these out of the scan is what let `contact.html` keep `href="/self-hosted"` while
     # every sibling it sits beside was rewritten (caught by the VGATE review, #11764).
-    ROOT_SERVED = ("index.html", "contact.html")
+    # Every page the company host serves at `/` + its own path. The legal three belong
+    # here: they stayed at the root, so `/` on them is the company homepage (not the
+    # product) and their links must use the prefix. A reviewer measured that they were in
+    # NEITHER link population, so a future `href="/"` labelled "Back to product" on
+    # `privacy.html` would have shipped green — the same miss measured on `contact.html`.
+    ROOT_SERVED = ("index.html", "contact.html", "privacy.html", "tos.html", "dpa.html")
+    # The app origin's page population, pinned for the same reason `_pages` is: the guard
+    # below walks a non-recursive glob, so a page added to a subdirectory (or served from
+    # `apps/dashboard/index.html`, which lives OUTSIDE `public/`) would leave coverage with
+    # no red anywhere.
+    APP_ORIGIN_PAGES = ("404.html", "invite-accept.html", "signup.html", "welcome.html")
     # The RETIRED path -> the path that serves it now. BOTH spellings are keys: the
     # middleware's `PRODUCT_PAGES` carries `/docs` AND `/docs.html`, so the `.html` form
     # is routed in one hop rather than 404ing — and a guard that only knew the
@@ -6891,6 +6901,9 @@ class TestProductSetIsServedUnderTheOneHost:
                      "/investors", "/design-partners-intro"}
         app_pages = sorted(self.CONTRACT.DASHBOARD_ROOT.glob("*.html"))
         assert app_pages, "no app-origin pages found — the guard would pass vacuously"
+        assert tuple(p.name for p in app_pages) == self.APP_ORIGIN_PAGES, (
+            "the app-origin page population changed — a page that MOVED into a "
+            f"subdirectory leaves this guard: {[p.name for p in app_pages]}")
         offenders = []
         for page in app_pages:
             for href in re.findall(r'href="([^"]+)"', page.read_text()):
