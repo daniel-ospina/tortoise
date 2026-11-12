@@ -90,7 +90,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > to name a successor** to mark something no-longer-current: Graphiti/Zep sets an edge's `invalid_at` to the invalidating edge's
 > `valid_at` and lets the SYSTEM link them; Cognee's `close_node()` stamps a validity end and takes no successor argument; mem0's
 > **Supersede** action ("marks an older fact as outdated when a newer one contradicts it", always on, all plans) infers both the
-> supersession and its replacement link in the background — `replacement_memory_id`/`lifecycle_state` are written by the system, not
+> supersession and its replacement link in the background — `replaced_by`/`lifecycle_state` are written by the system, not
 > passed by a caller. ⚠️ **Two corrections to an earlier version of this paragraph, each falsified by review.** (a) It said *"Every
 > agent-memory system surveyed uses **soft revocation** rather than deletion"*; the study below says **"Many** agent-memory systems
 > preserve history through soft revocation", and its §3.3 names two of the five it measures (cognee, langmem) as deleting the superseded
