@@ -57,17 +57,32 @@ JOB = "test-record-postgres"
 #: these — but reading BOTH forms keeps this guard's message about the major
 #: rather than about the spelling.
 IMAGE_RE = re.compile(r":(?:pg)?(\d+)$")
-CLIENT_PKG_RE = re.compile(r"postgresql-client-(\d+)\b")
 
-#: The INSTALL line specifically. `CLIENT_PKG_RE` is ALSO satisfied by the
-#: precondition's probe above it (`apt-cache show postgresql-client-16`), so a
-#: first-match read reported the PROBE's major as the installed one and a
-#: comment naming the package could select the step (MEASURED, review of
-#: `17847279b1`: mutating the install to `-18` left this test green, and a
-#: comment line naming `postgresql-client-16` could satisfy the pin-step search).
+#: The INSTALL line specifically, ANCHORED at its own line. Two facts pulled it
+#: apart from a mere mention of the package: the precondition's probe above it
+#: also names `postgresql-client-<major>`, and a comment — its own line OR a
+#: trailing one — is inert shell that reads exactly like live code. `_code_only`
+#: drops comment-ONLY lines, so the ANCHOR is what makes an inline comment
+#: (`echo ok  # apt-get install postgresql-client-16 …`) unable to answer as the
+#: install (MEASURED, review of `bfb7af441a`: that shape selected a second step
+#: and failed all six assertions with "a second installer" over a step that
+#: installs nothing).
 CLIENT_INSTALL_RE = re.compile(
-    r"apt(?:-get)?\s+install[^\n]*?\bpostgresql-client-(?P<major>\d+)\b"
+    r"^[ \t]*(?:sudo[ \t]+)?apt(?:-get)?[ \t]+install[^\n]*?"
+    r"\bpostgresql-client-(?P<major>\d+)\b",
+    re.MULTILINE,
 )
+
+#: A fail action's `exit 1`, ANCHORED at the start of its STATEMENT — line start,
+#: or just after `;` / `&&` / `||` / `{` / `(`. Enumerating what may FOLLOW it
+#: instead (`;`, `}`, `)`, end-of-string) red every nested or commented fail
+#: action: `exit 1  # fail closed`, an `exit 1` whose branch was indented one
+#: level deeper, and the `if true; then … fi` wrapper all failed "does not
+#: `exit 1`" over a guard that exits 1 (MEASURED, review of `bfb7af441a`), while
+#: the same text passed the EXECUTED arm — the most misleading failure this file
+#: can produce. Anchoring at the start also refuses a spoof in a message string
+#: (`echo "::error::… exit 1 …"` is preceded by a space, not a separator).
+_EXIT_1_RE = re.compile(r"(?:^|;|&&|\|\||\{|\()[ \t]*exit[ \t]+1\b", re.MULTILINE)
 
 #: The `$GITHUB_PATH` write as ONE unit: the versioned dir IS the value written.
 #: `echo <dir> >> "$GITHUB_PATH"` — read the major from the
@@ -289,11 +304,11 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
         "artifact. Read from the BRANCH, not the step: the package precondition "
         "above it carries a `::error::` of its own"
     )
-    assert re.search(r"\bexit\s+1\s*(?:;|\}|\)|$)", branch), (
+    assert _EXIT_1_RE.search(branch), (
         "the version branch does not `exit 1`: a named error with no exit status "
         "lets the mismatch carry on into the record leg, which is the silent "
-        "unrestorable artifact #12051 exists to prevent. Any separator is "
-        "accepted — the fact is the exit status, not the punctuation after it"
+        "unrestorable artifact #12051 exists to prevent. Read at the STATEMENT's "
+        "start, so a nested or commented fail action is still the same exit"
     )
     # The comparison is pinned by `_version_branch` itself, which asserts the
     # matched branch's own major EQUALS the servers' — so a spelling-exact search
@@ -392,8 +407,8 @@ _OR_PRECONDITION_RE = re.compile(
     # of `7dc1da573a`). The closer is LINE-ANCHORED, so the `{…}`/`(…)` characters
     # INSIDE the shipped message still cannot close it early — which is what the
     # window was protecting against.
-    r"(?P<body>(?:(?!^[ \t]*[})][ \t]*$).)*)"
-    r"^[ \t]*[})][ \t]*$",
+    r"(?P<body>(?:(?!^[ \t]*[})][ \t]*(?:#.*)?$).)*)"
+    r"^[ \t]*[})][ \t]*(?:#.*)?$",
     re.DOTALL | re.MULTILINE,
 )
 
@@ -593,29 +608,32 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
         "the precondition fails silently: an absent package must be reported as "
         "its OWN named failure, not as the archive's opaque apt error"
     )
-    assert re.search(r"\bexit\s+1\s*(?:;|\}|\)|$)", body), (
+    assert _EXIT_1_RE.search(body), (
         "the precondition does not `exit 1`, so a missing client would fall "
-        "through to the install and surface as exit 100 again. Any separator is "
-        "accepted — the fact is the exit status, not the punctuation around it."
+        "through to the install and surface as exit 100 again. Read at the "
+        "STATEMENT's start, so a nested or commented fail action is still the "
+        "same exit"
     )
 
     # ⛔ ORDER IS PART OF THE FIX. A precondition placed AFTER the install is
     # inert: the install has already died with the opaque `exit 100` this block
-    # exists to replace.
-    assert code.index("apt-cache") < code.index("apt-get install"), (
+    # exists to replace. Both positions come from ANCHORED matches, so a comment
+    # that merely says `apt-get install` cannot stand in for the install line and
+    # reverse this diagnosis (MEASURED, review of `bfb7af441a`).
+    _install_at = CLIENT_INSTALL_RE.search(code)
+    assert _install_at, "the pin never runs `apt-get install postgresql-client-<major>`"
+    assert code.index("apt-cache") < _install_at.start(), (
         "the package precondition runs AFTER `apt-get install`, so on an image "
         "whose archive lacks the major the job dies with the archive's opaque "
         "`E: Unable to locate package` and never reaches the named error"
     )
 
-    # ⛔ THE INSTALL LINE IS WHAT PICKS THE CLIENT. Asserted on the install
-    # itself, not on `CLIENT_PKG_RE.search(text)`: the precondition above names a
-    # package too and sits earlier, so a first-match read would satisfy an
+    # ⛔ THE INSTALL LINE IS WHAT PICKS THE CLIENT. Asserted on the anchored
+    # install line itself, never on a bare package mention: the precondition above
+    # names a package too and sits earlier, so a first-match read would satisfy an
     # install-major claim by reading the PROBE (measured: switching the install
     # to -18 stayed green under the old read).
-    install = re.search(
-        r"apt-get\s+install[^\n]*postgresql-client-(?P<major>\d+)", code
-    )
+    install = _install_at
     assert install, "the pin never runs `apt-get install postgresql-client-<major>`"
     assert int(install.group("major")) == server_major, (
         f"the pin INSTALLS postgresql-client-{install.group('major')} while the "
@@ -660,7 +678,7 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # `7dc1da573a`).
     masked = ["" if _COMMENT_ONLY_RE.match(line) else line for line in lines]
     install_at = next(
-        (i for i, line in enumerate(masked) if re.search(r"apt-get\s+install", line)),
+        (i for i, line in enumerate(masked) if CLIENT_INSTALL_RE.search(line)),
         None,
     )
     assert install_at is not None, "the pin has no `apt-get install` line to run up to"
