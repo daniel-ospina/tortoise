@@ -317,6 +317,30 @@ def validate_manifest(
     # acceptance is the signal the declaration will work. Refuse it on THIS
     # route with the limitation named, so a pack author is told rather than
     # left with a pack that validates and never folds.
+    # #12060 guards — INERT ON THIS ROUTE, so they do not install (`statuses`/
+    # `folds` above is the same reasoning, and the same function). The write door
+    # runs `kind_guards.resolve(...)` with NO pack confusions, so the table it
+    # consults is `CORE_CONFUSIONS + _catalog_pack_guards()`, and the latter reads
+    # `domain_loader._get_registry()` — the process FILESYSTEM catalog. A hosted
+    # manifest lives as a `:PackManifest` in the tenant graph and never enters
+    # that registry, so a guard declared here is compiled by nothing at write
+    # time: measured (round-8 review P1) `resolve("w-12", "object", None,
+    # installed={"acme"})` ACCEPTED the write with the tenant guard absent from
+    # the table, and forcing it in made every own-namespace target skip
+    # `no-usable-home` because tenant kinds never enter `kind_index_sections()`.
+    # Acceptance is the signal the declaration will work, so refuse it here and
+    # name the limitation rather than ship a guard that cannot fire.
+    if raw.get("ontology", {}).get("guards"):
+        return ManifestValidation(
+            False, namespace=ns,
+            errors=["ontology.guards is not supported on a hosted (graph-native) "
+                    "tenant pack — the write-time guard table is compiled from "
+                    "the process filesystem catalog, which a tenant manifest "
+                    "never enters, so the guard would install and then be "
+                    "completely INERT. Install the pack self-hosted under "
+                    "TORTOISE_PACKS_DIR (where `tortoise pack validate` also "
+                    "gates it), or drop the guards block "
+                    "(tortoise#12060 hosted wiring is tracked separately)"])
     _fold_decls = _tenant_fold_declarations(raw)
     if _fold_decls:
         return ManifestValidation(
@@ -361,40 +385,6 @@ def validate_manifest(
             return ManifestValidation(
                 False, namespace=ns,
                 errors=[f"cannot install — {m}" for m in unresolved])
-        # ⛔ THE GUARD TABLE IS A SECOND GATE ON THIS ROUTE, AND IT WAS MISSING
-        # HERE (round-7 review P1, measured). `_validate_guards` answers what ONE
-        # manifest can know: a target's namespace, and the KIND of a target in
-        # its own namespace (the only kind list it has). The `core` question and
-        # the `depends_on` question need the table and EVERY pack LOADED, so they
-        # run here — after `load_all`, where `reg.packs` holds the whole validated
-        # set — exactly as `tortoise pack validate` does it. Without this, a
-        # `redirect: core:WrokItem` returned `ok=True` on the hosted install and
-        # then degraded to `fallback` on every match: a dead guard installed on
-        # the production SaaS route, refused only by the local CLI.
-        #
-        # `include_catalog=False` (report on what was handed in, never the
-        # ambient catalog) and `pack_kinds` (the loaded namespaces' ROUTABLE
-        # kinds) together turn the table's deliberate pack-target abstention into
-        # a real answer wherever the pack IS loaded — and leave it an abstention
-        # where it is not, so no cross-pack guard can be false-refused here.
-        from tortoise.kind_guards import guard_table_problems, pack_guards
-        _confusions: list = []
-        for _pns in sorted(reg.packs):
-            _declared = getattr(reg.packs[_pns], "guards", None)
-            if _declared:
-                _confusions.extend(pack_guards(_pns, _declared))
-        _pack_kinds = {
-            _pns: list(getattr(reg.packs[_pns], "object_kinds", []) or [])
-            + list(getattr(reg.packs[_pns], "document_kinds", []) or [])
-            for _pns in reg.packs
-        }
-        _guard_problems = guard_table_problems(
-            _confusions, include_catalog=False, pack_kinds=_pack_kinds)
-        if _guard_problems:
-            return ManifestValidation(
-                False, namespace=ns,
-                errors=[f"cannot install — {m}" for m in _guard_problems])
-
     return ManifestValidation(True, namespace=ns)
 
 

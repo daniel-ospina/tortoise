@@ -11997,11 +11997,20 @@ def _cmd_pack_validate(args) -> int:
             _guard_confusions.extend(pack_guards(ns, _declared))
     # `pack_kinds` — the LOADED namespaces' routable kinds — turns the table's
     # deliberate pack-target abstention into a real answer wherever the pack IS
-    # loaded (a `redirect: venture:konpekt` typo). The hosted install route runs
-    # the same check (`validate_manifest`), so `pack validate` and an install
-    # cannot disagree about whether a guard names a home.
+    # loaded (a `redirect: venture:konpekt` typo).
+    #
+    # ⛔ SCOPED TO THE PACK(S) ASKED ABOUT, exactly like `errors`/`unresolved_refs`
+    # above (round-8 review P1, measured): a whole-`reg.packs` union made a
+    # SIBLING's dead guard print `✗ bad:thing:0 …` and exit 1 for a pack with no
+    # guards at all — the one bucket that bypassed `_scope`'s rule that a
+    # sibling's gap must not become this pack's verdict (#9663). The
+    # `target_keys` leg of the branch above is "one pack"; the directory leg is
+    # "every pack", where reporting the whole table IS the verdict asked for.
+    _scope_keys = target_keys if target_manifest.exists() else None
     guard_problems = guard_table_problems(
-        _guard_confusions, include_catalog=False,
+        [c for c in _guard_confusions
+         if _scope_keys is None or (c.declaring_pack in _scope_keys)],
+        include_catalog=False,
         pack_kinds={
             _ns: list(getattr(reg.packs[_ns], "object_kinds", []) or [])
             + list(getattr(reg.packs[_ns], "document_kinds", []) or [])

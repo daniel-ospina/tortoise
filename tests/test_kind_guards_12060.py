@@ -1917,10 +1917,17 @@ class TestReviewRound4Closed:
         # ⛔ AND ONLY THE TWO ROUTING AXES ARE HOMES (round-7 review P2): an
         # `actionKinds`/`eventKinds`/`pointKinds` declaration is not a layer, so
         # the matching target installs clean and then skips `no-usable-home`.
+        # ⛔ AND THE UNION IS PASSED EXPLICITLY, or the loop proves nothing: the
+        # real call site hands the method the manifest's FIVE-axis union (the
+        # `_validate_guards(ont, ns, depends_on, all_pack_kinds)` call in
+        # `pack_registry._validate`), so with the helper's default `{"concept"}`
+        # the PREVIOUS arm (`_bare not in all_pack_kinds`) already refused these
+        # and only the message would differ (round-8 review P3, measured).
         for axis in ("actionKinds", "eventKinds", "pointKinds"):
             axis_errs = self._validate(
                 {**base, "redirect": "acme:activate"},
-                ont_extra={axis: ["activate"]})
+                ont_extra={axis: ["activate"]},
+                all_pack_kinds={"concept", "activate"})
             assert axis_errs and axis in " ".join(axis_errs), (axis, axis_errs)
 
         # ⛔ END-TO-END, on a real manifest — because the round's FIRST version of
@@ -1949,80 +1956,87 @@ class TestReviewRound4Closed:
         assert bad.returncode == 1, bad.stdout + bad.stderr
         assert "redirect: 'acme:konpekt'" in bad.stdout, bad.stdout
 
-    def test_the_HOSTED_install_route_runs_the_guard_table(self):
-        """P1: the table ran only in `pack validate`, so SaaS installed dead guards.
+    def test_the_hosted_install_route_REFUSES_a_guard_it_cannot_fire(self):
+        """A tenant `guards:` block is INERT, so accepting it is a false PASS.
 
-        Round-7 review: `guard_table_problems()` had exactly one non-test caller —
-        the CLI — while the tenant install route (`validate_manifest` →
-        `PackRegistry.load_all()` → `_validate_guards`) never ran it. Measured: a
-        manifest with `redirect: core:WrokItem` returned `ok=True, errors=[]` on
-        the hosted route, so the guard installed and then degraded to `fallback`
-        on every match — refused by the local CLI and accepted in production.
+        Round-8 review P1, measured: the write door calls
+        `kind_guards.resolve(...)` with no pack confusions, so its table is
+        `CORE_CONFUSIONS + _catalog_pack_guards()`, and the latter reads
+        `domain_loader._get_registry()` — the process FILESYSTEM catalog. A
+        hosted manifest lives as a `:PackManifest` in the tenant graph and never
+        enters that registry: `resolve("w-12", "object", None,
+        installed={"acme"})` ACCEPTED the write with the tenant guard absent, and
+        forcing the guard in made every own-namespace target skip
+        `no-usable-home` (tenant kinds never enter `kind_index_sections()`).
 
-        Both routes now ask the same table, and each defect still has ONE gate:
-        the own-namespace KIND here (this method), the `core` KIND and the
-        `depends_on` KIND there (the table, with every pack loaded).
+        So this route refuses it, for the SAME reason — and with the same
+        wording shape — as the `statuses`/`folds` gate 60 lines above it:
+        acceptance is the signal the declaration will work.
         """
         from tortoise.pack_manifest_store import validate_manifest
 
-        def manifest(target, *, kinds="concept", dep="[]", extra=""):
-            return f"""namespace: acme
+        guarded = """namespace: acme
 name: Acme Test Pack
 version: "0.1.0"
 tier: free
 ontology:
   extends: core
-  objectKinds: [{kinds}]
+  objectKinds: [concept]
   guards:
   - kind: concept
     layer: object
     onConfusion:
       - when: nameMatches
         pattern: '^r-[0-9]+$'
-        redirect: {target}
+        redirect: core:WorkItem
         fallback: core:WorkItem
         reason: x
-{extra}depends_on: {dep}
-"""
-
-        assert validate_manifest(manifest("core:WorkItem")).ok is True
-        core_typo = validate_manifest(manifest("core:WrokItem"))
-        assert core_typo.ok is False, core_typo.errors
-        assert any("not routed to one layer" in e for e in core_typo.errors), (
-            core_typo.errors)
-        # a declared own kind is a home; a typo is refused by the method above
-        assert validate_manifest(
-            manifest("acme:widget", kinds="concept, widget")).ok is True
-        assert validate_manifest(manifest("acme:konpekt")).ok is False
-
-        # ── and the `depends_on` target, which ONLY this route can answer: with
-        # the dependency installed its kinds are known, so a typo is a dead guard
-        # (`resolve` skips `no-usable-home` on every match) — refused, while the
-        # real kind passes.
-        venture = """namespace: venture
-name: Venture Pack
-version: "0.1.0"
-tier: free
-ontology:
-  extends: core
-  objectKinds: [investment]
 depends_on: []
 """
-        # ⛔ AND THERE IS NO "DEPENDENCY ABSENT" CASE ON THIS ROUTE: #2781 already
-        # refuses an install whose declared dependency is not loaded, so the kinds
-        # are always knowable here — which is exactly why this check belongs HERE
-        # and not in `_validate_guards` (where load ORDER would decide it).
-        missing = validate_manifest(manifest("venture:konpekt", dep="[venture]"))
-        assert missing.ok is False and any(
-            "is not loaded" in e for e in missing.errors), missing.errors
-        typo = manifest("venture:konpekt", dep="[venture]")
-        installed = validate_manifest(typo, installed_manifests={"venture": venture})
-        assert installed.ok is False, installed.errors
-        assert any("no kind pack 'venture' routes" in e
-                   for e in installed.errors), installed.errors
-        good = validate_manifest(manifest("venture:investment", dep="[venture]"),
-                                 installed_manifests={"venture": venture})
-        assert good.ok is True, good.errors
+        refused = validate_manifest(guarded)
+        assert refused.ok is False, refused.errors
+        assert any("completely INERT" in e for e in refused.errors), refused.errors
+        assert any("TORTOISE_PACKS_DIR" in e for e in refused.errors), refused.errors
+        # ⛔ THE CONTROL: the same pack with NO guards block installs, so the
+        # refusal is the guards block and not the manifest.
+        bare = guarded.split("  guards:")[0] + "depends_on: []\n"
+        assert validate_manifest(bare).ok is True, validate_manifest(bare).errors
+
+    def test_the_guard_TABLE_gate_is_SCOPED_to_the_pack_asked_about(self, tmp_path):
+        """A sibling's dead guard must not become this pack's verdict (#9663).
+
+        Round-8 review P1, measured: `guard_problems` was built from EVERY loaded
+        pack, so `pack validate <dir>/packs/good` printed
+        `✗ bad:thing:0: redirect 'core:WrokItem' …` and exited 1 for a pack with
+        NO guards at all — the one bucket that bypassed `_scope`'s rule that a
+        sibling's gap is not the caller's verdict, which `errors` and
+        `unresolved_refs` already obey.
+        """
+        root = tmp_path / "packs"
+        _write_pack(
+            root, "bad", object_kinds="concept",
+            guards="""\
+  - kind: concept
+    layer: object
+    onConfusion:
+      - when: nameMatches
+        pattern: '^thing-[0-9]+$'
+        redirect: core:WrokItem
+        fallback: core:WorkItem
+        reason: x
+""")
+        # `guards:` with no entries — the shape a pack that declares none takes
+        good = _write_pack(root, "good", object_kinds="widget", guards="")
+        # the SIBLING is reported when the DIRECTORY is what was asked about
+        whole = _run_cli("pack", "validate", str(root), "--json")
+        assert whole.returncode == 1, whole.stdout
+        assert "bad:concept:0" in json.loads(whole.stdout)["guard_problems"][0]
+        # …and is NOT this pack's verdict when one pack is
+        one = _run_cli("pack", "validate", str(good.parent), "--json")
+        payload = json.loads(one.stdout)
+        assert payload["ok"] is True, payload
+        assert payload["guard_problems"] == [], payload["guard_problems"]
+        assert one.returncode == 0, one.stdout
 
     def test_a_fromKinds_scope_naming_no_CORE_kind_is_refused(self):
         """`core:WrokItem` is a typo the own-namespace arm cannot see.

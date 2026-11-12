@@ -149,6 +149,13 @@ def _get_registry() -> PackRegistry | None:
                         reg.fallback_note = (
                             f"TORTOISE_PACKS_DIR={env_val}: 0 valid packs; "
                             f"loaded default catalog {packs_dir}")
+                    # #12060: the guard TABLE's coherence, after every pack is
+                    # loaded — NOT inside `load_all`, where the table's
+                    # `_layer_of_kind` would re-enter this function through the
+                    # kind-index spec (measured: RecursionError, two shipped packs
+                    # isolated, every catalog test timing out). Non-blocking:
+                    # `pack validate` is the gate; this is the report.
+                    reg.check_guard_table()
                     _registry = reg
                 except Exception as e:  # noqa: BLE001, RUF100 — ponytail
                     if (_PACKS_DIR is None and env_val

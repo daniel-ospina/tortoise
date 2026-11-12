@@ -1837,6 +1837,7 @@ class PackRegistry:
         self.errors = {}
         self.unresolved_refs = {}
         self.lifecycle_warnings = {}
+        self.guard_warnings: dict[str, list[str]] = {}
         self._pending_lifecycle_warnings = {}
         self._status_fold_index = None
         count = 0
@@ -3187,6 +3188,17 @@ class PackRegistry:
                     # check (`fromKinds`, below) stays on `all_pack_kinds` on
                     # purpose: a scope is matched by the declared STRING (open
                     # vocabulary), a target needs a HOME.
+                    #
+                    # ⛔ AND `documentKinds` IS BOTH A HOME *AND* NOT A GUARDABLE
+                    # LAYER, which looks contradictory until you ask which
+                    # authority is speaking: `entity_route("dev:architectureDoc")
+                    # == "object"` — the kind INDEX puts document kinds in the
+                    # entity partition — while the guard-ON-a-kind check above
+                    # refuses a `documentKinds` kind because D10 says a document
+                    # write routes to a `:Source` keyed `url` on the DIRECT write
+                    # path. A redirect HOME is a classifier target; D10 governs
+                    # the write that a caller issues directly. Both hold, and the
+                    # next reader holding D10 must not "tidy" the other away.
                     _routable_own = {
                         k for axis in ("objectKinds", "documentKinds")
                         for k in (ont.get(axis) or [])
@@ -3345,6 +3357,54 @@ class PackRegistry:
         return errors
 
     # ── Cross-pack validation ──────────────────────────────────────────
+
+    def check_guard_table(self) -> dict[str, list[str]]:
+        """#12060 — the guard TABLE's coherence for the packs just loaded.
+
+        ⛔ NOT inside :meth:`load_all`, and that is not style: the table's
+        ``_layer_of_kind`` compiles the kind-index spec, which reads the DEFAULT
+        registry (``domain_loader._get_registry()``), which loads packs again —
+        measured as a ``RecursionError`` that isolated two shipped packs and
+        timed out every test that touched the catalog. Call it AFTER the load,
+        where every pack is present, which is what ``domain_loader`` does.
+
+        Covers the two questions ONE manifest cannot answer: the ``core`` target
+        kind and the ``depends_on`` target kind (both need the table and the
+        loaded set). ``_validate_guards`` answers the rest per manifest.
+
+        NON-BLOCKING on purpose — the catalog load is deliberately fail-open for
+        cross-pack questions (``unresolved_refs`` reports, ``validate_manifest``
+        refuses, and ``tortoise pack validate`` is what gates). Silence is not an
+        option either: a pack dropped into ``$TORTOISE_PACKS_DIR`` used to load
+        clean with a guard that could never fire (round-8 review P2).
+        """
+        self.guard_warnings = {}
+        try:
+            from tortoise.kind_guards import guard_table_problems, pack_guards
+
+            confusions: list = []
+            for ns in sorted(self.packs):
+                declared = getattr(self.packs[ns], "guards", None)
+                if declared:
+                    confusions.extend(pack_guards(ns, declared))
+            kinds = {
+                ns: list(getattr(self.packs[ns], "object_kinds", None) or [])
+                + list(getattr(self.packs[ns], "document_kinds", None) or [])
+                for ns in self.packs
+            }
+            for problem in guard_table_problems(
+                    confusions, include_catalog=False, pack_kinds=kinds):
+                owner = next((ns for ns in sorted(self.packs, reverse=True)
+                              if problem.startswith(ns + ":")), None)
+                if owner is not None:
+                    self.guard_warnings.setdefault(owner, []).append(problem)
+        except Exception as exc:  # noqa: BLE001, RUF100 — advisory, never raises
+            log.debug("pack_registry: guard-table check skipped (%s)", exc)
+            return self.guard_warnings
+        for ns in sorted(self.guard_warnings):
+            for msg in self.guard_warnings[ns]:
+                log.warning("pack %s: guard — %s", ns, msg)
+        return self.guard_warnings
 
     def _validate_cross_pack_refs(self) -> None:
         """Validate that all kind references resolve across packs.
