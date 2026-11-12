@@ -1247,8 +1247,9 @@ SELF_TEST_INDENT = 2
 #: The widths the second shape may use, in preference order: the shipped constant
 #: first (so the map §8 transcript stays byte-stable on the shipped map), then the
 #: remaining widths that are still markdown table rows.
-_SELF_TEST_WIDTHS = (SELF_TEST_INDENT,) + tuple(
-    width for width in range(1, MAX_TABLE_INDENT + 1) if width != SELF_TEST_INDENT
+_SELF_TEST_WIDTHS = (
+    SELF_TEST_INDENT,
+    *(width for width in range(1, MAX_TABLE_INDENT + 1) if width != SELF_TEST_INDENT),
 )
 
 
