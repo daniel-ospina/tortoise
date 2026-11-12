@@ -728,8 +728,10 @@ class EventAPI:
         malformed payload, two answers; the caller of a best-effort seam is the
         only one who can react, so a payload-shape refusal is reported here,
         BEFORE the arm that swallows I/O, wherever the gate is PURE enough to
-        run here: the record-shaped, envelope, marker and money families, and
-        the invisible-character half of the kind gate.
+        run here: the record-shaped, envelope, marker, money and percent
+        families, and the invisible-character half of the kind gate. Every one
+        of those five arrived the same way — a gate `_emit` got and this door
+        did not — so the list is checked against `_emit` rather than trusted.
 
         ⛔ THE APPROVAL half of the kind gate is the ONE exception, and it is
         not a hole: it needs a whole-graph READ, and that read RAISES on a
@@ -752,6 +754,15 @@ class EventAPI:
         # funnel uses (`refuse_malformed_money_in_payload`), so the two cannot
         # disagree about which shapes are malformed.
         refuse_malformed_money_in_payload(payload, door="EventAPI.emit_belief")
+        # …and the PERCENT family, the same divergence a THIRD time, found by
+        # the verification pass on the merge that brought this gate in
+        # (`927c24e233` / #11955 added it to `_emit` and no door): measured at
+        # the merge head, `emit_belief(..., basisPoints=20000)` returned None
+        # with the journal EMPTY while `add_point`/`add_object`/`add_event`
+        # raised `PercentValueError` on the identical payload. Pure walk of the
+        # same shape as the money one, so it belongs on this side of the arm.
+        refuse_malformed_percent_in_payload(
+            payload, door="EventAPI.emit_belief")
         # …and the KIND family, the last gate `_emit` runs before its commit
         # point. Found by the review of the money fix one family over AGAIN,
         # with the same measurement: at that head

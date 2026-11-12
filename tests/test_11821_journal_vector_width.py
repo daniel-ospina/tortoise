@@ -1332,6 +1332,16 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
                         pointKind="statement\u2003")
     with pytest.raises(ValueError, match="pointKind must be an identifier"):
         api.add_event("evt-kind", "session", pointKind="statement\u2003")
+    # …and the PERCENT family, the SAME divergence a third time: #11955's
+    # `refuse_malformed_percent_in_payload` reached `_emit` and no door, so at
+    # the merge head this door returned None with the journal empty while every
+    # sibling door raised on the identical payload. Pinned at BOTH doors for
+    # the reason the money and kind rows are: the enumeration rots, the pin
+    # does not.
+    with pytest.raises(Exception, match="percent|basisPoints|ratio"):
+        api.emit_belief("ConfidenceChanged", id="node-1", basisPoints=20000)
+    with pytest.raises(Exception, match="percent|basisPoints|ratio"):
+        api.add_object("an object", "skill", id="obj-pct", basisPoints=20000)
     assert not journal.exists() or not journal.read_text().strip(), (
         "the refusal must not leave a half-record behind")
 
