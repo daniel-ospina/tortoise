@@ -107,8 +107,10 @@ _BLOG_HOSTS_DIFFER = COMPANY != TORTISE
 #
 #    premiselabs.co            serves the blog
 #    tortoise.premiselabs.co   what robots.txt names TODAY; 301s /blog* to the company
-#                              origin (`_middleware.ts:513-521`, `_lib.ts:63-68`),
-#                              and grading that hop is the point of the as-written arm
+#                              origin (`_middleware.ts:513-521`, `_lib.ts:63-68`). The
+#                              as-written arm FOLLOWS that hop rather than grading it
+#                              (see the note on the probe below); the hop's direction is
+#                              asserted in `test_host_isolation_blog`.
 #
 # Nothing else belongs here: `app.premiselabs.co` is also in robots.txt but only for
 # its own sitemap, which the `/blog/sitemap.xml` filter drops. Keying the mode on
