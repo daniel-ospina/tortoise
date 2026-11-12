@@ -699,7 +699,8 @@ class QueueHealth:
     #: `total_count` above the page, a PRESENT-but-not-an-int count, and no count on a full
     #: page — named only because that is the growth which falsified the last numerals. (It is
     #: NOT the count in `pr_running_census_unwitnessed`'s comment, which is about something
-    #: else; this sentence used to say "the one count below" and pointed a reader there.) Layers are not routes: three layers is stable, a route count is not. The
+    #: else; this sentence used to say "the one count below" and pointed a reader there.)
+    #: Layers are not routes: three layers is stable, a route count is not. The
     #: callee's routes are in `read_run_live_job`'s Returns block (and the caller's two
     #: layers — the settle gate and the budget split — are in `read_health`); re-derive
     #: from those, never from here. (`has_live_job`'s bullet above spans all three layers and
@@ -710,8 +711,8 @@ class QueueHealth:
     pr_running_unmeasured: int = 0
     #: DID `pr_running` DEGRADE TO `PR-UNWITNESSED` FOR LACK OF MEASUREMENT? (#12037
     #: review round 5) `PR-UNWITNESSED` has three causes on three different dimensions —
-    #: a page-capped feed, an unreadable `created_at`, and this one — and they take
-    #: different levers. A consumer that re-derives the cause from
+    #: a page-capped feed, a WAITING run whose current-attempt age could not be measured,
+    #: and this one — and they take different levers. A consumer that re-derives the cause from
     #: `pr_running == pr_running_unmeasured > 0` gets the OVERLAP wrong: a reading whose
     #: WAIT was not witnessed can also have a fully unmeasured census, and the census
     #: lever would then be prescribed for a wait defect. This flag is set by the clause
@@ -1614,9 +1615,10 @@ def classify_queue(
             # comment too, and a duplicated key in a dict literal is legal Python — the
             # later value silently wins, so a mutation of the first copy tested nothing.)
             # `PR-UNWITNESSED` has THREE causes on different dimensions — a page-capped
-            # feed, an unreadable `created_at`, and this one (an unwitnessed RUNNING
-            # CENSUS) — and they take different levers. A consumer that re-derives the
-            # cause from the numbers gets it wrong on the OVERLAP: a reading with an
+            # feed, a WAITING run whose current-attempt age could not be measured, and this
+            # one (an unwitnessed RUNNING CENSUS) — and they take different levers. A
+            # consumer that re-derives the cause from the numbers gets it wrong on the
+            # OVERLAP: a reading with an
             # unreadable timestamp AND a fully unmeasured census has
             # `pr_running == pr_running_unmeasured > 0` while its wait — not its census —
             # is what was not witnessed, so a numeric selector prescribes the census
