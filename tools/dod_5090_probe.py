@@ -2801,14 +2801,33 @@ def score_rule_bullet() -> Row:
         # #12016, P3). `deployment["armed"]` is also the vocabulary `["silent"]`
         # beside it already uses, so the two halves of the split finally agree.
         armed_deployment_files = deployment["armed"]
-        armed_clause = (
-            f"the surface(s) that do arm it ({', '.join(armed_deployment_files)}) are "
-            "themselves deployment files, so a build that uses one of them carries the "
-            "flag — this reading is per FILE and does not model that merge"
-            if armed_deployment_files else
-            f"the surfaces that do arm it ({shipped['armed'] or 'none'}) do not deploy "
-            "the container's environment on their own"
-        )
+        # ⛔ THREE arms, because the else-arm was asserting a state the walk had just
+        # measured as ABSENT: on a tree where nothing arms the flag it published "the
+        # surfaces that do arm it (none) do not deploy the container's environment on
+        # their own" and closed "one armed TEMPLATE is not a shipped default" — naming
+        # a set as `none` while still speaking about "the surfaces that do arm it", and
+        # asserting a template where zero templates arm the flag. A published
+        # diagnostic must name ITS OWN state, not a neighbour's (fresh review of PR
+        # #12016, P3). The `#11455` reading moved into the arm where a template really
+        # does arm it, which is the only shape it describes.
+        if armed_deployment_files:
+            armed_clause = (
+                f"the surface(s) that do arm it ({', '.join(armed_deployment_files)}) "
+                "are themselves deployment files, so a build that uses one of them "
+                "carries the flag — this reading is per FILE and does not model that "
+                "merge"
+            )
+        elif shipped["armed"]:
+            armed_clause = (
+                f"the surfaces that do arm it ({', '.join(shipped['armed'])}) do not "
+                "deploy the container's environment on their own; this is the "
+                "`#11455` reading: one armed TEMPLATE is not a shipped default"
+            )
+        else:
+            armed_clause = (
+                "no shipped surface arms it at all, so there is no armed template "
+                "for a deployment to fail to inherit"
+            )
         # ⛔ The per-FILE fact is stated FIRST and no deployment consequence is
         # asserted then retracted (fresh review of PR #12016 P3, #12070 item 4): a
         # reader quoting the leading clause of the old wording carried the false
@@ -2819,8 +2838,7 @@ def score_rule_bullet() -> Row:
             f"{deployment['silent']} declare no gate. Read from that file ALONE the "
             "deployment is unarmed; a compose file that builds from an ARMED image "
             "build file INHERITS that image's `ENV`, so this is a per-FILE reading and "
-            f"not the merged view's; {armed_clause}. This is the `#11455` reading: one "
-            "armed TEMPLATE is not a shipped default)"
+            f"not the merged view's; {armed_clause})"
         )
     if not stated or not shared or not gated:
         verdict = "NOT MET"

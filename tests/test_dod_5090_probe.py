@@ -2394,6 +2394,24 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
     assert "do not deploy the container's environment on their own" in hold, hold
     assert "themselves deployment files" not in hold, hold
 
+    # ⛔ And the THIRD shape, where NOTHING arms the flag at all (fresh review of PR
+    # #12016, P3). The two-arm form published "the surfaces that do arm it (none) do
+    # not deploy the container's environment on their own" and closed "one armed
+    # TEMPLATE is not a shipped default" — naming a set as `none` while still speaking
+    # about the surfaces that DO arm it, and asserting a template where zero templates
+    # arm the flag. A published diagnostic must name ITS OWN state, not a neighbour's;
+    # the `#11455` reading now lives in the arm where a template really does arm it.
+    (tmp_path / ".env.example").write_text("SOME_OTHER_VAR=1\n", encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["armed"] == [], shipped
+    assert shipped["deployment"]["armed"] == [], shipped
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert "no shipped surface arms it at all" in hold, hold
+    assert "(none)" not in hold, hold
+    assert "one armed TEMPLATE" not in hold, hold
+
     # …and the `ambient` HALF of the same clause: a lane's exported flag is not a
     # DEFAULT. With the switch armed in the ENVIRONMENT and the deployment still
     # silent, an `ambient or deployment["on"]` reading turns this row `MET` — the
