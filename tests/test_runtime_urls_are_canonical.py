@@ -265,8 +265,8 @@ RETIRED_HOST_ALLOWLIST = {
     # (`premiselabs.co/tortoise/docs` answers 200; `/tortoise` is the product page;
     # `/auth` 301s to the app origin), and the sibling blog guard moves with it:
     # `tests/test_blog_seo_meta.mjs` pinned an UPPER BOUND (`<= 3`) only so it would
-    # "survive the repoint", and THIS PR flips it to `navRetired.length === 0` in
-    # the same commit — an exemption that outlives the deferral it excused is the
+    # "survive the repoint", and THIS PR flips it to `navRetired.length === 0` one
+    # commit later — an exemption that outlives the deferral it excused is the
     # false-PASS class that guard exists to refuse. So this PR emits the terminal
     # forms and the count goes to 0. The file STAYS in `RUNTIME_FILES` on purpose:
     # with no allowlist row its expected count is 0, so a literal coming back REDS
