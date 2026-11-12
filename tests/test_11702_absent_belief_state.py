@@ -6223,7 +6223,36 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             "the credibility word adds one weak body – the #2199 default "
             "alone reads 0.75",
             "the credibility word is not used here but the #2199 default "
-            "alone reads 0.75"):
+            "alone reads 0.75",
+            # ⛔ ONE ROW PER WINDOW TOKEN, cycle 13. The comment above states the
+            # window stops at the relativizers `which`/`that`/`whose`/`where`/
+            # `who` in EITHER segment and at `but`/`rather` in either — but only
+            # `which`/`whose`/`but` (pre) and `which` (post) had a row, so the
+            # rest were deletable with a GREEN suite and the stated boundary was
+            # unsupported (one was even self-masking: the `that` citation at
+            # :5964 is quiet via `NOT`, not via `that`). Each row below MATCHES
+            # the regex, is quiet ONLY because of its own token, and was
+            # measured RED with that single token removed from the class.
+            "the credibility word is a label that a pair reads 0.75 against",
+            "the credibility word is a body where the default alone reads "
+            "0.75",
+            "the credibility word is a body who the default alone reads 0.75 "
+            "with",
+            "the credibility word adds a body rather the default alone reads "
+            "0.75",
+            "the credibility word reads a body that 0.75 is the default's",
+            "the credibility word reads a body whose pair 0.75 is the "
+            "default's",
+            "the credibility word reads a body where 0.75 is the default's",
+            "the credibility word reads a body who 0.75 is the default's",
+            "the credibility word reads nothing but 0.75 is the default's",
+            "the credibility word reads rather the default 0.75",
+            # …and the two STOP CHARS the same comment lists that had no row:
+            # `;` sits before the verb here (so it is the PRE-verb class that
+            # carries it) and `.` after it (the POST-verb class). Each was
+            # measured RED by deleting that one char from the class it gates.
+            "the credibility word is one body; the default alone reads 0.75",
+            "the credibility word reads a body e.g. 0.75 is the default's"):
         assert not _cred_word_yields_075(true_sentence), (
             f"the credibility guard fires on TRUE prose: {true_sentence!r}")
     # ⛔ KNOWN FALSE PASS, pinned as a BOUNDARY, not as correctness: a pre-verb
