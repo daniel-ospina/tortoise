@@ -3124,10 +3124,12 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # files, the guard's pin ABSENT — the shape this entry closed.
              # ⚠️ RE-MEASURED after the `tier1` row this same PR adds, because the
              # entry is no longer the LIVENESS mechanism and an earlier revision of
-             # this comment said it was: without the entry -> surfaces=[], 89 files,
-             # pin PRESENT (`tier1` selects it); with the entry -> surfaces=['core'],
-             # 819 files. Both counts move with `main`; re-derive them with the
-             # `select()` one-liner rather than carrying them. The entry's job is WIDTH — a `tools/`-only diff runs the
+             # this comment said it was: without the entry -> surfaces=[], pin
+             # PRESENT (`tier1` selects it); with the entry -> surfaces=['core'].
+             # No file COUNT is quoted: both move with `main`, and an earlier
+             # revision paired a PRE-row count with the POST-row pin state, a pair
+             # that cannot both hold. Re-derive one with the `select()` one-liner
+             # rather than carrying it. The entry's job is WIDTH — a `tools/`-only diff runs the
              # core surface rather than tier-1 smoke. The DOC half
              # (`docs/architecture/MEMORY-SUBSTRATE-FINDINGS-LEDGER.md`) stays
              # unclaimed here for the sibling reason (a docs-only diff must stay on

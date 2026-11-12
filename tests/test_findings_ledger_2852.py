@@ -24,17 +24,18 @@ jobs and were easy to conflate (an earlier revision of this paragraph did):
 
 - the `tier1` row is what selects this module on a **docs-only** diff. Both
   `docs/` and `tools/` are dropped by `_keep_changed()`, so `select()` takes its
-  docs-only early return and emits `tier1` only: measured `surfaces: []`, 89 test
-  files, this module present;
+  docs-only early return and emits `tier1` only: measured `surfaces: []` with this
+  module present;
 - the `CORE_ALSO` entry in `tools/ci_selection.py` is what a **`tools/`-only**
   diff resolves to the full `core` surface instead of that same tier-1 smoke:
-  measured `surfaces: ['core']`, 819 test files. It is not what keeps this module
-  selected there — the `tier1` row already does, at 89 files (measured with the
-  entry removed: `surfaces: []`, 89 files, module present).
+  measured `surfaces: ['core']` — the full core surface. It is not what keeps this
+  module selected there — the `tier1` row already does (measured with the entry
+  removed: `surfaces: []`, module present).
 
-Both counts move with `main`, so re-derive them (`select()` in-process, as this
-paragraph did) rather than carrying them; the SURFACES above are what the pins
-assert. Both the classification row and the selection arms are asserted by
+File counts move with `main`, so none is quoted here: re-derive one with the
+`select()` one-liner if you need it, and never carry it into this paragraph. An
+earlier revision paired a PRE-row count with the POST-row pin state, a pair that
+cannot both hold. The SURFACES and module-presence above are what the pins assert. Both the classification row and the selection arms are asserted by
 `test_test_file_is_registered_in_ci_surfaces` /
 `test_test_file_is_selected_on_the_diffs_it_guards`.
 """
@@ -71,7 +72,14 @@ def _mutated(tmp_path: Path, monkeypatch, transform) -> Path:
     """Write a transformed copy of the real document and point the checker at it.
 
     Citations still resolve against `REPO` because `main()` is called with
-    `--root REPO`; only the DOC/INDEX the checker reads are swapped.
+    `--root REPO`; only the DOC and the INDEX the checker reads are swapped. The
+    INDEX has to be swapped too: `check_registration()` looks for the document's
+    BASENAME in it, and the real `docs/00_index.md` cannot name a `tmp_path` copy.
+    Leaving it pointing at the real file gave every mutation arm one
+    guaranteed-spurious problem — which is how a future arm written as a bare
+    `assert _doc_problems()` after a mutation would stay green without measuring
+    the behaviour under test (the "a case that is RED in both worlds pins nothing"
+    class this module names elsewhere).
     """
     original = DOC.read_text(encoding="utf-8")
     mutated = transform(original)
@@ -79,6 +87,12 @@ def _mutated(tmp_path: Path, monkeypatch, transform) -> Path:
     target = tmp_path / "ledger.md"
     target.write_text(mutated, encoding="utf-8")
     monkeypatch.setattr(flc, "DOC", str(target))
+    index = tmp_path / "00_index.md"
+    index.write_text(
+        f"# index\n\n| doc | note |\n| --- | --- |\n| {target.name} | mutated copy |\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(flc, "INDEX", str(index))
     return target
 
 
@@ -854,13 +868,12 @@ def test_a_class_first_tally_is_accepted(tmp_path, monkeypatch):
         "the tally sentence moved — re-point this pair at its new wording"
     )
 
-    # NOT `== []`: the copy lives at a tmp path, so the registration arm legitimately
-    # reports that no `docs/00_index.md` row names it. What must not appear is the
-    # false accusation about the sentence.
+    # The INDEX is swapped alongside the DOC by `_mutated()`, so the registration
+    # arm is satisfied on the copy and `== []` is now the real assertion: what must
+    # NOT survive a legitimate class-first reword is any problem at all, including
+    # the false accusation about the sentence.
     _mutated(tmp_path, monkeypatch, lambda t: t.replace(original, class_first, 1))
-    assert not any(
-        "assigns a different verdict" in p for p in _doc_problems()
-    ), "a legitimate class-first reword red the guard"
+    assert _doc_problems() == [], "a legitimate class-first reword red the guard"
 
     _mutated(tmp_path, monkeypatch, lambda t: t.replace(original, swapped, 1))
     assert any(
@@ -1519,9 +1532,11 @@ def test_escaped_pipe_inside_a_cell_does_not_shift_the_verdict_column(tmp_path, 
     Reachable by any row whose claim legitimately contains a literal pipe. A
     plain `line.split("|")` splits there too, shifts the verdict column and
     reports a correct row as "no bolded verdict" — a false red the reader cannot
-    act on, which is how a guard gets routed around. Asserted on that arm only:
-    the mutated copy lives outside the tree, so `check_registration` is expected
-    to complain about it either way.
+    act on, which is how a guard gets routed around. Asserted on that arm only, and
+    for ALL problems (`== []`), because `_mutated()` swaps the INDEX as well as the
+    DOC: the registration arm is satisfied on the copy, so any problem left here is
+    a false red against a legal row rather than the expected registration notice an
+    earlier revision of this docstring assumed.
     """
     _mutated(
         tmp_path,
@@ -1533,7 +1548,7 @@ def test_escaped_pipe_inside_a_cell_does_not_shift_the_verdict_column(tmp_path, 
         ),
     )
     problems = _doc_problems()
-    assert not any("no bolded verdict" in p for p in problems), problems
+    assert problems == [], "a legal escaped pipe inside a cell red the guard"
 
 
 # ── the population is pinned ───────────────────────────────────────────────
