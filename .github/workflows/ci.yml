@@ -2223,6 +2223,15 @@ jobs:
         run: node --experimental-strip-types tests/test_blog_markdown.mjs
       - name: Run blog SEO meta + agent-limiter harness (#8293)
         run: node --experimental-strip-types tests/test_blog_seo_meta.mjs
+      - name: Run host-consolidation routing harness (#11763)
+        # Drives the REAL `onRequest` offline, so no server, no DNS and no gate:
+        # every row of #11762's 301 map, the product-URL rewrite that makes each
+        # redirect land on a 200 in the same deploy, the `/blog/api/*` exclusion,
+        # the dev/preview pass-through, and the stray-code refusal above all of
+        # it. The Playwright half (`legal-e2e`) proves the DEPLOYED host is
+        # correct; this proves the RULES are, on every PR rather than only
+        # post-deploy.
+        run: node --experimental-strip-types tests/test_middleware_host_consolidation.mjs
       - name: Stop the preview server (scoped to this job's pid)
         if: always()
         # #10283: `stop-all` signals the pid this job RECORDED (and its

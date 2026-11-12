@@ -226,11 +226,14 @@ def test_an_authorization_code_at_the_site_root_is_refused_with_a_named_error(
 @pytest.mark.parametrize(
     "host,path",
     [
-        # Every renderable path class, on both marketing hosts. `/docs`, `/faq`
-        # and `/signin` are TORTOISE_ONLY and `/blog` is the blog prefix rule — on
-        # the company host all four are reached THROUGH a query-preserving 301, so
-        # pinning only the tortoise host is what let PR #10514 review finding 1
-        # stand for three rounds.
+        # Every renderable path class, on both marketing hosts. Epic #11762 gave
+        # the same four paths three different routing shapes: the PRODUCT host
+        # 301s `/docs`, `/signin` and `/blog` onto premiselabs.co (and `/product`
+        # onto `/tortoise`), the COMPANY host SERVES `/blog` and 301s `/docs`
+        # under `/tortoise`, and `/signin` leaves for the app origin in one hop.
+        # Pin them on BOTH hosts: the refusal must run above every one of those
+        # branches, and pinning a single host is what let PR #10514 review
+        # finding 1 stand for three rounds.
         (TORTOISE_HOST, "/docs"),
         (TORTOISE_HOST, "/product"),
         (TORTOISE_HOST, "/blog"),
@@ -270,25 +273,40 @@ def test_the_refusal_is_not_limited_to_the_root_path(host: str, path: str) -> No
     )
 
 
-def test_a_company_host_product_404_still_precedes_the_guard() -> None:
-    """The one path where a stray code is answered before any guard — recorded, not fixed.
+def test_a_company_host_product_request_is_REFUSED_not_404d() -> None:
+    """The residual PR #10514 recorded is now CLOSED — this shape answers the NAMED refusal.
 
-    `premiselabs.co/product` (+`.html`) is 404'd at the very top of the middleware
-    because that page exists only on the tortoise host; that branch precedes the
-    refusal. It forwards nothing and renders nothing, so the credential neither
-    leaks nor is silently burned by a marketing page — but it is the one shape
-    where the answer is a bare 404 rather than the named refusal, and the issue's
-    residual list records it. Pinned so a future reordering is a visible change
-    rather than a silent one.
+    `premiselabs.co/product` used to be 404'd at the very top of the middleware
+    (the page existed only on the tortoise host), which made it the one shape
+    where a stray code was answered by a bare 404 instead of the named refusal —
+    recorded in the issue's residual list, not fixed.
+
+    Epic #11762 removed that early 404: the product page's canonical URL is
+    `premiselabs.co/tortoise`, so `/product` answers a 301 to it. The consequence
+    is that a code on it now reaches the PRIMARY guard like every other
+    renderable path, so the residual is gone rather than relocated. Pinned both
+    ways — the refusal, and the no-code redirect — so neither can drift back
+    silently.
     """
-    (res,) = _run([_case(f"/product?code={STRAY_CODE}", host=COMPANY_HOST)])
-    assert res["status"] == 404, (
-        f"premiselabs.co/product?code=… answered {res['status']}, want 404 — either "
-        "the host-only 404 branch moved (record the new shape) or the page started "
-        "rendering on the company host"
+    (with_code,) = _run([_case(f"/product?code={STRAY_CODE}", host=COMPANY_HOST)])
+    assert with_code["status"] == 400, (
+        f"premiselabs.co/product?code=… answered {with_code['status']}, want 400 — "
+        "the product page is a renderable path under #11762 (it 301s to /tortoise), "
+        "so a code on it must reach the primary guard, not a bare 404"
     )
-    assert res["location"] is None, res
-    assert STRAY_CODE not in res["body"], "the 404 echoed the authorization code"
+    assert with_code["location"] is None, with_code
+    assert NAMED_REFUSAL in with_code["body"], (
+        "the refusal is no longer NAMED — the issue asks for a page that says so"
+    )
+    assert STRAY_CODE not in with_code["body"], "the refusal echoed the authorization code"
+
+    (plain,) = _run([_case("/product", host=COMPANY_HOST)])
+    assert plain["status"] == 301, (
+        f"premiselabs.co/product answered {plain['status']}, want 301 to the ONE "
+        "canonical product URL (/tortoise) — two reachable copies is what the "
+        "consolidation exists to prevent"
+    )
+    assert plain["location"] == "https://premiselabs.co/tortoise", plain
 
 
 def test_the_provider_ERROR_shape_keeps_the_1224_banner_reachable() -> None:
@@ -318,12 +336,20 @@ def test_the_provider_ERROR_shape_keeps_the_1224_banner_reachable() -> None:
         "/?error=server_error&error_description=Unable+to+exchange+external+code",
     ]
     for where, res in zip(paths, _run([_case(p) for p in paths]), strict=True):
-        assert res["status"] == 200, (
-            f"{where}: answered {res['status']}, want 200 — the error shape is not the "
-            "authorization-response shape (it carries no code) and `product.html`'s "
-            "#1224 banner is the recorded handler for it; refusing it here leaves the "
-            "documented trigger of that banner unreachable"
+        assert res["status"] in (200, 301), (
+            f"{where}: answered {res['status']}, want 200 or a query-preserving 301 — "
+            "the error shape is not the authorization-response shape (it carries no "
+            "code) and `product.html`'s #1224 banner is the recorded handler for it"
         )
+        if res["status"] == 301:
+            # #11762 moved the product ROOT to `premiselabs.co/tortoise`, so the
+            # documented banner trigger arrives there — and only lands on the
+            # handler if the query survives the hop. This is the assertion that
+            # makes the move safe for #1224.
+            assert res["location"] == "https://premiselabs.co/tortoise" + where[1:], (
+                f"{where}: redirected to {res['location']!r} — the #1224 trigger "
+                "must reach the product page with its query intact"
+            )
         assert NAMED_REFUSAL not in res["body"], (
             f"{where}: rendered the stray-return refusal — the #1224 banner's documented "
             "trigger (?error=…&error_code=bad_oauth_state) must keep reaching the page"
@@ -385,7 +411,7 @@ def test_the_pinned_redirect_surfaces_are_exempt_and_keep_their_status_and_query
     live behaviours, not hypotheticals: a refusal on `/admin` breaks the operator
     console, on `/signup` breaks the signup funnel, and on `/auth` turns a stale
     bookmark or a pre-cutover email link into the dead end #4328's rationale
-    (`_middleware.ts:360-365`) exists to avoid. `tests/test_admin_origin_redirect.py`
+    (`_middleware.ts:403-409`) exists to avoid. `tests/test_admin_origin_redirect.py`
     drives the same paths but never with `?code=`, so it cannot see an over-block here.
 
     So these assert the PRE-EXISTING answer (the pinned 30x, query preserved),
@@ -418,7 +444,7 @@ def test_an_app_only_page_forwards_on_the_company_host_and_the_BACKSTOP_refuses_
     company-host `/signup?code=…` keeps its #4054 301 to `app.premiselabs.co`
     instead of being refused — the signup funnel. (b) On a host the
     consolidation block does not handle, the same path is exempt from the
-    PRIMARY guard and reaches the BACKSTOP at `_middleware.ts:433-444`, which
+    PRIMARY guard and reaches the BACKSTOP at `_middleware.ts:477-487`, which
     refuses it. PR #10514 review, finding 1: deleting the whole 789-character
     backstop block changed **0** of the suite's 17 cases, so the branch the
     comment credits with order-independence was deletable machinery.
@@ -454,16 +480,29 @@ def test_an_app_only_page_forwards_on_the_company_host_and_the_BACKSTOP_refuses_
     ],
 )
 def test_ordinary_marketing_requests_are_not_refused(path: str) -> None:
-    # A pass-through can take either shape in this middleware: `context.next()`
-    # (the `x-mw: next` stub) for a non-root path, or the ASSETS rewrite that
-    # serves product.html at `/` on the tortoise host. Both mean "not refused",
-    # which is the property under test — asserting the mechanism would pin the
-    # router's shape instead of the guard's scope.
+    # A NOT-REFUSED answer can take several shapes in this middleware: `context.next()`
+    # (the `x-mw: next` stub) for a non-root path, and — since epic #11762 — a 301
+    # that carries the request onto the ONE marketing host. `/` on the retired
+    # product host is now exactly that: the product ROOT moved to
+    # `premiselabs.co/tortoise`, so the root answers a 301 instead of rendering.
+    #
+    # So assert the PROPERTY (not refused, and the query survives), never the
+    # mechanism: pinning 200 here would pin the router's shape rather than the
+    # guard's scope, which is the discrimination this test exists for.
     (res,) = _run([_case(path)])
-    assert res["status"] == 200, (
+    assert res["status"] in (200, 301), (
         f"{path} answered {res['status']} — the guard over-blocked an ordinary "
         f"marketing request (body {res['body'][:200]!r})"
     )
+    if res["status"] == 301:
+        # A redirect is only "not refused" if it carries the visitor's params
+        # across — a marketing link's query is the whole point of letting it
+        # through, and #11762 moved the root from a render to this redirect.
+        query = path.split("?", 1)[1] if "?" in path else ""
+        assert query in (res["location"] or ""), (
+            f"{path} was redirected to {res['location']!r}, dropping its query — "
+            "the params must survive the host move"
+        )
     assert NAMED_REFUSAL not in res["body"], (
         f"{path} was answered with the stray-return refusal — `code_challenge` is a "
         "PKCE verifier hash and a bare `error` is not the authorization-response "

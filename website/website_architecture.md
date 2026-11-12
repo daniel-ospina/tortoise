@@ -31,16 +31,25 @@ Host routing lives in `website/functions/_middleware.ts`:
 > project's `website/functions/` holds only `_middleware.ts` and `blog/**`, so read a bare path
 > against the app tree unless it is prefixed.
 
-- `tortoise.*` root → `product.html` (rewritten), everything else serves its own asset
 - `premiselabs.co` + preview hosts root → `index.html` (company page)
-- `/product` on non-tortoise hosts → 404 (product page never leaks onto the company host)
+- `premiselabs.co/tortoise` + `/tortoise/<page>` → the product page / product pages, **served** by the
+  middleware's rewrite over the same `website/*.html` assets — ONE URL per page (epic #11762). This is
+  what makes every 301 onto it land on a 200 in the same deploy: a 301 is browser-persistent, so a
+  redirect onto a 404 is an outage, not a migration
+- `premiselabs.co/blog*` → the blog Functions, served on this host (the middleware no longer 301s
+  `/blog*` to the product host; only `/blog/api/*` is special, see §6.6)
+- `premiselabs.co/{privacy,tos,dpa}` → served at the company ROOT: those pages govern the business,
+  not the product (#11762 settled that fork)
+- `tortoise.premiselabs.co/*` → a **PERMANENT 301** onto the paths above. The host, its DNS and its
+  Pages binding are a fixture, never a leftover
+- `/product`, `/product.html` → 301 to `/tortoise` on BOTH marketing hosts (one canonical product URL)
 - **a stray authorization response is refused, not rendered or forwarded** (`?code=…`, #10088 ask 3):
   a 400 with a named error page, on BOTH hosts, and **ahead of the company-host consolidation 301s**
   — the one refusal-shaped branch that supersedes the general "consolidate to the canonical host"
-  rule, because a `Location` would carry the credential to a second URL. (The one branch it does NOT
-  supersede is the company-host `/product` + `/product.html` 404, which sits above the guard and
-  forwards nothing and renders nothing, so `premiselabs.co/product?code=…` answers a bare 404 —
-  recorded, and pinned so a reordering is visible.) The **exception** is the
+  rule, because a `Location` would carry the credential to a second URL. (`premiselabs.co/product`
+  used to be the one exception: it was 404'd ABOVE the guard, so a code on it answered a bare 404.
+  #11762 turned that page into a renderable 301 to `/tortoise`, so the exception is gone — a code on
+  it now reaches the guard and answers the named refusal, pinned by the suite.) The **exception** is the
   surfaces whose redirects are pinned decisions — `/auth`, `/auth/*` (where `/auth/callback` is the
   one shape that actually redeems a code; its wrong-origin allow-list entry is the OPEN audit
   #8680), `/admin`, and the `APP_ONLY` pages the company host 301s to the app origin — which **skip**
@@ -58,7 +67,7 @@ Host routing lives in `website/functions/_middleware.ts`:
     differently, and naming the three explicitly is deliberate.) On the exact `premiselabs.co` host
     the middleware 301s them to the app origin with the code in its `Location` (the recorded
     residual); on `tortoise.*`/previews there is no middleware branch to keep, so the request falls
-    through to the **backstop** at `_middleware.ts:442` and is refused with the same 400
+    through to the **backstop** at `_middleware.ts:485` and is refused with the same 400
     (`/signup?code=…` on the tortoise host — pinned by the suite).
   - `/auth`, `/auth.html` (301), `/auth/*` (302) and `/admin`, `/admin/*` (302) are
     **host-independent**: those branches run on every host, so an exempt-shaped request carrying a
@@ -70,7 +79,7 @@ Host routing lives in `website/functions/_middleware.ts`:
   - the middleware's `APP_ONLY` **branch** (`/auth`, `/signup`, `/welcome`, `/invite-accept` + `.html`
     twins) runs **only** on the exact `premiselabs.co` host (`COMPANY_HOSTS`) — but `/auth` and
     `/auth.html` also have their own **unconditional** 301 below, so for those two the branch is not
-    what preserves the redirect on `tortoise.*`/previews (`_middleware.ts:344-349`);
+    what preserves the redirect on `tortoise.*`/previews (`_middleware.ts:387-392`);
   - `/auth` and `/auth.html` 301 **unconditionally** — the redirect #4054 shipped, left alone because
     it is already in browsers' caches and changing it is its own decision — while `/auth/*` answers
     **302** (`#4346`) and `/admin` **302**s (`#4409`), all **unconditionally** (those cover
@@ -80,7 +89,7 @@ Host routing lives in `website/functions/_middleware.ts`:
   - on the tortoise host the other three (`/signup`, `/welcome`, `/invite-accept` + twins) are 301'd
     by the **static** `website/_redirects`, not by the middleware. Deleting those rules breaks the
     tortoise host — the middleware does not cover it **for an ordinary request**. It DOES answer
-    those paths when the request carries a stray `?code=`: the backstop at `_middleware.ts:442`
+    those paths when the request carries a stray `?code=`: the backstop at `_middleware.ts:485`
     returns the 400 before `context.next()` reaches `_redirects`, so `tortoise…/signup?code=…` is a
     refusal, not a 301. Do not "fix" that by adding a middleware redirect for it — the backstop's
     own comment forbids reversing the exemption that way
@@ -338,29 +347,29 @@ Rules:
 > still lists auth on the tortoise host). The rest of this section describes the pre-#4054 contract
 > for those URLs.
 
-- **Host consolidation (the core fix):** legal pages + docs + FAQ + auth are
-  canonical on `tortoise.premiselabs.co` (where the service operates and the
-  product footer links them). The middleware 301s the tortoise-only pages
-  from the exact `premiselabs.co` hostname to their canonical — a 301 is the
-  strongest consolidation signal Google has, stronger than the canonical
-  tags (which alone left the copies live and produced the coverage-report
-  "alternate page" rows). Scoped to the exact company host: local dev
-  (`127.0.0.1`) and `*.pages.dev` previews keep the pass-through (not
-  indexed; E2E suite runs against a dev server). This supersedes the
-  original "legal pages 200 on both hosts" decision (locked in
-  `docs/plans/2026-08-08-657-legal-pages-plan.md` G-gate ③/⑨; the CI
-  verify-legal poll + `tests/e2e/test_legal_pages.py` + `test_welcome_page.py`
-  were updated to the new contract in the same change).
+- **Host consolidation (the core fix, REPLACED by epic #11762):** the 2026-08-17 pass made the
+  product surface canonical on `tortoise.premiselabs.co` and 301'd the company host's copies there.
+  Epic #11762 **inverts that direction on the owner's 2026-11-10 decision**: there is ONE marketing
+  host, `premiselabs.co` — company at the root, product at `/tortoise`, blog at `/blog` — and
+  `tortoise.premiselabs.co` is a permanent 301 onto those paths. The consolidation property is
+  unchanged (one reachable copy of every page, a 301 as the signal, scoped to the exact host so
+  `127.0.0.1` and `*.pages.dev` keep the pass-through the E2E suite runs against); only the
+  direction and the owner of each URL changed. The 2026-08-17 decision and its locks (the G-gate
+  ③/⑨ contract in `docs/plans/2026-08-08-657-legal-pages-plan.md`) are superseded by this, not
+  silently dropped.
 - **Canonical tags:** all indexable pages carry `<link rel="canonical">` — `index.html` → `https://premiselabs.co/`, `product.html` → `https://tortoise.premiselabs.co/` (served at `/`), plus docs/faq/self-hosted/auth. Legal pages already had them.
 - **Auth-gated pages** (`welcome.html`, `invite-accept.html`) are `noindex,nofollow` and excluded from sitemaps. Signup stays indexable (a redirect-free alias of `/auth`); the legacy `/signin` URLs 301 → `/auth`. Keep `.html` auth URLs as-is — OAuth `redirectTo` and invite emails reference them directly.
-- **Middleware** (runs before `_redirects`) 301s `/product`, `/product.html`, `/index.html` → `/` on the tortoise host (dedupe of the root rewrite); the company host keeps the 404 for `/product*`.
+- **Middleware** (runs before `_redirects`) consolidates the raw product assets onto the ONE
+  canonical product URL: `/product`, `/product.html` and (on the product host) `/index.html` 301 →
+  `premiselabs.co/tortoise`. They are duplicates of the root rewrite, not separate pages. The raw
+  `.html` spellings of the product set normalize onto the extensionless form so the chain is one hop.
 - **Search Console submission:** add all four sitemap URLs from robots.txt as separate properties (the four sitemaps cover three hosts — `tortoise.premiselabs.co` carries the product AND the blog sitemap).
 
 ## 6.6 Blog surface (2026-08-27)
 
 - **Public:** `/blog` (index: card grid, tag filter, SSR) + `/blog/:slug` (article, SSR) via `website/functions/blog/[[path]].ts` — markdown→sanitized HTML, full SEO head (title/meta/OG/Twitter/JSON-LD BlogPosting + BreadcrumbList), canonical, consent.js + PostHog snippet, ASSETS fallback for static assets.
 - **Agent API:** `website/functions/blog/api/posts/[[path]].ts` (#1795) — `X-Agent-Key` (sha256 vs `blog_agent_keys`); POST (default `draft` → review queue; `published` on explicit owner instruction, audited) + PATCH own posts; rate-limited.
-- **SEO:** dynamic `sitemap.xml` (published only) + RSS `feed.xml` (published only); a `/blog` + `/blog/…` rule in middleware 301s the company host to the tortoise host (`/blog/api/*` excluded — a 301 would turn a POST into a GET and drop the body; exact path-SEGMENT prefix, so `/blogpost` must not match); robots.txt cross-submission now lists the blog sitemap.
+- **SEO:** dynamic `sitemap.xml` (published only) + RSS `feed.xml` (published only); a `/blog` + `/blog/…` rule in middleware 301s the **product** host to `premiselabs.co/blog` (`/blog/api/*` excluded — a 301 would turn a POST into a GET and drop the body; exact path-SEGMENT prefix, so `/blogpost` must not match). The blog is SERVED on the company host since #11762; robots.txt cross-submission now lists the blog sitemap.
 - **Content:** Supabase `blog_posts`/`blog_agent_keys`/`blog_admins` (migration `20260827000001_blog_cms.sql`); admin SPA (ElDato editor port, #1798) served by the admin gate at `/admin` on the app origin — hash-routed (`#/`, `#/new`, `#/edit/:id`, `#/audit`), and for any `/admin/*` CLIENT route the gate falls through to `/admin/index.html` (real assets under `/admin/assets/…` pass through the asset router first); images in `blog-images` bucket.
 - **Epic:** docs/epics/2026-08-27-tortoise-blog-cms/.
 
@@ -378,7 +387,7 @@ One mark, on every **Pages** origin (`premiselabs.co`, `tortoise.premiselabs.co`
 - **The `rel` is graded on BOTH trees, by name.** A count of icon links cannot tell `rel="icon"` from `rel="apple-touch-icon"`, and iOS keys the home-screen bookmark off the latter alone — so the app pages are held to the same name-dispatching guard as the marketing pages (`sizes=` included), and `rel="apple-touch-icon"` swapped for `rel="icon"` reds. `mask-icon` and `apple-touch-icon-precomposed` are *different* relations and are not counted among the trio.
 - **No page may blank its icon** (`<link rel="icon" href="data:,">`, the old dashboard SPA trick) **or use the wordmark**: `/logo.png` is 400×244, so a tab squashes it into an unreadable bar. ⚠️ On the MARKETING origin that file exists and is the wordmark; on the APP origin it does not exist at all (measured 2026-11-09: `app.premiselabs.co/logo.png` → 404), so the `signup`/`welcome` tags that pointed at it there were a broken icon request, not a squashed one. All THREE auth pages also draw that wordmark in their top bar — `signup.html:564`, `welcome.html:249`, and `invite-accept.html:87` and `:106` — each as `<img src="/logo.png" alt="Premise Labs" onerror="this.style.display='none'">`, so on the app origin the tag deletes itself and the wordmark slot renders nothing. Pre-existing, tracked as **#11687**, and NOT fixed here because shipping the asset changes what those auth screens look like — an unverified visual is worse than a missing one that looks deliberate.
 - **Every href carries `?v=<sha256[:12]>`** of the file's own bytes. Cloudflare serves these with `max-age=14400` (measured: `curl -sI https://tortoise.premiselabs.co/favicon.ico` → `cache-control: public, max-age=14400, must-revalidate`) and a browser keeps a favicon far longer than any response header, so without a version the *old* artwork keeps drawing after a re-export. That four-hour edge cache is the floor of the problem, not its extent: a tab can hold the old mark across restarts, which no response header reaches. Re-exporting an icon without bumping the version fails the guard above. A query is honoured by the edge and by Chromium/Firefox; Safari's behaviour with a query-busted favicon is **not documented by Apple and reported inconsistently**, so if a stale mark ever survives a bump there, the next step is a content-hashed PATH (`/favicon-<sha12>.ico`) rather than a rollback — every source agrees a path change repaints.
-- **Three documents are STRINGS in TypeScript, not pages on disk, so no glob reaches them.** They are listed separately in the guard's `self_rendered` map: the blog head in `website/functions/blog/_lib.ts` (also asserted in `tests/test_blog_seo_meta.mjs`), the sign-in interstitial in `website/apps/dashboard/functions/auth/confirm.ts`, and the admin gate's 403 shell in `website/apps/dashboard/functions/admin/[[path]].ts`. All three now declare the trio; before this, the two app-origin ones rendered a full `<head>` with no icon link at all and fell back to the UNVERSIONED `/favicon.ico`. ⚠️ `website/functions/_middleware.ts`'s refusal page is a deliberate EXCEPTION and stays unlinked — but NOT because linking would add a request: a page with no icon link still triggers the browser's implicit `/favicon.ico` probe, so that argument is false as stated. The reason is that it is a refusal screen: it already sets `Referrer-Policy: no-referrer` (verified at `_middleware.ts:140`), its job is to render and send the user nowhere, and a brand mark on it is not worth widening what the refusal path emits. Each is graded in `test_every_surface_declares_the_same_versioned_icon_set` through the same `_surface_icon_violations` predicate as a real page — rel dispatched by name, each of the trio required, `sizes=`, origin resolved, file existence under the SOURCE'S OWN serving root, and the `?v=` recomputed from the bytes. It is NOT an `href` substring match: that was the first cut, and it was rel-BLIND, so `rel="preload"`, a demoted `apple-touch-icon` and a commented-out tag all passed. Each source must render exactly ONE `<head>`, and the guard fails closed if a second document appears in the same file, rather than grading the first and reporting green for both.
+- **Three documents are STRINGS in TypeScript, not pages on disk, so no glob reaches them.** They are listed separately in the guard's `self_rendered` map: the blog head in `website/functions/blog/_lib.ts` (also asserted in `tests/test_blog_seo_meta.mjs`), the sign-in interstitial in `website/apps/dashboard/functions/auth/confirm.ts`, and the admin gate's 403 shell in `website/apps/dashboard/functions/admin/[[path]].ts`. All three now declare the trio; before this, the two app-origin ones rendered a full `<head>` with no icon link at all and fell back to the UNVERSIONED `/favicon.ico`. ⚠️ `website/functions/_middleware.ts`'s refusal page is a deliberate EXCEPTION and stays unlinked — but NOT because linking would add a request: a page with no icon link still triggers the browser's implicit `/favicon.ico` probe, so that argument is false as stated. The reason is that it is a refusal screen: it already sets `Referrer-Policy: no-referrer` (verified at `_middleware.ts:148`), its job is to render and send the user nowhere, and a brand mark on it is not worth widening what the refusal path emits. Each is graded in `test_every_surface_declares_the_same_versioned_icon_set` through the same `_surface_icon_violations` predicate as a real page — rel dispatched by name, each of the trio required, `sizes=`, origin resolved, file existence under the SOURCE'S OWN serving root, and the `?v=` recomputed from the bytes. It is NOT an `href` substring match: that was the first cut, and it was rel-BLIND, so `rel="preload"`, a demoted `apple-touch-icon` and a commented-out tag all passed. Each source must render exactly ONE `<head>`, and the guard fails closed if a second document appears in the same file, rather than grading the first and reporting green for both.
 - The `/admin` console (`website/apps/blog-admin/index.html`, staged to `dist/admin/` and served on the app origin) declares the same three, or a browser there falls back to the UNVERSIONED `/favicon.ico`. ⚠️ BOTH spellings are graded — the vite source AND its committed `dist/index.html` — because the built artifact is a TRACKED, served file and the repo's source-of-record (#7749): grading only the source while `dist/` kept the pre-fix head is how the deployed `/admin` document could still have had no icon at all with every assertion green.
 - Regenerate the raster with `tools/build_site_icons.py --source <owner artwork>`; the source PNG is owner-side and deliberately NOT committed. The tool writes **both** copies (it mirrors into `apps/dashboard/public/` when `--out` is `website/`) ⚠️ but that mirroring is **not machine-checked** — the tool needs macOS `sips` and the owner's artwork, so no test drives it. What IS checked is its outcome: the byte-identity assertion reds if the two trees diverge, so a missed mirror cannot ship quietly. The remaining manual step is re-cutting `?v=<sha256[:12]>` across 14 marketing pages, the five dashboard entry points, `/admin` (both `apps/blog-admin/index.html` and its committed `dist/index.html`), and the three self-rendered heads (`website/functions/blog/_lib.ts`, `…/functions/auth/confirm.ts`, `…/functions/admin/[[path]].ts`) — 24 files in all (`git ls-files 'website/*.html' 'website/**/*.html' 'website/**/*.ts' | xargs grep -l '?v=' | wc -l` is the measurement; ⚠️ a plain `grep -rl` over `website/` also counts the UNTRACKED `apps/dashboard/dist/*.html` that `npm run build` creates, which is why it reads 29 in a worktree where the dashboard JS suite has run — measure the tracked tree, or you will "verify" a number the doc does not claim). The guard names whichever step was missed. ⚠️ A self-rendered head is a `grep` target, not a page: `grep -rl '?v=<old sha>' website/` is the complete list, and it must come back empty.
 
