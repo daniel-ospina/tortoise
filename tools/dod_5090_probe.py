@@ -322,7 +322,10 @@ _EMBED_CONTAINER_KEY = "embedding"
 #: writer out of the population entirely (the fail-OPEN direction `#11274` exists to close). The cost
 #: is a declared RESIDUAL — a writer whose only vector-related call is the clear guard is reported as
 #: `unresolved_write` and therefore owes a declaration it cannot honestly write, since the truthful
-#: disposition (`no-live-vector`) is refused by the register's own `STORE_CLAUSE_MARKERS`. No such
+#: disposition (`no-live-vector`) is refused by the guard's own `STORE_CLAUSE_MARKERS` (⚠️ that
+#: constant lives in `tests/test_embed_writer_register.py`, NOT in the register — `tests/` is not
+#: shipped in the wheel, so a lane sent to `tortoise/embed_writer_register.py` will not find it; the
+#: register states the rule it enforces, the suite holds the table). No such
 #: writer exists on this tree (population 32; every caller of the helper carries another signal),
 #: so the residual is recorded rather than repaired. Repairing it means dropping the name from this
 #: tuple AND from `STORE_CLAUSE_MARKERS` together, and re-measuring the population.
@@ -668,11 +671,46 @@ def _named_callees(node) -> set[str]:
     wrong for resolving an alias: `client._enc(x)` is a different function on a foreign object, and
     resolving it through the import map credited it as the gate seam (#12020 round 3, measured:
     `unresolved_write` -> `gated`, i.e. the writer stopped owing a declaration).
+
+    ⛔ A bare `Name` is not enough on its own (`#12020` round 7 review, P2 — measured): the shadow
+    set (`_locally_bound`) is deliberately OWN-SCOPE-ONLY, while this walk descends the WHOLE
+    subtree, so a nested scope's PARAMETER was attributed to the writer:
+
+        from tortoise.embeddings import encode_for_row as _enc
+        def w(proj, text):
+            def helper(_enc):          # binds in `helper` only — the writer keeps the module alias
+                return _enc(text)
+            proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": "x"})
+            return helper(str.upper)
+
+    measured `gated` here and `unresolved_write` on `main` — the same fail-open direction rounds
+    3/4/6 closed, one scope down. The lambda spelling `(lambda _enc: _enc(text))(…)` does it too.
+
+    ⛔ The fix is NOT "own scope only": that would drop the legitimate closure
+    (`def helper(): return _enc(text)`, where `_enc` really is the module alias, so the writer
+    genuinely reaches the gate and `gated` is the right answer). The shadow is threaded DOWNWARD
+    per scope instead — a name is dropped only inside the subtree that rebinds it.
     """
     import ast
 
-    return {c.func.id for c in ast.walk(node)
-            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)}
+    found: set[str] = set()
+
+    def visit(current: ast.AST, shadowed: frozenset[str]) -> None:
+        for child in ast.iter_child_nodes(current):
+            if isinstance(child, _NEW_SCOPE_NODES):
+                # This subtree's OWN bindings — its parameters, locals, captures, walrus targets
+                # and rebinding imports, plus a nested `def`/`class` NAME. A `global`/`nonlocal`
+                # rebinding inside it lands in this set too, which is the answer we want: the
+                # writer's later call to that name is then NOT the imported seam.
+                visit(child, shadowed | frozenset(_own_scope_bindings(child)))
+                continue
+            if (isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                    and child.func.id not in shadowed):
+                found.add(child.func.id)
+            visit(child, shadowed)
+
+    visit(node, frozenset())
+    return found
 
 
 def _writes_an_embedding(node, source: str, aliases: dict[str, str] | None = None) -> bool:

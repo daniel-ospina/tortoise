@@ -256,7 +256,10 @@ claim and a slogan:
   SCOPE of that sentence is the MODULE and the WRITER'S OWN scope: an alias imported in an
   ENCLOSING function and called in a nested one is neither resolved nor named as a writer, while the
   enclosing function is credited `gated` in its place — a named residual, not a resolved case
-  (`UNDECIDABLE_WRITE_SHAPES`, "closure-scoped alias"). ⛔ The
+  (`UNDECIDABLE_WRITE_SHAPES`, "closure-scoped alias"). ⛔ And a `global`/`nonlocal` rebinding of the
+  alias inside a NESTED scope is NOT resolved either (it rebinds the module alias, so the writer's
+  later call is no longer the seam) and classes the writer `gated` — measured, and the residual is
+  named in `UNDECIDABLE_WRITE_SHAPES` only; this bullet does not cover it. ⛔ The
   RESOLUTION IS OF CALLS, not of imports: an alias imported and never called is credited nothing —
   crediting the import would fill the population with writers that store nothing, the cry-wolf
   direction. Pinned, DRIVEN (a temp module per shape, through the real discovery filter), by

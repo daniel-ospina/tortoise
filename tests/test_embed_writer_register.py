@@ -635,8 +635,11 @@ def test_the_alias_forms_discovery_still_cannot_see_are_named(tmp_path):
     """`#12020` round 6: the alias class is CLOSED FOR ONE SPELLING, and says so.
 
     The bullet that closes the `from … import X as Y` fail-open is easy to read as "aliases are
-    resolved". They are not: the four shapes below are real vector writes, none reaches the
-    population, and one of them lands `gated` — the direction that owes nothing.
+    resolved". They are not: the shapes below are real vector writes, none reaches the population
+    (or, for a closure, reaches it only under the reset the entry records), and one of them lands
+    `gated` — the direction that owes nothing. The count is deliberately NOT restated here: the
+    table is the count (`#12020` round 7 review, P3 — this docstring said "four" over a table of
+    five, and a number in prose that the table contradicts is a claim waiting to rot).
 
     Pinned BOTH ways, because either half alone rots:
 
@@ -3438,6 +3441,46 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         "an aliased GATE call: the gate IS reached, so a declaration is owed by nobody — classing "
         "this as an unresolved producer would make the register declare a writer the rule already "
         "covers (the false-declaration direction)",
+    ),
+    # ── `#12020` round 7 review (P2): a NESTED scope's binding is not the writer's. ⛔ THREE arms,
+    # because the two directions must be distinguished: the first two were measured `gated` where
+    # `main` had `unresolved_write` (the fail-open direction), and the third must STAY `gated` or
+    # the fix has over-corrected into deleting a real gate reach (the cry-wolf direction).
+    "nested_scope_parameter_named_like_the_gate": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    def helper(_enc):\n"
+        "        return _enc(text)\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": "x"})\n'
+        "    return helper(str.upper)\n",
+        {"tortoise.m::w": "unresolved_write"},
+        "a nested scope's PARAMETER binds only inside that scope, so the writer still holds the "
+        "module alias and never reaches the gate — the call walk must not attribute the nested "
+        "body's call to the writer",
+    ),
+    "lambda_parameter_named_like_the_gate": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "\n"
+        "def w(proj, text):\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": "x"})\n'
+        "    return (lambda _enc: _enc(text))(str.upper)\n",
+        {"tortoise.m::w": "unresolved_write"},
+        "the same shadow through a LAMBDA parameter — `_NEW_SCOPE_NODES` already treats a lambda "
+        "as a scope, so it must be threaded the same way as a nested `def`",
+    ),
+    "honest_closure_still_credits_the_gate": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    def helper():\n"
+        "        return _enc(text)\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": "x"})\n'
+        "    return helper()\n",
+        {"tortoise.m::helper": "gated", "tortoise.m::w": "gated"},
+        "the direction that must NOT regress: the closure really calls the module alias, so the "
+        "gate IS reached and `gated` is right for both rows — restricting the call walk to the "
+        "writer's own scope would red this arm, which is why the shadow is threaded per scope",
     ),
     "plain_control": (
         "from tortoise.vector_write import set_embedding_clause\n"
