@@ -575,7 +575,7 @@ def test_the_PLANTED_property_set_is_DERIVED_not_the_literal_embedding(monkeypat
     assert literal.params["props"]["embedding"] == [0.5, 0.25]
 
 
-def test_the_row_two_MEASURES_the_EDGE_vector_door():
+def test_the_row_two_MEASURES_the_EDGE_vector_door(monkeypatch):
     """`#12015` — the projection's EDGE store is measured, not assumed away.
 
     `#11747` made row 2 measure the projection's NODE doors by running them. The same
@@ -611,6 +611,23 @@ def test_the_row_two_MEASURES_the_EDGE_vector_door():
     assert row.verdict == "MET", row.observed
     assert "cache projection RELATIONSHIP vector targets" in row.observed, row.observed
     assert "stored-without-a-query-path: none" in row.observed, row.observed
+    # ⛔ The POPULATION is PRINTED and an EMPTY one holds the row at PARTIAL — and both
+    # halves are pinned here (`#12015` round 4: measured UNPINNED by removing the
+    # `not projection["relationships_probed"]` arm and watching this file stay 172/172
+    # green). Without it, "41 edge types measured, none stores a vector" and "the edge
+    # arm never ran" are the SAME printed evidence — `stored-without-a-query-path: none`
+    # / `MET` — which is the rule the neighbouring notes already state: a `MET` must not
+    # rest on an unprinted (or unmeasured) set.
+    assert "PLANTED ON and saw REFUSE" in row.observed, row.observed
+    assert "BELONGS_TO" in row.observed, row.observed
+
+    empty = dict(measured, relationships=frozenset(), relationships_probed=frozenset())
+    monkeypatch.setattr(probe, "cache_projection_store_labels", lambda: empty)
+    unrun = probe.score_path_bullet()
+    assert unrun.verdict != "MET", (
+        "an edge arm that measured NOTHING reported the row clean — 'no edge stores a "
+        f"vector' and 'no edge was probed' are indistinguishable: {unrun.observed}")
+    assert unrun.verdict == "PARTIAL", unrun.observed
 
 
 def test_re_introducing_an_EDGE_vector_flips_row_two_to_NOT_MET(monkeypatch):
