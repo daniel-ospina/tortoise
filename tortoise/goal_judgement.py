@@ -268,10 +268,70 @@ def _assert_supersession_scope(
     seam: goal A ended with zero live judgements and its belief still moving.
     """
     node = sdk.get_entity(previous_point_id) or {}
+    if not node:
+        # ⛔ A MISSING predecessor is not a FOREIGN one, and the distinction is
+        # what a caller acts on: `get_entity` answers `{}` for an id no node
+        # backs, so folding it into the `judgementState` refusal below told a
+        # caller with a typo'd or stale id that the point EXISTS and is merely
+        # not a judgement — a false statement about the graph, pointing the
+        # investigation at the wrong thing. Pre-diff this input fell through to
+        # `supersede_point`, which named the missing point.
+        raise ValueError(
+            f"refusing to supersede {previous_point_id!r}: no entity has that id. "
+            "A supersession transfers the predecessor's operator edges (#6180), "
+            "so a predecessor that does not exist can be neither scoped nor "
+            "retired."
+        )
+    if node.get("judgementState") is None:
+        # ⛔ A predecessor this module does not own has NO scope props to compare,
+        # so an equality check that tolerates absence is a no-op exactly where it
+        # matters most. MEASURED: a foreign `derived` Point wired into goal B with
+        # no `goalId` was superseded silently, its operator TRANSFERRED (#6180),
+        # and goal B's belief went 0.0 -> 0.6502 on a judgement that belongs to
+        # goal A — while B's claim was retired with no successor. That is the
+        # failure this guard exists to prevent, so a predecessor must BE a
+        # judgement before its scope can be compared at all.
+        raise ValueError(
+            f"refusing to supersede {previous_point_id!r}: it carries no "
+            "`judgementState`, so it is not a judgement this module can scope. A "
+            "supersession transfers the predecessor's operator edges (#6180), so "
+            "retiring a foreign claim would re-point ITS belief onto this chain."
+        )
     for key, want in (("goalId", goal_id), ("indicatorId", indicator_id),
                       ("targetId", target_id)):
+        # ⛔ Presence AND equality, in BOTH directions, with ONE named exception
+        # — an ABSENT `indicatorId`. `want is not None and have is not None and
+        # have != want` was an escape that let `indicator_id=None` skip the check
+        # entirely (measured: a SECOND live claim and a doubled operator count),
+        # so `have != want` is the rule.
+        #
+        # ⛔ BUT `have is None` on `indicatorId` is NOT "another chain": it is a
+        # claim written by the module that shipped in #11942, where
+        # `indicator_id` defaulted to `None` and the writer stored the prop only
+        # for a truthy id. Such a claim carries `judgementState`/`goalId`/
+        # `targetId` and no `indicatorId`, and the DERIVED lookup can never see
+        # it — `latest_judgement` adds `p.indicatorId = $indicatorId` to its WHERE
+        # clause only when the argument is not `None`, and `indicator_id` is now
+        # REQUIRED, so the clause is always present and a Point carrying no
+        # `indicatorId` property fails it (Cypher: a null property never equals a
+        # value). That leaves THIS seam as the only path
+        # that can retire it, and refusing it made a goal that ever received a
+        # pre-#11965 judgement PERMANENTLY un-writable through `record_judgement`
+        # while the double-count behind it could not be repaired either.
+        # MEASURED at the pre-fix head: two live `met` claims and two IMPL
+        # arrows into one goal, and every repair call raised. Retiring ONE claim
+        # of the same goal+target — the supersession transfers its arrow, #6180 —
+        # is exactly the collapse this module exists to produce.
+        #
+        # `goalId` and `targetId` stay STRICT: this module has ALWAYS written
+        # them, so their absence means the Point is not a judgement of this chain
+        # at all. The tolerance is one named dimension, never a blanket rule —
+        # tolerating `goalId` would re-open the cross-goal transfer (#6180) this
+        # guard exists to stop.
         have = node.get(key)
-        if want is not None and have is not None and have != want:
+        if have is None and key == "indicatorId":
+            continue
+        if have != want:
             raise ValueError(
                 f"refusing to supersede {previous_point_id!r}: its {key} is "
                 f"{have!r} but this judgement is scoped to {want!r}. A "
@@ -430,6 +490,18 @@ class Reading:
     reading_id: str | None = None
     unit: str | None = None
     started_at: str | None = None
+
+    def __post_init__(self) -> None:
+        # ⛔ THE VALUE IS NORMALISED HERE, so EVERY path agrees with `_num` — the
+        # pure `compare()` included. MEASURED before this: `compare([Reading(value=True)],
+        # Target("<=", 10.0))` returned `met`, because `True` is an `int` in Python
+        # and only the graph loader applied `_num`; a stored `create_event(value=True)`
+        # was therefore a numeric "measurement" on one path and a boolean on the
+        # other. `_num` refuses bool, strings that are not numbers, and
+        # non-finite values, so `available` is False for all of them.
+        normalised = _num(self.value)
+        if normalised != self.value:
+            object.__setattr__(self, "value", normalised)
 
     @property
     def available(self) -> bool:
@@ -794,7 +866,9 @@ def _ensure_judgement_edge(sdk: Any, point_id: str, goal_id: str) -> str | None:
         sequence POST-FIX reads ``0.6502 -> 0.3498 -> 0.6502 -> 0.3498 ->
         0.6502``.
       * a write that failed after its Point landed leaves a live judgement with
-        no arrow at all, which the unchanged arm would then never repair.
+        no arrow at all — nothing else re-creates it, which is why this function
+        checks for the missing edge on every pass (the unchanged arm calls it
+        unconditionally).
 
     So the edge is (re)created only when the point has none INTO THIS GOAL — the
     check is goal-scoped, because "has an operator" is not the question: a point
@@ -813,6 +887,55 @@ def _ensure_judgement_edge(sdk: Any, point_id: str, goal_id: str) -> str | None:
         return rows[0][0]
     operator = sdk.create_operator("IMPL", point_id, [goal_id], direction="->")
     return (operator or {}).get("id")
+
+
+def _cache_then_arrow(
+    sdk: Any, point_id: str, goal_id: str, state: str
+) -> tuple[str | None, str | None]:
+    """Write the ``goalState`` cache and the IMPL arrow — NEITHER suppressing the other.
+
+    ORDER: the cache goes FIRST, and what that buys is bounded and exact — a
+    failed ARROW leaves the cache already agreeing with the live claim (pinned by
+    ``test_a_failed_arrow_leaves_the_cache_agreeing_with_the_claim``). It does NOT
+    make a refused ``update_entity`` harmless: on a flip the supersession has
+    already happened, so a refused cache write leaves ``goalState`` on the PREVIOUS
+    word under a live claim whichever of the two writes goes first. That
+    staleness is repaired on the next pass — the unchanged arm re-writes the cache
+    unconditionally (``_write_goal_state_cache`` does not read-then-compare), so a
+    failed CACHE and a failed ARROW both have a self-healing arm.
+
+    ⛔ BUT THE ARROW IS WRITTEN EITHER WAY, and that is the half a plain reorder
+    gets wrong: with the two writes merely SEQUENCED, a refused cache write skips
+    ``_ensure_judgement_edge`` entirely, so the judgement is live with NO belief
+    arrow (measured: with ``update_entity`` raising, the goal ended with ZERO IMPL
+    arrows while a live ``met`` judgement existed). Ordering two writes must
+    therefore not make one a precondition of the other: the cache refusal is
+    captured, the arrow is written regardless, and only then is the original
+    exception re-raised so the caller still sees it. The asymmetry that IS real is
+    about what each write is FOR, not about which one self-heals: the cache is a
+    word a reader sees, while an arrow is the belief path itself, and the two
+    comments above say which failure each repair arm covers.
+
+    Neither step has a compensating delete: the claim and its prior are correct,
+    and removing them would destroy the judgement.
+    """
+    cache_exc: Exception | None = None
+    cached: str | None = None
+    try:
+        cached = _write_goal_state_cache(sdk, goal_id, state)
+    except Exception as exc:  # captured, never swallowed: re-raised below
+        cache_exc = exc
+    try:
+        operator_id = _ensure_judgement_edge(sdk, point_id, goal_id)
+    except Exception as arrow_exc:
+        if cache_exc is not None:
+            # BOTH writes failed. The arrow error is the more actionable one, but
+            # the cache refusal came first; keep both traces on the way out.
+            raise cache_exc from arrow_exc
+        raise
+    if cache_exc is not None:
+        raise cache_exc
+    return cached, operator_id
 
 
 def _extra_operators(
@@ -836,7 +959,7 @@ def record_judgement(
     goal_id: str,
     judgement: Judgement,
     target: Target,
-    indicator_id: str | None = None,
+    indicator_id: str,
     previous_point_id: str | None = None,
     subject: str | None = None,
     strength: float = DEFAULT_STRENGTH,
@@ -880,12 +1003,43 @@ def record_judgement(
     # able to brick the judgement (or the EP run that reads it).
     alpha, beta = prior_for(judgement.state, strength)
 
+    # ⛔ The INDICATOR must be NAMED. It is the chain's identity, and the whole
+    # point of this module is "indicator + target + reading -> a judgement": a
+    # judgement that names neither indicator cannot be found by any scoped pass
+    # (`latest_judgement` drops an undeclared dimension from its WHERE clause), so
+    # it is PERMANENTLY un-supersedable — and two unscoped passes on one
+    # goal+target supersede each other, because the scope guard's `None == None`
+    # cannot tell "both absent" from "same chain". MEASURED, both: an unscoped
+    # pass followed by a scoped one left 2 live judgements and 2 IMPL arrows with
+    # goal belief 0.5 (the single-chain value is 0.3498), and two unscoped passes
+    # on one target retired each other's live claim and transferred the arrow.
+    # ⛔ TRUTHINESS, not identity. `is None` leaves the OTHER unscoped spelling
+    # open: `""` is not `None`, so it passed this refusal, was then never written
+    # (`if indicator_id:` below is truthiness) while the reader filtered on
+    # `p.indicatorId = ""` (`if val is not None`) — and the next pass minted a
+    # SECOND live judgement with no supersession, the exact double-count this
+    # refusal exists to prevent. MEASURED at the head this was found on:
+    # `record_judgement(..., indicator_id="")` returned `written=True`, stored no
+    # `indicatorId`, and left 2 live judgements with `extraOperators: []`.
+    # A name that is the empty string names nothing, so it is refused here too.
+    if not indicator_id:
+        raise ValueError(
+            "record_judgement needs `indicator_id`: the indicator is the chain a "
+            "judgement belongs to, and an unscoped judgement can neither be found "
+            "by a scoped pass (so it can never be superseded) nor be told apart "
+            "from another unscoped chain (so they would supersede each other). An "
+            "empty or falsy id is no better than a missing one."
+        )
+
     # ⛔ The target must be NAMED. `targetId` is what scopes the supersession
     # chain: with it absent, two targets on the same goal+indicator (D4 allows
     # n targets) both look up "the last judgement for this goal+indicator" and
     # supersede EACH OTHER's live claim, so the goal can hold only one live
     # judgement no matter how many targets it has.
-    if target.target_id is None:
+    # ⛔ Truthiness for the same reason as `indicator_id` above: an empty
+    # `target_id` would be dropped by the writer and filtered on by the reader,
+    # which is the same silent second-live-claim shape.
+    if not target.target_id:
         raise ValueError(
             "record_judgement needs a Target carrying `target_id` (build it with "
             "Target.from_node(<target Object>)). Without it the supersession "
@@ -932,12 +1086,22 @@ def record_judgement(
                                    target_id=target.target_id)
     if previous_point_id is None:
         previous_point_id = (prior_point or {}).get("id")
-    else:
-        # The seam decides WHAT gets superseded, so its scope is asserted rather
-        # than trusted: a predecessor from another goal/indicator/target would be
-        # retired while its belief arrow was transferred onto this chain, leaving
-        # the other goal with NO live judgement and a claim scoped elsewhere
-        # driving its belief (measured).
+    # ⛔ THE SCOPE IS ASSERTED ON THE RESOLVED ID, WHICHEVER BRANCH PRODUCED IT.
+    # With `indicator_id` and `target_id` both REQUIRED, the derived lookup is
+    # fully scoped and this assert is belt-and-braces there (a predecessor it can
+    # return already matches). It stays because it is the seam's ONLY guard, and
+    # because "the guard runs whichever branch produced the id" is a property
+    # worth holding by construction rather than by the argument above.
+    # Asserting only in the explicit-seam branch left the DERIVED branch
+    # unguarded, and `latest_judgement` DROPS a `None` dimension from its WHERE
+    # clause — so a caller who omitted `indicator_id` had its previous judgement
+    # taken from an indicator it never declared. MEASURED: the indicator-scoped
+    # claim was superseded, its arrow transferred, the successor carried no
+    # `indicatorId`, and no later scoped pass could ever see it again — 2 live
+    # judgements in one goal, 2 IMPL arrows, the successor PERMANENTLY
+    # un-supersedable, and `extraOperators` empty because it counts only the
+    # successor's own edges.
+    if previous_point_id is not None:
         _assert_supersession_scope(sdk, previous_point_id, goal_id,
                                    indicator_id, target.target_id)
 
@@ -952,8 +1116,8 @@ def record_judgement(
         #     because the state never changes again);
         #   * the IMPL arrow is re-asserted when it is missing, which is the
         #     self-healing arm for a write that failed after its point landed.
-        cached = _write_goal_state_cache(sdk, goal_id, judgement.state)
-        wired = _ensure_judgement_edge(sdk, previous_point_id, goal_id)
+        cached, wired = _cache_then_arrow(sdk, previous_point_id, goal_id,
+                                          judgement.state)
         return {
             "written": False,
             "point_id": previous_point_id,
@@ -1082,10 +1246,12 @@ def record_judgement(
                 raise exc from cleanup_exc
             raise
 
-    operator_id = _ensure_judgement_edge(sdk, point_id, goal_id)
+    # The cache is written BEFORE the arrow, deliberately — but neither write is
+    # a precondition of the other; see `_cache_then_arrow` for why the ordering
+    # alone was not enough.
+    cached, operator_id = _cache_then_arrow(sdk, point_id, goal_id,
+                                            judgement.state)
     extra_operators = _extra_operators(sdk, point_id, goal_id, operator_id)
-
-    cached = _write_goal_state_cache(sdk, goal_id, judgement.state)
 
     return {
         "written": True,
