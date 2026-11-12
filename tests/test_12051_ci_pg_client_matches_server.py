@@ -1029,7 +1029,14 @@ def _run_commands(step: dict) -> str:
     GREEN). Omitting them is therefore a fail-CLOSED narrowing — an ambiguous `#`
     keeps the tail live, so the guard still sees the command instead of erasing it —
     and `test_an_arithmetic_or_parameter_redirect_is_not_a_comment_boundary` pins
-    that direction: re-adding `<`/`>` to the class reds it. It also knows that a
+    that direction. ⛔ AND IT IS THE **FRAMES** THAT CARRY IT NOW (#12279 review round 3):
+    once `(( … ))` and `${…}` are modelled as word parts, re-adding `<`/`>` to this
+    class no longer changes those two lines — the test measures `#`-as-DATA in those
+    contexts, which holds independently of the class (measured: re-adding the two
+    characters leaves the test green). The characters still stay OUT, because bash's
+    comment-after-a-redirect rule is real at command level and the remaining
+    unmodelled redirect contexts are only fail-closed if the `#` keeps the tail
+    live. It also knows that a
     substitution/assignment `)` is a word part while a GROUP-closing one is an
     operator, and that a backslash escapes its partner inside double quotes
     (#12271 / #12279 review, each measured).
@@ -1446,10 +1453,13 @@ _EXEC_PRIMARY_WORDS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 #: accepts is `{ find … ';';}` — a quoted terminator, then the `;` LIST separator,
 #: then `}` — and `_segment_bounds` already cuts the segment at that unquoted `;`,
 #: so nothing needs a `}` rstrip. The only token a `}` rstrip would change is
-#: `';'}` / `';'};`, which bash REJECTS (`bash -n` → `syntax error: unexpected end
-#: of file`), so the character covered no valid spelling while its comment claimed
-#: it did — the same "a comment that attributes coverage to the wrong mechanism"
-#: class this change exists to remove.
+#: `';'}` / `';'};`, which `find` itself refuses as a non-terminator
+#: (`find: missing argument to \`-exec'`, measured) — and at TOP LEVEL `bash -n`
+#: ACCEPTS both (`rc=0`; it is only inside a brace group that `';'}` is
+#: `syntax error: unexpected end of file`). So the character covered no spelling
+#: that reaches the guard, and the first version of this note attributed that to the
+#: wrong mechanism — the same "a comment that attributes coverage to the wrong
+#: mechanism" class this change exists to remove.
 _TERMINATOR_TRAILING_OPERATORS = ")]`"
 
 
@@ -2951,7 +2961,9 @@ def _compared_variables(lines: list[str]) -> list[tuple[str, str]]:
 #: stripped, so it survives into the scan and can only cause a false RED (category
 #: B), never a bypass.
 #: `test_an_arithmetic_or_parameter_redirect_is_not_a_comment_boundary` pins the
-#: fail-OPEN direction of that trade: re-adding `<`/`>` to this class reds it.
+#: fail-OPEN direction of that trade: a `#` in an arithmetic / `${…}` context stays
+#: DATA there (measured), and it is the `(( … ))` / `${…}` FRAMES, not this class,
+#: that carry it — re-adding `<`/`>` now leaves those rows green.
 #: ⚠️ AND `(` IS ONLY THE DEFAULT, NOT A SHELL FACT (#12279 REVIEW 4, P0): a word
 #: begins after a plain `(` but NOT after an extglob opener (`@(#X)`) or the second
 #: `(` of a glued `((` — those are word parts, so `_strip_trailing_comment` derives
@@ -5999,7 +6011,9 @@ def test_an_arithmetic_or_parameter_redirect_is_not_a_comment_boundary() -> None
     `origin/main` and the pushed head both refuse. So the two characters stay OUT and
     the cost is the fail-CLOSED one (a `>#` tombstone survives into the scan and can
     only cause a false RED) — this test pins the direction that would otherwise have
-    no cover, because re-adding `<`/`>` to the class reds it.
+    no cover — `#` is DATA inside `(( … ))` / `$(( … ))` / `${…}` even where a
+    boundary character precedes it, and it is the FRAMES in `_strip_trailing_comment`
+    that enforce it (measured: re-adding `<`/`>` to the class leaves this test green).
     """
 
     # ⛔ `<`/`>` ARE **NOT** IN THE CLASS, AND THAT IS THE FIX (#12279 review round 2,
@@ -6016,7 +6030,8 @@ def test_an_arithmetic_or_parameter_redirect_is_not_a_comment_boundary() -> None
     # therefore NOT an operator boundary in a FLAT class, for the same reason `)`
     # is not — so it stays out and the fail-CLOSED cost is accepted (a `>#`
     # tombstone survives into the scan and can only cause a false RED). This test is
-    # the direction that has no cover otherwise: re-adding `<`/`>` reds it.
+    # the direction that has no cover otherwise: `#` must stay DATA inside
+    # `(( … ))` / `$(( … ))` / `${…}`, which the FRAMES enforce — not the class.
     replacement = 'sudo rsync -a "$b/17/bin/" "$b/16/bin/"'
     for opener in ("a=1; (( a >#0 ))", "a=1; (( a <#0 ))", "echo ${x:->#y}", "echo ${x:-<#y}"):
         step = {"run": f"b=/usr/lib/postgresql; {opener}; {replacement}"}
@@ -6080,6 +6095,22 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         # so the line was truncated AT THE `(` and every rule arm went blind.
         "true || ((#X))",
         "echo hi @(#X)",
+        # ⛔ `[[ … ]]` AND `(( … ))` ARE WORD PARTS TOO (#12279 REVIEW 4, P1,
+        # measured RED→GREEN — `main` refused every one of these and the head ERASED
+        # the line, GREEN, while bash runs the replacement). `; & | (` and a space are
+        # NOT operators inside them: after a regex alternation the `#` is part of the
+        # regex, and in arithmetic it is part of the token (`(( a|# 1 ))` errors on
+        # `# 1` and the line continues). Neither context is separable by the character
+        # before the `#`, so both are treated as open frames and a `#` inside is DATA.
+        # The fail-CLOSED cost — a `[[ -n x #c ]]`, which bash DOES comment (it
+        # swallows its own `]]` and dies on EOF) — stays live here instead, so a
+        # false RED is the worst case, never an erasure.
+        'v="#b"; [[ $v =~ a|#b ]]',
+        'v="#b"; [[ $v =~ (|#b) ]]',
+        "v=1; [[ $v == *#b ]]",
+        "a=1; (( a|# 1 )) || true",
+        "a=1; (( (;#a) )) || true",
+        "echo $((16#ff))",
     ):
         step = {"run": f"b=/usr/lib/postgresql; {opener}; {replacement}"}
         assert replacement in _run_commands(step), (
@@ -6986,6 +7017,19 @@ def _strip_trailing_comment(line: str) -> str:
     quote = ""
     stack: list[str] = []
     braces = 0
+    #: `[[ … ]]` and `(( … ))` are WHOLE WORD PARTS (#12279 REVIEW 4, P1, measured
+    #: RED→GREEN — `main` refused every row below, the head ERASED the line). Inside
+    #: them a `#` is not reliably a comment: bash keeps it as DATA after a regex
+    #: alternation (`[[ $v =~ a|#b ]]` matches), after a `(`/`;`/`&` in `(( … ))`
+    #: (`(( a|# 1 ))` errors on the token `# 1`, it does NOT truncate the line), and
+    #: inside arithmetic base notation (`$((16#ff))` is 255) — while `rest` of a
+    #: `[[` CAN comment (`[[ -n x #c ]]` swallows its own `]]` and dies on EOF).
+    #: The contexts are not separable by the character before the `#`, so BOTH are
+    #: treated as one word part: a `#` inside them is DATA, which is the fail-CLOSED
+    #: direction (the tail stays live, so the arms still see the command instead of
+    #: it being erased) and matches how `${…}` is already handled.
+    conditional = 0
+    arith = 0
     #: Does the character AT `index` begin a new shell WORD? Column 0 does, and so
     #: does the character after unquoted whitespace or an unquoted operator — the
     #: shell's own rule, which is what `boundary` tracks instead of re-reading
@@ -7023,7 +7067,7 @@ def _strip_trailing_comment(line: str) -> str:
             boundary = False
             index += 1
             continue
-        if char == "#" and braces:
+        if char == "#" and (braces or conditional or arith):
             boundary = False
             index += 1
             continue
@@ -7047,6 +7091,31 @@ def _strip_trailing_comment(line: str) -> str:
             braces -= 1
             boundary = False
             index += 1
+            continue
+        # ⛔ `[[ … ]]` / `(( … ))` ARE WORD PARTS, NOT OPERATOR CONTEXTS (#12279
+        # REVIEW 4, P1). Handled BEFORE the single-character branches below, so the
+        # `((` is not read as two group openers and the `[[` is not read as a word
+        # char. An UNCLOSED opener therefore protects the rest of the line, which is
+        # the fail-closed direction.
+        if char == "[" and index + 1 < len(line) and line[index + 1] == "[":
+            conditional += 1
+            boundary = False
+            index += 2
+            continue
+        if char == "]" and index + 1 < len(line) and line[index + 1] == "]" and conditional:
+            conditional -= 1
+            boundary = False
+            index += 2
+            continue
+        if char == "(" and index + 1 < len(line) and line[index + 1] == "(":
+            arith += 1
+            boundary = False
+            index += 2
+            continue
+        if char == ")" and index + 1 < len(line) and line[index + 1] == ")" and arith:
+            arith -= 1
+            boundary = False
+            index += 2
             continue
         # A `(` after `$`, `<` or `>` opens a SUBSTITUTION, and after `=` an
         # ASSIGNMENT VALUE — both are WORD parts, so their `)` does not end a
