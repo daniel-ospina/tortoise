@@ -1397,21 +1397,24 @@ def check_verdict_tally(text: str) -> list[str]:
         if not line.lstrip().startswith("|")
     )
     section_prose = re.sub(r"\s+", " ", section_prose)
-    #: The paragraph subject begins at the MARKER TEXT, which on this page sits INSIDE a
-    #: bold run (`**The one thing to take away:**`), so its first sentence carries no
-    #: leading `**` while the section prose does. Strip the bold opener from both sides
-    #: before comparing, or the paragraph's own tally reads as a stray.
-    paragraph_sentences = {
-        s.lstrip("* ") for s in re.split(r"(?<=\.)\s+", paragraph)
-    }
+    # ⛔ REMOVE THE PARAGRAPH BY CONTENT, NOT BY COMPARING SENTENCE-CHUNKS (#11902 review,
+    # round 9). The first shape compared each section chunk against the paragraph's chunks
+    # by string equality, and the two streams are chunked at DIFFERENT offsets: the
+    # paragraph subject starts at the MARKER TEXT (inside `**The one thing to take
+    # away:**`), while the section stream inherits whatever precedes the paragraph. Any
+    # terminator other than `.` + space — a trailing `:`, `;`, `—`, `?`, `…`, or no
+    # preceding prose at all — joined the paragraph's first sentence to the PREVIOUS text,
+    # so the page's own single tally chunked differently and was reported as a stray.
+    # Measured on a correct page whose intro paragraph ends `… since overtaken:` — rc 1,
+    # "carries 1 tally sentence(s) OUTSIDE the takeaway paragraph". Deleting the
+    # paragraph's own text removes the offset dependence entirely: what remains is by
+    # construction everything that is NOT the subject.
+    remainder = section_prose.replace(re.sub(r"\s+", " ", paragraph), " ")
     stray_tallies = [
         s
-        for s in re.split(r"(?<=\.)\s+", section_prose)
-        if (
-            "still read as written" in quoted.sub(" ", s)
-            or "no longer read as written" in quoted.sub(" ", s)
-        )
-        and s.lstrip("* ") not in paragraph_sentences
+        for s in re.split(r"(?<=\.)\s+", remainder)
+        if "still read as written" in quoted.sub(" ", s)
+        or "no longer read as written" in quoted.sub(" ", s)
     ]
     if stray_tallies:
         problems.append(

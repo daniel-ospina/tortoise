@@ -553,10 +553,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   stored* defect, inside the correction that exists to stop it — and the reason two reviewers could
   each "prove" the other side was the stale one.
 
-The self-test that proves the arms its 47 mutations exercise still fire has its own **population
+The self-test that proves the arms its 49 mutations exercise still fire has its own **population
 floor** (`MIN_SELF_TEST_MUTATIONS`). An emptied arm set used to print `PASS (0 failing arm(s))` and
 exit 0 — a gate reporting OK when it cannot run — so a shrunk population now reds instead. ⛔ **The
-population is 47 mutations of the PAGE, not a proof of the guard**, and every one of them edits the
+population is 49 mutations of the PAGE, not a proof of the guard**, and every one of them edits the
 page's text (a falsified tally, a deleted correction row, a second survivor sentence), so anything an
 arm reads that is not the page's CONTENT is outside it. Of the arms `check_document()` calls, exactly
 two are blind this way — `check_section_presence`, the FIRST one called, and `check_registration`,
@@ -634,7 +634,7 @@ opening to *"six of the eight"*, restating §7 as `11 of 40 have moved`, and fol
 section's own §6 re-read workflow (OPEN 4→3, one row to CLOSED COMPLETED 32→33, survivors
 `four`→`three` so every CHECKED number reconciles) each leave `--check` at exit 0 and the test file
 green — the last one while §7 still reads `36 of 40`, i.e. it goes stale silently on the update
-this section prescribes. Re-derive all eight from their own tables before quoting them; `#2852` §3 is
+this section prescribes. Re-derive all ten from their own tables before quoting them; `#2852` §3 is
 the population source, not the derivation.
 
 ---
