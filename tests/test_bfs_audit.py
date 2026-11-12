@@ -109,13 +109,19 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
         # ⛔ BYTES + ONE LINE MODEL, for the same reason the non-Python arm above
         # reads bytes: `read_text` applies UNIVERSAL NEWLINES, so a lone `\r`
         # silently becomes a line break the PARSER sees and `grep -rn` does not —
-        # and the CALLER's line number is grep's. `\r\n` is folded to `\n` (a real
-        # line break in both views); a lone `\r` becomes a SPACE, one byte for one
-        # byte, so columns survive and a file that used `\r` AS its separator stops
-        # parsing — `None`, i.e. every line is code. Loud, never quiet: a file whose
-        # line model disagrees with grep's is not certifiable. (README CRLF files
-        # are unaffected; they fold to `\n` and number identically in both views.)
-        src = path.read_bytes().decode("utf-8").replace("\r\n", "\n").replace("\r", " ")
+        # and the CALLER's line number is grep's.
+        #
+        # `\r\n` is folded to `\n` (a line break in BOTH views, so numbering is
+        # preserved). A lone `\r` is NOT substituted away: replacing it with a space
+        # merges the two physical lines, and a `#` comment on the first then runs to
+        # EOF and swallows a real dependency — measured, `b"x = 1  # comment\rpropagate_shock()\r"`
+        # read as prose. Instead a file that still holds a lone `\r` is a DEGRADED
+        # read: grep and the parser disagree about its lines, so it cannot be
+        # certified clean and `None` routes every line to `production_code`.
+        raw = path.read_bytes().decode("utf-8").replace("\r\n", "\n")
+        if "\r" in raw:
+            return None
+        src = raw
         tree = ast.parse(src, filename=str(path))
         tokens = list(tokenize.generate_tokens(io.StringIO(src).readline))
     except (OSError, UnicodeDecodeError, SyntaxError, ValueError, tokenize.TokenError,
@@ -131,10 +137,9 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
     # the middle. An earlier revision compared a TOKEN's character column against
     # an AST byte column and needed one; the string branch now reads the tree, so
     # that converter had become INERT (measured: removing it left every row green
-    # and every verdict identical over 100+ non-ASCII shapes). It is deleted
-    # rather than kept with a comment claiming work it no longer does — and the
-    # three em-dash rows that pinned it are gone for the same reason: a row that
-    # cannot fail is not a pin.
+    # and every verdict identical over 100+ non-ASCII shapes). It is deleted rather
+    # than kept with a comment claiming work it no longer does; the two single-line
+    # em-dash rows deleted alongside it are documented at their old site below.
     prose_boxes: list[tuple[int, int, int, int]] = []
 
     def _box(node: ast.AST) -> tuple[int, int, int, int] | None:
@@ -358,10 +363,10 @@ def test_the_code_detector_sees_every_shape_it_claims(tmp_path):
         # ⛔ COLUMN CONTAINMENT ACROSS A MULTI-LINE PROSE BOX: the docstring opens on
         # line 2 and closes on line 3, and a LIVE dependency shares its terminator
         # line. Making containment LINE-granular reds this row (`[]` against the
-        # correct `{3}` — measured), which is what it pins. It does NOT pin the
-        # box's SPAN: a prose statement's own value is always inside its own box
-        # (measured — collapsing the box to its start line leaves this row green),
-        # so no row can pin the span and none claims to.
+        # correct `{3}` — measured), which is what it pins; it is the row that does
+        # that job, so do not delete it as "an em-dash row". The prose box's SPAN is
+        # pinned elsewhere — `docstring_multiline` and `test_no_propagate_shock_callers`
+        # both red when the box is collapsed to its start line (measured).
         "multiline_non_ascii_docstring_then_string_same_line": (
             'def f():\n    """\u2014 the pass\n    ' + "\u2014" * 18
             + '"""; x = getattr(m, "propagate_shock")\n', {3}),
@@ -506,6 +511,14 @@ def test_the_code_detector_is_fail_closed(tmp_path):
     crlf = tmp_path / "crlf.py"
     crlf.write_bytes(b"x = 1\r\npropagate_shock()\r\n")
     assert _code_lines_naming(crlf, "propagate_shock") == frozenset({2})
+
+    # ⛔ The shape a `\r`→space substitution would MERGE into one line, where the
+    # `#` comment then runs to EOF and swallows the naming line: the audit would
+    # report prose while a real dependency sits there (measured before this row
+    # existed). A lone `\r` is never substituted away — the file is not certifiable.
+    swallowed = tmp_path / "swallowed.py"
+    swallowed.write_bytes(b"x = 1  # comment\rpropagate_shock()\r")
+    assert _code_lines_naming(swallowed, "propagate_shock") is None
 
 
 # ── 1. propagate_shock callers ────────────────────────────────────
