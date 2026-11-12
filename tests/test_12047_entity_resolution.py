@@ -1145,7 +1145,9 @@ class TestThirdReviewRound:
         sdk = sdk_factory()
         _create_raw(sdk, "Object", "obj-x", "Acme Corporation", "objectKind", "document")
         _create_raw(sdk, "Object", "obj-y", "Acme Corporaton", "objectKind", "document")
-        assert entity_pair_for(sdk._get_proj().g, "obj-x")
+        row = sdk.list_dedup_candidates(candidate_type="entity")[0]
+        del seen[:]
+        assert entity_pair_for(sdk._get_proj().g, row["candidate_id"])
         assert seen and seen[0] is None, f"the recompute was bounded: {seen}"
 
     # ── F-F (P2): the legacy fold shape is still findable ────────────────
