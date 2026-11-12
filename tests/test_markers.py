@@ -1030,6 +1030,18 @@ def test_no_redirect_stems_registry_exact():
         # first registration pass added the other two and missed this, reding
         # `test-slow (c)` at edd8f7ee (the pin working as designed).
         "test_mechanism_write_path_9963",
+        # #12067: the closed mechanism set (IMPL / NAND / coherence) and the
+        # write-door refusal of a pair carrying two of them. The `sdk` fixture
+        # builds `TortoiseSDK(db_path=<tmp_path>/mech.db)` and the pins read the
+        # stored mechanism back off that graph, so a URI-set lane would discard
+        # the path and grade a server this test never seeded. The file carries
+        # NO module-level `embedded_only` marker, so the load-bearing reason is
+        # the REDIRECT, not a skip. Registered in all THREE homes —
+        # config/ci-surfaces.yml:carve_out, TEST_NO_REDIRECT_STEMS and this
+        # declaration — and this pin is the one that caught the omission: the
+        # first registration pass added the other two and missed this, which is
+        # the pin working as designed (the #9963 shape, one commit later).
+        "test_12067_three_mechanisms",
         # #3590 round-5 review F3: the minted-identity acceptance pins build
         # `TortoiseSDK(<tmp_path>/t.db, event_log_path=…)` BY DB PATH and drive
         # `rebuild_all(...)` against that store, so a URI-set lane would discard

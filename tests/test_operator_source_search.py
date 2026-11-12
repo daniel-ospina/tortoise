@@ -79,7 +79,11 @@ class TestOperatorEntityType:
         a = sdk.create_point("statement", "a")
         b = sdk.create_point("statement", "b")
         sdk.create_operator("IMPL", a["id"], [b["id"]], label="addresses")
-        sdk.create_operator("NAND", a["id"], [b["id"]], label="opposes")
+        # #12067: a pair carries at most ONE mechanism, so the NAND operator gets
+        # its own pair — this test is about the op_type filter, not the closure.
+        c = sdk.create_point("statement", "c")
+        d = sdk.create_point("statement", "d")
+        sdk.create_operator("NAND", c["id"], [d["id"]], label="opposes")
 
         results = sdk.tortoise_fts_query("", entity_type="operator")
         assert isinstance(results, list)

@@ -715,7 +715,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_create_operator",
         id="surface.create_operator",
         description="Create an operator connecting Points. "
-                    "op_type: IMPL, NAND, composedOf, decomposesInto, contains, wraps. "
+                    "op_type: IMPL, NAND, coherence, composedOf, decomposesInto, contains, wraps. "
                     "semantics: the Layer-2 meaning (addresses, supports, refutes, "
                     "mutuallyExclusive, hasPart, related, …) — it resolves the direction.",
         risk="write",
