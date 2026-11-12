@@ -1066,9 +1066,28 @@ def test_product_route_blocked_on_company_host(page: Page) -> None:
     rather than render a second copy at a second URL — the property the old 404
     protected, expressed as a 301 now that the page is served here.
 
-    UNCONDITIONAL: the target is a constant, so this is safe on stale-DNS runs."""
+    UNCONDITIONAL: the target is a constant, so this is safe on stale-DNS runs.
+
+    ⛔ THE SCHEME IS THE REQUEST'S, NOT THE CONSTANT'S — measured, not assumed.
+    The middleware returns the ABSOLUTE `https://premiselabs.co/tortoise`, and
+    `wrangler pages dev` (workerd) rewrites a **same-origin** absolute `Location`
+    to the scheme of the request it answered, so over this suite's http dev
+    server that target comes back as `http://premiselabs.co/tortoise` (a
+    `Host: premiselabs.co`-spoofed request for `/product` is answered with
+    `Location: http://premiselabs.co/tortoise`, while a fixed
+    `Location: https://premiselabs.co/tortoise` probe returns the same http form
+    — the rewrite is the dev server's, not the middleware's). A CROSS-origin
+    target passes through verbatim, which is why the app-origin pins in this
+    file (`https://app.premiselabs.co/...`) hold in the same run.
+
+    So this asserts the canonical URL's OWN components — host and path, exactly,
+    which is what "ONE canonical URL" means — against the scheme this run
+    actually speaks: `https` on a real host (all production), `http` on the dev
+    server. Pinning the literal `https` here reds the suite on every http run,
+    which is not a property of the site."""
     b_host = urlsplit(BASE_URL).hostname or "premiselabs.co"
     b_spoof = b_host if b_host.endswith("premiselabs.co") else "premiselabs.co"
+    scheme = urlsplit(BASE_URL).scheme
     for path in ("/product", "/product.html"):
         r = page.request.get(BASE_URL + path, headers={"Host": b_spoof},
                              timeout=15_000, max_redirects=0)
@@ -1076,8 +1095,11 @@ def test_product_route_blocked_on_company_host(page: Page) -> None:
             f"{path} on premiselabs.co → {r.status} (expected a 301 to /tortoise — a "
             "200 here means the product page is reachable at two URLs again)"
         )
-        assert r.headers.get("location") == "https://premiselabs.co/tortoise", (
-            f"{path} redirects to {r.headers.get('location')!r}"
+        got = urlsplit(r.headers.get("location") or "")
+        assert (got.scheme, got.hostname, got.path) == (scheme, "premiselabs.co", "/tortoise"), (
+            f"{path} redirects to {r.headers.get('location')!r} (expected "
+            f"{scheme}://premiselabs.co/tortoise — the ONE canonical product URL, "
+            "normalised: no `.html`, no trailing slash, no second host)"
         )
 
 
