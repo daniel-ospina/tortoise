@@ -72,36 +72,9 @@ from test_9078_record_written_by_production_path import (
 
 from tortoise import record_projection as rp
 from tortoise import record_writer
-from tortoise.entity_resolver import normalize_entity_name
 from tortoise.projection import classify_entity_mutation_op
 from tortoise.record_writer import use_record_tenant
 from tortoise.sdk import TortoiseSDK
-
-
-#: A rename record built the way `sdk._journal_entity_mutation` builds it
-#: (`_update_entity`'s non-Point branch): identity as written, `state` = the
-#: write's own applied map — which since #12120 is BOTH keys the rename applies,
-#: the surface `name` and its fold (`normalize_entity_name`, the writer's key
-#: space). A rename record carrying only `name` is a shape this producer no longer
-#: emits for a NON-BLANK name; a blank one still journals `name` alone.
-def _producer_rename(oid: str, new_name: str, label: str = "Object") -> dict:
-    # The producer's own guards, mirrored (`sdk._update_entity`, #12120): the fold
-    # is applied only to a NAME-BEARING write (`sdk.py:45317`) and only when the
-    # fold is non-empty (`sdk.py:45366-45370`), so no real record carries
-    # `{"canonical_name": ""}`.
-    #
-    # ⛔ A BLANK name is NOT refused here: it skips those write-path guards (no
-    # lock, no `_refuse_ambiguous_rename`, no fold) but is STILL journaled as
-    # `EntityMutated op=rename state={"name": …}` — measured — so a helper that
-    # refused it would reject an input the producer accepts, which is the drift
-    # this rewrite exists to remove.
-    applied = {"name": new_name}
-    folded = normalize_entity_name(new_name)
-    if folded:
-        applied["canonical_name"] = folded
-    return {"type": "EntityMutated", "ts": "2026-11-06T00:00:00Z",
-            "id": oid, "op": classify_entity_mutation_op(applied),
-            "label": label, "state": applied}
 
 
 @pytest.fixture(autouse=True)
