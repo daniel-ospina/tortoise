@@ -2383,10 +2383,6 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # TRUE once the run is settled and a correct header may then state it.
         "`False` is a PROOF (every job of the run is `completed`, so it is executing nothing)",
         "now READ: every job is `completed`, so none of them is executing anything",
-        # the sufficiency CLAIM, carried through its own terminal clause: the short form alone
-        # ("… is the PROOF that excludes it from `pr_running`") is a prefix of a CORRECT
-        # sentence that qualifies it, so the needle is the whole shipped sentence.
-        "every job `completed` is the PROOF that EXCLUDES a run from `pr_running`",
         # ⛔ THE SUBJECT IS PART OF THE NEEDLE (review P3-1). Without it, dropping `*`
         # (above) turns this needle into a false positive on the ops doc's CORRECT
         # paragraph the moment its "(see the `excluded` sentence)" cross-reference is
@@ -2513,8 +2509,10 @@ def test_the_reason_line_names_the_runs_it_read_out_of_pr_running():
     # ⛔ BOTH HALVES OF THE PROOF ARE NAMED (review P2). Exclusion requires every job
     # `completed` AND the run's own `updated_at` still for `JOB_SETTLE_SECONDS`; a
     # one-half sentence taught that the settle-downgraded population cannot exist, while
-    # this very reading can produce it (an all-completed run whose list was not
-    # corroborated stays counted, in `pr_running_unmeasured`).
+    # the PRODUCTION reading (`read_health`) can produce it: an all-completed run whose list
+    # the settle gate did not corroborate stays counted, in `pr_running_unmeasured`. This
+    # fixture passes `has_live_job` directly, so `classify` applies no settle logic and must
+    # not be read as demonstrating the downgrade.
     assert "pr_running excluded 3 run(s) whose every job is completed AND" in joined
     assert f"still for {Q.JOB_SETTLE_SECONDS:.0f}s" in joined, joined
     for rid in GHOSTS:
@@ -3472,7 +3470,8 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
     routes are in `read_run_live_job`'s Returns block, the settle gate is the caller's
     (`read_health` downgrades an unproven `False` via `_settled_still` — the callee never sees
     `updated_at`), and the budget cause is neither. Only the ANNOTATION's copy of the first two
-    is pinned below; the prose that owns the set is `pr_running_unmeasured_unprobed`.
+    is pinned below; the prose that owns the ATTRIBUTION (which layer each cause comes from)
+    is `pr_running_unmeasured_unprobed` — it does not, and must not, own the set.
     """
     arm = _pr_unwitnessed_arm_and_branches()
 
