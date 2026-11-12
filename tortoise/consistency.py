@@ -192,6 +192,12 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "embedding_revision": "#5004 — payload-only embedding identity, never a node prop",
     "embedding_text_hash": "#5004 — payload-only embedding identity, never a node prop",
     "embedding_preserved": "#5004 — payload-only capture marker, never a node prop",
+    # #11821 P0: the width the payload's vector TEXT was written at. A property
+    # of the journal's encoding (`embeddings.JOURNAL_VECTOR_WIDTH_KEY`), so the
+    # graph has no counterpart to compare it against — a payload carrying it and
+    # a node lacking it is a FAITHFUL projection, not a missing property.
+    "embedding_width": (
+        "#11821 — payload-only vector-width marker, never a node prop"),
     "evidence_fold": (
         "#10010 — payload-only record flag (`_fold_source_evidence`): this "
         "PointAdded folded evidence into an EXISTING Point, it created nothing"),
@@ -700,9 +706,19 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset(),
 def _as_f32(vec: list) -> list | None:
     """Round a vector to the store's `vecf32` width, or None if not numeric.
 
-    The journal carries the ingest encoder's float64 (`encode_for_store`), while
-    the node stores `vecf32($embedding)` — so an exact comparison of a faithful
-    replay fails on the last mantissa bits. Compare at the stored width.
+    ⛔ **The premise was RE-STATED for #11821 P0; the conclusion and the
+    narrowing are unchanged, and the narrowing must be KEPT.** The journal no
+    longer carries the ingest encoder's float64 for a vector the writer
+    produced: it carries the **shortest float32 round-trip decimal** (`0.1`,
+    which is OFF the float32 grid as a float64), while the node stores
+    `vecf32($embedding)` (`0.10000000149011612`). So the two still differ on the
+    last mantissa bits — for a different reason than before — and an exact
+    comparison of a faithful replay still fails. Compare at the stored width:
+    `narrow_to_stored_width(journal 0.1)` → `0.10000000149011612` == the node.
+
+    A caller-owned (`embedding_verbatim`) vector never reaches this function:
+    `_compare_views` reads the marker on either side (`consistency.py:945`) and
+    normalises such a pair WITHOUT narrowing, so it compares exactly.
 
     #8615: the rounding itself lives in `tortoise/stored_form.py` — ONE spelling
     shared with the writer (`cache_projection.node_statement`) and with the
@@ -3381,6 +3397,18 @@ def recover_from_log(events_dir: str, projection) -> dict:
     `created`. The two classes report SEPARATELY (neither aggregate absorbs the
     other) for the same reason the three onboarding shapes do.
 
+    #9752 adds the `:PackSelection` pack-set marker on that same four-part
+    shape — `pack_selection_gap`, `pack_selection_state_unknown`,
+    `pack_selection_conflict` (a DIFFERENT marker is live, so the graph IS
+    configured and may hold a NEWER set — a reported conflict, never an
+    asserted loss), `pack_selection_verified` (forwarded so a caller can tell an
+    UNVERIFIED read from an observed loss), and their own
+    additive `reason` clauses — because an absent marker makes the rebuilt
+    graph read as UNCONFIGURED: `resolved_pack_set` falls back to the
+    records/union arms, so a pack an admin REMOVED is re-admitted with its
+    `revision` reset. All three classes report SEPARATELY, for the same reason
+    the onboarding shapes do.
+
     ATOMICITY on refusal (#7929): the refusals this function can only reach
     AFTER the replay has landed (the non-folded set and a non-empty `ok: False`
     verdict) are UNDONE before the `recovered: False` result is returned — the
@@ -3856,6 +3884,79 @@ def recover_from_log(events_dir: str, projection) -> dict:
                     "earlier interrupted rebuild — so whether this graph's "
                     "first-org marker was destroyed CANNOT be determined — "
                     "see #5353")
+        # #9752: the `:PackSelection` pack-set marker, forwarded on exactly the
+        # same contract as the `:TeamMeta` leg above — and for the same reason.
+        # Both consumers that can SEE this gap (`_auto_health_recover` and
+        # `_recover_or_raise`) read it off THIS dict, so a key that is not
+        # copied here is a warning that can never fire: the projection builds
+        # `pack_selection_gap` in `rebuild_all`'s counts and nothing else
+        # carries it out of the replay. The pending sidecar is retired once the
+        # replay lands, so these keys plus the `reason` clause are the only
+        # record the recovery entry point can hand its caller — an absent
+        # marker makes the graph read as UNCONFIGURED, which re-arms the
+        # records/union arms and so re-admits a pack an admin REMOVED, with its
+        # `revision` reset.
+        #
+        # Additive, not a chain (the #4641 round-7 rule the onboarding legs
+        # apply): a confirmed loss and a pre-preservation UNKNOWN can coexist,
+        # and one must not suppress the other.
+        pack_selection_gap = int(counts.get("pack_selection_gap") or 0)
+        if pack_selection_gap:
+            result["pack_selection_gap"] = pack_selection_gap
+            # The shape discriminator travels with the count, so no consumer has
+            # to re-infer it from `expected and not restored` (which cannot tell
+            # an absence from a DIFFERENT live marker).
+            if counts.get("pack_selection_conflict"):
+                result["pack_selection_conflict"] = True
+            # ⛔ The UNVERIFIED discriminator MUST travel in `result`, not only in
+            # the `reason` clause below: both recovery consumers
+            # (`_auto_health_recover`, `_recover_or_raise`) label the gap by
+            # calling `pack_selection_shape(result)`, and without this key the
+            # helper cannot see the unverified state — so it fell through to
+            # "restore gap … reads as UNCONFIGURED" while the SAME line's reason
+            # said "COULD NOT RUN … UNVERIFIED". Reproduced on a real run at
+            # head ebe23a2b26 (#9752 review round 5, P1). `migrate_db` already
+            # forwards it; this was the odd one out.
+            if "pack_selection_verified" in counts:
+                result["pack_selection_verified"] = counts.get(
+                    "pack_selection_verified")
+            if counts.get("pack_selection_verified") is False:
+                result["reason"] += (
+                    "; WARNING: the :PackSelection post-restore verification "
+                    "COULD NOT RUN, so the rebuilt graph's pack-set marker is "
+                    "UNVERIFIED (not confirmed intact, and not observed "
+                    "gone) — the graph may now read as UNCONFIGURED and "
+                    "re-admit a pack an admin removed — see #9752")
+            elif counts.get("pack_selection_conflict"):
+                # A DIFFERENT marker is present: the graph IS configured, and its
+                # marker may be NEWER than the captured one, so this is a
+                # reported CONFLICT rather than an observed loss — and the
+                # "re-pin" remedy of the arm below would overwrite that newer
+                # decision (the projection's own ERROR log says the same).
+                result["reason"] += (
+                    "; WARNING: a DIFFERENT :PackSelection marker is present in "
+                    "the rebuilt graph — the captured marker was NOT applied "
+                    "(a concurrent pack-set write landed between the wipe and "
+                    "the restore). This is a reported CONFLICT, not a loss: the "
+                    "graph IS configured and may hold a NEWER pack set, so do "
+                    "not re-pin over it without checking which is intended — "
+                    "see the rebuild ERROR log (#9752)")
+            elif (counts.get("pack_selection_expected")
+                  and not counts.get("pack_selection_restored")):
+                result["reason"] += (
+                    "; WARNING: the pre-wipe :PackSelection pack-set marker "
+                    "was NOT restored, so the graph reads as UNCONFIGURED and "
+                    "a pack an admin had REMOVED can be re-admitted with its "
+                    "`revision` reset — see the rebuild ERROR log (#9752)")
+            if counts.get("pack_selection_state_unknown"):
+                result["pack_selection_state_unknown"] = True
+                result["reason"] += (
+                    "; WARNING: the pending pre-wipe snapshot does not carry "
+                    "a usable :PackSelection record — it either predates "
+                    "pack-set marker preservation or inherits a state-UNKNOWN "
+                    "marker from an earlier interrupted rebuild — so whether "
+                    "this graph's pack-set marker was destroyed CANNOT be "
+                    "determined — see #9752")
         return result
 
     if not files:

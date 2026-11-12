@@ -6815,7 +6815,13 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
         # `stamp_journal_embedding` skip the identity on a CREATING record, so
         # a caller could silence the model-change record R1 exists to keep
         # (and, living only on the live side, it is a parity break too).
-        "embedding_verbatim", "embedding_preserved"}
+        "embedding_verbatim", "embedding_preserved",
+        # #11821 P0: the journal payload's vector WIDTH marker. Server-minted
+        # beside the vector (`stamp_journal_embedding`), and it must stay out of
+        # caller props for the same reason as the identity stamps: it is a
+        # recorded fact about the journal's text, and a caller could otherwise
+        # forge it.
+        "embedding_width"}
     if _embed_identity_keys:
         raise ValueError(
             f"{sorted(_embed_identity_keys)} are server-managed embedding "
@@ -12917,6 +12923,31 @@ class TortoiseSDK:
         if id is not None:
             event["id"] = id
         event.update(extra)
+        # #11835 review F1 (P1): EVERY journalled vector declares its width —
+        # including the ones that arrive through `extra` on this (`id=`) branch,
+        # which the `point=` branch above covers only for ITS payload. Two live
+        # producers journal a vector here (`_session_event_write`,
+        # `_embedding_repair_attempt`, both `EventRecorded`), and
+        # `update_point` splats a caller vector onto the same top level for
+        # `PointRevised`; before this, all three wrote a vector with NO marker,
+        # so `embeddings.py::JOURNAL_VECTOR_WIDTH_KEY`'s "absent means
+        # PRE-CHANGE / FOREIGN record" was false for records written AFTER the
+        # change. `creating=False` because none of these computed a vector from
+        # the content riding with them; the seam still decides every arm
+        # itself: a verbatim/preserved vector keeps its raw form and declares
+        # `f64` (#5004 round-7), an off-grid or unrepresentable vector is left
+        # untouched and declares `f64`, and only a value our own embedder
+        # produced is narrowed and declares `f32`.
+        if "embedding" in event:
+            try:
+                from .embeddings import stamp_journal_embedding
+            except Exception:  # noqa: BLE001, RUF100
+                # Same posture as the `point=` branch above: a write must not
+                # depend on an import succeeding. Nothing is lost but the
+                # normalisation and the width declaration.
+                stamp_journal_embedding = None
+            if stamp_journal_embedding is not None:
+                event = stamp_journal_embedding(event, creating=False)
         # #2600: server-resolved actor as the LAST write on the envelope
         # (after event.update(extra)), matching the graph branch order.
         if _jsonl_actor is not None:
@@ -13590,6 +13621,27 @@ class TortoiseSDK:
             record["eventKind"] = event_kind
         if embedding is not None:
             record["embedding"] = embedding
+            # #11821 P0: this door is a producer of a journal payload that
+            # carries a vector (a session `:Event`, whose vector is
+            # `_session_embedding`'s — our embedder's float32 — or a value read
+            # back off the node). ⛔ It does NOT stamp here, and must not: the
+            # seam's `creating=False` stamp lives ONE layer down, in
+            # `_emit_event`'s `id=`/`**extra` branch (`if "embedding" in
+            # event:`), which is where this payload actually lands.
+            # `_journal_entity_event` hands the record to `_emit_event` with
+            # `**_journal_record_payload(event)` ~130 lines above, so a stamp
+            # HERE is dead code — its value is overwritten by the same seam a
+            # moment later (#11835 review finding 2, measured: deleting this
+            # block reddened no row anywhere; deleting the emit branch's stamp
+            # reddened two). One stamp, one home: the emit branch owns every
+            # payload that meets it — this door's, `_session_event_write`'s,
+            # `_embedding_repair_attempt`'s and `update_point`'s top-level
+            # caller vector alike.
+            # ⚠️ `creating=False` (the emit branch's) stamps no identity, and
+            # that arm DROPS identity keys the props already carried (measured:
+            # `embedding_model`/`embedding_revision`/`embedding_text_hash` are
+            # popped) — a caller-supplied one is now absent. `_META_KEYS` skips
+            # them, so no node/replay change follows.
         built = {"type": "EventRecorded", "id": event_id, **record}
         # ── #5475: the record door is a WRITE door ──
         # The payload carries kind spellings straight from frontmatter --
@@ -38061,17 +38113,21 @@ class TortoiseSDK:
         (tortoise/retrieval.py::resolve_pool_size).
 
         Point results annotated with EP breakdown. confidence_mean is THE
-        point's confidence (issue #2206 contract): the belief mean α/(α+β) of
-        the persisted posterior when EP has run, else the persisted prior
-        mean — and ``null`` + ``ep_state: "absent"`` when nothing YIELDS a mean
-        and no readable ``n.confidence`` mirror supplies one:
-        nothing persisted, a half pair, a 0/0 pair, a negative operand, or an
-        operand this process cannot read (#11702: there is then no belief
-        to report; the neutral Beta(1,1) 0.5 was indistinguishable from a
-        measured symmetric coin flip, so it is no longer substituted anywhere
-        on a read/rank surface — ``get_confidence`` remains the EP prior read
-        and still answers 0.5 there). contention/evidence stay
-        the structural edge-ratio family (a different quantity). Non-Point
+        point's confidence (issue #2206 contract), and the contract is stated
+        ONCE — as R1/R2/R3 in ``tortoise/search_engine.py``, above
+        :func:`ep_measured_cypher`, where :class:`EpBreakdown` points: a
+        readable ``n.confidence`` MIRROR leads, else α/(α+β) of the persisted
+        pair, else ``null`` + ``ep_state: "absent"``. Do NOT re-derive it from
+        shapes here: this line used to say "else the persisted prior mean",
+        which is the wrong answer for a declared Beta(3,1) beside a stored 0.9
+        (the mirror serves 0.9 — and ``update``/``update_entity`` clear a
+        stale mirror precisely so the two cannot disagree), and every list of
+        shapes this comment has carried was later falsified by a shape beside
+        it (#11702: with nothing to report the neutral Beta(1,1) 0.5 was
+        indistinguishable from a measured symmetric coin flip, so it is no
+        longer substituted on a read/rank surface — ``get_confidence`` remains
+        the EP prior read and still answers 0.5 there). contention/evidence
+        stay the structural edge-ratio family (a different quantity). Non-Point
         entities skip EP annotation. min_confidence filters on
         confidence_mean (belief); defaults to 0.0 (no filter).
 

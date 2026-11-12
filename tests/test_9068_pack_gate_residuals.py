@@ -504,6 +504,12 @@ _NON_GATE_APPROVAL_DEFS: dict[str, str] = {
 #: rather than widens and is pinned by `…the_record_door_gates_before_the_append`),
 #: and the five connector folds gated by `#9068` (each before its first
 #: `apply`, through the shared `connectors._gate_kinds`).
+#: `#11948` added a THIRTEENTH: `EventAPI.emit_belief`. It re-runs the funnel's
+#: pre-commit-point families so a malformed payload is refused at the caller
+#: instead of being dropped by its own best-effort arm (the arm swallows every
+#: exception, so a gate that lives only inside `_emit` is invisible at that
+#: door). It passes `graph_reads=False`, i.e. it runs the PURE half only — the
+#: approval half reads the graph and must stay inside the arm it is protecting.
 #: "And no others" is a claim about the BASE: the day a new gate CALL SITE — or a new
 #: gate HELPER, see `_GATE_VOCABULARY` — lands, this reds and the header has to
 #: be updated in the same PR, which is the point. A paragraph asserting a scope
@@ -511,6 +517,7 @@ _NON_GATE_APPROVAL_DEFS: dict[str, str] = {
 #: and that this module exists to close.
 _DOORS: frozenset[str] = frozenset({
     "tortoise/api.py:EventAPI._emit",
+    "tortoise/api.py:EventAPI.emit_belief",
     "tortoise/connectors/github.py:GitHubConnector._fold_webhook_event",
     "tortoise/connectors/github.py:GitHubConnector.ingest",
     "tortoise/connectors/linear.py:LinearConnector.ingest",

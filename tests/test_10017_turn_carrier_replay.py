@@ -94,6 +94,12 @@ TURN_SNAPSHOT_UNATTESTABLE_KEYS = frozenset({"status", "createdAt"})
 TURN_SNAPSHOT_BRANCH_KEYS = frozenset({
     "embedding_preserved",
     "embedding_model", "embedding_revision", "embedding_text_hash",
+    # #11821 P0: the WIDTH the snapshot's vector text was written at
+    # (`stamp_journal_embedding`'s `f32`/`f64`). Optional for the same reason as
+    # the identity stamps — the stamping call site is import-GUARDED (#5148), so
+    # a capture whose seam was unimportable journals the pre-#11821 shape — and
+    # it is a description of the journal's ENCODING, never node state.
+    "embedding_width",
     # #8488 (review round 2, P1): rides the snapshot only on the branch where
     # `TORTOISE_CONTEXT_ENRICH` was ON and the enrichment produced a text, so it
     # belongs to the OPTIONAL (branch) set — the same set the pin below holds

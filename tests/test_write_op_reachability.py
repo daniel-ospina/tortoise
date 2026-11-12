@@ -84,12 +84,23 @@ def synthetic_book(monkeypatch):
 
 
 def _tier(allowance: int, cap: int) -> dict:
+    """A minimal synthetic tier — every ``_REQUIRED_LIMIT_KEYS`` member.
+
+    ⚠️ This helper must track ``pricing._REQUIRED_LIMIT_KEYS`` or every test in
+    this file fails with a KeyError that LOOKS like a pricing bug. That is the
+    fail-closed contract working as designed (#11758 added the two storage
+    allowances; a tier that publishes none must not read as unlimited). The
+    storage values are inert here — this file prices write-op reachability —
+    but they must be PRESENT.
+    """
     return {
         "max_graphs_per_team": 1,
         "max_users_per_team": 1,
         "max_api_keys": 1,
         "included_write_ops_per_month": allowance,
         "max_graph_nodes": cap,
+        "max_postgres_storage_bytes": None,
+        "max_graph_storage_mb": 0,
         "overage": False,
     }
 

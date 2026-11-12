@@ -23,16 +23,52 @@ _PRICING_PATH = os.environ.get(
 
 _cache: dict | None = None
 
-# Keys tier_limits must expose; a tier missing any of these is a config drift
-# bug and must fail loudly (KeyError), not silently degrade to None/unlimited
-# (#750.8).
+# Keys every tier must DECLARE. ⚠️ This does NOT mean `tier_limits` EXPOSES all
+# of them: it returns a SUBSET. The two storage allowances are declared-only on
+# purpose (see `storage_limits` — exposing them would arm a BLOCKED dimension in
+# the allowance gate and answer HTTP 500 on every gated write). A tier missing
+# any of these is a config drift bug and must fail loudly (KeyError), not
+# silently degrade to None/unlimited (#750.8).
 _REQUIRED_LIMIT_KEYS = (
     "max_graphs_per_team",
     "max_users_per_team",
     "max_api_keys",
     "included_write_ops_per_month",
     "max_graph_nodes",
+    # #11758: the two purchasable storage dimensions. REQUIRED TO BE DECLARED — a
+    # tier that publishes no storage allowance must fail LOUDLY here rather than
+    # read as "unlimited storage, free", which is the false-PASS this tuple
+    # exists to stop. `null` is an ALLOWED value (it is the recorded state for
+    # the free/anon record allowance); a MISSING key is not.
+    "max_postgres_storage_bytes",
+    "max_graph_storage_mb",
 )
+
+
+#: The dimension names ``billing.storage.dimensions`` is keyed by. They are the
+#: DECLARED registry names from ``tortoise.cost_dimensions.DIMENSIONS`` — not a
+#: second vocabulary. The customer-facing words live beside them in ``label``.
+#: Declared here as the artifact's contract; ``tests/test_pricing_storage_
+#: dimensions.py`` pins them to ``allowance_gate.ALLOWANCE_KEYS`` (the keys) and
+#: to ``cost_dimensions.by_name`` (the names, units), so the artifact, the loader,
+#: the gate and the arithmetic cannot drift into four spellings.
+#: ⚠ The pin is a TEST rather than a runtime import for IMPORT-WEIGHT, not because
+#: a cycle makes it impossible — ``quota`` imports this module only inside
+#: function bodies, so ``pricing -> allowance_gate`` would in fact import cleanly.
+#: It is not taken because ``allowance_gate`` pulls in ``quota``; ``pricing`` is
+#: imported by tools, graph scripts and the `pricing-artifact` CI parity check,
+#: which must stay dependency-light. If that cost ever stops mattering, making
+#: the import real is the better fix and this note should be deleted.
+STORAGE_DIMENSIONS = ("postgres_storage", "graph_storage")
+
+#: Decimal, and it is pinned ON PURPOSE. The two meters publish DIFFERENT units
+#: (``postgres_storage`` in bytes, ``graph_storage`` in decimal MB), so a silent
+#: MiB/decimal mix is the measured error class
+#: ``docs/architecture/STORAGE-ARCHITECTURE.md`` records. One definition, one
+#: conversion, no per-caller factor. The artifact restates it NUMERICALLY in
+#: ``billing.storage.bytes_per_gb`` and a test asserts the two are EQUAL — not
+#: that some prose mentions a number, which a contradictory sentence would pass.
+BYTES_PER_GB = 1_000_000_000
 
 
 def _load() -> dict:
@@ -75,6 +111,99 @@ def tier_limits(tier: str) -> dict:
         "overage": bool(t.get("overage", False)),
     }
 
+
+def storage_limits(tier: str) -> dict:
+    """Return a tier's two storage allowances, keyed by the GATE's own keys (#11758).
+
+    ⛔ **DELIBERATELY NOT part of :func:`tier_limits`.** That dict is handed
+    around as "the org's limits" and reaches ``quota.enforce_org_limit``; the
+    allowance gate arms on *presence* — ``allowance_gate.enforce_allowances``
+    does ``if dim.limit_key not in limits: continue``
+    (``allowance_gate.py``:823). Both storage dimensions are currently
+    **BLOCKED** there (``postgres_storage`` has no per-org byte meter — a
+    per-org split would be an ALLOCATION, not a measurement; ``graph_storage``'s
+    own contract forbids capping on the ledger figure because the HNSW index is
+    under-reported 8.5x-21.7x). Putting either key into the dict every caller
+    treats as "the limits" is therefore one ``{**tier_limits(t), ...}`` away
+    from arming a blocked dimension and answering HTTP 500 on every gated
+    write. ``quota.py`` states the intended state: *"INERT BY DEFAULT: no
+    production resolver emits an ``ALLOWANCE_KEYS`` value"*. This accessor keeps
+    that true while letting the artifact carry the values a future resolver
+    will emit.
+
+    Returns ``{<allowance_key>: value | None}`` for every STORAGE dimension —
+    ``None`` meaning UNCONFIGURED (the gate's own reading of it), never 0-by-0.
+    Unknown tiers fall back to free, exactly like :func:`tier_limits`.
+
+    ⛔ FAIL-CLOSED ON A MISSING KEY, exactly like :func:`tier_limits`. This is
+    the accessor the money arithmetic reads, so a tier that omits a storage key
+    must raise here rather than read as UNCONFIGURED: unconfigured means
+    UNLIMITED downstream (``metering.storage_overage_cost_usd`` then reports
+    ``allowance_configured: False`` and a $0.00 overage), so a silently dropped
+    key would bill $0 for unbounded hot capacity while every check stayed green.
+    An explicit ``null`` still passes — that is the RECORDED free/anon state —
+    only an ABSENT key raises.
+    """
+    data = _load()
+    tiers = data.get("tiers", {})
+    t = tiers.get(tier) or tiers.get("free", {})
+    dims = storage_dimensions()
+    missing = [dim["allowance_key"] for dim in dims.values()
+               if dim["allowance_key"] not in t]
+    if missing:
+        raise KeyError(
+            f"pricing.json tier {tier!r} missing required storage allowance "
+            f"key(s): {missing} — an absent allowance reads as UNCONFIGURED "
+            f"(= unlimited) in the overage arithmetic")
+    return {dim["allowance_key"]: t[dim["allowance_key"]]
+            for dim in dims.values()}
+
+
+def storage_dimensions() -> dict:
+    """The two purchasable storage dimensions, keyed by DECLARED name (#11758).
+
+    Each entry carries the per-GB-month rate, the cost basis it is priced above,
+    the allowance key that names its per-tier included amount, and the scope
+    (``account`` — unlimited graphs, nothing per graph). Raises ``KeyError`` when
+    the artifact is missing a declared dimension, so the artifact cannot quietly
+    shrink the offer to one dimension.
+    """
+    data = _load()
+    dims = data.get("billing", {}).get("storage", {}).get("dimensions", {})
+    missing = [name for name in STORAGE_DIMENSIONS if name not in dims]
+    if missing:
+        raise KeyError(
+            f"pricing.json billing.storage.dimensions missing declared "
+            f"storage dimension(s): {missing}")
+    return {name: dims[name] for name in STORAGE_DIMENSIONS}
+
+
+def storage_overage_rate(dimension: str) -> float:
+    """The sale rate for *dimension*, in USD per GB-month (decimal GB).
+
+    Read from the artifact, never hardcoded — the whole point of moving the
+    price of record into ``product/pricing.json``. Raises ``KeyError`` for an
+    undeclared dimension rather than returning a default rate: a default rate
+    would price a dimension nobody decided.
+    """
+    dims = storage_dimensions()
+    if dimension not in dims:
+        raise KeyError(
+            f"{dimension!r} is not a declared storage dimension "
+            f"(declared: {sorted(dims)})")
+    value = float(dims[dimension]["overage_price_usd_per_gb_month"])
+    # ⛔ THE RATE IS INPUT FROM A HAND-EDITED FILE, so it needs the same
+    # fail-closed guard as ``used``/``included`` in the arithmetic. Measured
+    # before this: a rate of -85.0 produced $-8.50 (a CREDIT line nobody
+    # decided) and NaN produced a NaN cost, and both came back looking like an
+    # ordinary result. 0 IS allowed — "overage is free" is a legitimate
+    # promotion — so the bound is finite-and-non-negative, not positive.
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(
+            f"{dimension!r} overage_price_usd_per_gb_month={value!r} must be "
+            f"finite and >= 0 — a negative rate would bill a CREDIT and a NaN "
+            f"would carry an unusable figure into invoicing")
+    return value
 
 def tier_price(tier: str) -> int:
     data = _load()

@@ -2252,6 +2252,174 @@ def get_current_usage(org_id: str) -> dict:
     return _view(ops_used, ops_limit, eligible, overage_cost)
 
 
+# ── Storage overage: the TWO purchasable dimensions, per account (#11758) ────
+#
+# WHY THIS IS NOT THE WRITE-OP PATH. The write-op overage above hardcodes its
+# unit and a 10_000 BLOCK rounding step:
+#
+#     overage_units = (ops_used - ops_limit + 9999) // 10000
+#
+# That is correct for a pre-paid block of write operations and WRONG for bytes:
+# a tenant who exceeds a 1 GB record allowance by 10 MB owes for 10 MB, not for
+# the next whole block. #11758 adds two dimensions whose rate, unit and
+# allowance key ALL live in ``product/pricing.json`` — so nothing here is
+# hardcoded, and the write-op path is left EXACTLY as it is (re-pricing
+# production write-op billing is not this change; #5313 carries it).
+#
+# ⛔ WHAT THIS IS NOT. This is ARITHMETIC, not enforcement. Nothing here prices,
+# caps, throttles or refuses. The refusal half ("free/anon refuse at the
+# included amount") is ``tortoise/allowance_gate.py``, where BOTH storage
+# dimensions are currently BLOCKED on instrument defects — so no shipped path
+# can refuse on them yet, and claiming otherwise would be the false claim this
+# note exists to prevent. What IS available, and is pinned by test, is the
+# billing SEMANTICS the artifact and ``#4815`` already state: a tier that is not
+# overage-eligible cannot be billed for overage, and every paid tier can.
+
+
+def _bytes_per_unit(unit: str) -> int:
+    """How many BYTES one unit of a storage dimension is, from its DECLARED unit.
+
+    Only the two units the artifact declares are accepted. This is deliberately
+    not a permissive parser: a dimension whose unit the arithmetic does not
+    understand must fail loudly rather than be multiplied by a guess — a silent
+    MiB/decimal mix is the error class
+    ``docs/architecture/STORAGE-ARCHITECTURE.md`` records as a measured 3.59x.
+    """
+    from tortoise.pricing import BYTES_PER_GB
+
+    if unit == "bytes":
+        return 1
+    if unit == "MB":
+        # DECIMAL MB: it is BYTES_PER_GB / 1000, derived rather than restated so
+        # the artifact's own ``gb_definition`` (1 GB = 1,000 MB) is the only
+        # place the ratio is written down.
+        return BYTES_PER_GB // 1000
+    raise ValueError(
+        f"storage dimension unit {unit!r} is not one this arithmetic knows "
+        f"('bytes' or 'MB') — refusing to convert it rather than assuming")
+
+
+def storage_overage_cost_usd(tier: str, dimension: str, used, *,
+                             included=None) -> dict:
+    """Overage for ONE storage dimension, priced from the artifact (#11758).
+
+    The customer buys DATA STORED and DATA HELD HOT, **per account**, with no
+    per-graph and no per-node component (#11758 comment 6807826749; the owner's
+    correction in 6805077325). So ``used`` is an ACCOUNT TOTAL: a second graph
+    does not double the allowance and does not add a second line.
+
+    ⛔ HOW the account total is obtained DIFFERS by dimension, and only one of
+    them can be summed today: ``graph_storage`` is metered per graph, so summing
+    an account's graphs IS the account total; ``postgres_storage`` has no
+    per-org figure at all (see the ``used`` note below). "Sum your graphs" is
+    therefore correct for exactly one of the two.
+
+    Args:
+        tier: the org's tier. Decides whether overage is PURCHASABLE at all
+            (``#4815``: every paid tier is metered; free/anon are not).
+        dimension: a declared storage dimension name — ``postgres_storage``
+            (unit ``bytes``) or ``graph_storage`` (unit ``MB``). Taken from the
+            ONE declared registry, not a second spelling: an undeclared name
+            raises ``KeyError``.
+        used: the account total in the dimension's OWN unit.
+            ⛔ ``postgres_storage`` HAS NO PER-ORG BYTE METER, and this is a trap
+            for a caller, not a docstring nicety: ``cost_dimensions`` declares
+            its attribution as *"DATABASE grain — no per-org figure exists, and
+            none is invented. Per-org BYTES would be an ALLOCATION, not a
+            measurement"*, and the only shipped reader is
+            ``measure_postgres_storage()``, which returns the WHOLE database.
+            Passing that figure as ``used`` would bill every tenant for the
+            shared database's bytes — the over-charge the allowance gate
+            records as its own reason for blocking this dimension. So this
+            function can price ``postgres_storage`` only once a per-org
+            attribution exists; until then it is callable with a figure the
+            caller has some OTHER way to establish, never with the database
+            total. ``graph_storage`` has no such problem: the graph meter is
+            genuinely per-graph, and summing an account's graphs IS the account
+            total.
+        included: the tier's allowance in the same unit. Defaults to
+            ``pricing.storage_limits(tier)[allowance_key]``. ``None`` means
+            UNCONFIGURED, which the allowance gate reads as unlimited — so no
+            overage is computed and the result says so rather than reporting a
+            fabricated 0 as if it were a measurement.
+
+    Returns ``{dimension, unit, tier, used, included, allowance_configured,
+    overage_quantity, overage_gb, rate_usd_per_gb_month, overage_cost_usd,
+    overage_purchasable}``.
+
+    ⛔ ``overage_purchasable`` is a BILLING SEMANTIC, not an enforcement result:
+    it says whether this tier may be billed for overage at all. Whether a write
+    is REFUSED at the allowance is the allowance gate's answer, and for both
+    storage dimensions that gate is BLOCKED — see the section note above.
+
+    RAISES (never degrades to a zero) for an unusable input: a non-finite or
+    negative ``used``/``included``, or an undeclared dimension/unit. Coercing a
+    NaN or a non-numeric reading to ``0.0`` would present an unmeasurable figure
+    as a measured zero — the false-zero the storage gauge writer already refuses
+    (see ``record_graph_storage_reading``).
+
+    No block rounding: a byte is billed pro-rata, not in 10_000-unit steps.
+    The returned cost is UNROUNDED; cents are the invoice layer's business.
+    """
+    from tortoise.pricing import (
+        BYTES_PER_GB, storage_dimensions, storage_limits, storage_overage_rate,
+    )
+
+    dims = storage_dimensions()
+    if dimension not in dims:
+        raise KeyError(
+            f"{dimension!r} is not a declared storage dimension "
+            f"(declared: {sorted(dims)})")
+    declared = dims[dimension]
+    unit = str(declared["unit"])
+    allowance_key = str(declared["allowance_key"])
+    bytes_per_unit = _bytes_per_unit(unit)
+
+    def _number(value, field: str) -> float:
+        try:
+            num = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError(
+                f"storage overage: {field}={value!r} is not a number "
+                f"(tier={tier!r} dimension={dimension!r})") from None
+        if not math.isfinite(num) or num < 0:
+            raise ValueError(
+                f"storage overage: {field}={value!r} must be finite and >= 0 "
+                f"(tier={tier!r} dimension={dimension!r})")
+        return num
+
+    used_n = _number(used, "used")
+    if included is None:
+        included = storage_limits(tier).get(allowance_key)
+    allowance_configured = included is not None
+    overage_quantity = 0.0
+    included_n = None
+    if allowance_configured:
+        included_n = _number(included, "included")
+        overage_quantity = max(0.0, used_n - included_n)
+
+    purchasable = _overage_eligible(tier)
+    rate = storage_overage_rate(dimension)
+    overage_gb = overage_quantity * bytes_per_unit / BYTES_PER_GB
+    # A tier that cannot be billed for overage costs 0 — explicitly, and with
+    # ``overage_purchasable`` False so the caller can tell "nothing owed" from
+    # "this tier may not be charged" (the free-refuses / paid-bills split).
+    cost = overage_gb * rate if purchasable else 0.0
+    return {
+        "dimension": dimension,
+        "unit": unit,
+        "tier": tier,
+        "used": used_n,
+        "included": included_n,
+        "allowance_configured": allowance_configured,
+        "overage_quantity": overage_quantity,
+        "overage_gb": overage_gb,
+        "rate_usd_per_gb_month": rate,
+        "overage_cost_usd": cost,
+        "overage_purchasable": purchasable,
+    }
+
+
 def measure_write_ops(org_id: str) -> int:
     """FAIL-CLOSED read of one org's write-ops for its CURRENT metering window.
 
