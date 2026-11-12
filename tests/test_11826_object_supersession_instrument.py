@@ -2902,3 +2902,57 @@ def test_a_neutral_id_less_row_gets_no_chain_tail(sdk):
         assert advice not in fix, (
             f"{advice!r} is transfer advice on a row whose instruction is DELETE: "
             + fix)
+
+
+def test_an_id_less_row_never_names_a_dangling_successor(sdk):
+    """`dest` is built for ``carrier_count == 1``; the id-less arm must not reuse it.
+
+    On a dangling ``supersededBy`` the arm asserted "re-point … onto the successor
+    ('PolicyGhost')" while its own ``detail`` said no Object answers that name — a
+    destination that does not exist, in the one string the reader acts on
+    (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyGhost' REMOVE o.id", {"i": v1["id"]})
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyGhost'}) RETURN count(o)",
+              {}) == [[0]]
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == "PolicyV1")
+    fix = issue.fix
+    assert "No id-keyed repair is possible" in fix, fix
+    assert "onto the successor ('PolicyGhost')" not in fix, (
+        "no Object answers that name, so it cannot be the destination: " + fix)
+    assert "onto that successor" in fix, fix
+
+
+def test_an_id_less_row_with_an_ambiguous_successor_asks_which_one(sdk):
+    """…and with N≥2 carriers it must carry the SAME "name the one meant" demand.
+
+    The other arms build ``prefix`` long after the id-less arm has returned, so an
+    ambiguous id-less row named a single successor that the repair cannot pick —
+    while its own ``detail`` said the repair must name the Object meant
+    (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+    _q(sdk, "CREATE (:Object {id:'twin-idless', name:'PolicyV2', "
+            "objectKind:'other', status:'live'})", {})
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) RETURN count(o)",
+              {}) == [[2]]
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == "PolicyV1")
+    fix = issue.fix
+    assert "carried by 2 Objects" in fix, (
+        "an ambiguous name needs the same demand in this arm: " + fix)
+    assert "onto the intended one by ID" in fix, fix
+    assert "onto the successor ('PolicyV2')" not in fix, (
+        "the repair cannot pick one, so it must not name one: " + fix)

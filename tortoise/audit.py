@@ -1394,6 +1394,30 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                        "by the repair")
         return detail
 
+    def _ambiguity_prefix(s: dict) -> str:
+        """The "FIRST name the successor meant" demand, for N≥2 carriers.
+
+        ⛔ One source, because TWO arms name a destination: the resolvable one and the
+        id-less one, which returns before the resolvable arm's ``prefix`` was ever
+        built — so it asserted a single successor for an ambiguous name whose own
+        ``detail`` says the repair must pick one (#12210 review, P3). With N≥2 the
+        refusal cannot be ATTRIBUTED to the name (``carrier_status`` is one arbitrary
+        row — round 19), but an all-archived population is reachable and a re-point
+        onto a dead carrier builds no factor (measured: the row goes quiet with the
+        belief still gone).
+        """
+        if s["carrier_count"] <= 1:
+            return ""
+        return (f"FIRST name the successor meant: {_quoted(s['sup_sb'])} is "
+                f"carried by {s['carrier_count']} Objects (#3573) and this "
+                "check cannot pick one, so re-point onto the intended one "
+                "by ID — and confirm THAT one is live and one EP reads as an "
+                "input (``is_operator`` absent or ``false``"
+                + (" and no ``op_type`` set), because an edge written to a dead "
+                   "or shaped node builds no factor. " if not s["is_operator"]
+                   else "), because an edge written to a dead node builds no "
+                        "factor (an ``op_type`` only is ADMITTED here). "))
+
     def _chain_tail(s: dict) -> str:
         """What to do when the named successor is not a live target.
 
@@ -1783,8 +1807,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                    # before: on a flowing row it named the successor unconditionally,
                    # so an archived / retracted / draft one left the row quiet over a
                    # claim whose support was never carried (measured, #12210 review).
-                   f"re-point this {s['edge_type']} input onto {dest}, "
-                   "deleting the edge into the old endpoint")
+                   # ⛔ ``dest`` is built for ``carrier_count == 1`` — it either
+                   # names the single successor or withdraws it. Interpolating it
+                   # here asserted a destination for a DANGLING name (count 0, while
+                   # this finding's own ``detail`` says no Object answers it) and for
+                   # an AMBIGUOUS one (count ≥ 2, while the other arms demand the
+                   # reader pick one first). Measured on both (#12210 review, P3).
+                   _ambiguity_prefix(s) + (
+                       f"re-point this {s['edge_type']} input onto "
+                       + (dest if s["carrier_count"] == 1 else "that successor")
+                       + ", deleting the edge into the old endpoint"))
                 + ". "
                 # ⛔ ``tail`` IS guarded here, and the guard is live: this arm is
                 # ``sup_id is None``, not ``carrier_count == 0`` — the
@@ -1869,22 +1901,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                            "write the equivalent edge onto that successor and "
                            "delete this one"))
             return fix
-        prefix = ""
-        if s["carrier_count"] > 1:
-            # ⛔ …and CONFIRM the intended carrier is one EP reads: with N≥2 the
-            # refusal cannot be ATTRIBUTED to the name (``carrier_status`` is one
-            # arbitrary row — round 19), but an all-archived population is reachable
-            # and a re-point onto a dead carrier builds no factor (measured: the row
-            # goes quiet with the belief still gone, #12210 review P3).
-            prefix = (f"FIRST name the successor meant: {_quoted(s['sup_sb'])} is "
-                      f"carried by {s['carrier_count']} Objects (#3573) and this "
-                      "check cannot pick one, so re-point onto the intended one "
-                      "by ID — and confirm THAT one is live and one EP reads as an "
-                      "input (``is_operator`` absent or ``false``"
-                      + (" and no ``op_type`` set), because an edge written to a dead "
-                         "or shaped node builds no factor. " if not s["is_operator"]
-                         else "), because an edge written to a dead node builds no "
-                              "factor (an ``op_type`` only is ADMITTED here). "))
+        prefix = _ambiguity_prefix(s)
         if s["shape"] and not s["is_operator"]:
             # ⛔ NEITHER arm: "write the equivalent edge" would change nothing, so the
             # repair is to clear the SHAPE **and** move the edge — measured: clearing
