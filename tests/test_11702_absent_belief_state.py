@@ -5990,6 +5990,49 @@ _MIRROR_NEGATED = re.compile(
 _MIRROR_SOURCE_BROKEN_BY_DENIAL = re.compile(
     r"\bmirror\b(?:\s+[\w'’]+){0,3}\s+suppl(?:y|ies|ying)\b", re.IGNORECASE)
 
+#: The MENTION of the mirror, in EVERY form the prose uses — `mirror`, `mirrors`,
+#: `mirrored`, `mirroring`. Defined ONCE and shared by the predicate (which
+#: refuses on a denied mention) and the diagnosis (which reports that same
+#: mention as the cause), for the reason `_ABBREV_LOOKBEHIND` is: two copies let
+#: one arm drift, and here a drift means the message names a cause the guard did
+#: not decide on.
+#:
+#: The class was widened TWICE by review, each time one morphology short:
+#: `\bmirror\b` matched no `mirrors`, so a denial written against `the
+#: n.confidence mirrors` was never scanned while an unrelated singular
+#: possessive certified the sentence; `\bmirrors?\b` left `mirrored` /
+#: `mirroring` equally invisible, and the corpus writes those on 39 sentences,
+#: so the wording is IN-TREE for the next claim sentence (measured: widening
+#: changes 0 corpus verdicts — every corpus claim sentence uses the singular
+#: possessive). A plural POSSESSIVE (`mirrors' value`) still matches no source
+#: shape; that false block is residual 1 and is deliberate.
+_MIRROR_MENTION = re.compile(r"\bmirror(?:s|ed|ing)?\b", re.IGNORECASE)
+
+
+def _denied_mirror_mention(sentence: str) -> str | None:
+    """The first mirror mention whose OWN clause carries a `_MIRROR_NEGATED` word.
+
+    `None` when every mention's clause is clean. ONE shared definition, used by
+    `_mirror_sources_the_value` (which refuses when it is not `None`) and by
+    `_mirror_refusal_reason` (which names it as a cause), so the two cannot
+    disagree about which leg refused.
+
+    EVERY mention is checked, not only the ones that matched a source construct:
+    a denial can sit on a BARE mention in an earlier clause (`the mirror never
+    leads it, but the mirror's value applies elsewhere`), and a construct-scoped
+    scan let that through — the denied mention carries no construct, so nothing
+    scanned its clause (review, measured). Refusing on ANY denied mention is the
+    fail-closed direction, and it also subsumes the construct's own text: the
+    span after the noun runs to the next break, so it covers `'s value, never
+    the prior's`.
+    """
+    for mention in _MIRROR_MENTION.finditer(sentence):
+        before = _MIRROR_CLAUSE_BREAK.split(sentence[:mention.start()])[-1]
+        after = _MIRROR_CLAUSE_BREAK.split(sentence[mention.end():])[0]
+        if _MIRROR_NEGATED.search(f"{before} {mention.group(0)} {after}"):
+            return mention.group(0)
+    return None
+
 
 def _belief_prose(rel: str) -> str:
     """One normalised string for a module: comment markers gone, whitespace
@@ -6028,6 +6071,9 @@ def _mirror_refusal_reason(sentence: str) -> str:
                "`no longer` / `cannot` / any `-n't` contraction); if that "
                "word negates something else, reword so it is not in the same "
                "clause as a mirror mention")
+    _missing = ("names a mirror but NOT as the value's source — it uses no "
+                "`mirror's value` or `mirror supplies` construct (see "
+                "`_MIRROR_SOURCE`)")
     if _MIRROR_SOURCE.search(sentence):
         return _denial
     # …and a construct that could not match because a negated AUXILIARY broke
@@ -6041,9 +6087,19 @@ def _mirror_refusal_reason(sentence: str) -> str:
     broken = _MIRROR_SOURCE_BROKEN_BY_DENIAL.search(sentence)
     if broken and _MIRROR_NEGATED.search(broken.group(0)):
         return _denial
-    return ("names a mirror but NOT as the value's source — it uses no "
-            "`mirror's value` or `mirror supplies` construct (see "
-            "`_MIRROR_SOURCE`)")
+    # ⛔ BUT a sentence can be refused by BOTH legs — no source construct AND a
+    # denial in a mention's own clause — and then naming only one cause sends
+    # the fixer to a remedy that does not clear the red (measured on THIS
+    # file's headline shape, `…; the mirror never leads it.`: the report said
+    # "no source construct", and adding one left the sentence refused because
+    # the denial was still in the clause). Both causes are therefore named, in
+    # the order the fixer has to address them. A clause that legitimately
+    # negates something else keeps the truthful `_denial` wording — reword so
+    # the negator is not in the mention's clause — so this does not tell anyone
+    # to delete a word that belongs there.
+    if _denied_mirror_mention(sentence) is not None:
+        return f"{_denial}; {_missing}"
+    return _missing
 
 
 def _mirror_sources_the_value(sentence: str) -> bool:
@@ -6123,31 +6179,12 @@ def _mirror_sources_the_value(sentence: str) -> bool:
     inversion exists".
     """
     # EVERY mirror mention is checked, not only the ones that matched a source
-    # construct. A denial can sit on a BARE mention in an earlier clause
-    # (`the mirror never leads it, but the mirror's value applies elsewhere`),
-    # and a construct-scoped scan let it through: the denied mention carries no
-    # construct, so nothing scanned its clause (review, measured). Refusing on
-    # ANY denied mention is the fail-closed direction, and it also subsumes the
-    # construct's own text — the span after the noun runs to the next break, so
-    # it covers `'s value, never the prior's`.
-    #
-    # The mention is `mirrors?` — the PLURAL counts. With the bare `\bmirror\b`
-    # a plural mention was invisible to this loop, so a denial written against
-    # `the n.confidence mirrors` was never scanned while an unrelated singular
-    # possessive elsewhere in the sentence satisfied `_MIRROR_SOURCE`: the
-    # inversion of the exact class this guard exists for, CERTIFIED and NOT
-    # covered by residual 2 (whose scope is a clause carrying NO mention — this
-    # one carries a plural one). Measured on the shipped code: "…the n.confidence
-    # mirrors are never what the field serves; the mirror's value is documented
-    # for another column." qualified the claim. `mirrors?` changes NO corpus
-    # verdict (measured: 92 of the corpus's sentences carry a plural-only
-    # mention, 0 change verdict) — every corpus claim sentence uses the
-    # singular possessive.
-    for mention in re.finditer(r"\bmirrors?\b", sentence, re.IGNORECASE):
-        before = _MIRROR_CLAUSE_BREAK.split(sentence[:mention.start()])[-1]
-        after = _MIRROR_CLAUSE_BREAK.split(sentence[mention.end():])[0]
-        if _MIRROR_NEGATED.search(f"{before} {mention.group(0)} {after}"):
-            return False
+    # construct — see `_denied_mirror_mention`, which owns the sweep and the
+    # measured history of the mention class (`mirror` was not `mirrors` was not
+    # `mirrored`/`mirroring`). ONE definition, so this predicate and the
+    # diagnosis cannot disagree about which leg refused.
+    if _denied_mirror_mention(sentence) is not None:
+        return False
     return bool(_MIRROR_SOURCE.search(sentence))
 
 
@@ -6624,6 +6661,19 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             "Its confidence_mean IS the declared PRIOR mean — the n.confidence "
             "mirrors are never what the field serves; the mirror's value is "
             "documented for another column.",
+            # …and the VERB forms of the mention, `mirrored` / `mirroring`, one
+            # morphology over from the plural. `\bmirrors?\b` left them equally
+            # invisible to the scan, and the corpus writes them on 39 sentences,
+            # so the wording is in-tree for the next claim sentence (measured).
+            # Widening the class to `mirror(?:s|ed|ing)?` changes 0 corpus
+            # verdicts — every corpus claim sentence uses the singular
+            # possessive.
+            "Its confidence_mean IS the declared PRIOR mean — the field never "
+            "serves what n.confidence mirrored; the mirror's value is "
+            "documented for another column.",
+            "Its confidence_mean IS the declared PRIOR mean — n.confidence "
+            "mirroring is never what the field serves; the mirror's value is "
+            "documented for another column.",
             # the denial BEFORE the construct, in its own clause: this row's
             # ONLY defence is the prefix leg of the scan, so dropping that leg
             # reds here instead of shipping silently.
@@ -6773,6 +6823,24 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             missing_shape), (
             "a missing source SHAPE must not be diagnosed as a denial: "
             f"{missing_shape!r}")
+    # ⛔ BUT a sentence refused by BOTH legs — a denial in a mention's clause AND
+    # no source construct — must be told BOTH, in that order. This is the
+    # #11993 headline shape, and it used to be told only "no source construct":
+    # applying that advice (adding one) left the sentence REFUSED, because the
+    # denial was still in the clause — advice that cannot clear the red (review,
+    # measured). A control row per cause, because either half can be dropped
+    # with the rest of the file green.
+    _headline = ("A prior-only claim's confidence_mean IS the declared PRIOR "
+                 "mean; the mirror never leads it.")
+    assert "NEGATED clause" in _mirror_refusal_reason(_headline), (
+        "the denial leg must be named for the headline shape")
+    assert "NOT as the value's source" in _mirror_refusal_reason(_headline), (
+        "the missing-source leg must be named too — both remedies are needed")
+    assert "NEGATED clause" in _mirror_refusal_reason(
+        "Its confidence_mean IS the PRIOR mean — the field never serves what "
+        "n.confidence mirrored; the mirror's value is documented elsewhere."), (
+        "the diagnosis must scan the WIDENED mention class too, not just "
+        "`mirror`/`mirrors`")
     # The sentence→cause WIRING is a leg of its own: the allow-list trade-off
     # is justified by the message, so the message must be pinned, not merely
     # present (review: reverting the f-string left 125 green).
