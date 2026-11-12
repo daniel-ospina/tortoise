@@ -1322,7 +1322,7 @@ def test_a_4_3_change_must_be_quoted_verbatim_by_some_changelog_block() -> None:
 
 
 def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
-    """A §4.3-recording release must name a comment, in one of the fleet's forms.
+    """A §4.3-recording release must cite a comment id, in one of the enumerated forms.
 
     The file's CRITICAL RULE names a PERSON, so the entry has to name where that
     person's answer lives. The sibling entries do it by comment id —
@@ -1370,9 +1370,15 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
         # newest block quoteless, the sibling pin green, and this arm disabled.
         # Measured; see the SCOPE paragraph above and #12068.
         return
-    # Accept the forms the fleet actually writes: ``comment 1234567890``,
-    # ``comment `1234567890` ``, ``comment-id: 1234567890``, and the permalink
-    # ``#issuecomment-1234567890``. A BARE ``(1234567890)`` is deliberately NOT
+    # Accept these ENUMERATED forms, each measured against this detector:
+    # ``comment 1234567890``, ``comment `1234567890` ``, ``comment-id: 1234567890``,
+    # and the permalink ``#issuecomment-1234567890``.
+    # ⛔ THE PLURAL ``comments 1234567890`` IS REFUSED even though the file itself
+    # uses that style (v3.32, ``docs/ONTOLOGY-CHANGELOG.md:192``): accepting it
+    # re-opens the issue-number arm below. A reader who hits a red on that form is
+    # looking at a deliberate refusal, not a broken pin — rewrite it in the
+    # singular or as a permalink.
+    # A BARE ``(1234567890)`` is deliberately NOT
     # accepted — the pin cannot tell it from a version or an issue number, and a
     # citation a reader cannot resolve is the state this pin exists to refuse.
     # ⛔ THE TOKEN MUST BE ADJACENT TO THE DIGITS. An earlier cut allowed up to 12
@@ -1385,9 +1391,11 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
             r"#issuecomment-(\d{6,})|comment(?:-id)?\s*[:`]?\s*(\d{6,})", block)
     ]
     assert cited, (
-        "the newest changelog block records the §4.3 clause but names no comment "
-        "id, so its owner approval has no home a reader can verify — cite the "
-        "comment that records it (``comment <id>`` or the permalink)")
+        "the newest changelog block records the §4.3 clause but carries no comment "
+        "id in an accepted form, so its owner approval has no home a reader can "
+        "verify — cite the comment that records it (``comment <id>`` or the "
+        "permalink). NOTE: the plural ``comments <id>`` is refused on purpose; if "
+        "you cited two ids that way, rewrite them in the singular.")
 
 
 def _assert_no_block_records_a_version_above_the_declared_one(
