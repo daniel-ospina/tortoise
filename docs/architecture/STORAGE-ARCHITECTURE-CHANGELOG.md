@@ -2241,3 +2241,17 @@ which holds the method ruling, the executing surface of the move, the window pol
 (M1–M5) that gate it. Two corrections belong to this entry because the design document states the design and
 not the history: the earlier *"5.6 KB vs 1 KB"* and *"19.4 MB as a 2026-11-04 measurement"* figures recorded
 above stand as corrected there, and neither is an input to the 2026-11-07 decision.
+
+**2026-11-12 — `#11987`.** §13's read-site table GAINED **row 41**,
+`goal_judgement.py::latest_readings` — the reader that `#11942`'s new module shipped without a row for. The
+site was already DERIVED (`tests/_about_call_time_census.py` resolves the relationship type through the local
+`where` the reader builds its pattern into, and keys the site on the enclosing symbol), so it owned neither a
+row nor an `EMPTY_PATTERN` entry, and the guard reddened in the REQUIRED `test (e)` shard — which is what kept
+`python-ci-gate` red for every PR while `main` carried it. It is a ROW rather than a `_SITE_ALIASES` alias
+because no existing row names `goal_judgement.py` or a constant that site consumes. Reach is `write path`:
+`judge` reads the edge and `judge_and_record` then WRITES the judgement claim and supersedes its predecessor,
+and no MCP tool, SDK method or REST route reaches the module. **Only ONE derived figure moved — read sites
+39 → 40.** Customer-callable stays **18**, distinct doors stay **21** (SDK doors 7, MCP 10, REST 4) and cell
+occurrences stay **30**, because row 41's reach cell names no door and is not `customer-callable`;
+`EXTRACTOR-V4-ARCHITECTURE.md` §13.8 states only the customer-callable and door figures, so it did not move.
+The gap at 36 stays a gap, and row 41 is appended rather than renumbering the tail.

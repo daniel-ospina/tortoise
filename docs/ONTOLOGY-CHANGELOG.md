@@ -33,33 +33,23 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
-> **Changelog v3.34 (2026-11-12 — issue #11824 — the §4.3 Object vocabulary is scoped, and `draft` is confirmed):**
+> **Changelog v3.34 (2026-11-12 — issue #11824 — the successor clause becomes a definition of the word):**
 >
-> **Owner approval of the exact changes** is on record on #11824 — **comment `6815950417`** (2026-11-12,
-> the DECISION RELAY, which relays the owner's answers verbatim after three lanes measured that they had
-> never been written down where a lane could read them). It covers **both** halves of this entry: the
-> **three-item amendment** was answered `ok`, and restating clause 3 as a **definition of the word** was
-> answered `ok, execute`. This entry cites that comment id for the reason the sibling entries do
-> (`#11827 (comment 6805834755)`, `#11083 (comment 6667121779)`): an approval asserted with no home is the
-> artifact grading itself, which is exactly what the pointer carried before the relay — it named an `ok`
-> that was on no record anywhere. This entry records the change; **v3.33 → v3.34** because one sentence
-> cannot carry two meanings under one version, and a citation to `v3.33` must not be ambiguous between the
-> sentence that landed on 2026-11-11 and this one. The build of the guard is still not part of this change
-> — this is the model.
+> **Owner approval of the exact changes** is on record on #11824 (comment `6815950417`, the decision relay:
+> it quotes the owner's verbatim answers and states each one's provenance). This entry records the change;
+> **v3.33 → v3.34** because one sentence cannot carry two meanings under one version, and a citation to
+> `v3.33` must not be ambiguous between the sentence that landed on 2026-11-11 and this one. The build of
+> the guard is still not part of this change — this is the model.
 >
-> **v3.34 lands the §4.3 lifecycle sentence with three scopes fixed AND clause 3 restated as a definition of
-> the word — and nothing else.** Quoted below is the sentence as it is LANDED in `docs/ONTOLOGY.md` §4.3.
-> The quote and the landed row must agree: the approval in `6815950417` is an approval of exact text, so a
-> changelog quoting a text the model does not carry is a false record rather than a paraphrase.
+> **v3.34 lands this sentence, and this is the sentence the file carries:**
 >
-> > **Core Object types accept `draft`, `live`, `superseded`, `deprecated`, `archived`,
-> > `in_progress`, `completed`; an Object created without a status stores none and reads as `live`
-> > (#9974 R1 — never a fabricated `live` write). `superseded` means *replaced by*: it names the
-> > successor, and a retirement with no successor is `archived`; `deprecated` is an independent
-> > terminal state and needs no successor. A journal rebuild is unchanged and still restores a
-> > supersession recorded without a successor. `outdated` and `retracted` are not Object lifecycle
-> > words (read-only, retained for legacy data). Pack-declared kinds validate against their own
-> > declared words.**
+> > **Core Object types accept `draft`, `live`, `superseded`, `deprecated`, `archived`, `in_progress`,
+> > `completed`; an Object created without a status stores none and reads as `live` (#9974 R1 — never a
+> > fabricated `live` write). `superseded` means *replaced by*: it names the successor, and a retirement
+> > with no successor is `archived`; `deprecated` is an independent terminal state and needs no successor.
+> > A journal rebuild is unchanged and still restores a supersession recorded without a successor.
+> > `outdated` and `retracted` are not Object lifecycle words (read-only, retained for legacy data).
+> > Pack-declared kinds validate against their own declared words.**
 >
 > **What each scope fixes, and why the previous wording could not stand.** (1) **`draft` stays** — the
 > owner's ruling is that an Object may be a draft; what changes is that the sentence no longer implies the
@@ -67,20 +57,22 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > `coalesce($st,'live')` was removed as a fabricated birth in #9974 R1. (2) *"a removal with no successor
 > is `archived`"* redirected **every** `deprecated` write to `archived`, because a deprecated Object is
 > terminal and by definition has no successor — erasing the difference between *something replaced this*
-> and *this was wrong*. The clause is now scoped to a **replacement**, and `deprecated` is stated as an
-> independent terminal state. (3) **The successor clause is stated as a DEFINITION OF THE WORD, not as a description of a door.** The
+> and *this was wrong*. The clause is now stated through the replacement reading ("`superseded` means
+> *replaced by*: it names the successor"), and `deprecated` is stated as an independent terminal state. ⚠️ The
+> landed wording still says *"a **retirement** with no successor is `archived`"*, and `deprecated` is a
+> retirement — so the two clauses sit in tension even with the `deprecated` carve-out beside them. That is
+> **owner-approved text**, so it is a follow-up on #11824, not a defect fixed here. (3) **The successor clause is stated as a DEFINITION OF THE WORD, not as a description of a door.** The
 > previous wording — *"at the write door `superseded` requires the successor"* — was MEASURED FALSE of the
 > generic doors (`create_object(..., status='superseded')` and `update_entity(<object>, status='superseded')`
 > both store `status='superseded'` with `supersededBy` absent), so a guard builder reading it concluded the
 > door was already covered or built a refusal `sdk.py` calls an **over-block**. The clause now says what the
 > word MEANS — *`superseded` means **replaced by**: it names the successor, and a retirement with no
-> successor is `archived`* — which is true of the vocabulary and enforceable by the unbuilt guard.
-> ⛔ **It does NOT dissolve `sdk.py`'s over-block note, and this entry no longer claims it does.** That note
-> stands for the `status='superseded'`-with-no-carrier shape, because `archived` is *retirement*, not *no
-> longer current with the replacement not yet known* — the state the extractor's owner-ruled *"mark stale
-> now, supersede on re-inference"* policy needs (see the OWED note below). A definition does not make a
-> successorless `superseded` **wrong**; it makes it the wrong *word*, and the vocabulary has not yet been
-> given the right one. The **journal rebuild**
+> successor is `archived`* — which is true of the vocabulary and enforceable by the unbuilt guard, because
+> `archived` is a legal successorless route for a **retirement**. ⚠️ **That does NOT retire `sdk.py`'s
+> over-block objection**, and an earlier draft of this entry wrongly said it did. The shape `sdk.py` protects
+> is not a retirement: it is *no longer current, replacement not yet known* — the state the extractor's
+> owner-ruled policy needs, and one `archived` cannot express (see OWED below). So that objection **still
+> stands for that shape**, and the guard must not refuse it on the strength of this clause alone. The **journal rebuild**
 > carve-out is kept and must be: `_fold_object_superseded` folds `supersededBy` from
 > `ev.get("supersedes_by") or ""`, and `sdk.py` records the id-only legacy `ObjectSuperseded` as a
 > legitimate record row, so a refusal at the rebuild would break §11's reconstruction guarantee.

@@ -12,17 +12,22 @@ Covers plan checks #1-#10 (T7 of docs/plans/2026-08-08-657-legal-pages-plan.md):
       TORTISE_HOST_CHECK; product.html's footer is covered by the tortoise-host
       half only. /signin and /welcome are NOT in either set: both redirect to
       /auth, which is already covered.
-  #5  company-host redirects, split by ORIGIN (#4054): the tortoise-only pages
-      (docs, FAQ, security, self-hosted, the 4 legal pages, signin) 301 → the
-      exact tortoise host URL (canonical consolidation, 2026-08-17); the
-      app-only pages (auth, signup, welcome, invite-accept)
+  #5  company-host redirects, split by ORIGIN (#4054) and INVERTED by #11762:
+      `premiselabs.co` is the ONE marketing host now. The product set (docs, FAQ,
+      security, self-hosted, license, design-partners-intro, investors) 301 →
+      `premiselabs.co/tortoise/…`; the pages that govern the BUSINESS (privacy,
+      tos, dpa) are SERVED at the ROOT and are not redirected; `/signin` is an
+      alias for an app-origin page and 301s → `app.premiselabs.co/auth` in ONE
+      hop; the app-only pages (auth, signup, welcome, invite-accept)
       301 → app.premiselabs.co on EVERY host, because this project no longer
-      holds their assets. Dev/preview keep the tortoise-only pass-through
-      (200), and the tortoise-host copies 200 (gated). `aviso-privacidad` was
-      RETIRED in #9486 and now 301s to `/privacy` on every host — it is no
-      longer a canonical-consolidation subject, and its hop has its own test.
-  #6  middleware root rewrites — tortoise.* → product marker,
-      premiselabs.co → index marker (gated)
+      holds their assets. Dev/preview keep the product-set pass-through (200),
+      and the PRODUCT-host copies 301 onto the company host (gated).
+      `aviso-privacidad` was RETIRED in #9486 and 301s to `/privacy` on every
+      host — it is no longer a canonical-consolidation subject, and its hop has
+      its own test.
+  #6  middleware routing — the product host's root 301s onto
+      `premiselabs.co/tortoise`; premiselabs.co serves the index marker and
+      `/tortoise` serves the product marker (gated)
   #7  same-viewport acceptance (.legal-accept vs .providers + #btn-submit at
       1280x720 AND 375x667) + DOM parentage + mocked email signup + mocked
       GitHub OAuth click. Run on the APP origin, which serves the page and the
@@ -604,8 +609,8 @@ def _has_blog_entry(content: str) -> bool:
 
     `href="/blog"` (the index) and `/blog/<slug>` (a post — its own nav links
     back) both count. A root-relative href is accepted as written; an absolute
-    one must name a host the site owns, so `premiselabs.co/blog` (which 301s to
-    the tortoise host) counts while a typo'd or third-party host does not. And
+    one must name a host the site owns, so `premiselabs.co/blog` (where the blog
+    is SERVED since #11762) counts while a typo'd or third-party host does not. And
     because the extractor reads anchors, a `<link rel="prefetch">` is not a way
     in.
     """
@@ -787,15 +792,26 @@ def test_footer_legal_links_on_all_site_pages(page: Page) -> None:
 
 @TORTOISE_HOST_SKIP
 def test_tortoise_host_footer_half(page: Page) -> None:
-    """TORTISE-HOST half: the middleware rewrites / → product.html on the
-    tortoise host, so the product footer must be served there too. Runs only
-    when TORTISE_HOST_CHECK == 1 (stale-DNS runs skip, never red)."""
+    """TORTISE-HOST half: the product host now 301s its root onto the ONE
+    marketing host (#11762), so this asserts BOTH the redirect and that the
+    canonical page a visitor lands on carries the product footer.
+
+    Runs only when TORTISE_HOST_CHECK == 1 (stale-DNS runs skip, never red)."""
     host = urlsplit(TORTISE_HOST).hostname or "tortoise.premiselabs.co"
     spoof = host if host.startswith("tortoise.") else "tortoise.premiselabs.co"
-    resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof}, timeout=15_000)
-    assert resp.status == 200, f"tortoise host root returned {resp.status}"
-    body = resp.text()
-    _assert_serves_product(body, "tortoise host root (footer half)")
+    resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof},
+                            timeout=15_000, max_redirects=0)
+    assert resp.status == 301, (
+        f"tortoise host root returned {resp.status} (expected a 301 to the canonical "
+        "product URL since #11762 — the product host serves nothing itself)"
+    )
+    assert resp.headers.get("location") == "https://premiselabs.co/tortoise", (
+        f"tortoise root redirects to {resp.headers.get('location')!r}"
+    )
+    # The canonical target, read same-origin (BASE_URL is the company host in a
+    # production run) so this half never depends on tortoise DNS.
+    body = _goto(page, BASE_URL + "/tortoise")
+    _assert_serves_product(body, "the canonical product URL (footer half)")
     _footer_links_present(body)
 
 
@@ -825,20 +841,24 @@ def test_company_root_links_to_the_blog(page: Page) -> None:
 def test_tortoise_root_links_to_the_blog(page: Page) -> None:
     """TORTISE-HOST half (#3950): the page the owner actually complained about.
 
-    The middleware rewrites `/` to `product.html`, so this is the served landing
-    page. Gated by TORTISE_HOST_CHECK exactly like the footer half — a stale-DNS
-    run skips (green-with-annotation), never reddens.
+    The product host's root is now a 301 onto `premiselabs.co/tortoise` (#11762), so
+    the SERVED landing page is the canonical one — that is where the blog entry
+    point is asserted. Gated by TORTISE_HOST_CHECK exactly like the footer half —
+    a stale-DNS run skips (green-with-annotation), never reddens.
     """
     host = urlsplit(TORTISE_HOST).hostname or "tortoise.premiselabs.co"
     spoof = host if host.startswith("tortoise.") else "tortoise.premiselabs.co"
-    resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof}, timeout=15_000)
-    assert resp.status == 200, f"tortoise host root returned {resp.status}"
-    body = resp.text()
-    _assert_serves_product(body, "tortoise host root (blog entry point)")
+    resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof},
+                            timeout=15_000, max_redirects=0)
+    assert resp.status == 301, (
+        f"tortoise host root returned {resp.status} (expected a 301, #11762)"
+    )
+    body = _goto(page, BASE_URL + "/tortoise")
+    _assert_serves_product(body, "the canonical product URL (blog entry point)")
     assert _has_blog_entry(body), (
-        "tortoise.premiselabs.co/ carries no /blog entry point (#3950) — this is the "
-        "exact page the owner reported as unreachable. It must offer the blog in the "
-        "hero's secondary-link row (above the fold) and in the footer."
+        "the canonical product page carries no /blog entry point (#3950) — this is the "
+        "page the owner reported as unreachable. It must offer the blog in the hero's "
+        "secondary-link row (above the fold) and in the footer."
     )
 
 
@@ -848,37 +868,39 @@ def test_tortoise_root_links_to_the_blog(page: Page) -> None:
 
 
 def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
-    """UNCONDITIONAL consolidation half (#5, 2026-08-17), split by ORIGIN in
-    #4054.
+    """The ONE marketing host (#11762) — where each surface answers on
+    premiselabs.co, split by ORIGIN in #4054.
 
-    TORTOISE_ONLY (docs, FAQ, security, self-hosted, the 4 legal pages,
-    signin, design-partners-intro, investors) is canonical on
-    tortoise.premiselabs.co. `aviso-privacidad` was retired in #9486 (it now
-    301s to /privacy — `test_retired_aviso_redirects_to_privacy`).
-    APP_ONLY (auth, signup, welcome, invite-accept) moved to the APP origin —
-    the BFF and the three pages it serves live in the `tortoise-dashboard`
-    project — so those 301 to app.premiselabs.co, NOT to the tortoise host.
+    Epic #11762 INVERTED the 2026-08-17 consolidation: `premiselabs.co` is now the
+    only marketing host, so this test answers three different questions about the
+    same paths rather than one question about one set.
 
-    On the exact premiselabs.co hostname the middleware 301s the tortoise-only
-    set; redirect targets are constants, so this is safe on stale-DNS runs.
-    Local dev / *.pages.dev previews keep the pass-through for that set (not
-    indexed; the suite runs against a dev server). The APP_ONLY 301s apply on
-    EVERY host, though: this project can no longer render those pages (the
-    assets moved with the BFF), so a dev request for one must not fall through
-    to a deleted asset. /signin is the marketing-side redirect — it 301s to
-    /auth, which then lands on the app origin.
+      - the PRODUCT set (docs, FAQ, security, self-hosted, license,
+        design-partners-intro, investors) lives UNDER `/tortoise`, so the company
+        host 301s the bare paths there;
+      - the pages that govern the BUSINESS (privacy, tos, dpa) stay at the ROOT and
+        are SERVED here — they are NOT redirected any more;
+      - `/signin` is an alias for an app-origin page, so it resolves there in ONE
+        hop (it is deliberately NOT moved under `/tortoise`, which would give it a
+        second, wrong canonical).
+
+    APP_ONLY (auth, signup, welcome, invite-accept) moved to the APP origin — the
+    BFF and the three pages it serves live in the `tortoise-dashboard` project — so
+    those 301 to app.premiselabs.co on EVERY host, unchanged by the host move.
+
+    Redirect targets are constants, so this is safe on stale-DNS runs. Local dev /
+    *.pages.dev previews keep the pass-through for the product set (not indexed; the
+    suite runs against a dev server).
     """
     prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
-    # `/aviso-privacidad` LEFT this tuple in #9486: the Spanish LFPDPPP notice was
-    # retired (the controller is UK-resident), so the route 301s to `/privacy`
-    # rather than to the tortoise host — `test_retired_aviso_redirects_to_privacy`
-    # pins that hop instead.
-    tortoise_only = ("/docs", "/faq", "/security", "/self-hosted", "/privacy",
-                     "/tos", "/license", "/dpa", "/signin",
-                     "/design-partners-intro", "/investors")
+    # `/aviso-privacidad` is NOT here: it is retired (#9486) and 301s to /privacy —
+    # `test_retired_aviso_redirects_to_privacy` pins that hop.
+    product_set = ("/docs", "/faq", "/security", "/self-hosted", "/license",
+                   "/design-partners-intro", "/investors")
+    legal_at_root = ("/privacy", "/tos", "/dpa")
     app_only = ("/auth", "/signup", "/welcome", "/invite-accept")
 
-    for path in tortoise_only + app_only:
+    for path in product_set + legal_at_root + app_only + ("/signin",):
         r = page.request.get(BASE_URL + path, timeout=15_000, max_redirects=0)
         location = r.headers.get("location")
         if path in app_only:
@@ -888,21 +910,34 @@ def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
             assert location == expected, (
                 f"{path} redirects to {location!r} (expected {expected})"
             )
-        elif prod_company:
+        elif path == "/signin":
+            if prod_company:
+                # One hop to the app origin: the legacy alias points at `/auth`,
+                # which IS an app-origin page. Never under `/tortoise`.
+                assert r.status == 301, f"/signin on {BASE_URL} → {r.status} (expected 301)"
+                assert location == "https://app.premiselabs.co/auth", (
+                    f"/signin redirects to {location!r} (expected the app origin's /auth)"
+                )
+            else:
+                # Dev/preview: `_redirects` answers same-origin, as before.
+                assert r.status == 301, f"/signin on {BASE_URL} → {r.status} (expected 301)"
+                assert location == "/auth", f"/signin redirects to {location!r} (expected '/auth')"
+        elif prod_company and path in product_set:
             assert r.status == 301, f"{path} on premiselabs.co → {r.status} (expected 301)"
             # Pin the raw Location verbatim — the middleware deterministically
-            # strips trailing slashes, so a trailing-slash regression would
-            # emit a non-canonical URL (a second 301 hop via _redirects on the
-            # tortoise host) instead of the exact canonical and MUST fail this.
-            expected = "https://tortoise.premiselabs.co" + path
+            # strips trailing slashes and normalizes `.html`, so a regression would
+            # emit a non-canonical URL (a second hop) instead of the exact target.
+            expected = "https://premiselabs.co/tortoise" + path
             assert location == expected, (
                 f"{path} redirects to {location!r} (expected {expected})"
             )
-        elif path == "/signin":
-            # The legacy alias consolidates onto the single auth screen; the
-            # hop is same-origin here and the NEXT hop leaves for the app.
-            assert r.status == 301, f"/signin on {BASE_URL} → {r.status} (expected 301)"
-            assert location == "/auth", f"/signin redirects to {location!r} (expected '/auth')"
+        elif prod_company and path in legal_at_root:
+            # SERVED at the company ROOT (#11762: they govern the business, not the
+            # product). A 301 here would mean the inversion regressed.
+            assert r.status == 200, (
+                f"{path} on premiselabs.co → {r.status} (expected 200: the legal pages "
+                "live at the company ROOT since #11762, they are not redirected)"
+            )
         else:
             assert r.status == 200, (
                 f"{path} on {BASE_URL} → {r.status} (expected 200 dev pass-through)"
@@ -971,13 +1006,21 @@ def test_retired_aviso_redirects_to_privacy(page: Page) -> None:
 
 @TORTOISE_HOST_SKIP
 def test_cross_host_privacy_and_tos_200(page: Page) -> None:
-    """The canonical host (tortoise.premiselabs.co) serves the legal pages
-    with full content; the company-host copies 301 there (asserted in
-    test_company_host_legal_pages_redirect_to_tortoise)."""
+    """The legal pages are canonical on the COMPANY host now (#11762), so the
+    product host 301s them there and THEY 200 at the company root."""
     for path in ("/privacy", "/tos"):
-        resp = page.request.get(TORTISE_HOST + path, timeout=15_000)
-        assert resp.status == 200, f"{path} on {TORTISE_HOST} returned {resp.status}"
-        assert PINNED_CANONICAL["no-training"] in _clean(resp.text())
+        resp = page.request.get(TORTISE_HOST + path, timeout=15_000, max_redirects=0)
+        assert resp.status == 301, (
+            f"{path} on {TORTISE_HOST} returned {resp.status} (expected a 301 onto the "
+            "company host — legal governs the business, so it landed at the ROOT)"
+        )
+        assert resp.headers.get("location") == "https://premiselabs.co" + path, (
+            f"{path} redirects to {resp.headers.get('location')!r}"
+        )
+    for path in ("/privacy", "/tos"):
+        served = page.request.get(BASE_URL + path, timeout=15_000)
+        assert served.status == 200, f"{path} on {BASE_URL} returned {served.status}"
+        assert PINNED_CANONICAL["no-training"] in _clean(served.text())
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -987,14 +1030,23 @@ def test_cross_host_privacy_and_tos_200(page: Page) -> None:
 
 @TORTOISE_HOST_SKIP
 def test_middleware_root_rewrites(page: Page) -> None:
-    """tortoise.* root → product.html marker; premiselabs.co root →
-    index.html marker. Host spoofing drives the middleware branch (browsers
-    forbid setting Host on navigations, so the raw request API is used)."""
+    """The product host's root is a 301 onto the ONE marketing host (#11762);
+    premiselabs.co/ serves the index marker; premiselabs.co/tortoise serves the
+    product marker.
+
+    Host spoofing drives the middleware branch (browsers forbid setting Host on
+    navigations, so the raw request API is used)."""
     t_host = urlsplit(TORTISE_HOST).hostname or "tortoise.premiselabs.co"
     t_spoof = t_host if t_host.startswith("tortoise.") else "tortoise.premiselabs.co"
-    r = page.request.get(TORTISE_HOST + "/", headers={"Host": t_spoof}, timeout=15_000)
-    assert r.status == 200
-    _assert_serves_product(r.text(), "tortoise root (middleware rewrite)")
+    r = page.request.get(TORTISE_HOST + "/", headers={"Host": t_spoof},
+                         timeout=15_000, max_redirects=0)
+    assert r.status == 301, (
+        f"tortoise root returned {r.status} (expected a 301 onto premiselabs.co/tortoise, "
+        "#11762 — the product host serves no page of its own)"
+    )
+    assert r.headers.get("location") == "https://premiselabs.co/tortoise", (
+        f"tortoise root redirects to {r.headers.get('location')!r}"
+    )
 
     b_host = urlsplit(BASE_URL).hostname or "premiselabs.co"
     b_spoof = b_host if b_host.endswith("premiselabs.co") else "premiselabs.co"
@@ -1002,30 +1054,90 @@ def test_middleware_root_rewrites(page: Page) -> None:
     assert r2.status == 200
     _assert_serves_company(r2.text(), "premiselabs root (middleware rewrite)")
 
+    # The rewrite that makes every 301 above land on a 200 in the SAME deploy.
+    r3 = page.request.get(BASE_URL + "/tortoise", headers={"Host": b_spoof}, timeout=15_000)
+    assert r3.status == 200, f"premiselabs.co/tortoise returned {r3.status}"
+    _assert_serves_product(r3.text(), "premiselabs.co/tortoise (product rewrite)")
+
 
 def test_product_route_blocked_on_company_host(page: Page) -> None:
-    """The product page lives ONLY on the tortoise host. /product and
-    /product.html are static assets on the shared Pages project and would
-    otherwise leak onto premiselabs.co — the middleware must 404 them on
-    the company host. UNCONDITIONAL: the middleware 404s non-tortoise hosts
-    regardless of DNS state, so this is safe on stale-DNS runs too."""
+    """The product page has ONE canonical URL (#11762): `/product` and
+    `/product.html` are duplicates of it and must CONSOLIDATE onto `/tortoise`
+    rather than render a second copy at a second URL — the property the old 404
+    protected, expressed as a 301 now that the page is served here.
+
+    UNCONDITIONAL: the target is a constant, so this is safe on stale-DNS runs.
+
+    ⛔ THE SCHEME IS ASSERTED ONLY WHERE THE DEPLOYMENT ANSWERS IT (#12004).
+    This is the ONE redirect in the map whose target is on the SAME host as the
+    request, and `wrangler pages dev` NORMALIZES a same-origin absolute
+    `Location` to the request's own scheme — measured on this job's own preview
+    at `origin/main` (`500242fac6`), Host-spoofed `premiselabs.co`:
+
+        GET /product     → Location: http://premiselabs.co/tortoise    (rewritten)
+        GET /signin      → Location: https://app.premiselabs.co/auth   (untouched)
+
+    The second row is why the cross-host assertions elsewhere in this file need
+    no such carve-out: only a SAME-origin absolute is rewritten, and only the
+    local preview's scheme (`http`) differs from production's. So the preview
+    pins the CONSOLIDATION TARGET (host + path, which is the property this test
+    exists for) and a real company-host run additionally pins the exact https
+    string. Asserting `== "https://…"` unconditionally reds `legal-e2e` on every
+    PR from a local preview while production answers correctly."""
     b_host = urlsplit(BASE_URL).hostname or "premiselabs.co"
     b_spoof = b_host if b_host.endswith("premiselabs.co") else "premiselabs.co"
+    prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
     for path in ("/product", "/product.html"):
-        r = page.request.get(BASE_URL + path, headers={"Host": b_spoof}, timeout=15_000)
-        assert r.status == 404, f"{path} on premiselabs.co → {r.status} (expected 404)"
+        r = page.request.get(BASE_URL + path, headers={"Host": b_spoof},
+                             timeout=15_000, max_redirects=0)
+        assert r.status == 301, (
+            f"{path} on premiselabs.co → {r.status} (expected a 301 to /tortoise — a "
+            "200 here means the product page is reachable at two URLs again)"
+        )
+        location = r.headers.get("location") or ""
+        if prod_company:
+            assert location == "https://premiselabs.co/tortoise", (
+                f"{path} redirects to {location!r}"
+            )
+            continue
+        # Local preview: accept the dev-normalized absolute OR `_redirects`'
+        # same-origin relative form, and pin host+path either way — a bare
+        # `endswith("/tortoise")` would also accept any other host.
+        parsed = urlsplit(location)
+        target_path = parsed.path if parsed.netloc else location
+        assert (parsed.hostname in (None, "premiselabs.co")
+                and target_path == "/tortoise"
+                and not parsed.query), (
+            f"{path} redirects to {location!r} — expected one unit of "
+            "consolidation onto premiselabs.co/tortoise (a query string, a "
+            "second host, or an extra hop is a second URL)"
+        )
 
 
 @TORTOISE_HOST_SKIP
 def test_product_served_on_tortoise_host(page: Page) -> None:
-    """TORTISE-HOST half: the tortoise root must keep serving the product
-    page after the company-host 404 is in place. Gated — stale tortoise DNS
-    defers to T8 production."""
+    """TORTISE-HOST half: the product host 301s onto the canonical product URL
+    (#11762), and that URL SERVES the product page in the same deploy — the
+    property that keeps the 301 map safe, since a 301 is browser-persistent.
+
+    Gated — stale tortoise DNS defers to the post-deploy run."""
     t_host = urlsplit(TORTISE_HOST).hostname or "tortoise.premiselabs.co"
     t_spoof = t_host if t_host.startswith("tortoise.") else "tortoise.premiselabs.co"
-    r_t = page.request.get(TORTISE_HOST + "/", headers={"Host": t_spoof}, timeout=15_000)
-    assert r_t.status == 200
-    _assert_serves_product(r_t.text(), "tortoise root (product page served)")
+    r_t = page.request.get(TORTISE_HOST + "/", headers={"Host": t_spoof},
+                           timeout=15_000, max_redirects=0)
+    assert r_t.status == 301, (
+        f"tortoise root returned {r_t.status} (expected a 301 onto the canonical "
+        "product URL)"
+    )
+    assert r_t.headers.get("location") == "https://premiselabs.co/tortoise", (
+        f"tortoise root redirects to {r_t.headers.get('location')!r}"
+    )
+    canonical = page.request.get("https://premiselabs.co/tortoise", timeout=15_000)
+    assert canonical.status == 200, (
+        f"the 301's target returned {canonical.status} — every redirect in the map must "
+        "land on a 200 in the same deploy"
+    )
+    _assert_serves_product(canonical.text(), "the canonical product URL")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1268,14 +1380,24 @@ def test_crawl_all_pages_final_200(page: Page) -> None:
 
 @TORTOISE_HOST_SKIP
 def test_crawl_tortoise_root_serves_product(page: Page) -> None:
-    """The tortoise-host crawl item: / on the tortoise host (middleware
-    rewrite) returns 200, serves the product page, and carries the footer."""
+    """The tortoise-host crawl item: / on the tortoise host 301s onto the ONE
+    marketing host (#11762), and the canonical product URL it names returns 200,
+    serves the product page, and carries the footer."""
     host = urlsplit(TORTISE_HOST).hostname or "tortoise.premiselabs.co"
     spoof = host if host.startswith("tortoise.") else "tortoise.premiselabs.co"
-    resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof}, timeout=15_000)
-    assert resp.status == 200, f"tortoise root → {resp.status}"
-    body = resp.text()
-    _assert_serves_product(body, "tortoise root (crawl)")
+    resp = page.request.get(TORTISE_HOST + "/", headers={"Host": spoof},
+                            timeout=15_000, max_redirects=0)
+    assert resp.status == 301, (
+        f"tortoise root → {resp.status} (expected a 301 onto the canonical product "
+        "URL since #11762)"
+    )
+    assert resp.headers.get("location") == "https://premiselabs.co/tortoise", (
+        f"tortoise root redirects to {resp.headers.get('location')!r}"
+    )
+    canonical = page.request.get("https://premiselabs.co/tortoise", timeout=15_000)
+    assert canonical.status == 200, f"the 301's target → {canonical.status}"
+    body = canonical.text()
+    _assert_serves_product(body, "the canonical product URL (crawl)")
     _footer_links_present(body)
 
 
