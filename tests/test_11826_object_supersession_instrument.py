@@ -14,11 +14,17 @@ issue's "also measured" list), never the transfer:
 
   * ``superseded_object_active_edges`` (high) — a superseded :Object that still
     carries an active IMPL/NAND edge, i.e. the defunded factor's shape —
-    including its TWO reachable variants, which the emitted strings depend on:
-    a successorless supersede (the generic ``update_entity`` door reaches the
-    status with no ``supersededBy``, so there is nothing to re-point onto) and a
+    including the states of its OWN anchor that the emitted strings depend on and
+    that the anchor does not rule out: a successorless supersede (the generic
+    ``update_entity`` door reaches the status with no ``supersededBy``), a
+    set-but-unresolvable pointer (a renamed successor), a self-pointer, a
     successor that was already rewired while the stale edge survived (the factor
-    then RUNS, so the belief is not lost and the repair reduces to the delete);
+    then RUNS — the belief is not lost and the repair reduces to the delete), a
+    DIRECTIONAL operator whose idx-0 source is the stripped input (rewiring does
+    not restore it, and a delete alone renumbers and inverts the factor), a
+    DIRECT operator-less edge (no factor is built, so no skipped-factor record
+    exists), and a supersession CHAIN (the pointer's target is itself superseded,
+    so the repair targets the live head);
   * ``superseded_by_unresolvable`` (medium) — ``supersededBy`` is a NAME, so
     renaming the successor dangles the only link the predecessor has to it
     (#3590 made the name mutable and the id the identity);
@@ -230,7 +236,7 @@ def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
               if i.node_id == v1["id"]]
     assert issues, "the successorless shape is still lost belief — report it"
     issue = issues[0]
-    assert "no OTHER Object answers its supersededBy (none is set)" in issue.detail, \
+    assert "no OTHER Object answers its supersededBy (none)" in issue.detail, \
         issue.detail
     assert "nothing to re-point this input onto" in issue.detail, issue.detail
     # ⛔ The repair must not send the reader to a node that does not exist, and it
@@ -282,13 +288,15 @@ def test_a_barely_resolvable_pointer_takes_the_successorless_arm(sdk):
     assert "none is set" not in issues[0].detail, issues[0].detail
 
 
-def test_a_directional_operators_stripped_source_is_not_repaired_by_rewiring(sdk):
-    """The rewiring hedge is scoped to "a slot EP reads", and this is why.
+def test_a_directional_operators_stripped_source_is_not_repaired_by_deleting(sdk):
+    """The idx-0 SOURCE slot of a directional operator is its own repair.
 
-    A directional operator whose idx-0 SOURCE is the superseded Object is skipped
-    by EP's ``source_stripped`` branch (ahead of the degenerate test), so a
-    successor wired in alongside does NOT restore participation — the detail must
-    say so, or it understates a real `high` finding into a benign one.
+    EP drops the whole factor while that slot is terminal (the ``source_stripped``
+    branch, ahead of the degenerate test), so a successor wired in alongside does
+    NOT restore participation — and DELETING the stale edge alone is worse than
+    useless: the surviving input is renumbered into idx 0 and the factor's
+    direction inverts (``ep.py``'s own note). The emitted ``fix`` must say "write
+    the successor into the SOURCE slot", not "re-point, preserving idx".
     """
     p = sdk.create_point("statement", "the gateway enforces the policy")
     v1 = _obj(sdk, "PolicyV1")
@@ -305,7 +313,7 @@ def test_a_directional_operators_stripped_source_is_not_repaired_by_rewiring(sdk
 
     run = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
     assert [s["reason"] for s in run.get("skipped_factors") or []] == ["source_stripped"], \
-        ("a rewired directional source is no longer skipped — the hedge is now "
+        ("a rewired directional source is no longer skipped — the arm is now "
          f"over-cautious: {run.get('skipped_factors')}")
 
     issues = [i for i in _issues(sdk, "superseded_object_active_edges")
@@ -313,6 +321,72 @@ def test_a_directional_operators_stripped_source_is_not_repaired_by_rewiring(sdk
     assert issues
     assert "source_stripped" in issues[0].detail, issues[0].detail
     assert "a slot EP reads" in issues[0].detail, issues[0].detail
+    # ⛔ The delete-only wording is exactly what must NOT appear for this row.
+    assert "only that delete" not in issues[0].fix, issues[0].fix
+    assert "into the SOURCE slot" in issues[0].fix, issues[0].fix
+    assert "direction inverts" in issues[0].fix, issues[0].fix
+
+
+def test_a_direct_edge_gets_the_direct_edge_upkeep(sdk):
+    """A DIRECT (operator-less) edge is a different mechanism, so a different string.
+
+    ``create_direct_edge("IMPL", <point>, <object>)`` writes
+    ``Point-[:IMPL]->Object`` — no operator node, no ``idx``, and EP builds no
+    factor record for it: with a terminal endpoint the row is excluded before
+    evaluation, so there is no skipped-factor record to find and "preserve the
+    edge idx" would name a property the edge does not have (measured:
+    ``keys(r) == ['direction']``).
+    """
+    o = _obj(sdk, "PolicyV1")
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    sdk.create_direct_edge("IMPL", p["id"], o["id"])
+    assert _q(sdk, "MATCH (a:Point {id:$p})-[r:IMPL]->(b:Object {id:$o}) "
+                   "RETURN r.idx, keys(r)",
+              {"o": o["id"], "p": p["id"]})[0][0] is None
+    _obj(sdk, "PolicyV2")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
+            "o.supersededBy = 'PolicyV2'", {"i": o["id"]})
+
+    # The engine fact the wording rests on: no factor is built, so there is no
+    # skipped-factor record — the exclusion happens before evaluation.
+    run = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
+    assert not run.get("skipped_factors"), run.get("skipped_factors")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == o["id"]]
+    assert issues, "an operator-less edge into a terminal endpoint is still the shape"
+    issue = issues[0]
+    assert "EP builds NO factor for a direct edge" in issue.detail, issue.detail
+    assert "skipped-factor record" in issue.detail, issue.detail
+    assert "it is a DIRECT edge" in issue.fix, issue.fix
+    assert "PRESERVES the edge idx" not in issue.fix, issue.fix
+
+
+def test_a_supersession_chain_points_the_repair_at_the_live_head(sdk):
+    """Re-pointing onto an immediate successor that is ITSELF superseded clears the
+    finding and leaves the input anchored to another EP-dead node.
+
+    The Object lane writes no chain edge (the fold moves nothing), so this is
+    reachable with two ordinary supersessions: V1→V2→V3.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    _obj(sdk, "PolicyV3")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+    assert _q(sdk, "MATCH (o:Object) WHERE o.status = 'superseded' "
+                   "RETURN o.name, o.supersededBy ORDER BY o.name",
+              {}) == [["PolicyV1", "PolicyV2"], ["PolicyV2", "PolicyV3"]]
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    assert "the successor it names is ITSELF 'superseded'" in issues[0].detail, \
+        issues[0].detail
+    assert "target the LIVE head of that chain" in issues[0].fix, issues[0].fix
+    assert "its own supersededBy is 'PolicyV3'" in issues[0].fix, issues[0].fix
 
 
 def test_a_rewired_successor_leaves_the_stale_edge_reported_honestly(sdk):
@@ -434,13 +508,26 @@ def test_a_self_pointer_is_not_a_successor(sdk):
     assert [i.node_id for i in issues] == [v1["id"]], (
         "a pointer that names only the node itself was read as resolved: "
         f"{[(i.node_id, i.detail) for i in issues]}")
-    assert "NO Object carries that name" in issues[0].detail, issues[0].detail
+    # ⛔ The sentence must not claim NO Object carries the name — this one does.
+    assert "names ITSELF as its successor" in issues[0].detail, issues[0].detail
+    assert "NO Object carries that name" not in issues[0].detail, issues[0].detail
+    # 4b reads the same pointer, so its repair arm must say the same thing.
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    edge_issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+                   if i.node_id == v1["id"]]
+    assert edge_issues
+    assert "names the Object ITSELF" in edge_issues[0].detail, edge_issues[0].detail
+    assert "No resolvable successor is named" in edge_issues[0].fix, edge_issues[0].fix
 
     # The counterpart the exclusion must NOT break: a successor that is a
-    # DIFFERENT node sharing the name still resolves.
-    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'live'", {"i": v1["id"]})
+    # DIFFERENT node sharing the name still resolves. Keep this node superseded and
+    # self-pointed — with the status cleared there are no superseded Objects at all,
+    # so the assertion could not fail (#12111 review).
     _obj(sdk, "PolicyV1")  # a second, distinct Object with the same name
-    assert _issues(sdk, "superseded_by_unresolvable") == []
+    assert [i for i in _issues(sdk, "superseded_by_unresolvable")
+            if i.node_id == v1["id"]] == [], \
+        "a twin carrying the name resolves the pointer — the exclusion went too far"
 
 
 # ── 3. the history surface stops hiding a terminal chain head ──────

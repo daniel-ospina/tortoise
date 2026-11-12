@@ -511,7 +511,8 @@ structure, not the return value.
   rewired separately into a slot EP reads and only the stale edge was left
   behind* — the emitted `detail` says whether a resolvable successor exists and
   what EP does with the stripped input, because the repair differs; the check is
-  `:Object`-anchored, so a superseded `:Subject` input is still not covered), a
+  `:Object`-anchored, so a superseded `:Subject` input is still not covered, and
+  neither is an OUTGOING direct `IMPL`/`NAND` edge from a superseded Object), a
   superseded Object
   whose `supersededBy` name resolves to no OTHER node
   (`superseded_by_unresolvable` — a rename, a deletion, a name never created, or

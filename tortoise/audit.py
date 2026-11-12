@@ -44,6 +44,8 @@ from dataclasses import dataclass, field
 from tortoise.live import (  # #7927: traversal-position widening + the ONE
     # two-key identity declaration (``EPISTEMIC_ID_KEYS``) every widened
     # surface must resolve through.
+    direction_flows,  # the ONE read-side direction normalizer — the repair's
+    # idx-0-source arm has to ask the SAME question ep.py asks.
     epistemic_disjunction,
     epistemic_identity,
     is_terminal_status,  # #7819: the shared terminal predicate (Python mirror)
@@ -592,12 +594,20 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # measured defect rather than a stray survivor.
     #
     # INCOMING only — check 4's orientation, kept so the two checks answer ONE
-    # question in two vocabularies. An outgoing IMPL/NAND from a superseded
-    # :Object would mean the Object is acting as the OPERATOR, which the EP
-    # loader does not do (operators are Points carrying ``is_operator`` /
-    # ``op_type``); if that shape ever becomes constructible it is a NEW check,
-    # not this one widened — the rule the module-scope note above already states
-    # for provenance coverage.
+    # question in two vocabularies.
+    #
+    # ⛔ THE OUTGOING ORIENTATION IS A DECLARED FALSE-CLEAN, and the reason first
+    # given here was FALSE — corrected rather than quietly deleted. An outgoing
+    # IMPL/NAND from a superseded :Object does NOT require the Object to act as an
+    # operator: ``create_direct_edge("IMPL", <object>, <point>)`` is a public SDK
+    # door that writes the operator-less edge ``Object-[:IMPL]->Point`` (its own
+    # docstring admits any of the four epistemic labels, #7902), and EP DOES build a
+    # factor from it with the Object as the factor's source (measured: two
+    # confidences before the supersession, NONE after — ``confidences: {}``,
+    # ``skipped_factors: None``, every supersession count 0). So the same lost belief
+    # exists in the other direction and no check in this module reports it. The arm
+    # is a follow-up (it needs its own consequence text: a direct edge carries no
+    # ``idx`` and produces no skipped-factor record), not this change's.
     #
     # ANCHORED on ``status = 'superseded'`` and nothing wider. NOT the legacy
     # ``outdated`` status/flag: an ``outdated`` :Object has no successor to
@@ -698,11 +708,150 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # a same-named OTHER Object still counts (1 carrier, silent).
         "OPTIONAL MATCH (carrier:Object) WHERE carrier.name = sup.supersededBy "
         "AND carrier.id <> sup.id\n"
-        "WITH sup, r, active, count(carrier) AS carrier_count\n"
-        "RETURN DISTINCT sup.id, sup.name, sup.supersededBy, type(r), "
-        f"{epistemic_identity('active')}, active.id, carrier_count "
+        "WITH sup, r, active, count(carrier) AS carrier_count, "
+        "     head(collect(carrier.status)) AS carrier_status, "
+        "     head(collect(carrier.supersededBy)) AS carrier_sb\n"
+        # ``r.idx`` and the OPERATOR's ``direction`` are projected because the repair
+        # differs in the idx-0 source slot (ep.py's ``source_stripped`` hazard), and
+        # ``active.is_operator`` because a DIRECT edge is a different mechanism again
+        # (no factor is built, so no skipped-factor record exists and there is no
+        # ``idx`` — measured: ``keys(r) == ['direction']``).
+        "RETURN DISTINCT sup.id, sup.name, sup.supersededBy, type(r), r.idx, "
+        "coalesce(active.is_operator, false), active.direction, "
+        f"{epistemic_identity('active')}, active.id, carrier_count, "
+        "carrier_status, carrier_sb "
         f"LIMIT {SAMPLE_LIMIT}",
     )
+
+    def _successor_note(sup_sb, carrier_count, carrier_status, carrier_sb) -> str:
+        """The pointer's state, as the trailing clause of a ``detail``.
+
+        Three facts, not one: nothing resolvable, a resolvable successor, or a
+        resolvable successor that is ITSELF terminal (a supersession CHAIN —
+        re-pointing onto it clears this finding and leaves the input anchored to
+        another EP-dead node, so the repair must target the live head).
+        """
+        if not carrier_count:
+            named = f"{_quoted(sup_sb)}" if bool(sup_sb) else "none"
+            return ("; and no OTHER Object answers its supersededBy "
+                    f"({named}), so there is nothing to re-point this input onto")
+        if is_terminal_status(carrier_status):
+            return ("; the successor it names is ITSELF "
+                    f"{_quoted(carrier_status)}, so the re-point must target the "
+                    "LIVE head of that chain")
+        return ""
+
+    def _active_edge_detail(sup_id, sup_name, sup_sb, edge_type, idx, is_operator,
+                            active_id, carrier_count, carrier_status,
+                            carrier_sb) -> str:
+        """The consequence, at its measured scope, for THIS row's mechanism.
+
+        Two mechanisms live behind one pattern: an operator INPUT (EP builds the
+        factor and then strips it) and a DIRECT edge (EP builds no factor at all,
+        so the claim loses the support silently and there is no skipped-factor
+        record to find). Stating the first for the second would send a reader to a
+        diagnostic that never exists.
+        """
+        source = (active_id if active_id is not None
+                  else "<no id or eventId>")
+        detail = (f"Superseded Object '{sup_name}' still carries an active "
+                  f"{edge_type} edge from {source}")
+        if is_operator:
+            detail += (
+                " — the Object lane moved no edges on supersession, so EP strips "
+                "that terminal input: a two-input factor is then skipped as "
+                "degenerate (#780/#2422), a wider one runs without it, and a "
+                "DIRECTIONAL operator is skipped outright when the stripped input "
+                "is its idx-0 source (source_stripped). The successor inherits no "
+                "belief from this edge unless it was separately rewired into a "
+                "slot EP reads (#11826)")
+        else:
+            detail += (
+                " — the Object lane moved no edges on supersession, and EP builds "
+                "NO factor for a direct edge: with a terminal endpoint the row is "
+                "excluded before evaluation, so there is no skipped-factor record "
+                "for it and the claim silently loses that support (#11826)")
+        if not carrier_count and sup_id is not None and sup_sb and sup_name == sup_sb:
+            detail += ("; and its supersededBy names the Object ITSELF, so no OTHER "
+                       "Object answers it — name the real successor")
+        else:
+            detail += _successor_note(sup_sb, carrier_count, carrier_status,
+                                      carrier_sb)
+        if active_id is None:
+            detail += ("; that endpoint carries no identity, so it cannot be named "
+                       "by the repair")
+        return detail
+
+    def _active_edge_fix(sup_id, sup_name, sup_sb, edge_type, idx, is_operator,
+                         direction, carrier_count, carrier_status,
+                         carrier_sb) -> str:
+        """The repair for this row, chosen by the state the row carries.
+
+        Four arms, each a state the anchor does not rule out:
+
+          * NO RESOLVABLE SUCCESSOR — the transfer has no destination, so naming
+            one is step one. ``archived`` is offered only to say what it does NOT
+            clear (#11824's two-arm rule is a write-door rule; archiving here
+            keeps the input stripped AND drops the node out of this check's
+            anchor, so a re-audit would read clean over a dead factor).
+          * A DIRECT edge — no ``idx`` exists and no factor is built, so the repair
+            writes the equivalent edge onto the successor.
+          * The operator's idx-0 SOURCE of a non-bidirectional operator — EP drops
+            the whole factor while that slot is terminal, and DELETING the edge
+            alone renumbers a live target into idx 0 and inverts the factor's
+            direction (``ep.py``'s ``source_stripped`` note).
+          * Any other operator input — re-point, preserving ``idx``; a successor
+            that already carries an equivalent input needs only the delete.
+        """
+        q = _quoted(sup_id) if sup_id is not None else _quoted(sup_name)
+        if not carrier_count:
+            fix = (
+                f"No resolvable successor is named for {q}, so there is nothing to "
+                f"re-point this {edge_type} input onto: name the successor — "
+                f"tortoise_update_entity({q}, {{'supersededBy': '<the successor "
+                f"name>'}}) — then re-point the input onto it and delete the edge "
+                f"into {q}. Archiving it instead — tortoise_update_entity({q}, "
+                f"{{'status': 'archived'}}) — does NOT clear this: EP strips a "
+                f"terminal input either way, so the edge must still be deleted or "
+                f"re-pointed onto whatever now carries the claim")
+            if not is_operator:
+                fix += ("; and this is a DIRECT edge, so there is no factor to "
+                        "re-point — write the equivalent edge onto that successor "
+                        "and delete this one")
+            return fix
+        successor = f"'{sup_sb}'" if bool(sup_sb) else "its successor"
+        tail = ""
+        if is_terminal_status(carrier_status):
+            tail = (
+                f" That successor ({successor}) is ITSELF "
+                f"{_quoted(carrier_status)}, so target the LIVE head of that chain"
+                + (f" — its own supersededBy is {_quoted(carrier_sb)}"
+                   if carrier_sb else "")
+                + ", not the immediate successor")
+        if not is_operator:
+            return (
+                f"Re-point this {edge_type} edge off {q} onto the successor "
+                f"({successor}): it is a DIRECT edge, so there is no factor to "
+                f"re-point and no edge idx to preserve — write the equivalent "
+                f"edge from the same source onto the successor and delete this "
+                f"one." + tail)
+        if idx == 0 and not all(direction_flows(direction)):
+            return (
+                f"Write the successor ({successor}) into the SOURCE slot: this "
+                f"{edge_type} edge is the operator's idx-0 source and the operator "
+                f"is {_quoted(direction)}-directional, so EP drops the whole factor "
+                f"while that slot is terminal — and DELETING the edge alone is not "
+                f"the repair: the surviving input is renumbered into idx 0 and the "
+                f"factor's direction inverts (ep.py's source_stripped note). "
+                f"Re-point idx 0 onto the successor, then delete the edge into "
+                f"{q}." + tail)
+        return (
+            f"Re-point this {edge_type} input from {q} to the successor "
+            f"({successor}): an explicit edge write against the successor's ID "
+            f"that PRESERVES the edge idx (the slot EP reads), then delete the "
+            f"edge into {q}. A successor that ALREADY carries an equivalent input "
+            f"needs only that delete. No SDK door rewires an operator's inputs"
+            + tail)
     _record("superseded_object_active_edges", [
         AuditIssue(
             issue_type="superseded_object_active_edges",
@@ -715,24 +864,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # with three or more inputs still runs on the survivors, so its belief
             # is diluted rather than zeroed. Claiming "the factor is skipped"
             # unconditionally would misreport every wider operator as a
-            # higher-severity consequence than it has.
-            detail=(f"Superseded Object '{sup_name}' still carries an active "
-                    f"{edge_type} edge from "
-                    f"{active_id if active_id is not None else '<no id or eventId>'}"
-                    " — the Object lane moved no edges on supersession, so EP "
-                    "strips that terminal input: a two-input factor is then "
-                    "skipped as degenerate (#780/#2422), a wider one runs without "
-                    "it, and a DIRECTIONAL operator is skipped outright when the "
-                    "stripped input is its idx-0 source (source_stripped). The "
-                    "successor inherits no belief from this edge unless it was "
-                    "separately rewired into a slot EP reads (#11826)"
-                    + ("" if carrier_count else
-                       "; and no OTHER Object answers its supersededBy ("
-                       + (_quoted(sup_sb) if bool(sup_sb) else "none is set")
-                       + "), so there is nothing to re-point this input onto")
-                    + ("" if active_id is not None else
-                       "; that endpoint carries no identity, so it cannot be "
-                       "named by the repair")),
+            # higher-severity consequence than it has. The per-state wording lives
+            # in `_active_edge_detail` / `_active_edge_fix` (see their docstrings).
             # The repair is a TRANSFER, not a deletion: the successor is the node
             # the belief belongs to.
             #
@@ -763,38 +896,24 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # fix states the PROPERTIES the write must have (target the
             # successor's ID; preserve `idx`) and leaves the statement to whoever
             # has the successor in hand.
-            # ⛔ TWO arms, because NO successor and an ALREADY-REWIRED successor are
-            # both reachable states of this check's anchor (see the 4b note) and
-            # each one makes the plain transfer wording false or unperformable. The
-            # pointer is read in the row query; the "already rewired" half is
-            # handled in the wording ("needs only that delete") rather than by a
-            # second query, because the diagnostic that decides it at run time is
-            # EP's own skipped-factor record, not a graph read this check could
-            # trust without re-deriving the participation predicate.
-            fix=((f"No resolvable successor is named for {_quoted(sup_id)}, so "
-                  f"there is nothing to re-point this {edge_type} input onto: name "
-                  f"the successor — tortoise_update_entity({_quoted(sup_id)}, "
-                  "{'supersededBy': '<the successor name>'}) — then re-point the "
-                  f"input onto it (PRESERVING the edge idx) and delete the edge "
-                  f"into {_quoted(sup_id)}. Archiving it instead "
-                  f"(tortoise_update_entity({_quoted(sup_id)}, "
-                  "{'status': 'archived'})) does NOT clear this — EP strips a "
-                  "terminal input either way — so the edge must still be deleted "
-                  "or re-pointed onto whatever now carries the claim")
-                 if (sup_id is not None and not carrier_count)
-                 else ((f"Re-point this {edge_type} input from {_quoted(sup_id)} to the "
-                        f"successor named by its supersededBy: an explicit edge write "
-                        f"against the successor's ID that PRESERVES the edge idx (the "
-                        f"slot EP reads), then delete the edge into {_quoted(sup_id)}. "
-                        f"A successor that ALREADY carries an equivalent input needs "
-                        f"only that delete. No SDK door rewires an operator's inputs")
-                       if sup_id is not None
-                       else (f"Re-point the active {edge_type} edge off the superseded "
-                             f"Object {_quoted(sup_name)} onto its successor, preserving "
-                             f"the edge idx"))),
+            # ⛔ FOUR arms, not one: the anchor rules out no state of these facts,
+            # and the row query now carries all of them (see the 4b note).
+            # `_active_edge_fix` is the arm table; `_active_edge_detail` is the
+            # matching consequence. The "already rewired" half is handled in the
+            # wording ("needs only that delete") rather than by a second query,
+            # because the diagnostic that decides it at run time is EP's own
+            # skipped-factor record, not a graph read this check could trust without
+            # re-deriving the participation predicate.
+            detail=_active_edge_detail(sup_id, sup_name, sup_sb, edge_type, idx,
+                                       is_operator, active_id, carrier_count,
+                                       carrier_status, carrier_sb),
+            fix=_active_edge_fix(sup_id, sup_name, sup_sb, edge_type, idx,
+                                 is_operator, direction, carrier_count,
+                                 carrier_status, carrier_sb),
         )
-        for (sup_id, sup_name, sup_sb, edge_type, active_id, active_nid,
-             carrier_count) in rows4b
+        for (sup_id, sup_name, sup_sb, edge_type, idx, is_operator, direction,
+             active_id, active_nid, carrier_count, carrier_status,
+             carrier_sb) in rows4b
     ], count4b)
 
     # ── 4c. superseded_by_unresolvable (medium) ─────────────────
@@ -863,18 +982,20 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             severity="medium",
             node_id=str(sup_id) if sup_id is not None else str(sup_name),
             # ⛔ ZERO CARRIERS is the fact; the CAUSE is not established by it, so
-            # the string names the candidate causes instead of asserting one. A
-            # rename dangles the name-keyed pointer (#3590) — the measured case —
-            # but a DELETED successor and a pointer a caller wrote to a name that
-            # never existed (``supersededBy`` is writable through
-            # ``tortoise_update_entity``) leave the identical zero-carrier state
-            # with a different first repair. Asserting the rename ("any more … a
-            # rename dangles") would flatten three facts into one label, the
-            # flattening #11824's AX note refuses one surface over.
-            detail=(f"Superseded Object '{sup_name}' names successor "
-                    f"'{sb_name}', but NO Object carries that name "
-                    "(a renamed successor, or one that was deleted or never "
-                    "created — the name-keyed pointer dangles, #3590/#11826)"),
+            # the string names the candidate causes instead of asserting one — AND a
+            # SELF-pointer is its own state, spelled out, because the general clause
+            # would then be false ("NO Object carries that name" is untrue: the node
+            # carries it by definition; what is missing is a DIFFERENT node). Measured:
+            # `update_entity(obj, supersededBy='<its own name>')` is accepted.
+            detail=((f"Superseded Object '{sup_name}' names ITSELF as its successor "
+                     "(supersededBy is its own name, which no OTHER Object answers), "
+                     "so the name-keyed pointer names no successor at all — name the "
+                     "real successor (#3590/#11826)")
+                    if (bool(sb_name) and sb_name == sup_name) else
+                    (f"Superseded Object '{sup_name}' names successor "
+                     f"'{sb_name}', but NO Object carries that name "
+                     "(a renamed successor, or one that was deleted or never "
+                     "created — the name-keyed pointer dangles, #3590/#11826)")),
             # ⛔ The PROPS form is the door's own signature — ``tortoise_update_entity(
             # id, props)`` (``mcp_server.py``) takes the properties as ONE dict, so a
             # keyword spelling (``status='superseded'``) is a ``TypeError`` at the
