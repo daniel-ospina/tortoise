@@ -2152,7 +2152,9 @@ def ghost_runs():
 def test_the_issue_reproduction_frozen_runs_no_longer_make_a_starved_queue_read_OK():
     """The exact reproduction from #12037, as a two-branch discrimination.
 
-    One PR run queued 300 s — inside the 180 s floor, far inside the 5400 s budget.
+    One PR run queued 300 s — PAST the 180 s floor, far inside the 5400 s budget.
+    (The relative sizes are the point: `PR-STARVED` needs the oldest wait at or past
+    `min_age_seconds`, and the pre-fix `OK` needs it under `max_pr_wait_seconds`.)
     The ONLY difference between the two readings is whether the three frozen runs are
     treated as executing, and `has_live_job=None` IS the pre-fix code path (an
     unmeasured run keeps counting), so this is a discrimination against the real old
@@ -2225,9 +2227,11 @@ def test_an_unmeasured_run_still_counts_as_executing():
     An unread jobs surface must never manufacture `PR-STARVED`: that verdict is in
     `STARVING_VERDICTS` and `ci_check_repair` turns it into a per-PR cancel-then-rerun,
     so an unreadable jobs read cancelling a genuinely running run would be a worse
-    defect than the false `OK` being fixed. Pre-fix behaviour is reproduced exactly,
-    and the abstention is counted so it is visible rather than silently equal to a
-    measurement.
+    defect than the false `OK` being fixed. The pre-fix CENSUS and VERDICT are reproduced
+    exactly (`pr_running` and the verdict are unchanged) — the reading is not byte-identical,
+    and does not claim to be: the reason line and the two new `to_dict` keys are the added
+    VISIBILITY this change exists to provide. The abstention is counted so it is visible,
+    rather than silently equal to a measurement.
     """
     unmeasured = [run(777, "Python CI", event="pull_request", age_seconds=60,
                       has_live_job=None)]
@@ -2295,20 +2299,22 @@ def _jobs(*statuses, total_count=None):
 
 def test_live_job_false_only_when_every_job_is_completed(monkeypatch):
     """`False` is a PROOF of non-execution — the frozen-run shape, measured."""
-    monkeypatch.setattr(Q, "gh_json", lambda args: _jobs("completed", "completed"))
+    monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None: _jobs("completed", "completed"))
     assert Q.read_run_live_job("o/r", 42066648922) is False
 
 
 def test_live_job_true_on_any_non_terminal_job(monkeypatch):
     """One live job is enough, whatever its flavour — `waiting` is approval-parked."""
     for status in ("queued", "in_progress", "waiting", "pending", "requested"):
-        monkeypatch.setattr(Q, "gh_json", lambda args, s=status: _jobs("completed", s))
+        monkeypatch.setattr(
+            Q, "gh_json", lambda args, timeout=None, s=status: _jobs("completed", s)
+        )
         assert Q.read_run_live_job("o/r", 1) is True, status
 
 
 def test_live_job_abstains_when_the_jobs_read_fails(monkeypatch):
     """A transient jobs failure is NOT an unmeasurable queue (never raises)."""
-    def boom(args):
+    def boom(args, timeout=None):
         raise Q.MeasureError("HTTP 502")
 
     monkeypatch.setattr(Q, "gh_json", boom)
@@ -2322,14 +2328,14 @@ def test_live_job_abstains_when_the_jobs_read_fails(monkeypatch):
     {"total_count": 1, "jobs": [{"n": 1}]},  # a row with no status: could be the live one
 ])
 def test_live_job_abstains_when_the_evidence_is_absent_or_malformed(monkeypatch, payload):
-    monkeypatch.setattr(Q, "gh_json", lambda args: payload)
+    monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None: payload)
     assert Q.read_run_live_job("o/r", 1) is None
 
 
 def test_live_job_abstains_on_a_page_capped_list_it_could_not_see_all_of(monkeypatch):
     """`total_count` > the page means unseen pages could hold the live job."""
     monkeypatch.setattr(
-        Q, "gh_json", lambda args: _jobs("completed", "completed", total_count=250)
+        Q, "gh_json", lambda args, timeout=None: _jobs("completed", "completed", total_count=250)
     )
     assert Q.read_run_live_job("o/r", 1) is None
 
@@ -2341,7 +2347,7 @@ def test_a_live_job_on_a_capped_page_still_answers_true(monkeypatch):
     question: abstaining here would discard a positive observation.
     """
     monkeypatch.setattr(
-        Q, "gh_json", lambda args: _jobs("in_progress", total_count=250)
+        Q, "gh_json", lambda args, timeout=None: _jobs("in_progress", total_count=250)
     )
     assert Q.read_run_live_job("o/r", 1) is True
 
@@ -2377,21 +2383,22 @@ def test_read_health_probes_only_pr_event_runs(monkeypatch):
 
 
 def test_live_job_reads_only_the_latest_attempt(monkeypatch):
-    """The probe SPELLS `filter=latest` instead of relying on the API's default.
+    """The probe SPELLS `filter=latest`, and the parameter is LOAD-BEARING.
 
-    ⚠️ CORRECTED: an earlier revision of this test said the parameter was what stopped a
-    fresh attempt-2 from being read through its completed attempt-1 jobs. GitHub's OpenAPI
-    description declares `filter` with `default: "latest"`, so the parameter does not change
-    behaviour — it PINS a behaviour this repo's thresholds were measured against, and the
-    assertion is kept so the choice stays visible to whoever next edits the URL.
+    ⚠️ CORRECTED TWICE. The first revision claimed the endpoint returns every attempt's jobs
+    by default and that this parameter prevented attempt mixing — WRONG: GitHub's OpenAPI
+    declares `default: "latest"`. A second revision over-corrected to "the parameter does not
+    change behaviour" — ALSO WRONG: under `filter=all` the response includes OLD executions,
+    so a fresh attempt-2 with no jobs yet returns its completed attempt-1 jobs and the probe
+    would answer `False` instead of abstaining. `latest` is what keeps that list empty.
 
-    The attempt-mixing hazard is answered by the EMPTY-LIST rule, which this test also
-    covers: a run whose current attempt has created no jobs yet returns an empty list (under
-    either `filter` value) and the probe abstains rather than reading it as terminated.
+    The URL assertion below is therefore not cosmetic, and switching to `filter=all` (a
+    plausible edit — `docs/ops/ci-wall-clock.md` spells that form for step history) is what
+    this pin stops. The empty-list arm has its own test in the malformed/absent payload case.
     """
     seen = []
 
-    def fake_gh_json(args):
+    def fake_gh_json(args, timeout=None):
         seen.append(args)
         # The attempt-1 jobs are gone from the latest view: nothing yet for attempt 2.
         return {"total_count": 0, "jobs": []}
@@ -2402,3 +2409,171 @@ def test_live_job_reads_only_the_latest_attempt(monkeypatch):
     job_url = " ".join(seen[0])
     assert "jobs?filter=latest" in job_url
     assert "43160143520/jobs" in job_url
+
+
+# --- review round 1 findings (2026-11-12) -------------------------------------
+#
+# Both findings are pinned here so the defects cannot come back silently. Finding 1 is
+# the fail-open one: a probe answer of `False` SUBTRACTS a run from `pr_running`, and a
+# low `pr_running` is what makes `PR-STARVED` reachable — a verdict that authorises a
+# destructive cancel-then-rerun. So "proved idle" may only be concluded from a read that
+# is provably COMPLETE.
+
+
+def test_live_job_abstains_when_a_full_page_carries_no_usable_total_count(monkeypatch):
+    """Review finding 1: completeness must not depend on `total_count` being an int.
+
+    Pre-fix this returned `False` — the value the function's own docstring calls a PROOF
+    of non-execution — from a page that could have been one of several, because the cap
+    guard tested only `isinstance(total, int)`. A run with >100 jobs whose live job sits
+    on page 2 would have been subtracted from `pr_running`.
+    """
+    # A FULL page with no `total_count`: cannot know whether more pages exist.
+    monkeypatch.setattr(
+        Q, "gh_json", lambda args, timeout=None: {"jobs": [{"status": "completed"}] * Q.PER_PAGE}
+    )
+    assert Q.read_run_live_job("o/r", 1) is None
+
+
+@pytest.mark.parametrize("total", ["250", None, 250.0, {"n": 250}])
+def test_live_job_abstains_when_total_count_is_not_an_int(monkeypatch, total):
+    """A string/None/float/dict `total_count` is not a completeness signal."""
+    payload = {"total_count": total, "jobs": [{"status": "completed"}] * Q.PER_PAGE}
+    monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None, p=payload: p)
+    assert Q.read_run_live_job("o/r", 1) is None
+
+
+def test_live_job_false_on_a_short_page_even_without_total_count(monkeypatch):
+    """The counter-arm: a SHORT page IS a complete read, so it may still prove idleness.
+
+    Without this the fix for finding 1 would simply abstain forever on any payload lacking
+    `total_count`, and the frozen-run exclusion would never fire there.
+    """
+    monkeypatch.setattr(
+        Q, "gh_json", lambda args, timeout=None: {"jobs": [{"status": "completed"}] * 3}
+    )
+    assert Q.read_run_live_job("o/r", 1) is False
+
+
+def test_live_job_abstains_when_total_count_exceeds_the_page(monkeypatch):
+    """Re-pinned: an int `total_count` larger than the page still abstains."""
+    payload = {"total_count": 250, "jobs": [{"status": "completed"}] * 3}
+    monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None, p=payload: p)
+    assert Q.read_run_live_job("o/r", 1) is None
+
+
+def test_the_probe_budget_is_bounded_and_spent_oldest_first(monkeypatch):
+    """Review finding 2: the probed population ACCUMULATES, so the probes are budgeted.
+
+    The workflow has a 10-minute step timeout and `main()` re-measures when it acts, so an
+    unbounded probe grows forever on the very runs it exists to find — and the failure mode
+    is the step being killed with NO state line written, i.e. the observer goes dark exactly
+    when the queue is degraded.
+
+    OLDEST-FIRST is part of the fix, not a detail: `read_runs` returns the feed newest-first
+    while a run GitHub has stopped driving is by definition an old one, so a head-of-list
+    sample would spend every probe on the runs most likely to be genuinely executing and
+    never reach the frozen runs.
+    """
+    probed: list[int] = []
+    # Feed order is newest-first, and ids are deliberately ANTI-CORRELATED with age — the
+    # OLDEST run carries the HIGHEST id — so "oldest-first" and "lowest-id-first" cannot
+    # produce the same answer. An id-ordered (or feed-ordered) implementation must fail.
+    #   i=0 -> age 600 s, id 20 (oldest, highest id)
+    #   i=5 -> age   0 s, id 15 (newest, lowest id)
+    runs = [
+        {"id": 20 - i, "name": "python-ci", "event": "pull_request",
+         "created_at": (NOW - timedelta(seconds=(10 - i) * 60)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        for i in range(6)
+    ]
+
+    monkeypatch.setattr(
+        Q,
+        "read_runs",
+        lambda repo, status, max_pages=5: (
+            runs if status == "in_progress" else [],
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        Q, "read_run_live_job", lambda repo, rid: (probed.append(rid), None)[1]
+    )
+
+    health = Q.read_health("o/r", NOW, max_job_probes=3)
+
+    # Oldest-first must select the three OLDEST = ids 20, 19, 18. An id-ordered
+    # implementation would select 15, 16, 17 and a feed-ordered one 15, 16, 17 — both
+    # wrong for this probe, whose target population is the OLD end of the feed.
+    assert probed == [20, 19, 18], probed
+    assert health.in_progress_total == 6
+    assert health.pr_running_unmeasured == 6, "unprobed runs abstain and stay counted"
+    assert health.pr_running == 6
+
+
+def test_a_capped_probe_never_subtracts_a_run(monkeypatch):
+    """Hitting the budget degrades DETECTION, never the safety property."""
+    monkeys = [
+        {"id": 7, "name": "python-ci", "event": "pull_request",
+         "created_at": "2026-10-19T03:00:00Z"},
+    ]
+    monkeypatch.setattr(
+        Q,
+        "read_runs",
+        lambda repo, status, max_pages=5: (
+            monkeys if status == "in_progress" else [],
+            False,
+        ),
+    )
+    monkeypatch.setattr(Q, "read_run_live_job", lambda repo, rid: False)
+
+    # Budget 0 = probe nothing: the run keeps has_live_job=None and still counts.
+    health = Q.read_health("o/r", NOW, max_job_probes=0)
+    assert health.pr_running == 1
+    assert health.pr_running_excluded == ()
+    assert health.pr_running_unmeasured == 1
+
+    # Budget 1 = probe it, and only then may it be subtracted.
+    health = Q.read_health("o/r", NOW, max_job_probes=1)
+    assert health.pr_running == 0
+    assert health.pr_running_excluded == (7,)
+
+
+def test_the_reason_line_does_not_report_an_exclusion_that_did_not_happen():
+    """Review nit: the sentence about excluded runs must not render `0 run(s) … []`.
+
+    A caller that never probes jobs has `unmeasured > 0` and `excluded == 0`; it should be
+    told about the abstention it has, not about an exclusion it does not.
+    """
+    health = classify(starving_pr_runs(20),
+                      in_progress=[run(1, "Python CI", event="pull_request")],
+                     )
+    joined = " ".join(health.reasons)
+    assert "excluded 0 run(s)" not in joined
+    assert "UNMEASURED" in joined
+
+
+def test_the_audit_trail_records_the_filter_param_because_it_is_load_bearing():
+    """A guard on the parameter VALUE, not just its presence (review finding, round 1).
+
+    `filter=all` returns old executions, so a fresh attempt-2 would be read through its
+    completed attempt-1 jobs and answered `False`. The source must therefore keep
+    `filter=latest`, and this pin fails if someone switches it to `all` or drops it.
+    """
+    import inspect
+
+    src = inspect.getsource(Q.read_run_live_job)
+    assert "filter=latest&per_page" in src
+    assert "jobs?filter=all" not in src
+
+
+def test_live_job_false_when_an_int_total_count_equals_a_full_page(monkeypatch):
+    """Completeness accepted from `total_count` EQUAL to the page, not only below it.
+
+    The counter-arm to the abstentions: a full page whose `total_count` says exactly that
+    many jobs exist IS a complete read, so it may still prove non-execution. Without this
+    the guard could be "fixed" by abstaining on every full page and the frozen-run
+    exclusion would silently stop working on any run with >= 100 jobs.
+    """
+    payload = {"total_count": Q.PER_PAGE, "jobs": [{"status": "completed"}] * Q.PER_PAGE}
+    monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None, p=payload: p)
+    assert Q.read_run_live_job("o/r", 1) is False

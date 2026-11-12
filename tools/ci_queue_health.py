@@ -379,6 +379,29 @@ TRIM_SAFE_EVENTS: dict[str, frozenset[str]] = {
 DEFAULT_MAX_PAGES = 5
 PER_PAGE = 100
 
+#: How many PR-event `in_progress` runs one reading may PROBE at job level (#12037).
+#:
+#: A budget, not a correctness knob: each probe is one API call, the workflow that runs
+#: this tool has a 10-minute step timeout, `main()` re-measures when it acts, and the
+#: population being probed is the one that ACCUMULATES — a run frozen at `in_progress`
+#: never leaves the feed (three have sat here since 2026-11-05 and no endpoint can clear
+#: them), so an unbounded probe grows forever on exactly the runs it exists to find, and
+#: the failure mode is the step being killed with no state line written at all. At that
+#: point the observer goes dark precisely when the queue is degraded.
+#:
+#: What a capped-out run costs: it keeps `has_live_job = None`, i.e. it ABSTAINS toward
+#: executing and is reported in `pr_running_unmeasured`. That is the safe direction —
+#: under-counting is what manufactures a destructive ``PR-STARVED`` — so hitting the
+#: budget degrades detection, never the safety property. 12 is comfortably above the
+#: measured live population (`in_progress` has been 5-10 on this repo) and bounded well
+#: inside the step budget.
+DEFAULT_MAX_JOB_PROBES = 12
+
+#: Timeout for ONE jobs probe. Much shorter than `_gh`'s 120 s default on purpose: a
+#: stalled jobs read should cost a fraction of a step's budget and then ABSTAIN, rather
+#: than spend the whole budget and take the reading down with it.
+JOB_PROBE_TIMEOUT_SECONDS = 30
+
 
 class MeasureError(RuntimeError):
     """Could not measure. Fail closed: change nothing, exit 2."""
@@ -1148,20 +1171,23 @@ def classify_queue(
     # ⛔ A COUNT THAT EXCLUDED OR ABSTAINED ON A RUN MUST SAY SO (#12037). Silence here
     # would leave the two facts that change every clause above invisible: which runs were
     # read out of `pr_running` and PROVED not to be executing, and how many were never
-    # measured and are therefore still counted as executing. Emitted only when either is
-    # non-empty, so a queue whose every in-progress run was measured keeps its existing
-    # output byte-for-byte.
+    # measured and are therefore still counted as executing. Each clause appears only when
+    # it has something to report, so a fully-measured queue keeps its existing output
+    # byte-for-byte (and a caller that never probes prints no exclusion sentence about an
+    # exclusion that did not happen).
     if pr_running_excluded or pr_running_unmeasured:
-        excluded_note = (
-            f"pr_running excluded {len(pr_running_excluded)} run(s) whose every job "
-            f"is completed {list(pr_running_excluded)}"
-        )
+        notes: list[str] = []
+        if pr_running_excluded:
+            notes.append(
+                f"pr_running excluded {len(pr_running_excluded)} run(s) whose every job "
+                f"is completed {list(pr_running_excluded)}"
+            )
         if pr_running_unmeasured:
-            excluded_note += (
-                f"; {pr_running_unmeasured} run(s) UNMEASURED (no jobs read), "
+            notes.append(
+                f"{pr_running_unmeasured} run(s) UNMEASURED (no jobs read), "
                 "counted as executing"
             )
-        reasons.append(excluded_note)
+        reasons.append("; ".join(notes))
 
     def health(verdict: str, **override: Any) -> QueueHealth:
         # A TRUNCATED FEED CANNOT CERTIFY HEALTH. The runs endpoint is newest-first
@@ -1487,8 +1513,8 @@ def _gh(args: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
         raise MeasureError(f"could not run {GH_BIN}: {exc}") from exc
 
 
-def gh_json(args: list[str]) -> Any:
-    proc = _gh(args)
+def gh_json(args: list[str], timeout: int | None = None) -> Any:
+    proc = _gh(args, timeout) if timeout is not None else _gh(args)
     if proc.returncode != 0:
         raise MeasureError(
             f"gh {' '.join(args)} exited {proc.returncode}: "
@@ -1555,29 +1581,35 @@ def read_run_live_job(repo: str, run_id: int, *, per_page: int = PER_PAGE) -> bo
     A non-terminal job on the page is enough to answer ``True`` regardless of paging,
     which is why paging cannot make this abstain in the direction that matters.
 
-    ⚠️ ``filter=latest`` IS EXPLICIT ON PURPOSE, AND IT IS **NOT** THE LOAD-BEARING PART
-    OF THIS READ. An earlier revision of this docstring claimed the endpoint returns every
-    attempt's jobs by default and that the parameter was therefore what prevented a fresh
-    attempt-2 from being read through its completed attempt-1 jobs. **That claim was wrong
-    and is corrected here rather than reworded:** GitHub's OpenAPI description for "List
-    jobs for a workflow run" declares ``filter`` with ``default: "latest"``, so the
-    parameter pins a behaviour the API already has. It is kept because an API default is
-    not a contract this repo's thresholds were measured against, and spelling it costs one
-    query token — but nobody should delete it believing the default is ``all``, nor keep it
-    believing it prevents attempt mixing.
+    ⚠️ ``filter=latest`` IS LOAD-BEARING AND IS SPELLED EXPLICITLY. This parameter has been
+    corrected TWICE, so BOTH halves are stated instead of implied:
 
-    The attempt-mixing hazard the old comment described is REAL and is answered by the
-    EMPTY-LIST rule above, not by the parameter: a run whose current attempt has created no
-    jobs yet returns an empty list — under either value of ``filter`` — and this probe
-    abstains (``None``) instead of reading it as "every job completed". That is the rule
-    that keeps a run about to execute from being counted out.
+      * Its DEFAULT is already ``latest`` (GitHub's OpenAPI description: "``latest``
+        returns jobs from the most recent execution … ``all`` returns all jobs for a
+        workflow run, **including from old executions**"; ``default: "latest"``). An
+        earlier revision of this docstring claimed the default was ``all`` and that the
+        parameter was therefore what prevented attempt mixing. That was WRONG, and it is
+        retracted here by name rather than reworded.
+      * But the parameter DOES change behaviour, and it is what the empty-list rule above
+        rests on. A second revision over-corrected, claiming that rule held "under either
+        value of ``filter``". THAT IS ALSO FALSE: under ``filter=all`` a run whose current
+        attempt has created no jobs yet returns its PREVIOUS attempt's completed jobs —
+        non-empty, all ``completed``, ``total_count == len(jobs)`` — so this probe would
+        answer ``False`` and read a run that is about to execute as proved idle. ``latest``
+        is what makes that list EMPTY, so the abstention above can fire.
+
+    So it is not decoration: switching this to ``filter=all`` (a plausible edit —
+    ``docs/ops/ci-wall-clock.md`` spells that form for step history) turns a fresh re-run
+    into ``has_live_job=False``, subtracts it from `pr_running`, and can make ``PR-STARVED``
+    reachable on a queue that IS being served — the destructive direction.
     """
     try:
         data = gh_json(
             [
                 "api",
                 f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page={per_page}",
-            ]
+            ],
+            timeout=JOB_PROBE_TIMEOUT_SECONDS,
         )
     except MeasureError:
         return None
@@ -1595,10 +1627,22 @@ def read_run_live_job(repo: str, run_id: int, *, per_page: int = PER_PAGE) -> bo
         return None
     if any(status != "completed" for status in statuses):
         return True
+    # ⛔ ONLY A PROVABLY COMPLETE LIST MAY PROVE NON-EXECUTION. The two answers are not
+    # symmetric: ``False`` subtracts a run from `pr_running`, and a low `pr_running` is
+    # what makes ``PR-STARVED`` reachable — a verdict that authorises a destructive
+    # cancel-then-rerun. Completeness is therefore accepted from EITHER signal, and the
+    # absence of a usable one abstains.
     total = data.get("total_count")
-    if isinstance(total, int) and total > len(statuses):
-        return None
-    return False
+    if isinstance(total, int):
+        return False if total <= len(statuses) else None
+    # No usable `total_count` (absent, or serialised as a string): a SHORT page is still a
+    # complete read — the endpoint never returns more than `per_page` — so it proves the
+    # same thing, while a FULL page may be a cut list and must abstain. An earlier revision
+    # tested only `isinstance(total, int)`, so a missing or string-valued count fell through
+    # to ``False`` on a page that could have been one of several (review finding,
+    # 2026-11-12; reproducible with 100 completed jobs and no `total_count`, and with
+    # `total_count` as the string "250").
+    return False if len(statuses) < per_page else None
 
 
 def read_health(
@@ -1611,6 +1655,7 @@ def read_health(
     max_cancel: int = 20,
     max_pages: int = DEFAULT_MAX_PAGES,
     max_pr_wait_seconds: float = DEFAULT_MAX_PR_WAIT_SECONDS,
+    max_job_probes: int = DEFAULT_MAX_JOB_PROBES,
 ) -> QueueHealth:
     """Measure the repo's queue. Raises ``MeasureError`` — never returns OK unread.
 
@@ -1646,11 +1691,26 @@ def read_health(
     # probe is spent ONLY on PR-event runs: they are the only population `pr_running`
     # counts, and an in-progress read can be wide during a flood (measured `in_progress=9`)
     # so probing non-PR runs would spend requests on a fact no clause consumes.
+    #
+    # ⛔ AND THE PROBES ARE BUDGETED AND SPENT OLDEST-FIRST. Budgeted because the probed
+    # population accumulates forever (see `DEFAULT_MAX_JOB_PROBES`). OLDEST-first because
+    # `read_runs` returns the feed NEWEST-FIRST while a run GitHub has stopped driving is
+    # by definition an old one — a naive head-of-list sample would spend every probe on the
+    # runs most likely to be genuinely executing and never reach the frozen runs the probe
+    # exists to find. A run left unprobed abstains toward executing (safe) and is reported
+    # as `pr_running_unmeasured` (visible).
+    projected = _project(running)
+    probe_order = sorted(
+        (run for run in projected if run.is_pr),
+        key=lambda run: _parse_time(run.created_at) or datetime.max.replace(tzinfo=UTC),
+    )
+    probed = {
+        run.id: read_run_live_job(repo, run.id)
+        for run in probe_order[: max(0, max_job_probes)]
+    }
     running = [
-        replace(run, has_live_job=read_run_live_job(repo, run.id))
-        if run.is_pr
-        else run
-        for run in _project(running)
+        replace(run, has_live_job=probed[run.id]) if run.id in probed else run
+        for run in projected
     ]
     # The legs the `status=queued` filter cannot contain. A failure here raises, like
     # every other read: an unmeasured queue is not a healthy one.
