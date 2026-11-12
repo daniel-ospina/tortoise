@@ -1104,8 +1104,19 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
       6. a nested substitution                  `echo "$(bash -c \"bash h.sh\")"`
       7. the helper as the ARGUMENT-EXECUTING   `printf x | bash helper.sh`
          end of a pipeline
+      8. a TRAILING COMMENT that mentions   `python3 helper.py --emit  # echo done`
+         `echo`, on a line that really invokes
 
     …while the INERT shapes stay inert, so the fix cannot be satisfied by reverting it.
+
+    ⛔ CLASS 8 IS CARRIED FROM A SIBLING LANE'S REVIEW (#12153, measured 2026-11-12). Its
+    first fix reduced the exemption to "the command word is `echo`/`printf` AND the line
+    carries no shell operator", which reads the line WHOLE — so a real invocation followed
+    by a comment mentioning `echo` became a "message" and was exempt, because `_code_only`
+    keeps the comment. The widening survived all 34 of that lane's tests until the row was
+    added, so the absence of such a row here is a measured gap, not a hypothetical one. The
+    POSITIONAL rule below cannot make this mistake — the command word is `python3` — and
+    this row is what reddens if anyone ever restores a whole-line predicate.
     """
     scripts = _gh_executing_scripts()
     helper = "install-ci-runner-x64.sh"
@@ -1133,6 +1144,15 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     assert _gh_hazards([f"            echo $(bash 'tools/{helper}')"], scripts)
     # 6 — the helper quoted as an argument to a NESTED substitution
     assert _gh_hazards([f'            echo "$(bash -c "bash tools/{helper}")"'], scripts)
+    # 8 — a REAL invocation whose trailing COMMENT mentions the message command. A
+    #     whole-line "starts with echo / has no separator" exemption reads the comment as
+    #     part of the command and exempts the invocation (#12153, carried from PR #12088).
+    assert _gh_hazards(
+        [f"            python3 tools/{helper} --emit  # then echo done"], scripts
+    ), "a trailing comment that mentions `echo` must not turn a real invocation into a message"
+    assert _gh_hazards(
+        [f"            tools/{helper} --emit; # then echo done"], scripts
+    ), "a comment after a separator must not exempt the command before it"
 
     # …and the inert shapes that motivated the fix stay inert — including prose that
     # CONTAINS a separator, which must not split the message into a raw segment.
