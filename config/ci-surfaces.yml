@@ -2219,6 +2219,7 @@ surfaces:
   # `test_9664_premise_census.py` precedent). ⛔ NOT in `battery`: a docs census
   # has no business running on a battery-only diff.
   - test_11739_quote_population_probe.py
+  - test_pricing_storage_dimensions.py
 
   # #11855: pins the BLAST RADIUS of an unreadable belief operand — a batch
   # containing a legacy `List`-valued α still returns every requested row, and
