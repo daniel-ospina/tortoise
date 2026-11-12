@@ -430,6 +430,52 @@ class TestTheEventApiDoor:
         assert len(_journal_lines(sdk._test_log)) == _before, (
             "a refused call must append nothing to the journal")
 
+    def test_a_terminal_declaration_cannot_be_MASKED_by_a_later_key(self, sdk):
+        """Review cycle 8, P0 — the guard judged only the LAST declaration.
+
+        The writer applies EVERY key of the map, so two keys that both render to
+        `status` are BOTH written. A last-one-wins guard let a terminal value be
+        masked by a later non-terminal one: measured, `{status: superseded,
+        <alias whose content is status>: live}` was ACCEPTED and the node landed
+        `status='superseded'` — live, and again after `rebuild_all` — at six of
+        the seven doors. The guard now refuses if ANY declaration is terminal,
+        and the same rule covers `outdated` (`{outdated: True, <alias
+        outdated>: False}`), symmetric with the Phase-1 arm.
+        """
+
+        class _AliasHarmless(str):
+            def __str__(self):
+                return "harmless"
+
+            def __hash__(self):
+                return 424242
+
+            def __eq__(self, other):
+                return isinstance(other, _AliasHarmless) and str.__eq__(self, other)
+
+        class _AliasOutdated(str):
+            def __str__(self):
+                return "harmless"
+
+            def __hash__(self):
+                return 919191
+
+            def __eq__(self, other):
+                return isinstance(other, _AliasOutdated) and str.__eq__(self, other)
+
+        eid = _event(sdk, name="Masked")
+        with pytest.raises(ValueError, match="not writable on an :Event"):
+            sdk.update_entity(eid, **{"status": "superseded",
+                                      _AliasHarmless("status"): "live"})
+        assert "status" not in _props(sdk, eid)
+
+        api = self._api(sdk)
+        before = len(_journal_lines(sdk._test_log))
+        with pytest.raises(ValueError, match="not writable on an :Event"):
+            api.add_event("ev-masked-flag", "deployment",
+                          **{"outdated": True, _AliasOutdated("outdated"): False})
+        assert len(_journal_lines(sdk._test_log)) == before
+
     def test_a_key_the_JOURNAL_would_file_as_status_is_guarded_too(self, sdk):
         """Review cycle 7, P1 — TWO key renderers, and the journal is the second.
 

@@ -690,45 +690,29 @@ def declares_event_state_key(props) -> bool:
                for key in props)
 
 
-def _event_state_declarations(props) -> tuple[bool, object, bool, object]:
-    """``(status_declared, status, outdated_declared, outdated)`` for a prop map.
+def _event_state_declarations(props) -> tuple[list, list]:
+    """EVERY value this map declares for ``status`` and for ``outdated``.
 
-    DECLARATION is separate from the VALUE because ``status: None`` is a
-    meaningful clear (``live.py``'s refusal text documents it), so a caller
-    cannot use ``None`` as "absent".
+    ⛔ LISTS, not one value, and that is the whole point (review cycle 8, P0).
+    The writer applies EVERY key of the map, so two different keys that both
+    render to ``status`` are BOTH written; picking the last one let a terminal
+    declaration be MASKED by a later non-terminal one and the terminal value was
+    stored — live, and again after `rebuild_all` — at six of the seven doors.
+    The refusal must fire if ANY declaration is terminal, which is also what the
+    Phase-1 arm already does, so the two cannot disagree.
+
+    A declaration is kept distinct from "absent" because ``status: None`` is a
+    meaningful clear (the refusal text documents it).
     """
-    status_declared = outdated_declared = False
-    status = outdated = None
+    status_values: list = []
+    outdated_values: list = []
     for key, value in props.items():
         names = _event_state_key_names(key)
         if "status" in names:
-            status_declared, status = True, value
+            status_values.append(value)
         if "outdated" in names:
-            outdated_declared, outdated = True, value
-    return status_declared, status, outdated_declared, outdated
-
-
-def _event_state_keys(props) -> tuple[object, object]:
-    """``(status, outdated)`` for a caller's property map, INSENSITIVE to a lying
-    ``str`` KEY.
-
-    ⛔ ``props.get("status")`` is not a boundary. A ``str`` SUBCLASS key that
-    overrides ``__hash__`` (or ``__eq__``) is invisible to the dict lookup for the
-    literal name, while ``_persist_extra_props`` writes it anyway — it iterates
-    ``items()`` and the driver renders the key with ``str()``. Measured at review
-    cycle 4: ``{class K(str): __hash__ = lambda s: 0; "status": "superseded"}``
-    reached ``add_event``/``update_entity``/``create_entity('event')`` unrefused and
-    STORED ``superseded``, i.e. the guard's promise — an answer independent of the
-    kwargs SHAPE (``api._emit`` says the same) — failed on the KEY axis while the
-    value axis was already closed.
-
-    So the key is RENDERED as the writer renders it (``_event_state_key``) and
-    compared by EQUALITY, never by hashing the caller's object. Cost on the
-    normal path is a shallow scan of the
-    caller's map — the same order as the loop the writer runs anyway.
-    """
-    _sd, status, _od, outdated = _event_state_declarations(props)
-    return status, outdated
+            outdated_values.append(value)
+    return status_values, outdated_values
 
 
 def refuse_terminal_event_state(props, *, door: str) -> None:
@@ -813,7 +797,7 @@ def refuse_terminal_event_state(props, *, door: str) -> None:
     ``door`` names the surface in the refusal, per `docs/ax/ax-principles.md`
     (#10183): refused, exactly what failed, exactly what to do.
     """
-    status, outdated = _event_state_keys(props)
+    status_values, outdated_values = _event_state_declarations(props)
     # Both keys are typed here, because this is the ONE `:Event` writer with no
     # ``_sanitize_props`` intake to do it. A non-STRING status is not merely
     # undeclared: an unhashable one (a list, a dict) reached the membership test
@@ -838,27 +822,31 @@ def refuse_terminal_event_state(props, *, door: str) -> None:
     # or reject a different set, and asking only the fold's — as the first
     # revision of this scope did — let an ``np.int64`` be STORED and a ``bytes``
     # turn a named refusal into a bare ``TypeError`` (review cycle 3, P2).
-    if status is not None and not isinstance(status, str):
-        if not _status_is_discarded_by_every_writer(status):
+    #
+    # ⛔ EVERY DECLARATION is judged, in BOTH directions (review cycle 8, P0).
+    # The writer applies every key of the map, so two keys that both render to
+    # ``status`` are BOTH written; a last-one-wins guard let a terminal value be
+    # MASKED by a later non-terminal one and the terminal value was stored — live
+    # and again after `rebuild_all` — at six of the seven doors. This is also why
+    # the door cannot disagree with the Phase-1 arm, which already tests every
+    # declaration.
+    for _value in status_values:
+        if _value is None or isinstance(_value, str):
+            continue
+        if not _status_is_discarded_by_every_writer(_value):
             raise ValueError(
-                f"Refused: `status={status!r}` is not a legal value on an :Event "
+                f"Refused: `status={_value!r}` is not a legal value on an :Event "
                 f"({door}). `status` is a STRING drawn from the vocabulary, or "
                 f"`None` to clear it. WHAT TO DO: pass a string (to record a "
                 f"correction, write a NEW :Event; for ingest state use "
                 f"`eventStatus`)."
             )
-        # The writer drops it, so nothing lands that a reader could call
-        # terminal. Treated as ABSENT rather than refused (#7925).
-        status = None
-    if outdated is not None and not isinstance(outdated, bool):
-        if _status_is_discarded_by_every_writer(outdated):
-            # Same rule as `status`, and the peer lane's correction: a value no
-            # writer keeps cannot be read as a terminal FLAG either, so it is
-            # ABSENT rather than refused (#7925's over-rejection class).
-            outdated = None
-        else:
+    for _value in outdated_values:
+        if _value is None or isinstance(_value, bool):
+            continue
+        if not _status_is_discarded_by_every_writer(_value):
             raise ValueError(
-                f"Refused: `outdated={outdated!r}` is not a legal value on an "
+                f"Refused: `outdated={_value!r}` is not a legal value on an "
                 f":Event ({door}). `outdated` is contractually a BOOLEAN and it is "
                 f"server-managed; a non-boolean is read as TERMINAL by the Cypher "
                 f"predicate and as LIVE by the Python mirror, which is the "
@@ -867,7 +855,7 @@ def refuse_terminal_event_state(props, *, door: str) -> None:
                 f"`False`, or omit the key."
             )
     # ⛔ A ``str`` SUBCLASS can LIE about all three methods the terminal test
-    # uses, and it reaches here as a perfectly legal ``isinstance(status, str)``:
+    # uses, and it reaches here as a perfectly legal ``isinstance(value, str)``:
     # ``__hash__ = None`` raises inside the frozenset membership, a constant
     # ``__hash__`` lands in the wrong bucket so a terminal word tests False, and
     # ``__eq__`` can answer False outright. Measured at review cycle 3 — the
@@ -875,22 +863,18 @@ def refuse_terminal_event_state(props, *, door: str) -> None:
     # instead of a refusal. ``str.__str__`` returns a plain ``str`` and does not
     # consult any of the subclass's overrides, so the test runs on the value the
     # store would actually hold.
-    if isinstance(status, str):
-        status = str.__str__(status)
-    if not is_terminal_status(status, outdated):
-        return
-    # Terminal — name the key that made it so. `is_terminal_status` is
-    # ``(status or '') in TERMINAL_EXCLUDED_STATUSES or bool(outdated)``, so a
-    # true flag can only be the flag's message; otherwise it is the status's.
-    if outdated:
-        raise ValueError(
-            f"Refused: `outdated={outdated!r}` is not writable on an "
-            f":Event ({door}). {_EVENT_TERMINAL_STATE_REFUSAL}"
-        )
-    raise ValueError(
-        f"Refused: `status={status!r}` is not writable on an :Event "
-        f"({door}). {_EVENT_TERMINAL_STATE_REFUSAL}"
-    )
+    for _value in status_values:
+        if isinstance(_value, str) and is_terminal_status(str.__str__(_value)):
+            raise ValueError(
+                f"Refused: `status={_value!r}` is not writable on an :Event "
+                f"({door}). {_EVENT_TERMINAL_STATE_REFUSAL}"
+            )
+    for _value in outdated_values:
+        if _value is True:
+            raise ValueError(
+                f"Refused: `outdated={_value!r}` is not writable on an "
+                f":Event ({door}). {_EVENT_TERMINAL_STATE_REFUSAL}"
+            )
 
 
 #: The keys an epistemic node's identity may live under, in resolution order

@@ -7886,11 +7886,15 @@ def _item_rendered_prop(scope: dict, key: str) -> tuple[bool, object]:
     is the one the writer keeps — which is also the arm's rule, and the two must
     agree or Phase 1 reports clean for a bundle the door refuses.
     """
-    from .live import _event_state_key
+    from .live import _event_state_key_names
 
     found, value = False, None
     for raw, candidate in scope.items():
-        if _event_state_key(raw) == key:
+        # ⛔ BOTH renderings, the same union the write door asks
+        # (`_event_state_key_names`): Phase 1 reading one renderer while the door
+        # reads two is how a rendered-alias `outdated` key was refused mid-write
+        # after the earlier items committed (measured, review cycle 8, P1).
+        if key in _event_state_key_names(raw):
             found, value = True, candidate
     return found, value
 
@@ -27539,16 +27543,6 @@ class TortoiseSDK:
                            f"carries no lifecycle, so its door refuses the "
                            f"terminal half mid-write and the bundle is rejected "
                            f"at validation. WHAT TO DO: drop `status` from the "
-                           f"item, or use a non-terminal value (the door "
-                           f"accepts `scheduled`/`draft`/`live`).",
-            })
-            violations.append({
-                "section": "entities", "index": i,
-                "message": f"ingest: entities[{i}] declares status "
-                           f"{own_status!r} for an :Event — an :Event carries "
-                           f"no lifecycle, so its door refuses the terminal "
-                           f"half mid-write and the bundle is rejected at "
-                           f"validation. WHAT TO DO: drop `status` from the "
                            f"item, or use a non-terminal value (the door "
                            f"accepts `scheduled`/`draft`/`live`).",
             })
