@@ -1228,7 +1228,9 @@ def test_signup_acceptance_same_viewport(page: Page, viewport: tuple[int, int]) 
 def test_signup_acceptance_dom_structure(page: Page) -> None:
     """DOM parentage (P1-2): .legal-accept is a SIBLING of .providers,
     PRECEDES <form id="email-form"> in document order, and is NOT a
-    descendant of the form. Links resolve to /tos and /privacy."""
+    descendant of the form. Links resolve to the /tos and /privacy DOCUMENTS —
+    root-relative, or ABSOLUTE onto the one marketing origin since #11762 (see
+    the pin below)."""
     _goto(page, _app_url("/signup"))
 
     struct = page.evaluate(
@@ -1251,7 +1253,29 @@ def test_signup_acceptance_dom_structure(page: Page) -> None:
     hrefs = page.evaluate(
         """() => [...document.querySelectorAll('.legal-accept a')].map(a => a.getAttribute('href'))"""
     )
-    assert "/tos" in hrefs and "/privacy" in hrefs, f"legal-accept links wrong: {hrefs}"
+    # The DOCUMENT each link addresses, in either spelling. Since epic #11762 the app
+    # origin names these two ABSOLUTELY: `/tos` on `app.premiselabs.co` is a 404
+    # (measured), so `signup.html` carries `https://premiselabs.co/tos`, and
+    # `test_website_static.py`'s app-origin guard refuses the root-relative form.
+    # The pin is therefore the resolved PATH, never a substring of the raw attribute:
+    # `/tos` and `https://premiselabs.co/tos` are the same document, while
+    # `/tos-archive` is not — and an absolute link must name the ONE marketing origin
+    # in full (scheme AND netloc), so a scheme downgrade or an odd port cannot pass.
+    def _legal_accept_target(href: str) -> tuple[str | None, str]:
+        if "//" in href:
+            parsed = urlsplit(href)
+            return f"{parsed.scheme}://{parsed.netloc}", parsed.path
+        return None, href.split("#", 1)[0]
+
+    targets = [_legal_accept_target(h) for h in hrefs]
+    for document in ("/tos", "/privacy"):
+        assert any(path == document for _, path in targets), (
+            f"legal-accept does not link the {document} document: {hrefs}")
+    for origin, path in targets:
+        if origin is not None:
+            assert origin == "https://premiselabs.co", (
+                f"legal-accept absolute link to {path!r} names {origin!r}, not the one "
+                f"marketing origin https://premiselabs.co (hrefs: {hrefs})")
 
 
 def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
