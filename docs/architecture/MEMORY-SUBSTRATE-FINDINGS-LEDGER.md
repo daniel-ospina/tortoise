@@ -428,8 +428,20 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   comment blesses was REFUSED as a swap of all seven rows, and the documented
   negated complement (a `— <letters> do not.` clause, letters in code or italic) was
   COUNTED into the STILL-TRUE list. One constant
-  (`_LETTER_ALT_MARKED`) now feeds all four readers, so the spellings cannot drift apart again —
-  which is the only reason a sentence's markup could decide its verdict.
+  (`_LETTER_ALT_MARKED`) now BUILDS the extractor's regex and is embedded in the complement
+  pattern, and `test_the_span_readers_and_the_extractor_share_one_spelling_list` pins that it
+  stays the single source — because a first attempt at this fix left a SECOND literal beside it,
+  and a review measured the drift it permitted: a spelling added to one side alone re-opened the
+  fail-open (or the false accusation) with a green suite.
+  ⛔ ONE SPELLING IS DELIBERATELY NOT READ, and it is named here rather than left to a test
+  docstring: the BARE form **outside** a list run. `Note d is **ADOPTED**.` beside the `(d)`
+  row reads CLEAN, so markup still decides THAT case — `a` and `i` are English words, and reading
+  every bare `[a-l]` token as a verdict claim would let ordinary prose assign one, which is the
+  false-accusation direction this arm must not create either. A bare letter IS read where it is
+  unambiguous: inside a list RUN (the §3 tally extractor), and in a clause-anchored complement
+  (the `— <letters> do not.` form, where the group ends the clause). Pinned in both directions by
+  `test_a_bare_letter_outside_a_list_run_assigns_no_verdict` and
+  `test_the_complement_clause_is_read_in_every_spelling`.
   A single parenthetical letter in prose is **not** a list — `row (c) still read as written` is a
   sentence, not a tally — and a
   sentence that merely QUOTES the phrase has no list to disagree with the table, so counting it reded
