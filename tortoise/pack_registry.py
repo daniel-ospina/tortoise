@@ -3166,13 +3166,36 @@ class PackRegistry:
                             f"{cw}.fromKinds: '{fk}' names namespace "
                             f"'{_fkns}', which this pack neither owns nor "
                             f"declares in depends_on (R1)")
+                    # ⛔ ``own_layer`` — the ENTITY axes — and NOT
+                    # ``all_pack_kinds``. That set is the union of every
+                    # `KIND_FIELDS` axis, and it includes the two this same
+                    # method already refuses a guard `kind:` for
+                    # (`documentKinds`, `actionKinds`) and deliberately leaves
+                    # out of ``own_layer`` because no door writes them. A scope
+                    # on one of those therefore validated CLEAN and compiled
+                    # DEAD — `_named_layer_kinds` never yields it, so no write
+                    # can ever declare it — which is the exact false PASS this
+                    # check exists to close (round-5 review P2, measured with a
+                    # real registry: `documentKinds: [contract]` +
+                    # `fromKinds: [contract]` → `✓ Clean`).
                     elif (_fkns is not None and _fkns == (ns or None)
-                          and _fkq.split(":", 1)[-1] not in all_pack_kinds
                           and _fkq.split(":", 1)[-1] not in own_layer):
                         errors.append(
                             f"{cw}.fromKinds: '{fk}' is this pack's own "
-                            f"namespace but no kind it declares — a scope no "
-                            f"write to this pack can ever match")
+                            f"namespace but no entity kind it declares — a "
+                            f"scope no write to this pack can ever match")
+                    # ⛔ AND A CORE SCOPE THAT NAMES NO CORE KIND. The arm above
+                    # only covers this pack's OWN namespace, so `core:WrokItem`
+                    # (a typo of `core:WorkItem`) validated clean and compiled to
+                    # a scope that matches nothing — the same dead-guard class,
+                    # reached through the one namespace with no pack to check it
+                    # against (round-5 review P2, measured).
+                    elif (_fkns is None
+                          and _fkq not in core_names
+                          and _fkq.split(":", 1)[-1] not in core_names):
+                        errors.append(
+                            f"{cw}.fromKinds: '{fk}' is a core scope but names "
+                            f"no core kind — a scope no write can ever match")
                 # ⛔ A `linkPredicate` the runtime does not know is a guard that
                 # abstains for ever, and one that names no key of
                 # `LINK_PREDICATES` at all is a typo the install gate used to

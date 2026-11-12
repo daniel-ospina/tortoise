@@ -1765,6 +1765,84 @@ class TestReviewRound4Closed:
         errs = self._validate({**base, "fromKind": ["concept"]})
         assert errs and "fromKind" in " ".join(errs), errs
 
+    def test_the_degraded_SKIPPED_row_is_withdrawn_by_an_abstention(self):
+        """A degraded redirect's `skipped` row names a target the `_unrecord` missed.
+
+        Round-5 review P2, measured: `_redirect` records TWO rows for a degraded
+        redirect — `accepted` for the fallback, `skipped` for the declared target
+        that was unusable — and `abstain` withdrew only the `accepted` row (it
+        keys on `decision.kind`, which for a degraded decision IS the fallback).
+        A degraded-then-abstained write therefore left a `skipped` row for
+        `other:issue` in the tally while NO redirect happened at all: a counter
+        reporting a redirect that did not happen, which is the one thing
+        `abstain`'s own docstring forbids — and it poisons the exact question the
+        row was added to answer, because a target that failed to resolve for a
+        write the door then refused to redirect is not an installed-target gap.
+        """
+        guard = Confusion(
+            rule="acme:deg-abstain",
+            when="nameMatches",
+            pattern=r"^ticket-[0-9]+$",
+            redirect="other:issue",       # not installed -> degrades
+            fallback="core:WorkItem",
+            reason="a ticket is a work item",
+        )
+        d = kg.resolve("ticket-9", "subject", None,
+                       pack_confusions=(guard,),
+                       installed=frozenset({"acme"}))
+        assert d.outcome == kg.GuardOutcome.REDIRECT
+        assert d.redirect["degraded"] is True
+        assert d.skipped["target"] == "other:issue"
+        kg.abstain(d, kg.SKIP_STATUS_NOT_LEGAL_ON_SUBJECT, layer="subject")
+        rows = [r for r in kg.kind_guard_counts()
+                if r["rule"] == "acme:deg-abstain"]
+        assert [r for r in rows if r["to"] == "other:issue"] == [], (
+            "the declared target's `skipped` row survived an abstention — the "
+            f"redirect it describes never happened: {rows}")
+        # …and the abstention's OWN row is still there, so the fix withdrew the
+        # phantom and not the measurement.
+        assert [r for r in rows if r["outcome"] == "skipped"
+                and r["to"] == "core:WorkItem"], rows
+
+    def test_a_fromKinds_scope_on_a_NON_ENTITY_axis_is_refused(self):
+        """`documentKinds`/`actionKinds` declare no entity layer — a scope on one is DEAD.
+
+        Round-5 review P2: the membership test used `all_pack_kinds`, the union of
+        EVERY `KIND_FIELDS` axis — including the two this same method refuses a
+        guard `kind:` for. `_named_layer_kinds` never yields them, so no write can
+        ever declare one: the guard installed `✓ Clean` and could never fire, the
+        exact false PASS the check exists to close.
+        """
+        errs = self._validate(
+            {"rule": "acme:doc", "pattern": r"^contract-[0-9]+$",
+             "redirect": "core:WorkItem", "fallback": "core:WorkItem",
+             "reason": "x", "fromKinds": ["contract"]},
+        )
+        # `_validate` declares only `concept` on the entity axes, so `contract`
+        # is a scope no entity write can match.
+        assert errs and "fromKinds" in " ".join(errs), errs
+
+    def test_a_fromKinds_scope_naming_no_CORE_kind_is_refused(self):
+        """`core:WrokItem` is a typo the own-namespace arm cannot see.
+
+        Round-5 review P2, measured: the arm only covered this pack's OWN
+        namespace, so a misspelled CORE scope validated clean and compiled to a
+        scope that matches nothing — the same dead-guard class, through the one
+        namespace with no pack to check it against.
+        """
+        errs = self._validate(
+            {"rule": "acme:core-typo", "pattern": r"^x-[0-9]+$",
+             "redirect": "core:WorkItem", "fallback": "core:WorkItem",
+             "reason": "x", "fromKinds": ["core:WrokItem"]},
+        )
+        assert errs and "core" in " ".join(errs), errs
+        # the real one still passes
+        assert self._validate(
+            {"rule": "acme:core-ok", "pattern": r"^x-[0-9]+$",
+             "redirect": "core:WorkItem", "fallback": "core:WorkItem",
+             "reason": "x", "fromKinds": ["core:WorkItem"]},
+        ) == []
+
     def test_a_misspelled_key_on_the_GUARD_itself_is_refused(self):
         """The same rule one level up: `onConfusions:` (plural) loses every entry."""
         errs = self._validate(

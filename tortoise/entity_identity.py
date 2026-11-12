@@ -1053,8 +1053,12 @@ def refuse_if_ambiguous(label: str, name: str, holders) -> None:
     """Refuse a CREATE whose name 2+ LIVE entities hold — records and raises.
 
     ⛔ THE ONE REFUSAL PREDICATE (#9876 review, this head). ``holders`` is the
-    raw :func:`live_name_holder_ids` row list (id-less LIVE rows INCLUDED, per
-    that function's own contract), and ``len(holders) > 1`` is the create's
+    row list the READER produced — today :func:`_live_holders_same_entity`
+    (``name`` AND ``canonical_name``, plus the folded spelling), i.e. exactly the
+    rows :func:`resolve_or_mint` refuses on; it is NOT the narrower
+    :func:`live_name_holder_ids` list, and this docstring said it was until the
+    #12060 round-5 review read the two call sites (id-less LIVE rows INCLUDED,
+    per that reader's own contract), and ``len(holders) > 1`` is the create's
     route-then-refuse (R8) threshold. Two sites ask it and both call here, so
     they cannot answer differently:
 

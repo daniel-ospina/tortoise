@@ -212,8 +212,9 @@ PROVISIONAL, and the identity-bearing kind is the writer's act, reconciled later
 So `the owner → role` presupposes an entity exists while `the owner → mention`
 denies it, and kind-first could mint a node that referentiality would have
 refused — a node the resolver has no mandate to delete. Conversely this guard is
-deterministic, cheap and idempotent, so it is safe to run AGAIN after `#12047`
-merges (which is how NER's provisional type survives in those pipelines).
+deterministic, cheap and idempotent, so it is safe to run AGAIN on the
+`#12047` write path (which is how NER's provisional type survives in those
+pipelines) — the PATH, not a pending merge: `#12047` has landed.
 
 And the case the owner named as the meeting point is why the role guard
 **abstains** rather than redirecting: redirecting `the owner` to `core:role`
@@ -967,6 +968,22 @@ def abstain(decision: GuardDecision, reason: str, *,
         _ABSTAINED.pop(id(decision), None)
     _unrecord(decision.rule or "", decision.declared_kind, decision.kind or "",
               GuardOutcome.REDIRECT)
+    # ⛔ AND THE DEGRADED ARM'S OWN `skipped` ROW, which the line above does NOT
+    # touch — it names a DIFFERENT target. A degraded redirect recorded two rows:
+    # `accepted` for the fallback it re-filed to, and `skipped` for the declared
+    # target that was unusable. Withdrawing the redirect withdraws BOTH statements:
+    # measured (round-5 review P2) a degraded-then-abstained write left a `skipped`
+    # row for `other:issue` in the tally while no redirect happened at all — a
+    # counter reporting a redirect that did not happen, which is the one thing this
+    # function's own docstring says a counter must never do. It also poisoned the
+    # exact question that row was added to answer ("how often does a guard's
+    # declared target fail to resolve?"): a target that failed to resolve for a
+    # write the door then REFUSED TO REDIRECT is not an installed-target gap.
+    _degraded_target = str((decision.skipped or {}).get("target") or "")
+    if (decision.redirect or {}).get("degraded") and _degraded_target \
+            and _degraded_target != (decision.kind or ""):
+        _unrecord(decision.rule or "", decision.declared_kind, _degraded_target,
+                  GuardOutcome.SKIPPED)
     skipped = {"rule": decision.rule, "target": decision.kind, "reason": reason}
     _record(decision.rule or "", decision.declared_kind, decision.kind or "",
             GuardOutcome.SKIPPED)
@@ -1015,6 +1032,16 @@ def subject_only_prop_abstention(
     ⛔ ENUMERATED, NOT GENERALISED. These are the two prop/kind validations the
     entity doors perform today; a third needs its own arm HERE, beside them,
     rather than a registry loop that would silently miss it.
+
+    ⚠️ THE BOUNDARY, stated because a review measured it and the arm does not
+    reach it: this makes the GUARD abstain, and the write then lands at the door
+    the caller asked for. When the write ALSO declares the kind explicitly
+    (`create_object(..., objectKind='core:organization', roleHolder=...)`),
+    `sdk._kind_layer_note` runs AFTER this and re-routes to the Subject label,
+    where the door raises — with or without any guard, so that refusal is the
+    router's, not one this arm invents (``_kind_layer_note``'s own ``blocked``
+    test covers `status` alone; tracked in #12228, and out of this module's
+    reach by design).
 
     ⛔ ``status_values`` is passed IN rather than imported. This module holds no
     tortoise import at module scope (the header's rule), and — the reason that
