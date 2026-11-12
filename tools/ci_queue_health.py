@@ -79,8 +79,8 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               per REPO — the PR WORK WAS NOT WITNESSED, for one of three reasons:
               (a) the FEED WAS CUT AT ITS PAGE CAP, so the older runs — the end
               the age clause needs — were never read (and no PR-event run is
-              executing); (b) the QUEUED PR-EVENT RUNS CARRY NO READABLE
-              ``created_at``, so the wait cannot be measured at all; or (c) the
+              executing); (b) a WAITING PR-EVENT RUN (queued/pending/requested, not the
+              queued leg) carries no readable ``created_at`` — wait unmeasurable; or (c) the
               RUNNING CENSUS IS UNWITNESSED — every run counted in ``pr_running``
               was UNMEASURED (the jobs probe could not read it, or the probe budget
               did not reach it), so that count is the pre-#12037 status-string

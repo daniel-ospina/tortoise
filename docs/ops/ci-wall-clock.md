@@ -440,12 +440,15 @@ same step with the same tail is the investigation.
   document's own §1 measurement (max first-job wait 81.9 min → 90 min), so it fires past the
   measured-normal population rather than on it. `PR-UNWITNESSED` is reported rather than `OK`
   whenever the PR work is neither witnessed nor disproved, and it has THREE causes on different
-  dimensions — and FOUR triggers, because a cut `pending`/`requested` leg is unwitnessed by the
-  same argument as a cut queued feed and takes the same lever (it just is not a *fourth* cause):
+  dimensions — and FIVE triggers, because a cut `pending`/`requested` leg is unwitnessed by the
+  same argument as a cut queued feed and takes the same lever (it just is not a *fourth* cause),
+  and because the unreadable-stamp cause applies to the WHOLE waiting population
+  (`queued + pending + requested`), not to the queued leg alone:
   - the queued feed was cut at its page cap **and no PR-event run is executing** — raise
     `--max-pages` to read further back;
-  - the queued PR runs carry no readable `created_at`, so the wait cannot be measured at all —
-    there is no lever here; a stamp GitHub never wrote cannot be recovered, so retry the reading;
+  - a WAITING PR-event run (`queued`/`pending`/`requested`) carries no readable `created_at`,
+    so the wait cannot be measured at all — there is no lever here; a stamp GitHub never wrote
+    cannot be recovered, so retry the reading;
   - the RUNNING CENSUS is unwitnessed — every run counted in `pr_running` was unmeasured. This
     shows on the state line as `census=unmeasured` **whenever the counted census is entirely
     unmeasured, on ANY verdict that can carry that shape** (`PR-BACKLOGGED`, `PR-UNWITNESSED`
