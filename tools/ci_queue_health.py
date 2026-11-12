@@ -31,7 +31,8 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               work is starved of slots. THIS tool's state, and the only one that
               no per-commit reading can produce.
   PR-BACKLOGGED
-              per REPO — PR CI IS executing, and a queued PR-event run has waited
+              per REPO — PR CI is COUNTED as executing (`pr_running > 0`), and a queued
+              PR-event run has waited
               past ``max_pr_wait_seconds``. The SERVING half of the starvation
               class, and the one state a saturated-but-moving queue produces: the
               other two starvation witnesses both require ``pr_running == 0``,
@@ -268,7 +269,9 @@ from typing import Any
 OK = "OK"
 FLOOD = "FLOOD"
 PR_STARVED = "PR-STARVED"
-#: PR CI IS executing and the backlog behind it is past the wait budget. The
+#: PR CI is counted as executing (`pr_running > 0`) and the backlog behind it is past the
+#: wait budget — "counted", not "proved": the count may include runs whose jobs could not be
+#: read, which `_executing_claim` reports separately rather than asserting. The
 #: SERVING half of the starvation class — see the module docstring. Distinct from
 #: PR_STARVED (which means nothing of the PR work is executing at all): the two are
 #: true of different queues, and neither may be inferred from the other.
@@ -404,9 +407,10 @@ PER_PAGE = 100
 #: SECOND reading when it acts. Worst case here is therefore 2 × 8 × 15 s = 240 s of a 600 s
 #: job budget — the numbers are chosen to fit that arithmetic rather than asserted to.
 #:
-#: Why bound it at all: a frozen run does not leave the feed on its own (three have sat at
-#: `in_progress` here since 2026-11-05 and no endpoint accepts a repair), so the probed
-#: population only grows and an unbounded probe grows with it — on exactly the runs it exists
+#: Why bound it at all: a frozen run does not leave the feed on its own (three runs sat at
+#: `in_progress` here for a week in November 2026 with every job `completed`, and no repair
+#: endpoint accepted them), so the probed population only grows and an unbounded probe grows
+#: with it — on exactly the runs it exists
 #: to find. The failure mode is the job dying with no state line written, i.e. the observer
 #: going dark precisely when the queue is degraded.
 #:
