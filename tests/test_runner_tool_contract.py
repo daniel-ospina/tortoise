@@ -927,7 +927,7 @@ def _segment_executes_a_helper(line: str, script_ref: re.Pattern[str]) -> bool:
     is that operator-facing PROSE naming a helper reads as a hazard.
 
     MEASURED 2026-11-12 on main's tip `4b1d6cd0d4` (introduced by `8126970432`):
-    `test-record-postgres`'s client-pin step EMITS
+    `test-record-postgres`'s client-pin step EMITTED
     `::error::… tools/install-ci-runner-x64.sh --repair-labels …` as guidance for the
     operator, and the scan named `python-ci.yml::test-record-postgres` an undeclared
     gap — reddening `test-carve-out (c)` on main's tip, which withheld the REQUIRED
@@ -1060,7 +1060,7 @@ def test_an_operator_message_naming_a_helper_is_not_a_gh_hazard():
     """PROSE is not an INVOCATION — the false positive that reddened main's tip.
 
     MEASURED 2026-11-12 on main `4b1d6cd0d4`: `test-record-postgres`'s client-pin step
-    emits `::error::… tools/install-ci-runner-x64.sh --repair-labels …` as operator
+    emitted `::error::… tools/install-ci-runner-x64.sh --repair-labels …` as operator
     guidance, and the NAME arm — reading the raw line, which it must — took the message
     for a hazard. `test_every_pool_eligible_gh_job_is_declared` then named
     `python-ci.yml::test-record-postgres` an undeclared gap, `test-carve-out (c)` reddened
@@ -1267,6 +1267,15 @@ def test_a_script_named_only_in_an_operator_message_is_not_a_gh_hazard():
     as the row below), and one of the 30 is an `on.push.paths` filter entry rather than an
     invocation. Pinning any of them re-creates the coupling that red `main` here. The
     `::error::` line below is the shape #12133 red on.
+
+    ⛔ THE OVERLAP WITH `test_an_operator_message_naming_a_helper_…` IS DELIBERATE, and
+    the split is stated so a later de-duplication pass does not delete coverage: that
+    sibling pins the same prose shape for the #12133 false positive (and carries the
+    block-scalar spelling), while the rows UNIQUE to this test are the inert two-argument
+    `printf` spelling (`printf '%s\\n' 'see …'`) and the bare-`echo` residual hazard —
+    neither appears there. What is also unique here is the subject: this pin is the one
+    that READ the live job body, so its docstring is where #12188's red and the reason a
+    live-text pin is refused are recorded.
     """
     scripts = _gh_executing_scripts()
     # ANTI-VACUITY: the PROSE cases below pass trivially the moment this name stops being a
