@@ -350,12 +350,12 @@ itself (every other `partial`-hold fixture injects the sentinel string, so nothi
 derivation to `PARTIAL_LABEL_PREFIX` — see the note below), and one added by `#11437` that drives
 the residual pin's polarity as an executor over its own row set rather than a table in a message —
 and
-reads 165 passed, 1 skipped on the docker lane. The
-skip is the `<3.12` re-derive. ⛔ The SPLIT is lane-bound, and the same tree reads **164 passed,
+reads 170 passed, 1 skipped on the docker lane. The
+skip is the `<3.12` re-derive. ⛔ The SPLIT is lane-bound, and the same tree reads **169 passed,
 2 skipped** under `TORTOISE_TEST_CARVE_OUT=1` with no `TORTOISE_DB_URI` — the second skip is
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies. Both splits add
-to the same `166` the pin re-derives, so **neither is a stale figure**: a carve-out run that
-"corrects" 165/1 to 164/2 rewrites a true record into a false one, and the pin deliberately does
+to the same `171` the pin re-derives, so **neither is a stale figure**: a carve-out run that
+"corrects" 170/1 to 169/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
 head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is

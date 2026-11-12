@@ -7233,11 +7233,11 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `169 passed, 1 skipped`
+    defect. Measured at this tree: the docker lane reads `170 passed, 1 skipped`
     (the skip is the `<3.12` re-derive) and the carve-out lane reads
-    `168 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
+    `169 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
     fixture, which only a lane with a `TORTOISE_DB_URI` satisfies). Both splits add
-    to the `170` re-derived below, which is why the doc states its split as
+    to the `171` re-derived below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
     root = Path(probe.__file__).resolve().parent.parent

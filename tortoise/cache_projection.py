@@ -337,7 +337,16 @@ def served_vector_labels() -> frozenset[str]:
     at import time, so a per-label exception or a narrowed bound added to the
     owner later would still be read here as the OLD function's answer — the copy
     the `#11641` rule forbids, one indirection deeper. Reading the attribute
-    every call means the owner's answer is the answer this module gets.
+    every call means the owner's answer is the answer THIS SEAM gets.
+
+    ⚠️ WHAT IS LIVE AND WHAT IS NOT, stated plainly (`#11747` round-4 review):
+    this function delegates per call, but :data:`UNSERVED_VECTOR_LABELS` below is
+    an import-time SNAPSHOT of the owner's answer, and that constant — not this
+    seam — is what both production doors read (`node_from_row`, `node_statement`).
+    So a change to the owner lands here on the next call and in the drop decision
+    at the next import. Live re-derivation of the constant is not free (it is read
+    per node, and a widened set is a schema decision, not a runtime knob); what the
+    test pin holds is that the two cannot disagree at import.
     """
     return _vector_write.served_store_labels()
 

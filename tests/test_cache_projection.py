@@ -1129,10 +1129,20 @@ def test_the_PLAN_reports_the_vectors_it_refuses():
     #
     # ⚠️ `ProjectionReport` is CALLER-FILLABLE: nothing in the tree constructs
     # one on a run path, so these three assertions pin the RENDERER's shape, not
-    # a wired surface (`#11747` review, finding 3). The operator-facing pin for
-    # the drop is
-    # `test_9556_record_restore_verb.py::test_the_human_line_names_the_DROPPED_vectors_and_denies_the_re_run`,
-    # which drives the real `rebuild_from_record` → `RestoreOutcome` path.
+    # a wired surface (`#11747` review, finding 3). Where the drop is actually
+    # wired is pinned ELSEWHERE, and the two halves are different tests:
+    #   * the report keys → `RestoreOutcome` parse —
+    #     `test_9556_record_restore_verb.py::test_the_report_carries_the_drop_from_the_projection_to_the_outcome`
+    #     (a STUB projection, so that pin is about the WIRING, not the run);
+    #   * the run itself — `test_cache_projection_live.py`:
+    #     `test_a_REFUSED_rebuild_does_not_LOG_a_drop_it_never_made` asserts a real
+    #     `rebuild_from_record` reports `dropped_vectors == 1`.
+    # ⛔ The earlier version of this note cited
+    # `test_the_human_line_names_the_DROPPED_vectors_and_denies_the_re_run` as
+    # driving "the real `rebuild_from_record` path": it hand-constructs a
+    # `RestoreOutcome` and never calls `rebuild_from_record`, so a lane that
+    # rewrote the wiring would find that citation green (`#11747` round-4 review,
+    # finding F1).
     report = cp.ProjectionReport(nodes_written=3, dropped_vectors=2,
                                  dropped_vector_labels=("Session",))
     assert "2 vector(s) DROPPED" in report.render(), report.render()
