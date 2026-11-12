@@ -464,24 +464,31 @@ def test_a_successorless_neutral_operator_loses_no_belief_by_archiving(sdk):
     assert "degenerate" not in fix, (
         "neither leg flows, so no factor is stripped and nothing is degenerate: "
         + fix)
-    # ⛔ A high row would assert a lost belief the same finding's detail denies; the
-    # neutral arm is leftover wiring, the reading check 4 uses `medium` for.
-    assert issues[0].severity == "medium", issues[0].severity
+    # ⛔ Severity stays `high` on purpose: a per-row demotion was measured against
+    # the module's aggregates (one severity per check id — `_sev_total` kept the
+    # FIRST sample's), so a medium row first made `summary.high` read 0 over a real
+    # high row, a false PASS. Recorded in the 4b `_record` comment; the over-warn is
+    # the safe direction until the aggregation is redesigned.
+    assert issues[0].severity == "high", issues[0].severity
     assert "ONTOLOGY §3.1's per-edge triage" in fix, fix
+    # ...and the triage must NOT offer a carry this operator cannot perform.
+    assert "may CARRY to the successor" not in fix, (
+        "a neutral operator carries nothing, so §3.1's disposition here is DROP: "
+        + fix)
     sdk.update_entity(v1["id"], status="archived")
     assert _issues(sdk, "superseded_object_active_edges") == [], \
         "archiving did not clear the finding — the clause's premise is wrong"
 
 
-def test_a_unary_operator_claims_no_degenerate_skip(sdk):
-    """An operator whose ONLY input is the superseded endpoint loses NOTHING.
+def test_a_one_input_operator_claims_no_degenerate_skip(sdk):
+    """A one-input operator going terminal is never even collected — say nothing more.
 
-    ``ep.py`` records the degenerate skip behind ``elif len(input_ids) < 2 <=
-    len(full_inputs)``, so with a one-input operator the ``2 <=`` half is false and
-    no record is appended. A clause asserting a ``degenerate`` skip on that row
-    would send the reader to a diagnostic that cannot exist — the same contradiction
-    the mechanism split exists to remove (#12111 review). The fixture form is the
-    one ``test_an_operators_arity_is_not_asserted`` already establishes.
+    ``create_operator("IMPL", <obj>, [])`` is door-accepted, and once its only
+    input is terminal the operator never enters EP's affected set — measured on this
+    fixture: no factor, no ``skipped_factors``, no run at all. So the clause must
+    not promise a ``degenerate`` skip a reader could look for; the honest statement
+    is that no factor existed to lose. The fixture form is the one
+    ``test_an_operators_arity_is_not_asserted`` already establishes.
     """
     v1 = _obj(sdk, "PolicyV1")
     sdk.create_operator("IMPL", v1["id"], [], direction="->")
@@ -491,22 +498,20 @@ def test_a_unary_operator_claims_no_degenerate_skip(sdk):
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
             "o.supersededBy = 'PolicyGone'", {"i": v1["id"]})
 
+    # The measured engine fact: nothing is collected, so nothing is skipped.
     run = sdk.compute_confidence(require_calibration=False)
-    assert not run.get("skipped_factors"), (
-        "a one-input operator going terminal records no skip: "
-        + repr(run.get("skipped_factors")))
+    assert not run.get("skipped_factors"), run.get("skipped_factors")
+    assert not run.get("confidences"), (
+        "the one-input operator was collected after all — then the fixture no "
+        f"longer isolates the zero-remaining case: {run.get('confidences')}")
 
     issues = [i for i in _issues(sdk, "superseded_object_active_edges")
               if i.node_id == v1["id"]]
     assert issues, "the one-input operator's stale edge is still wiring"
     fix = issues[0].fix
-    assert "SILENCES THIS CHECK WITHOUT CLEARING THE DEFICIT" in fix, fix
-    # The clause must NAME the zero-remaining case rather than assert a skip the
-    # engine measured as absent.
-    assert "has no factor to begin with" in fix, (
-        "a one-input operator's strip records no skip, so the clause must say so: "
-        + fix)
-    assert "TWO OR MORE run without it" in fix, fix
+    # The clause names the whole ladder, zero-remaining included, so a reader on
+    # this row is told there was no factor rather than sent after a skip record.
+    assert "has no factor to begin with" in fix, fix
     assert "ONTOLOGY §3.1's per-edge triage" in fix, fix
 
 
@@ -1198,6 +1203,11 @@ def test_a_shaped_endpoint_with_no_successor_gets_no_edge_rewrite(sdk):
         [[False]], "the emitted call did not clear the shape"
     # The archive sentence must not claim a strip that never happens either.
     assert "EP strips a terminal input either way" not in fix, fix
+    # ⛔ §3.1's disposition on a neither-arm row is DROP: this fix says no edge
+    # rewrite repairs it, so offering a CARRY in the appended triage would
+    # contradict the repair it rides on (#12111 review).
+    assert "may CARRY to the successor" not in fix, fix
+    assert "the disposition here is DROP" in fix, fix
 
 
 def test_a_flag_dead_successor_names_the_flag_not_none(sdk):

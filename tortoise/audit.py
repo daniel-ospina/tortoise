@@ -1097,16 +1097,35 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         edge write is not replayed by ``rebuild_all`` and this finding returns
         after the next rebuild — a repair that reads clean until then is exactly
         the failure the sentence prevents.
+
+        ⛔ The CARRY half is conditional, and ``s`` is what decides it: on a row
+        where no belief was ever assembled (a DIRECT edge, a shaped endpoint in
+        neither EP arm) or where nothing transfers by design (a NEUTRAL operator),
+        §3.1's disposition is DROP — telling the reader an IMPL "may CARRY to the
+        successor" there contradicts the very repair it is appended to, in the same
+        string ("No edge rewrite repairs this: EP builds NO factor in either arm"
+        twice over).
         """
+        fwd, bwd = direction_flows(s["direction"])
+        if s["is_operator"] and (fwd or bwd):
+            disposal = (
+                "an IMPL may CARRY to the successor, and so may a NAND that STILL "
+                "APPLIES (a refutation that still applies is kept) — while a NAND "
+                "that MOTIVATED the correction must NOT re-attach; drop it, or "
+                "record it as pending per §3.1 (no door implements `pend` today)")
+        else:
+            disposal = (
+                "this edge carried no belief to carry over — EP assembles no factor "
+                "for it at all, or nothing transfers through it by design — so the "
+                "disposition here is DROP (or `pend`, the non-voting placeholder, "
+                "if the claim may still be revisited); do NOT re-point it onto the "
+                "successor and call it a carry (§3.1, no door implements `pend` "
+                "today)")
         return (
             f" ⛔ Dispose of this {s['edge_type']} input by ONTOLOGY §3.1's "
-            "per-edge triage, not by a blanket re-point: an IMPL may CARRY to the "
-            "successor, and so may a NAND that STILL APPLIES (a refutation that "
-            "still applies is kept) — while a NAND that MOTIVATED the correction "
-            "must NOT re-attach; drop it, or record it as pending per §3.1 (no "
-            "door implements `pend` today). An unjournalled edge write is not "
-            "rebuild-durable: `rebuild_all` replays the event log, and this "
-            "finding returns after the next rebuild")
+            f"per-edge triage, not by a blanket re-point: {disposal}. An "
+            "unjournalled edge write is not rebuild-durable: `rebuild_all` replays "
+            "the event log, and this finding returns after the next rebuild")
 
     def _archive_clause(s: dict) -> str:
         """What ``archived`` does to THIS row — and it is never the repair.
@@ -1174,20 +1193,6 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             "whose ONLY input this was has no factor to begin with — so either way "
             "the claim funds nothing through this edge, while " + anchor + ". The "
             "edge must still be deleted or re-pointed onto whatever now carries it")
-
-    def _active_edge_severity(s: dict) -> str:
-        """HIGH for a row where belief is at stake, MEDIUM for leftover wiring.
-
-        ⛔ The check's own rationale ("on an :Object the successor inherits nothing
-        BY CONSTRUCTION, so every finding here is the measured defect") is VOID for a
-        NEUTRAL operator (``direction='-'``): ``_update_nary_factor`` returns before
-        any pair math, so nothing is transferred, nothing is lost, and the stale
-        edge is the leftover-wiring reading check 4 uses ``medium`` for. Emitting
-        ``high`` there is a false alarm the same finding's ``detail`` argues against
-        in its own words ("no belief is lost here … safe to delete").
-        """
-        fwd, bwd = direction_flows(s["direction"])
-        return "high" if (fwd or bwd) else "medium"
 
     def _active_edge_fix(s: dict) -> str:
         """The repair for this row, chosen by the state the row carries.
@@ -1352,7 +1357,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     _record("superseded_object_active_edges", [
         AuditIssue(
             issue_type="superseded_object_active_edges",
-            severity=_active_edge_severity(s),
+            # ⛔ ONE severity for the check, deliberately. A per-row calibration
+            # (a NEUTRAL operator loses no belief, so its row is leftover wiring
+            # rather than a lost one) was tried and REVERTED: every aggregate in
+            # this module assumes one severity per ``issue_type`` —
+            # ``_sev_total``/``to_dict`` keep the FIRST sample's severity for the
+            # whole check, so with a medium row first ``summary.high`` read 0 while
+            # a high 4b row existed (measured), a false PASS for any consumer
+            # gating on ``summary.high``. That calibration needs the aggregation
+            # redesigned first; until then the neutral row over-warns rather than
+            # under-reports, which is the safe direction for an instrument.
+            severity="high",
             node_id=str(s["sup_id"]) if s["sup_id"] is not None else str(s["sup_name"]),
             detail=_active_edge_detail(s),
             # ⛔ The §3.1 disposition is appended HERE, once, so no arm added
