@@ -1466,6 +1466,17 @@ class LLMExtractor:
                     # honest answer, never a nearby match.
                     _match = re.search(rf"(?<!\w){re.escape(name)}(?!\w)", body)
                     _offset = _match.start() if _match is not None else None
+                    # ⚠️ COORDINATE BASE (#12102 review P3): `_offset` indexes
+                    # THIS SECTION'S STRIPPED BODY (`body`, leading whitespace
+                    # removed), while `span` below is DOCUMENT coordinates
+                    # `[content_start, content_end]`. The two fields of this
+                    # one record therefore cannot be combined: do NOT compute
+                    # the document index as `span[0] + phrase_offset` (measured:
+                    # that lands one char left of the surface on the fixture
+                    # above). Nothing consumes the pair yet; stated because
+                    # the census exists to feed a measurement (#5087 R1) and a
+                    # provenance-looking pair that silently disagrees is how a
+                    # measurement goes wrong in the quiet direction.
                     held_subjects.append({
                         "surface": name,
                         "rule_id": _verdict[0],
