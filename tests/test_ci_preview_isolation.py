@@ -293,9 +293,10 @@ def _refusal_arm(env: dict[str, str], name: str, pid: int) -> str:
             "the LIVENESS leg refused (`pid_running`). ⚠️ THE WITNESS DOES NOT SAY WHICH "
             "OF THAT ARM'S THREE CAUSES FIRED — `kill -0` failing gives ESRCH (gone) or "
             "EPERM (unsignalable), and a `Z` state letter is the third — so this names "
-            "the candidates and not a culprit: the interpreter running under that "
-            "argv[0] died (its own `-c` code, or the box killed it — a thrashing "
-            "runner OOM-killing a decoy is #12039's own wording for this case), or a "
+            "the candidates and not a culprit: the decoy we spawned died — at the "
+            "sites that run an interpreter under a fake `argv[0]` its own `-c` code can "
+            "be the cause, and elsewhere it is the box that killed it (a thrashing "
+            "runner OOM-killing a decoy is #12039's own wording for this case) — or a "
             "peer job's machine-global reap killed it (#10283's actual defect, i.e. a "
             "REAL finding). ⚠️ A pid the read could not SEE is NOT one of them and "
             "lands on the start-time arm instead: `pid_state` returns empty, "
@@ -321,7 +322,8 @@ def _pid_now(pid: int) -> str:
     kill0 = _kill0(pid)
     if not kill0.startswith("ok"):
         return f"kill -0 says {kill0}"
-    return f"kill -0 says ok, /proc state is {_pid_state_letter(pid) or 'unreadable'!r}"
+    return f"kill -0 says ok, state is {_pid_state_letter(pid) or 'unreadable'!r} " \
+        "(from `/proc/<pid>/stat`, or `ps -o state=` on a host without /proc)"
 
 
 def _recorded(result: subprocess.CompletedProcess, pid: int, env: dict[str, str],
@@ -1057,6 +1059,10 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
         "the liveness arm's message must name the REAL defect a dead decoy can be "
         f"(#10283's machine-global reap), not only the fixture: {liveness}"
     )
+    # ⛔ NO POLL HAPPENED HERE, so the message must not claim a deadline. Pinned
+    # positively — without this the `if timeout` guard could be dropped and every test
+    # would still pass while the message claimed `for 0s` (measured before pinning).
+    assert "refused pid 999999:" in liveness, liveness
     assert "observed NOW" in liveness, liveness
 
     # ⛔ A witness for a DIFFERENT pid is not this refusal's arm. `cmd_record` writes
@@ -1072,6 +1078,9 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
     starttime = _recorded(dead, 4242, state, timeout=0.0)
     assert "START-TIME leg refused" in starttime, starttime
     assert "retryable arm" in starttime, starttime
+    # The OTHER arm of the same guard: a caller that really polled DOES name its deadline.
+    # Pinned so "never claim one" cannot be implemented as "never state one".
+    assert "refused pid 4242 for 10s:" in _recorded(dead, 4242, state, timeout=10.0)
     assert "the candidates and not a culprit" not in starttime, (
         "the start-time arm has ONE cause the witness names exactly — a multi-cause "
         f"message here would send the reader hunting: {starttime}"
