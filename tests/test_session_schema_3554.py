@@ -1046,7 +1046,7 @@ def _model_version(text: str) -> tuple[int, ...]:
     return tuple(int(part) for part in text.split("."))
 
 
-_BLOCK_VERSION_RE = re.compile(r">\s*\*\*Changelog v(\d+\.\d+)")
+_BLOCK_VERSION_RE = re.compile(r"^>\s*\*\*Changelog v(\d+\.\d+)", re.M)
 
 
 def _newest_changelog_version(changelog: str) -> str:
@@ -1249,7 +1249,13 @@ def _quoted_clause(block: str) -> str | None:
 
 
 def _block_bodies(changelog: str) -> list[str]:
-    """Every block's text, newest first (the file's own order)."""
+    """Every RELEASE block's text, newest first (the file's own order).
+
+    ``^`` is load-bearing: a block's prose can QUOTE an older header
+    (``> > **Changelog v3.7 …`` inside the v3.2 entry), and an unanchored
+    pattern counts that quote as a release — measured at this head: 40 pieces
+    for 39 blocks, one of them a fragment starting at the quoted header.
+    """
     starts = [m.start() for m in _BLOCK_VERSION_RE.finditer(changelog)]
     return [changelog[a:b] for a, b in zip(starts, starts[1:] + [len(changelog)])]
 
@@ -1270,16 +1276,16 @@ def test_a_4_3_change_must_be_quoted_verbatim_by_the_release_that_lands_it() -> 
     an approved artifact came to disagree with itself. Nothing else in the tree
     compares them.
 
-    ⛔ THE RULE IS "MAY NOT CHANGE WITHOUT A QUOTE", NOT "EVERY BLOCK MUST QUOTE".
-    An earlier cut of this pin demanded a §4.3 quote in the NEWEST block
-    unconditionally, which reds the next release that touches §4.5 or §4.6 and
-    teaches the lane to paste a §4.3 quote into an entry that did not change
-    §4.3 — a changelog recording a change it did not make. The landed clause is
-    instead compared against the clause of the most recent block that DOES quote
-    it: equal means §4.3 did not move this release (nothing to pin), different
-    means it moved and this release must be the one recording the new text.
-    Absence is therefore never a silent pass — a change with no quote fails, and
-    there is no state in which both sides are uncompared.
+    ⛔ THE RULE IS "MAY NOT CHANGE WITHOUT A RELEASE RECORDING IT", NOT "EVERY
+    BLOCK MUST QUOTE". An earlier cut of this pin demanded a §4.3 quote in the
+    NEWEST block unconditionally, which reds the next release that touches §4.5
+    or §4.6 and teaches the lane to paste a §4.3 quote into an entry that did
+    not change §4.3 — a changelog recording a change it did not make. The landed
+    clause is instead compared against the clause of the most recent block that
+    DOES quote it: equal means §4.3 did not move this release (nothing to pin),
+    different means it moved and this release must be the one recording the new
+    text. Absence is therefore never a silent pass — a change with no quote
+    fails, and there is no state in which both sides go uncompared.
     """
     ontology = ONTOLOGY.read_text(encoding="utf-8")
     blocks = _block_bodies(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
@@ -1320,12 +1326,31 @@ def test_the_newest_block_discharges_its_approval_with_a_comment_id() -> None:
 
     Pinned as a SHAPE, not as that id: a later entry cites its own relay, and a
     shape is what stays true.
+
+    ⛔ SCOPED TO A RELEASE THAT RECORDS §4.3, because the unconditional form was
+    measured to false-block. Demanding a comment id in EVERY newest block reds
+    the next release that touches §4.5 (verified with a synthetic `v3.35`), and
+    the file's practice does not support the demand: **3 of 39** blocks cite a
+    comment id, and v3.33 — the block that landed `D2 — A` for this very
+    question — cites none. What the approval rule actually needs is that no
+    release RECORDS owner-approved §4.3 text without naming where that approval
+    lives, so the requirement is tied to the same condition the sibling pin uses:
+    a newest block that quotes the §4.3 clause must name a comment id.
     """
     block = _newest_block_body(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
-    cited = re.findall(r"comment\s*`?(\d{6,})`?", block)
+    if _quoted_clause(block) is None:
+        # This release does not record the §4.3 clause, so it owes no §4.3-style
+        # approval citation. (A release that CHANGES §4.3 is caught by the sibling
+        # pin: it must quote the new sentence, and then this arm applies.)
+        return
+    # Accept every form the fleet actually writes: ``comment 1234567890``,
+    # ``comment `1234567890` ``, ``comment-id: 1234567890``, ``(1234567890)``,
+    # and the permalink ``#issuecomment-1234567890``.
+    cited = re.findall(r"(?:#issuecomment-|comment)\D{0,12}(\d{6,})", block)
     assert cited, (
-        "the newest changelog block names no comment id, so its owner approval "
-        "has no home a reader can verify — cite the comment that records it")
+        "the newest changelog block records the §4.3 clause but names no comment "
+        "id, so its owner approval has no home a reader can verify — cite the "
+        "comment that records it (``comment <id>`` or the permalink)")
 
 
 def _assert_no_block_records_a_version_above_the_declared_one(
