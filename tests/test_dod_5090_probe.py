@@ -4903,7 +4903,15 @@ def _byref_sdk_source() -> str:
         # ── `#11397` review: `*. __class__` is only the ENCLOSING class when the base is an
         # in-module receiver; a foreign object's class is not this module's method.
         "    def foreign_dunder_class_receiver(self, other):\n"
-        "        return _safe(other.__class__._review_pool)\n")
+        "        return _safe(other.__class__._review_pool)\n"
+        # ── `#12020` round 6 review (P3): `type(…)` is the SAME receiver rule written a second way,
+        # and the arm accepted ANY call to `type` while its twin above refuses a foreign base. The
+        # pair is pinned together: `type(self)` is the enclosing class, `type(other)` is a FOREIGN
+        # object's class and must not be declared.
+        "    def type_of_self_is_a_receiver(self):\n"
+        "        return _safe(type(self)._review_pool, 'object')\n"
+        "    def type_of_a_FOREIGN_object(self, other):\n"
+        "        return _safe(type(other)._review_pool, 'object')\n")
 
 
 def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
@@ -4979,6 +4987,10 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
               # in the enclosing scope, so it is a reach too.
               "lambda_param_does_not_shade_the_body",
               "lambda_default_is_the_enclosing_scope",
+              # ⛔ `#12020` round 6 review (P3): `type(self)` is the receiver spelled through the
+              # type — the positive half of the pair whose NEGATIVE (`type(other)`) is asserted
+              # beside `other.__class__` above.
+              "type_of_self_is_a_receiver",
               # the CONTROL for the star-arg half: `*args`/`**kwargs` bind THEIR names, and a
               # mention of a different name is still a reach — without this row, "add every
               # vararg name to `shadowed`" could shade the whole body and stay green.
@@ -5108,6 +5120,14 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
     # A foreign receiver is not an in-module method either.
     assert "passes_a_FOREIGN_receiver" not in declared, (
         f"a call on a FOREIGN receiver was declared as an in-module reach: {declared}")
+    # ⛔ `#12020` round 6 review (P3): the receiver rule applies to `type(…)` exactly as it does to
+    # `*.__class__`. `type(self)` IS the enclosing class; `type(other)` is a FOREIGN object's class,
+    # and the arm above (`func.id in ("super", "type")` → True) accepted both — a spurious caveat
+    # on a complete caller table. Pre-fix this arm is DECLARED, so the assertion is non-vacuous.
+    assert "type_of_self_is_a_receiver" in declared, declared
+    assert "type_of_a_FOREIGN_object" not in declared, (
+        f"a call on `type(<a foreign object>)`'s helper was declared as an in-module reach — its "
+        f"twin `other.__class__._helper` is refused for exactly that reason: {declared}")
     # …and a method taking TWO helpers by reference must name BOTH: keeping one
     # target per method dropped the second with the entry still looking complete.
     assert "passes_two" in declared, declared

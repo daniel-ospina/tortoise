@@ -614,6 +614,20 @@ ALIAS_FORMS_STILL_BLIND: dict[str, tuple[str, dict[str, str], str, str]] = {
         "it: the DANGEROUS direction — `gated` owes no declaration while never reaching the gate",
         "`global` rebinding",
     ),
+    # ⛔ `#12020` round 6 review (P3): the ENCLOSING-scope axis. Both halves are pinned — the nested
+    # writer is ABSENT and the enclosing function is credited `gated` in its place — because the
+    # second half is the one that makes the silence look like coverage.
+    "closure_scoped_alias": (
+        "def factory():\n"
+        "    from tortoise.embeddings import encode_for_row as _enc\n"
+        "    def w(text):\n"
+        "        return _enc(text, 384)\n",
+        {"tortoise.m::factory": "gated"},
+        "an alias bound in the ENCLOSING function: `_import_aliases` reads the module and the "
+        "writer's own scope only, so the nested writer is absent — while the call walk descends "
+        "into it and credits `factory`, a function that stores nothing, as `gated`",
+        "closure-scoped alias",
+    ),
 }
 
 
@@ -3459,6 +3473,62 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         "a module-level `def _enc` rebinds the alias exactly as `_enc = lambda …` does, so the gate "
         "is not reached through it — the own-scope walk skipped nested scope NODES, so this "
         "rebinding was invisible and the writer stayed `gated`",
+    ),
+    # ⛔ `#12020` round 6 review (P2) — four more ways the same local name is rebound to
+    # something that is NOT the seam. Each measured `gated` at the head that carried the alias
+    # resolver and `unresolved_write` on `main`, i.e. a REGRESSION the resolver introduced in the
+    # one direction that owes nothing. Every one of them is `ast.alias`-shaped or a binding form
+    # the own-scope walk never inspected.
+    "alias_rebound_by_an_import_in_the_writer": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    import json as _enc\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n'
+        "    return _enc(text)\n",
+        {"tortoise.m::w": "unresolved_write"},
+        "`import json as _enc` REBINDS the local name to the module: `_enc(text)` reaches json, "
+        "not the gate, but `ast.alias` was excluded from the shadow set wholesale so the module "
+        "alias survived and the writer owed nothing",
+    ),
+    "alias_rebound_by_a_FOREIGN_from_import": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    from thirdparty.lib import encode_for_row as _enc\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")}, _enc(text))\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "an `ImportFrom` whose HOME is not the seam's rebinds the alias to a same-named function "
+        "— `_import_aliases` refuses it as an alias, but the shadow set did not count it as a "
+        "BINDING either, so the earlier seam import stayed live",
+    ),
+    "alias_rebound_by_a_walrus_in_a_comprehension": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, rows):\n"
+        "    [_enc := r for r in rows]\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")}, _enc(1))\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "PEP 572 puts a walrus inside a comprehension in the CONTAINING scope, and the own-scope "
+        "walk skips the comprehension body (correctly, for its `for` target) — so this rebinding "
+        "was invisible while the element target's exclusion had to stay",
+    ),
+    "alias_rebound_by_a_MATCH_capture": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, v):\n"
+        "    match v:\n"
+        '        case {"k": _enc}:\n'
+        "            pass\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")}, _enc(1))\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "`MatchAs` / `MatchStar` / `MatchMapping.rest` bind in the FUNCTION's scope and the "
+        "own-scope walk never inspected a pattern: a capture named like the alias rebound it "
+        "invisibly",
     ),
 }
 
