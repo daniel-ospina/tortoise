@@ -2910,42 +2910,60 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # `JOB_SETTLE_SECONDS`, so `hits()` reads them as a correction (measured — with only the
     # discriminator, reverts to c0c53f8c's and 6c05aeb9's sentences were GREEN), and the third
     # shipped form is listed because it shipped, not because it is disarmed.
+    # ⛔ ONE ENTRY, TWO LEGS (review P2, round 21). The needle list and its
+    # detection-direction proof are the SAME list, because when they were two lists a typo in
+    # an entry was SILENT: the loop kept its own literal copy and kept passing (measured —
+    # renaming an entry so it could never match left 157 passed). Each entry pairs the clause
+    # with the sentence that actually shipped; a needle that stops matching its own target reds,
+    # and a deleted entry loses its content check with it.
     unconditional = [
-        "disproved — three causes, one bucket",
-        "disproved — FOUR causes, one bucket",
-        "disproved. FOUR causes, ONE bucket",
-        # ⛔ AND THE TWO SHIPPED CAUSE-NAMING COMMENTS (review rounds 18-20). Content-checked
-        # without the discriminator for the same reason as the count claims: the retraction is
-        # that the CAUSE is mis-named, which no stillness qualifier repairs. Provenance is
-        # `origin/main`, where both shipped and this PR corrected them. Clause-level, NOT
-        # sentence-prefixed: a re-typed form that inserts a qualifier before the wrong cause
-        # (measured — review round 20's own falsification) must still match.
-        "the count is the old status-string census",
-        "is set by `read_health` inside its `verdict == OK`-gated clause",
-    ]
-    for phrase in unconditional:
-        needle = flat(phrase)
-        for name, hay in flats.items():
-            assert needle not in hay, (
-                f"a RETRACTED COUNT is back in the {name}: {phrase!r} — no count is given "
-                f"anywhere any more, so this check does not use the stillness discriminator"
-            )
-    # ⛔ AND THIS LEG NEEDS A DETECTION-DIRECTION PROOF OF ITS OWN (review P2, round 11): the
-    # `exercised` assertion above covers `retracted` only, so a typo in one of these needles was
-    # SILENT (measured: changing the first one's em dash to a hyphen left the suite green). Each
-    # is asserted to occur in the sentence that actually shipped, so a needle that stopped
-    # matching its own target reds.
-    for phrase, shipped in (
         ("disproved — three causes, one bucket",
          "disproved — three causes, one bucket: the jobs could NOT be read"),
         ("disproved — FOUR causes, one bucket",
          "disproved — FOUR causes, one bucket: the probe BUDGET never reached the run"),
         ("disproved. FOUR causes, ONE bucket",
          "disproved. FOUR causes, ONE bucket — and the causes span three layers"),
-    ):
-        assert flat(phrase) in flat(shipped), (
-            f"this count needle no longer matches the sentence it exists to catch: {phrase!r}"
+        # ⛔ AND THE TWO SHIPPED CAUSE-NAMING COMMENTS (review rounds 18-21). Content-checked
+        # without the discriminator for the same reason as the count claims: the retraction is
+        # that the CAUSE is mis-named, which no stillness qualifier repairs. Clause-level, NOT
+        # sentence-prefixed: a re-typed form that inserts a qualifier before the wrong cause
+        # (measured — review round 20's own falsification) must still match. ⛔ SCOPED TO THE
+        # RETRACTED COUPLING: the bare clause "the count is the old status-string census" alone
+        # reds CORRECT prose at `tools/ci_queue_health.py:1626`, which scopes that census to the
+        # BUDGET surplus (measured, review round 21 — a re-typing of a correct sentence).
+        ("the count is the old status-string census and cannot certify health",
+         "unmeasured, the count is the old status-string census and cannot certify health"),
+        ("is set by `read_health` inside its `verdict == OK`-gated clause",
+         "`pr_running_census_unwitnessed` is set by `read_health` inside its "
+         "`verdict == OK`-gated clause"),
+        # ⛔ AND THE SHIPPED `state_line` CLAIM ITSELF (review P2, round 21). The presence pin
+        # beside it sits on the META-sentence describing the correction, so restoring the claim
+        # verbatim left both sentences in the block and the suite green. This pins the CLAIM, so
+        # the claim's return is what reds. Absent from correct prose in every scanned surface.
+        ("PR runs ARE executing but carry no readable timestamp",
+         "the second cause of this state is a queue whose PR runs ARE executing but carry "
+         "no readable timestamp"),
+    ]
+    # ⛔ A DELETION OF AN ENTRY IS STILL SILENT WITHOUT A FLOOR (review P2, round 21): deleting
+    # an entry removes its content check AND its proof at once, which is indistinguishable from
+    # never having written it — measured, 157 passed. A MEASURED FLOOR, not an exact count, so
+    # adding an entry needs no edit here while dropping one reds. Same shape as `disarming`'s
+    # floor above; the numeral is a guard rail, not an inventory claim.
+    assert len(unconditional) >= 6, (
+        "an `unconditional` entry was deleted: this list is the ONLY check for claims that are "
+        "wrong whatever stillness they name, so a removal must be deliberate"
+    )
+    for phrase, shipped in unconditional:
+        needle = flat(phrase)
+        assert needle in flat(shipped), (
+            f"this needle no longer matches the sentence it exists to catch: {phrase!r}"
         )
+        for name, hay in flats.items():
+            assert needle not in hay, (
+                f"a RETRACTED claim is back in the {name}: {phrase!r} — this check does not "
+                f"use the stillness discriminator, because the claim is mis-named whatever "
+                f"stillness the sentence also names"
+            )
 
     # ⛔ AND THE DELETION CLASS NEEDS A POSITIVE LEG (review P2). A blocklist cannot see a site
     # that went SILENT, and `pre_fix` only covers sentences that shipped: the ops doc's
