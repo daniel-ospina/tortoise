@@ -1134,15 +1134,31 @@ def _ref_candidates(entities, label: str, *, id_idx: int = 1,
     # lets `_ref_is_one_gone_entity` ask the question its name states.
     widened: dict = {}
     for rep, key, members in entities:
-        if rep is not None:
+        # ⛔ A TERMINAL representative is the same question as a GONE one (review
+        # round 18): `_entity_rows` makes the representative the SURVIVOR, so a
+        # merge-then-supersede graph hands back the RETIRED survivor while a LIVE
+        # carrier still holds the name. Replying with the survivor alone sent the
+        # ref into the keep-first arm with a terminal target, which refused a fold
+        # `main` applied and left the carrier live and search-visible — measured on
+        # both families. Same answer as the gone case: contribute the LIVE members.
+        if rep is not None and (rep[status_idx] or "") not in terminal:
             rows.append(rep)
             continue
+        contributed = False
         for m in members:
             if not m[id_idx] or (m[status_idx] or "") in terminal:
                 continue
             rows.append(m)
-            if m[id_idx]:
+            contributed = True
+            if rep is None and m[id_idx]:
+                # ONLY a genuinely GONE survivor's carriers are "widened": a
+                # present-but-retired survivor is a real target, not a dangling
+                # pointer, so it must not be reported as "survivor is gone".
                 widened[str(m[id_idx])] = key
+        if rep is not None and not contributed:
+            # no live member: the retired survivor IS the target, and the keep-first
+            # arms own it (an idempotent re-ingest stays a silent dedup).
+            rows.append(rep)
     return rows, widened
 
 
@@ -1395,14 +1411,15 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
         # the rows are grouped by ENTITY first so a merged-away carrier is not
         # counted as a second carrier (see `_entity_rows`).
         _ref_space, _ref_params = name_key_space_same_entity("s", ref)
-        by_name, _ref_widened = _ref_candidates(_entity_rows(
+        _subj_raw = _entity_rows(
             proj.g, "Subject",
             proj.g.query(
                 f"MATCH (s:Subject) WHERE {_ref_space} "
                 "RETURN ID(s), s.id, s.name, s.status, s.supersededBy",
                 params=_ref_params,
             ).result_set if _ref_space else [],
-            with_groups=True), "Subject")
+            with_groups=True)
+        by_name, _ref_widened = _ref_candidates(_subj_raw, "Subject")
         if len(by_name) > 1:
             # ⛔ A DUPLICATE-ID pair is CORRUPTION, not two incarnations, and the
             # live narrowing below cannot tell them apart: with one claimant
@@ -1457,6 +1474,28 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
             _skip(ref, supersedes_by, "ambiguous subject name")
             return False
         if not by_name:
+            # ⛔ `by_name` can be empty because `_ref_candidates` DROPPED the
+            # matched carriers (terminal, under a gone survivor) — not because the
+            # graph has no such `:Subject`. Saying so was measurably false about a
+            # node the graph holds (review round 18), and it also turned an
+            # idempotent re-ingest into a fresh refusal where `main` was silent.
+            _matched_subj = [r for _rep, _key, _members in _subj_raw
+                             for r in _members]
+            _matched_subj += [rep for rep, _key, _members in _subj_raw
+                              if rep is not None]
+            if any(_same_successor(str(r[4] or ""), supersedes_by)
+                   for r in _matched_subj if len(r) > 4):
+                return False
+            if _matched_subj:
+                record_non_folded(
+                    "Subject", ref,
+                    display_holder_ids([r[1] for r in _matched_subj if r[1]]),
+                    shape="unaddressable-name")
+                warn(f"subject supersession {ref!r} matched "
+                     f"{len(_matched_subj)} Subject carrier(s) whose merged "
+                     f"survivor is gone — skipped (no addressable carrier)")
+                _skip(ref, supersedes_by, "ref carrier's survivor is gone")
+                return False
             warn(f"subject supersession {ref!r} not found in the graph as "
                  f"a :Subject — skipped (fail-open)")
             _skip(ref, supersedes_by, "ref is not a Subject")
@@ -1956,6 +1995,25 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # `_ref_candidates` hands a gone-survivor group's LIVE carriers back
             # as addressable (review round 10), so reaching this branch means the
             # matched nodes are all terminal or id-less — not merely orphaned.
+            # ⛔ An IDEMPOTENT re-ingest must stay silent (review round 18): the
+            # target may already carry exactly this successor, in which case the
+            # keep-first arms would have deduped it without a word — but the guard
+            # runs BEFORE them, so reporting here turned every re-ingest into a
+            # fresh `skipped` entry and two warnings, which the branch's own rule
+            # forbids ("only the same-successor arm stays silent … an idempotent
+            # dedup, not a refusal"). Measured on `main`: `applied=0, skips=[],
+            # warns=[]` for that shape.
+            if any(_same_successor(str(r[4] or ""), supersedes_by)
+                   for r in _name_rows):
+                continue
+            # The entry is the record (review round 18): both twin refusals
+            # (`unaddressable-name` on the Subject lane and on the Object id arm)
+            # write one, so a warn + `_skip` alone was invisible to the repair
+            # consumer that reads `non_folded_entries()`.
+            record_non_folded(
+                "Object", ref,
+                display_holder_ids([r[1] for r in _name_rows if r[1]]),
+                shape="unaddressable-name")
             warn(f"supersession ref {ref!r} matched {len(_name_rows)} "
                  f"Object(s) whose merged survivor is gone, and no :Subject "
                  f"holds the ref — skipped (no addressable carrier)")

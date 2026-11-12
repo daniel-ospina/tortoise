@@ -4687,3 +4687,131 @@ class TestThe12120ReviewRound17:
                 f"one repairable entity: {shapes} (skips: {skips!r})")
         finally:
             sdk.close()
+
+
+class TestThe12120ReviewRound18:
+    """A live carrier of a RETIRED survivor is addressable; a re-ingest stays silent.
+
+    `_ref_candidates` contributed a group's live members only when the survivor was
+    GONE. A merge-then-supersede graph hands back the retired SURVIVOR as the
+    representative (it is present, so the group is not a gone-survivor group), and
+    the live carrier that actually holds the name was dropped — so the ref resolved
+    to the retired row, keep-first refused `terminal object target`, and the target
+    stayed live and search-visible where `main` applied the fold (measured, both
+    families). The same drop made the Subject lane say "not found in the graph as a
+    :Subject" about a Subject the graph holds, and turned an idempotent re-ingest
+    into a fresh refusal with two warnings.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r18",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_a_live_carrier_beside_a_retired_survivor_folds(self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("New Co", "document")
+            g.query(
+                "CREATE (s:Object {id:'r18-surv', name:'Acme Holdings', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Elsewhere'}) "
+                "CREATE (c:Object {id:'r18-carrier', name:'The Team', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'team', resolved_from:'r18-surv'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "The Team", "supersedes_by": "New Co",
+                 "evidence": "test"}])
+            assert applied == 1, (
+                "a live carrier beside a RETIRED survivor was refused as a "
+                f"terminal target: {skips!r} {msgs!r}")
+            row = g.query(
+                "MATCH (o:Object {id:'r18-carrier'}) "
+                "RETURN o.status, o.supersededBy").result_set
+            assert row and tuple(row[0]) == ("superseded", "New Co"), row
+        finally:
+            sdk.close()
+
+    def test_a_live_subject_carrier_beside_a_retired_survivor_folds(
+            self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_subject("New Team", "organization")
+            g.query(
+                "CREATE (s:Subject {id:'r18-ssurv', name:'Acme Holdings', "
+                "subjectKind:'organization', status:'superseded', "
+                "supersededBy:'Elsewhere'}) "
+                "CREATE (c:Subject {id:'r18-scarrier', name:'The Team', "
+                "subjectKind:'organization', status:'live', "
+                "resolved_from:'r18-ssurv'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "The Team", "supersedes_by": "New Team",
+                 "evidence": "test"}])
+            assert applied == 1, (
+                "the Subject twin refused a live carrier beside a retired "
+                f"survivor: {skips!r} {msgs!r}")
+            row = g.query(
+                "MATCH (s:Subject {id:'r18-scarrier'}) "
+                "RETURN s.status, s.supersededBy").result_set
+            assert row and tuple(row[0]) == ("superseded", "New Team"), row
+        finally:
+            sdk.close()
+
+    def test_an_idempotent_reingest_through_a_gone_survivor_stays_silent(
+            self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("Even Older Team", "document")
+            g.query(
+                "CREATE (o:Object {id:'r18-old', name:'Old Team', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Even Older Team', "
+                "resolved_from:'r18-deleted'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Team", "supersedes_by": "Even Older Team",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips == [], (
+                "an idempotent re-ingest was reported as a fresh refusal — "
+                f"`main` is silent here: {skips!r}")
+            assert msgs == [], f"the dedup emitted warnings: {msgs!r}"
+        finally:
+            sdk.close()
+
+    def test_the_gone_survivor_refusal_is_recorded_durably(self, sdk_factory):
+        from tortoise.entity_identity import (
+            clear_non_folded_entries,
+            non_folded_entries,
+        )
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("New Co", "document")
+            g.query(
+                "CREATE (o:Object {id:'r18-old2', name:'Old Co', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Different Older', "
+                "resolved_from:'r18-deleted2'})")
+            clear_non_folded_entries()
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Co", "supersedes_by": "New Co",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            shapes = [e.shape for e in non_folded_entries()
+                      if e.name == "Old Co"]
+            assert shapes == ["unaddressable-name"], (
+                "the gone-survivor refusal wrote no durable record although its "
+                f"twin arms do: {shapes} (skips: {skips!r})")
+        finally:
+            sdk.close()
