@@ -450,6 +450,29 @@ def _runs_on_labels(job: dict) -> list[str]:
     return [str(label) for label in runs_on]
 
 
+def _has_live_substitution(text: str) -> bool:
+    """True when `text` runs a command substitution rather than printing the span.
+
+    ⛔ `\\$(` IS LIVE, and this is why a substring test for `\\$(` is wrong: bash
+    consumes one backslash, prints one, and then executes the substitution.
+    Only an ODD number of preceding backslashes escapes it. MEASURED, review
+    cycle 8: `echo "value: \\$(uname -s)"` stayed GREEN under the substring
+    version of this guard while bash executed `uname -s` and printed its output.
+    The run is counted, so `$(` (0), `\\$(` (2) are live and `\\$(` (1) is not.
+    """
+    index = 0
+    while True:
+        found = text.find("$(", index)
+        if found < 0:
+            return False
+        backslashes = found
+        while backslashes > 0 and text[backslashes - 1] == "\\":
+            backslashes -= 1
+        if (found - backslashes) % 2 == 0:
+            return True
+        index = found + 2
+
+
 def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> None:
     """⛔ A BACKTICK INSIDE `echo "…"` IS COMMAND SUBSTITUTION, WHICH SILENTLY EDITS THE MESSAGE.
 
@@ -472,11 +495,13 @@ def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> 
         substitution whose output is wanted — the opposite case, and the first cut of this
         test false-redded exactly that line (measured, cycle 6).
       · DELIBERATELY CONSERVATIVE, and said so here so it reads as a choice rather than a
-        bug: an ESCAPED `\\$(…)` prints literally and is exempted, but text after a
-        trailing `#` on a printing line is still refused (the scan cannot tell a comment
-        from a `#` inside quotes without a parser, and this step has no legitimate `$(` in
-        any printed message). A future lane that needs one should move the message to a
-        single-quoted string instead of widening this guard.
+        bug: an ESCAPED `\\$(…)` (an ODD run of backslashes) prints literally and is
+        exempted — `\\$(…)` is NOT, because bash consumes one backslash and then runs it
+        (MEASURED, review cycle 8) — but text after a trailing `#` on a printing line is
+        still refused (the scan cannot tell a comment from a `#` inside quotes without a
+        parser, and this step has no legitimate `$(` in any printed message). A future
+        lane that needs one should move the message to a single-quoted string instead of
+        widening this guard.
 
     ⛔ A LINE-INITIAL `echo` SCAN IS NOT ENOUGH, and that is a correction this test needed: an
     earlier version checked only lines whose stripped form BEGAN with `echo `, so a backticked
@@ -492,9 +517,7 @@ def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> 
             offenders.append(stripped[:140])
             continue
         for match in re.finditer(r"\b(?:echo|printf)\b", stripped):
-            # An ESCAPED `\$(` prints literally, so it is not the defect; strip the
-            # escaped form and refuse anything left.
-            if "$(" in stripped[match.end():].replace("\\$(", ""):
+            if _has_live_substitution(stripped[match.end():]):
                 offenders.append(stripped[:140])
                 break
     assert not offenders, (
@@ -744,9 +767,15 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
         "the availability probe never asserts WHERE the candidate came from, so on a "
         "release whose own archive carries the major it passes with PGDG never applied "
         "(`apt-get update` only WARNS on a failed fetch) — the fix silently reverted "
-        "with every check green. The probe must prove the candidate is listed by "
-        f"apt.postgresql.org: {probes!r}"
+        f"with every check green. The probe must prove apt.postgresql.org lists this major: "
+        f"{probes!r}"
     )
+    # ⚠️ DELIBERATELY NOT scoped to apt's `Candidate:` row. A release whose own archive
+    # carries a HIGHER revision of the same major still installs the archive's build, and
+    # that is a VALID state — the artifact contract is the major, held by the in-step
+    # `pg_dump`/`pg_restore` assertion. Scoping this predicate to `Candidate:` would red the
+    # job on a correct tree, which is a false block, not a stronger guard. If the contract
+    # ever moves to "the PGDG build specifically", this is where it must be re-cut.
 
     # ⛔ AND THE INSTALL ITSELF IS NAMED. It is the one pre-version branch the executable
     # arm cannot reach (that arm stops at the install line by construction), so text is all
@@ -826,11 +855,14 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     instead of silently restoring the host dependency.
 
     ⏔ AND THE ORIGIN CHECK'S POLICY FILE IS THE SAME CLASS A THIRD TIME. The
-    guard writes `apt-cache policy` to `/tmp/pgdg-policy.txt`, so the prefix run
-    verbatim would write the HOST's `/tmp` — outside this test's hermeticity
-    claim. That path is REPLACED with one under `tmp_path` (the substitution
-    asserts it matched exactly TWICE: the redirect and the `grep` argument),
-    which is what keeps "no write outside `tmp_path`" true.
+    guard writes `apt-cache policy` to a `mktemp` file (a FIXED `/tmp` path was the
+    first cut; this job is pool-eligible and a shared box can pre-create that path
+    as a symlink), so the prefix run verbatim would create the HOST's temp file —
+    outside this test's hermeticity claim. The `mktemp` CALL is REPLACED with a
+    path under `tmp_path`; the substitution asserts it matched exactly once, and
+    that `"$policy_file"` is used exactly twice (the redirect and the `grep`
+    argument), so a future rewrite reds here instead of silently restoring the
+    host dependency.
 
     Six arms over the step's FOUR named pre-install branches — the key fetch, the
     codename, `apt-get update`, and the ORIGIN check (THREE arms: an `apt-cache`
@@ -877,14 +909,19 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     prefix = prefix.replace(". /etc/os-release", f". {os_release}")
 
     policy_file = tmp_path / "pgdg-policy.txt"
-    policy_substitutions = _code_only(prefix).count("/tmp/pgdg-policy.txt")
-    assert policy_substitutions == 2, (
-        "the origin guard's policy file is expected to appear exactly twice in the "
-        f"prefix's CODE (the redirect and the `grep` argument); found "
-        f"{policy_substitutions}. Re-derive the substitution rather than letting the "
-        "arm write the HOST's /tmp"
+    mktemp_sites = _code_only(prefix).count('policy_file="$(mktemp)"')
+    assert mktemp_sites == 1, (
+        "the origin guard's policy file is expected to be created by exactly one "
+        f"`policy_file=\"$(mktemp)\"` in the prefix's CODE; found {mktemp_sites}. "
+        "Re-derive the substitution rather than letting the arm write the HOST's temp dir"
     )
-    prefix = prefix.replace("/tmp/pgdg-policy.txt", str(policy_file))
+    prefix = prefix.replace('policy_file="$(mktemp)"', f'policy_file="{policy_file}"')
+    uses = _code_only(prefix).count('"$policy_file"')
+    assert uses == 2, (
+        "the policy file is expected to be READ twice (the `apt-cache policy` redirect "
+        f"and the `grep` argument); found {uses}. A rewrite that inlines another path "
+        "would make this arm read something the guard does not"
+    )
 
     def run_with(
         stub: str,

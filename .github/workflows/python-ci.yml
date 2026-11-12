@@ -4613,8 +4613,8 @@ jobs:
     #     precondition is what fails closed") is why it is worth spelling out:
     #     the pin no longer DEPENDS on the box's ARCHIVE carrying the major
     #     (#12051 round 3 makes `<codename>-pgdg` the source that RESOLVES it, and
-    #     the step ASSERTS that index SUPPLIED the candidate — `apt-cache policy`
-    #     must name apt.postgresql.org — because `apt-get update` reports a
+    #     the step ASSERTS that index LISTS this major — `apt-cache policy` must show
+    #     a pgdg row for it — because `apt-get update` reports a
     #     repository it could not FETCH as a WARNING and exits 0, so an egress
     #     failure would otherwise fall back to the box's own archive with every
     #     check green), so a supported release needs no fail-closed branch. ⚠️ Not
@@ -4823,15 +4823,23 @@ jobs:
           # review cycle 7 of `fc9d4204aa`: a DNS failure gives `W: Some index files failed
           # to download`, exit 0), so on a release whose own archive also carries the major
           # a bare `apt-cache show` passes with PGDG never applied — the mechanism this
-          # change installs, silently absent and green. So the CANDIDATE must be listed by
-          # apt.postgresql.org itself. Both causes share one guard, because they read
+          # change installs, silently absent and green. So apt.postgresql.org must LIST this
+          # major. ⚠️ That is exactly what this proves, and no more: a release whose own
+          # archive carries a HIGHER revision of the same major still installs the archive's
+          # build (apt picks by version order). That is a valid state — the artifact contract
+          # is the MAJOR, enforced by the pg_dump/pg_restore assertion below — so scoping this
+          # to apt's `Candidate:` row would red the job on a correct tree. Do not "strengthen"
+          # it without moving that contract. Both causes share one guard, because they read
           # identically from here: the index fetch failed, or the suite carries no such
-          # package. THIS BRANCH'S REMEDY IS NAMED FROM ITS OWN CAUSE, not from release
+          # package. The policy file is `mktemp`, not a fixed `/tmp` path: this job is
+          # pool-eligible, and a shared box can pre-create that path as a symlink.
+          # THIS BRANCH'S REMEDY IS NAMED FROM ITS OWN CAUSE, not from release
           # drift: a release PGDG does not publish (no suite) fails HARD at `apt-get update`,
           # i.e. the guard ABOVE, so the old `--repair-labels` advice here was advice that
           # could not change apt's answer.
-          if ! apt-cache policy postgresql-client-16 > /tmp/pgdg-policy.txt 2>/dev/null || ! grep -qF 'apt.postgresql.org' /tmp/pgdg-policy.txt; then
-            echo "::error::apt.postgresql.org did not SUPPLY postgresql-client-16 for this codename [$identity] — either its index never LOADED (apt-get update only WARNS and exits 0 on a DNS/egress/5xx failure; look for 'W: Some index files failed to download' above) or the suite '${VERSION_CODENAME:-unknown}-pgdg' carries no such package. BOTH provisioned servers are pg16 and the client major is part of the artifact's contract (#12051), so this drill cannot fall back to the image's own archive client. Check 'apt-cache policy postgresql-client-16': the candidate must be listed under apt.postgresql.org."
+          policy_file="$(mktemp)"
+          if ! apt-cache policy postgresql-client-16 > "$policy_file" 2>/dev/null || ! grep -qF 'apt.postgresql.org' "$policy_file"; then
+            echo "::error::apt.postgresql.org did not SUPPLY postgresql-client-16 for this codename [$identity] — either its index never LOADED (apt-get update only WARNS and exits 0 on a DNS/egress/5xx failure; look for 'W: Some index files failed to download' above) or the suite '${VERSION_CODENAME:-unknown}-pgdg' carries no such package. BOTH provisioned servers are pg16 and the client major is part of the artifact's contract (#12051), so this drill cannot fall back to the image's own archive client. Check 'apt-cache policy postgresql-client-16': apt.postgresql.org must list this major."
             exit 1
           fi
           if ! sudo apt-get install -y --no-install-recommends postgresql-client-16; then

@@ -548,9 +548,9 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
 
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
-    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:610-612`) — and the runbook still sells
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:612-614`) — and the runbook still sells
     `--repair-labels` as the manual heal that "re-applies this arch's marker"
-    (`docs/ops/ci-runner-x64.md:766-767`). Keeping
+    (`docs/ops/ci-runner-x64.md:768-769`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -3404,11 +3404,11 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
     # cited start line -> a regex the CITED RANGE must match, i.e. the sentence quoted here
     anchors: dict[int, str] = {
         95: r"DROPS the whole class on re-registration",
-        610: r"A foreign arch marker",
-        766: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
+        612: r"A foreign arch marker",
+        768: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
-        886: r"test_the_changes_job_carries_no_job_scope_env",
+        888: r"test_the_changes_job_carries_no_job_scope_env",
         # 8h-bis quotes the label-contract table for the pre-mitigation absolute it pins: the two
         # rows a comment about what the pool CLAIMS must land on (the pair, and `:26` alone).
         25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
@@ -3460,7 +3460,7 @@ _RUNBOOK_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+
 def test_every_test_name_the_runbook_names_exists():
     """⛔ A RUNBOOK REFERENCE TO A TEST THAT DOES NOT EXIST READS AS CONFIRMATION.
 
-    `docs/ops/ci-runner-x64.md:886` told the operator the job-scope lever is a red check
+    `docs/ops/ci-runner-x64.md:888` told the operator the job-scope lever is a red check
     "`tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`" — and no test of
     that name existed in the tree (the guard was
     `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`). Nothing redded: the
@@ -3530,7 +3530,7 @@ _TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
     26: r"^\| `ubuntu-24\.04` \| 10 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
     90: r"still does \*\*not\*\* claim any",
     95: r"DROPS the whole class on re-registration",
-    864: r"^\| `40986603502`",
+    866: r"^\| `40986603502`",
 }
 
 
@@ -3609,14 +3609,14 @@ _SHORTHAND_CITING_FILES = (*_TOOLS_CITING_THE_RUNBOOK, "docs/ops/batch-integrati
 #: that handle unambiguous (see `_last_md_ref`).
 _RUNBOOK_NAME = "ci-runner-x64.md"
 
-#: A backticked BARE handle — `:54-55`, `:790-796`. No file name, no digits before the colon.
+#: A backticked BARE handle — `:54-55`, `:792-798`. No file name, no digits before the colon.
 _SHORTHAND_RE = re.compile(r"`:(?P<start>\d+)(?:-(?P<end>\d+))?`")
 
 #: shorthand start line -> a regex the cited window must match (the sentence it names).
 _SHORTHAND_RUNBOOK_ANCHORS: dict[int, str] = {
     54: r"the ARM64 VMs register `self-hosted, Linux, ARM64",
-    790: r"The OPT-IN split \(`CI_SHARD_ROUTING=pool-split`\)",
-    905: r"three pool legs were killed at their own watchdogs",
+    792: r"The OPT-IN split \(`CI_SHARD_ROUTING=pool-split`\)",
+    907: r"three pool legs were killed at their own watchdogs",
 }
 
 
@@ -3876,8 +3876,11 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: ⚠ The four numbers the register STARTED with were re-anchored THREE times: once when #10962's merge
 #: first brought the workflow forward, again after `origin/main`'s 113 further commits moved
 #: every one of them (the falkor/torch row by −59, the three `test-record-postgres`-era rows by
-#: +48…+56 — measured, not guessed), and a third time by #12051's PGDG step, which grew that job by
-#: nine lines above both `test-record-postgres` citations (+9 each). ⛔ NOT "every number": the three cache-step spans #11273
+#: +48…+56 — measured, not guessed), and again by #12051's PGDG step, which grew that job above both
+#: `test-record-postgres` citations. ⛔ That last delta is deliberately NOT restated as a number: an
+#: earlier draft of this very sentence said "+9 each" and the value at the merged head was +22, i.e.
+#: the sentence re-staled exactly like the citations it describes. The numbers are re-derived from the
+#: live file at each head; the COUNT of re-anchors is not a fact worth pinning. ⛔ NOT "every number": the three cache-step spans #11273
 #: registered were ADDED by this correction in post-`origin/main` coordinates, so they were never
 #: re-anchored at all (round-3 review, P3). The doc ALSO names the same constructs in prose (`Install package + the postgres extra`,
 #: the `Cache pip dependency caches (#7612)` step's `with:` block, `install-cpu-torch` in the
@@ -5034,7 +5037,7 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # sentence (the fifth reason, `test-record-postgres`'s client-major pin), so the
         # relay was re-derived from THIS head rather than carried forward — the same
         # discipline this comment already records for the 866 → 869 move.
-        ("docs/ops/ci-runner-x64.md", 886): r"test_the_changes_job_carries_no_job_scope_env",
+        ("docs/ops/ci-runner-x64.md", 888): r"test_the_changes_job_carries_no_job_scope_env",
         # ⛔ the capstone pin's re-cut history is NOT here, and its absence is the fix, not a gap:
         # it used to be ("tests/test_capstone_preregistration_9075.py", 1703), and that number was
         # re-derived SEVEN times (1590 → 1596 → 1673 → 1682 → 1693 → 1701 → 1703) because the
