@@ -1470,9 +1470,12 @@ class EpBreakdown:
     # point WHENEVER one is persisted — THOSE TWO READ α/β ONLY, so a readable
     # mirror is the first stated divergence (they answer the pair mean where
     # this field answers the mirror's value). ⛔ Scope of that second reader: the
-    # EP read under an explicit `require_calibration=False`; under its own
-    # default every uncalibrated claim raises `CalibrationError` there whatever
-    # its shape, so that raise is the calibration gate, not this arithmetic.
+    # EP read under an explicit `require_calibration=False`. Under its own
+    # default the gate raises `CalibrationError` only for a LIVE, non-baselined
+    # Point of evidence kind (`''`/`statement`/`observation`/`hypothesis`) with
+    # no belief — a draft, a terminal, or a `goal`/`plan`/`vision` claim raises
+    # nothing and the arithmetic below runs there under the default too. So that
+    # raise is the calibration gate, not this arithmetic.
     # The second divergence is the pairs R1 REFUSES: those two read each operand
     # on its OWN `1.0` default (`coalesce(posterior_α, ep_α, 1.0)` and the β
     # twin), then answer `α / (α + β)` — with a `total <= 0` guard that answers
@@ -1482,7 +1485,7 @@ class EpBreakdown:
     # above 1, 0.0, 0.5 or nan. Compute it, do not predict it. That arithmetic
     # raises only on an operand Python cannot coerce at all.
     # A pair whose SUM OVERFLOWS is not one of those: R1 ACCEPTS it and answers
-    # the overflow-free identity, so (1.7e308, 1e307) serves 0.944 here while
+    # the overflow-free identity, so (1.7e308, 1e307) serves 0.9444 here while
     # there the total becomes `inf` and the division answers 0.0 — a divergence
     # in VALUE, not in presence. ⛔ Do not assume the two readers agree on a
     # shape because they agree on the pairs R1 accepts. A claim with NO operands
