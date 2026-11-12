@@ -5883,12 +5883,13 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         install_log.write_text("", encoding="utf-8")
         apt_sources.write_text("", encoding="utf-8")
         apt_sources_dir.mkdir(parents=True, exist_ok=True)
-        for stale in apt_sources_dir.glob("*.list"):
-            stale.unlink()
-        # ⛔ `*.sources` TOO: a deb822 fixture left behind by one arm would satisfy the
-        # presence probe in every arm after it, so the "the step must CONFIGURE the box"
-        # rows would silently take the reuse branch instead.
-        for stale in apt_sources_dir.glob("*.sources"):
+        # ⛔ EVERY ENTRY, not the two suffixes this file happens to write today: the
+        # `pgdg.list.save` fixture below is a THIRD spelling (`*.list` does not match
+        # `pgdg.list.save`), and a leftover from one arm would let a later arm's probe see a
+        # peer's file — the vacuous pass the `*.sources` clear was added to prevent. Measured:
+        # `glob("*.list")` -> [] and `glob("*.sources")` -> [] with `['pgdg.list.save']` on
+        # disk.
+        for stale in apt_sources_dir.iterdir():
             stale.unlink()
         if plant_sources_file is not None:
             apt_sources.write_text(plant_sources_file, encoding="utf-8")
@@ -5993,10 +5994,12 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     already_combined = already.stdout + already.stderr
     assert already.returncode == 0, (
         "the step RED on a box that already configures apt.postgresql.org — it either added a "
-        "second stanza for the same suite (apt then refuses the whole source list), fetched "
-        "a key it does not need, or ABORTED under `set -u` on a line hoisted out of the gate "
-        "that reads `${VERSION_CODENAME}` or `$key_file` — both are defined only in the "
-        "else-branch, so a hoisted write dies there before any recorder is read: "
+        "stanza the box does not need (benign on THIS fixture, which carries no `signed-by`: "
+        "apt only warns `configured multiple times`; on an operator stanza whose `Signed-By` "
+        "DIFFERS it makes apt refuse the whole source list), fetched a key it does not need, "
+        "or ABORTED under `set -u` on a line hoisted out of the gate that reads "
+        "`${VERSION_CODENAME}` or `$key_file` — both are defined only in the else-branch, so "
+        "a hoisted write dies there before any recorder is read: "
         + repr(already_combined)
     )
     assert "REACHED_PAST_PRECONDITION" in already.stdout, (
@@ -6013,18 +6016,21 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     )
     # ⛔ AND IT MUST NOT HAVE WRITTEN A STANZA AT ALL. `already` prints the reuse message and
     # skips the fetch, and BOTH of those stay true if the `tee` is hoisted OUT of the gate —
-    # the exact regression this arm exists for (a second stanza for the same suite makes apt
-    # refuse the whole source list). MEASURED, review of `330dd8b962`: that hoist left the
-    # whole suite GREEN until this assertion existed.
+    # the exact regression this arm exists for. MEASURED, review of `330dd8b962`: that hoist
+    # left the whole suite GREEN until this assertion existed. ⚠️ THE CONSEQUENCE IS STATED PER
+    # SHAPE (the same rule as the positive arms below): this fixture carries NO `signed-by`,
+    # so a second stanza would NOT conflict — it is still wrong, because the operator's own
+    # stanza is the one apt should keep using and this job would be adding state it never
+    # needs. The conflicting shapes are covered by the positive arms, not by this one.
     assert install_log.read_text(encoding="utf-8").strip() == "", (
         "the step still ran `install` on a box that already has a PGDG source — it created "
         "the keyring DIRECTORY/file it will never reference: "
         + repr(install_log.read_text(encoding="utf-8"))
     )
     assert tee_log.read_text(encoding="utf-8").strip() == "", (
-        "the step still WROTE an apt source stanza on a box that already has one — apt keys "
-        "a source on URI+suite and refuses the WHOLE list when the two stanzas carry "
-        "different Signed-By values, so this reds a correct box: "
+        "the step still WROTE an apt source stanza on a box that already has one — the box "
+        "needs it not, and on an operator stanza whose `Signed-By` differs a second one makes "
+        "apt refuse the whole list (benign on THIS no-`signed-by` fixture, wrong either way): "
         + repr(tee_log.read_text(encoding="utf-8"))
     )
 
