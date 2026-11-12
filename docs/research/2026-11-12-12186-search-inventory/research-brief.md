@@ -343,3 +343,503 @@ This brief first repeated `#12184`'s locators (`tortoise/ranking.py:766-768` for
 Recorded because the discipline is the point: *a number on a published surface that no committed artifact
 holds* is the class `#11901`'s **correction comment** (`6826725103`, *"Correction to the figures in the comment above"*) caught one of — it is also where `+63.4 → +63.3` is fixed — and re-deriving it costs a
 lane a file-wide search.
+
+---
+
+# §7. Round 2 — the primaries round 1 could not read, and the three disputes settled
+
+**Lane:** `research/12186-round2-depth` · verified at **`9828250732`** (round 1 pinned `1f28d107cf`)
+· research only, no implementation. This section **extends** §1–§6; it does not replace them, and where
+it falsifies a round-1 claim the falsified claim is named so the two can be read together.
+
+## 7.0 Rung taken, queries, and one thing that changed
+
+**Rung 1 worked this time.** `mcp__seo-intelligence__perplexity_search` was force-loaded and answered on
+this cell; round 1's cell reported `Unknown MCP server 'seo-intelligence'` (§0). Rung 2 was never needed.
+
+Queries run (rung 1, `perplexity_search`, ~$0.005 each): (1) `FalkorDB db.idx.fulltext.queryNodes score
+TFIDF BM25 scorer fulltext index`; (2) `RediSearch FT.SEARCH default SCORER TFIDF BM25 TFIDF.DOCNORM
+documentation`; (3) `FalkorDB fulltext index "scorer" option BM25 support CREATE FULLTEXT INDEX OPTIONS
+language stopwords`; (4) `Mem0 new memory algorithm April 2026 arXiv single-pass ADD-only extraction entity
+linking`; (5) `Hindsight agent memory four retrieval arms cross-encoder entity temporal graph LongMemEval
+open source`; (6) `Cognee memory graph "cognify" entity resolution deduplication how it works docs`;
+(7) `Honcho plastic labs memory architecture "deriver" peer representation theory of mind how it works`;
+(8) `entity resolution merge chain transitive closure error rollback audit trail record linkage reversible
+merge best practice`; (9) `Supermemory architecture how it works memory graph entity extraction docs`.
+
+Primary sources fetched (`web_fetch` / raw): `docs.falkordb.com/cypher/indexing/fulltext-index`;
+`getzep/graphiti` → `dedup_helpers.py`, `node_operations.py`, `prompts/dedupe_nodes.py`, `nodes.py`;
+`mem0ai/mem0` → `memory/main.py`, `utils/scoring.py`, `utils/entity_extraction.py`.
+
+⚠️ **Locators drift, and a pin is not a citation.** Round 1's `sdk.py:39588-39606` for the BM25 arm's wiring
+is **`:40737-40835`** at this head — the file grew ~1,230 lines in one day of merges. Every locator below
+is re-derived at `9828250732`; a lane reading this doc at a later head must re-derive, not copy.
+
+## 7.1 C2 SETTLED — the product lane runs TF-IDF, that is the vendor's own name for it, and BM25 is one gate away
+
+### The vendor says TF-IDF, and the API has no scorer to change it
+
+FalkorDB's full-text documentation states the returned score's identity directly
+([docs.falkordb.com/cypher/indexing/fulltext-index](https://docs.falkordb.com/cypher/indexing/fulltext-index)):
+
+> "In addition to yielding matching nodes, full-text index scans will return the score of each node. **This
+> is the TF-IDF score of the node**, which is informed by how many times the search terms appear in the node
+> and how closely grouped they are."
+
+and in its own FAQ on the same page: *"The score reflects **TF-IDF** relevance ranking."* The indexing
+overview repeats it once more (*"scoring based on TF-IDF"*,
+[docs.falkordb.com/cypher/indexing](https://docs.falkordb.com/cypher/indexing)).
+
+**The configuration surface carries no scorer.** The documented index options are `language` and `stopwords`
+(index-level) and `weight` / `nostem` / `phonetic` (field-level); the query surface is
+`db.idx.fulltext.queryNodes(label, string)` — *a string*, no options map
+([docs.falkordb.com/cypher/procedures](https://docs.falkordb.com/cypher/procedures)). RediSearch itself
+does expose `SCORER` (`TFIDF` default historically, `BM25STD` default from Redis 8,
+[redis.io/.../scoring](https://redis.io/docs/latest/develop/ai/search-and-query/advanced-concepts/scoring/)),
+but **FalkorDB does not surface that parameter to Cypher** — so BM25 is not reachable inside our text index
+by any documented route.
+
+**And our code passes no options at all.** `_create_fulltext_index`
+(`tortoise/projection/__init__.py:20762`) issues either
+`CREATE FULLTEXT INDEX FOR (n:{label}) ON ({fields_expr})` or the legacy procedure, with **no `OPTIONS`
+block** (`:20785-20788`) — so the index is on vendor defaults: default language, default stopwords, TF-IDF.
+
+### Our own tree says three different things, and one of them is a comment error
+
+| site | claim | verdict |
+|---|---|---|
+| `tortoise/sparse.py:13-14` | RediSearch's *"TFIDF scorer"* ranks by term-overlap, *"which is the BM25-style rank behavior the epic's scope prescribes"* | ⛔ **wrong on the mapping.** TF-IDF is not BM25-style: it has no document-length term and no rarity weighting of the BM25 form, and `bm25.py`'s own measurement (below) found **neither**. The vendor calls it TF-IDF; so should we. |
+| `tortoise/bm25.py:4-6` | quotes `sparse.py`, then reports the **measurement**: on the embedded (falkordblite) lane the shipped scorer *"behaves like a per-matched-term count whose weight is NOT driven by rarity and whose score is NOT driven by document length"* | ✅ the measurement is the authority here, and it says the shipped scorer prices **neither idf nor length** |
+| `SEARCH-ARCHITECTURE.md:§6.2` (`:268`) | *"The FalkorDB leg is RediSearch's TF-IDF scorer"*, the 8–23 nDCG@10 gap is *"measured against a BM25 implementation"*, and **how far our hosted leg sits from that baseline is unmeasured** | ✅ **correct, and more careful than its own epic row** |
+
+⇒ **The epic's C2 row title, "BM25 instead of TF-IDF", is literally accurate for the product lane.** Round 1
+corrected the status (which was right) but also proposed dropping the title reading because *"we run BM25 on
+the embedded lane"* — that is true **only on the embedded lane**, and it is not the lane the product runs.
+
+### The bound round 1 did not find: the arm is embedded-only for a latency reason, not a decision
+
+`tortoise/search_engine.py:3103-3108`, verbatim:
+
+> "…`search_keys` into Python and tokenises all of them on the caller's thread, OUTSIDE
+> `degradation_chain`'s `as_completed` deadline (only the driver-side query timeout bounds it). **That is
+> why the arm is gated off, is embedded-lane-only, and why its latency must be measured (#8486) before it is
+> enabled anywhere.**"
+
+with `DEFAULT_BM25_CORPUS_CAP = 20000` (`:3108`) and the arm gated on `is_embedded`
+(`tortoise/sdk.py:40641`, `:40740`; `BM25_DEFAULT_ENABLED = True` at `tortoise/bm25.py:166`,
+`run_bm25_query` at `search_engine.py:3198`). So the hosted wall is **a ≤20 000-row corpus read tokenised
+in Python off the deadline**, not a decision that hosted should stay TF-IDF. `#8486` — the benchmark that
+would settle the latency — is **OPEN and never executed** (`gh issue view 8486`: *"PENDING — never executed;
+no comparable number exists"*), and `bm25.py`'s own constant records that the owner armed the arm on
+mechanism-level evidence **with #8486 still pending**.
+
+### The mechanism nobody had stated: the scorer acts on RECALL, not on order
+
+The FTS leg does `ORDER BY score DESC … LIMIT $limit` (`search_engine.py:2994-3001`), and `rrf_fusion`
+**throws the leg's score away** — the binding is literally `for rank, (pid, _score) in enumerate(ranked)`
+(`search_engine.py:4492`), and the function's own comment states the rule: *"fusion consumes leg
+POSITIONS"* (`:4519`). §6.2 says the same at `:3091-3093`. So the
+TF-IDF score never reaches the answer *as a score*: **it decides which rows survive the LIMIT.** That makes
+C2 a **candidate-generation (recall) lever**, not a ranking lever — i.e. it belongs to §A of the epic, and
+**M3 must measure the FTS leg's recall@k in isolation**, not only its score distribution. §6.2's word is
+"re-ranks"; the sharper, actionable word is **"re-selects"**.
+
+### Contradiction test
+
+**No recorded decision reaches "measure the hosted corpus-read latency".** V1 gates the **index location**
+(`SEARCH-ARCHITECTURE.md:§6.2`) and an in-process leg does not move the index. ⚠️ But broadly arming a
+lexical arm on the product read path is exactly what M3's measurement would have to judge, so this is
+declared as **`#8486`'s own question** and must not be armed on a lane's judgement — see M-7 in §7.8.
+
+## 7.2 B2 SETTLED — name shingles, and the highest-precision non-name signal is not an overlap score
+
+### Zep's Jaccard is over NAME SHINGLES. Confirmed from the source.
+
+`graphiti_core/utils/maintenance/dedup_helpers.py`:
+
+```python
+def _shingles(normalized_name: str) -> set[str]:
+    """Create 3-gram shingles from the normalized name for MinHash calculations."""
+    cleaned = normalized_name.replace(' ', '')
+    ...
+    return {cleaned[i : i + 3] for i in range(len(cleaned) - 2)}
+
+def _jaccard_similarity(a: set[str], b: set[str]) -> float:
+    """Return the Jaccard similarity between two shingle sets, ..."""
+```
+
+(`:89-96`, `:132-142`), with `_FUZZY_JACCARD_THRESHOLD = 0.9`, `_MINHASH_PERMUTATIONS = 32`,
+`_MINHASH_BAND_SIZE = 4` (`:31-37`). The candidate universe for the comparison is **the LSH band buckets**
+(`:357-368`), not the graph. **No edge is read anywhere in this module.** ✅ Round 1's B2 claim stands.
+
+**The ordering is the precision property, and round 1 under-stated it.** `_resolve_with_similarity`
+(`:321-380`) runs: exact-normalised (always, `:337-345`) → **if more than one node shares the normalised
+name, escalate straight to the LLM and never run fuzzy** (`:346-352`) → entropy gate (`:354-357`) → LSH
+fuzzy (`:358-380`). So an **ambiguous** exact name is a *deliberate* LLM case; the fuzzy arm only ever sees
+the residual.
+
+### The highest-precision non-name signal in systems that have a graph is **candidate generation**, not overlap
+
+Two mechanisms, both read from source or the paper, and neither is a pairwise neighbour-overlap feature:
+
+**(a) Mem0, April 2026 — entity linking as a per-document BOOST.** During `add()`, entities are extracted and
+stored in a parallel collection `{collection}_entities`; at search, query entities are embedded and searched
+against it, and each matched entity **adds** to the score of every memory it links
+(`mem0/memory/main.py::_compute_entity_boosts`):
+
+```python
+num_linked = max(len(linked_memory_ids), 1)
+memory_count_weight = 1.0 / (1.0 + 0.001 * ((num_linked - 1) ** 2))
+boost = similarity * ENTITY_BOOST_WEIGHT * memory_count_weight
+```
+
+with `ENTITY_BOOST_WEIGHT = 0.5` (`mem0/utils/scoring.py:57`) and the fusion **additive and normalised**,
+not RRF: `combined = (semantic + bm25 + entity_boost) / max_possible` (`scoring.py:72`, `:94-101`). The
+entity extractor is **deterministic spaCy-NER + heuristics**, not an LLM call
+(`mem0/utils/entity_extraction.py`: `_add_ner_candidates`, `_add_proper_name_candidates`,
+`_add_quoted_candidates`, `_add_topic_phrase_candidates`, `_resolve_candidates`).
+
+⛔ **And Mem0's lexical and entity arms are RANKERS, not candidate generators:** Step 7 of
+`_search_vector_store` builds the candidate set from `semantic_results` only (`main.py:1674-1690`) and
+`score_and_rank` re-scores that pool. A BM25-only or entity-only match that the dense leg did not return
+**cannot enter the result set at all**. That is a deliberate trade (cheap, precise) with a recall cost —
+⚠️ **copy the signal, not the pool construction**, because our measured ceiling is a recall problem
+(`#11901`: 81 of 300 absent even at k=15).
+
+**(b) Hindsight — the graph is one of four parallel arms, and the fusion order is RRF → cross-encoder.**
+TEMPR's recall runs semantic vector, BM25, **entity/causal/temporal graph traversal**, and an explicit
+temporal filter **in parallel**, fuses by reciprocal rank fusion, then **reranks the fused candidates with a
+neural cross-encoder** ([ACL 2026 demo abstract](https://aclanthology.org/2026.acl-demo.27/);
+[arXiv:2512.12818 summary](https://www.emergentmind.com/papers/2512.12818): *"After RRF fusion, TEMPR
+applies a neural cross-encoder reranker to refine precision on the top candidates"*). Edges are **weighted
+by decay or similarity** to bias traversal. Two things follow for us: **(i)** the graph's job is to *produce
+candidates a vector leg cannot reach*, not to score pairs; **(ii)** the cross-encoder sits **after** fusion —
+which is the order C1 and A6 need, and which our `rrf_fusion` + `ask_lane_rerank` already implement in the
+ask path.
+
+### ⚠️ CORRECTION to round 1's absolute
+
+Round 1 wrote *"no surveyed system reports typed-edge neighbourhood overlap as a ranking feature"*. That is
+true of the **memory systems** surveyed, and **false of ER practice**, which recommends exactly it:
+*"Add graph structural similarity to your score — it is free and it is strong"*
+([archtin.com/blog/entity-resolution-in-knowledge-graphs](https://archtin.com/blog/entity-resolution-in-knowledge-graphs)).
+The narrow, defensible claim is: **no memory system does it; ER practice does, on a graph that has typed
+edges.** Our failing store has none (`#4211`'s census on the frozen store: **484 Points, 484 edges, ALL
+`CONTAINS`; `aboutObject` 0, `IMPL` 0, `NAND` 0**, read at `#4211`), so the lever is real and its substrate
+is absent — which is round 1's conclusion, reached on a claim it had stated too broadly.
+
+**Contradiction test:** no recorded decision reaches this work.
+
+## 7.3 A3 SETTLED — the field exists (`title`), the vector is already name-only, and context belongs in the adjudicator
+
+### `:Object` carries `title`, not just `name`
+
+`tortoise/projection/entities.py`: `title` is in the `:Object` property list (`:1902`), written
+`o.title=coalesce($title, '')` (`:5069`) and merged `o.title=coalesce($title, o.title)` (`:5087`).
+`STORAGE-ARCHITECTURE.md:1317` says *"Its only text fields are `name` and `title`"* — which round 1 read as
+"no context field", but **`title` is a context field**. What is unknown is its **fill rate**, and the
+`coalesce($title, '')` write makes an absent title indistinguishable from an empty one at the row. **One
+census settles it** (`MATCH (o:Object) WHERE o.title IS NOT NULL AND o.title <> '' RETURN count(*)`) — and
+that count does not exist anywhere in this repo. See **M-8**.
+
+### Our `:Object` vector is ALREADY Zep's shape
+
+`_upsert_object` computes the embedding from the **name alone** —
+`embedding = encode_for_row(name, self.required_embedding_dim)` (`:5013-5020`, comment *"Compute embedding
+from name (#7845)"*), behind the `#5008` embed gate. Zep does exactly the same thing:
+
+```python
+class EntityNode(Node):
+    name_embedding: list[float] | None = Field(default=None, description='embedding of the name')
+    summary: str = Field(description='regional summary of surrounding edges', default_factory=str)
+
+    async def generate_name_embedding(self, embedder: EmbedderClient):
+        text = self.name.replace('\n', ' ')
+        self.name_embedding = await embedder.create(input_data=[text])
+```
+
+(`graphiti_core/nodes.py:499-511`.) ⭐ **Zep separates the embedded key from the adjudication context**:
+`summary` is a *regional summary of surrounding edges*, and it is rendered into the dedupe prompt's
+`EXISTING ENTITIES` JSON (`graphiti_core/prompts/dedupe_nodes.py`) — **never embedded**.
+
+### The minimal viable version, for a graph whose entities have no description field
+
+1. **Keep the vector name-only.** It is the **resolution key** job (§12.2c `:1313`), and it is what both we
+   and Zep already do. Putting context in the vector would answer *"does this entity's neighbourhood look
+   like that entity's"*, which is not the question a dedupe rung asks.
+2. **Put the context in the adjudicator payload** — one-hop neighbour names, `object_kind`, and `title`
+   where non-empty. That is **B1's work, not A3's**, and it is free: the candidates are already assembled.
+3. **Take the `title` census** (M-8) to learn whether (2) has a field at all or only topology.
+
+⚠️ **This narrows A3 to almost nothing and moves its value into B1.** It does not reopen the KEEP ruling
+(`#11395` `6781921075`), does not touch §12.2c's sequencing (the entity vector still waits on the extractor
+for the *index* half), and does not contradict §12.2/§12.2c — an entity vector already exists and is not
+being added to.
+
+**Contradiction test:** no recorded decision reaches "put neighbour names in the adjudicator payload". The
+KEEP ruling and §12.2c are **obeyed**, not reversed: nothing here removes, stops writing, or newly indexes a
+vector.
+
+## 7.4 CONFIRMED — round 1 was right, and here is the primary source
+
+| round-1 claim | status at `9828250732` |
+|---|---|
+| **C1** built and wired, ask-lane only, default OFF | ✅ `tortoise/ask_lane.py:630-631` (`from tortoise.rerank import ask_lane_rerank`); `tortoise/rerank.py:66` `ASK_RERANK_ENV = "TORTOISE_ASK_RERANK"`, `:78` fail-safe-OFF gate. No noun-path caller exists. |
+| **A5** `GraphRanker` two-branch dispatch sends non-`event` types to point signals | ✅ `tortoise/ranking.py:926-928`, inside `_fetch_signals` declared `:914`, `class GraphRanker` at `:677`. `class StateRanker` at `:1206`; `_fetch_object_signals` at `:1773`; the only caller `:1337` is **inside `StateRanker`**. Round 1's §6.1 correction stands; the round-1 **comment**'s `:766-768`/`:1233` were wrong. |
+| **A2** an alias rung exists but has no production caller | ✅ `aliases[]` is read by `find_live_holder` (`entity_resolver.py:610-611`, declared `:580`), whose only call site is `:650` inside `resolve_entity_name` (`:632`). `apply_entity_merge` writes it (`:792`). |
+| **M-1** Zep's entropy gate is an **AND**, not an OR, and does not cover our bare-definite-description class | ✅ `_has_high_entropy` (`dedup_helpers.py:80-86`): `if len(normalized_name) < _MIN_NAME_LENGTH and token_count < _MIN_TOKEN_COUNT: return False` — both needed to refuse; then `return _name_entropy(...) >= _NAME_ENTROPY_THRESHOLD`. |
+| **M-2** MinHash/LSH over name shingles, 3-gram, 32 perms, band 4, Jaccard ≥ 0.9 | ✅ `dedup_helpers.py:31-37, 89-144, 293-318, 321-380`. |
+| **B2** Zep's Jaccard is **blocking**, not ranking | ✅ it resolves deterministically before any LLM sees the residual (`:329-380` then `node_operations.py:660+`). |
+| **D2** the read ledger must not be an admission-control signal | ✅ recorded, and **not re-litigated here** — §7 (`SEARCH-ARCHITECTURE.md`) + §17.4.6. Nothing in this section proposes it. |
+| **M-4** transitive closure is the merge hazard | ✅ confirmed **externally twice**; see §7.7, which also finds the hazard is *half-built* in our tree rather than absent. |
+
+## 7.5 CORRECTED — round-1 claims this round falsifies
+
+| # | round-1 claim | the falsification | what it changes |
+|---|---|---|---|
+| **1** | *(round-1 **comment** only)* "Zep unions **FOUR** candidate sources" | `node_operations.py:_collect_candidate_nodes` (`:456-484`) unions **three**: identity-property (`:466`), exact-normalised name (`:471`), semantic search (`:472`). LSH is a **separate, earlier, deterministic** stage. | ✅ Round 1's **doc** already corrected this (§2 A2). The comment's FOUR was never re-derived and should not be quoted. |
+| **2** | "C2 — drop the 'build BM25' reading; the only open question is whether the **text index** moves" | The product lane has **no BM25 leg at all** and the vendor API **cannot express one** (§7.1). The embedded-only limit is a **latency** reason, not a decision, and its gate (`#8486`) is open. | A **second, cheaper route to BM25 ranking** exists that does not move the index (M-7). It does not overturn M3; it makes M3's *quality* half reachable before M3's *migration* half. |
+| **3** | "**No** surveyed system reports typed-edge neighbourhood overlap as a ranking feature" | True of memory systems; **ER practice recommends it** (archtin: *"add graph structural similarity to your score"*). | The claim narrows to *"no memory system; ER practice does, on a graph that has typed edges"* — and our substrate census (`#4211`) is what kills it here, not the absence of precedent. |
+| **4** | A3: *"name + context has **no context to embed**"* | `Object.title` exists and is written (`entities.py:1902`, `:5069`). The **fill rate** is unmeasured; `description`/`summary` = 0 rows is a different statistic. | A3 becomes **one census** away from an answer, and its remaining work moves to B1. |
+| **5** | *(round-2 brief premise, and the epic's phrasing)* `#11901` carries an **explicit DECLINE** of widening the window | The record says *"**not decided, and deliberately not changed**"*, and the DoD box is **unchecked** (`#11901` comment `6826507139`). The first comment's *"do not widen now"* was **superseded** by that comment. | Round 1 stated it correctly (*"declined neither"*). ⛔ **The window question is still UN-OWNED** — no child carries the paired decision — and a lane reading "declined" would think it closed. |
+| **6** | A2: *"419 real surface variants"* | They are **GENERATED** from real names, not observed (`#11901` comment 3, the relay). | Any sentence that says "real variants" overstates the population. |
+| **7** | Mem0's April-2026 algorithm is documented by **an arXiv paper** | There is **no April-2026 paper**. `arXiv:2504.19413` is **2025** (ECAI 2025) and **predates** the April-2026 algorithm; Mem0's own page says so explicitly: *"this report also covers Mem0's April 2026 … update, which **post-dates** the original ECAI 2025 paper and isn't reflected in its published numbers"* ([mem0.ai/blog/state-of-ai-agent-memory-2026](https://mem0.ai/blog/state-of-ai-agent-memory-2026)). | Cite the **README + blog + code** for the April-2026 algorithm, and the **2025 paper** only for what the 2025 paper measured. The two must not be merged into one citation. |
+
+## 7.6 EXPANDED — the performers round 1 never read, to mechanism level
+
+**Mem0 (April 2026) — read from `README.md`, the vendor's 2026 report, and the code.** Single-pass
+**ADD-only** extraction: one LLM call, **no UPDATE/DELETE** — *"Memories accumulate; nothing is overwritten"*.
+Agent-generated facts are first-class. Entity linking into `{collection}_entities`. Multi-signal retrieval
+= semantic + **BM25** + entity matching, **additive-normalised** (not RRF), over a **semantic-only candidate
+pool**. ⭐ **And it deleted its graph**: *"we replaced external graph store support with built-in entity
+linking … The `relations` field from prior versions is gone. Entity relationships now influence retrieval
+ranking but **cannot be traversed directly**"* — a stated regression for graph-interface users, traded for
+deployment simplicity. Reported: LoCoMo 71.4 → **92.5**, LongMemEval 67.8 → **94.4**, ~6.8–7.0 K tokens/query
+(⚠️ **vendor self-report; the managed platform "includes proprietary optimizations not available in the
+open-source SDK"**).
+→ **Lesson for us:** the strongest evidence in the field that **entity-keyed boosting without traversable
+edges** buys most of the graph's retrieval value — which is an argument for B2-as-*candidate-generation* and
+against B2-as-*edge-overlap-score*.
+
+**Cognee — read from its docs.** Identity is a **function of the name**: *"The identity of the stored node is
+derived from its `name` (normalized to lowercase, with spaces turned into underscores and apostrophes
+stripped), so every mention of the same name … resolves to the same `Entity` node instead of creating a
+duplicate"* (`Entity.id_for(name)`). Several same-name nodes **inside one chunk** get deterministic
+ordinal ids instead of merging. Optional **OWL ontology validation** canonicalises LLM-derived names to
+URI-derived forms via `difflib.get_close_matches()` at a **0.80** cutoff and injects `rdfs:subClassOf` /
+`owl:ObjectProperty` structure. An opt-in `PROVENANCE_TRACKING` audit ledger appends *"an entry for every
+document, chunk, entity, and relationship this run produced"* (off by default).
+⚠️ Its own documented migration hazard: nodes written before the name-derived-id change *"keep their old
+ids, so re-running `.cognify` over data that is already in the graph can create a second node alongside the
+existing one."*
+→ **Lesson for us:** Cognee makes duplicates **structurally impossible** by folding identity into the id.
+We did the opposite deliberately — `#3590` landed `merge_key = "id"` — so similarity-based candidate finding
+is the only mechanism left (which is exactly the KEEP ruling's premise). ⛔ **Not a candidate: it would
+reverse `#3590`.** It is evidence for *why our problem exists*, not a fix for it.
+
+**Honcho — read from its README/CLAUDE.md and reasoning docs.** Entities are **declared, not extracted**:
+"peers" (humans and agents) are first-class records, and there is no name-matching rung anywhere. Storage
+is PostgreSQL + pgvector; representations live in **collections keyed by `(observer, observed)` peer
+pairs**, which is how it models per-observer knowledge asymmetry. A background **Deriver** is *"a single LLM
+call per batch using structured output, not an agentic tool loop"*; a **Dreamer** consolidates conclusions
+into reasoning trees on a schedule; retrieval includes **hybrid BM25 + vector** search.
+→ **Lesson for us:** for the entity-resolution problem, Honcho is a *null case* — it has no duplicate-noun
+class because it never mints an entity from prose. It is only usable as evidence that resolution is a
+**write-path** decision, not a read-path one.
+
+**Supermemory — read from its docs.** The knowledge graph is **facts on facts, not entity-relation-entity
+triples** (*"not classic entity–relation–entity triples you maintain by hand"*): nodes are memory entries;
+edges are `updates` / `extends` / `derives`. A second phase, **"dreaming"**, forms memories from *coherent
+units* rather than per-write (`dreaming: "dynamic"` by default; `"instant"` for demos) — i.e. deferred
+consolidation, like Letta's sleep-time compute. Forgetting **excludes memories from search while preserving
+their records**. Hybrid search = vector + filters + graph-edge expansion (`include: { related: true }`) +
+re-ranking.
+→ **Lesson for us:** two of the "graph" performers (Mem0, Supermemory) have **no entity nodes in the
+retrieval graph at all**. Entity resolution is not a prerequisite for a top score; it is a prerequisite for
+*our* semantics (identity, supersession, EP over a closed component).
+
+**Letta/MemGPT and Mastra:** round 1's §5.1 readings are **inherited, not re-verified this lane** — declared
+in §7.9. Mastra's observability route remains the counter-case for the whole retrieval-centric inventory;
+Hindsight (§7.2b, 91.4 % LongMemEval with Gemini-3 Pro per its ACL demo paper) is the counter-case to
+*"Mem0 deleted its graph because graphs don't help"*.
+
+### The cross-cutting finding, which no single row shows
+
+**At the top of the board, entity identity is DECLARED or DERIVED, not MATCHED.** Mastra: no entity layer.
+Honcho: peers are records. Mem0 (Apr 2026): ADD-only, nothing merged. Supermemory: facts, not entities.
+Cognee: `id = f(name)` by construction. **The only surveyed system that runs a real fuzzy entity matcher
+(Zep) resolves the mention onto an existing node *before persistence*, so no persisted identity link can
+chain.** Our system does persist a redirect pointer — which is *more* recoverable than Zep's and *more*
+exposed than Zep's to the transitive hazard. §7.7 is that trade, priced.
+
+## 7.7 Merge chains and reversibility — what the field does, and what we already have
+
+### The hazard, stated externally (two independent sources, not our record)
+
+- Connected-components clustering *"is transitive by construction"*, so **"A matches B and B matches C puts
+  A and C in the same entity even where A and C were compared and rejected. The pairwise model's own verdict
+  on the A-C pair is discarded."** And the cost is super-linear: *"a single false-positive edge between two
+  otherwise-correct clusters of 50 records produces one 100-record 'customer', and the badness of the outcome
+  scales with the size of what it joined, not with the number of mistakes."*
+  ([erikevenson.github.io/architect/patterns/entity-resolution](https://erikevenson.github.io/architect/patterns/entity-resolution/))
+- *"Pairwise decisions are not transitive … Naive union-find over all matched pairs is how you get one giant
+  blob node containing 40,000 'entities' — the classic transitive-closure explosion."*
+  ([archtin.com](https://archtin.com/blog/entity-resolution-in-knowledge-graphs))
+- *"Record **which derived claims, embeddings, summaries, and permissions depended on the old cluster** so
+  they can be invalidated"* — ([granveo.com](https://www.granveo.com/blog/resolve-entities-without-corrupting-knowledge-graph))
+
+### The controls the field actually uses
+
+| control | source | do we have it? |
+|---|---|---|
+| **Maximum cluster size**, anything above it routed to **review**, not published | erikevenson; archtin (*"a cluster of 500 people is a bug, not a discovery"*) | ⛔ **NO** |
+| **Blast-radius rule** — never auto-merge above a degree/evidence threshold | writeitai/remember-stack; granveo | ⛔ **NO** |
+| **Persisted no-merge assertions**, honoured by the clustering step so an un-merge is not a treadmill | erikevenson (*"a steward's 'these are not the same' must be persisted"*) | ✅ **YES** — `dedup_target_id` / `dedup_rejected_targets` are read by `_ENTITY_READ` (`entity_resolver.py:203-214`) |
+| **Merge = redirect, not rewrite** (Wikidata QIDs never reused; a dead ID resolves to the survivor forever) | writeitai; and the SAME_AS pattern | ✅ **YES** — see below |
+| **Un-merge is deleting one edge** and re-clustering, not a recovery exercise | archtin (*"Unmerging is deleting one `SAME_AS` edge and re-clustering"*) | ✅ **structurally yes**; ⛔ **but nothing in-tree issues it** — `rg 'resolved_from'` over `tortoise/` finds **one write** (`apply_entity_merge`) and **reads only** (the `_ENTITY_READ` predicate at `:199-214`, `follow_resolved_from`, and four call sites in `entity_identity.py`); there is **no clear/REMOVE/reverse path at all** |
+| **`score`, `method`, `decidedAt` recorded ON the link** so *"why are these one customer"* is one query | archtin (*`SET r.score=$score, r.method=$method, r.decidedAt=datetime()`*); Senzing (*"every merge records why"*) | ⛔ **NO — the fields exist in the return value only** |
+| **Append-only decision rows + pre-merge membership snapshot** (what makes un-merge possible) | writeitai; granveo | ⚠️ **partly** — the journal gives replay (`derived == replay(journal)`), but there is no pre-merge *membership* snapshot |
+| **Cluster-size distribution** as a health metric (*"emerging giant cluster = over-merge in progress"*) | writeitai | ⛔ **NO** |
+| **Three outcomes** — same / different / **unresolved** | granveo | ✅ the review queue + `dedup_reviewed` exist |
+
+### What our tree already has — verified, and better than most of the field
+
+`apply_entity_merge` (`tortoise/entity_resolver.py:728-812`) is a **non-destructive, journal-backable
+redirect**, not a collapse: the survivor gains the candidate's folded name in `aliases[]`, the candidate is
+stamped `resolved_from` + `dedup_reviewed='merge'` + `reviewed`, and — verbatim from its docstring —
+*"Both nodes and all their edges survive."* Both writes route through `update_entity`, which journals an
+`EntityMutated` record, *"so `derived == replay(journal)` holds for the merge: a rebuild restores the alias
+and the resolution pointer."* `follow_resolved_from` (`:536-577`) walks the pointer chain to a **fixpoint
+with a cycle guard** (`seen`), and `_ENTITY_READ` excludes `resolved_from IS NOT NULL` so a retired carrier
+is never re-elected as a survivor. ⚠️ **And the redirect is load-bearing beyond the resolver:** `entity_identity.py`
+follows it on the identity path too (`:378-384`, `:593-594`), so a chain that is wrong is not a
+resolver-only defect — it is walked by identity reads.
+
+⭐ **This is the Wikidata shape** — a merge is a redirect, the pre-merge records survive, and un-merge is
+"remove the pointer" — and it is **more reversible than Zep's**, which needs no reversal because it never
+persists a merge.
+
+### What we do NOT have, and it is cheap
+
+1. **No evidence on the link.** `apply_entity_merge` **returns** `method` and `similarity` (`:809-812`) but
+   **writes neither** — the persisted properties are `resolved_from`, `dedup_reviewed`, `reviewed`, and
+   `canonical_name` when it was empty. So *"why are these one entity"* is **not answerable after the fact**,
+   and the caller's `method`/`similarity` live only in whatever the caller logged. → **M-9**.
+2. **No blast-radius or chain-length bound.** A merge is accepted on a pairwise verdict; nothing checks the
+   **closure** it creates. `follow_resolved_from` silently collapses an arbitrarily long chain to its
+   fixpoint instead of reporting that a chain existed. → **M-10**. This is the field's #1 control and we have
+   none of it, which makes round 1's M-4 finding *more* urgent, not less: the danger here is not an
+   irreversible destructive merge (we do not have one) — it is an **unaudited, unbounded redirect chain**.
+3. **A doc/code divergence a reviewer will trip on:** `follow_resolved_from`'s docstring says *"A **single
+   hop**, cycle-guarded by the `seen` set"* (`:547`) while the body is a `while True` loop that keeps
+   following (`:556-577`). The code is right; the sentence is wrong, and it is the sentence a reviewer reads
+   before deciding whether a chain can exist.
+4. **No `SAME_AS` predicate** — unchanged from round 1: `_VALID_EDGE_PREDICATES`
+   (`tortoise/projection/edges.py:717-729`) carries no `sameAs`. So B1's third band still cannot be written
+   as an edge; it can be written as **this redirect**, which needs no ontology decision at all. ⚠️ **That is a
+   material change to N-4's dispatch readiness**: round 1 said the three-band ladder was *blocked on an
+   ontology decision*; the **redirect already exists**, so the link-without-merge band is buildable as a
+   `resolved_from` write with `dedup_reviewed='link'` and no new predicate. Declare it, do not assume it —
+   the 2730 brief's owner question (`:241`) is about `SAME_AS` as a *graph edge*, which this does not need.
+
+**Contradiction test:** nothing here reverses the KEEP ruling, §12.2c, V1 or §2.0. M-9/M-10 obey the
+non-destructive-merge rule (`#2730` §6.7.3, `#783` J-2) rather than revising it.
+
+## 7.8 The levers no inventory lists yet
+
+### M-7 ⭐ **Arm the BM25 leg on the HOSTED lane — the non-index route to C2**
+
+The in-process Okapi BM25 leg exists, is default-ON, and is gated to `is_embedded` for a stated
+**latency** reason (a ≤`DEFAULT_BM25_CORPUS_CAP` = 20 000-row corpus read tokenised in Python outside
+`degradation_chain`'s deadline — `search_engine.py:3103-3108`). Its own recorded precondition for wider
+arming is **`#8486`**, which is OPEN and **never executed**.
+**Why it matters:** it reaches BM25 *ranking* on the product lane **without moving the text index**, so it
+does not touch V1's decision and does not wait on M3's migration. It is the cheapest path to the quality half
+of C2, and the inventory has no row for it because C2 was read as "the index move".
+**Falsifier:** the corpus read's p95 on a production-sized label exceeds the read deadline (or the row count
+exceeds the cap on the labels that matter) → the lever is unaffordable and M3's index move is the only route.
+⛔ **Do not arm it on a lane's judgement.** The gate is `#8486`; a lane may measure, not decide.
+
+### M-8 ⭐ **The `title` census** — one query that decides whether A3 has a context field at all
+
+`MATCH (o:Object) WHERE o.title IS NOT NULL AND o.title <> '' RETURN count(*)` (+ the same over `:Subject`).
+**Why:** §7.3 shows `title` is the only candidate context field on the label, and its fill rate is unknown
+because the writer `coalesce`s to `''`. **No artifact in this repo holds this number.** Until it exists,
+"name + context" is neither buildable nor refutable.
+**Falsifier:** near-zero non-empty → `title` is a dead slot, A3's context arm reduces to topology (neighbour
+names), and the extractor supplies the only real context. Cost: one query per graph.
+
+### M-9 **Stamp the merge link** — `method`, `similarity`, `decidedAt` (and the actor, where one exists)
+
+`apply_entity_merge` already computes all of it and throws it away. Three properties on the redirect make
+*"why are these one entity"* a one-query answer (the field's own test, archtin/Senzing) and make an un-merge
+auditable. Cost: ~5 lines in a function that already validates its inputs.
+**Falsifier:** a reviewer cannot show a case where the stamp changes a decision → it is decoration; drop it.
+
+### M-10 ⭐ **Blast-radius / chain-length guard on the merge closure**
+
+Before an `apply_entity_merge` is accepted, compute the closure it joins (both endpoints' existing chains and
+fan-in) and **refuse or route to review** above N — and *report* the chain length that `follow_resolved_from`
+would walk rather than collapsing it silently. This is the single control the ER literature names as the
+transitive-closure mitigation, and §7.7 shows we have none of it.
+**Falsifier:** no `resolved_from` chain longer than 1 exists on any real graph → the guard is inert, keep the
+reporting half and drop the refusal. ⚠️ Cannot be measured on this box (§7.9).
+
+### M-11 **Entity-boost over the UNION candidate set** — Mem0's signal without Mem0's pool
+
+Mem0's entity boost is a good signal applied to a **narrow** pool (semantic-only, `main.py:1674-1690`). Ours
+would be a **per-document additive boost** over `rrf_fusion`'s union — so a BM25-only or entity-only match can
+still surface. ⚠️ **Deliberately NOT Mem0's construction:** copying the pool would deepen the recall problem
+`#11901` measured, and §7.2's ⛔ warns exactly there.
+**Falsifier:** the boost does not change ranking on the `#11901` fixture beyond its own weight →
+`ENTITY_BOOST_WEIGHT` is doing the work and the entity collection is not earned.
+
+## 7.9 What this lane could NOT establish (declared, never skipped)
+
+1. **No graph census was possible.** This box serves no tenant for these populations, so `Object.title` fill
+   rate (M-8), `resolved_from` chain lengths and cluster sizes (M-10) are **declared and unmeasured**. Every
+   one of them is one Cypher query away on a graph that serves them.
+2. **`#8486` is unexecuted**, so the hosted BM25 corpus-read latency (M-7's gate) has **no number**. This lane
+   did not run it — that is a benchmark, not a research read.
+3. **There is no April-2026 Mem0 paper** (§7.5 #7). The April-2026 algorithm is documented by README/blog/code
+   and is **not** reflected in `arXiv:2504.19413`; Mem0 says so itself. Any citation saying otherwise is
+   wrong.
+4. **Every performance figure in §7.6 is its vendor's**, on its own harness: Mem0 (LoCoMo 92.5 / LongMemEval
+   94.4 — and *"proprietary optimizations not available in the open-source SDK"*), Hindsight (83.6 % @20B,
+   91.4 % with Gemini-3 Pro — ACL demo paper + vendor board), Mastra (round 1's reading). None is comparable
+   to `#11901`'s 61.3 % / 73.0 %, which is **candidate recall@k on our capture corpus**.
+5. **Letta/MemGPT and Mastra are inherited from round 1's §5.1**, not re-verified at this head. Cognee,
+   Honcho, Supermemory, Mem0 and Hindsight were read to primary sources this lane.
+6. **The 8–23 nDCG@10 Postgres-full-text-vs-BM25 gap** is inherited from `SEARCH-ARCHITECTURE.md:§6.2`; this
+   lane did not re-read the underlying measurement. It does not need to: §7.1's C2 resolution does not rest
+   on it.
+7. **`#4211`'s census (484 Points / all `CONTAINS` / `aboutObject` 0)** is cited from `#4211` itself, not
+   re-measured here.
+8. **Zep's LLM dedupe quality is unmeasured anywhere** — no isolated number exists, in its repo or its paper.
+
+## 7.10 Contradiction test — one row per finding in §7
+
+| finding | recorded decision it would reverse | verdict |
+|---|---|---|
+| C2: product lane is TF-IDF; vendor has no scorer option | none — it **confirms** `SEARCH-ARCHITECTURE.md:§6.2` | ✅ candidate (informational; it sharpens M3) |
+| C2: the scorer acts on **recall** (LIMIT) not order (RRF discards score) | none — M3's scope already says "score distributions"; this adds a metric | ✅ candidate (it narrows M3 to a measurable question) |
+| **M-7** arm the BM25 leg on hosted | **V1 does not reach it** (V1 gates the index *location*); the gate is `#8486`, a code-recorded precondition | ⚠️ candidate **only through `#8486`** — a lane may measure, not arm |
+| B2: Zep's Jaccard is name shingles | none | ✅ confirmed, not adopted |
+| B2: the graph's job is candidate generation / per-doc boost | none | ✅ candidate |
+| **A3: context belongs in the adjudicator, not the vector** | **obeys** §12.2c (`:1319`, `:1330`) and the KEEP ruling (`#11395` `6781921075`); adds no vector, removes none | ✅ candidate |
+| **M-8** `title` census | none | ✅ candidate (a measurement, not a change) |
+| **M-9** stamp `method`/`similarity`/`decidedAt` on the merge redirect | none — obeys `#2730` §6.7.3 / `#783` J-2 (non-destructive merge) | ✅ candidate |
+| **M-10** blast-radius guard | none — it **strengthens** the KEEP ruling's purpose | ✅ candidate |
+| **M-11** entity boost over the union | none | ✅ candidate |
+| Cognee's `id = f(name)` identity | ⛔ **reverses `#3590`** (`merge_key = "id"`) and the KEEP ruling's premise | ⛔ **not a candidate** — evidence for a reopen only, argued at `#3590` |
+| Supermemory/Honcho/Mastra "no entity graph" | ⛔ would reverse §12.2c's entity-vector work and the KEEP ruling | ⛔ **not a candidate** — and note two of the three are *repository*-shaped systems, not identity-bearing ones |
+| "Widen the window" | `#11901`'s record says *not decided*; a wider window without a verdict is X7's known regression | ⛔ **not a candidate** until the paired decision is taken |
+| Any use of `read_ledger` as an admission-control signal | ⛔ §7 + §17.4.6 | ⛔ **not a candidate** — nothing here proposes it |
+| Row eviction / hot-cold row tiering | ⛔ hosted FalkorDB has no eviction; the unit is a projection-time window | ⛔ **not a candidate** |
+
+---
+
+**Refs:** `#12186` (epic) · `#12189` (round 1) · `#11901` (measurement of record; DoD comment
+`6826507139`) · `#11395` (KEEP ruling, `6781921075`) · `#4211` (census) · `#8486` (BM25 latency benchmark,
+OPEN) · `#2518` · `#2513` · `#12184` · `#3590` (`merge_key = id`) · `SEARCH-ARCHITECTURE.md` §6.2/§7 ·
+`STORAGE-ARCHITECTURE.md` §12.2c/§14.3 V3/§17.4.6 · `docs/research/2026-09-24-2730-entity-attachment/research-brief.md`
