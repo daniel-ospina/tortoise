@@ -1320,9 +1320,10 @@ def test_the_newest_block_body_starts_at_its_header_line() -> None:
     # become false while the extent pin stayed green.
     assert sum(1 for block in blocks
                if _CITATION_RE.search(block.split("\n", 1)[0])) == 0, (
-        "a block now writes a comment citation in its HEADER line, so the wider "
-        "extent is no longer verdict-neutral — re-measure the citation verdicts "
-        "before restating the docstring's claim")
+        "a block's HEADER line now carries a comment citation, so the citing "
+        "COUNT the prose states is stale — re-measure it. (The extent itself only "
+        "moves if the newest block's header gains one, which is what the equality "
+        "above checks.)")
 
 
 def test_the_lifecycle_clause_extraction_ignores_the_rest_of_the_row() -> None:
@@ -1532,12 +1533,14 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     the attribution half "cannot" be re-derived and left it as prose; measured,
     ``v3.31`` — a version that cites nothing — could be substituted for a citing
     one with the suite green, which is the second half of finding 1 reproduced
-    live). The three patterned statements must each appear EXACTLY ONCE, and
-    every other BOLD count in the module is swept against the two measured values —
-    so a stale copy in bold cannot sit beside the checked one (measured before the
-    sweep: editing a second copy's count left the module green). What remains
-    unpinned is the PROSE that draws conclusions from those facts, and any count
-    written outside the swept shapes: this pin checks that the sentences' facts
+    live). The three patterned statements must each appear EXACTLY ONCE, and every
+    bold ``**N of M**`` PAIR in the module is swept against the two measured values
+    (measured before the sweep: editing a second copy's count left the module
+    green). What remains unpinned is the PROSE that draws conclusions from those
+    facts, and any count written OUTSIDE the swept shapes — a bold ``**3 of the
+    39**``, a bare ``**3**``, or a plain restatement is prose this pin does not
+    read, which is why the shapes are enumerated rather than promised: this pin
+    checks that the sentences' facts
     match the file, not that their argument is right.
     """
     doc = test_the_newest_block_recording_4_3_cites_a_comment_id.__doc__ or ""
@@ -1600,9 +1603,10 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
         assert tuple(int(part) for part in seen) in allowed_bold, (
             f"this module states **{seen[0]} of {seen[1]}** somewhere; the detector "
             f"measures {measured_pair[0]} of {len(blocks)} citing a comment id and "
-            f"{measured_none} of {len(blocks)} citing nothing. Every bold count must "
-            "be one of the two measurements — a stale copy beside the checked one is "
-            "the defect finding 1 was about")
+            f"{measured_none} of {len(blocks)} citing nothing. Every bold "
+            "`**N of M**` pair must be one of the two measurements — a stale copy "
+            "beside the checked one is the defect finding 1 was about (a bold count "
+            "in another SHAPE is not swept; see the docstring's enumeration)")
     for seen in re.findall(r"the (\d+) blocks? that cite nothing", module_source):
         assert int(seen) == measured_none, (
             f"this module restates the complement as 'the {seen} blocks that cite "
@@ -1671,24 +1675,27 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     # the block does not carry, is exactly what C5 found. Each claim is PARSED, so
     # its claim must be recognisable, not free-form: the shapes below are the ones
     # accepted, they mirror the module-wide sweep's own tolerance (a `file's` is
-    # accepted by both), and a truthful sentence phrased outside them is a
-    # recogniser gap to widen here — not evidence that the sentence is wrong.
+    # accepted by both, and both are CASE-INSENSITIVE — the sweep matches with
+    # `re.I`, so these do too; measured before: "the FIRST of the two …" redded
+    # here while the sweep accepted it), and a truthful sentence phrased outside
+    # them is a recogniser gap to widen here — not evidence that the sentence is
+    # wrong.
     ordinal = re.search(
-        r"the (?:file's )?(first|second) of the two v3\.33 entries", flat_doc)
+        r"the (?:file's )?(first|second) of the two v3\.33 entries", flat_doc, re.I)
     assert ordinal, (
         "the SCOPE paragraph must say WHICH of the two v3.33 entries it means — "
         "\"the first/second of the two v3.33 entries\" — so this pin can check it")
     lands_first = lands_d2[0] == v333[0]
-    assert (ordinal.group(1) == "first") == lands_first, (
+    assert (ordinal.group(1).lower() == "first") == lands_first, (
         "the SCOPE paragraph calls the `D2 — A` block the "
-        f"{ordinal.group(1)} of the two v3.33 entries; measured, it is the "
+        f"{ordinal.group(1).lower()} of the two v3.33 entries; measured, it is the "
         f"{'first' if lands_first else 'second'}")
     for word in ordinals:
         assert (word.lower() == "first") == lands_first, (
             f"this module calls the `D2 — A` block the {word.lower()} of the two "
             f"v3.33 entries somewhere; measured, it is the "
             f"{'first' if lands_first else 'second'}")
-    named_issue = re.search(r"issue\s+#(\d+)", flat_doc)
+    named_issue = re.search(r"issue\s+#(\d+)", flat_doc, re.I)
     assert named_issue, (
         "the SCOPE paragraph must name the ISSUE the landing block records — "
         "\"issue #<n>\" in any wording — so this pin can check it")
