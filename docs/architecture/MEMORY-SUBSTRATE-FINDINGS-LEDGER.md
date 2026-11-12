@@ -274,8 +274,9 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   of those moves stayed IN RANGE with `--check` at exit 0: 2661 landed on a bare `continue`, 17045 on
   a `_rollup_llm(...)` call, 17478 on a `# deliberately EXCLUDES validFrom` comment. That is the arm's
   limit, measured three times on one page — and it will
-  rot again the moment the file moves, which is why the symbol arm is the missing half. The same
-  commit moved `sdk.py` by 168 lines, taking `_extract_session_v2`, `create_point` and row (d)'s
+  rot again the moment the file moves, which is why the symbol arm is the missing half. That third
+  move is `main`'s `9958281e7c`, which shifted `sdk.py` by **52** lines net (17045 → 17097), taking
+  `_extract_session_v2`, `create_point` and row (d)'s
   quoted range with it; `tests/test_substrate_map.py::test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names`
   is the sibling that pins symbol identity, and no such arm exists here. That includes the
   **shorthand `:LINE`** form used inside a cell — in row (b),
