@@ -692,37 +692,99 @@ def _inert_shell_reason(job: dict | None, step: dict) -> str | None:
     `_run_commands()`-only sibling of the round-13/14 `shell:` findings: those two
     scans learned to READ the shell; nothing asked whether it reaches the script.
 
-    ACCEPTED: any shell whose text before `{0}` has no `exit`/`return` — including
-    `bash -c 'echo hi; exec bash {0}'` (a statement before the exec is harmless)
-    and a bare `bash` (the runner appends the script when `{0}` is absent).
-    REFUSED: `exit`/`return` in statement position before the script, in any of the
-    spellings measured below and pinned in `INERT_SHELL_POLARITY`.
+    ACCEPTED: an interpreter running `{0}`, with no `exit`/`return` before it —
+    including `bash -c 'echo hi; exec bash {0}'` (a statement before the exec is
+    harmless) and a bare `bash` (the runner appends the script when `{0}` is
+    absent). REFUSED: a terminator before the script, or `{0}` handed to something
+    that is not an interpreter — the spellings measured below and pinned in
+    `INERT_SHELL_POLARITY`.
 
-    STATED LIMIT: this reads ONE spelling class (a terminator before `{0}`); a
-    shell that blocks forever, or one that execs a DIFFERENT script under a name
-    it computes, is not decidable from text. The in-job `pg_dump --version`
-    assertion is what makes a surviving blind spot visible in the log.
+    ⛔ THE EFFECTIVE SHELL IS THE STEP'S OWN **OR** THE DEFAULT, NEVER BOTH (#12069
+    review round 18, measured). The first cut split `_effective_shell()`'s
+    CONCATENATION on the first `{0}`, so a `defaults.run.shell: bash -e {0}` — a
+    documented form this file folds into the job — hid the step's own inert shell
+    behind it and the measured mutant went GREEN again. A step `shell:` REPLACES
+    the default; only when the step has none does the default apply.
+
+    ⛔ AND MENTIONING `{0}` IS NOT EXECUTING IT (#12069 review round 18,
+    measured): `shell: bash -c 'cat {0} >/dev/null; exit 0'` has no terminator
+    before `{0}`, so the first cut passed it while the step body never ran. The
+    last non-flag word before `{0}` must therefore BE an interpreter
+    (`SHELL_COMMANDS`), which `bash -e {0}`, `bash {0} || exit 1` and
+    `bash -c '… exec bash {0}'` all satisfy.
+
+    STATED LIMIT: this reads ONE spelling class (a terminator before `{0}`, or a
+    non-interpreter runner of it); a shell that blocks forever, or one that execs
+    a DIFFERENT script under a name it computes, is not decidable from text. The
+    in-job `pg_dump --version` assertion is what makes a surviving blind spot
+    visible in the log.
     """
 
-    shell = _effective_shell(job, step)
+    # THE STEP'S OWN SHELL REPLACES THE DEFAULT (runner semantics) — joining them
+    # lets a correct default mask an inert step shell.
+    shell = str(
+        step.get("shell")
+        or (((job or {}).get("defaults") or {}).get("run") or {}).get("shell")
+        or ""
+    )
     if not shell.strip():
         return None
-    before = shell.split("{0}", 1)[0]
+    before, marker, _after = shell.partition("{0}")
+    words = [
+        word
+        for word in SHELL_WORD_SPLIT_RE.split(before)
+        if word and not word.startswith("-")
+    ]
     match = TERMINATING_COMMAND_RE.search(before)
-    if not match:
-        return None
-    return (
-        f"`shell:` runs `{match.group('word')}` BEFORE the step's own script "
-        f"({shell.strip()!r}), so the `run:` block never executes — the whole "
-        "step is inert (never installed, prepended, or asserted) while its text "
-        "satisfies every row here (#12069 review round 17)"
-    )
+    if match:
+        return (
+            f"`shell:` runs `{match.group('word')}` BEFORE the step's own script "
+            f"({shell.strip()!r}), so the `run:` block never executes — the whole "
+            "step is inert (never installed, prepended, or asserted) while its "
+            "text satisfies every row here (#12069 review round 17)"
+        )
+    if marker and words and words[-1] not in SHELL_COMMANDS:
+        return (
+            f"`shell:` hands the step's script to `{words[-1]}` "
+            f"({shell.strip()!r}), which does not run it AS a shell — mentioning "
+            "`{0}` is not executing it, so the `run:` block never runs while its "
+            "text satisfies every row here (#12069 review round 18)"
+        )
+    return None
 
+
+#: The interpreters a `shell:` can legitimately use to RUN `{0}` — the runner's
+#: own documented set, so `python {0}` and `pwsh -Command {0}` are not false-RED
+#: here. `cat {0}` is.
+SHELL_COMMANDS = frozenset(
+    {
+        "bash",
+        "sh",
+        "dash",
+        "zsh",
+        "ksh",
+        "pwsh",
+        "powershell",
+        "python",
+        "python3",
+        "node",
+        "cmd",
+    }
+)
+
+#: Words in a `shell:` string's argv, with every shell separator and quote treated
+#: as a boundary.
+SHELL_WORD_SPLIT_RE = re.compile(r"[\s;&|()'\"`]+")
 
 #: A statement that LEAVES the current iteration from the loop body's TOP LEVEL.
 #: It runs before anything below it, so the body it precedes is text the shell
-#: never reaches.
-LOOP_TRUNCATING_RE = re.compile(r"^[ \t]*(?:break|continue)[ \t]*(?:;.*)?$")
+#: never reaches. ⛔ THE LEVEL ARGUMENT IS PART OF THE STATEMENT (#12069 review
+#: round 18, measured): `break 2` at a body's top level left a multi-tool loop
+#: crediting both tools while the one-line spelling of the same statement was
+#: refused — the two forms disagreed about one fact.
+LOOP_TRUNCATING_RE = re.compile(
+    r"^[ \t]*(?:break|continue)(?:[ \t]+[0-9]+)?[ \t]*(?:;.*)?$"
+)
 
 
 def _truncated_at_top_level(body: list[str]) -> bool:
@@ -743,6 +805,12 @@ def _truncated_at_top_level(body: list[str]) -> bool:
     runs only when that block's condition holds, so the pass that reaches the
     condition still runs the body above it. Only lines at the body's MINIMUM
     indent — the top level — are refused.
+
+    ⛔ AND ONLY WHEN SOMETHING FOLLOWS IT (#12069 review round 18, measured): a
+    `break`/`continue` as the body's LAST significant line skips nothing — every
+    tool above it was checked — so refusing it red a body that checks every tool
+    (measured: `1 failed` on the real workflow). A terminator with code after it
+    is the defect; a terminator with none is a no-op.
     """
 
     significant = [
@@ -752,8 +820,10 @@ def _truncated_at_top_level(body: list[str]) -> bool:
         return False
     top = min(len(line) - len(line.lstrip()) for line in significant)
     return any(
-        len(line) - len(line.lstrip()) == top and LOOP_TRUNCATING_RE.match(line)
-        for line in significant
+        len(line) - len(line.lstrip()) == top
+        and LOOP_TRUNCATING_RE.match(line)
+        and index < len(significant) - 1
+        for index, line in enumerate(significant)
     )
 
 #: `if:` conditions that CANNOT SKIP the step, normalised (no `${{ }}`, single
@@ -926,6 +996,23 @@ def _asserting_loop_line_spans(code: str) -> list[tuple[int, int]]:
 INLINE_LOOP_TRUNCATING_RE = re.compile(r"(?:^|[;&])[ \t]*(?:break|continue)\b")
 
 
+def _inline_truncates(rest: str) -> bool:
+    """Does a one-line loop body LEAVE the iteration with code after it?
+
+    The `do` line's own body (`rest`), down to `done`, split into statements. The
+    same rule as `_truncated_at_top_level`, including its round-18 correction: a
+    terminator with NO statement after it skips nothing and is accepted.
+    """
+
+    body = re.split(r"(?:^|[;&])[ \t]*done\b", rest, maxsplit=1)[0]
+    statements = [part.strip() for part in body.split(";")]
+    significant = [part for part in statements if part and not part.startswith("#")]
+    return any(
+        INLINE_LOOP_TRUNCATING_RE.match(part) and index < len(significant) - 1
+        for index, part in enumerate(significant)
+    )
+
+
 def _truncated_loop_bodies(code: str) -> list[str]:
     """The multi-tool loops whose top level LEAVES the iteration before its checks.
 
@@ -956,7 +1043,7 @@ def _truncated_loop_bodies(code: str) -> list[str]:
         if start == end:
             inline = LOOP_HEAD_INLINE_RE.match(header)
             rest = (inline.groupdict().get("rest") or "") if inline else ""
-            if INLINE_LOOP_TRUNCATING_RE.search(rest):
+            if _inline_truncates(rest):
                 offenders.append(header.strip())
             continue
         body = [line for line in lines[start + 1 : end] if not LOOP_DO_RE.match(line)]
@@ -1377,7 +1464,7 @@ def _version_checked_tools(code: str) -> set[str]:
         # --version; done` credits both names from a `--version` the shell never
         # reaches. A bare `break` names no loop variable, so the selection rule
         # above cannot see it.
-        inline_truncated = bool(INLINE_LOOP_TRUNCATING_RE.search(rest))
+        inline_truncated = _inline_truncates(rest)
         if rest.strip() and closes_here:
             scan(
                 rest,
@@ -3070,6 +3157,17 @@ INERT_SHELL_POLARITY: list[tuple[str, bool, str]] = [
         False,
         "control: a terminator AFTER the script is not before it",
     ),
+    (
+        "bash -c 'cat {0} >/dev/null; exit 0'",
+        True,
+        "#12069 round 18: `{0}` MENTIONED is not `{0}` EXECUTED — the step body "
+        "never ran and the first cut passed it",
+    ),
+    (
+        "python {0}",
+        False,
+        "control: `python` is one of the runner's own shells, so it runs the script",
+    ),
 ]
 
 
@@ -3109,6 +3207,36 @@ def test_a_shell_that_cannot_reach_the_script_is_refused(
     )
 
 
+def test_a_step_shell_is_graded_on_its_own_and_not_masked_by_the_default() -> None:
+    """A correct `defaults.run.shell` must not hide an inert STEP shell (#12069 r18).
+
+    ⛔ THE RUNNER USES ONE OF THEM, NOT BOTH. A step `shell:` REPLACES the job or
+    workflow default; the first cut graded `_effective_shell()`'s CONCATENATION and
+    split it on the first `{0}`, so a default `bash -e {0}` came first, the step's
+    `exit 0` shell fell after the split point, and the measured mutant went GREEN
+    again — the exact fail-open this row exists to catch, resurrected by a
+    document-supported default.
+    """
+
+    inert = "bash -c 'exit 0; exec bash {0}'"
+    default = {"defaults": {"run": {"shell": "bash -e {0}"}}}
+
+    assert _inert_shell_reason(default, {"shell": inert}) is not None, (
+        "a job default `shell: bash -e {0}` masked the step's own inert shell: a "
+        "step `shell:` REPLACES the default, so the step's must be the one graded"
+    )
+    assert _inert_shell_reason(default, {}) is None, (
+        "the DEFAULT alone is correct (`bash -e {0}`), so a step with no `shell:` "
+        "must stay GREEN — refusing it would be a false RED"
+    )
+    assert _inert_shell_reason(
+        {"defaults": {"run": {"shell": inert}}}, {}
+    ) is not None, (
+        "an INERT default applies to every step that does not override it, so it "
+        "must be refused too"
+    )
+
+
 #: The same both-directions rule for the loop-body refusal. A nested
 #: `break`/`continue` is a CONTROL: it runs only under that block's condition, so
 #: the body above it still runs on the pass that reaches the condition. Refusing it
@@ -3126,9 +3254,26 @@ TRUNCATING_LOOP_POLARITY: list[tuple[str, bool, str]] = [
         "`continue` leaves the iteration the same way `break` leaves the loop",
     ),
     (
+        'for tool in pg_dump pg_restore; do\n  break 2\n  "$tool" --version\ndone',
+        True,
+        "#12069 round 18: the LEVEL argument is part of the statement — `break 2` "
+        "left the multi-tool loop crediting both while the one-line spelling red",
+    ),
+    (
         'for tool in pg_dump pg_restore; do break; "$tool" --version; done',
         True,
         "the one-line spelling is the same statement",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n  "$tool" --version\n  break\ndone',
+        False,
+        "#12069 round 18 control: a TRAILING break skips nothing — every tool above "
+        "it was checked, and refusing it red a body that checks every tool",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do "$tool" --version; break; done',
+        False,
+        "control: the trailing break in the one-line form skips nothing either",
     ),
     (
         'for tool in pg_dump pg_restore; do\n'
