@@ -93,6 +93,16 @@ CLIENT_INSTALL_RE = re.compile(
     re.MULTILINE,
 )
 
+#: The same command ANYWHERE on a line (after `;`, `&&`, …): `CLIENT_INSTALL_RE` is
+#: line-anchored, so two installs joined on ONE line counted as one and the
+#: "exactly ONE install" fact was false over a step that installs twice
+#: (MEASURED, review of `aec7c83e15`).
+_ANY_INSTALL_RE = re.compile(
+    r"(?:^|[;&|])[ \t]*" + _APT_INSTALL
+    + r"(?:(?!&&|[;|&])[^\n])*?\bpostgresql-client-(?P<major>\d+)\b",
+    re.MULTILINE,
+)
+
 #: Where the INSTALL COMMAND STARTS, for truncating the executed prefix. Separate
 #: from `CLIENT_INSTALL_RE` because a continued command puts the package on its
 #: SECOND line — the prefix must stop at the command, and the raw lines here are
@@ -130,22 +140,22 @@ def _statements(line: str) -> str:
     return _SQUOTED_RE.sub("''", _DQUOTED_RE.sub('""', line))
 
 
-def _heredoc_tags(line: str) -> list[str]:
-    """Every UNQUOTED `<<` heredoc tag opened on this line, in order.
+def _heredoc_tags(line: str) -> list[tuple[str, bool]]:
+    """`(tag, indented_allowed)` for every UNQUOTED `<<` opener on this line.
 
-    A `<<` inside a quoted string is message text, not an opener: `search`ing the
-    raw line made `echo "see <<EOF in the docs"` swallow the rest of the step, and
-    the `exit 1` after it was reported missing (MEASURED, review of
-    `2547274eaa`). ALL openers are returned because bash reads one body per
-    opener in order — tracking only the first made a `cat <<A <<B` line leave the
-    SECOND body live, so an `exit 1` inside it counted as a fail action
-    (MEASURED, review of `48370b8261`).
+    Three facts this must get right, each paid for by a measured review finding:
+    a `<<` inside a quoted string is message text (`echo "see <<EOF in the docs"`);
+    a `<<` inside a TRAILING COMMENT is inert shell (`# the body arrives via <<EOF`)
+    — so the scan runs over `_strip_comments(line)`; and bash reads one body per
+    opener in order, so ALL of them are returned (`cat <<A <<B` left the SECOND
+    body live when only the first was tracked).
     """
-    tags: list[str] = []
+    tags: list[tuple[str, bool]] = []
+    code = _strip_comments(line)
     quote: str | None = None
     index = 0
-    while index < len(line):
-        char = line[index]
+    while index < len(code):
+        char = code[index]
         if quote:
             if char == "\\" and quote == '"':
                 index += 2
@@ -154,10 +164,10 @@ def _heredoc_tags(line: str) -> list[str]:
                 quote = None
         elif char in "\"'":
             quote = char
-        elif line.startswith("<<", index):
-            opener = _HEREDOC_RE.match(line, index)
+        elif code.startswith("<<", index):
+            opener = _HEREDOC_RE.match(code, index)
             if opener:
-                tags.append(opener.group("tag"))
+                tags.append((opener.group("tag"), code.startswith("<<-", index)))
                 index = opener.end()
                 continue
         index += 1
@@ -200,15 +210,19 @@ def _without_heredocs(text: str) -> str:
     """Drop heredoc bodies and their terminator lines: they are DATA, not shell.
 
     Every opener on a line is tracked, in order, because bash reads one body per
-    opener. STATED LIMIT: a terminator that is not the next line's whole content
-    (bash allows trailing tabs after it) is not recognised — this workflow uses
-    none.
+    opener. The terminator test follows bash: `<<EOF` needs the tag at column 0,
+    while `<<-EOF` also accepts tabs before it — recognising an INDENTED tag for
+    the `<<` form was wrong in BOTH directions (an indented terminator never ends
+    the heredoc in bash, so everything after it is data, and the `::error::` /
+    `exit 1` "inside" it was read as live; MEASURED, review of `aec7c83e15`).
     """
     kept: list[str] = []
-    pending: list[str] = []
+    pending: list[tuple[str, bool]] = []
     for line in text.splitlines():
         if pending:
-            if line.strip() == pending[0]:
+            tag, indented_ok = pending[0]
+            candidate = line.lstrip("\t") if indented_ok else line
+            if candidate == tag:
                 pending.pop(0)
             continue
         kept.append(line)
@@ -243,7 +257,7 @@ _GITHUB_PATH_REF = r"['\"]?\$\{?GITHUB_PATH\}?['\"]?"
 
 GITHUB_PATH_PREPEND_RE = re.compile(
     r"echo\s+(?P<quote>['\"]?)/usr/lib/postgresql/(?P<major>\d+)/bin(?P=quote)"
-    r"\s*(?:>>?|\|[ \t]*(?:sudo[ \t]+)?tee[ \t]+(?:-[A-Za-z]+[ \t]+)*)\s*"
+    r"\s*(?:>>?|\|[ \t]*(?:sudo[ \t]+)?tee[ \t]+(?:-{1,2}[A-Za-z]+[ \t]+)*)\s*"
     + _GITHUB_PATH_REF
 )
 
@@ -258,8 +272,8 @@ _GITHUB_PATH_WRITE_RE = re.compile(
     # MEASURED, review of `48370b8261`: `> "$GITHUB_PATH"` was not counted at all,
     # and previously `| tee -a` was not either.
     r">>{0,2}[ \t]*" + _GITHUB_PATH_REF
-    + r"|\|[ \t]*(?:sudo[ \t]+(?:-[A-Za-z]+[ \t]+)*)?tee[ \t]+"
-    r"(?:-[A-Za-z]+[ \t]+)*" + _GITHUB_PATH_REF
+    + r"|\|[ \t]*(?:sudo[ \t]+(?:-{1,2}[A-Za-z]+[ \t]+)*)?tee[ \t]+"
+    r"(?:-{1,2}[A-Za-z]+[ \t]+)*" + _GITHUB_PATH_REF
 )
 
 
@@ -300,7 +314,7 @@ def _pin_step(steps: list[dict]) -> tuple[int, dict]:
     # review of `f34c4fb741`: an appended `… postgresql-client-18` line in the pin
     # step passed all six).
     install_lines = sum(
-        len(CLIENT_INSTALL_RE.findall(_code_only(_run_text(step)))) for step in steps
+        len(_ANY_INSTALL_RE.findall(_code_only(_run_text(step)))) for step in steps
     )
     assert install_lines == 1, (
         f"expected exactly ONE `apt-get install postgresql-client-*` in `{JOB}`; "
@@ -455,7 +469,12 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
         "matched line is read. A second write (e.g. `/usr/bin`) is the full "
         "revert #12051 removed, with the guard green"
     )
-    prepend = GITHUB_PATH_PREPEND_RE.search(_code_only(text))
+    # The READ is prepared exactly like the COUNT above: `_code_only` alone keeps
+    # trailing comments and heredoc bodies, so a real `/usr/bin` write with the
+    # versioned dir left in a comment (or in a heredoc body) satisfied this read
+    # (MEASURED, review of `aec7c83e15`).
+    _prepared = _strip_comments(_without_heredocs(_code_only(text)))
+    prepend = GITHUB_PATH_PREPEND_RE.search(_prepared)
     assert prepend, (
         "the pin step never writes a `/usr/lib/postgresql/<major>/bin` entry to "
         "`$GITHUB_PATH`; a prepend that only exists as an `export` inside this "
@@ -500,7 +519,12 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     server_major = _postgres_image_majors(job)[0]
 
     branch = _version_branch(_code_only(text), server_major)
-    assert "::error::" in branch, (
+    # Read the branch the way the shell would: no comment, no heredoc body. A raw
+    # substring test was satisfied by `:  # echo "::error::…"` and by the same line
+    # inside a `cat <<EOF` body, over a branch that exits silently — the unlabelled
+    # failure this assertion exists to prevent (MEASURED, review of `aec7c83e15`).
+    _branch_code = _strip_comments(_without_heredocs(branch))
+    assert "::error::" in _branch_code, (
         "the client pin's VERSION BRANCH asserts nothing about the version it "
         "actually got — the branch's own body must `echo \"::error::…\"`, so a "
         "runner image change surfaces as this step, not as an unrestorable "
