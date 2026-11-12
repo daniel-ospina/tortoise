@@ -2547,6 +2547,28 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
     hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
     assert "docker-compose.yml" in hold, hold
+    # ⛔ The hold must not state a DEPLOYMENT consequence it did not measure (fresh
+    # review of PR #12016, P2): a silent compose file that BUILDS from an armed image
+    # build file inherits that image's `ENV`, so "a deployment built from them runs
+    # with the rule off" was false for exactly the shape below — the same
+    # per-file-vs-merged-view conflation the note builder above had already been
+    # corrected for. Both notes now qualify it.
+    assert "one of them ALONE runs with the rule off" in hold, hold
+    assert "INHERITS that image's `ENV`" in hold, hold
+
+    # The latent shape, executed: the compose file is silent AND builds from an armed
+    # dockerfile, so the MERGED deployment is armed while the per-file reading still
+    # holds the row. The verdict stays the conservative `PARTIAL`; what must not
+    # happen is the note telling a reader the deployment runs with the gate off.
+    (tmp_path / "Dockerfile.selfhost").write_text(
+        'FROM python:3.12-slim\nENV TORTOISE_EMBED_GATE="1"\n', encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["deployment"]["on"] is False, shipped
+    assert shipped["deployment"]["armed"] == ["Dockerfile.selfhost"], shipped
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert "one of them ALONE runs with the rule off" in hold, hold
 
 
 @pytest.mark.parametrize("text", [

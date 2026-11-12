@@ -60,6 +60,16 @@ top-level, so no row can be hidden that way today; the residual is stated rather
 than claimed away, and such a line is neither graded nor refused (refusing it would
 red a docs-only code-block edit).
 
+⚠️ **A second residual, of the same stated-not-claimed-away kind: a row with NO
+leading pipe.** GFM does not require one (`| a | b |` and `a | b` both denote a
+table row; §4.10 calls the leading pipe *"recommended for clarity of reading"*,
+not required), so `3 | four | x | y` with a blanked cell renders as a row that
+`_is_table_line` does not see — a one-character way to hide the row this checker
+exists to catch. Pre-existing, NOT introduced by `#11415` (the predicate has always
+keyed on the leading delimiter), and the shipped map's every table row carries one,
+so nothing is ungraded today. Stated here because this docstring otherwise reads as
+a closed population of residuals, which it is not.
+
 A `|` line inside a FENCED code block is still **graded**, deliberately: moving a
 row into a fence takes it out of the rendered table, which is the shrink this
 checker exists to catch, so the fail-closed direction is to grade it. The cost is
