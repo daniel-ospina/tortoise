@@ -1539,6 +1539,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             if not by_name:  # pragma: no cover - probe WHERE clause guarantees
                 warn(f"supersession ref {ref!r} matched a row via neither id "
                      f"nor name — skipped (never-guess)")
+                _skip(ref, supersedes_by, "nameless object target")
                 continue
             obj_id, obj_name, o_status, o_sb = by_name[0]
         # #3590: the target's id IS the identity, and there is no synthesized
@@ -1555,8 +1556,17 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # payload became {} — the ObjectSuperseded journaled NOWHERE (the
             # M2 provenance gap). Never guess an id when the name is also gone.
             if not obj_name:
+                # #12120 review round 7: REACHABLE now, and it must report. The
+                # widened arm matches `canonical_name`/`aliases`, so a legacy
+                # Object carrying a folded key with NEITHER id NOR name arrives
+                # here — pre-widening `o.name = $ref` could not match a NULL
+                # name, so this branch fell through to the "ref is not a
+                # Subject" report instead. Dropping it silently would be the
+                # #5365 gap this lane closes everywhere else (and three lines
+                # below for the id-less-but-named case).
                 warn(f"supersession ref {ref!r} resolved to an Object with "
                      f"neither id nor name — skipped (never-guess)")
+                _skip(ref, supersedes_by, "id-less nameless object target")
                 continue
             # #3590: REFUSE, never synthesize. The old branch fabricated the
             # canonical name-derived id (`obj-<sha26(name)>`) so the journal

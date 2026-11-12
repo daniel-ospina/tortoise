@@ -2821,6 +2821,32 @@ class TestThe12120ReviewRound6:
         finally:
             sdk.close()
 
+    def test_a_nameless_id_less_object_refusal_is_reported(self, sdk_factory):
+        """Round 7: the widened arm makes this branch REACHABLE, so it must report.
+
+        Pre-widening the name arm was `o.name = $ref`, which cannot match a NULL
+        name, so a node carrying only a folded key never arrived here; the arm now
+        matches `canonical_name`/`aliases`, so a legacy Object with neither id nor
+        name reaches the refusal — and dropping it silently would be the #5365 gap
+        this lane closes everywhere else.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (o:Object {canonical_name:'legacy widget', "
+                "status:'live'})")
+            sdk.create_object("New Widget", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Legacy Widget", "supersedes_by": "New Widget",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips, (
+                "the nameless id-less refusal never reached the caller's "
+                f"skipped list: {skips!r} (warnings: {msgs!r})")
+        finally:
+            sdk.close()
+
     def test_a_duplicate_id_with_one_pointer_is_refused_either_way(
             self, sdk_factory):
         """The merge hop must not make the verdict depend on row order.
@@ -2982,8 +3008,8 @@ class TestThe12120ReviewRound3:
             self, sdk_factory):
         """Round 5: two nodes claiming the SURVIVOR's id are reached via the fetch.
 
-        Neither duplicate is among the probe's rows, so the `claims` guard cannot
-        see them; the fetch used to take `fetched[0]`, i.e. pick the
+        Neither duplicate is among the probe's rows, so the `_own_counts` pre-pass
+        cannot see them; the fetch used to take `fetched[0]`, i.e. pick the
         representative by backend row order — the same order-dependent decision
         #2164 P2-2 removed (and here it decides whether ONE duplicate or BOTH are
         retired by the id-keyed fold).
