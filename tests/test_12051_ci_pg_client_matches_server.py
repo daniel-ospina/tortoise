@@ -195,20 +195,32 @@ not a tenth spelling — it is the one a text guard cannot reach:
   (`the record capstone (D8) is not in any run step of this job`). That is the
   fail-closed direction — the real leg invokes pytest inline, in the same step as
   the attribution wrapper — and it is stated here rather than left as an
-  expected shape. A step that only COLLECTS (`--collect-only`, `--co`) is not a
-  leg either, which is what stops a listing step collapsing the graded window
-  (scoped to the line that names the capstone, so a leg may still collect
-  something else in the same step).
+  expected shape. It is fail-closed only while NOTHING ELSE in the job matches
+  `_leg_indexes`: a step that invokes pytest on the file (a `-k` narrowed probe,
+  say) IS the population then, and the window would end before the wrapper leg.
+  A step that only COLLECTS (`--collect-only`, `--co`) is not a leg either, which
+  is what stops a listing step collapsing the graded window (scoped to the line
+  that names the capstone, so a leg may still collect something else in the same
+  step), and a step whose line only MENTIONS the file beside the word `pytest`
+  (`echo "about to run pytest …"`) is not a leg: the invocation must be in
+  command position.
 - **The directory arm reads a text, and a text can be laundered.** The destination
-  is taken as the last POSITIONAL path token of the verb's command segment, with
-  redirect targets and `-`-prefixed options skipped. Three residuals are stated
-  rather than claimed closed: an option whose VALUE carries a path
+  is taken as the last POSITIONAL path token of the owning verb's command
+  segment, with redirect targets and `-`-prefixed options skipped. FIVE residuals
+  are stated rather than claimed closed: an option whose VALUE carries a path
   (`rsync … --log-file="$SCRATCH/x.log"`, `-e "ssh -o X=/a"`), a base quoted
-  separately from its token (`"$b"/16/bin/`, `"${b}"/17/bin/`), and a quoted
-  command word (`sh -c 'rsync …'`) can each still move the last-path reading past
-  the real target. The task's own `pg_dump --version` assertion is the
-  observation that does not depend on this text at all; this row is the static
-  half, and it fails closed on every spelling it can read.
+  separately from its token (`"$b"/16/bin/`, `"${b}"/17/bin/`), a quoted
+  command word (`sh -c 'rsync …'`), a destination reached through an EXPANSION
+  or an assigned variable (`d="$b/16/bin"; rsync -a "$b/17/bin/" "$d/"` — the
+  last path never matches the token pattern, so the arm is not reached at all),
+  and a versioned path under a VARIABLE base, which cannot be resolved
+  (`d=$RUNNER_TEMP/tools; rsync -a "$d/17/bin/" "$d/16/bin/"`) and is therefore
+  REFUSED even though its literal spelling is spared — the fail-closed direction,
+  and the reason the pin's own base arrives in a variable.
+  Each can still move the last-path reading past the real target. The task's own
+  `pg_dump --version` assertion is the observation that does not depend on this
+  text at all; this row is the static half, and it fails closed on every spelling
+  it can read.
 
 So: a green run means "no plausible spelling of the regression is in this
 text", not "the job provably installs and uses pg16". The job's own assertion is
@@ -1032,7 +1044,20 @@ def _leg_indexes(steps: list[dict]) -> list[int]:
         for line in _run_commands(step).splitlines():
             if CAPSTONE_FILE not in line:
                 continue
-            if not LEG_INVOCATION_RE.search(line):
+            invocation = LEG_INVOCATION_RE.search(line)
+            if invocation is None:
+                continue
+            # ⛔ THE WORD MUST BE THE COMMAND (#12069 review round 23, measured).
+            # A PRODUCER line that only carries the word —
+            # `echo "about to run pytest tests/test_9567_record_capstone.py"` —
+            # satisfied the word test and was counted as the leg: the same
+            # "names it, does not run it" defect this rule closes, one
+            # punctuation over. It is not merely cosmetic: with a leg invoked
+            # through a wrapper script (the stated limit below), such a step is
+            # the ONLY member of the population, so `max()` is its index and the
+            # graded window collapses to nothing. `_is_command_position` is this
+            # file's existing answer for "run, not written/named".
+            if not _is_command_position(line, invocation.start()):
                 continue
             if COLLECT_ONLY_RE.search(line):
                 continue
@@ -1141,15 +1166,31 @@ def _replaces_a_client_binary(line: str) -> bool:
     # Verbs with no direction (`chmod`, `rm`, `sed`, `dd`, `tee`) keep refusing
     # the mention wherever it sits, which is the same polarity the binary arm has
     # always stated for them.
+    # ⛔ THE VERB THAT OWNS THE MENTION'S SEGMENT, NOT THE LINE'S FIRST VERB
+    # (#12069 review round 23, measured BOTH WAYS). `verb` above is the first
+    # mutating verb on the LINE, and `_is_last_path_token` bounds "last path" to
+    # THAT verb's segment — so a pinned dir in a LATER segment could never be the
+    # destination:
+    #
+    #     sudo cp /etc/hosts /tmp/hosts && sudo rsync -a "$b/17/bin/" "$b/16/bin/"
+    #
+    # was GREEN — the full #12051 regression on one line — and the mirror was a
+    # false RED: `sudo chmod 755 /tmp/x && sudo cp -a "$b/16/bin"
+    # "$RUNNER_TEMP/snap"` refused a plain READ, because the first verb's missing
+    # direction was applied to a copy verb's operand. One verb cannot answer for
+    # another command.
     if "GITHUB_PATH" not in line and "GITHUB_ENV" not in line:
-        verb_word = verb.group(0).strip()
-        for dir_match in CLIENT_DIR_ANY_BASE_RE.finditer(line, verb.end()):
+        for dir_match in CLIENT_DIR_ANY_BASE_RE.finditer(line):
             if _is_command_position(line, dir_match.start()):
                 continue
-            if verb_word in _DESTINATION_VERBS and not _is_last_path_token(
-                line, dir_match.start(), dir_match.end(), verb.start()
+            owner = _owning_verb(line, dir_match.start())
+            if owner is None:
+                # No mutating verb of its OWN segment names this directory.
+                continue
+            if owner.group(0).strip() in _DESTINATION_VERBS and not _is_last_path_token(
+                line, dir_match.start(), dir_match.end(), owner
             ):
-                # A path follows on the line: this mention is the SOURCE.
+                # A path follows in the verb's own segment: this mention is a SOURCE.
                 continue
             return True
     # ⛔ A NAME IN COMMAND POSITION IS BEING RUN, NOT WRITTEN (#12069 review 12,
@@ -1193,6 +1234,19 @@ _OPERAND_TAKING_WORDS = frozenset(
 #: arm's stated polarity: the mention is refused wherever it sits.
 _DESTINATION_VERBS = frozenset({"cp", "rsync", "mv", "ln", "install"})
 
+#: Verbs for which `-t` / `--target-directory` NAMES the destination — and the
+#: reason `_TARGET_OPTION_RE` is gated on the verb (#12069 review round 23,
+#: measured). `rsync -t` is `--times`, not a target directory, so the ungated
+#: reading took the NEXT FLAG as "the destination" and made a full replacement
+#: GREEN, while refusing the same line's plain read:
+#:
+#:     sudo rsync -r -t -v "$b/17/bin/" "$b/16/bin/"   -> GREEN (the regression)
+#:     sudo rsync -a -t "$b/16/bin" "$RUNNER_TEMP/snap" -> RED (a read)
+#:
+#: `-rtv` (clustered, no bare `-t` token) was caught all along — the hole was a
+#: bare flag, which is what a person writes.
+_TARGET_OPTION_VERBS = frozenset({"cp", "mv", "ln", "install"})
+
 
 #: A whitespace-delimited token that names a path (contains a `/`).
 _PATH_TOKEN_RE = re.compile(r"[^\s]+")
@@ -1210,8 +1264,48 @@ _REDIRECT_RE = re.compile(r"\d*>>?\s*\S+")
 _TARGET_OPTION_RE = re.compile(r"(?:^|\s)(?:-t|--target-directory)(?:=|\s)\s*(?P<value>[^\s]+)")
 
 
-def _is_last_path_token(line: str, start: int, end: int, verb_start: int) -> bool:
-    """Is `[start, end)` the DESTINATION of the verb that starts at `verb_start`?
+def _segment_bounds(line: str, pos: int) -> tuple[int, int]:
+    """The command SEGMENT of a shell line that contains `pos`.
+
+    ⛔ A SEPARATOR INSIDE A QUOTED OPERAND IS NOT A SEPARATOR (#12069 review
+    round 23, measured). Cutting blindly at every `;` meant
+
+        sudo rsync -a --exclude="a;b" "$b/16/bin" "$RUNNER_TEMP/snap"
+
+    had its destination OUTSIDE the segment, `_is_last_path_token` saw no path
+    there and answered "destination", and a plain READ was refused. The scan is
+    the file's own `_inside_quotes`, so the two cannot disagree about quoting.
+    """
+
+    seg_start, seg_end = 0, len(line)
+    for sep in _SEGMENT_SPLIT_RE.finditer(line):
+        if _inside_quotes(line, sep.start()):
+            continue
+        if sep.start() <= pos:
+            seg_start = sep.end()
+        else:
+            seg_end = sep.start()
+            break
+    return seg_start, seg_end
+
+
+def _owning_verb(line: str, pos: int) -> re.Match[str] | None:
+    """The MUTATING VERB of the command SEGMENT that contains `pos`.
+
+    The LAST such verb before `pos` in that segment, or None — a directory named
+    in a segment with no mutating verb is not being written by anything there.
+    """
+
+    seg_start, seg_end = _segment_bounds(line, pos)
+    owner = None
+    for verb in BINARY_MUTATION_RE.finditer(line, seg_start, seg_end):
+        if verb.end() <= pos:
+            owner = verb
+    return owner
+
+
+def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) -> bool:
+    """Is `[start, end)` the DESTINATION of `verb`?
 
     The destination of a copy-like verb is the last path operand OF ITS OWN
     COMMAND SEGMENT. Two traps, both measured (#12069 review rounds 20-21):
@@ -1230,20 +1324,20 @@ def _is_last_path_token(line: str, start: int, end: int, verb_start: int) -> boo
     which any trailing path defeated. This one reads the verb's own segment.
     """
 
-    seg_start = 0
-    seg_end = len(line)
-    for sep in _SEGMENT_SPLIT_RE.finditer(line):
-        if sep.start() <= verb_start:
-            seg_start = sep.end()
-        else:
-            seg_end = sep.start()
-            break
-
+    seg_start, seg_end = _segment_bounds(line, verb.start())
     segment = line[seg_start:seg_end]
+    verb_word = verb.group(0).strip()
 
-    # `-t DIR` / `--target-directory=DIR` states the destination outright.
+    # `-t DIR` / `--target-directory=DIR` states the destination outright — for
+    # the verbs where that flag MEANS it. `rsync -t` is `--times`, and a value
+    # that is itself a flag (`-t -v`) names no directory either; both are skipped
+    # into the positional scan below. See `_TARGET_OPTION_VERBS`.
     target = _TARGET_OPTION_RE.search(segment)
-    if target is not None:
+    if (
+        target is not None
+        and verb_word in _TARGET_OPTION_VERBS
+        and not target.group("value").startswith("-")
+    ):
         v_start = target.start("value") + seg_start
         v_end = target.end("value") + seg_start
         return start >= v_start and end <= v_end
@@ -4598,6 +4692,54 @@ BINARY_MUTATION_POLARITY = [
         "#12069 round-21 P1: nor a later command's path argument after `&&`",
     ),
     (
+        'sudo cp /etc/hosts /tmp/hosts && sudo rsync -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-23 P1: the MENTION's own segment owns the verb — a copy verb "
+        "EARLIER on the line must not hide a later rewrite (measured GREEN)",
+    ),
+    (
+        'sudo install -d -m 755 "$RUNNER_TEMP/tools" && sudo rsync -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-23 P1: same, with `install` as the leading verb",
+    ),
+    (
+        'sudo rsync -r -t -v "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-23 P1: rsync's `-t` is `--times`; read as target-directory it "
+        "took `-v` for the destination and the replacement was GREEN (measured)",
+    ),
+    (
+        'sudo rsync -a --exclude="a;b" "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-23 P1: a quoted `;` in an operand does not end the segment",
+    ),
+    (
+        'sudo chmod 755 /tmp/x && sudo cp -a "$b/16/bin" "$RUNNER_TEMP/snap"',
+        False,
+        "CONTROL: the mirror of the row above — a READ in a later segment is not a "
+        "rewrite, even when the segment's first verb has no direction (#12069 "
+        "round 23: this was a false RED before the owner-verb fix)",
+    ),
+    (
+        'sudo rsync -a -t "$b/16/bin" "$RUNNER_TEMP/snap"',
+        False,
+        "CONTROL: `rsync -t` is `--times`, so this is a READ — the same act spelled "
+        "`--times` was already green (#12069 round 23: `-t` made it a false RED)",
+    ),
+    (
+        'sudo rsync -a --exclude="a;b" "$b/16/bin" "$RUNNER_TEMP/snap"',
+        False,
+        "CONTROL: a quoted `;` in an operand must not truncate the segment past the "
+        "destination (#12069 round 23: false RED before the quote-aware split)",
+    ),
+    (
+        'sudo rsync -a "$d/17/bin/" "$d/16/bin/"',
+        True,
+        "ACCEPTED OVER-REFUSAL: a variable base cannot be resolved, so a versioned "
+        "SCRATCH dir is refused while its literal spelling is spared — fail-closed, "
+        "and the pin's own base arrives in a variable (#12069 round 23, stated)",
+    ),
+    (
         'sudo sh -c "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"',
         True,
         "`cat >` is the same act as the `tee` the list already carried",
@@ -4856,14 +4998,66 @@ def test_a_step_that_only_NAMES_the_capstone_is_not_the_leg() -> None:
             "run": 'echo "about to run tests/test_9567_record_capstone.py"',
         },
         {
+            # ⛔ AND THE SPELLING THAT CARRIES THE WORD (#12069 review round 23,
+            # measured): a PRODUCER line was counted as the leg because the word
+            # `pytest` appeared in it, which is the same defect one punctuation
+            # over and left the class this test names open.
+            "name": "announce with the word",
+            "run": 'echo "about to run pytest tests/test_9567_record_capstone.py"',
+        },
+        {
+            "name": "announce via printf",
+            "run": "printf '%s\\n' 'python -m pytest tests/test_9567_record_capstone.py'",
+        },
+        {
             "name": "leg",
             "run": "python -m pytest tests/test_9567_record_capstone.py",
         },
     ]
-    assert _leg_indexes(steps) == [1], (
+    assert _leg_indexes(steps) == [3], (
         "a step that only NAMES the capstone was read as the leg, which collapses "
         "the window the `env:`/`PATH` rows are graded over"
     )
+
+
+def test_the_path_window_ends_at_the_LAST_leg_not_the_first(job: dict) -> None:
+    """`max()`, not `min()`, and this row is what makes the choice load-bearing.
+
+    A step that really INVOKES the capstone (`-k` narrows it; that is not
+    `--collect-only`) satisfies `_leg_indexes` while running nothing. Under
+    `min()` it becomes the window END, so the real leg's own `env: PATH` falls
+    outside every window and a job with the pin bypassed stays green — the exact
+    fail-open #12069 review round 20 named. Reverting `max()` to `min()` here
+    makes this test fail, which is the only thing that keeps the direction
+    pinned (#12069 review round 23).
+    """
+
+    steps = _steps(job)
+    leg_indexes = _leg_indexes(steps)
+    assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
+    real_leg = max(leg_indexes)
+
+    mutated = copy.deepcopy(job)
+    # ⛔ MUTATE THE JOB'S OWN LIST (`_steps()` returns a NEW list, so inserting
+    # into it lands nothing — measured: the row then red for the wrong reason and
+    # did not discriminate at all, #12069 review round 23).
+    mutated["steps"].insert(
+        real_leg,
+        {
+            "name": "early probe of the record capstone",
+            "run": "python -m pytest tests/test_9567_record_capstone.py -k nothing_matches",
+        },
+    )
+    # The real leg now sits one step later, and it drops the pin outright.
+    mutated["steps"][real_leg + 1]["env"] = {"PATH": "/usr/bin:/bin"}
+    assert _leg_indexes(_steps(mutated)) == [real_leg, real_leg + 1], (
+        "the fixture did not land two legs — the decoy must INVOKE the capstone "
+        "(it is not `--collect-only`) so `min()` would end the window before the leg"
+    )
+
+    with pytest.raises(AssertionError, match="sets `env: PATH`"):
+        test_no_step_rewrites_the_client_path_to_another_major(mutated)
+
 
 
 def test_a_step_env_outside_the_pin_leg_window_is_not_an_offender() -> None:
