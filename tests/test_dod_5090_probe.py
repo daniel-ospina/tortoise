@@ -2631,8 +2631,21 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
 
     `#11455` exists because the row reached `MET` on one armed template while the
     compose path shipped the gate off; the row's own hold note must name that path.
-    This is also the finding the lane reports: on THIS tree row 1 moves `MET` →
-    `PARTIAL`, because `docker-compose.yml` is present and ships no gate.
+    ⛔ WHAT MOVES ON THIS TREE IS THE CLAUSE, NOT THE VERDICT (fresh review, P3,
+    measured): row 1 is `PARTIAL` on BOTH sides of this change — at `origin/main`
+    held by the undeclared `session_indexer::main` writer, here by the unarmed
+    deployment files — and only `gate enabled by default` moves `True` → `False`,
+    which is the field `#11086` item 4 is ticked on. An earlier draft of this
+    docstring said the row "moves `MET` → `PARTIAL`", which misleads the other way
+    too: arming `docker-compose.yml` ALONE does not flip it back, because the two
+    `Dockerfile*` files stay silent (measured at this head). The VERDICT flip is
+    pinned on the divergent fixture in
+    `test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool`.
+
+    This fixture is also WHY the verdict cannot move here: `_row_one_fixture` arms
+    `docker-compose.yml` and deliberately no `.env.example`, so overwriting the
+    compose file with `services: {}` leaves the tree with no armed surface under
+    EITHER clause — the hold this test asserts is the deployment one, and it says so.
     """
     _row_one_fixture(tmp_path, monkeypatch)
     (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
