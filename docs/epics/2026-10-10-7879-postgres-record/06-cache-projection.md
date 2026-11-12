@@ -170,9 +170,12 @@ production reader touched):
   cache refuses);
 * the PLAN — `ProjectionPlan.dropped_vectors()`, read off the statements, so a
   directly-built `RecordNode` is counted too;
-* the RUN — `rebuild_from_record` returns the plan's `{label: count}` as
-  `dropped_vectors` / `dropped_vector_labels` beside its write counts and logs a
-  warning **after the write**, and `record_restore.RestoreOutcome` prints them on
+* the RUN — `rebuild_from_record` carries the plan's drop beside its write
+  counts as TWO report keys of different shapes: `dropped_vectors`, an `int`
+  TOTAL, and `dropped_vector_labels`, the sorted label list (the projection
+  returns them at `tortoise/projection/__init__.py`'s report dict, and
+  `record_restore.RestoreOutcome` types them `int` / `tuple[str, …]`). It also
+  logs a warning **after the write**, and `RestoreOutcome` prints the pair on
   the operator's line and in `as_dict()`. A rebuild that DELETES vectors a
   previous cache held must not read the same as one that lost nothing, and no
   re-run can bring them back: the record row is the only carrier and it is what

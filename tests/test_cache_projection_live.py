@@ -330,6 +330,35 @@ def test_a_REFUSED_rebuild_does_not_LOG_a_drop_it_never_made(caplog):
     assert logged, "an authorised rebuild dropped a vector and said nothing in the log"
 
 
+def test_a_PRODUCTION_graph_refusal_does_not_log_a_drop_it_never_made(caplog):
+    """`#11747` round-3 review, finding 2 — the L2 arm, which is the one production hits.
+
+    The pin above exercises the L1 (destructive-token) refusal only, so a warning placed BETWEEN
+    the two guards kept it green while restoring the defect for the case the finding is actually
+    about: `_assert_test_graph` refuses every `org_<org>` name (`record_restore.py:55` states it:
+    that guard "fires on every production graph name"), so a rebuild over a tenant would log
+    `dropped N vector(s)` over a cache that was never touched.
+
+    ⛔ The name is PRODUCTION-SHAPED on purpose: that is the input the L2 guard exists for. The
+    refusal happens before any wipe, so the graph this fixture opens is never written to.
+    """
+    import logging
+    import os
+
+    _skip_unless_live_uri()
+    prod = FalkorProjection.from_uri(os.environ["TORTOISE_DB_URI"],
+                                     graph_name="org_11747_l2_pin")
+    view = _view_with_an_unserved_vector()
+
+    with caplog.at_level(logging.WARNING), pytest.raises(
+            RuntimeError, match="REFUSING to run bulk DETACH DELETE on non-test graph"):
+        prod.rebuild_from_record(view, confirm_destructive=True)
+    claimed = [r.getMessage() for r in caplog.records if "dropped" in r.getMessage()]
+    assert not claimed, (
+        "an L2-refused rebuild over a production-shaped graph logged a drop it never made: "
+        f"{claimed}")
+
+
 def test_rebuild_from_record_refuses_without_the_destructive_token():
     """L1 (#2944) is not bypassed by the new source.
 
