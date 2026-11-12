@@ -618,6 +618,18 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # successor inherits nothing BY CONSTRUCTION, so every finding here is the
     # measured defect rather than a stray survivor.
     #
+    # ⛔ That rationale is VOID on three of the four row mechanisms this check
+    # distinguishes — a NEUTRAL operator transfers no confidence by design, a
+    # SHAPED non-``:Point`` endpoint is in neither EP arm, and a DIRECT edge
+    # assembles no factor once its target is terminal (``_active_edge_detail``
+    # says so on each). Those rows are leftover wiring, i.e. check 4's ``medium``
+    # reading. They are nonetheless emitted ``high``, because every aggregate in
+    # this module carries ONE severity per ``issue_type`` (``_sev_total``/
+    # ``to_dict`` keep the FIRST sample's) and a mixed check made ``summary.high``
+    # read 0 over a real high row — a false PASS. Do NOT restore a per-row
+    # severity here before #12154 lands the aggregation redesign; the over-warn is
+    # the safe direction until then.
+    #
     # INCOMING only — check 4's orientation, kept so the two checks answer ONE
     # question in two vocabularies.
     #
@@ -901,14 +913,24 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         The check does not project the arity (a fourth ``OPTIONAL MATCH`` would
         multiply rows and move ``SAMPLE_LIMIT``), so the consequence is stated as
         the ladder ``ep.py`` actually runs rather than as one rung of it.
+
+        ⛔ The ladder has one more rung than the two-input case makes obvious:
+        ``source_stripped`` fires AHEAD of the degenerate test for a directional
+        operator whose idx-0 source is the input taken — but only where every input
+        edge carries an ``idx`` (``op_idx_known``; an idx-less input edge degrades
+        the reason to ``degenerate``), so the rung is qualified rather than asserted.
         """
         if not s["is_operator"]:
             return ("EP assembles no factor for this row in the first place, so the "
                     "re-point moves no belief either way")
         return ("EP drops that input from the factor and re-scores it over the "
-                "REMAINING inputs — ONE left is skipped as degenerate "
-                "(``len(input_ids) < 2``), two or more run without it (measured "
-                "on a three-input operator: two confidences, ``skipped: None``)")
+                "REMAINING inputs — TWO OR MORE run without it (measured on a "
+                "three-input operator: two confidences, ``skipped: None``), ONE "
+                "left is skipped as degenerate (``len(input_ids) < 2``), "
+                "``source_stripped`` instead where every input edge carries an "
+                "``idx`` and the one taken is a directional operator's idx-0 "
+                "source, and an operator whose ONLY input this was has no factor "
+                "to begin with")
 
     def _successor_note(s: dict) -> str:
         """The pointer's state, as the trailing clause of a ``detail``.
@@ -1140,33 +1162,57 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         the failure the sentence prevents.
 
         ⛔ The CARRY half is conditional, and ``s`` is what decides it: on a row
-        where no belief was ever assembled (a DIRECT edge, a shaped endpoint in
-        neither EP arm) or where nothing transfers by design (a NEUTRAL operator),
-        §3.1's disposition is DROP — telling the reader an IMPL "may CARRY to the
-        successor" there contradicts the very repair it is appended to, in the same
-        string ("No edge rewrite repairs this: EP builds NO factor in either arm"
-        twice over).
+        where nothing was ever assembled (a SHAPED non-``:Point`` endpoint — EP's
+        neither arm) or where nothing transfers by design (a NEUTRAL operator),
+        §3.1's disposition is DROP, and telling the reader an IMPL "may CARRY to the
+        successor" there contradicts the very repair it is appended to ("No edge
+        rewrite repairs this: EP builds NO factor in either arm").
+
+        ⛔ A DIRECT edge is NOT one of those rows, however easily it reads as one: it
+        carries real belief into the Object while the target is live (measured: two
+        confidences before the supersession, none after), so it keeps the
+        carry/drop triage. Sending it to DROP put a "do not re-point it onto the
+        successor" next to a fix whose whole instruction is "write the equivalent
+        edge onto the successor".
         """
         fwd, bwd = direction_flows(s["direction"])
-        if s["is_operator"] and (fwd or bwd):
+        # ⛔ "A belief existed" is NOT the same question as "this is an operator
+        # input". A DIRECT edge into a superseded Object carries real belief while
+        # its target is live (measured: two confidences before the supersession,
+        # none after), which is exactly why this check exists — so a direct row takes
+        # the carry/drop triage too, and classifying it as "no belief to carry" put
+        # a DROP next to a fix that says "write the equivalent edge onto the
+        # successor". The rows where nothing was ever assembled are the NEITHER-arm
+        # ones (a shaped, non-:Point endpoint), and the one where nothing transfers
+        # by design is a NEUTRAL operator.
+        neither_arm = s["shape"] and not s["is_operator"]
+        neutral = s["is_operator"] and not (fwd or bwd)
+        if neither_arm or neutral:
+            why = ("EP assembles no factor for this endpoint in either arm, so the "
+                   "support never counted"
+                   if neither_arm else
+                   f"this operator is {_quoted(s['direction'])} (neutral), so no "
+                   "confidence transfers through it by design")
+            disposal = (
+                f"{why} — the disposition here is DROP, or `pend` (the non-voting "
+                "placeholder) if the claim may still be revisited, and no door "
+                "implements `pend` today. ⛔ A refutation that STILL APPLIES is "
+                "kept, not dropped: carry it where EP can actually read it (a "
+                ":Point operator the engine evaluates), and never by re-attaching "
+                "it to a successor that cannot carry it — only a refutation that "
+                "MOTIVATED the correction is dropped")
+        else:
             disposal = (
                 "an IMPL may CARRY to the successor, and so may a NAND that STILL "
                 "APPLIES (a refutation that still applies is kept) — while a NAND "
                 "that MOTIVATED the correction must NOT re-attach; drop it, or "
                 "record it as pending per §3.1 (no door implements `pend` today)")
-        else:
-            disposal = (
-                "this edge carried no belief to carry over — EP assembles no factor "
-                "for it at all, or nothing transfers through it by design — so the "
-                "disposition here is DROP (or `pend`, the non-voting placeholder, "
-                "if the claim may still be revisited); do NOT re-point it onto the "
-                "successor and call it a carry (§3.1, no door implements `pend` "
-                "today)")
         return (
-            f" ⛔ Dispose of this {s['edge_type']} input by ONTOLOGY §3.1's "
-            f"per-edge triage, not by a blanket re-point: {disposal}. An "
-            "unjournalled edge write is not rebuild-durable: `rebuild_all` replays "
-            "the event log, and this finding returns after the next rebuild")
+            f" ⛔ Dispose of this {s['edge_type']}{' input' if s['is_operator'] else ' edge'} "
+            f"by ONTOLOGY §3.1's per-edge triage, not by a blanket re-point: "
+            f"{disposal}. An unjournalled edge write is not rebuild-durable: "
+            "`rebuild_all` replays the event log, and this finding returns after "
+            "the next rebuild")
 
     def _archive_clause(s: dict) -> str:
         """What ``archived`` does to THIS row — and it is never the repair.
@@ -1227,14 +1273,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "direction. But " + anchor + " over a stale edge that is still "
                 "there, which is leftover wiring to clean up")
         return lead + (
-            "SILENCES THIS CHECK WITHOUT CLEARING THE DEFICIT: EP still strips that "
-            "terminal input and re-scores the operator over its REMAINING inputs — "
-            "ONE left is skipped as degenerate (``source_stripped`` instead where "
-            "the input edges carry an ``idx`` and the one taken is a directional "
-            "operator's idx-0 source), TWO OR MORE run without it, and an operator "
-            "whose ONLY input this was has no factor to begin with — so either way "
-            "the claim funds nothing through this edge, while " + anchor + ". The "
-            "edge must still be deleted or re-pointed onto whatever now carries it")
+            "SILENCES THIS CHECK WITHOUT CLEARING THE DEFICIT: " + _dropped_input(s) +
+            " — and " + anchor + ". The edge must still be deleted or re-pointed "
+            "onto whatever now carries it")
 
     def _active_edge_fix(s: dict) -> str:
         """The repair for this row, chosen by the state the row carries.
@@ -1388,11 +1429,13 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"Write the successor ({successor}) into the SOURCE slot: this "
                 f"{s['edge_type']} edge is the operator's idx-0 source and the "
                 f"operator is {_quoted(s['direction'])}-directional, so EP drops "
-                f"the whole factor while that slot is terminal — and DELETING the "
-                f"edge alone is not the repair: any SURVIVING input is renumbered "
-                f"into idx 0 and the factor's direction inverts (ep.py's "
-                f"source_stripped note). Re-point idx 0 onto the successor, then "
-                f"delete the edge into {q}." + tail)
+                f"the whole factor while that slot is terminal. ⛔ Deleting the "
+                f"edge alone is not the repair: where the operator has ANY other "
+                f"input, that input is renumbered into idx 0 and the factor's "
+                f"direction inverts (ep.py's source_stripped note) — and an "
+                f"operator whose ONLY input this is has no factor to begin with, so "
+                f"only the successor write gives it one. Re-point idx 0 onto the "
+                f"successor, then delete the edge into {q}." + tail)
         if s["idx"] is None:
             return prefix + (
                 f"Re-point this {s['edge_type']} input from {q} onto the successor "
@@ -1411,8 +1454,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     _record("superseded_object_active_edges", [
         AuditIssue(
             issue_type="superseded_object_active_edges",
-            # ⛔ ONE severity for the check, deliberately. A per-row calibration
-            # (a NEUTRAL operator loses no belief, so its row is leftover wiring
+            # ⛔ ONE severity for the check, deliberately. A per-row calibration            # (a NEUTRAL operator loses no belief, so its row is leftover wiring
             # rather than a lost one) was tried and REVERTED: every aggregate in
             # this module assumes one severity per ``issue_type`` —
             # ``_sev_total``/``to_dict`` keep the FIRST sample's severity for the

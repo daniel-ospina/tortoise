@@ -383,6 +383,12 @@ def test_a_direct_edge_gets_the_direct_edge_upkeep(sdk):
     assert "skipped-factor record" in issue.detail, issue.detail
     assert "it is a DIRECT edge" in issue.fix, issue.fix
     assert "PRESERVES the edge idx" not in issue.fix, issue.fix
+    # ⛔ A DIRECT edge carries real belief while its target is live (measured: two
+    # confidences before the supersession, none after), so its §3.1 disposition is
+    # the carry/drop triage — NOT the DROP-only text that belongs to a neither-arm
+    # row (#12111 review).
+    assert "may CARRY to the successor" in issue.fix, issue.fix
+    assert "the disposition here is DROP" not in issue.fix, issue.fix
 
 
 def test_a_successorless_direct_edge_names_the_wiring_it_silences(sdk):
@@ -425,8 +431,9 @@ def test_a_successorless_direct_edge_names_the_wiring_it_silences(sdk):
     assert "EP still strips" not in fix, fix
     # The §3.1 triage rides the emission site, so a successorless row carries it
     # too — this is the arm that would go silent if `+ _triage(s)` were moved into
-    # the resolvable branch (#12111 review).
+    # the resolvable branch (#12111 review). A DIRECT row keeps the carry triage.
     assert "ONTOLOGY §3.1's per-edge triage" in fix, fix
+    assert "may CARRY to the successor" in fix, fix
     # Archiving does silence the CHECK (the finding goes away) — the clause says
     # so, and this measures it rather than trusting the sentence.
     sdk.update_entity(o["id"], status="archived")
@@ -1478,7 +1485,14 @@ def test_an_operators_arity_is_not_asserted(sdk):
     assert "has no factor to begin with" in issues[0].detail, issues[0].detail
     assert "a two-input factor is then skipped" not in issues[0].detail, (
         "the row cannot prove two inputs exist: " + issues[0].detail)
-    assert "any SURVIVING input is renumbered" in issues[0].fix, issues[0].fix
+    # ⛔ The fix must scope the renumbering hazard to the rows that HAVE another
+    # input, and name the zero-remaining case, rather than assert a surviving input
+    # this row does not have (#12111 review).
+    assert "has no factor to begin with" in issues[0].fix, issues[0].fix
+    assert "where the operator has ANY other input" in issues[0].fix, (
+        "the renumbering hazard must be conditional, not asserted: " + issues[0].fix)
+    assert "any SURVIVING input is renumbered" not in issues[0].fix, (
+        "this row has no surviving input: " + issues[0].fix)
 
 
 # ── 3. the history surface stops hiding a terminal chain head ──────

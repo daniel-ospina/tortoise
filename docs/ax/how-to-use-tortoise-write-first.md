@@ -507,10 +507,14 @@ structure, not the return value.
   superseded **Object** that still has a live `IMPL`/`NAND` edge on it
   (`superseded_object_active_edges`, high — the `:Point` lane transfers its
   edges on supersede, the `:Object` lane moves none, so on an Object the
-  survivor is lost belief rather than leftover wiring, *unless the successor was
-  rewired separately into a slot EP reads and only the stale edge was left
-  behind* — the emitted `detail` says whether a resolvable successor exists and
-  what EP does with the stripped input, because the repair differs; the check is
+  survivor is lost belief rather than leftover wiring **where the row is an
+  operator input**. The check distinguishes four mechanisms and its emitted
+  `detail` names which one this row is: a neutral operator transfers no
+  confidence by design, a shaped non-`:Point` endpoint is in neither EP arm, and
+  a direct edge assembles no factor once its target is terminal — those three are
+  leftover wiring, and only the operator input is lost belief. The `fix` differs
+  for each for that reason. Severity is `high` on every row until #12154 (this
+  module's aggregates carry one severity per check); the check is
   `:Object`-anchored, so a superseded `:Subject` input is still not covered, and
   neither is an OUTGOING direct `IMPL`/`NAND` edge from a superseded Object), a
   superseded Object
