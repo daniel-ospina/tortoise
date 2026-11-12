@@ -599,13 +599,41 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
         "aborts `set -u` at the sources line with no `::error::` — the exact "
         "unnamed failure the guards exist to replace. Guard it explicitly."
     )
-    assert "install -d /usr/share/postgresql-common/pgdg" in code, (
-        "the keyring's DIRECTORY is not created. PGDG publishes it inside "
-        "`postgresql-common`, which a bare runner image does not carry, so the "
-        "`install -m 0644` of the key fails `No such file or directory` — unnamed, "
-        "one line before the guard. MEASURED: deleting this line alone left the "
-        "whole file green."
+    # ⛔ THE KEYRING'S DIRECTORY: the FACT is that it exists before the key is written
+    # into it, so this asserts the ORDER and accepts every equivalent spelling.
+    # PGDG publishes that directory inside `postgresql-common`, which a bare runner
+    # image does not carry, so `install -m 0644` into a missing directory fails
+    # `No such file or directory` — unnamed, one line before the guard.
+    # MEASURED, review cycle 3 of `c86a3efde`: pinning the SPELLING instead (a bare
+    # `"install -d …" in code`) was BOTH under- and over-tight — swapping the two
+    # `install` lines (which reproduces the exact runtime failure the message names)
+    # stayed GREEN, while the equivalent `install -D -m 0644 …` (which creates the
+    # leading components; verified rc=0) FALSE-REDDED.
+    key_install = re.search(
+        r"install\s+(?P<flags>-[A-Za-z]+)\s+[^\n]*apt\.postgresql\.org\.asc", code
     )
+    assert key_install, (
+        "the PGDG keyring is never installed with `install … apt.postgresql.org.asc` — "
+        "the `signed-by` on the sources line would point at nothing"
+    )
+    if "D" not in key_install.group("flags"):
+        # `-D` creates the leading components itself; without it the directory must be
+        # created FIRST, and that ordering is the whole fact.
+        mkdir = re.search(
+            r"install\s+(?:-[A-Za-z]+\s+)*-d\s+/usr/share/postgresql-common/pgdg", code
+        )
+        assert mkdir, (
+            "the keyring's DIRECTORY is not created before the key is written into it "
+            "(and this is not the `install -D` form, which would create it): PGDG "
+            "publishes that directory inside `postgresql-common`, so on a bare runner "
+            "image `install -m 0644` fails `No such file or directory` — unnamed, one "
+            "line before the guard"
+        )
+        assert mkdir.start() < key_install.start(), (
+            "`install -d` of the keyring directory runs AFTER the key is written into "
+            "it, which reproduces exactly the unnamed `No such file or directory` abort "
+            "this guard exists to prevent. Order is the fact here, not presence."
+        )
 
     # ⛔ ORDER IS THE MECHANISM. Sources added, THEN the indexes refreshed, THEN the
     # install. Any other order installs from the distro archive (or from an index
@@ -828,4 +856,15 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "a missing VERSION_CODENAME stopped the step but named nothing — the "
         "whole point of the guard is that it reads as THIS defect rather than as "
         f"an unbound-variable abort: {codename_combined!r}"
+    )
+    # ⛔ THIS LINE IS THE DISCRIMINATOR, not a nicety. Without it the arm cannot tell
+    # the guard's own `exit 1` from the `set -u` BACKSTOP one line later: the unguarded
+    # `${VERSION_CODENAME}` in the sources line aborts with `unbound variable` and rc=1,
+    # and the guard's `::error::` is already in the output — so all three assertions
+    # above are satisfied by the backstop. MEASURED, review cycle 3 of `c86a3efde`:
+    # replacing the codename guard's `exit 1` with `true` left all 7 tests GREEN.
+    assert "unbound variable" not in codename_combined, (
+        "the step failed on the shell's `set -u` backstop instead of on the named "
+        "guard, so the guard's own `exit 1` is unpinned: a lane could gut it and this "
+        f"arm would still pass: {codename_combined!r}"
     )
