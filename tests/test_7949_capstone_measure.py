@@ -4637,7 +4637,11 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
             continue
         line = hits[0]
         for number, anchor in cites:
-            if f":{number}" not in line and f"-{number}" not in line:
+            # ⛔ The delimiter is required AND the number must not be a PREFIX of a
+            # longer one: a bare substring test lets a document citing `:7000` pass
+            # while the call is at `:700`, which is a false PASS in exactly the
+            # direction this pin exists to catch.
+            if not re.search(rf"(?::|-){re.escape(str(number))}(?![0-9])", line):
                 failures.append(
                     f"{doc_label}: the sentence containing {phrase!r} does not "
                     f"cite :{number} — a bare continuation is invisible to "
@@ -5033,7 +5037,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
         "number from the tree before changing this pin:\n  " + "\n  ".join(failures))
 
 
-#: The epic bundle's documents and the two sources its re-derived cites name.
+#: The epic bundle's documents and the four sources its re-derived cites name.
 #: ⛔ NEITHER side is in the bundle sweep: `_BUNDLE_DOCS` carries the bundle's own six
 #: documents, so `00-plan.md`, `03-test-design.md` and `RECONCILE-A1-A2-A5.md` were
 #: swept by NOTHING, and `search_engine.py` is in neither `_BUNDLE_SOURCES` nor
@@ -5184,8 +5188,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # The `plan_hierarchy_edges` CALL, in the two documents that name it, keyed
         # by the sentence rather than by the number: #12112 moved this line three
         # times (`631` on main, `695`, `700`) and each move left a document behind.
-        # ⛔ Three rows, not one, because a row scopes to ONE document + ONE source
-        # and the 11083 record is a different file that no sweep reads at all.
+        # ⛔ Three rows, not one, for TWO distinct reasons — and the distinction is
+        # load-bearing. A row scopes to exactly ONE line of ONE document against ONE
+        # source, so `RECONCILE-A1-A2-A5.md` needs TWO rows: it names the call on
+        # `:107` and again on `:169`. The third row is `11083/README.md`, a different
+        # file that no sweep reads at all. ⛔ Collapsing the two RECONCILE rows to
+        # "one row per document + source" silently drops the `:107` cite from this
+        # pin — which is precisely the failure the rows exist to prevent.
         ("RECONCILE-A1-A2-A5.md", "one of them the **call**", (
             ("700", "planned = plan_hierarchy_edges("),
         ), "relation_write"),
@@ -5199,10 +5208,14 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("9933", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
-    assert len(rows) >= 9, (
+    # ⛔ The floor tracks the table, not a number chosen once: it sat at 9 for 9
+    # rows, and three rows were added without raising it — which would have let the
+    # new `relation_write` / `11083/README.md` pins be deleted with this assertion
+    # still green, defeating the whole point of adding them.
+    assert len(rows) >= 12, (
         f"only {len(rows)} rows — an emptied table would pass vacuously, and these "
         "are the cites the review found wrong on the pre-fix documents plus the "
-        "consume pair that sat beside them")
+        "consume pair that sat beside them and the `plan_hierarchy_edges` call")
     sources = {name: path.read_text(encoding="utf-8").splitlines()
                for name, path in _EPIC_CITE_SOURCES.items()}
     failures = _pin_row_failures(rows, _EPIC_CITE_DOCS, sources)
