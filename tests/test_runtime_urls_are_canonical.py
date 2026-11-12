@@ -36,12 +36,14 @@ removes one of those literals must remove its recorded reason too.
 ⛔ ONE ROW CHANGED UNDER THIS PR, AND THE CHANGE IS THE POINT OF THE EXACT COUNT.
 `website/functions/blog/_lib.ts` was 4 when this file was written; main's #11765
 (PR #11976, landed 2026-11-12 while this PR was open) flipped that file's
-`SITE_URL` to `premiselabs.co`, so the count is now 3 — the three `navHtml`
-product hrefs, which #11976's own `tests/test_blog_seo_meta.mjs` keeps on the
-retired host ON PURPOSE and assigns to #11764. This file was rebased onto that
-commit and the row follows it down; a count that had stayed at 4 would have gone
-RED on a file nobody broke, and a sweep that "fixed" it by deleting the row would
-have un-pinned the three hrefs that legitimately remain.
+`SITE_URL` to `premiselabs.co`, so the count was 3 — the three `navHtml`
+product hrefs, which #11976's own `tests/test_blog_seo_meta.mjs` kept on the
+retired host ON PURPOSE and assigned to #11764. This file was rebased onto that
+commit and the row followed it down to 3; #11764 then closed WITHOUT repointing
+them, so this PR emits the terminal forms and the row is now GONE (count 0). The
+file stays in `RUNTIME_FILES`, so a literal coming back REDS the guard. A count
+kept at 4 would have gone RED on a file nobody broke; a row deleted without the
+repoint would have un-pinned a deferral nobody owns.
 """
 from __future__ import annotations
 
@@ -234,31 +236,21 @@ RETIRED_HOST_ALLOWLIST = {
     # ⛔ The blog origin's ACTUAL source, missed by the first pass at this map: it
     # named the admin client and the dashboard Function but not `_lib.ts`, which is
     # what the blog's canonicals, OG tags, JSON-LD, sitemap and feed are built from.
-    # ⛔ THIS ROW WAS 4 AND IS NOW 3, because main landed half of it. #11765 (PR
-    # #11976) re-aimed `SITE_URL` to `premiselabs.co`; the three occurrences that
-    # remain are `navHtml`'s product hrefs, which that PR deliberately left absolute
-    # on the retired host (`/docs`, `/#pricing` and `/auth` did not exist on the
-    # company host when it shipped) and whose repoint `tests/test_blog_seo_meta.mjs`
-    # assigns to #11764. So the row is not a stale leftover: it pins the three
-    # hrefs the DESTINATION question owns, and the moment #11764 repoints them the
-    # count goes to 0 and this row must be deleted in that commit.
-    "website/functions/blog/_lib.ts": (
-        3,
-        "#11767 item 4, remaining half — `navHtml`'s three product hrefs: `/docs` "
-        "(301 -> premiselabs.co/tortoise/docs), `/#pricing` (301 -> "
-        "premiselabs.co/tortoise) and `/auth` (301 -> app.premiselabs.co/auth) "
-        "— map measured 2026-11-12 under #11763's inverted consolidation. The "
-        "FOURTH occurrence this row used to carry, `SITE_URL`, is GONE: #11765 "
-        "(PR #11976) flipped it to premiselabs.co, which is why the count is 3."
-        " ⛔ The hrefs are a DESTINATION deferral with an owner — #11764 owns the "
-        "repoint itself (`tests/test_blog_seo_meta.mjs`, #11976, records the same "
-        "assignment) — so this is NOT the same class as the #12057 sweep and must "
-        "not be folded into it. ⛔ The product paths ALREADY EXIST on the company "
-        "host: #12031 made `/docs` a same-host 301 onto `/tortoise/docs` before "
-        "#11976 shipped, so this is a hop and not a 404 — an earlier revision of "
-        "this row said they \"did not exist ... when it shipped\", which was false "
-        "and is the reason the deferral is about the destination, not about "
-        "creating a path."),
+    # ⛔ THIS ROW IS GONE, and the removal is the deferral being PAID rather than
+    # moved. Two things happened under this PR: #11765 (PR #11976) re-aimed
+    # `SITE_URL` to `premiselabs.co`, and the three remaining occurrences were
+    # `navHtml`'s product hrefs, deferred to #11764. #11764 then CLOSED
+    # (2026-11-12T07:23:26Z, COMPLETED, by PR #12058) WITHOUT repointing them and
+    # #12057 explicitly excludes this file — so the deferral pointed at a closed
+    # issue, which this file's own OWNERSHIP note forbids ("a note deferring to it
+    # defers nowhere"). The destinations exist and were measured 2026-11-12
+    # (`premiselabs.co/tortoise/docs` answers 200; `/tortoise` is the product page;
+    # `/auth` 301s to the app origin), `tests/test_blog_seo_meta.mjs` pins an UPPER
+    # BOUND (`navRetired.length <= NAV_PRODUCT_HREFS.length`, deliberately `<=` so
+    # it "survives the repoint"), so this PR emits the terminal forms and the count
+    # goes to 0. The file STAYS in `RUNTIME_FILES` on purpose: with no allowlist
+    # row its expected count is 0, so a literal coming back REDS this guard instead
+    # of silently leaving the surface.
     "website/apps/dashboard/functions/admin/[[path]].ts": (
         1,
         "#11767 item 4 — the 403 page's `<a>← Back to the blog</a>` link (line "
@@ -314,7 +306,7 @@ RETIRED_HOST_ALLOWLIST = {
 #: follow) — a PROSE comment that merely names the host is not counted, which is
 #: why `[[path]].ts` is 1 and not 2 (line 12 is a comment, line 49 emits):
 #:   website/apps/dashboard/functions/blog/api/[[path]].ts   1  DEFAULT_BLOG_ORIGIN
-#:   website/functions/blog/_lib.ts                          3  navHtml product hrefs (SITE_URL re-aimed by #11976)
+#:   website/functions/blog/_lib.ts                          0  navHtml repointed to the terminal forms (row removed)
 #:   website/apps/blog-admin/src/lib/blog-api.ts             1  DEFAULT_AUTHOR_IMAGE_URL avatar
 #:   website/apps/dashboard/functions/admin/[[path]].ts      1  the 403 page's ← Back to the blog link
 #:   website/apps/blog-admin/src/App.tsx                     1  blog-admin UI origin
