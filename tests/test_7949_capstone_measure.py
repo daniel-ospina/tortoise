@@ -5067,12 +5067,17 @@ _EPIC_CITE_SOURCES = {
     "ci_surfaces": _REPO / "config/ci-surfaces.yml",
     # ⛔ `relation_write.py`'s `plan_hierarchy_edges` call is cited by two documents
     # (and by an artifact row that talks about the same seam) and by NOTHING else in
-    # this file. Measured commit-by-commit across #12112's own 36 commits (2 of them
-    # predate the call's existence): the call sat at `:631` on `origin/main` (8
-    # commits), then `:687` (22), then `:695` (3), then
-    # `:700` at the squash (1) — **four** numbers, not three, with the documents
-    # trailing one behind at each step. (`:687` is the move an earlier draft of this
-    # comment dropped, and dropping it is the same error the comment is about.)
+    # this file. Measured commit-by-commit across ALL of #12112's 36 commits (every
+    # one of them carries the call; none predates it): it sat at `:631` on
+    # `origin/main` (8 commits), then `:687` (22), then `:695` (4), then `:700` at
+    # the squash (2) — **four** numbers, not three, with the documents trailing one
+    # behind at each step. (`:687` is the move an earlier draft of this comment
+    # dropped, and dropping it is the same error the comment is about.) ⛔ Do not mix
+    # denominators: restricted to the 30 SINGLE-PARENT commits the split is
+    # 8 / 18 / 3 / 1, and an earlier draft took `:631` and `:687` from the 36-commit
+    # population but `:695` and `:700` from the 30-commit one — the arithmetic closed
+    # only because it then asserted two commits predated the call, which no commit
+    # does. One population, or the numbers mean nothing.
     # ⛔ ONE TREE, ONE NUMBER: `:631` is the call at `aebf91352bfd` and is
     # `declared=None,` at the branch's forward merge `5b17de24de42` (that merge is what
     # made the number wrong). Quoting either tree's reading as if it described both is
