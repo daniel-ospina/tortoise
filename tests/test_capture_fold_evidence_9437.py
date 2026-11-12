@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -275,3 +276,195 @@ def test_the_operator_wired_duplicate_still_stays_distinct(sdk, monkeypatch):
     assert [p["dedup"] for p in res["points"]] == ["new", "new"], res["points"]
     assert any("not deduped" in w for w in res["warnings"]), res["warnings"]
     assert len(_claim_rows(sdk._get_proj())) == 2, "operator-wired duplicate kept"
+
+
+# ── 6) the two slot shapes that are not independent slots ─────────────────
+
+
+def test_a_date_is_one_slot_and_the_fold_never_gives_it_two_spellings(
+        sdk, monkeypatch):
+    """`when` and `validFrom` are ONE date slot (ONTOLOGY §4.7), so the fold
+    must not fill `validFrom` with the duplicate's date while the canonical
+    already records its own under the raw `when` spelling.
+
+    Measured before the fix (this exact fixture): the node held
+    `when=2026-08-01` AND `validFrom=2026-08-02` — one slot, two values — and
+    the receipt reported `copied validFrom` as a success.
+
+    RED on the pre-fix carry: `canonical.get("validFrom", canonical.get("when"))`
+    never evaluated its default (`_canonical_view` always returns both keys), so
+    the canonical's own `when` was invisible to the occupancy check.
+    """
+    extracted, meta = _extract(
+        sdk, monkeypatch,
+        canon_evidence={"when": "2026-08-01"},
+        evidence={"when": "2026-08-02"})
+    assert meta["errors"] == [], meta["errors"]
+    assert [e["dedup"] for e in extracted] == ["new", "rephrase_linked"], extracted
+    proj = sdk._get_proj()
+    row = proj.g.query(
+        "MATCH (p:Point {id:$pid}) RETURN p.when, p.validFrom",
+        params={"pid": extracted[0]["id"]}).result_set
+    assert row and row[0][0] == "2026-08-01", row
+    assert row[0][1] is None, f"one date, two spellings: {row}"
+    assert any("when" in w for w in meta["warnings"]), meta["warnings"]
+
+
+def test_the_occurrence_address_is_carried_whole_or_not_at_all(
+        sdk, monkeypatch):
+    """`quote` + `source_turn_id` + the span are ONE address. When the
+    canonical holds any of it, the fold must not graft the duplicate's span
+    onto the canonical's quote and turn — that composes offsets against text
+    the survivor is not quoting, and `validate_span` cannot catch it.
+
+    Measured before this shape: the survivor read `quote='q first'`,
+    `source_turn_id='turn-1'`, `span_start=40, span_end=72` — turn-2's
+    offsets under turn-1's quote.
+    """
+    extracted, meta = _extract(
+        sdk, monkeypatch,
+        canon_evidence={"quote": "q first", "source_turn_id": "turn-1"},
+        evidence={"span_start": 40, "span_end": 72})
+    assert [e["dedup"] for e in extracted] == ["new", "rephrase_linked"], extracted
+    proj = sdk._get_proj()
+    row = proj.g.query(
+        "MATCH (p:Point {id:$pid}) RETURN p.quote, p.source_turn_id, "
+        "p.span_start, p.span_end", params={"pid": extracted[0]["id"]}).result_set
+    assert tuple(row[0]) == ("q first", "turn-1", None, None), \
+        f"a composed address is not an address: {row}"
+    for key in ("span_start", "span_end"):
+        assert any(key in w for w in meta["warnings"]), (key, meta["warnings"])
+
+
+# ── 7) the refusal tokens, one construction each ──────────────────────────
+
+#: The nine columns the evidence read selects, in query order:
+#: extractedFrom, extractedFromAll, quote, span_start, span_end,
+#: source_turn_id, search_keys, when, validFrom.
+_DUP_ROW = ("session:s", [], None, None, None, None, None, None, None)
+_DUP_ROW_QUOTED = ("session:s", [], "q dup", None, None, None, None, None, None)
+_CANON_ROW = ("session:s", [], None, None, None, None, None, None, None)
+
+
+class _FakeGraph:
+    """Answers the four reads the carry issues, by query SHAPE.
+
+    Deliberately not a graph stub that pretends everything worked: the point of
+    most of these cases is that the fake CANNOT answer, so the carry has to
+    refuse. A stub that always succeeds would pin nothing.
+    """
+
+    def __init__(self, *, dup_row=_DUP_ROW, edges=(), carried=(0, None),
+                 canon_row=_CANON_ROW, raise_on=frozenset()):
+        self.dup_row = dup_row
+        self.edges = list(edges)
+        self.carried = carried
+        self.canon_row = canon_row
+        self.raise_on = set(raise_on)
+
+    def query(self, q, **kw):
+        if any(marker in q for marker in self.raise_on):
+            raise RuntimeError("graph refused the read")
+        # ⚠️ Order matters: the EDGES read also starts `MATCH (d:Point`, so it
+        # is keyed on its own shape and checked before the property read.
+        if "-[r]->" in q:
+            return SimpleNamespace(result_set=self.edges)
+        if "d.extractedFrom" in q:
+            return SimpleNamespace(result_set=[self.dup_row])
+        if "c.extractedFrom" in q:
+            return SimpleNamespace(result_set=[self.canon_row])
+        if "head(collect(r.confidence))" in q:
+            return SimpleNamespace(result_set=[list(self.carried)])
+        return SimpleNamespace(result_set=[])
+
+
+class _FakeProj:
+    def __init__(self, graph):
+        self.g = graph
+
+
+class _FakeSDK:
+    """A write door that records the call and does NOT write the graph —
+    exactly the silent-success `update_point` gives for an absent id."""
+
+    def __init__(self, *, raises: Exception | None = None):
+        self.raises = raises
+        self.calls: list[dict] = []
+
+    def update_point(self, point_id, **props):
+        self.calls.append({"id": point_id, **props})
+        if self.raises:
+            raise self.raises
+        return {}
+
+
+def test_an_unaddressable_attachment_refuses():
+    """An `about*` link whose target has no id cannot be re-pointed
+    (`link_entity` MERGEs on `{id:$id}` and would mint a DIFFERENT node), so
+    the fold must keep the duplicate. Token: `unaddressable`."""
+    proj = _FakeProj(_FakeGraph(edges=[("aboutObject", "Object", "", None)]))
+    out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "unaddressable", out
+    assert "cannot be carried" in out["blocked"], out
+
+
+def test_a_link_that_does_not_land_refuses():
+    """A link is counted, never assumed: `link_entity` MERGEs and creates
+    nothing when an endpoint is absent. Token: `link_not_carried`."""
+    proj = _FakeProj(_FakeGraph(
+        edges=[("aboutObject", "Object", "obj_1", None)], carried=(0, None)))
+    out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "link_not_carried", out
+    assert "did not land" in out["blocked"], out
+
+
+def test_an_attachment_already_on_the_canonical_reports_the_grading():
+    """`link_entity` leaves an existing edge's `confidence` alone (#1370), so
+    the duplicate's grade cannot ride it — the carry reports that residual
+    instead of claiming it carried the grading."""
+    proj = _FakeProj(_FakeGraph(
+        edges=[("aboutObject", "Object", "obj_1", 0.7)], carried=(1, None)))
+    out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
+    assert out["ok"] is True, out
+    assert out["carried"] == 1, out
+    assert any("confidence of aboutObject" in r for r in out["residual"]), out
+
+
+def test_a_slot_write_that_raises_or_has_no_door_refuses():
+    """Both arms of `slot_write_failed`: the write door raising, and no door
+    at all. Token: `slot_write_failed`."""
+    proj = _FakeProj(_FakeGraph(dup_row=_DUP_ROW_QUOTED))
+    out = capture_fold.carry_fold_evidence(
+        proj, "pt_dup", "pt_canon",
+        sdk=_FakeSDK(raises=RuntimeError("no such point")))
+    assert out["ok"] is False and out["reason"] == "slot_write_failed", out
+    assert "no such point" in out["blocked"], out
+
+    out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon", sdk=None)
+    assert out["ok"] is False and out["reason"] == "slot_write_failed", out
+    assert "no SDK write door" in out["blocked"], out
+
+
+def test_a_silent_slot_write_is_detected_by_the_read_back():
+    """The write returned cleanly and NOTHING landed — the absent-canonical
+    shape `update_point` reports as success. The carry must refuse rather than
+    let the caller delete a duplicate whose evidence never arrived."""
+    sdk = _FakeSDK()
+    proj = _FakeProj(_FakeGraph(dup_row=_DUP_ROW_QUOTED))  # canonical stays free
+    out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon", sdk=sdk)
+    assert sdk.calls == [{"id": "pt_canon", "quote": "q dup"}], sdk.calls
+    assert out["ok"] is False and out["reason"] == "slot_write_failed", out
+    assert "did not land" in out["blocked"], out
+
+
+def test_an_internal_error_is_a_refusal_never_an_exception():
+    """The caller sits inside the capture's single per-loop `try`, so a
+    propagated error would abandon every remaining statement's resolution.
+    A raise anywhere inside the carry becomes `internal_error` — a refused
+    fold, the safe answer in front of a destructive act."""
+    proj = _FakeProj(_FakeGraph(
+        edges=[("aboutObject", "Object", "obj_1", None)],
+        raise_on={"head(collect(r.confidence))"}))
+    out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "internal_error", out
+    assert "graph refused the read" in out["blocked"], out

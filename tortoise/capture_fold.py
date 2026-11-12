@@ -28,14 +28,22 @@ WHAT IS CARRIED, AND HOW (the ruling, not a preference)
   `session_link.link_entity`, the shared journaled about*-edge writer (the
   same writer `near_dup_merge.apply_merge_union` uses for the authorised
   fusion). “UNION THE ATTACHMENTS, NEVER FUSE THE CLAIM” (§S2.2): the
-  canonical's own text is untouched, and the duplicate's link — including
-  the binding `confidence` the `#1370` binder put on it — is added beside it.
-* **Per-occurrence scalar evidence** (`quote` / `span_start` / `span_end` /
-  `source_turn_id` / `when` / `search_keys`) is copied onto the canonical
-  ONLY where that slot is EMPTY. A Point holds one value per field, so a slot
-  the canonical already fills keeps the canonical's value (first-writer —
-  the same rule `_extract_session_v2` states for its dedup hits), and the
+  canonical's own text is untouched, and the duplicate's link is added beside
+  it. ⚠️ The link's GRADING is carried only when the link is NEW on the
+  canonical: `link_entity` short-circuits an edge that already exists and does
+  not re-grade it (`#1370`), so a duplicate whose `confidence` differs from an
+  edge the canonical already holds keeps that difference as a REPORTED
+  residual — it is not silently claimed as carried.
+* **Per-occurrence scalar evidence** is copied onto the canonical ONLY where
+  that evidence is EMPTY. A Point holds one value per field, so a slot the
+  canonical already fills keeps the canonical's value (first-writer — the
+  same rule `_extract_session_v2` states for its dedup hits), and the
   difference is REPORTED as a residual instead of being silently dropped.
+  Two shapes need care, and both were measured wrong before this wording:
+  the occurrence ADDRESS (`quote` + `source_turn_id` + `span_start`/`span_end`)
+  is ONE group — copy it whole or not at all, or the survivor presents
+  turn-2's offsets as turn-1's — and `when`/`validFrom` are ONE date slot,
+  so occupancy must be read from BOTH spellings.
 * **A PHYSICAL DELETE IS FORECLOSED** where any of the above cannot be
   carried. `§4.3` (PR `#10069`, 2026-10-26) forecloses a physical delete to
   every pass, and this fold is not a pass — which is why this issue exists
@@ -63,14 +71,37 @@ lost and cannot be re-created:
   never assumed, the same rule `apply_merge_union` follows;
 * evidence that cannot be READ at all (`unreadable`). Fail-closed: this
   module is about to authorise a delete, and "could not tell" is not "nothing
-  there" (the distinction `extractor_v2._attachment_ids` draws with `None`).
+  there" (the distinction `extractor_v2._attachment_ids` draws with `None`);
+* a scalar slot write that did not LAND (`slot_write_failed`) — read back,
+  because `update_point` on an absent id SUCCEEDS silently, and reporting the
+  attempt there would delete a duplicate whose evidence never arrived;
+* anything else that raised (`internal_error`). The public entry point never
+  raises: its caller sits inside the capture's single per-loop `try`, so a
+  propagated error would abandon every remaining statement's resolution, and a
+  refusal is the only correct answer in front of a destructive act.
+
+WHY A CONFLICTING SLOT IS A RESIDUAL BUT AN UNCURRIED SOURCE REF IS A REFUSAL
+----------------------------------------------------------------------------
+They are not the same kind of fact. `quote`/`span_*`/`source_turn_id`/`when`/
+`search_keys` DESCRIBE one occurrence of the claim, and a Point models one
+claim — the canonical's own occurrence is a truthful record, so keeping it and
+reporting the difference loses a description, not support. `extractedFrom` is
+the claim's PROVENANCE — which document asserted it — and a Point holds ONE
+scalar ref, so the second source would have to overwrite the first: a
+destructive field write on a committed row, which §4.3 forecloses outside a
+lifecycle event. Refusing keeps both claims and both attributions.
 
 MEASURED BEFORE THIS MODULE (2026-11-12, this worktree)
 -------------------------------------------------------
-The in-tree M2 producer (`extractor.LLMExtractor.run` → `_PointStage`) emits
-cleaned content only, so on THAT lane the duplicate's node carries provenance
-identical to the canonical's (same `session:<id>` source, same
-`sourceVersionTransit`) and no attachments — the concrete loss is nil TODAY.
+Scope the following to the UTTERANCE lane: `extractor.LLMExtractor.run` →
+`_PointStage` emits cleaned content only (`_POINTS_SYS`, `extractor.py:565`), so
+there the duplicate's node carries provenance identical to the canonical's
+(same `session:<id>` source, same `sourceVersionTransit`) and no attachments.
+That is a statement about one producer, not about the code base — the DOCUMENT
+lane (`extractor.LLMExtractor._run_document`, `extractor.py:1146-1156`) passes
+`aboutEntities` into `api.add_point`, which mints `aboutSubject`/`aboutObject`
+edges, so the attachment class this module carries is live in the tree; that
+lane does not route through this seam.
 The hole is structural, and it is reachable the moment a producer attaches
 evidence: `tests/test_capture_session.py` already drives this fold with a
 stub whose duplicate carries `quote`/`when`/`source_turn_id`, and the
@@ -79,6 +110,29 @@ reply used to describe a payload the surviving node never held.
 `config/v4-mechanisms.yml` records the same split (`near_dup_detect`'s note:
 "the FOLD and the `DETACH DELETE` of the folded node's `aboutObject` happen
 in the SDK's capture seam (`sdk.py`) … tracked at #9437").
+WHAT THE CARRY COSTS, DECLARED (measured on this worktree)
+----------------------------------------------------------
+Two writes per folded duplicate, never more: `link_entity` per attachment
+(a MERGE plus one pre-check read, journaled as `EntityLinked` when the SDK has
+a journal) and — only when a free slot is actually filled — ONE `update_point`.
+
+⚠️ `update_point` is the SDK's lifecycle door, and it is used deliberately:
+§4.3 forbids writing a committed row's field outside an appended lifecycle
+Event, and this door appends `PointRevised`. Two consequences a later reader
+must know rather than discover:
+
+* on a journal-armed SDK the record is appended, and the capture's own Points
+  live in `_InMemoryEventLog` (`durable = False`, `sdk.py`) — so the journal
+  holds a `PointRevised` for an id whose `PointAdded` it never had. It is inert
+  on the graph fold (the revision matches no row) and no replay can reach it;
+  the seam is journal-free by design for these points, and this is the one
+  record that steps outside that. Tracked as a declared residual, not fixed
+  here: routing the carry through the capture's own event stream would need a
+  prop-carrying revision door `EventAPI` does not have;
+* it marks the canonical as an EP-dirty root, so the fold can schedule one
+  belief re-calibration for it. Content and edges are unchanged; this is cost,
+  not corruption. It is why the carry is skipped entirely when there is
+  nothing free to fill.
 """
 from __future__ import annotations
 
@@ -90,15 +144,28 @@ from typing import Any
 #: ONTOLOGY §3.2 triples for a Point source (`session_link.ENTITY_LINKED_TRIPLES`).
 _FOLD_ATTACHMENT_RELS = ("aboutObject", "aboutSubject")
 
-#: Per-occurrence, SINGLE-VALUED evidence: ``(read key, write key)``.
-#: ``when`` maps onto ``validFrom`` — the ONTOLOGY §4.7 date slot, and the
-#: same mapping the v2 capture seam's create branch applies, so the fold
-#: cannot invent a second spelling of one date.
-_SCALAR_EVIDENCE = (
-    ("quote", "quote"),
-    ("span_start", "span_start"),
-    ("span_end", "span_end"),
-    ("source_turn_id", "source_turn_id"),
+#: ONE OCCURRENCE'S ADDRESS — an all-or-nothing group.
+#:
+#: ``quote`` + ``source_turn_id`` + ``span_start``/``span_end`` address the
+#: same thing: a region of one turn's text (the E3 and E4 shapes the capture
+#: contract writes). They are NOT independent slots. Copying a span from the
+#: duplicate onto a canonical that kept its OWN quote and turn composes an
+#: address no occurrence ever had — offsets computed against turn-2's text,
+#: presented as turn-1's — and nothing downstream can catch it (`validate_span`
+#: checks order and range, not which text the range indexes). So the group is
+#: carried WHOLE when the canonical holds none of it, and left alone (with the
+#: difference reported) the moment the canonical holds any part of it.
+_OCCURRENCE_ADDRESS = ("quote", "span_start", "span_end", "source_turn_id")
+
+#: Single-valued FACTS about the occurrence: ``(read key, write key)``.
+#:
+#: ``when`` maps onto ``validFrom`` — the ONTOLOGY §4.7 date slot, and the same
+#: mapping the v2 capture seam's create branch applies. ⚠️ The two spellings are
+#: ONE slot on the canonical side too: a producer that stored the raw ``when``
+#: (the E3 passthrough does) fills ``validFrom`` as much as a ``validFrom``
+#: does, so the occupancy check reads BOTH — reading only ``validFrom`` wrote a
+#: second value for one date onto the node (measured, then fixed here).
+_SINGLE_SLOTS = (
     ("when", "validFrom"),
     ("search_keys", "search_keys"),
 )
@@ -206,22 +273,54 @@ def _canonical_view(proj: Any, canonical_id: str) -> dict | None:
 
 
 def _carried(proj: Any, canonical_id: str, rel: str, label: str,
-             target_id: str) -> bool:
-    """Whether the edge EXISTS after the write — a count, never an attempt."""
+             target_id: str) -> tuple[int, float | None]:
+    """``(does the edge exist, the grading it carries)`` — measured, not assumed.
+
+    Existence is COUNTED, never inferred from the write having been issued:
+    `link_entity`'s MERGE creates nothing when a endpoint is absent. The
+    grading is read back for the same reason — `link_entity` short-circuits a
+    pre-existing edge WITHOUT re-grading it (#1370: "a later no-confidence link
+    therefore never clears an earlier confident one"), so the duplicate's
+    `confidence` is NOT carried onto an edge the canonical already holds. That
+    is a fact the caller must report rather than assume.
+    """
     if rel not in _FOLD_ATTACHMENT_RELS or label not in ("Object", "Subject"):
         # Both halves are read from the graph itself; the allowlist is a
         # fail-closed backstop against interpolating an unvetted label into a
         # pattern (the same posture `session_link.link_entity` takes).
-        return False
+        return 0, None
     rows = proj.g.query(
-        f"MATCH (:Point {{id:$canon}})-[:{rel}]->(t:{label} {{id:$target}}) "
-        "RETURN count(*)",
+        f"MATCH (:Point {{id:$canon}})-[r:{rel}]->(t:{label} {{id:$target}}) "
+        "RETURN count(*), head(collect(r.confidence))",
         params={"canon": canonical_id, "target": target_id}).result_set
-    return bool(rows and rows[0] and rows[0][0])
+    if not rows or not rows[0] or not rows[0][0]:
+        return 0, None
+    grading = rows[0][1]
+    return int(rows[0][0]), (grading if isinstance(grading, (int, float))
+                             else None)
 
 
 def carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                         sdk: Any = None) -> dict:
+    """NEVER raises — any internal failure is a REFUSAL, never a propagated error.
+
+    The caller sits inside the capture's per-statement loop whose surrounding
+    ``try`` is the WHOLE loop, so a raise here would abort the remaining
+    statements' resolution (they would not fold, not be registered as
+    canonicals, and not be wired into the Session) and surface as one generic
+    error. A refusal is the correct answer for a destructive act.
+    """
+    try:
+        return _carry_fold_evidence(proj, dup_id, canonical_id, sdk=sdk)
+    except Exception as e:
+        return {"ok": False, "reason": "internal_error",
+                "blocked": ("the evidence carry failed "
+                            f"({type(e).__name__}: {e})"),
+                "carried": 0, "copied": [], "residual": []}
+
+
+def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
+                         sdk: Any = None) -> dict:
     """Move the duplicate's own evidence onto the canonical. NEVER raises.
 
     Call this BEFORE the copy is removed; a refusal means the caller must NOT
@@ -275,9 +374,7 @@ def carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
         return out
 
     # 4) Carry the attachment links (additive, journaled when the SDK has a
-    #    journal), then COUNT what landed. Last, so a refusal leaves the
-    #    canonical with at most ADDITIVE evidence — a refusal never removes
-    #    anything from either node.
+    #    journal), then COUNT what landed.
     from .session_link import link_entity
     failures: list[str] = []
     for rel, label, target_id, confidence in evidence.attachments:
@@ -288,34 +385,58 @@ def carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
         except Exception as e:
             failures.append(f"{rel}→{target_id} ({type(e).__name__}: {e})")
             continue
-        if _carried(proj, canonical_id, rel, label, target_id):
-            out["carried"] += 1
-        else:
+        present, grading = _carried(proj, canonical_id, rel, label, target_id)
+        if not present:
             failures.append(f"{rel}→{target_id} (did not land)")
+            continue
+        out["carried"] += 1
+        # ⚠️ The LINK is carried; its GRADING may not be. `link_entity`
+        # short-circuits a pre-existing edge without re-grading it (#1370),
+        # so when the canonical already held this link the duplicate's
+        # `confidence` is still on the duplicate — about to be deleted. That
+        # is reported, never claimed as carried.
+        if confidence is not None and grading != confidence:
+            out["residual"].append(f"confidence of {rel}→{label}")
     if failures:
         out["reason"] = "link_not_carried"
         out["blocked"] = ("its attachment link(s) could not be carried onto "
                           f"the canonical: {'; '.join(failures[:3])}")
         return out
 
-    # 3) Fill FREE scalar slots; report the ones the canonical already owns.
-    #    ONE call, because the write must be ATOMIC: `update_point` refuses a
-    #    half span (`span_start` without `span_end` is not an address), so
-    #    writing the slots one at a time made a refused fold leave a partially
-    #    copied node behind (measured before this shape: `quote` landed and the
-    #    span did not). A single `SET n += $props` either lands whole or not at
-    #    all.
+    # 5) Fill FREE evidence slots; report the ones the canonical already owns.
+    #
+    #    ONE write for all of them, because the write must be ATOMIC:
+    #    `update_point` refuses a half span (`span_start` without `span_end`
+    #    is not an address), so per-slot writes left a partially copied node
+    #    behind on a refused fold (measured: `quote` landed and the span did
+    #    not). One `SET n += $props` either lands whole or not at all.
     to_write: dict[str, Any] = {}
-    for key, write_key in _SCALAR_EVIDENCE:
+    # 5a) the occurrence ADDRESS — all or nothing (see `_OCCURRENCE_ADDRESS`).
+    address_held = any(canonical.get(k) is not None for k in _OCCURRENCE_ADDRESS)
+    for key in _OCCURRENCE_ADDRESS:
+        if key not in evidence.scalar:
+            continue
+        if address_held:
+            if canonical.get(key) != evidence.scalar[key]:
+                out["residual"].append(key)
+        else:
+            to_write[key] = evidence.scalar[key]
+    # 5b) single-slot facts. `when`/`validFrom` are ONE slot: the occupancy
+    #     check reads both spellings, or a producer that stored the raw `when`
+    #     would receive a second value for one date.
+    for key, write_key in _SINGLE_SLOTS:
         if key not in evidence.scalar:
             continue
         value = evidence.scalar[key]
-        held = canonical.get(write_key, canonical.get(key))
+        held = canonical.get(write_key)
+        if held is None:
+            held = canonical.get(key)
         if held is not None:
             if held != value:
                 out["residual"].append(key)
             continue
         to_write[write_key] = value
+
     if to_write:
         try:
             if sdk is None:
@@ -327,6 +448,24 @@ def carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                 "its " + ", ".join(sorted(to_write))
                 + " evidence could not be written onto the canonical "
                 f"({type(e).__name__}: {e})")
+            return out
+        # COUNT what landed, do not report the attempt: `update_point` on an
+        # absent id is a SILENT success (it returns {} and raises nothing), so
+        # a canonical that vanished between the read and the write would
+        # otherwise be reported as carrying evidence it never received — and
+        # the caller would then delete the duplicate. The same rule the links
+        # follow ("counted, never assumed").
+        after = _canonical_view(proj, canonical_id)
+        if after is None:
+            out["reason"] = "slot_write_failed"
+            out["blocked"] = ("the canonical could not be read back after the "
+                              "evidence write, so the carry is unproven")
+            return out
+        unlanded = sorted(k for k, v in to_write.items() if after.get(k) != v)
+        if unlanded:
+            out["reason"] = "slot_write_failed"
+            out["blocked"] = ("its " + ", ".join(unlanded)
+                              + " evidence did not land on the canonical")
             return out
         out["copied"] = sorted(to_write)
 
