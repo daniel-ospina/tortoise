@@ -2556,7 +2556,11 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # NEEDLE SPAN (review NIT): measured, only a minority do, because most correct rewrites
     # QUALIFY the span away rather than quote it. The entries that do not embed one are still
     # worth keeping — they are the shapes a NARROWED needle would newly match — but they
-    # exercise nothing today, so the discriminator's real cover is the assertion below.
+    # exercise nothing today. ⛔ NOR IS THE DISARM PATH COVERED BY `pre_fix` BELOW (round 10):
+    # those entries must FIRE, and a firing hit is by definition one the context check did
+    # not disarm — so `pre_fix` covers detection, never disarming. The disarm path is
+    # exercised ONLY by the `correct` entries that embed a span, and today that is exactly
+    # ONE. The assertion after this list pins that, so deleting it cannot be silent.
     correct = [
         "PR-event runs whose EVERY job had completed, and which are therefore NOT counted "
         "in `pr_running` (#12037) only once its `updated_at` has been still for "
@@ -2588,6 +2592,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         "now READ and SETTLED (their `updated_at` is 7 days old, so both halves of the "
         "exclusion proof hold), so none of them is executing anything",
     ]
+    disarming = []
     for phrase in correct:
         want = flat(phrase)
         for needle_phrase in retracted:
@@ -2595,6 +2600,16 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
                 f"a needle reds CORRECT prose: {needle_phrase!r} fires on {phrase!r} — "
                 f"add the stilling context or narrow the needle (review P2)"
             )
+            if flat(needle_phrase) in want:
+                disarming.append((phrase, needle_phrase))
+    # ⛔ THE DISARM PATH MUST BE EXERCISED, not merely described (round 10). Every assertion
+    # above passes trivially for an entry that contains no needle span, so without this a
+    # future edit could delete the ONE entry that makes `hits()`'s context check
+    # load-bearing and the whole suite would stay green (measured).
+    assert disarming, (
+        "no `correct` entry embeds a needle span, so hits()'s disarm path is UNTESTED — "
+        "add a correct sentence that quotes a needle and qualifies it in the SAME sentence"
+    )
 
     # ⛔ AND THE OTHER HALF OF THE CONTRACT: EVERY SHIPPED RETRACTED SENTENCE MUST STILL FIRE
     # (review P2-2). The loop above pins NO FALSE POSITIVES; on its own it is satisfiable
@@ -4223,7 +4238,7 @@ def test_the_unread_bracket_names_the_THREE_causes_it_names():
     emitted sentence does not name (issue #12219). The docstring used to say "every cause it
     stands for", which the code contradicts.
 
-    The settle gate gave this bucket a third cause — a read that SUCCEEDED while its list
+    The settle gate gave this bucket a third NAMED cause — a read that SUCCEEDED while its list
     proved nothing (truncated, or jobs stamped for another attempt, where the stamp can be
     hours old so stillness is no obstacle). A two-cause bracket then asserted a cause that
     did not happen for that reading, which is the precise class this PR removes. Nothing

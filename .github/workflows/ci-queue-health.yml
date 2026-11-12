@@ -79,14 +79,18 @@ name: ci-queue-health
 # needs --max-pages and the annotation must not forbid it. The arm therefore reads
 # `truncated` from the payload rather than hardcoding the refutation.
 # ⛔ And NOT "repair the frozen runs": exclusion from `pr_running` requires TWO halves —
-# every job `completed` AND the run's own `updated_at` still for JOB_SETTLE_SECONDS — so
+# every job `completed` AND the run's own `updated_at` still for JOB_SETTLE_SECONDS — AND
+# only once the probe reached it and its jobs READ BACK all-`completed` (a failed read or an
+# unprovable list abstains into `_unread` before the settle gate is consulted) — so
 # an all-`completed` run whose last update just moved is COUNTED (unmeasured), not
 # excluded. `repair` is not a lever either way, but ⛔ FOR TWO DIFFERENT REASONS and they
 # must not be merged: the 409 evidence ("not in progress" / "has not been queued yet") is
 # scoped to the FROZEN population, while a run whose stillness is merely UNPROVEN may still
 # be working — the DYNAMIC matrix's pre-expansion window, a run that has just finished
 # every job, or one whose stamp cannot be read or is future-dated (`_settled_still` answers
-# False for all four) — and /cancel on THAT may be ACCEPTED (it may also still answer 409:
+# False for ALL OF THEM — three routes, not four: the pre-expansion window and the
+# just-finished run are the same "merely recent stamp" route) — and /cancel on THAT may be
+# ACCEPTED (it may also still answer 409:
 # the 409 evidence covers only a run whose stillness is PROVEN), so it is the one thing here
 # an operator must not be told is a closed avenue.
 # Neither can block a merge, because a
