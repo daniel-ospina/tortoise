@@ -587,11 +587,14 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   hidden, while a `` `</script>` `` inside a code span is escaped and closes nothing either
   (measured against a real browser; reading the attribute text as content was a fail-open in all
   four columns). `<script>` additionally has the tokenizer's ESCAPED and DOUBLE-escaped states, so
-  `<!-- </script>AFTER -->` SHOWS `AFTER -->` (escaped: the close tag ends the element) while
-  `<!--<script></script>-->lorem` shows nothing (double-escaped: the inner close only returns to
-  the escaped state). `<template>` is the mirror case — its content is PARSED as markup but never
-  rendered, so there a `</template` inside a COMMENT, a TAG's quoted attribute, a code span, an
-  escape or a recognised link closes nothing. A browser SHOWS the text of `<textarea>`, `<xmp>` and
+  `<!-- </script>AFTER -->` SHOWS `AFTER -->` (escaped: the close tag ends the element),
+  `<!--<script></script>-->lorem` shows nothing (double-escaped: the inner close only returns to the
+  escaped state), and `<!--<script>--></script>VISIBLE` SHOWS `VISIBLE`, because `-->` leaves BOTH
+  dash-dash states for the data state. `<template>` is the mirror case — its content is PARSED as
+  markup but never rendered — so there a `</template` inside a COMMENT, a TAG's quoted attribute, a
+  code span, an escape or a recognised link closes nothing, the element NESTS (an inner
+  `</template>` closes only the inner one), and a trailing `/` does not self-close it (`<template/>`
+  OPENS one), which is why `<template><template>x</template>VISIBLE` renders blank and is refused. A browser SHOWS the text of `<textarea>`, `<xmp>` and
   `<plaintext>`, so those count — refusing `<plaintext>` was this guard's own false accusation
   until the tenth review measured a real render and found the words on screen.
   A cell whose every word is a **declared placeholder** (`n/a`, `to do`, `tbc`) is

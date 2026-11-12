@@ -976,28 +976,21 @@ def _code_span_end(cell: str, i: int) -> int:
 _RAW_TEXT_CLOSE = r"</{name}\s*>"
 
 
-#: How a raw-text body starts keeping state, in the tokenizer's own vocabulary: `<script>` has an
+#: How a `<script>` body keeps state, in the tokenizer's own vocabulary: `<script>` has an
 #: ESCAPED state entered by `<!--` and a DOUBLE-escaped state entered by a nested `<script`, and a
-#: `</script` closes the element only from the first two. ⛔ Measured with a real browser (eleventh
-#: review of this change): `<script><!-- </script>AFTER -->` SHOWS `AFTER -->` (escaped state, so the
-#: close tag ends the element), while `<script><!--<script></script>-->lorem</script>` renders BLANK
-#: (double-escaped, so the inner close tag only returns to the escaped state).
+#: `</script` closes the element only from `data` and `escaped`. `-->` leaves BOTH dash-dash states
+#: for `data`. ⛔ All three transitions are measured with a real browser (eleventh and twelfth
+#: reviews of this change): `<script><!-- </script>AFTER -->` SHOWS `AFTER -->` (escaped, so the
+#: close tag ends the element), `<script><!--<script></script>-->lorem</script>` renders BLANK (the
+#: inner close only returns to escaped … and then `-->` returns to data, after which there is
+#: nothing left to show), and `<script><!--<script>--></script>VISIBLE` SHOWS `VISIBLE` — omitting
+#: the `-->` transition refused that cell, a false accusation on a required job.
 _SCRIPT_START_RE = re.compile(r"<script(?=[\s/>])", re.IGNORECASE)
-_COMMENT_CLOSE = "-->>"
 
 
-
-def _mask_escapes_and_spans(
-    cell: str, start: int, *, structured: bool = False, preserve: re.Pattern[str] | None = None
-) -> str:
+def _mask_escapes_and_spans(cell: str, start: int) -> str:
     r"""`cell[start:]` with ESCAPES and CODE SPANS blanked in place, so their characters cannot
     match a tag.
-
-    With `structured=True` a COMMENT, a TAG (whole, with its quoted attributes) and a RECOGNISED
-    link are blanked too — the model `<template>` needs, because its content is parsed as markup.
-    ⛔ `preserve` keeps the close tag this body is looking for: blanking it made
-    `<template></template>VISIBLE` read as one long body and refused a cell a reader can read
-    (measured, eleventh review of this change).
 
     markdown-it emits both entity-escaped (`\</script>` and `` `</script>` `` become
     `&lt;/script&gt;`), so a close tag inside either is not one the browser ever sees — measured.
@@ -1022,46 +1015,85 @@ def _mask_escapes_and_spans(
             while i < n and chars[i] == "`":
                 i += 1
             continue
-        if structured and (preserve is None or preserve.match(cell, start + i) is None):
-            comment = COMMENT_AT_RE.match(cell, start + i)
-            if comment is not None:
-                for k in range(i, comment.end() - start):
-                    chars[k] = " "
-                i = comment.end() - start
-                continue
-            tag = TAG_RE.match(cell, start + i)
-            if tag is not None:
-                for k in range(i, tag.end() - start):
-                    chars[k] = " "
-                i = tag.end() - start
-                continue
-            link = _link_at(cell, start + i)
-            if link is not None and _RECOGNISED_LINK_TAIL.match(cell[link[2]:link[1]]):
-                for k in range(i, link[1] - start):
-                    chars[k] = " "
-                i = link[1] - start
-                continue
         i += 1
     return "".join(chars)
+
+
+def _parsed_hidden_end(
+    cell: str, start: int, name: str, close_re: re.Pattern[str]
+) -> int:
+    """End of the body of an element whose content is PARSED as markup but never rendered.
+
+    `<template>` is the family: its content goes to an inert fragment, so a `</template` inside a
+    COMMENT, a TAG's quoted attribute, a code span, an escape or a recognised link closes nothing
+    (measured, eleventh review of this change) — and the element NESTS, so an inner
+    `</template>` closes only the inner one and the rest of the body stays hidden. Without the depth
+    count `<template><template>x</template>VISIBLE` read `VISIBLE` as content while a browser renders
+    the cell blank — a fail-open in all four §3 columns (twelfth review of this change).
+    """
+    depth = 1
+    i, n = start, len(cell)
+    while i < n:
+        if cell[i] == "\\" and i + 1 < n and _ESCAPABLE_RE.match(cell[i + 1]):
+            i += 2
+            continue
+        if cell[i] == "`":
+            span_end = _code_span_end(cell, i)
+            if span_end > 0:
+                i = span_end
+                continue
+            while i < n and cell[i] == "`":
+                i += 1
+            continue
+        comment = COMMENT_AT_RE.match(cell, i)
+        if comment is not None:
+            i = comment.end()
+            continue
+        link = _link_at(cell, i)
+        if link is not None and _RECOGNISED_LINK_TAIL.match(cell[link[2]:link[1]]):
+            i = link[1]
+            continue
+        close = close_re.match(cell, i)
+        if close is not None:
+            depth -= 1
+            if depth == 0:
+                return close.end()
+            i = close.end()
+            continue
+        tag = TAG_RE.match(cell, i)
+        if tag is not None:
+            opened = OPEN_TAG_NAME_RE.match(tag.group(0))
+            # ⛔ NO SELF-CLOSING EXEMPTION: HTML ignores a trailing `/` on a non-void element, so
+            # `<template/>` OPENS one, and treating it as self-closed read
+            # `<template><template/>VISIBLE</template>VISIBLE</template>` as content while a browser
+            # renders the cell blank (measured, twelfth review of this change).
+            if opened is not None and opened.group(1).casefold() == name:
+                depth += 1
+            i = tag.end()
+            continue
+        i += 1
+    return n
 
 
 def _raw_text_end(cell: str, start: int, name: str) -> int:
     """End of the body of the raw-text element `name` whose content begins at `start`.
 
-    Three facts, each measured against a real renderer (tenth and eleventh reviews of this
+    Four facts, each measured against a real renderer (tenth, eleventh and twelfth reviews of this
     change):
 
     * an ESCAPE and a CODE SPAN are entity-escaped by markdown-it, so a close tag inside one is not
       a close tag the browser sees — hence `_mask_escapes_and_spans`;
     * a COMMENT and a LINK are NOT protected — `<script><!-- </script>AFTER -->` and
       `<script>[a](</script>VISIBLE)` both SHOW text, so treating either as opaque refused a cell a
-      reader can read;
-    * `<script>` alone has the tokenizer's ESCAPED and DOUBLE-escaped states, so the first
-      `</script` after `<!--` closes while the one after a nested `<script` does not.
+      reader can read; a LINK is skipped only where markdown-it actually parses one;
+    * `<script>` alone has the tokenizer's ESCAPED and DOUBLE-escaped states;
+    * an element that is PARSED but hidden (`<template>`) has the opposite close-tag spelling
+      sensitivity AND nests — hence `_parsed_hidden_end`.
     """
     close_re = re.compile(_RAW_TEXT_CLOSE.format(name=re.escape(name)), re.IGNORECASE)
-    structured = name in PARSED_BUT_HIDDEN_ELEMENTS
-    body = _mask_escapes_and_spans(cell, start, structured=structured, preserve=close_re)
+    if name in PARSED_BUT_HIDDEN_ELEMENTS:
+        return _parsed_hidden_end(cell, start, name, close_re)
+    body = _mask_escapes_and_spans(cell, start)
     state = "data"
     i, n = 0, len(body)
     while i < n:
@@ -1087,6 +1119,10 @@ def _raw_text_end(cell: str, start: int, name: str) -> int:
                     i += 1
                     continue
             if state == "double":
+                if body.startswith("-->", i):
+                    state = "data"
+                    i += 3
+                    continue
                 close = close_re.match(body, i)
                 if close is not None:
                     state = "escaped"

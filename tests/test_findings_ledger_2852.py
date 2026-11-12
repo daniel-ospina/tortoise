@@ -539,6 +539,8 @@ def test_a_blank_prose_cell_is_rejected(tmp_path, monkeypatch, cell, column, abs
         "&#x20;",
         '<script>x</script foo=">**STILL-TRUE**">',  # an ATTRIBUTED close tag closes nothing
         "<script><!--<script></script>-->lorem</script>",  # DOUBLE-escaped: the inner close is not one
+        "<template><template>x</template>VISIBLE",  # `<template>` NESTS: the inner close is not ours
+        "<template><template/>VISIBLE</template>VISIBLE</template>",  # HTML ignores a self-closing `/`
         "<script>[b](</script>)VISIBLE</script>",  # a RECOGNISED link re-emits its destination
         "<template><!-- </template>VISIBLE -->",  # PARSED but hidden: a comment's close is not one
         "[<br>](https://x)",  # a LINK LABEL renders; the destination does not
@@ -829,6 +831,7 @@ def test_a_correction_that_quotes_its_claim_and_adds_is_accepted():
         "<script>[a](</script>VISIBLE)",  # NOT a recognised link, so the close tag is literal
         "<script><!-- </script>AFTER -->",  # the escaped state ends at the close tag
         "<template></template>VISIBLE",  # the body ends at its OWN close tag
+        "<script><!--<script>--></script>VISIBLE",  # `-->` leaves the double-escaped state
         "x Ложно",  # a placeholder beside a non-Latin word is not placeholders alone
     ],
 )
