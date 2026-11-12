@@ -5692,7 +5692,7 @@ def test_the_merge_leg_drops_a_stated_record_and_that_is_declared(client):
 class TestThe12120HostedAboutObjectAnchor:
     """The hosted session-capture `about_entities` anchor (POST /v1/sessions/commit).
 
-    #12047 / #12120 finding 1 (P2): `_execute_commit_writes`' §6a anchor did
+    #12047 / #12120 about-anchor site (P2): `_execute_commit_writes`' §6a anchor did
     `MATCH (p:Point {id:$pid}), (o:Object {name:$name})` — the RAW name — while
     every writer that produced the Object resolved the folded union (`name` ·
     `canonical_name` · `aliases`, raw and folded). A claim naming a fold-equivalent
@@ -5776,9 +5776,12 @@ class TestThe12120HostedAboutObjectAnchor:
         (`resolve_fold_name`) falls back to the writer's folded union, so an
         exact-only guard left a fold-equivalent spelling of a subject-kind name
         free to write the un-gated `aboutObject` edge the `#1370`/`#4934` rule
-        forbids. Unlike the Point anchor there is no exactness exception here:
-        this channel drops the attribution ENTIRELY (F5), so nothing intended is
-        lost by skipping in the fold too.
+        forbids. Round 6 corrected that reasoning: this channel does NOT drop the
+        attribution — it defers the reference EXACT-ONLY (§6a), the same
+        narrowing the Point anchor applies, so F6's exact-name carrier keeps its
+        Event edge (the sibling `test_an_event_keeps_the_edge_for_an_exact_name_
+        carrier`) and only a FOLD-ONLY carrier is refused. What this test pins is
+        the fold-only carrier: no edge, and no un-gated `aboutObject` write.
         """
         _seed_objects(client, "s12120-ev-narrow-1", ["Acme Corp"])
         raw = _raw_payload(

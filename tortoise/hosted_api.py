@@ -21844,24 +21844,38 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # live/replay parity break R8 forbids.
     for _eid, _name, _exact_only in _deferred_about_objects:
         if _exact_only:
-            # Fold-equal to a declared subject-kind name: attribute an EXACT-name
-            # Object only (the `#4934` rule), never a fold-only carrier. The
-            # resolver cannot express "exact spelling", so ask directly.
+            # Fold-equal to a declared subject-kind name: attribute EXACT-name
+            # Objects only (the `#4934` rule), never a fold-only carrier. The
+            # resolver cannot express "exact spelling", so ask directly — but ask
+            # the SAME other two questions the resolver it narrows
+            # (`resolve_fold_name`) answers, or the narrow arm silently changes
+            # more than the spelling:
+            #   • LIVE-ONLY — `resolve_fold_name` reads live holders, so an
+            #     unfiltered probe would write a NEW `aboutObject` edge onto a
+            #     superseded/archived/retracted Object that every recall surface
+            #     excludes (and for `retracted`, the #689 direction).
+            #   • ATTACH TO EVERY carrier, like the Point anchor below (which
+            #     narrows with `AND o.name = $exact` and MERGEs per matching row) —
+            #     otherwise one payload with two exact carriers yields N Point
+            #     edges and ZERO Event edges, a family split no rule asks for.
+            # No ambiguity record is owed here: nothing is chosen between
+            # carriers (the pre-fix `_refuse` fired because a FOLD-WIDE resolver
+            # would have had to pick one, which is exactly what this arm avoids).
             _exact_rows = proj.g.query(
-                "MATCH (o:Object) WHERE o.name = $n RETURN o.id",
+                "MATCH (o:Object) WHERE o.name = $n AND "
+                f"{_terminal_excluded('o.status')} RETURN o.id",
                 params={"n": _name}).result_set
-            _resolved = (_exact_rows[0][0]
-                         if len(_exact_rows) == 1 and _exact_rows[0][0]
-                         else None)
+            _targets = [r[0] for r in _exact_rows if r and r[0]]
         else:
-            _resolved = resolve_fold_name(proj.g, "Object", _name,
-                                          context="session-commit aboutObject",
-                                          mention=True)
-        if _resolved:
+            _one = resolve_fold_name(proj.g, "Object", _name,
+                                     context="session-commit aboutObject",
+                                     mention=True)
+            _targets = [_one] if _one else []
+        for _oid in _targets:
             proj.g.query(
                 "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "
                 "MERGE (e)-[:aboutObject]->(o)",
-                params={"eid": _eid, "oid": _resolved},
+                params={"eid": _eid, "oid": _oid},
             )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel
@@ -21958,7 +21972,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         for name in pr.point.about_entities:
             if str(name) in subject_entity_names:
                 continue  # #1370: the gated binder owns aboutSubject (EXACT, per F6)
-            # #12120 finding 1: the anchor attached on the RAW `name` only, while
+            # #12120 about-anchor site: the anchor attached on the RAW `name` only, while
             # every writer resolves the FOLDED union (`name` · `canonical_name` ·
             # `aliases`, raw and folded). A point whose payload named a
             # fold-equivalent spelling of an already-registered Object therefore

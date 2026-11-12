@@ -786,8 +786,9 @@ _FOREIGN_KIND_PAYLOAD = {
     "operators": [], "chain_notes": [], "link_before_create": [],
 }
 
-#: Case-only divergence (F6): subject entity "The Team" and a legitimately
-#: cased Object "the team"; the exact-name skip must NOT drop the latter.
+#: A fold-equivalent VARIANT of a subject-kind name ("the acme corp" vs the
+#: declared Subject "Acme Corp"); the narrowed probe must not attribute a
+#: fold-only Object carrier.
 _FOLD_VARIANT_PAYLOAD = {
     "entities": [
         {"name": "Acme Corp", "kind": "organization", "lifecycle": "created",
@@ -802,7 +803,8 @@ _FOLD_VARIANT_PAYLOAD = {
     "operators": [], "chain_notes": [], "link_before_create": [],
 }
 
-
+#: Case-only divergence (F6): subject entity "The Team" and a legitimately
+#: cased Object "the team"; the exact-name skip must NOT drop the latter.
 _CASE_PAYLOAD = {
     "entities": [
         {"name": "The Team", "kind": "core:team", "lifecycle": "created",

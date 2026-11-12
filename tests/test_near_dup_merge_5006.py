@@ -794,7 +794,7 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
         linked = {r[0] for r in rows}
         assert linked == {team["id"], office["id"]}, linked
 
-        # …and the resolution is the WRITER's fold on purpose (#12120 finding 3).
+        # …and the resolution is the WRITER's fold on purpose (#12120 merge-attachment site).
         # ⛔ THIS CONTROL WAS RESTATED, not deleted. It used to assert that
         # `"office"` (lower-case) stayed UNRESOLVED against the Object `Office`,
         # citing "nothing else in the code base matches entity names that way".
@@ -1177,7 +1177,7 @@ if __name__ == "__main__":  # pragma: no cover - manual mutation aid
 
 
 class TestThe12120MergeAttachmentAsksTheWritersKeySpace:
-    """The merge attachment resolved on the RAW `name` (#12120 finding 3, P3).
+    """The merge attachment resolved on the RAW `name` (#12120 merge-attachment site, P3).
 
     `apply_merge_union` mirrors capture's attachment pass, and capture resolves the
     folded union (`name` · `canonical_name` · `aliases`, raw and folded). Reading

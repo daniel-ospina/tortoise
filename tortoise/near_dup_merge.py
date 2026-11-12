@@ -285,7 +285,7 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     ``{point_id (the SURVIVOR), about_entities (the union), ...}``.
 
     ``subject_names`` is the SUBJECT-KIND names the caller's payload declared
-    (capture's ``subject_entity_names``, ``sdk.py:11857``). They are SKIPPED —
+    (capture's ``subject_entity_names``, ``sdk.py:17618``, skipped at ``sdk.py:17937``). They are SKIPPED —
     see "the subject channel" below — and reported in ``skipped_subject``.
     Omitting it is safe rather than silently wider: with no set there is
     nothing to skip, which is exactly what a capture whose payload declares no
@@ -320,7 +320,7 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     lowering written into THIS query would be a second key space beside the
     writer's, and would equate spellings the fold does not.
 
-    #12120 finding 3: the pre-fix lookup was NARROWER than the write it mirrors.
+    #12120 merge-attachment site: the pre-fix lookup was NARROWER than the write it mirrors.
     `_entity_names` carries the union of names the CLAIMS mention, while the
     writer resolves them on the FOLDED union (`name` · `canonical_name` ·
     `aliases`, over the raw and the folded spelling), so a claim naming
@@ -346,7 +346,7 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
 
     Why the skip is by NAME and not by "resolution failed": an `:Object` may
     legitimately share a subject's EXACT name — that is why capture's own pass
-    skips on the name (`sdk.py:17655`) — and the shared spelling is what makes the
+    skips on the name (`sdk.py:17937`) — and the shared spelling is what makes the
     case ambiguous. So the lookup below RESOLVES in that case, and a write without
     this skip would attach the claim to an Object under a subject's name — the
     un-gated `aboutObject` edge capture deliberately refuses to write there
@@ -364,7 +364,7 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     than assumed — ⚠️ **but only for subject-kind names that appear in the
     union's `about_entities`.** A participant that reaches the claim through the
     point's SLOTS is dropped UNREPORTED: the ordinary path binds it via
-    `bind_point_subjects` (`sdk.py:12165`), a merge emits no payload point so
+    `bind_point_subjects` (`sdk.py:18023`), a merge emits no payload point so
     that call never runs for the candidate, and the slots are not carried onto
     the merge record. So "nothing it argued for is silently dropped" is true of
     OBJECT attachments, and for subject binding it holds only for the
@@ -414,7 +414,7 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     if not isinstance(names, (list, tuple, set, frozenset)):
         out["warnings"].append("merge record's about_entities is unreadable")
         return out
-    # #12120 finding 3: the writer's key space for an about-edge name. Lazy for
+    # #12120 merge-attachment site: the writer's key space for an about-edge name. Lazy for
     # the same import-cost reason as `link_entity` above (`entity_identity`
     # pulls `entity_resolver`, and this module is on every extractor import).
     try:
@@ -428,7 +428,7 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     # folds. Local import: this module must stay importable without
     # `entity_resolver` being pulled in eagerly (see the block above).
     from .entity_resolver import normalize_entity_name as _ndm_fold
-    # Capture's own skip (`sdk.py:17655`), applied here so a merge cannot write
+    # Capture's own skip (`sdk.py:17937`), applied here so a merge cannot write
     # an edge the SAME capture refuses to write on the normal route. The
     # comparison is made in the WRITER's key space (raw OR folded), because the
     # resolution below matches the folded union — an exact-only skip here would

@@ -908,7 +908,7 @@ _ALLOWED_OPERATOR = {
         # that selects an identity: the fold itself still goes through the
         # writer's key space, and the row it returns is only used as a boolean.
         '_subj_exact_ref = proj.g.query( f"MATCH (s:Subject) WHERE {_subj_ref_space} AND s.name = $ref " "RETURN s.id", params={**_subj_ref_params, "ref": ref}, ).result_set if _subj_ref_space else []': 1,
-        # ⛔ TWO ENTRIES REMOVED by #12120 finding 2 — the ref-side probes of the
+        # ⛔ TWO ENTRIES REMOVED by #12120 supersession-probe site — the ref-side probes of the
         # supersession fold (`o.name = $ref` / the #1423 Subject twin
         # `s.name = $ref`). Both were candidate-ENUMERATION reads over a key space
         # NARROWER than the write they describe, which is the same defect class as
@@ -978,7 +978,15 @@ _ALLOWED_OPERATOR = {
         # carrier would be the un-gated `#4934` edge, while F6's exact carrier
         # keeps its edge). Same disposition as the line above — the fold is the
         # writer's, and this only refuses a fold-only carrier.
-        '_exact_rows = proj.g.query( "MATCH (o:Object) WHERE o.name = $n RETURN o.id", params={"n": _name}).result_set': 1,
+        # #12120 review (round 7): the arm also carries the resolver's LIVE
+        # predicate (`live._terminal_excluded`, the Cypher deny-list behind the
+        # Python mirror `resolve_fold_name` reads), because narrowing the spelling
+        # must not silently widen the rest of the arm's contract: without it a
+        # fold-only reference with ONE exact carrier that is already
+        # superseded/archived/retracted would receive a NEW `aboutObject` edge no
+        # recall surface shows. Still an exactness + liveness TEST, never an
+        # identity pick — the caller attaches to EVERY surviving exact carrier.
+        '_exact_rows = proj.g.query( "MATCH (o:Object) WHERE o.name = $n AND " f"{_terminal_excluded(\'o.status\')} RETURN o.id", params={"n": _name}).result_set': 1,
     },
     'tortoise/session_link.py': {
         # D: the suffix probe already enforces EXACTLY-ONE (`if len(rows) == 1`),
@@ -988,7 +996,7 @@ _ALLOWED_OPERATOR = {
 }
 
 _ALLOWED_KEYED = {
-    # ⛔ NO ENTRY for `tortoise/commit_ops.py` (removed by #12120 findings 1/2).
+    # ⛔ NO ENTRY for `tortoise/commit_ops.py` (removed by the supersession-probe site).
     # Its successor and ref probes used to be raw `{name:$sb}` reads — a keyed
     # READ enumerating a NARROWER key space than the supersession fold resolves on
     # (`name` · `canonical_name` · `aliases`, raw and folded), so a fold-equivalent
@@ -996,7 +1004,7 @@ _ALLOWED_KEYED = {
     # They take their arms from `entity_identity.name_key_space_same_entity` now,
     # so there is no narrower coordinate left to excuse; the never-guess/visible-
     # successor gates are unchanged.
-    # ⛔ NO ENTRY for `tortoise/hosted_api.py` (removed by #12120 finding 1). The
+    # ⛔ NO ENTRY for `tortoise/hosted_api.py` (removed by the about-anchor site). The
     # hosted `about_entities` anchor attached on the RAW name only, so a
     # fold-equivalent spelling matched nothing and the `aboutObject` edge was
     # silently dropped. It still attaches to EVERY carrier (no identity is picked,
@@ -1104,7 +1112,7 @@ _ALLOWED_KEYED = {
         # sweep clear a pattern that no longer exists.
     },
     'tortoise/near_dup_merge.py': {
-        # ⛔ NO ENTRY (removed by #12120 finding 3). The merge attachment was a raw
+        # ⛔ NO ENTRY (removed by the merge-attachment site). The merge attachment was a raw
         # `{name:$n}` lookup — narrower than the write it mirrors, so a claim naming
         # a fold-equivalent spelling of a registered Object was reported
         # `unresolved` instead of linked. It takes its arms from

@@ -2035,7 +2035,7 @@ class TestThe12120ReadersOutsideTheEntityModule:
 
     ⛔ SCOPE — this class pins TWO of the nine migrated callers (`belief_timeline`,
     `file_human_approval`). It used to claim the whole set, which made a revert of
-    any of the other seven invisible; #12120 finding 4 measured that (2 of 9) and
+    any of the other seven invisible; #12120 coverage-gap finding measured that (2 of 9) and
     the remaining seven are pinned in
     :class:`TestThe12120Finding4TheUnpinnedMigratedReaders` below. Do not widen
     this docstring without adding the pins.
@@ -2504,7 +2504,7 @@ class TestThe12120AboutEdgeStubIsFoldAware:
 class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
     """The supersession fold resolved its endpoints on the RAW `name`.
 
-    #12120 finding 2 (P2): every write that produces a supersession record
+    #12120 supersession-probe site (P2): every write that produces a supersession record
     resolves the names on the WRITER's folded union (`name` · `canonical_name` ·
     `aliases`, over the raw and the folded spelling). The fold's probes did not,
     so a fold-equivalent SUCCESSOR was reported `dangling successor` / fed an
@@ -2557,7 +2557,26 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
             assert skips == [], skips
             assert not any("dangling successor" in m for m in msgs), msgs
             rows = self._row(sdk, "Object", "Widget")
-            assert rows and tuple(rows[0][1:]) == ("superseded", "the new widget"), rows
+            # #12120: the fold records the SUCCESSOR's own spelling, not the
+            # record's. `supersededBy` is read back BY NAME by every consumer
+            # that is not this fold — audit's 4b/4c carrier probes,
+            # `assembly._probe_visible_successors`, the renderer — and those
+            # reads are RAW, while the probe that found this successor is the
+            # writer's folded union. Recording "the new widget" would name NO
+            # node to them: #5370's harm ("no successor record found" about a
+            # live successor), re-created from the reader side.
+            assert rows and tuple(rows[0][1:]) == ("superseded", "New Widget"), rows
+            from tortoise.audit import audit_graph
+            issues = audit_graph(sdk._get_proj()).issues
+            assert [i for i in issues
+                    if i.issue_type == "superseded_by_unresolvable"] == [], (
+                "a fold-variant supersession must not read as an unresolvable "
+                "supersededBy")
+            assert not [i for i in issues
+                        if i.issue_type == "superseded_object_active_edges"
+                        and "no OTHER Object answers its supersededBy"
+                        in i.detail], (
+                "4b must still find the successor the fold recorded")
         finally:
             sdk.close()
 
@@ -2600,7 +2619,7 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
             assert skips == [], skips
             assert not any("dangling successor" in m for m in msgs), msgs
             rows = self._row(sdk, "Subject", "Old Team")
-            assert rows and tuple(rows[0][1:]) == ("superseded", "the new team"), rows
+            assert rows and tuple(rows[0][1:]) == ("superseded", "New Team"), rows
         finally:
             sdk.close()
 
@@ -2648,7 +2667,7 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
             assert applied == 1, (applied, skips, msgs)
             assert skips == [], skips
             rows = self._row(sdk, "Subject", "Old Team")
-            assert rows and tuple(rows[0][1:]) == ("superseded", "the new team"), rows
+            assert rows and tuple(rows[0][1:]) == ("superseded", "New Team"), rows
         finally:
             sdk.close()
 
@@ -2656,7 +2675,7 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
 class TestThe12120Finding1TheAboutAnchorAsksTheWritersKeySpace:
     """The SDK's local `about_entities` attachment loop resolved on the RAW name.
 
-    #12120 finding 1 (P2): its hosted twin (`hosted_api._execute_commit_writes`)
+    #12120 about-anchor site (P2): its hosted twin (`hosted_api._execute_commit_writes`)
     and this loop both did `MATCH (o:Object {name:$n})` while every write resolves
     the folded union. A captured claim naming a fold-equivalent spelling of an
     already-registered Object therefore matched NOTHING and the `aboutObject` edge
@@ -3104,7 +3123,7 @@ class TestThe12120ReviewRound3:
 class TestThe12120Finding4TheUnpinnedMigratedReaders:
     """Pins for the seven migrated callers the class above claimed but did not hold.
 
-    #12120 finding 4 (P3): `TestThe12120ReadersOutsideTheEntityModule`'s docstring
+    #12120 coverage-gap finding (P3): `TestThe12120ReadersOutsideTheEntityModule`'s docstring
     said every raw-key-space caller now goes through
     `resolve_entity_id_same_entity`, and pinned two of nine. A revert of any of the
     other seven was invisible. Each pin below uses a **folded-only** coordinate —

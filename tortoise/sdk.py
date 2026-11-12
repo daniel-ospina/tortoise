@@ -17585,16 +17585,18 @@ class TortoiseSDK:
         # `about_entities` topic channel below SKIPS subject-kind names (it
         # must not emit an un-gated aboutSubject, and it must not mint an
         # id-less Object stub for one).
-        # F6 (corrected, #12120 review round 3): the names come from payload
+        # F6 (corrected, #12120 review rounds 3-6): the names come from payload
         # entities whose KIND is a subject kind — the same population the
-        # resolver checks against — but the skip must be as WIDE as the
-        # resolution it guards. That resolution now asks the WRITER's key space
-        # (`name_key_space_same_entity`), so an exact-string membership test let a
-        # fold-equivalent spelling of a subject-kind name through (`"the acme
-        # corp"` beside a declared Subject `"Acme Corp"`) and attached an
-        # un-gated `aboutObject` to the fold-equal Object — the #4934 label leak
-        # this skip exists to prevent, on a spelling the pre-fix raw probe could
-        # not reach. Compare in the fold too.
+        # resolver checks against — and the SKIP stays EXACT (F6's rule: a
+        # legitimately-cased Object keeps its edge). The probe below, however, is
+        # FOLD-WIDE (`name_key_space_same_entity`), so a spelling that only
+        # FOLD-equals a declared subject-kind name (`"the acme corp"` beside a
+        # declared Subject `"Acme Corp"`) must be attributed to an EXACT-name
+        # Object only — otherwise a fold-equal Object takes the un-gated
+        # `aboutObject` edge the #4934 rule forbids, on a spelling the pre-fix raw
+        # probe could not reach. The fold therefore NARROWS THE LOOKUP; it never
+        # widens the skip (round 6 corrected round 4: dropping here is NOT free -
+        # it drops F6's case too).
         subject_entity_names: set[str] = set()
         subject_entity_names_folded: set[str] = set()
         # #11237: `{name: [(graph_id, kind), …]}` — every entity THIS capture
@@ -17956,7 +17958,7 @@ class TortoiseSDK:
                             # exactness, never a blanket skip.
                             _subject_fold_only = (
                                 _fold(_n) in subject_entity_names_folded)
-                            # #12120 finding 1: this twin of hosted_api's anchor
+                            # #12120 about-anchor site: this twin of hosted_api's anchor
                             # read the RAW `name` only, so a fold-equivalent
                             # spelling of an already-registered Object matched
                             # NOTHING and the `aboutObject` edge was silently
@@ -18003,7 +18005,7 @@ class TortoiseSDK:
                                 # dropped — live-only, honestly unjournaled —
                                 # over the SAME widened key space, or an
                                 # id-less holder reached by the folded spelling
-                                # would still lose its edge (#12120 finding 1).
+                                # would still lose its edge (#12120 about-anchor site).
                                 proj.g.query(
                                     f"MATCH (p:Point {{id:$pid}}), (o:Object) "
                                     f"WHERE ({_space}) "

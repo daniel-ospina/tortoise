@@ -881,15 +881,24 @@ def name_key_space_same_entity(var: str, name: str) -> tuple[str, dict]:
     ``s``, …). The returned clause is PARENTHESISED, so a caller composes it
     with ``AND`` directly.
 
-    Returns ``("", {})`` when there is nothing to match (a blank name and no
-    folded spelling) — a ZERO-ROW answer the caller must honour (skip the
-    query), never a degenerate ``WHERE ()``.
+    Returns ``("", {})`` when the name folds away — a ZERO-ROW answer the caller
+    must honour (skip the query), never a degenerate ``WHERE ()``.
+    ⛔ That is DELIBERATELY not the shape its twins over the same union use:
+    :func:`_name_holder_ids_same_entity` and
+    :func:`_live_holders_same_entity` fall back to a raw ``name`` read here
+    (``if not folded: return _read(g, label, name)``). The two answers cannot
+    disagree on a real graph — whitespace is the ONLY input
+    ``normalize_entity_name`` maps to ``""`` (``"the_"`` folds to ``"_"``, not to
+    empty), and a blank name is not a name any write door mints — so the
+    difference is cost, not semantics: an id-returning twin pays one query to
+    learn "no holder", while this props-returning helper hands the caller the
+    skip it would have taken anyway. A caller that ever needs the literal
+    whitespace match must ask for it explicitly, not rely on a silent fallback.
     """
     folded = normalize_entity_name(name) or ""
     if not folded:
-        # Blank (or everything-folds-away) name: there is no key space to derive
-        # — the return is the ZERO-ROW answer documented above, NOT a
-        # props-only clause. Answering `n.name = ''` here would match a
+        # Blank (or all-whitespace) name: the ZERO-ROW answer documented above,
+        # NOT a props-only clause. Answering `n.name = ''` here would match a
         # placeholder label nothing writes, and a caller that skipped the check
         # would run a query whose result means nothing.
         return "", {}
