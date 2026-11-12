@@ -147,14 +147,16 @@ def _wait_alive(pid: int, timeout: float = 5.0) -> None:
     """Wait for the pid to be RUNNING — ⚠️ in the sense `_pid_alive` means, which is NOT
     "the decoy is up".
 
-    ⛔ `Popen` RETURNS AFTER A SUCCESSFUL `execve` on CPython/Linux (the parent blocks on
-    the CLOEXEC errpipe), so this never samples a pre-exec fork: measured the instant
-    `Popen` returned, `/proc/<pid>/cmdline` carried OUR argv[0] in 38/40 spawns and was
-    unreadable in the other 2 — never the parent's. What it does sample is the few
-    milliseconds BETWEEN exec and a decoy's own death: against `executable=/bin/false`
-    (which execs and exits at once) every wait passed, 6/6, because the process is still
-    live when the wait looks. ⚠️ `posix_spawn` paths on other platforms may return
-    earlier, so this is a statement about this box's CPython, not a guarantee everywhere.
+    ⛔ `Popen` DOES NOT RETURN BEFORE `execve` on CPython/Linux (the parent blocks on the
+    CLOEXEC errpipe), so this never samples a pre-exec fork of THIS process. What it does
+    sample is the window right after exec: reading `/proc/<pid>/cmdline` the instant
+    `Popen` returned NEVER carried the parent's argv, but it CAN succeed and be EMPTY
+    while the child is state `R`, the same file reading our `argv[0]` microseconds later
+    (measured over 40-spawn samples: OUR argv 13-30, EMPTY 10-27 depending on spawn mode
+    and load — load-dependent, so not a constant to quote). Against `executable=/bin/false`
+    (execs and exits at once) every wait passed, 6/6, because the process is still live
+    when the wait looks. ⚠️ `posix_spawn` paths on other platforms may return earlier, so
+    this is a statement about this box's CPython, not a guarantee everywhere.
 
     Use `_await_exec` when the question is "does a row NAME what we spawned", which is
     what a census matcher and a human reading a failure both need.
@@ -189,10 +191,11 @@ def _await_exec(pid: int, argv0: str, timeout: float = 5.0) -> None:
         if not _pid_alive(pid):
             break
         time.sleep(0.05)
+    why = (f"the last row read for it named {seen!r}, not {argv0!r}" if seen
+           else "the table had no row for it")
     pytest.fail(
         f"decoy pid {pid} never showed a row starting {argv0!r} — the harness cannot "
-        f"measure (the last row read for it was {seen!r}, so it either died at exec or "
-        f"was already gone when the table was read)"
+        f"measure ({why})"
     )
 
 
@@ -1082,14 +1085,14 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
     state_dir.mkdir(parents=True, exist_ok=True)
     dead = subprocess.CompletedProcess([], 4, "", "pid 4242 is not running — nothing recorded")
 
-    sut_refusal = _script("record", "--name", "app", "--pid", "999999", env=state)
+    sut_refusal = _script("record", "--name", "app", "--pid", "99999999", env=state)
     assert sut_refusal.returncode == 4, (
         f"the harness cannot measure: the SUT must refuse a dead pid (rc 4): {sut_refusal.stderr}"
     )
     # ⛔ NO POLL HAPPENED FOR THESE FOUR, so the message must not claim a deadline
     # (`timeout=0.0`): one result came from a single `record` invocation and three are
     # fabricated outright.
-    liveness = _recorded(sut_refusal, 999999, state, timeout=0.0)
+    liveness = _recorded(sut_refusal, 99999999, state, timeout=0.0)
     assert "LIVENESS leg refused" in liveness, (
         "the SUT's own witness no longer parses — its wording moved and every arm is now "
         f"attributed to nothing: {liveness}"
@@ -1102,7 +1105,7 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
     # ⛔ NO POLL HAPPENED HERE, so the message must not claim a deadline. Pinned
     # positively — without this the `if timeout` guard could be dropped and every test
     # would still pass while the message claimed `for 0s` (measured before pinning).
-    assert "refused pid 999999:" in liveness, liveness
+    assert "refused pid 99999999:" in liveness, liveness
     assert "observed NOW" in liveness, liveness
 
     # ⛔ A witness for a DIFFERENT pid is not this refusal's arm. `cmd_record` writes
@@ -1174,12 +1177,15 @@ def test_the_record_poll_does_not_call_a_dead_pid_running(tmp_path: Path, state)
 def test_the_record_poll_retries_a_refusal_until_the_sut_answers(tmp_path: Path, state, monkeypatch) -> None:
     """#12039's mechanism itself: the FIRST refusal is not the verdict.
 
-    The window this fixes is not reproducible on demand (it is a scheduling gap between
-    `_wait_alive`'s `/proc` read and `record`'s `kill -0`), so it is pinned by STANDING IN
-    for it: the pid is alive and the SUT refuses exactly once. The poll must ask again
-    and take the second answer. Without the retry this sees one call and a refusal — so
-    deleting the loop cannot pass unnoticed, which is the failure mode a purely
-    environmental reproducer would leave untested.
+    The mechanism this pins is the LOOP, not an environmental race: on this file's own
+    account (`_record_when_running`) a live, signalable pid cannot be refused at all, so
+    the window it absorbs is the START-TIME read — which cannot be forced on demand. It is
+    therefore pinned by STANDING IN for it: the pid is alive and the SUT refuses exactly
+    once. The poll must ask again and take the second answer. Without the retry this sees
+    one call and a refusal — so deleting the loop cannot pass unnoticed, which is the
+    failure mode a purely environmental reproducer would leave untested. ⚠️ It does NOT
+    follow that the poll rescues a decoy that died: a refusal on the LIVENESS leg survives
+    every retry, by design.
     """
     victim = _spawn(["/bin/sleep", "60"], tmp_path)
     _wait_alive(victim.pid)

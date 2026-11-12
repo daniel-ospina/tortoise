@@ -3741,15 +3741,20 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     `executable=` runs this interpreter under the long path — exactly the argv[0] the
     matcher reads — with no dependence on a copied binary accepting its new name.
 
-    ⛔ A BOUNDED POLL, AND THE REASON IS NOT A FORK WINDOW (#12039, measured). `Popen`
-    returns only after a successful `execve` on CPython/Linux (the parent blocks on the
-    CLOEXEC errpipe), so a row naming this child exists as soon as the spawn returns —
-    measured on this box, `/proc/<pid>/cmdline` carried our argv[0] the instant `Popen`
-    returned in 38/40 spawns (the other 2 were already gone). What this test has actually
-    measured is worse for the one-shot form: at `70116a870dbb` the census redded with
-    `pids seen: []` AFTER the full 10 s poll, which a window cannot produce — a window
-    resolves inside the deadline, so that red was the FIXTURE (a copied multi-call
-    `sleep` that refuses its new name on `ubuntu-26.04`), which `executable=` fixes.
+    ⛔ A BOUNDED POLL, AND THE REASON IS NOT THE FORK WINDOW THIS ONCE CLAIMED (#12039,
+    measured). `Popen` returns after a successful `execve` on CPython/Linux (the parent
+    blocks on the CLOEXEC errpipe), and a `/proc/<pid>/cmdline` read taken the instant it
+    returned never carried the parent's argv — though it CAN be readable-and-EMPTY while
+    the child is state `R` (measured: 13-30 OURS / 10-27 EMPTY over 40-spawn samples,
+    load- and spawn-mode dependent). So a `/proc` read is not a witness that the row is
+    populated; a `ps` invocation costs ~43 ms here, which is why a poll on the TABLE (what
+    the census itself reads) is the shape that settles.
+
+    What this test has actually measured is worse for the one-shot form: at `70116a870dbb`
+    the census redded with `pids seen: []` AFTER the full 10 s poll, which a window cannot
+    produce — a window resolves inside the deadline, so that red was the FIXTURE (a copied
+    multi-call `sleep` that refuses its new name on `ubuntu-26.04`), which `executable=`
+    fixes.
 
     The poll is kept because it costs nothing on the green path and it makes a red
     legible (the deadline plus the table's own row, below), NOT because a race here was
