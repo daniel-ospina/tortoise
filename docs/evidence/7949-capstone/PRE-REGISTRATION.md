@@ -2505,6 +2505,9 @@ to answer.
   §8's rule for *any* edit to this file. The probe's cite and this document's cite are re-pointed
   TOGETHER so they cannot disagree about this anchor, which is the failure §10.25 was written to
   stop and this entry closes.
+- ⛔ **Superseded for the merged tree by §10.27.** The numbers above are the head this entry
+  measured; `29ec0f3471` inserted a net `+3` above the anchor and did not re-derive the cite,
+  so the live window is `:14248-14250`.
 
 ### 10.27 — the same §548 cite re-pointed once more, for this branch's own `+3` (2026-11-12, `#9752`)
 
