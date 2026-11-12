@@ -673,6 +673,52 @@ ALIAS_FORMS_STILL_BLIND: dict[str, tuple[str, dict[str, str], str, str]] = {
         "BODY executes, a method body does not until called, so the credited seam call never runs",
         "never-run nested scope",
     ),
+    # ⛔ The SPELLING axis (`#12020`): the gate credit is NAME-BASED on the literal path, so neither
+    # the shadow model nor `_ALIAS_HOMES` is consulted. Each pair below is the SAME code shape twice,
+    # once with a cosmetic `as` — and the two halves measure OPPOSITELY, which is the whole point.
+    "literal_seam_name_rebound_in_the_writer": (
+        "from tortoise.embeddings import encode_for_row\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    encode_for_row = lambda *a: a\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n'
+        "    return encode_for_row(text)\n",
+        {"tortoise.m::w": "gated"},
+        "the writer REBINDS the seam name in its own scope and calls the rebinding, so it reaches no "
+        "gate — `unresolved_write` is the right answer, and the ALIASED spelling of this same shape "
+        "measures it; the literal spelling is credited by `_callees`, which the shadow model never "
+        "filters",
+        "literal seam spelling",
+    ),
+    "literal_seam_name_from_a_FOREIGN_module": (
+        "from thirdparty.lib import encode_for_row\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n'
+        "    return encode_for_row(text)\n",
+        {"tortoise.m::w": "gated"},
+        "`_ALIAS_HOMES` exists to stop exactly this flip, and it guards only the ALIASED path: the "
+        "same import written `... as _enc` measures `unresolved_write`, so a cosmetic `as` is what "
+        "decides whether a foreign same-named function is credited as the gate",
+        "literal seam spelling",
+    ),
+    "literal_seam_name_shadowed_by_a_nested_parameter": (
+        "from tortoise.embeddings import encode_for_row\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    def helper(encode_for_row):\n"
+        "        return encode_for_row(text)\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n'
+        "    return helper(str.upper)\n",
+        {"tortoise.m::w": "gated", "tortoise.m::helper": "gated"},
+        "the round-7 nested-parameter shape, spelled WITHOUT the alias: `_named_callees` drops the "
+        "shadowed name correctly, but `_callees` re-adds the literal one, so the round-7 fix is "
+        "inert for this spelling — measured, and the aliased twin is `unresolved_write`",
+        "literal seam spelling",
+    ),
 }
 
 

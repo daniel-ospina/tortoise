@@ -342,8 +342,11 @@ visible for a DIFFERENT reason — `_EMBED_WRITE` matches the `embedding=None` i
 it is not evidence that a literal subscript is what gets a carrier seen; the writers that genuinely
 owe their visibility to `#11274`'s AST pass are the ones the container-key bullet above names as
 found — not every container-key declaration in the table. A writer is also
-excluded from the declaration requirement when discovery classes it `gated` (a bare call to anything
-*named* `encode_for_row`), `producer`, `duplicate` (two same-named defs in one module that BOTH
+excluded from the declaration requirement when discovery classes it `gated` (a call to anything
+*named* `encode_for_row` — the credit is NAME-BASED on the literal path, so it covers both a bare
+`Name` and an attribute call, and it is NOT filtered by the writer's own rebinding or by which
+module the name came from: named in `UNDECIDABLE_WRITE_SHAPES`, "literal seam spelling …" — a named
+residual, not a claim that the reach is real), `producer`, `duplicate` (two same-named defs in one module that BOTH
 reach `_put` — `_put` is only reached for a def discovery CLASSIFIES, so a colliding def that is a
 pure reader never reaches it and the discovered def's own kind stays in the map, leaving an
 `unresolved_write`/`ungated` sibling CAUGHT rather than excused; the test header's collision note

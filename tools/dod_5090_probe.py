@@ -353,6 +353,11 @@ _ALIASABLE_CALL_NAMES: frozenset[str] = (
 #: false PASS in the population rows 1-2 are scored on, i.e. `#11274`'s failure class re-created in
 #: the opposite direction (#12020 review round 3). Both the package-absolute and the bare spelling
 #: are accepted so a RELATIVE import (`from .embeddings import …`, `level > 0`) still resolves.
+#: ⛔ THIS MAP GUARDS THE ALIAS PATH ONLY, and it is not a guard on the literal spelling (measured,
+#: `#12020`): `_callees` credits a call by its NAME with no home check and no shadow check, so
+#: `from thirdparty.lib import encode_for_row` then `encode_for_row(text)` is `gated` — the flip this
+#: rationale describes is still one UN-ALIASED import away. Named in `UNDECIDABLE_WRITE_SHAPES`
+#: ("literal seam spelling …") rather than papered over.
 _ALIAS_HOMES: dict[str, frozenset[str]] = {
     "set_embedding_clause": frozenset({"tortoise.vector_write", "vector_write"}),
     "clear_then_set_prefix": frozenset({"tortoise.vector_write", "vector_write"}),
@@ -442,6 +447,24 @@ UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
         "pinned in `ALIASED_IMPORT_SHAPES` (`honest_closure_still_credits_the_gate`, "
         "`plain_control`): a writer with NO seam reach is `unresolved_write`, and the honest "
         "CLOSURE the writer does call keeps its `gated`."
+    ),
+    # ⛔ `#12020` — the SPELLING axis, and the widest one: on the literal path the gate credit is
+    # NAME-BASED, so neither the shadow model nor `_ALIAS_HOMES` is ever consulted.
+    "literal seam spelling (`encode_for_row`) bypasses the shadow model and `_ALIAS_HOMES`": (
+        "the caller builds its reach set as `_callees(node) | {aliases[name] for name in "
+        "_named_callees(node)}`, and `_callees` returns a call's `id`/`attr` with NO home check "
+        "and NO shadow check. Both guards therefore constrain the ALIASED spelling only, so the "
+        "same three shapes measure OPPOSITELY depending on a cosmetic `as`: a writer-local `_enc "
+        "= lambda` rebinding, a nested `def helper(…)` parameter, and `from thirdparty.lib "
+        "import encode_for_row` all measure `gated` — owed nothing — while their aliased "
+        "equivalents measure `unresolved_write`. Measured, one shape per process. Pre-existing "
+        "(`_callees` is byte-identical on `main`) and with NO live-tree instance: a latent "
+        "spelling, not a landed bypass. Named rather than repaired because closing it means "
+        "deciding, for a bare name, \"which binding does this call reach\" — the same call-graph "
+        "question as the entry above, on the same walk — and getting that wrong manufactures "
+        "declarations across the whole population (the cry-wolf direction). ⛔ An ATTRIBUTE call "
+        "`other.encode_for_row(…)` reaches `gated` here too, which is why the register no longer "
+        "says \"a bare call\"."
     ),
 }
 
@@ -712,6 +735,13 @@ def _named_callees(node) -> set[str]:
     (`def helper(): return _enc(text)`, where `_enc` really is the module alias, so the writer
     genuinely reaches the gate and `gated` is the right answer). The shadow is threaded DOWNWARD
     per scope instead — a name is dropped only inside the subtree that rebinds it.
+
+    ⛔ THIS SHADOW MODEL GOVERNS THE ALIAS PATH ONLY (measured, `#12020`): the caller credits the
+    LITERAL spelling from `_callees`, which this walk does not filter, so a writer that rebinds
+    `encode_for_row` in its own scope — or imports that name from a FOREIGN module — still reads
+    `gated`. The same two shapes spelled through an alias are `unresolved_write`, which is why the
+    asymmetry is not visible from reading this function alone. Named in
+    `UNDECIDABLE_WRITE_SHAPES` ("literal seam spelling …"), not resolved here.
 
     ⚠️ This walk answers SCOPE, and one neighbour of this bug is a CALL-GRAPH question it does not
     answer: a seam call inside a nested scope the writer never RUNS — a never-called nested `def`,
