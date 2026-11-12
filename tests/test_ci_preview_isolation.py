@@ -170,10 +170,15 @@ def _record_when_running(name: str, pid: int, env: dict[str, str],
 
     ⛔ THE SUT GRADES LIVENESS ITSELF. `record` decides with
     `preview-server.sh::pid_running` = `kill -0 <pid>` **and** `/proc` state != `Z`;
-    `_wait_alive` decides with `/proc` state alone. Proving with one predicate and
-    grading with another, once, with no second sample, is what let a loaded runner
-    report *"pid 8855 is not running"* while `/proc` had just called it RUNNING
-    (issue #12039; `test (a)` red on main at `4b1d6cd0d4`).
+    `_wait_alive` decides with the state letter alone. Read those two again: they are
+    the SAME question — exists, and is not a zombie — because `kill -0` succeeds for a
+    zombie and only the state letter rules it out. So one sample cannot disagree, and
+    the red this issue reports is a GAP IN TIME rather than a difference of predicate:
+    the decoy was alive when `_wait_alive` returned and gone by the time `record` had
+    finished spawning its shell (issue #12039; `test (a)` red on main at `4b1d6cd0d4`).
+    ⚠️ Said plainly because the issue's own first framing was "two predicates disagreed
+    about the same pid within the same millisecond" — that cannot happen; a later sample
+    can only differ if the process can come back, and this one cannot.
 
     ⚠️ WHAT THE POLL CAN AND CANNOT REPAIR — stated because the honest answer
     determines whether a red here blames the code or the box. Of `record`'s two
@@ -181,8 +186,10 @@ def _record_when_running(name: str, pid: int, env: dict[str, str],
     start time"); the LIVENESS arm (`kill -0` says ESRCH/EPERM, or the state letter
     is `Z`) is a process that is gone or a zombie, and no number of retries brings it
     back. So this is not a fix for "the decoy was OOM-killed on a thrashing runner" —
-    it is a fix for proving liveness with the same function that grades it, plus a
-    refusal that says WHICH leg refused so the next reader does not have to guess.
+    it is a bounded second look at the ONE retryable arm, plus a refusal that says
+    WHICH leg refused so the next reader does not have to guess. The time-gap arm that
+    produced the reported red stays open, and it is a capacity/dead-decoy question, not
+    a probe question.
 
     A refusal that survives the deadline stays a FAILURE: this is a bounded second
     look at a transient window, not a licence for a dead pid to go green.
