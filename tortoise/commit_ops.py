@@ -483,24 +483,36 @@ def apply_payload_operators(proj, sdk, operators: list, *,
         op_id = target_op_ids.get((t_src, t_dst, t_op_type))
         if op_id is None:
             # ⛔ THE BRIDGE MAY BE A COHERENCE OPERATOR (#12067 review round 4,
-            # P2). Both mechanisms are stored on the `:IMPL` edge type, so the
-            # EDGE half of this probe was always right and only the NODE filter
-            # (`op_type:'IMPL'`) excluded the third mechanism — every mitigation
-            # aimed at a necessity bridge missed its target and was dropped. The
-            # closed set guarantees AT MOST ONE of the two on a pair, so the
-            # widened match cannot double-resolve.
+            # P2), AND IT MUST CARRY THE MECHANISM THE TARGET DECLARES (#12067
+            # review round 13, P1). Round 4's widening stopped `coherence` being
+            # excluded, but it widened to a SET — and a set drops the half that
+            # made the declaration load-bearing: `t_op_type` is read from the
+            # payload and then used only in the `target_op_ids` key, never in the
+            # probe. A payload declaring IMPL therefore attached to a `coherence`
+            # bridge (and the mirror), silently, on exactly the pair the
+            # declaration was about — a mitigation that says "support" damping a
+            # necessity. Filtering on `$t` keeps `OperatorTarget.op_type`
+            # load-bearing; the EDGE half comes from the one declaration of the
+            # storage spelling, `ep.MECHANISM_REL_TYPES` (coherence shares
+            # `:IMPL` with IMPL; NAND lives on `:NAND`). The closed set
+            # guarantees at most one mechanism per pair, so neither the filter nor
+            # the parameter can double-resolve.
+            from tortoise.ep import MECHANISM_REL_TYPES
+            _bridge_rel = MECHANISM_REL_TYPES.get(t_op_type, "IMPL")
             rows = proj.g.query(
                 "MATCH (o:Point {is_operator:true}) "
-                "WHERE o.op_type IN ['IMPL', 'coherence'] "
+                "WHERE o.op_type = $t "
                 # ⛔ THE `WITH o` IS LOAD-BEARING (#6976): without it the
                 # predicate is dropped by the planner and the query returns
                 # OTHER points' rows — the same shape the bounded-relationship
                 # pin refuses everywhere else.
                 "WITH o "
-                f"MATCH (o)-[:IMPL {{idx:0}}]->(s) WHERE {epistemic_disjunction('s')} AND s.id = $src "
-                f"MATCH (o)-[:IMPL {{idx:1}}]->(d) WHERE {epistemic_disjunction('d')} AND d.id = $dst "
+                f"MATCH (o)-[:{_bridge_rel} {{idx:0}}]->(s) "
+                f"WHERE {epistemic_disjunction('s')} AND s.id = $src "
+                f"MATCH (o)-[:{_bridge_rel} {{idx:1}}]->(d) "
+                f"WHERE {epistemic_disjunction('d')} AND d.id = $dst "
                 "RETURN o.id LIMIT 1",
-                params={"src": t_src, "dst": t_dst},
+                params={"src": t_src, "dst": t_dst, "t": t_op_type},
             ).result_set
             op_id = rows[0][0] if rows else None
         if op_id is None:
