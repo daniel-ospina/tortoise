@@ -736,8 +736,13 @@ def _scope_bound_names(root: ast.AST) -> set[str]:
 def _alias_credit_rank(name: str) -> int:
     """How much a credited alias HELPS the writer stay visible — higher is safer (`#12020` round 8).
 
-    The rank is the collision rule in `_import_aliases`: when one local name resolves to two
-    primitives, the resolution must not depend on source order, so the higher rank wins.
+    The rank is `_import_aliases`' collision rule: when one local name resolves to two primitives,
+    the resolution must not depend on source order, so the higher rank wins.
+    ⛔ The SAME rank also arbitrates the MODULE↔WRITER merge in `_embedding_writers`
+    (`#12020` round 8 cycle 5), where the two candidates are not siblings in one map and neither is
+    necessarily LIVE — so a DEAD higher-rank binding beats a LIVE lower-rank one. That is
+    deliberate: every rank above `SEAM_CALL` keeps the writer inside `NEEDS_A_DECLARATION`, while
+    liveness is not knowable statically (`if TYPE_CHECKING:` is the idiom that made the point).
 
     * 2 — `WRITE_CLAUSE_BUILDERS`: the alias is the ONLY discovery signal, so the writer is
       discovered and owes a declaration.
@@ -4639,6 +4644,16 @@ def _sdk_methods_on_vector_leg(
                 # under-report direction this guard exists to narrow, not create
                 # (#11389 review). Comprehension scopes are skipped entirely.
                 if isinstance(n, _COMPREHENSION_NODES):
+                    continue
+                # ⛔ AND a LAMBDA is its own scope too (`#12020` round 8 cycle 6, P3). The two skips
+                # above were the only ones, so the walk descended into a lambda BODY and a walrus
+                # there (`f = lambda: (_pool := 1)`) landed in the METHOD's shadow set and suppressed
+                # a genuine by-reference mention of `_pool` further down — the UNDER-report
+                # direction, and the same asymmetry `#11397` closed one spelling over (nested `def`
+                # body vs comprehension body). `dis` confirms the lambda's walrus is `STORE_FAST` in
+                # the lambda, leaving the enclosing binding untouched. A lambda binds no NAME here,
+                # so there is nothing to add before `continue`.
+                if isinstance(n, ast.Lambda):
                     continue
                 if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
                     shadowed.add(n.id)

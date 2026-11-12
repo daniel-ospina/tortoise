@@ -4900,6 +4900,13 @@ def _byref_sdk_source() -> str:
         "    def lambda_default_is_the_enclosing_scope(self):\n"
         "        f = lambda v=_review_pool: v\n"
         "        return f()\n"
+        # ⛔ `#12020` round 8 cycle 6 (P3): the LAMBDA BODY is its own scope too, and the walk
+        # descended into it — a walrus INSIDE a lambda landed in the METHOD's shadow set and
+        # suppressed a genuine by-reference mention further down (the under-report direction). `dis`
+        # confirms `lambda: (x := 1)` binds `x` as the lambda's own fast local.
+        "    def walrus_inside_a_LAMBDA_does_not_shade_the_body(self):\n"
+        "        f = lambda: (_review_pool := 1)\n"
+        "        return _safe(_review_pool)\n"
         # ── `#11397` review: `*. __class__` is only the ENCLOSING class when the base is an
         # in-module receiver; a foreign object's class is not this module's method.
         "    def foreign_dunder_class_receiver(self, other):\n"
@@ -4987,6 +4994,9 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
               # in the enclosing scope, so it is a reach too.
               "lambda_param_does_not_shade_the_body",
               "lambda_default_is_the_enclosing_scope",
+              # ⛔ and the lambda BODY is its own scope: a walrus there is the lambda's local, so a
+              # mention of the same name in the enclosing method is still a reach (round 8 cycle 6).
+              "walrus_inside_a_LAMBDA_does_not_shade_the_body",
               # ⛔ `#12020` round 6 review (P3): `type(self)` is the receiver spelled through the
               # type — the positive half of the pair whose NEGATIVE (`type(other)`) is asserted
               # beside `other.__class__` above.

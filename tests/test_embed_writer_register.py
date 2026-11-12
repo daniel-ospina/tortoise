@@ -4412,7 +4412,8 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
     # `BUILDER_then_a_GATE` was ALREADY `unresolved_write` — the reversed-order CONTROL, red only
     # under the opposite "prefer the gate" wrong fix, which is what its own note says; the two
     # `UNGATED…SEAM` arms were `gated` under the builder-only rule; and the two cross-scope arms
-    # were `gated`/`producer` while the module and writer maps were merged UNRANKED.
+    # were `gated`/`ungated` while the module and writer maps were merged UNRANKED (the `producer`
+    # demotion needs the variant WITHOUT its own write clause, pinned separately below).
 
     # ⛔ `#12020` round 8 cycle 4 (P1) — the collision rule was BUILDER-ONLY, so a `SEAM_CALL` vs
     # `UNGATED_CALLS` collision (neither is a builder) still fell through to first-seen, which is
@@ -4448,8 +4449,9 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": text})\n'
         '    return _set("n")\n',
         {"tortoise.m::w": "unresolved_write"},
-        "the same cross-scope merge, one rank down: `producer`/`gated` here demoted a writer that "
-        "really calls the builder",
+        "the same cross-scope merge, one rank down: measured `ungated` here (INSIDE the guard) while "
+        "the maps were merged unranked, so the harm is the demotion this arm still catches, not a "
+        "hide",
     ),
     "one_local_name_bound_by_an_UNGATED_then_a_SEAM_import": (
         "from tortoise.embeddings import encode_for_store as _a\n"
