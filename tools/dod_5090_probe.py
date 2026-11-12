@@ -1129,6 +1129,18 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "docstring is still in the population (measured). `_EMBED_WRITE` reads raw source, so "
         "prose QUOTING the shape matches, as `tortoise.projection::_prewipe_synthetic_write_scope`'s "
         "does. It issues no write at all (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`)"),
+    "tortoise.api::_int_is_float_exact": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::_int_is_float_exact` — a pure PREDICATE (`float(value) == value`, "
+        "`#11996` review round 12), not a producer: it reads one `int` and returns a `bool`, "
+        "and issues no write of any kind (`NO_LIVE_VECTOR` in "
+        "`tortoise/embed_writer_register`). The instrument's only match is its DOCSTRING, "
+        "which QUOTES the measured refusal it exists to explain — `embedding=[2 ** 2000]` "
+        "under `f32` — and `_EMBED_WRITE` reads raw source, so prose reproducing the shape "
+        "matches, exactly as it does for `_verify_record_vector_width` above. ⛔ Not reworded "
+        "away: the instrument is deliberately over-inclusive (a bypass that reads as exempt "
+        "is the failure its population exists to prevent), so a prose match is READ and "
+        "CLASSIFIED here rather than silenced by editing the evidence out of the docstring"),
     "tortoise.consistency::_compare_views": (
         CENSUS_EXEMPT,
         "issues no write; the only WRITE-SHAPED text is a COMMENT in "
@@ -1278,6 +1290,18 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.api::add_point": (
         ("tortoise/api.py", "add_point",
          'p["embedding"] = fields["embedding"]'),),
+    "tortoise.api::_int_is_float_exact": (
+        # ⛔ The DOCSTRING's quoted REFUSAL is the entire reason this name is in
+        # the population: `_EMBED_WRITE` reads raw SOURCE, so the measured example
+        # the predicate's docstring records is what enrolled it. The needle is the
+        # refusal's own sentence — reword the example away and the function drops
+        # out of the population, which is why this is re-derived rather than
+        # assumed (`#11996` review round 17).
+        ("tortoise/api.py", "_int_is_float_exact",
+         "embedding=[2 ** 2000]` under `f32`"),
+        # …and the TOTALITY the row's class rests on: `float()` is undefined above
+        # ~1.8e308, so the refusal is a `ValueError` verdict and not a crash.
+        ("tortoise/api.py", "_int_is_float_exact", "except OverflowError:"),),
     "tortoise.api::_emit": (
         ("tortoise/api.py", "_emit", 'embedding="abc"'),
         # ⛔ NOT `stamp_journal_embedding =` — that needle matches the import-failure

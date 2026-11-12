@@ -952,6 +952,20 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
         ),
     ),
     (
+        "tortoise.api::_int_is_float_exact",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/api.py::_int_is_float_exact` — a pure PREDICATE: it reads one `int`, "
+            "returns `bool` (`float(value) == value`, `#11996` review round 12), and stores "
+            "nothing. The instrument's only match is its DOCSTRING, which QUOTES the measured "
+            "refusal it exists to explain (`embedding=[2 ** 2000]` under `f32`); "
+            "`_EMBED_WRITE` reads raw SOURCE, so prose reproducing a shape matches, as it does "
+            "for `tortoise.api::_verify_record_vector_width` above",
+            "#11835",
+            stores=NO_LIVE_VECTOR,  # the match is the DOCSTRING quoting a REFUSED shape
+        ),
+    ),
+    (
         "tortoise.consistency::_compare_views",
         WriterClass(
             EXEMPT,
