@@ -2153,6 +2153,28 @@ single `fixtures_hash`, its checker parses one criteria table and one machine re
 `measurement_visible_to_author` is per-row. A second registration would duplicate the corpus pin and
 split the gate, which is the failure shape `#10982` already refused for the `A`-rows.
 
+### 10.27 — the same §548 cite re-pointed once more, for this branch's own `+3` (2026-11-12, `#9752`)
+
+- **What redded.** `probes/capstone_measure.py:2989` carried
+  `tortoise/projection/__init__.py:14245-14247` from §10.26, and `29ec0f3471` ("name :PackSelection at
+  the last five enumeration sites") added one prose line each at `:3945`, `:4887` and `:10787` — all
+  ABOVE this anchor — moving `# Ensure pointKind is present (operators often lack it)` from `14245` to
+  `14248`. `tests/test_7949_capstone_measure.py::test_the_bundles_cites_resolve_where_the_bundle_says_they_do`
+  reported `projection_init.py:14245 reads 'clean["content"] = ('`, which carries none of the three
+  lines the cite names.
+- **New value — measured at this head, by opening the lines:**
+  `tortoise/projection/__init__.py:14248-14250` — `14248` is
+  `# Ensure pointKind is present (operators often lack it)`, `14249` is
+  `if "pointKind" not in clean:` and `14250` is `clean["pointKind"] = ""`.
+- **The offset is `+3`, and it is this branch's own**, not `main`'s: §10.26 measured `14245` at
+  `44d5942ee8`, and `git show 44d5942ee8:tortoise/projection/__init__.py | grep -n 'Ensure pointKind
+  is present'` returns `14245`. The `+3` is the three lines `29ec0f3471` inserted above the anchor.
+- **What moved: one citation, and nothing that is a protocol value.** No metric, denominator,
+  threshold, class set or corpus pin is changed — every §1-§9 criterion VALUE and the E4 denominator
+  are the ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for
+  *any* edit to this file, and the probe's cite and this document's cite are re-pointed TOGETHER so
+  they cannot disagree about this anchor.
+
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
 **Why this section exists.** `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5
