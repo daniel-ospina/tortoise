@@ -1274,8 +1274,12 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
     # (`#12015` review): a format composed independently here and in the projection is how one
     # of them moves and leaves the other's consumer classifying an edge as a record label.
     # Imported at the POINT OF USE, which is this module's own convention for reaching out
-    # (`alert_channel`, `record_backup`, `backup_sweep`, `hosted_api` all import from here the
-    # same way) — a DR verb should not pull another subsystem's import graph in at module
+    # (`hosted_api` at :496/:590, `backup_config` at :209 and `cypher_guard` at :2802 are
+    # all reached this way from HERE). ⛔ Four modules that import FROM `hosted_backup`
+    # (`record_backup`, `backup_sweep`, `hosted_api` at MODULE scope; `alert_channel` at
+    # point of use) are importers, not examples of this convention — an earlier draft of
+    # this comment cited them and three of the four are top-level imports. A DR verb
+    # should not pull another subsystem's import graph in at module
     # scope. There is no cycle here (`cache_projection` never imports `hosted_backup`), so
     # module scope would also work; this is the lighter of two valid choices, not a constraint.
     from tortoise.cache_projection import relationship_target

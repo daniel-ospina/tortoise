@@ -444,8 +444,8 @@ def _unserved_vector_reason(label: str) -> str:
 #: can never contain it: a comparison that is true by construction, i.e. a rule that
 #: cannot fail and so cannot be measured.
 #:
-#: ⚠️ AND WHY A FUNCTION AT ALL, given that it is snapshotted just like
-#: `UNSERVED_VECTOR_LABELS` — stated precisely, because an earlier draft of this note
+#: ⚠️ AND WHY A FUNCTION AT ALL, given that it reads a set that `from .stored_form import …`
+#: binds ONCE — stated precisely, because an earlier draft of this note
 #: claimed it was "read live and cannot drift" and that is FALSE (`#12015` review):
 #: :func:`stored_vector_props` returns this module's own `STORED_VECTOR_PROPS`, which
 #: `from .stored_form import …` binds ONCE at import, so rebinding the owner
@@ -517,8 +517,8 @@ def relation_vector_declined_properties() -> frozenset[str]:
     """The properties this projection refuses to store on a RELATIONSHIP — `#12015`.
 
     An alias of :func:`stored_vector_props` (see the note above for why a
-    relationship is refused unconditionally, for exactly how "alias" here is still
-    an import-time snapshot, and for the falsifier this name exists to give a handle
+    relationship is refused unconditionally, for exactly which half of "alias" here is
+    import-time, and for the falsifier this name exists to give a handle
     to). Empty is not a state this can return today; the seam exists so the RULE has a
     name, the two edge doors share one spelling of it, and the instrument's edge arm
     can be disabled by a test.

@@ -610,7 +610,38 @@ def test_the_row_two_MEASURES_the_EDGE_vector_door():
     row = probe.score_path_bullet()
     assert row.verdict == "MET", row.observed
     assert "cache projection RELATIONSHIP vector targets" in row.observed, row.observed
+    # ⛔ The POPULATION is PRINTED, not merely computed (`#12015` review, finding D): the
+    # key existed and nothing read it, so `relationships: []` and "the arm never ran" were
+    # the same printed evidence. Deleting this note entry now reds here.
+    assert "PLANTED ON and saw REFUSE" in row.observed, row.observed
     assert "stored-without-a-query-path: none" in row.observed, row.observed
+
+
+def test_an_EMPTY_edge_population_HOLDS_row_two_at_PARTIAL(monkeypatch):
+    """`#12015` review, finding D — an unrun edge arm is not a clean edge arm.
+
+    `relationships` is empty on the fixed tree by design, so the EMPTY SET carries no
+    information: it is the same value an arm that planted on nothing returns. The
+    published row therefore reports the POPULATION it planted on and saw refused, and
+    holds itself at `PARTIAL` when that population is empty.
+
+    ⛔ Driven by emptying the ALLOWLIST rather than the decline: emptying the decline
+    stores the planted vector and the row goes `NOT MET` first (precedence, asserted
+    next door), which would make this arm pass for the wrong reason.
+    """
+    import tortoise.security as security
+
+    monkeypatch.setattr(security, "KNOWN_REL_TYPES", frozenset())
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert measured["relationships_probed"] == frozenset(), (
+        "the arm reports a population it never planted on: "
+        f"{sorted(measured['relationships_probed'])}")
+    row = probe.score_path_bullet()
+    assert row.verdict == "PARTIAL", (
+        "an empty edge population was read as clean — 'no relationship stores a vector' "
+        f"and 'the edge arm never ran' are the same answer again: {row.observed}")
+    assert "PLANTED ON and saw REFUSE" in row.observed, row.observed
 
 
 def test_re_introducing_an_EDGE_vector_flips_row_two_to_NOT_MET(monkeypatch):
@@ -7235,7 +7266,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # 152 — deleting that line left `3 failed, 148 passed, 1 skipped` in a scratch
     # copy, byte-identical to the UNMUTATED copy's three repo-context failures,
     # i.e. the removal redded NOTHING. ⛔ The count is SCOPED to that head rather
-    # than re-cut, because this file collects 173 now and no run of it can report
+    # than re-cut, because this file collects 174 now and no run of it can report
     # 152; an unscoped figure here would be the stale-measurement defect §6 of the
     # census doc exists to forbid. What closed the gap is the AST guard below —
     # measured at this tree, deleting the same line ADDS exactly one failure over
@@ -7307,11 +7338,11 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `172 passed, 1 skipped`
+    defect. Measured at this tree: the docker lane reads `173 passed, 1 skipped`
     (the skip is the `<3.12` re-derive) and the carve-out lane reads
-    `171 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
+    `172 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
     fixture, which only a lane with a `TORTOISE_DB_URI` satisfies). Both splits add
-    to the `173` re-derived below, which is why the doc states its split as
+    to the `174` re-derived below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
     root = Path(probe.__file__).resolve().parent.parent
