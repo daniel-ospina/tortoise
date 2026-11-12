@@ -301,9 +301,9 @@ only leg whose pin is about speed, and the mitigation buys it nothing (above):
   `/etc/apt/sources.list.d/tortoise-12051-pgdg.list` and `/etc/apt/keyrings/tortoise-12051-pgdg.asc` —
   and an `EXIT` trap removes exactly those plus the `mktemp`'d key file. ⚠️ STEP-PRIVATE ON PURPOSE:
   keying removal on "did it pre-exist" was measured wrong the other way (an operator `pgdg.list` with
-  no keyring at the shared path was rewritten onto one the trap deleted, leaving an unverifiable
-  source). ⚠️ Also remaining: the installed `postgresql-client-16` and its closure STAY, and a box
-  already carrying PGDG sees a duplicate-suite warning (not a failure). The trap exists because
+  no keyring at the shared path was rewritten onto one the trap deleted). ⚠️ A box that ALREADY
+  configures PGDG is reused, not duplicated (a second stanza for the same suite with a different
+  `Signed-By` makes apt refuse the whole list); the installed client STAYs. The trap exists because
   the job is POOL-ELIGIBLE, and a leftover sources file changes apt resolution for every later job on
   the same box; outliving its keyring, it would turn the next job's `apt-get update` into the very
   soft failure the ORIGIN check exists to catch.
@@ -981,7 +981,7 @@ job itself:
   self-hosted runner lost communication with the server"*. The zero-step count is the
   discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
   investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
-  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5287`) buys no landing:
+  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5302`) buys no landing:
   the rail blocks on any red on the PR's tree, so this one costs a re-run.
 
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to ONE job whose red costs a
