@@ -48,6 +48,13 @@ into the NIGHTLY main-health report and not into a per-PR check —
 ⛔ The pattern requires DIGITS (`[0-9]+`, not `[0-9]*`). The `*` form also matches a
 bare `hosted_api.py:` and `sort -u` then counts that empty run as one more target —
 that is exactly how the count was briefly "re-measured" from 449 to 450.
+
+⛔ A cite target is a TOKEN that IS ``hosted_api.py:<n>``. ``tests/test_hosted_api.py:22``
+is a cite of the TEST file, not of `hosted_api.py` line 22, and counting those
+overstated the population by 16 distinct targets and 6 citing files while quoting
+a floor (``22``) that no bare cite targets (#11850). The boundary is applied with
+``fullmatch`` in `census`, and the tokens it declines are counted into
+``non_cite_tokens`` so the definition's cost is reported rather than silent.
 """
 from __future__ import annotations
 
@@ -68,9 +75,30 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-#: The one pattern that defines a "cite target". DIGITS REQUIRED — see the module
-#: docstring for the `*` footgun.
+#: The DEFINITION of a cite target: a token that IS ``hosted_api.py:<n>``.
+#:
+#: ⛔ A token that merely ENDS with it — ``tests/test_hosted_api.py:22`` — is a cite
+#: of a DIFFERENT file. Counting those overstated the population by 16 distinct
+#: targets (456 for 440) and 6 citing files, and it quoted a floor of ``22`` that
+#: named a line no bare cite targets (#11850). The boundary is enforced by
+#: ``fullmatch`` in `census`, never by suffix-matching the file name.
+#:
+#: ⚠️ TWO patterns, and the split is FORCED: ``git grep -E`` is POSIX ERE, which
+#: has NO lookbehind, so the left boundary cannot be expressed on the grep side.
+#: ``_CITE_CANDIDATE_RE`` is therefore deliberately PERMISSIVE on the left — it
+#: captures any run of filename characters before the basename — and the Python
+#: side decides which candidates are actually cites. DIGITS REQUIRED in both (see
+#: the module docstring for the ``[0-9]*`` footgun).
+#:
+#: ⚠️ A PATH-QUALIFIED cite IS counted: the candidate class excludes ``/``, so
+#: ``git grep -o`` starts its match after the slash and ``tortoise/hosted_api.py:<n>``
+#: arrives as ``hosted_api.py:<n>`` — same file, same absolute line, so it belongs in
+#: the population. This is stated because the obvious later "tighten the boundary"
+#: edit (admitting ``/`` into the class) would silently drop those targets and force
+#: a note refresh with nothing to explain it. No count is frozen here on purpose: it
+#: moves with every new qualified cite, and `census()` is the verb that measures it.
 CITE_RE = r"hosted_api\.py:[0-9]+"
+_CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 
 #: The line the two notes are written around: the ONE production execution site of
 #: `LIFETIME_MEMORY_QUERY`. ⚠️ A FALLBACK, not the source: every shipped path
@@ -142,22 +170,33 @@ def census(pivot: int = DEFAULT_PIVOT, repo: Path = REPO) -> dict:
     failure, and the fast test's collapse floor is what decides whether an empty
     one is acceptable. Only rc >= 2 is a real error.
     """
+    # ONE `git grep` answers both questions: `-o` without `-h` prints
+    # `path:matched-text`, and git puts the path first, so the FIRST colon
+    # separates it from the token (no tracked path contains a colon — measured, and
+    # a path that did would yield a token failing `fullmatch` below, i.e. an
+    # undercount this function reports as `non_cite_tokens`, never a miscount).
     proc = subprocess.run(
-        ["git", "grep", "-o", "-h", "-E", CITE_RE],
+        ["git", "grep", "-o", "-E", _CITE_CANDIDATE_RE],
         cwd=str(repo), capture_output=True, text=True, check=False,
     )
     if proc.returncode > 1:
         raise SystemExit(
             f"hosted_api_cite_census: `git grep` failed in {repo}: {proc.stderr!r}")
-    targets = sorted({int(tok.rsplit(":", 1)[1]) for tok in proc.stdout.split()})
 
-    files = subprocess.run(
-        ["git", "grep", "-l", "-E", CITE_RE],
-        cwd=str(repo), capture_output=True, text=True, check=False,
-    )
-    if files.returncode > 1:
-        raise SystemExit(
-            f"hosted_api_cite_census: `git grep -l` failed: {files.stderr!r}")
+    targets_seen: set[int] = set()
+    citing_files: set[str] = set()
+    non_cite = 0
+    for line in proc.stdout.splitlines():
+        path, _, token = line.partition(":")
+        if not token:
+            continue
+        if not re.fullmatch(CITE_RE, token):
+            # e.g. `tests/test_hosted_api.py:22` — a cite of a different file.
+            non_cite += 1
+            continue
+        citing_files.add(path)
+        targets_seen.add(int(token.rsplit(":", 1)[1]))
+    targets = sorted(targets_seen)
 
     below = [n for n in targets if n < pivot]
     above = [n for n in targets if n > pivot]
@@ -167,7 +206,10 @@ def census(pivot: int = DEFAULT_PIVOT, repo: Path = REPO) -> dict:
         "below_pivot": len(below),
         "above_pivot": len(above),
         "at_pivot": sum(1 for n in targets if n == pivot),
-        "citing_files": len([ln for ln in files.stdout.splitlines() if ln.strip()]),
+        "citing_files": len(citing_files),
+        #: tokens the permissive grep found that are NOT cites of this file. Report
+        #: them so the definition's cost is visible instead of silent (#11850).
+        "non_cite_tokens": non_cite,
         "min_target": below[0] if below else None,
         "max_below": below[-1] if below else None,
         "above_min": above[0] if above else None,
@@ -340,6 +382,8 @@ def main(argv: list[str] | None = None) -> int:
           f"({data['above_min']} … {data['max_above']})")
     print(f"  at the pivot       {data['at_pivot']}")
     print(f"  citing files       {data['citing_files']}")
+    print(f"  not a cite         {data['non_cite_tokens']} token(s) name a "
+          f"different file (e.g. `tests/test_hosted_api.py:<n>`)")
     print(f"  pivot is the LIFETIME_MEMORY_QUERY site: "
           f"{data['pivot_is_lifetime_site']}")
     return 0

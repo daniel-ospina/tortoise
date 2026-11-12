@@ -47,6 +47,7 @@ the P1 regression pin (`STARTS WITH` on a non-string id).
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -816,6 +817,70 @@ def _census_tmp_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         dest.write_text(_src(rel), encoding="utf-8")
     monkeypatch.setattr(census_mod, "REPO", tmp_path)
     return tmp_path
+
+
+def test_the_census_counts_cites_of_this_file_and_not_of_its_lookalikes(tmp_path):
+    """A token that merely ENDS with the basename is a cite of a DIFFERENT file.
+
+    Why this exists (#11850): ``CITE_RE`` was ``hosted_api\\.py:[0-9]+`` with no
+    left boundary, so ``tests/test_hosted_api.py:22`` counted as a cite of
+    ``hosted_api.py`` line 22. That overstated the shipped population by 16
+    distinct targets and 6 citing files, and it quoted a floor (``22``) naming a
+    line no bare cite targets — in two prose notes whose whole justification is
+    that their figures are MEASURED.
+
+    The boundary cannot be expressed on the grep side (``git grep -E`` is POSIX
+    ERE: no lookbehind), so the tool greps PERMISSIVELY and decides with
+    ``fullmatch``. This arm pins that decision: it builds a throwaway repository
+    holding one genuine cite and one lookalike, and asserts the lookalike is
+    counted nowhere — not as a target, not as a citing file.
+
+    REDS IF: the population is matched by suffix again (targets 1 -> 2, citing
+    files 1 -> 2, ``non_cite_tokens`` 1 -> 0), which is the defect #11850 records.
+    """
+    from tools import hosted_api_cite_census as census_mod
+
+    repo = tmp_path / "census_repo"
+    (repo / "docs").mkdir(parents=True)
+    (repo / "tortoise").mkdir(parents=True)
+    (repo / "tests").mkdir(parents=True)
+    # `census()` also derives the pivot from the tree, so the throwaway repo needs
+    # the module it reads: the call must sit on the pivot line this arm passes.
+    (repo / "tortoise" / "hosted_api.py").write_text(
+        "\n" * 9 + "    rows = graph.query(LIFETIME_MEMORY_QUERY, params)\n",
+        encoding="utf-8",
+    )
+    # ⛔ IN TWO DIFFERENT FILES, so the `citing_files` assertion can discriminate.
+    # Both tokens in one file leaves `citing_files` at 1 whether the lookalike is
+    # counted or not — an assertion the mutant survives reads as coverage
+    # (measured: it survived a boundary-only mutant).
+    #
+    # ⛔ And BUILT, never written as a literal: the census greps EVERY tracked
+    # file, so a `hosted_api.py:<n>` literal in this file would itself join the
+    # measured population and move the very figures the notes state (measured: it
+    # took 442 -> 443 distinct and quoted a floor of 10).
+    (repo / "docs" / "notes.md").write_text(
+        "a real cite " + "hosted_api.py:" + "10" + "\n", encoding="utf-8")
+    (repo / "tests" / "lookalike.md").write_text(
+        "a lookalike " + "tests/test_hosted_api.py:" + "22" + "\n",
+        encoding="utf-8",
+    )
+    # `git grep` reads the INDEX, so the file must be tracked; no commit needed.
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+
+    data = census_mod.census(10, repo=repo)
+
+    assert data["distinct_targets"] == 1, (
+        f"the lookalike `tests/test_hosted_api.py:22` was counted as a cite of "
+        f"`hosted_api.py`: {data!r}")
+    assert data["citing_files"] == 1, (
+        f"the lookalike's file was counted as citing `hosted_api.py`: {data!r}")
+    assert data["non_cite_tokens"] == 1, (
+        "the declined token is not reported: the definition's cost would be "
+        f"invisible instead of stated — {data!r}")
+    assert data["at_pivot"] == 1 and data["below_pivot"] == 0, (
+        f"the one genuine cite must be the pivot itself: {data!r}")
 
 
 def test_the_census_check_verb_reds_on_a_stale_figure(tmp_path, monkeypatch):
