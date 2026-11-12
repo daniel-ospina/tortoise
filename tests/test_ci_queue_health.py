@@ -2913,6 +2913,11 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # incompatible causes. Nothing pinned this text (the alert is a shell `echo`, not a
         # Python reason line), so the reword was silent — a revert measured GREEN.
         ("workflow", "so the count is an UPPER BOUND on executing work rather than a census of it"),
+        # ⛔ AND THE HEADER'S OWN CAUSE (c), same class one paragraph up (#12166 review round 17).
+        # It attributed the unwitnessed census to "#12037's own defect returned by the probe
+        # budget" while naming a NON-budget lever two sentences later. Reverting the whole
+        # passage to that text measured GREEN at this head, i.e. the correction had no leg.
+        ("workflow", "layers (the callee's read, the CALLER's settle gate, and the probe BUDGET)"),
         # ⛔ AND THE MODULE DOCSTRING'S cause (c), the same defect one surface over (#12166
         # review round 15). It named the three routes and then concluded "so that count is the
         # pre-#12037 status-string census" — which contradicts the route list in the SAME
@@ -2922,10 +2927,15 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         ("module", "pr_running count in this state is an UPPER BOUND on executing work"),
         # ⛔ AND THE GLOSSES THAT ONLY A MAINTAINER READS — pinned because the delta's own rule
         # is that a corrected claim needs a leg, and these had none (#12166 review round 16).
-        # The `--help` one is EMITTED (argparse's description), i.e. operator-visible; a revert
-        # of any of the three measured GREEN while the suite stayed at 157 passed.
+        # The `--help` one is EMITTED (argparse's description), i.e. operator-visible; the rest
+        # are property and inline comments. ⛔ NO COUNT IS GIVEN HERE: a numeral in this comment
+        # goes stale before the list it describes does, which is the same reason no other count
+        # in this file is quoted. Every read-only gloss the one-half correction touched has an
+        # entry below, and reverting any ONE of them REDs.
         ("module", "read, or whose read did not PROVE them idle — a count, not a proof"),
         ("module", "whose jobs were never read, or whose read did not PROVE them idle) but the oldest"),
+        ("module", "that count may be runs whose jobs could not be read, or"),
+        ("module", "count may be made entirely of runs whose jobs could not be read, or of runs whose"),
     ]
     # ⛔ PER-FILE, NOT "SOMEWHERE" (review NIT, round 11). The comments above name a SITE, so
     # a presence check over all four surfaces passes when the named site loses the clause and
