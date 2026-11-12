@@ -55,7 +55,7 @@ JOB = "test-record-postgres"
 #: extension (#11642), so a plain `postgres:NN` pin cannot substitute for one of
 #: these — but reading BOTH forms keeps this guard's message about the major
 #: rather than about the spelling.
-IMAGE_RE = re.compile(r":(?:pg)?(\d+)$")
+IMAGE_RE = re.compile(r":(?:pg)?(\d+)(?:[-_][A-Za-z0-9._-]*)?$")
 CLIENT_PKG_RE = re.compile(r"postgresql-client-(\d+)\b")
 
 #: The `$GITHUB_PATH` write as ONE unit: the versioned dir IS the value written.
@@ -66,23 +66,37 @@ GITHUB_PATH_PREPEND_RE = re.compile(
     r"\s*>>\s*['\"]?\$\{?GITHUB_PATH\}?['\"]?"
 )
 
-#: Anything that puts a value on the job's path, with the PRODUCER not assumed
-#: (#12051 review round 6). `GITHUB_PATH_PREPEND_RE` above spells `echo`, so a
-#: write by any other producer was invisible: measured, a later step running
-#: `printf '%s\n' /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"` (and the same
-#: through `tee -a`, and a plain `echo "/usr/bin" >> "$GITHUB_PATH"`) left all
-#: five rows GREEN while the leg resolved `pg_dump` from pg17 — the #12051
-#: artifact, restored. The redirect (`>`/`>>`) and `tee` are the two ways a
-#: shell can reach that file, so this detector reads the WRITE and the
-#: assertion then requires the write to be one the guard can CLASSIFY.
-GITHUB_PATH_WRITE_RE = re.compile(
-    r"(?:>>?|\btee\b[^\n]*?)\s*['\"]?\$\{?GITHUB_PATH\b"
-)
+#: ANY mention of `$GITHUB_PATH` in the job's code (#12051 review rounds 6 and
+#: 7). Round 6 detected the WRITE (`>`, `>>`, `tee`) and still missed both a
+#: file-name indirection (`gp="$GITHUB_PATH"; echo … >> "$gp"`) and a
+#: backslash-continued redirect (`>> \` then `"$GITHUB_PATH"`), each measured
+#: GREEN while the leg resolved pg17. A mention needs no guess about the
+#: producer or the redirect: every mention must BE the one classified write, and
+#: any mention the guard cannot classify is refused. Measured against the source:
+#: this job's only mention is the pin's own append, so the rule costs nothing.
+#:
+#: STATED LIMIT: this reads the job's inline `run:` script text (with comment
+#: lines and trailing comments stripped, and backslash continuations joined). It
+#: does NOT follow an invoked script — `run: bash .github/scripts/x.sh` where
+#: `x.sh` appends to `$GITHUB_PATH` is invisible, and no in-repo script this job
+#: calls does that today (`grep -n GITHUB_PATH .github/scripts/pytest-attribution.sh
+#: .github/scripts/record-postgres-leg-gate.py` → none).
+GITHUB_PATH_MENTION_RE = re.compile(r"\$\{?GITHUB_PATH\b")
 
-#: The fail-closed branch as ONE unit (#12051 review rounds 4 and 6): the `if`
-#: line that compares `$major`, its body, and its `fi`. "`::error::` and `exit
-#: 1` appear somewhere in the step" is NOT the claim — `if false && [ "$major"
-#: != "16" ]; then` keeps both tokens in the text and can never fire.
+#: A versioned client directory named ANYWHERE in the job's code (#12051 review
+#: round 7): the `$GITHUB_PATH` write is not the only way to put a client on the
+#: leg's PATH — the LEG's own script can `export PATH="/usr/lib/postgresql/17/bin:$PATH"`
+#: and, because the step's own assignment runs after the runner composes the
+#: prepend (actions/runner `Handler.AddPrependPathToEnvironment` → `ScriptHandler`),
+#: that export WINS. Measured GREEN before this rule, with the in-job
+#: `pg_dump --version` assertion still printing 16 because it lives in the PIN
+#: step. So no line in this job may name a major other than the servers'.
+CLIENT_DIR_RE = re.compile(r"/usr/lib/postgresql/(?P<major>\d+)/bin")
+
+#: The fail-closed branch as ONE unit (#12051 review rounds 4, 6 and 7): the
+#: `if` line that compares `$major`, its body, and its `fi`. "`::error::` and
+#: `exit 1` appear somewhere in the step" is NOT the claim — `if false && [
+#: "$major" != "16" ]; then` keeps both tokens in the text and can never fire.
 #: ⛔ THE BODY MAY NOT CONTAIN NESTED SHELL STRUCTURE. It used to stop at the
 #: FIRST `fi`, so a nested `if false; then echo ::error::…; exit 1; fi` inside
 #: the branch satisfied both tokens while the outer branch could never be
@@ -90,6 +104,11 @@ GITHUB_PATH_WRITE_RE = re.compile(
 #: Refusing the structure lines rather than counting nesting keeps this a text
 #: guard: the branch must be FLAT, and a message that merely says "if" is not a
 #: structure line.
+#: ⛔ AND THE STOP IS ANCHORED, not a substring (#12051 review round 7):
+#: `false && exit 1` and `bail() { exit 1; }` both CONTAIN the token while the
+#: branch announces and continues — measured GREEN, step exit 0, leg on the
+#: inherited client. `FAIL_CLOSED_ANNOUNCE_RE` / `_STOP_RE` below read whole
+#: lines for that reason.
 FAIL_CLOSED_BRANCH_RE = re.compile(
     r'^[ \t]*if[ \t]+\[[ \t]*"\$major"[ \t]*!=[ \t]*"(?P<major>\d+)"[ \t]*\][ \t]*;'
     r'[ \t]*then[ \t]*\n'
@@ -98,6 +117,11 @@ FAIL_CLOSED_BRANCH_RE = re.compile(
     r'[ \t]*fi[ \t]*$',
     re.MULTILINE,
 )
+
+#: The two things the armed branch must DO, each anchored to its own line so
+#: that a line which merely contains the token does not satisfy it.
+FAIL_CLOSED_ANNOUNCE_RE = re.compile(r'^[ \t]*echo[ \t]+["\']::error::', re.MULTILINE)
+FAIL_CLOSED_STOP_RE = re.compile(r"^[ \t]*exit 1[ \t]*$", re.MULTILINE)
 
 
 @pytest.fixture(scope="module")
@@ -145,47 +169,68 @@ def _run_code(step: dict) -> str:
 
 
 def _run_commands(step: dict) -> str:
-    """`_run_code()` with trailing comments removed, for line-as-a-unit searches.
+    """`_run_code()` with trailing comments removed and continuations joined.
 
     ` #…` (whitespace before the `#`) is the shell's comment start outside
     quotes, which is what every call site needs: they match a whole write/entry
     line, and a trailing comment there is either a tombstone (the value it
     names is NOT what runs) or noise (the capstone's name in the pin step).
+
+    A BACKSLASH CONTINUATION IS JOINED first (#12051 review round 7): measured,
+    `echo "/usr/lib/postgresql/17/bin" >> \\` on one line and `"$GITHUB_PATH"`
+    on the next left every row GREEN, because a per-line scan sees neither a
+    write nor a mention. It is one shell command, so it is read as one line.
+
     STATED LIMIT: a `#` inside a quoted string is not special-cased — it is
     only reached here when a line quotes a literal `#` AND names one of the two
     paths, which then reds rather than silently passing.
     """
 
+    joined = _run_code(step).replace("\\\n", " ")
     return "\n".join(
         re.split(r"\s+#", line, maxsplit=1)[0]
-        for line in _run_code(step).splitlines()
+        for line in joined.splitlines()
     )
 
 
 def _github_path_writes(steps: list[dict]) -> list[tuple[int, str, int | None]]:
-    """Every `$GITHUB_PATH` write in the job, as `(step, line, major | None)`.
+    """Every `$GITHUB_PATH` MENTION in the job, as `(step, line, major | None)`.
 
-    `major` is `None` when the guard cannot CLASSIFY the write — a producer it
-    does not read, a directory it cannot see, a value built at runtime. Both
-    assertions below refuse that, because an unclassifiable write is exactly the
-    fail-open this guard exists to remove: the branch could be pointed at
-    another major and every row would stay green (#12051 review round 6,
-    measured on `printf`/`tee -a`/a plain `/usr/bin` append in a later step).
-
-    STATED LIMIT: `$GITHUB_PATH` is read from the step's CODE with trailing
-    comments stripped, so a write assembled indirectly (`d=/usr/lib/postgresql/17
-    /bin; echo "$d" >> "$GITHUB_PATH"`) is detected as a WRITE and refused as
-    unclassifiable rather than silently passed — the refusal is the point, and
-    the remedy is a literal write the guard can read.
+    `major` is `None` when the guard cannot CLASSIFY the mention — a producer it
+    does not read, a directory it cannot see, a value or FILE NAME built at
+    runtime, a redirect split across lines. Round 6 detected only the WRITE
+    (`>`, `>>`, `tee`) and spelled the producer `echo`-or-redirect, and two
+    spellings were then measured GREEN while the leg ran on pg17: a file-name
+    indirection (`gp="$GITHUB_PATH"; echo … >> "$gp"`) and a continued
+    redirect. Detecting the mention needs no guess about either, and the
+    assertions below require every mention to BE the one classified write.
     """
 
     return [
-        (index, line.strip(), classified)
+        (index, line.strip(), _classify_path_write(line))
         for index, step in enumerate(steps)
         for line in _run_commands(step).splitlines()
-        if GITHUB_PATH_WRITE_RE.search(line)
-        for classified in [_classify_path_write(line)]
+        if GITHUB_PATH_MENTION_RE.search(line)
     ]
+
+
+def _client_dir_mentions(steps: list[dict]) -> list[tuple[int, str, int]]:
+    """Every line that names a `/usr/lib/postgresql/<major>/bin` directory.
+
+    The PATH that matters on the leg is not built by `$GITHUB_PATH` alone: the
+    leg's own script may `export PATH="/usr/lib/postgresql/17/bin:$PATH"`, and a
+    step-script assignment runs AFTER the runner composes the prepend, so it
+    wins (actions/runner `Handler.AddPrependPathToEnvironment` / `ScriptHandler`).
+    Measured GREEN before this rule, with the in-job `pg_dump --version`
+    assertion still printing 16 because it lives in the pin step.
+    """
+
+    found: list[tuple[int, str, int]] = []
+    for index, step in enumerate(steps):
+        for line in _run_commands(step).splitlines():
+            for match in CLIENT_DIR_RE.finditer(line):
+                found.append((index, line.strip(), int(match.group("major"))))
+    return found
 
 
 def _classify_path_write(line: str) -> int | None:
@@ -261,6 +306,14 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     resolves through `pg_wrapper` to the image's newest client (17), while the
     in-step check still prints 16 because it runs under the export. The write
     line is therefore matched as a unit below.
+
+    ACCEPTED SPELLING: exactly one — the literal
+    `echo "/usr/lib/postgresql/<major>/bin" >> "$GITHUB_PATH"` line. An
+    equivalent write of the SAME directory in another spelling (a trailing
+    `/bin/`, `printf … | tee -a "$GITHUB_PATH"`, `echo … | sudo tee -a …`) is
+    REFUSED, loudly, with this accepted form in the message (measured, round 7).
+    That is the deliberate polarity: one spelling the guard can read beats a
+    rule broad enough to accept a spelling it cannot.
     """
     steps = _steps(job)
     image_majors = _postgres_image_majors(job)
@@ -283,8 +336,8 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # WRITTEN TO `$GITHUB_PATH`. A bare `CLIENT_PATH_RE`/`"GITHUB_PATH" in text`
     # pair is satisfiable by two different lines and by an inert `export`.
     pin_index = steps.index(pin)
-    in_pin = [write for write in _github_path_writes(steps) if write[0] == pin_index]
-    assert in_pin, (
+    pin_mentions = [w for w in _github_path_writes(steps) if w[0] == pin_index]
+    assert pin_mentions, (
         "the pin step never writes a `/usr/lib/postgresql/<major>/bin` entry to "
         "`$GITHUB_PATH`; a prepend that only exists as an `export` inside this "
         "step cannot reach the pytest leg, so the leg would resolve `pg_dump` "
@@ -298,17 +351,17 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # does `PrependPath.RemoveAll(x => x == line); PrependPath.Add(line);` per
     # line (actions/runner `FileCommandManager.AddPathFileCommand.
     # ProcessCommand`), so the LAST line is the one that wins on PATH.
-    # ⛔ And the producer is not assumed (#12051 review round 6): the write is
-    # detected as a WRITE first, then classified, so a `printf`/`tee`/`/usr/bin`
-    # append is refused instead of not being seen at all.
-    unreadable = [line for _, line, major in in_pin if major is None]
+    # ⛔ And round 6 made this a MENTION scan: the write is detected whatever
+    # its producer or redirect, then required to be classifiable, so
+    # `printf`/`tee`/`/usr/bin`/a continued redirect cannot slip past unseen.
+    unreadable = [line for _, line, major in pin_mentions if major is None]
     assert not unreadable, (
         "the pin step writes `$GITHUB_PATH` in a form this guard cannot read, so "
         "it cannot prove which client major wins on the leg: "
         f"{unreadable!r}. Write the versioned dir as a literal "
         f'`echo "/usr/lib/postgresql/<major>/bin" >> "$GITHUB_PATH"` line.'
     )
-    wrong = [str(major) for _, _, major in in_pin if major != server_major]
+    wrong = [str(major) for _, _, major in pin_mentions if major != server_major]
     assert not wrong, (
         f"the pin step writes pg{', pg'.join(wrong)} to `$GITHUB_PATH` alongside "
         f"its pg{server_major} entry — the runner adds each line in file order, "
@@ -319,45 +372,80 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
 
 
 def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
-    """The pin's prepend must be the ONLY postgres bin dir this job puts on PATH.
+    """No line in this job may name a client major other than the servers'.
 
     `$GITHUB_PATH` is JOB-scoped and last-writer-wins, so a LATER step appending
     `/usr/lib/postgresql/<other>/bin` neutralises the pin completely while every
     other row here stays green — measured, round 5: a step inserted between the
-    pin and the leg that appends pg17 left all four rows PASS while `pg_dump` on
+    pin and the leg that appends pg17 left every row PASS while `pg_dump` on
     the leg resolved from pg17, i.e. exactly the artifact #12051 shipped. The
     pin step's own write is asserted above; this asserts nobody else undoes it.
+
+    ⛔ AND `$GITHUB_PATH` IS NOT THE ONLY WAY (#12051 review round 7). The leg's
+    OWN script can `export PATH="/usr/lib/postgresql/<other>/bin:$PATH"`, and a
+    step-script assignment runs after the runner composes the prepend, so it
+    WINS (actions/runner `Handler.AddPrependPathToEnvironment` →
+    `ScriptHandler`). Measured GREEN before this rule, with the in-job
+    `pg_dump --version` assertion still printing 16 because it lives in the PIN
+    step. So the population here is `_client_dir_mentions()` — every line that
+    names a versioned client dir, whatever it does with it — and the rule is the
+    simple, complete one: no other major may be named at all.
 
     Read through `_run_commands()` for the same reason as every other search
     here: a commented-out line is inert shell that reads identically to the live
     one.
+
+    ACCEPTED SPELLING / PRECISION: a `$GITHUB_PATH` mention the guard cannot
+    classify is an offender only at or AFTER the pin — a pre-pin write of
+    something unrelated (`echo "$HOME/.local/bin" >> "$GITHUB_PATH"`) cannot
+    outrank a later write, so it stays green (measured, round 7). A mention that
+    NAMES another major is an offender wherever it lives.
+
+    STATED LIMIT: a step that merely INVOKES a script (`run: bash x.sh`) is read
+    as that one line; a versioned dir chosen inside `x.sh` is invisible. No
+    in-repo script this job calls names one — the pin's dir is inline.
     """
     steps = _steps(job)
     server_major = _postgres_image_majors(job)[0]
     pin_index, _ = _pin_step(steps)
 
-    writes = _github_path_writes(steps)
-    assert writes, (
+    mentions = _github_path_writes(steps)
+    assert mentions, (
         "no step in this job writes a `/usr/lib/postgresql/<major>/bin` entry to "
         "`$GITHUB_PATH` — see the pin-step assertion above"
     )
 
-    # A write the guard cannot classify is refused wherever it lives: "nobody
-    # else undoes it" is not a claim a search for ONE producer can support.
+    # Only a write at or AFTER the pin can outrank it (later wins, and within a
+    # step the script's own assignments win over the prepend), so a pre-pin
+    # write of something else is NOT an offender — the precision costs one
+    # comparison and keeps a correct tree green. A write that names ANOTHER
+    # major is an offender wherever it lives.
     offenders = sorted(
         {
             f"step {index} writes `$GITHUB_PATH` as {line!r}, "
-            + (f"putting pg{major} on PATH" if major is not None else "which this guard cannot classify")
-            for index, line, major in writes
-            if index != pin_index or (major is not None and major != server_major)
+            + (
+                f"putting pg{major} on PATH"
+                if major is not None
+                else "which this guard cannot classify"
+            )
+            for index, line, major in mentions
+            if major != server_major and (major is not None or index >= pin_index)
         }
     )
-    assert not offenders, (
-        "a `$GITHUB_PATH` write outside the pin (or an unreadable one) changes "
-        f"which client major the leg runs: {'; '.join(offenders)}. The runner "
-        "adds each line in file order, so a later write WINS and the pin becomes "
-        "inert — the leg would run on that client instead (#12051). The pin's "
-        f"own literal pg{server_major} append is the only write this job may make."
+    other_majors = sorted(
+        {
+            f"step {index} names pg{major}: {line!r}"
+            for index, line, major in _client_dir_mentions(steps)
+            if major != server_major
+        }
+    )
+    assert not (offenders or other_majors), (
+        "a `$GITHUB_PATH` write (or a step's own PATH entry) changes which "
+        "client major the leg runs: "
+        + "; ".join(offenders + other_majors)
+        + ". Later writes and in-step assignments both WIN over the pin, so the "
+        "leg would run on that client instead (#12051). The pin's own literal "
+        f"pg{server_major} append is the only way this job may name a client dir."
     )
 
 
@@ -372,7 +460,16 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     `"::error::" in text and "exit 1" in text` cannot tell an ARMED branch from
     a disarmed one: measured, `if [ "$major" != "16" ]; then` → `if false; then`
     left all four tests green while the job would never fail closed. The
-    comparison literal is therefore pinned to the servers' major.
+    comparison literal is therefore pinned to the servers' major, and the "
+    announce/stop pair is matched as WHOLE LINES rather than substrings (round
+    7): `false && exit 1` and `bail() { exit 1; }` contain the stop and never
+    take it.
+
+    STATED LIMIT: the branch must be FLAT (`FAIL_CLOSED_BRANCH_RE`) — a nested
+    conditional inside it is refused rather than reasoned about, because a
+    hermetic text guard cannot prove a nested branch is reachable. An
+    `if … else … fi` variant is refused for the same reason; there is no such
+    branch in the real step.
 
     STATED LIMIT: this is a hermetic text guard, so it cannot prove the
     version-EXTRACTION arithmetic — a `sed` rewritten to a constant (`s/.*/16/`)
@@ -398,9 +495,17 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
         f"{branch.group('major')} but the provisioned servers are pg{server_major} — "
         "a branch that can never be true is the same symptom as no branch"
     )
-    assert "::error::" in branch.group("body") and "exit 1" in branch.group("body"), (
-        "the armed branch does not both announce (`::error::`) and stop "
-        "(`exit 1`) — a branch that prints and continues ships the bad artifact"
+    assert FAIL_CLOSED_ANNOUNCE_RE.search(branch.group("body")), (
+        "the armed branch never ANNOUNCES a `::error::` on its own line — a "
+        "branch that prints nothing and continues ships the bad artifact "
+        "silently (measured, round 7: `false && echo \"::error::…\"` contains "
+        "the token and never runs)"
+    )
+    assert FAIL_CLOSED_STOP_RE.search(branch.group("body")), (
+        "the armed branch never STOPS on its own `exit 1` line — measured, "
+        "round 7: `false && exit 1` and `bail() { exit 1; }` both contain the "
+        "token while the branch announces and continues, so the job runs the "
+        "leg on the inherited client and exits 0"
     )
     for tool in ("pg_dump", "pg_restore"):
         assert tool in text, (
