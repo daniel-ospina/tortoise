@@ -78,8 +78,8 @@ Three consequences decide the shape of the measurement, and none of them was on 
 
 The harness runs the real code path: names harvested from this box's **real capture corpus**
 (`~/.tortoise/session-events`, 9 daily files, 8,218 real session records, 45.3 M characters — **as of the
-measurement run**; the corpus is live, so re-measure rather than trusting these three, which the artifact does not
-carry) into a **real FalkorDB**
+measurement run**; the corpus is live, so re-measure rather than trusting the record count and the character
+total, which the artifact does not carry — the file count it does carry, as `corpus.files`) into a **real FalkorDB**
 through the real projection (`_upsert_object`, id-keyed per `#3590`), queried by `sdk.tortoise_fts_query` with the
 exact flags `_fts_rows` passes (`include_terminal=True`, `_record_reads=False`, `_valid_time_rerank=False`) and
 production's own query sanitisation.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Candidate recall@k for the capture-time link-before-create prior (#11901).
 
-WHAT THIS MEASURES, AND WHY IT IS TWO ARMS NOT ONE
+WHAT THIS MEASURES, AND WHY THE THREE ARMS ARE MEASURED SEPARATELY
 ---------------------------------------------------
 Every capture derives one ``object`` query per extracted entity name and feeds
 it to the hybrid read at ``limit=3`` (``extractor_v2._derive_queries`` ->
@@ -26,8 +26,17 @@ unusable, and the two failures have different fixes:
 
 This tool measures both, on a real entity-name population, through the real
 code path, so "does the window earn its keep" is answered by a number instead of
-by an argument. Arm 3 measures what would happen under a candidate fix that is
-NOT shipped here — the point of #11901 is to decide on evidence, not to patch.
+by an argument. Three arms, because the failures have different fixes:
+
+  ARM 1  RETRIEVAL     a mention that IS the stored name — how often is the node
+                       in the window at each k? (widening can help)
+  ARM 2  MATCHING      a mention that is a real surface VARIANT of the stored
+                       name — how often does phase 1 bind it? This arm ALSO
+                       measures `attached_folded`, what a candidate punctuation
+                       fold would recover, and that fix is NOT shipped here: the
+                       point of #11901 is to decide on evidence, not to patch.
+  ARM 3  THE UNION     how large is the candidate set a capture actually hands
+                       `resolve_entities`? (not `limit` — see below)
 
 POPULATION — WHAT IS REAL AND WHAT IS NOT (read before quoting a number)
 -----------------------------------------------------------------------

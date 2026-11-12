@@ -361,6 +361,12 @@ def test_the_brief_quotes_the_variant_rates_the_artifact_holds(report, control):
     assert (f"in-window {c3['in_window']} ({100 * c3['in_window'] / c_pairs:.1f} %) → "
             f"{c15['in_window']} ({100 * c15['in_window'] / c_pairs:.1f} %)") in text, (
         "§4's control sentence does not state the control's own in-window rates")
+    # …and the SAME sentence's fold column: it is the figure §7-2b's
+    # mode-independence argument cites beside the hybrid one, and a loose
+    # `attached_folded > 0` does not pin it (round 4, F1).
+    assert (f"folded {c3['attached_folded']} ({100 * c3['attached_folded'] / c_pairs:.1f} %) → "
+            f"{c15['attached_folded']} ({100 * c15['attached_folded'] / c_pairs:.1f} %)") in text, (
+        "§4's control sentence does not state the control's own fold column")
     # The brief aggregates the two separator directions into one row; the
     # artifact keeps them apart because the fold only helps one of them
     # (`space→hyphen` is 101/180 in window, `hyphen→space` is 13/13).
@@ -418,6 +424,42 @@ def test_the_brief_quotes_the_pooled_set_the_artifact_holds(report):
         assert (f"| {k} | {mean:.1f} | {pooled['set_min']} | {pooled['set_max']} |") in text, (
             f"§1 pooled k={k}: the brief does not carry "
             f"`| {k} | {mean:.1f} | {pooled['set_min']} | {pooled['set_max']} |`")
+
+
+def test_the_briefs_recommendation_repeats_only_recomputed_figures(report, control):
+    """§7 restates §3 and §3.1's figures; they are recomputed HERE too.
+
+    The recommendation section is where a follow-up lane reads the numbers it is
+    told to act on, and it was outside every guard — so §7 could say "paths by
+    63.4" (the exact figure round 3 corrected) with a green suite (round 4, F4).
+    """
+    text = _squash(BRIEF.read_text())
+    h, f = report["arms"]["exact_by_class"], control["arms"]["exact_by_class"]
+    d_def = 100 * (h["definite"]["3"]["in_window"] / h["definite"]["3"]["n"]
+                   - f["definite"]["3"]["in_window"] / f["definite"]["3"]["n"])
+    d_id = 100 * (h["ident"]["3"]["in_window"] / h["ident"]["3"]["n"]
+                  - f["ident"]["3"]["in_window"] / f["ident"]["3"]["n"])
+    d_path = 100 * (h["path"]["3"]["in_window"] / h["path"]["3"]["n"]
+                    - f["path"]["3"]["in_window"] / f["path"]["3"]["n"])
+    assert f"by {abs(d_id):.1f} and paths by {abs(d_path):.1f}" in text, (
+        f"§7 does not state the recomputed class deltas "
+        f"({abs(d_id):.1f} / {abs(d_path):.1f})")
+    assert f"class by {abs(d_def):.1f} points" in text, (
+        f"§7 does not state the recomputed definite-description delta ({abs(d_def):.1f})")
+    exact3 = report["arms"]["exact"]["3"]
+    total = exact3["miss_past_k"] + exact3["miss_absent_at_max_k"]
+    assert f"It recovers {100 * exact3['miss_past_k'] / total:.1f} %" in text, (
+        "§7 does not state the recomputed share of misses a wider window fixes")
+    # §7's zero-row sentence (control): the count, its sample share, and the
+    # identifier share of it — all three recomputed.
+    cz = control["arms"]["exact"]["3"]["rows_zero"]
+    idz = control["arms"]["exact_by_class"]["ident"]["3"]["rows_zero"]
+    assert f"zero rows for {cz}/{control['corpus']['sample']} names" in text, (
+        f"§7 does not state the control's zero-row count ({cz})")
+    assert f"{idz} of them identifiers" in text, (
+        f"§7 does not state the identifier share of the zero-row class ({idz})")
+    assert report["arms"]["exact"]["3"]["rows_zero"] == 0, (
+        "the hybrid arm's zero-row claim (`rows_zero` 0) is no longer what the artifact holds")
 
 
 def test_the_brief_keeps_its_two_standing_negatives():
