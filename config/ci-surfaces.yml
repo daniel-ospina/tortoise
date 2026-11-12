@@ -1596,6 +1596,19 @@ surfaces:
   # diff, so the suite would have stayed green if the gate were deleted. That is
   # the #10513 / #1349 silent-drop class. Keep BOTH arms.
   - test_allowance_gate.py
+  # #11758/#11981 review: the `api` arm of the storage-dimensions evidence.
+  # `tortoise/metering.py` IS an exact `api` SOURCE_PATTERNS entry (measured:
+  # `--changed-files tortoise/metering.py` -> surfaces ['api']), and five cases in
+  # the file drive `metering.storage_overage_cost_usd` through it — the hot
+  # capacity overage priced per MB, the per-GB-of-data basis and the
+  # overage-eligibility arms. A `core`-only row leaves those asleep on a
+  # `metering.py`-only diff, because a named-surface match REPLACES the `core`
+  # fallback in `select()` (measured on the `core`-only tree: `select([
+  # 'tortoise/metering.py'])` -> ['api'] with this file ABSENT) — the same
+  # #10513/#1349/#2938/#3154 silent-drop class as the #9567 D11/D12 rows above.
+  # DUAL-REGISTERED with `core` (pricing/cost_dimensions/allowance_gate all fall
+  # through there); keep BOTH arms.
+  - test_pricing_storage_dimensions.py
   # #4010: the session-cap removal — drives the hosted capture path + the
   # registry resolver, so it belongs with the quota/api surface.
   - test_issue_4010_sessions_unlimited.py
@@ -2218,13 +2231,14 @@ surfaces:
   - test_allowance_gate.py
   # #11758/#11981: the two purchasable storage dimensions (stored data, hot
   # capacity) pinned against the cost-dimension registry, the pricing artifact,
-  # `tier_limits()` and the overage arithmetic. Its four subjects —
-  # `tortoise/pricing.py`, `tortoise/metering.py`, `tortoise/allowance_gate.py`,
+  # `tier_limits()` and the overage arithmetic. THREE of its four subjects —
+  # `tortoise/pricing.py`, `tortoise/allowance_gate.py` and
   # `tortoise/cost_dimensions.py` — match NO `SOURCE_PATTERNS` entry and are not
   # SHARED_MODULEs, so each falls through to the `core` fallback (measured:
-  # `select(['tortoise/pricing.py'])` -> surfaces ['core']). A named-surface
-  # match REPLACES the fallback, so a `core` row is the only one that covers
-  # them.
+  # `select(['tortoise/pricing.py'])` -> surfaces ['core']). The fourth,
+  # `tortoise/metering.py`, IS an exact `api` match, so this row alone would miss
+  # every `metering.py`-only diff — the `api` arm beside `test_allowance_gate.py`
+  # covers that half, and BOTH arms are required.
   #
   # ⛔ THIS ROW REPAIRS `main`, NOT THIS PR. #11981 squash-merged at `a3d20763ab`
   # WITHOUT registering the file it added, so the REQUIRED `manifest-integrity`
@@ -2233,6 +2247,10 @@ surfaces:
   # `ci_selection.py --integrity` -> `manifest drift:
   # ['test_pricing_storage_dimensions.py']`). An unlisted file is the #1262
   # drift class: the suite runs in NO leg while the required leg is red.
+  # ⚠️ If a PEER PR lands this same repair first, these rows become the duplicate
+  # the #11210/#11211/#11222 recurrence is about — `--integrity` reds on
+  # `duplicate entry … .surfaces.core[]`. Then DELETE the extra row; do not add
+  # a third.
   - test_pricing_storage_dimensions.py
   - test_10000_narrative_record_home.py
   - test_10017_cache_tier.py
