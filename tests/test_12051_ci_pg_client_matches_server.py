@@ -287,10 +287,33 @@ REDIRECT_TARGET_RE = re.compile(
 
 
 #: The runner's own COMMAND FILES are the only redirect targets whose basename
-#: is a bare expansion that is not an offence: each is governed by its own
-#: classified-write rule (`$GITHUB_PATH` by the prepend unit, `$GITHUB_ENV` by
-#: `GITHUB_ENV_MENTION_RE`), so an exemption here cannot hide a write.
-COMMAND_FILE_TARGET_RE = re.compile(r"^\$\{?(?:GITHUB_PATH|GITHUB_ENV)\}?$")
+#: is a bare expansion that is not an offence: none can reach a client binary, and
+#: the two that matter here are governed by their own classified-write rules
+#: (`$GITHUB_PATH` by the prepend unit, `$GITHUB_ENV` by `GITHUB_ENV_MENTION_RE`),
+#: so an exemption cannot hide a write.
+#: ⛔ ALL FIVE, NOT TWO (#12069 review round 3, measured). The runner publishes
+#: five command files; exempting only the two this job happens to use made a
+#: legitimate `echo x >> "$GITHUB_OUTPUT"` red as a CLIENT-BINARY REPLACEMENT — a
+#: false RED with a message that is simply untrue, on an idiom the repo already
+#: uses elsewhere (`python-ci.yml:4219` writes `$GITHUB_STEP_SUMMARY`). A guard
+#: that reds a correct write is the same defect class as one that passes a broken
+#: one, so the population is the runner's, not this job's.
+COMMAND_FILE_TARGET_RE = re.compile(
+    r"^\$\{?(?:GITHUB_PATH|GITHUB_ENV|GITHUB_OUTPUT|GITHUB_STATE|GITHUB_STEP_SUMMARY)\}?$"
+)
+
+#: What makes a redirect TARGET unreadable: ANY expansion sigil, not a leading
+#: `$`. ⛔ BACKTICKS ARE THE SAME TARGET ONE PUNCTUATION OVER (#12069 review round
+#: 3, measured): keying on `basename.startswith("$")` left the whole class open —
+#:
+#:     : > `printf %s /usr/lib/postgresql/16/bin/pg_dump`                     199 passed
+#:     printf '#!/bin/sh\nexec /usr/bin/pg_dump "$@"\n' \
+#:       > `printf %s /usr/lib/postgresql/16/bin/pg_dump`                     199 passed
+#:
+#: the third row being verbatim the #12051 regression this rule exists for. The
+#: verb arm DID refuse ``| tee `printf %s …/pg_dump` `` (the path text sits after
+#: the verb), so the hole was exactly the no-verb redirect class.
+UNREADABLE_TARGET_RE = re.compile(r"[`$]")
 
 
 def _redirects_into_a_client_binary(line: str) -> bool:
@@ -326,7 +349,7 @@ def _redirects_into_a_client_binary(line: str) -> bool:
             return True
         if CLIENT_DIR_RE.search(target):
             return True
-        if basename.startswith("$") and not COMMAND_FILE_TARGET_RE.match(basename):
+        if UNREADABLE_TARGET_RE.search(basename) and not COMMAND_FILE_TARGET_RE.match(basename):
             return True
     return False
 
@@ -4022,6 +4045,13 @@ REDIRECT_POLARITY = [
     ('echo "X=1" >> "${GITHUB_ENV}"', False, "the second command file has its own rule"),
     ('bash x.sh > "$SCRATCH/pytest-rc"', False, "a literal basename under a variable dir"),
     ('cmd > "$RUNNER_TEMP/v.txt"', False, "the guard's own recommended redirect"),
+    # ⛔ BACKTICKS ARE THE SAME TARGET (#12069 review round 3, measured): keying the
+    # refusal on a LEADING `$` left command substitution green — including the
+    # verbatim #12051 wrapper — so the population is the sigil, not its position.
+    (": > `printf %s /usr/lib/postgresql/16/bin/pg_dump`", True, "a backtick-substituted target"),
+    ('f=/usr/lib/postgresql/16/bin/pg_dump; : > `printf %s "$f"`', True, "backticks over a variable"),
+    ('echo x >> "$GITHUB_OUTPUT"', False, "a runner command file this job does not use"),
+    ('echo x >> "$GITHUB_STEP_SUMMARY"', False, "…and the summary file the repo does use"),
 ]
 
 
