@@ -789,6 +789,66 @@ class TestProbeDbBoundedAcquisition:
             f"NO answer and must be observed=False (#3683) — got {refused!r}"
         )
 
+    def test_a_landed_acquisition_is_returned_not_reported_as_an_overrun(
+            self, monkeypatch):
+        """#11962 review — the SUCCESS half of that same ``done()`` window.
+
+        The sibling row pins the failure half (a landed error keeps its own
+        message and ``observed`` bit). When the acquisition SUCCEEDED inside the
+        window, ``future.exception()`` is None, and an arm that handles only the
+        failure case falls through to the synthesized phase timeout: a false
+        "no answer" for an SDK that was built, with ``observed=False`` per #3683
+        — which can send the health report to ``unknown`` for a healthy SDK. The
+        control-plane seam's ``_bounded_graph_size`` answers this window the
+        other way, so this branch is the parity claim its sibling makes.
+
+        RED when the success branch is removed (measured): the report becomes
+        ``probe sdk acquisition timeout after …`` with ``ok=False``.
+        """
+        class _LandedSuccessAfterTheWaitExpired:
+            """The ``done()`` window, with a successful outcome."""
+
+            def result(self, timeout=None):
+                if timeout is not None:
+                    raise concurrent.futures.TimeoutError()  # the BUDGET's expiry
+                return FakeSDK()
+
+            def done(self):
+                return True
+
+            def cancelled(self):
+                return False
+
+            def exception(self):
+                return None
+
+        # Only the FIRST submission is the acquisition, and only it gets the fake
+        # future: ``_probe_once`` submits its own phases to the same worker, so a
+        # worker that kept answering with the fake would poison the setup phase
+        # and this would pass or fail for the wrong reason.
+        real_worker = monitoring._SingleSlotWorker(
+            "test-11962-landed-success", workers=1)
+        submitted = {"n": 0}
+
+        class _FirstLandingThenReal:
+            def submit(self, fn):
+                submitted["n"] += 1
+                if submitted["n"] == 1:
+                    return _LandedSuccessAfterTheWaitExpired()
+                return real_worker.submit(fn)
+
+        monkeypatch.setattr(monitoring, "_probe_worker",
+                            lambda: _FirstLandingThenReal())
+
+        result = monitoring.probe_db(acquire=lambda: FakeSDK())
+        assert submitted["n"] > 1, (
+            f"the probe never reached its own phases ({submitted!r}) — the "
+            "acquisition's value was not used")
+        assert result["ok"] is True, result
+        assert "acquisition timeout" not in str(result.get("error")), (
+            "an acquisition that SUCCEEDED inside the window was reported as a "
+            f"phase timeout: {result!r}")
+
     def test_ambiguous_phase_ownership_is_rejected(self):
         """Passing BOTH an sdk and an acquire callable is a CALL error.
 
@@ -1719,6 +1779,56 @@ class TestGraphSizeMeasurementIsBoundedAndReported:
 
         assert monitoring._bounded_graph_size(
             SimpleNamespace(taxonomy=lambda: {}), 0.05) == 7
+
+    def test_a_landed_count_error_keeps_its_own_cause(self, monkeypatch):
+        """#11962 review — the same two halves at the THIRD site.
+
+        The sibling row pins the half a plain ``raise`` gets wrong (the budget
+        stays DISPLAYED as the count error's context). This one pins the half
+        ``from None`` gets wrong: a count error raised ``from <inner>`` must keep
+        that cause, so ``from None`` is not a valid way to suppress the budget
+        here either.
+
+        RED under ``from None`` at this site (measured): the class is unchanged
+        and only this assertion reds.
+        """
+        def _raised_from_inner():
+            try:
+                raise OSError("conn reset")
+            except OSError as inner:
+                try:
+                    raise TimeoutError("redis socket read timeout") from inner
+                except TimeoutError as outer:
+                    return outer
+
+        landed = _raised_from_inner()
+
+        class _LandedAfterTheWaitExpired:
+            def result(self, timeout=None):
+                raise concurrent.futures.TimeoutError()  # the BUDGET's expiry
+
+            def done(self):
+                return True
+
+            def cancelled(self):
+                return False
+
+            def exception(self):
+                return landed
+
+        monkeypatch.setattr(
+            monitoring, "daemon_worker",
+            lambda name, **kw: SimpleNamespace(
+                submit=lambda fn: _LandedAfterTheWaitExpired()))
+
+        with pytest.raises(
+                TimeoutError, match="redis socket read timeout") as caught:
+            monitoring._bounded_graph_size(
+                SimpleNamespace(taxonomy=lambda: {"Point": 1}), 0.05)
+
+        assert isinstance(caught.value.__cause__, OSError), (
+            "the count error's own chain was discarded — its __cause__ is "
+            f"{caught.value.__cause__!r}, not the OSError it was raised from")
 
 
 class TestProbeNeverAskedStatus:
