@@ -2632,20 +2632,21 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     `#11455` exists because the row reached `MET` on one armed template while the
     compose path shipped the gate off; the row's own hold note must name that path.
     ⛔ WHAT MOVES ON THIS TREE IS THE CLAUSE, NOT THE VERDICT (fresh review, P3,
-    measured): row 1 is `PARTIAL` on BOTH sides of this change — at `origin/main`
-    held by an UNCLAIMED WRITER the product register had not yet credited (the
-    `#12113` prose match on `create_source`, declared earlier on this branch), here
-    by the unarmed deployment files — and only `gate enabled by default` moves
-    `True` → `False`, which is the field `#11086` item 4 is ticked on. An earlier
-    draft of this docstring said the row "moves `MET` → `PARTIAL`", which misleads
-    the other way too: arming `docker-compose.yml` ALONE does not flip it back,
-    because the two `Dockerfile*` files stay silent (measured at this head). The
-    VERDICT flip is pinned on the divergent fixture in
+    measured): row 1 is `PARTIAL` on BOTH sides of this change, and only
+    `gate enabled by default` moves `True` → `False`, which is the field `#11086`
+    item 4 is ticked on. An earlier draft of this docstring said the row
+    "moves `MET` → `PARTIAL`", which misleads the other way too: arming
+    `docker-compose.yml` ALONE does not flip it back, because the two `Dockerfile*`
+    files stay silent (measured at this head). The VERDICT flip is pinned on the
+    divergent fixture in
     `test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool`.
-    ⛔ The writer is named by CLASS on purpose: `tortoise.session_indexer::main` is
-    the writer a reader is most likely to reach for here, and it is wrong — it is a
-    DECLARED `recognised_producer` (owner `#5008`) in every tree the register has
-    ever existed in, so no reading of row 1 has ever held on it.
+    ⛔ NO attribution of WHICH writer held the row at `origin/main` is stated here,
+    on purpose. Two review rounds each caught a wrong one — the first draft named
+    `session_indexer::main`, which the register declares as a `recognised_producer`;
+    the second named the mechanism's history, which is itself a claim that rots.
+    This test does not read that writer, so it does not claim it: the shape is
+    pinned where it is measured, in `test_the_LIVE_register_credits_every_writer…`
+    and the census tests.
 
     This fixture is also WHY the verdict cannot move here: `_row_one_fixture` arms
     `docker-compose.yml` and deliberately no `.env.example`, so overwriting the
