@@ -2060,6 +2060,123 @@ def unparsed_modules(writers: dict[str, dict] | None = None) -> list[str]:
     return sorted(d["at"] for d in writers.values() if d["kind"] == "unparsed")
 
 
+#: `#11747` — a width is irrelevant here: the statement is BUILT, never executed,
+#: so the probe plants a two-element vector rather than importing the encoder.
+_CACHE_PROJECTION_PROBE_VECTOR: tuple[float, ...] = (0.5, 0.25)
+
+
+def cache_projection_store_labels() -> dict:
+    """The labels `cache_projection` can still put a vector on — MEASURED, not read.
+
+    ⛔ `#11747`: `cache_projection.node_statement` was storing a vector on
+    `:Session` while this row read `MET` with `stored-without-a-query-path: none`.
+    The reason is the DISCOVERY's blind spot, not a gap in the served set: the
+    writer emits `f", n.{prop} = {form}"` (a property name INTERPOLATED into the
+    clause), which is one of the shapes `_EMBED_WRITE` and the AST pass cannot
+    decide — so the writer was absent from `embedding_writers()` entirely and its
+    label never reached the served-set comparison. (`tortoise/embed_writer_register`
+    says the same in its own words; `INVISIBLE_SHAPES["interpolated_property"]`
+    pins it.)
+
+    So this derivation does not read the writer's SOURCE — it RUNS the writer's
+    own pipeline (`node_from_row` → `node_statement`) for every label in
+    :data:`tortoise.cache_projection.NODE_TABLES` and asks the resulting
+    statement what it would actually store. That is immune to the spelling of
+    the clause by construction: the answer is read off ``stmt.params``, where a
+    vector appears only when a store clause was emitted for it.
+
+    ⛔ BOTH RECORD DOORS ARE PROBED, and neither is assumed: a vector reaches this
+    writer through the record's ``embedding`` COLUMN (point/event/source/… carry
+    one) or through the row's open-set ``props`` TAIL — which is the ONLY door on
+    `public.session`, whose `chk_session_props_no_derived` refuses nothing at all
+    (`NOT (props ?| ARRAY[]::text[])`). A shape that REFUSES the name is a
+    measurement of that door, not a hole; a label where NO door could be
+    built is reported as unmeasured, which holds the row rather than answering
+    for it.
+
+    ⛔ THE PLANTED PROPERTY NAME IS DERIVED, never the literal `"embedding"`
+    (`#11747` review, finding 3). Both doors are planted with
+    :func:`tortoise.cache_projection.stored_vector_props` — the seam designed to be
+    widened — so the day a second vector property joins it, this probe plants
+    that one too. A literal here would leave an unserved store of the new
+    property in NO ``stmt.params`` the probe inspects, and row 2 would keep
+    printing `stored-without-a-query-path: none` — the same "second copy of the
+    set" this change removes on the served side.
+
+    ⛔ THE WHOLE PER-LABEL DERIVATION IS INSIDE THE FAIL-CLOSED ENVELOPE
+    (`#11747` review, finding 4). It used to wrap only the imports and the two
+    door-builds, so a label in `cp.NODE_TABLES` that
+    `cp.KEY_PROPERTY` does not know made this function RAISE `KeyError` — taking
+    the whole DoD report down instead of holding row 2 at `PARTIAL`, which is what
+    this function's own contract says an unbuildable shape does. A `KeyError` here
+    is a MEASUREMENT FAILURE, and it is recorded as one.
+
+    ⛔ THREE DOORS, not two (`#11747` review, finding 5). The two RECORD doors
+    above both enter through :func:`~tortoise.cache_projection.node_from_row`, and
+    `record_plan` is public: a caller may hand it a `RecordNode` it built itself,
+    which never passes the row→property map. That path is guarded ONLY by
+    :func:`~tortoise.cache_projection.node_statement`'s own check, so it is
+    probed as its own door — otherwise this row's claim (*"every label a write
+    path embeds is one the query path serves"*) would be measurably narrower than
+    stated, and deleting that one check would leave the row `MET`.
+
+    Returns ``{"labels": frozenset[str], "unmeasured": {label: why}, "error": str|None}``
+    — ``error`` means the projection could not be imported at all, so nothing
+    was measured and the row must not read as if something had been.
+    """
+    try:
+        from tortoise import cache_projection as cp
+        from tortoise import record_projection as rp
+    except Exception as e:  # an unimportable projection is UNMEASURED
+        return {"labels": frozenset(), "unmeasured": {},
+                "error": f"{type(e).__name__}: {e}"}
+    stored: set[str] = set()
+    unmeasured: dict[str, str] = {}
+    for label in sorted(cp.NODE_TABLES):
+        try:
+            # The record's own key column for this label (the schema's contract key).
+            key_column = rp.snake(cp.KEY_PROPERTY[label])
+            key = f"dod-5090-probe-{rp.snake(label)}"
+            # DERIVED, not the literal: whatever this projection stores, planted.
+            vector_props = sorted(cp.stored_vector_props())
+        except Exception as e:
+            unmeasured[label] = f"{type(e).__name__}: {e}"
+            continue
+        vector = list(_CACHE_PROJECTION_PROBE_VECTOR)
+        planted = {prop: vector for prop in vector_props}
+        # (1) the `props` TAIL — the open set every table carries. (2) the record's
+        # `embedding` COLUMN, where the table has one. Both through `node_from_row`.
+        record_rows = (
+            ("props tail", {key_column: key, "props": dict(planted)}),
+            ("embedding column", {key_column: key, **planted}),
+        )
+        statements: list[tuple[str, object]] = []
+        errors: list[str] = []
+        for door, row in record_rows:
+            try:
+                statements.append((door, cp.node_statement(cp.node_from_row(label, row))))
+            except Exception as e:  # a refusal is one door's answer
+                errors.append(f"{door}: {type(e).__name__}: {e}")
+        # (3) the DIRECT writer door — `node_from_row` is out of the path entirely.
+        try:
+            statements.append((
+                "direct writer",
+                cp.node_statement(cp.RecordNode(
+                    label=label, key=key,
+                    props={key_column: key, **planted}))))
+        except Exception as e:
+            errors.append(f"direct writer: {type(e).__name__}: {e}")
+        if not statements:
+            # NOTHING could be built: hold the row rather than answering for it.
+            unmeasured[label] = "; ".join(errors)
+            continue
+        for _door, stmt in statements:
+            if any(prop in stmt.params for prop in vector_props):
+                stored.add(label)
+                break
+    return {"labels": frozenset(stored), "unmeasured": unmeasured, "error": None}
+
+
 def served_labels() -> set[str]:
     """The labels `run_vector_query` can query — its declared vocabulary.
 
@@ -2149,6 +2266,18 @@ def score_path_bullet() -> Row:
     scored = scored_labels(writers=writers)
     written, labels, unknown, resolved = (
         scored["by_writer"], scored["labels"], scored["unresolved"], scored["resolution"])
+    # ⛔ `#11747`: the cache projection is a WRITE PATH this row could not see. Its store
+    # clause interpolates the property name (`f", n.{prop} = {form}"`), which is one of the
+    # shapes `_EMBED_WRITE`/`_writes_an_embedding` cannot decide — so it was ABSENT from
+    # `embedding_writers()` and a `:Session` vector reached the graph with this row reading
+    # `MET`. `cache_projection_store_labels()` measures it by running the writer instead of
+    # reading it, and its labels join the SAME served-set comparison as the derived ones:
+    # `Session` is not in `served`, so its presence in `projection["labels"]` makes `orphans`
+    # non-empty and this row `NOT MET` — the falsifier for a re-introduced write.
+    # ⚠️ `projection["labels"]`, NOT the `labels` map above (`#11747` review, finding 5):
+    # `labels` is the writer DERIVATION's map and never contains `Session`, so a reader
+    # tracing where `Session` enters this comparison would be sent to a map it is not in.
+    projection = cache_projection_store_labels()
     served = served_labels()
     # ⛔ `unknown` is row 2's OWN hold set, and it is computed AFTER resolution: a writer the
     # register resolved is no longer unknown (that is the whole fix), while a writer declared
@@ -2190,12 +2319,39 @@ def score_path_bullet() -> Row:
         - {fn for fn in unknown
            if writers[fn]["kind"] in ("unresolved_write", "ungated")}
     )
-    orphans = labels - served
+    # ⛔ `#11747`: the PROJECTION's labels are compared against the served set in the same
+    # comparison, but they are deliberately NOT folded into `labels` — that map is this row's
+    # writer DERIVATION, and its note is pinned as such (a fixture-built writer tree asserts its
+    # own exact content). Keeping the two populations separate in the notes and united only in
+    # the comparison is what lets the row catch an unserved projection label WITHOUT the
+    # instrument's writer tree appearing to gain a writer it does not have.
+    orphans = (labels | set(projection["labels"])) - served
     notes = [
         f"written labels: {sorted(labels)}",
+        # The evidence for the comparison below: HOW the cache projection's labels were obtained.
+        # Named on every run — `#11492` learned that a `MET` resting on a declaration is
+        # invisible unless the row prints where each label came from, and this one rests on a
+        # MEASUREMENT the discovery cannot make at all (`#11747`).
+        "cache projection vector targets (MEASURED by running "
+        "cache_projection.node_from_row → node_statement over every record label — the "
+        "`embedding` column, the `props` tail, and a directly-built `RecordNode` — "
+        f"#11747): {sorted(projection['labels'])}",
         f"served labels (run_vector_query vocabulary): {sorted(served)}",
         f"stored-without-a-query-path: {sorted(orphans) or 'none'}",
     ]
+    if projection["error"]:
+        notes.append(
+            "cache projection vector targets: UNMEASURED "
+            f"({projection['error']}) — the projection could not be imported, so NOTHING is "
+            "claimed about where it stores (hold this row at PARTIAL)"
+        )
+    if projection["unmeasured"]:
+        notes.append(
+            "cache projection labels whose store could not be MEASURED (hold this row at "
+            "PARTIAL — not one of the three doors could be built): "
+            + "; ".join(f"{label}: {why}" for label, why in
+                        sorted(projection["unmeasured"].items()))
+        )
     if resolved["error"]:
         notes.append(
             "#11492 — labels resolved from the product register "
@@ -2426,7 +2582,8 @@ def score_path_bullet() -> Row:
         "PARTIAL" if (unknown or unparsed or duplicates or real_bypasses or register_bypasses
                       or resolved["partial"] or resolved["contradictions"]
                       or resolved["at_runtime"] or resolved["violations"]
-                      or resolved["error"])
+                      or resolved["error"]
+                      or projection["error"] or projection["unmeasured"])
         else "MET")
     return Row(
         bullet=2,

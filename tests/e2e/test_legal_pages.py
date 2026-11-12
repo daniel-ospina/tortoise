@@ -1068,7 +1068,7 @@ def test_product_route_blocked_on_company_host(page: Page) -> None:
 
     UNCONDITIONAL: the target is a constant, so this is safe on stale-DNS runs.
 
-    ⛔ THE SCHEME IS ASSERTED ONLY WHERE THE DEPLOYMENT ANSWERS IT (#12004).
+    ⛔ THE SCHEME IS ASSERTED ONLY WHERE THE DEPLOYMENT ANSWERS IT (#12052).
     This is the ONE redirect in the map whose target is on the SAME host as the
     request, and `wrangler pages dev` NORMALIZES a same-origin absolute
     `Location` to the request's own scheme — measured on this job's own preview
@@ -1083,7 +1083,13 @@ def test_product_route_blocked_on_company_host(page: Page) -> None:
     pins the CONSOLIDATION TARGET (host + path, which is the property this test
     exists for) and a real company-host run additionally pins the exact https
     string. Asserting `== "https://…"` unconditionally reds `legal-e2e` on every
-    PR from a local preview while production answers correctly."""
+    PR from a local preview while production answers correctly.
+
+    ⛔ The scheme is NOT left ungraded by that carve-out: the SAME redirect is
+    driven through the real `onRequest` in-process — no dev proxy in the path —
+    and pinned to the exact `https://premiselabs.co/tortoise` by
+    `tests/test_oauth_stray_code_refusal.py::test_a_company_host_product_request_is_REFUSED_not_404d`
+    (:309), on every PR. This test keeps what only a served deploy can answer."""
     b_host = urlsplit(BASE_URL).hostname or "premiselabs.co"
     b_spoof = b_host if b_host.endswith("premiselabs.co") else "premiselabs.co"
     prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
