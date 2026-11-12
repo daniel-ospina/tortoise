@@ -252,7 +252,7 @@ none.
 `aboutDocument` **edge** is retargeted at `:Source` — that asymmetry is the
 whole fold, and it is why L1 and L2 could close. The retirement mechanism is a
 symbol pair this guard does check: the writers' retired-key allowlist
-`_DOC_RETIRED_KEYS` (`projection/entities.py:2245`, at this head — `1584` at
+`_DOC_RETIRED_KEYS` (`projection/entities.py:2253`, at this head — `1584` at
 `4f68a2aa7`) and the graph migration `relabel_legacy_documents`
 (`migrate_kinds.py:167`).
 
