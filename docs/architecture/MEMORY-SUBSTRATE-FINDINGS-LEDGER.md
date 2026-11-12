@@ -397,8 +397,16 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   `, c and **(j)**` vanished so the compared set silently equalled the table's. `a` and `i` are the
   only single letters that are also English words, so WHICH SIDE IS EVIDENCE DEPENDS ON
   WHERE THE LETTER SITS: an INTERIOR `a`/`i` is read only when the separator to its left is
-  punctuation alone (`,` `;` `&`, no connector word) — that is the whole difference from
-  prose, since `, and I,` carries the word `and` beside the letter; the HEAD of a list is
+  HOMOGENEOUS — exactly one punctuation mark (`,` `;` `&`) or exactly one bare connector
+  (`and`, `or`, `also`, `plus`, as well as, followed by, namely), both of which §8 lists as
+  separators, so `a, f, h, i, j` AND `a and f and h and i and j` must each read every member;
+  a MIXTURE of the two is REFUSED, which is a declared over-refusal (`a, f, h, and i, j`
+  loses its `i`) and it is deliberate: the mixture's bytes ARE prose's bytes, so the same
+  bytes can either read a phantom (`…, and I, **(j)** …` closed a stale complement list) or
+  drop a member, and a false PASS outranks the friction of an over-block; the TAIL is
+  unaffected — it is decided by what FOLLOWS it, so the Oxford-comma spelling
+  `a, f, h, and i.` does read its `i`;
+  the HEAD of a list is
   read because a run's first item has no item before it, so there is no separator-side
   evidence to consult — a choice, not a proof (see the residuals below);
   and the END of a run is read only when the sentence's own ending follows — a full stop that
@@ -408,12 +416,16 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   (`still read` yes, `still-unsolved` no). ⛔ A bare comma is NOT an ending for the last item:
   a comma there means the
   run did not end, so `Only a, f, h, i, and then some.` must not read `i` (measured — an
-  ordering that tested the LEFT side first did read it). ⚠️ FOUR shapes remain readable and
+  ordering that tested the LEFT side first did read it). ⚠️ FOUR OVER-READINGS remain open and
   none is closable in code, because each is byte-identical to a spelling §8 accepts: an
-  `a`/`i` inside a run between punctuation (`…, a, …`, indistinguishable from the bare
-  list); a connector-preceded TAIL with an accepted ending (`a, f, h, and i.` IS the
+  `a`/`i` inside a run beside a homogeneous separator (`…, a, …`, or `… and a and …`,
+  indistinguishable from the bare and connector spellings); a connector-preceded TAIL with an accepted ending (`a, f, h, and i.` IS the
   Oxford-comma spelling, so it must read); a TAIL followed by one of the arm's own
-  predicates (a verb phrase can start with one); and a prose `I`/`a` at a run's HEAD. Markup
+  predicates (a verb phrase can start with one); and a prose `I`/`a` at a run's HEAD. One
+  OVER-REFUSAL is deliberate and is not closable either: an INTERIOR item joined by a MIXED
+  separator (`a, f, h, and i, j`) loses that member, because those bytes are prose's bytes
+  and a false PASS outranks the friction of an over-block; the TAIL is decided by what
+  follows it, so the Oxford-comma spelling above still reads. Markup
   around a
   member never decides candidacy (`**(c)**` and `(c)` are the same item), which is
   what stops a `**` from being the difference between a red and a green; code, italic and
@@ -501,17 +513,18 @@ arm reads that is not the page's CONTENT is outside it. Of the arms `check_docum
 two are blind this way — `check_section_presence`, the FIRST one called, and `check_registration`,
 which reads `docs/00_index.md` rather than the page — and so are the §3 letter-list rules above, which
 decide which letters a sentence names and are internal to the tally arms rather than one of them.
-Measured: making either arm a no-op, or removing a letter-membership rule (the run requirement,
-or the `a`/`i` ending test), leaves `--self-test`
-reporting `PASS` with exit 0, while EVERY OTHER arm reds when no-op'd. Their mechanism is
-the pytest arms instead: `test_every_section_is_required_not_just_the_bounded_ones` for the structural
-arm, `test_unregistered_document_is_rejected` for the registration arm, and
-`test_english_prose_cannot_supply_a_missing_member` for each of the two letter-rule deletions
-(measured), while `test_a_written_bare_member_is_still_read` and
+Those rules are THREE and each is deletable — the list-RUN grouping, the `a`/`i` evidence test, and
+its ending test. Measured: no-op'ing either arm, or deleting any one of the three letter rules, leaves
+`--self-test` reporting `PASS` with exit 0 (measured, all five), while EVERY OTHER arm reds when
+no-op'd. Their mechanism is the pytest arms instead: `test_every_section_is_required_not_just_the_bounded_ones`
+for the structural arm, `test_unregistered_document_is_rejected` for the registration arm, and
+`test_english_prose_cannot_supply_a_missing_member` — beside
+`test_a_mixed_separator_interior_join_is_the_declared_over_refusal` — for the letter-rule deletions
+(measured, one rule at a time), while `test_a_written_bare_member_is_still_read` and
 `test_a_letter_added_to_either_tally_list_is_compared_in_every_spelling` pin the opposite direction —
 that a spelling §8 accepts is still READ, so a guard cannot buy a green by refusing correct prose. All
-five run in the `test` jobs on both change classes this guard exists for (`core` for a `tools/` edit,
-`tier1` for a `docs/` one).
+of them run in the `test` jobs on both change classes this guard exists for (`core` for a `tools/`
+edit, `tier1` for a `docs/` one).
 Two mechanisms, stated separately, for the same reason the ancestry arm below states its own.
 
 Exactly one arm needs `git` **history**: the frontmatter's `measured_at_commit` must be an ancestor of

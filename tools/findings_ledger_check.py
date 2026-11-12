@@ -766,11 +766,24 @@ _MEMBER_END_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: A separator that is PUNCTUATION ONLY — no connector word. This is what makes the
-#: documented bare spelling (`a, f, h, i, j`) evidence, and it is the whole difference
-#: between it and prose: `, and I,` carries a WORD beside the `a`/`i`, a bare list
-#: carries only `,` `;` or `&`.
+#: A separator that is ONE PUNCTUATION MARK (`\s*[,;&]\s*`) or ONE BARE CONNECTOR
+#: (`and`, `or`, `also`, `plus`, `as well as`, `followed by`, `namely`) — each regex
+#: matches exactly one, so a doubled join (`a,; i`, `a and or i`) is not matched either.
+#: ⛔ WHAT AN INTERIOR `a`/`i` NEEDS IS A HOMOGENEOUS SEPARATOR — one mark or one
+#: connector — because both are documented list separators (`a, f, h, i, j` and
+#: `a and f and h and i and j` must each read every member). A MIXTURE (`a, f, h, and i, j`)
+#: is the DECLARED OVER-REFUSAL, and it is deliberate: `, and i,` is byte-identical to
+#: prose, so with the same bytes we can either read a phantom (`…, and I, **(j)** …` closed
+#: a stale complement list — measured) or drop a member of a mixed-separator list. A false
+#: PASS outranks the friction of a false accusation (AGENTS.md A/B: fail-open is A,
+#: over-block is B), so the mixture is refused and the loss is stated. The TAIL is NOT
+#: affected: the Oxford-comma spelling `a, f, h, and i.` reads its `i`, because a run's last
+#: item is decided by what FOLLOWS it, not by its left separator.
 _PUNCTUATION_SEP_RE = re.compile(r"\s*[,;&]\s*")
+_CONNECTOR_SEP_RE = re.compile(
+    r"\s*\b(?:and|or|also|plus|as\s+well\s+as|followed\s+by|namely)\b\s*",
+    re.IGNORECASE,
+)
 
 
 def _bare_list_members(masked: str) -> set[str]:
@@ -846,33 +859,49 @@ def _proselike_has_evidence(
        after a comma (`then x, I, j …`), and none of that is consulted.
     2. **TAIL** (`pos == len(run) - 1`) — the RIGHT side decides, via `_MEMBER_END_RE`:
        it is prose once the list is over.
-    3. **INTERIOR** — both sides are separators, and only a PUNCTUATION-ONLY left
-       separator (`,` `;` `&`, no connector word) makes it an item. That is what
-       separates the documented bare spelling (`a, f, h, i, j`) from prose: `, and I,`
-       carries the word `and` beside the letter.
+    3. **INTERIOR** — both sides are separators, and the LEFT one must be HOMOGENEOUS:
+       exactly one punctuation mark (`,` `;` `&`) or exactly one bare connector (`and`,
+       `or`, `also`, `plus`, `as well as`, `followed by`, `namely`). Both are documented
+       list separators, so both are evidence (`a, f, h, i, j` and `a and f and h and i and j`
+       must each read every member — refusing the connector form reded a CORRECT page,
+       measured by #11902's review round 3). A MIXTURE is refused, and that is the
+       DECLARED OVER-REFUSAL: `a, f, h, and i, j` loses its `i`. It is deliberate — see
+       the residual below — because the mixture's bytes are the prose bytes.
 
-    ⚠️ RESIDUALS, stated rather than implied — NONE of them is closable in code, because
-    every one is byte-identical to a spelling §8 accepts:
-    * INTERIOR punctuation adjacency: `…, a, …` / `…, I, …` inside a run. A bare list item
-      and an English word between two commas are the same bytes.
-    * TAIL preceded by a connector, followed by an accepted ending: `, and a.`,
-      `, and I — the rest …`, `, and I: the rest …`. ⛔ THIS IS THE OXFORD-COMMA SPELLING:
-      `a, f, h, and i.` must read `i`, so refusing the connector-preceded tail would be
-      the false-accusation class #12028 rejects. The connector is refused only for an
-      INTERIOR item, where the left side is all there is to read.
-    * TAIL followed by one of the arm's own predicates can still be a verb phrase
-      (`, and a read of §4 shows …`); closing it needs a WIDER predicate list, which is
-      the same false-accusation trade.
-    * HEAD: prose `I`/`a` at a run's head is read (`I, j still read as written.`) — a run
-      begins at its first item, and nothing to its left can distinguish the two.
-    Every residual also needs the phantom to be exactly a row the stale list OMITS.
+    ⚠️ RESIDUALS, stated rather than implied — FOUR OVER-READINGS (prose read as a member)
+    and ONE OVER-REFUSAL (a member not read). None is closable in code, because every one is
+    byte-identical to the other side of the same ambiguity:
+    * OVER-READING — INTERIOR adjacency: `…, a, …` / `…, I, …` inside a punctuation-joined
+      run, `… and a and …` inside a connector-joined one. A bare list item and an English
+      word beside a homogeneous separator are the same bytes.
+    * OVER-READING — TAIL preceded by a connector, followed by an accepted ending:
+      `, and a.`, `, and I — the rest …`, `, and I: the rest …`. ⛔ THIS IS THE
+      OXFORD-COMMA SPELLING: `a, f, h, and i.` must read `i`, so refusing the
+      connector-preceded tail would be the false-accusation class #12028 rejects.
+    * OVER-READING — TAIL followed by one of the arm's own predicates can still be a verb
+      phrase (`, and a read of §4 shows …`); closing it needs a WIDER predicate list, the
+      same false-accusation trade.
+    * OVER-READING — HEAD: prose `I`/`a` at a run's head is read (`I, j still read as
+      written.`) — a run begins at its first item, and nothing to its left can distinguish
+      the two.
+    * OVER-REFUSAL — a MIXED left separator on an INTERIOR item (`a, f, h, and i, j`) drops
+      that member. Deliberate: those bytes are prose's bytes (`, and I,` closed a stale
+      complement list — measured), and a false PASS outranks the friction of an over-block
+      (AGENTS.md A/B). Pinned by
+      `test_a_mixed_separator_interior_join_is_the_declared_over_refusal`, so a change that
+      flips the trade must update this list rather than drift from it.
+    Every over-reading also needs the phantom to be exactly a row the stale list OMITS.
     """
     if pos == 0:  # a run's FIRST item — no separator-side evidence exists, so it is read
         return True
     if pos == len(run) - 1:  # the list's TAIL — what follows it is the evidence
         return bool(_MEMBER_END_RE.match(masked[end:]))
-    # INTERIOR: only punctuation beside it, no connector word.
-    return bool(_PUNCTUATION_SEP_RE.fullmatch(masked[run[pos - 1][1] : start]))
+    # INTERIOR: the left separator must be homogeneous — punctuation alone or a bare
+    # connector, never a mixture (`, and I,` is prose).
+    left_sep = masked[run[pos - 1][1] : start]
+    return bool(
+        _PUNCTUATION_SEP_RE.fullmatch(left_sep) or _CONNECTOR_SEP_RE.fullmatch(left_sep)
+    )
 
 
 def _named_letters(sentence: str) -> set[str]:

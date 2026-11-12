@@ -2727,6 +2727,14 @@ def test_english_prose_cannot_supply_a_missing_member(tmp_path, monkeypatch):
     for sentence, expected in (
         ("Only a, f, h, i, j still read as written.", {"a", "f", "h", "i", "j"}),
         ("Only a, f, h, i and j still read as written.", {"a", "f", "h", "i", "j"}),
+        # ⛔ A CONNECTOR-JOINED RUN IS A LIST TOO (§8). An INTERIOR rule that accepted only
+        # punctuation-only separators dropped the `i` here and REDed a correct page —
+        # measured by #11902's review round 3 on the previous head, which read all five.
+        # Both homogeneous forms are evidence; a MIXTURE (`, and I,`) is prose.
+        ("Only a and f and h and i and j still read as written.", {"a", "f", "h", "i", "j"}),
+        ("Only a and i and j still read as written.", {"a", "i", "j"}),
+        ("Only a as well as i as well as j still read as written.", {"a", "i", "j"}),
+        ("Only a followed by i followed by j still read as written.", {"a", "i", "j"}),
         ("Only a, f, h, i remain STILL-TRUE.", {"a", "f", "h", "i"}),
         ("Only a, f, h, i) still read as written.", {"a", "f", "h", "i"}),
         ("Note: j or a no longer read as written.", {"a", "j"}),
@@ -2788,6 +2796,40 @@ def test_a_written_bare_member_is_still_read(tmp_path, monkeypatch):
             assert any(
                 "STILL-TRUE list names" in p for p in problems
             ), f"a bare member inside a run must be read: {replacement!r} -> {problems}"
+
+
+def test_a_mixed_separator_interior_join_is_the_declared_over_refusal() -> None:
+    """An interior item joined by BOTH kinds of separator loses that member — on purpose.
+
+    `a, f, h, and i, j` is a genuine list (§8 counts `,` and `and` as separators), and this
+    reads it WITHOUT the `i`. That is the delta's one OVER-REFUSAL, and it is a deliberate
+    trade rather than an oversight: the same bytes (`, and i,`) are prose, and a prose `I`/`a`
+    there closes a stale complement list (`, and I, **(j)**` read CLEAN over one — measured,
+    the reason #12028 exists). With identical bytes we can either read a phantom or drop a
+    member, and a false PASS outranks the friction of an over-block (AGENTS.md A/B).
+
+    ⛔ THIS TEST PINS THE DISCLOSURE, NOT A DESIRABLE OUTCOME. The run's TAIL is unaffected —
+    `a, f, h, and i.` still reads its `i`, because a tail is decided by what follows it — so
+    the Oxford-comma spelling every real page uses is safe. If a future change makes mixed
+    interior separators evidence, this assertion MUST be inverted together with the residual
+    lists in `findings_ledger_check.py` and the page; drifting from them silently is the
+    failure this pins against.
+    """
+    for sentence in (
+        "Only a, f, h, and i, j still read as written.",
+        "Only a, f, h, and i and j still read as written.",
+        "Only a and f and h, and i, j still read as written.",
+    ):
+        letters = flc._named_letters(sentence)
+        assert "i" not in letters, f"over-refusal closed without updating the disclosure: {sentence!r}"
+        assert {"a", "f", "h"} <= letters, f"the rest of the run must still read: {sentence!r}"
+    # …and the TAIL of a mixed run IS read, which is the half that must never regress.
+    assert flc._named_letters("Only a, f, h, and i. still read as written.") == {
+        "a",
+        "f",
+        "h",
+        "i",
+    }
 
 
 def test_a_quoted_figure_is_not_a_second_assertion(tmp_path, monkeypatch):
