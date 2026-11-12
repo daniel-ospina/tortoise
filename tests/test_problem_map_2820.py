@@ -23,9 +23,11 @@ the shipped source read as an AST — the interpreter guard's exit code, which n
 runtime fixture can produce (1). That is 51 negative controls plus 6 positives:
 three read the shipped page whole
 (`test_the_recut_row_and_survivors_hold_their_status_by_ISSUE` is the fourth —
-added when fresh review measured that no arm read a row's status BY ISSUE, so a
-compensating status swap between two rows was invisible to the whole file; see
-its docstring),
+added when fresh review measured that no arm ASSERTED a row's status by issue, so
+a compensating status swap between two rows was invisible to the whole file as a
+claim — one arm carries a per-issue status literal only as a mutation fixture's
+premise, where it reds as a broken fixture rather than a status finding; see its
+docstring),
 a fifth
 (`test_every_status_token_is_in_the_vocabulary`) reads the closed-vocabulary
 CONSTANT rather than the page — see below — and the sixth is the positive half of
@@ -173,11 +175,16 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     """Fails when two rows SWAP statuses — a compensating edit no count can see.
 
     Reachable, and measured at the head that added this arm: BEFORE THIS ARM no
-    comparison in this file read a row's status BY ISSUE — the arms that read the
-    page compare COUNTS (§2's tally, the abstract, the WS-C cell) or check a row's
-    presence, its pin, its status vocabulary and its anchors, and none tied a
-    status to a specific issue — so an edit that held the tally and moved the
-    claim was invisible to all of them. Reverting §2's `#2782` to `OPEN`
+    arm ASSERTED a row's status by issue — the arms that read the page compare
+    COUNTS (§2's tally, the abstract, the WS-C cell) or check a row's presence,
+    its pin, its status vocabulary and its anchors — so an edit that held the
+    tally and moved the claim was invisible to all of them as a CLAIM. One arm
+    does carry a per-issue status literal, but as a MUTATION FIXTURE's premise
+    rather than an assertion: `_rewrite_row(..., 2813, "| VERIFIED-FIXED |", …)`
+    fails with "row #2813 does not contain '| VERIFIED-FIXED |'", i.e. as a
+    broken fixture, not as a status finding. So a swap touching `#2813` reds by
+    accident of that fixture and nothing else, which is not coverage.
+    Reverting §2's `#2782` to `OPEN`
     **and** promoting `#2684` to `VERIFIED-FIXED` (one row each way, so §2 stays
     22/4/0, the total 26, WS-C 4 of 6, and both headlines intact) left
     `tools/problem_map_check.py --check` **CLEAN** and this suite **58 passed** —
