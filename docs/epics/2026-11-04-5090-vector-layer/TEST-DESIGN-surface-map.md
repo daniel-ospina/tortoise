@@ -273,9 +273,12 @@ as a row). A *required* row could not hide that way (its seam token was then mis
 and R5 red), but a row with no seam token could. ONE bound now decides what a row is —
 `MAX_TABLE_INDENT`, 0–3 leading spaces then `|` — applied by `_is_table_line` in the block builder, the
 seam discovery, the R5 presence arm **and the `--self-test` mutators** (`_line_matches`), and spelled
-into the §1/§3/§4 row regexes; the harness runs
-its whole population twice, on the shipped map and on a copy whose rows are all indented 2 spaces, so a
-mutator or an arm that can only reach column 0 is caught instead of silent. ⚠️ The 4+ boundary is
+into the §1/§3/§4 row regexes; the harness runs its whole population twice, on the shipped map and on a
+copy whose rows are all at 2 spaces, and it requires the two shapes to earn the **same baseline
+verdict** — the shapes are the same document, so a RULE that only reaches column-0 rows reds on the
+baseline alone (measured: reverting the R5 presence arm, the §3 capability regex or the §4 child regex
+each reds the second shape with the violations the regression adds), while a MUTATOR that cannot find an
+indented target reports UNTESTABLE. Neither half is silent. ⚠️ The 4+ boundary is
 relative to the containing block and the checker models document-column indentation only; the map's
 tables are top-level, so no row can be hidden that way here.
 A second table belongs in its own section.
