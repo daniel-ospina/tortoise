@@ -4334,8 +4334,42 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
     # LEXICALLY FIRST binding (the walk yields siblings LIFO), so a GATE spelling that never runs
     # replaced the live BUILDER it shares a name with and the writer measured `gated` — outside
     # `NEEDS_A_DECLARATION`, i.e. it stopped owing a declaration. Neither binding is a "rebinding",
-    # so no other rule saw the collision. Resolution now prefers the BUILDER in every collision,
-    # which is fail-closed in both source orders; each arm below is the shape that was `gated`.
+    # so no other rule saw the collision. Resolution is now ordered by what the CREDIT DOES to the
+    # writer (builders > ungated > seam), so it does not depend on source order.
+    # ⛔ The three arms below are NOT three instances of one bug (round 8 cycle 4, P2):
+    # `GATE_then_a_BUILDER` and `TYPE_CHECKING_then_a_builder` were `gated` before the fix, while
+    # `BUILDER_then_a_GATE` was ALREADY `unresolved_write` — it is the reversed-order CONTROL, and it
+    # reds only under the opposite "prefer the gate" wrong fix, which is what its own note says.
+
+    # ⛔ `#12020` round 8 cycle 4 (P1) — the collision rule was BUILDER-ONLY, so a `SEAM_CALL` vs
+    # `UNGATED_CALLS` collision (neither is a builder) still fell through to first-seen, which is
+    # source-order-dependent — and LIFO made "first-seen" the lexically LAST binding, so the common
+    # `try: import encode_for_store` / `except ImportError: import encode_for_row` idiom resolved to
+    # the seam that never runs and the writer measured `gated`: HIDDEN, and a regression against
+    # `main` for a writer whose live binding is ungated. Both orders must now resolve to `ungated`,
+    # which is INSIDE `NEEDS_A_DECLARATION`.
+    "one_local_name_bound_by_an_UNGATED_then_a_SEAM_import": (
+        "from tortoise.embeddings import encode_for_store as _a\n"
+        "from tortoise.embeddings import encode_for_row as _a\n"
+        "\n"
+        "def w(proj):\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": _a("t", 384)})\n',
+        {"tortoise.m::w": "ungated"},
+        "neither name is a builder, so the builder-only preference left this to source order; the "
+        "seam rank must LOSE every collision because `gated` is the only rank that hides a writer",
+    ),
+    "one_local_name_bound_by_an_UNGATED_import_with_a_try_except_SEAM_fallback": (
+        "try:\n"
+        "    from tortoise.embeddings import encode_for_store as _a\n"
+        "except ImportError:\n"
+        "    from tortoise.embeddings import encode_for_row as _a\n"
+        "\n"
+        "def w(proj):\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": _a("t", 384)})\n',
+        {"tortoise.m::w": "ungated"},
+        "the idiomatic optional-dependency spelling, whose LIVE binding is the ungated one: it "
+        "measured `gated` (hidden) while the fix was builder-only",
+    ),
     "one_local_name_bound_by_a_GATE_then_a_BUILDER_import": (
         "from tortoise.embeddings import encode_for_row as _a\n"
         "from tortoise.vector_write import set_embedding_clause as _a\n"

@@ -733,6 +733,25 @@ def _scope_bound_names(root: ast.AST) -> set[str]:
     return _own_scope_bindings(root)
 
 
+def _alias_credit_rank(name: str) -> int:
+    """How much a credited alias HELPS the writer stay visible — higher is safer (`#12020` round 8).
+
+    The rank is the collision rule in `_import_aliases`: when one local name resolves to two
+    primitives, the resolution must not depend on source order, so the higher rank wins.
+
+    * 2 — `WRITE_CLAUSE_BUILDERS`: the alias is the ONLY discovery signal, so the writer is
+      discovered and owes a declaration.
+    * 1 — `UNGATED_CALLS`: the writer is `ungated`, which is INSIDE `NEEDS_A_DECLARATION`.
+    * 0 — `SEAM_CALL`: `gated`, which is OUTSIDE `NEEDS_A_DECLARATION` — the only rank that can
+      HIDE a writer, so it loses every collision.
+    """
+    if name in WRITE_CLAUSE_BUILDERS:
+        return 2
+    if name in UNGATED_CALLS:
+        return 1
+    return 0
+
+
 def _import_aliases(*roots: ast.AST) -> dict[str, str]:
     """Local name -> the name it was IMPORTED AS, for the seams and clause builders (`#11274`).
 
@@ -791,14 +810,18 @@ def _import_aliases(*roots: ast.AST) -> dict[str, str]:
                 # writer measured `gated` (outside `NEEDS_A_DECLARATION`, i.e. it stopped owing a
                 # declaration; measured). Neither binding is a "rebinding" (`_imports_that_REBIND`
                 # skips every import that RESOLVES), so no other rule sees the collision.
-                # ⛔ Prefer the BUILDER in every collision, which is fail-closed in BOTH orders:
-                # the builder outcome is `unresolved_write`/`ungated`, both inside
-                # `NEEDS_A_DECLARATION`, while a source-order-dependent answer is right in one order
-                # and a silent hide in the other.
-                if previous is None or (
-                    previous not in WRITE_CLAUSE_BUILDERS
-                    and alias.name in WRITE_CLAUSE_BUILDERS
-                ):
+                # ⛔ ⛔ A BUILDER-ONLY preference is NOT a total order, and saying it was cost a P1
+                # (round 8 cycle 4). It left `SEAM_CALL` vs `UNGATED_CALLS` — both NON-builder — to
+                # the first-seen rule, which is source-order-dependent; and because the walk is LIFO,
+                # "first-seen" is the lexically LAST binding, so the common idiom
+                # `try: import encode_for_store as _a / except ImportError: import encode_for_row as _a`
+                # resolved to the SEAM spelling that never runs and the writer measured `gated` —
+                # HIDDEN, a regression against `main` for a writer whose live binding is ungated.
+                # ⛔ So the collision is decided by what the CREDIT DOES to the writer, highest wins,
+                # independent of source order: builders (KEEP the writer, `unresolved_write`) >
+                # `UNGATED_CALLS` (`ungated`, inside `NEEDS_A_DECLARATION`) > `SEAM_CALL` (`gated`,
+                # outside it — the only rank that can hide a writer, so it loses every collision).
+                if previous is None or _alias_credit_rank(alias.name) > _alias_credit_rank(previous):
                     found[local] = alias.name
     return found
 
