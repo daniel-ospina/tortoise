@@ -528,6 +528,31 @@ CENSUS_BYPASS = "bypass"
 CENSUS_CLASSES = (CENSUS_RECOGNISED, CENSUS_EXEMPT, CENSUS_BYPASS)
 
 WRITER_CENSUS: dict[str, tuple[str, str]] = {
+    "tortoise.api::_emit": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::_emit` — the instrument's match is COMMENT PROSE: the "
+        "measured-transcript comment `#12000` round 10 left in the body (\"measured "
+        "with `embedding=\"abc\"` on the payload\") is not a write clause. Its "
+        "carrier role is the JOURNAL, not the graph: it stamps the record through "
+        "`stamp_journal_embedding` and hands it to `write_live_record`, and the "
+        "STORE belongs to the fold that replays it — the `_journal_event_raw_write` "
+        "class exactly (a sanctioned replay carrier, explicitly NOT exempt "
+        "because no vector is reachable through it: `_point` stamps one into this "
+        "very record, and a caller-supplied vector is carried verbatim under the "
+        "`#5004` contract). ⚠️ The match appeared when `#11948`/`#12000` grew this "
+        "body's prose, which is why the class is READ here and not a change to the "
+        "needle: `_EMBED_WRITE` is deliberately blind (it cannot see the `SET n += "
+        "$p` map-merge `_update_entity` relies on), so its false positives are "
+        "CLASSIFIED and never silenced"),
+    "tortoise.api::_verify_record_vector_width": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::_verify_record_vector_width` — the match is its own "
+        "DOCSTRING: the measured transcript that explains the guard shows the "
+        "forbidden input (`embedding=[0.1234567890123, 1/3])`). The body VERIFIES "
+        "and returns: it re-derives the declared width through "
+        "`shortest_float32_vector` and raises on a disagreement, so a truthful "
+        "declaration lands and a lie is refused. Nothing is stored here — the "
+        "writer it verifies for is `_emit` above, and the store is the fold's"),
     "tortoise.api::add_point": (
         CENSUS_EXEMPT,
         "`tortoise/api.py::add_point` — discovered by the CONTAINER-KEY shape "
@@ -695,6 +720,13 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
 #: union of `WRITER_CENSUS` and `WRITER_LABEL_OVERRIDES`, so a new entry cannot
 #: be added without evidence and evidence cannot outlive its entry.
 CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "tortoise.api::_emit": (
+        ("tortoise/api.py", "_emit", 'embedding="abc"'),
+        ("tortoise/api.py", "_emit", "stamp_journal_embedding(")),
+    "tortoise.api::_verify_record_vector_width": (
+        ("tortoise/api.py", "_verify_record_vector_width",
+         "embedding=[0.1234567890123, 1/3])"),
+        ("tortoise/api.py", "_verify_record_vector_width", "shortest_float32_vector(")),
     "tortoise.api::add_point": (
         ("tortoise/api.py", "add_point",
          'p["embedding"] = fields["embedding"]'),),
