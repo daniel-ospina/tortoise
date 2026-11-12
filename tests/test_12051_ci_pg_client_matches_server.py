@@ -130,7 +130,11 @@ ROOT = Path(__file__).resolve().parents[1]
 PYTHON_CI = ROOT / ".github" / "workflows" / "python-ci.yml"
 JOB = "test-record-postgres"
 
-#: `pgvector/pgvector:pg16` -> 16, and a plain `postgres:16` -> 16. The
+#: `pgvector/pgvector:pg16` -> 16, and a plain `postgres:16` -> 16. The DIGEST is
+#: stripped before matching (#12051 review round 12): `pgvector/pgvector:pg16@sha256:…`
+#: is the strictly SAFER form of the same pin, and the `$` anchor refused it with
+#: a message saying it did not name its major, which it does (measured, four rows
+#: red). See `_postgres_image_majors`, which matches the reference without it.
 #: `pgvector` prefix is not incidental: the record's vector migration needs the
 #: extension (#11642), so a plain `postgres:NN` pin cannot substitute for one of
 #: these — but reading BOTH forms keeps this guard's message about the major
@@ -142,8 +146,14 @@ IMAGE_RE = re.compile(r":(?:pg)?(\d+)(?:[-_][A-Za-z0-9._-]*)?$")
 #: postgresql-client-16 | tail -2`), which made the "exactly ONE pin step" rule
 #: red four rows and call a correct tree a second installer (measured). An
 #: install verb on the same line is what makes a step the pin.
+#: Flags between the manager and the verb are ORDINARY (#12051 review round 12):
+#: `apt-get -y install …` is the same command as `apt-get install -y …`, and the
+#: first spelling made `_pin_step` find ZERO installers and raise "a second
+#: installer makes the client whichever one ran last" about a tree with exactly
+#: one correct installer (measured, four rows red).
 CLIENT_PKG_RE = re.compile(
-    r"(?:apt-get|apt|aptitude)\s+(?:install|reinstall)[^\n]*?postgresql-client-(\d+)\b"
+    r"(?:apt-get|apt|aptitude)\s+(?:-\S+\s+|--\S+\s+)*"
+    r"(?:install|reinstall)[^\n]*?postgresql-client-(\d+)\b"
 )
 
 #: The runner's own command-file directory (#12051 review round 9): `$GITHUB_PATH`
@@ -153,6 +163,16 @@ CLIENT_PKG_RE = re.compile(
 #: >> "$f"; done`). Nothing legitimate in this job names the directory, so the
 #: name itself is refused.
 RUNNER_FILE_COMMAND_RE = re.compile(r"_runner_file_commands")
+
+#: A shell PATH ASSIGNMENT (#12051 review round 12). `_client_dir_mentions` only
+#: refuses a line that NAMES a versioned client dir, so
+#: `export PATH="/usr/local/bin:/usr/bin:/bin"` looked innocent — it names no
+#: client dir — while `/usr/bin/pg_dump` is `pg_wrapper`, which this file's own
+#: docstring says resolves to the image's NEWEST client (17). All five rows stayed
+#: GREEN with the leg on pg17 (measured). An assignment KEEPS the pin if its value
+#: names the pinned dir or still references `$PATH` (an append or a re-order cannot
+#: drop what is already on it); anything else REPLACES it.
+PATH_ASSIGN_RE = re.compile(r"\bPATH\s*=\s*(?P<quote>[\"']?)(?P<value>[^\s;\"']*)")
 
 #: A command that REPLACES a binary rather than naming one (#12051 review round
 #: 9). The pinned dir can be rewritten after the pin, and "may the job NAME
@@ -571,39 +591,102 @@ def _conditional_skip(step: dict) -> str | None:
 #: defaults each to its bare name).
 TOOLS = ("pg_dump", "pg_restore")
 
-LOOP_HEAD_RE = re.compile(r"^[ \t]*for[ \t]+(?P<var>[A-Za-z_]\w*)[ \t]+in[ \t]+(?P<names>[^;]*);?[ \t]*do[ \t]*$")
+LOOP_HEAD_RE = re.compile(
+    r"^[ \t]*for[ \t]+(?P<var>[A-Za-z_]\w*)[ \t]+in[ \t]+(?P<names>[^;]*);?[ \t]*do[ \t]*$"
+)
+LOOP_END_RE = re.compile(r"^[ \t]*done\b")
+
+#: Commands that PRINT their argument instead of running it. A client named after
+#: one of these is MENTIONED, not checked (#12051 review round 12): with the
+#: earlier substring test, `version="$(echo "$tool --version")"` — which runs
+#: nothing — covered both tools, and so did `printf '%s\n' "$tool --version"`
+#: beside a body that only ever checked `pg_dump`.
+PRINTING_COMMANDS = frozenset({"echo", "printf", "cat", "tee", "logger", "true", ":"})
+
+#: The COMMAND WORD that governs a position: the first word after the nearest
+#: command separator (`$(`, a backtick, `;`, `&&`, `||`, `|`, a bracket, or the
+#: start of the line), skipping `sudo` and `env` prefixes.
+COMMAND_WORD_RE = re.compile(
+    r"(?:^|\$\(|`|;|&&|\|\||\||[(){}])\s*"
+    r"(?:sudo\s+|env\s+(?:-\S+\s+)*)*"
+    r"([^\s;|&(){}]+)"
+)
+
+
+def _command_word(before: str) -> str:
+    """The command word that would RUN whatever follows `before`."""
+
+    words = COMMAND_WORD_RE.findall(before)
+    return words[-1].strip("\"'") if words else ""
 
 
 def _version_checked_tools(code: str) -> set[str]:
-    """Which client tools this code actually VERSION-CHECKS (#12051 round 11).
+    """Which client tools this code actually VERSION-CHECKS (#12051 rounds 11-12).
 
-    A bare substring test over the step is satisfied by a `for` HEADER alone, so
-    a pin that names both tools on the header and then checks only one of them
-    (`version="$(pg_dump --version)"`) read as covering both — pg_restore was
-    never checked and every row stayed green (measured). Coverage therefore
-    requires the version command to USE whatever the loop iterates, or a
-    per-tool `<tool> --version` line.
+    Coverage is what the code RUNS, in two accepted shapes: a `for <var> in …; do`
+    loop whose body invokes `$<var> --version`, and a `<tool> --version` command.
+    A bare `for` HEADER naming both tools does not count (round 11: a body
+    hard-coding `pg_dump --version` left `pg_restore` unchecked and every row
+    green), and neither does a QUOTED mention (round 12: `$(echo "$tool
+    --version")` runs nothing). Both are the token-in-text defect rounds 4 and 7
+    fixed for `::error::` / `exit 1`.
     """
 
     checked: set[str] = set()
     lines = code.splitlines()
+
+    def scan(line: str, loop_var: str | None, loop_names: set[str]) -> None:
+        for match in re.finditer(r"--version\b", line):
+            word = _command_word(line[: match.start()])
+            if not word or word in PRINTING_COMMANDS:
+                continue
+            if loop_var and word in (f"${loop_var}", f"${{{loop_var}}}"):
+                checked.update(loop_names)
+            elif word in TOOLS:
+                checked.add(word)
+
     for index, line in enumerate(lines):
         head = LOOP_HEAD_RE.match(line)
-        if head:
-            names = {
-                name
-                for name in re.findall(r"[A-Za-z_][\w-]*", head.group("names"))
-                if name in TOOLS
-            }
-            body = "\n".join(lines[index + 1 :])
-            iterate = re.escape(head.group("var"))
-            if re.search(rf'"?\$\{{?{iterate}\}}?"?[ \t]+--version', body):
-                checked |= names
+        if not head:
+            scan(line, None, set())
             continue
-        for tool in TOOLS:
-            if re.search(rf"\b{tool}\b[^\n]*--version", line):
-                checked.add(tool)
+        names = {
+            name
+            for name in re.findall(r"[A-Za-z_][\w-]*", head.group("names"))
+            if name in TOOLS
+        }
+        var = head.group("var")
+        for body_line in lines[index + 1 :]:
+            if LOOP_END_RE.match(body_line):
+                break
+            scan(body_line, var, names)
     return checked
+
+
+def _path_assignments_that_drop_the_pin(
+    steps: list[dict], start: int, server_major: int
+) -> list[str]:
+    """PATH assignments at or after the pin that can no longer see the pinned dir.
+
+    Only a value that neither names `/usr/lib/postgresql/<major>/bin` nor keeps
+    `$PATH` can DROP it, which is what keeps the rule precise: the pin's own
+    `export PATH="/usr/lib/postgresql/16/bin:$PATH"` and every append
+    (`PATH="$PATH:/x"`, `PATH=/x:$PATH`) stay green, and a diagnostic
+    `echo "PATH=$PATH"` is not an assignment at all.
+    """
+
+    pinned = f"/usr/lib/postgresql/{server_major}/bin"
+    offenders: set[str] = set()
+    for index in range(start, len(steps)):
+        for line in _run_commands(steps[index]).splitlines():
+            for match in PATH_ASSIGN_RE.finditer(line):
+                value = match.group("value")
+                if pinned in value or "$PATH" in value or "${PATH}" in value:
+                    continue
+                if _command_word(line[: match.start()]) in PRINTING_COMMANDS:
+                    continue
+                offenders.add(f"step {index} REPLACES the client PATH: {line.strip()!r}")
+    return sorted(offenders)
 
 
 def _pin_step(steps: list[dict]) -> tuple[int, dict]:
@@ -648,7 +731,8 @@ def _postgres_image_majors(job: dict) -> list[int]:
         # is named `pgvector`, which does not contain `postgres`.
         if "pgvector" not in image and "postgres" not in image:
             continue
-        match = IMAGE_RE.search(image)
+        # The digest is not part of the TAG: `image:pg16@sha256:…` still pins 16.
+        match = IMAGE_RE.search(image.split("@", 1)[0])
         assert match, (
             f"postgres image pin {image!r} does not name its major "
             "(`:pg<major>` or `:<major>`); an unpinned major cannot be matched "
@@ -866,7 +950,8 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
         }
     )
     replacements = sorted(
-        {
+        set(_path_assignments_that_drop_the_pin(steps, pin_index, server_major))
+        | {
             f"step {index} REPLACES a client binary: {line!r}"
             for index, step in enumerate(steps)
             if index >= pin_index
@@ -881,8 +966,9 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
         }
     )
     assert not (offenders or other_majors or replacements), (
-        "a `$GITHUB_PATH` write, a step's own PATH entry, or a REPLACEMENT of a "
-        "client binary changes which client the leg runs: "
+        "a `$GITHUB_PATH` write, a step's own PATH entry, a PATH ASSIGNMENT that "
+        "drops the pinned dir, or a REPLACEMENT of a client binary changes which "
+        "client the leg runs: "
         + "; ".join(offenders + other_majors + replacements)
         + ". Later writes and in-step assignments both WIN over the pin, and a "
         "replaced binary is what the pinned dir resolves, so the leg would run "
@@ -1203,7 +1289,78 @@ VERSION_CHECK_POLARITY = [
         set(),
         "the loop variable is echoed, never version-checked",
     ),
+    (
+        'for tool in pg_dump pg_restore; do\n  version="$(echo "$tool --version")"\ndone',
+        set(),
+        "a QUOTED `--version` argument runs nothing: the command word is `echo`",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  printf \'%s\\n\' "$tool --version"\n'
+        '  version="$(pg_dump --version)"\ndone',
+        {"pg_dump"},
+        "printf mentions both, the only real check is pg_dump",
+    ),
 ]
+
+
+#: (line, does it DROP the pinned dir, why) — the pin for
+#: `_path_assignments_that_drop_the_pin`. A PATH assignment that names no client
+#: dir was invisible, and `/usr/bin/pg_dump` is `pg_wrapper`, i.e. the image's
+#: newest client (#12051 review round 12, measured GREEN on all five rows).
+PATH_ASSIGNMENT_POLARITY = [
+    ('export PATH="/usr/local/bin:/usr/bin:/bin"', True, "a bare replacement drops the pin"),
+    ('PATH="/usr/bin:/bin" timeout -s INT bash x.sh', True, "a command-prefix assignment drops it"),
+    ("env -i PATH=/usr/bin:/bin bash x.sh", True, "`env -i` drops it just as well"),
+    ('export PATH="/usr/lib/postgresql/16/bin:$PATH"', False, "the pin's own assignment"),
+    ('export PATH="$PATH:/usr/local/bin"', False, "an append cannot drop what is already there"),
+    ('PATH="/usr/local/bin:$PATH" bash x.sh', False, "a re-order keeps `$PATH` intact"),
+    ('echo "PATH=/usr/bin"', False, "a diagnostic PRINTS a value, it does not assign one"),
+]
+
+
+@pytest.mark.parametrize(
+    ("line", "drops", "why"), PATH_ASSIGNMENT_POLARITY, ids=[c.replace(" ", "-")[:28] for c, _, _ in PATH_ASSIGNMENT_POLARITY]
+)
+def test_a_path_assignment_must_keep_the_pinned_dir(line: str, drops: bool, why: str) -> None:
+    """Only a value that neither names the pin nor keeps `$PATH` can DROP it."""
+
+    offenders = _path_assignments_that_drop_the_pin([{"run": line}], 0, 16)
+    assert bool(offenders) is drops, f"{why} (measured, round 12): {line!r}"
+
+
+#: (command, the major it installs, why) — the pin for `CLIENT_PKG_RE`.
+INSTALL_POLARITY = [
+    ("sudo apt-get install -y --no-install-recommends postgresql-client-16", 16, "the real line"),
+    ("sudo apt-get -y install --no-install-recommends postgresql-client-16", 16, "flags before the verb"),
+    ("sudo apt-get --yes install postgresql-client-16", 16, "the long spelling of the same flag"),
+    ("sudo apt-get install postgresql-client-17", 17, "a wrong major is still an install"),
+    ("dpkg -l postgresql-client-16", None, "a read-only diagnostic is NOT an installer"),
+    ('echo "sudo apt-get install postgresql-client-16"', 16, "a mention still reads as an install"),
+]
+
+
+@pytest.mark.parametrize(
+    ("command", "major", "why"), INSTALL_POLARITY, ids=[c.replace(" ", "-")[:28] for c, _, _ in INSTALL_POLARITY]
+)
+def test_an_install_verb_reads_through_its_flags(command: str, major: int | None, why: str) -> None:
+    """`apt-get -y install X` is the same command as `apt-get install -y X`."""
+
+    match = CLIENT_PKG_RE.search(command)
+    assert (int(match.group(1)) if match else None) == major, f"{why} (measured, round 12)"
+
+
+def test_an_image_digest_does_not_hide_its_major() -> None:
+    """`image:pg16@sha256:…` is the STRICTLY SAFER form of the same pin."""
+
+    digest = "sha256:" + "0" * 64
+    majors = _postgres_image_majors(
+        {"steps": [{"with": {"image": f"pgvector/pgvector:pg16@{digest}"}}]}
+    )
+    assert majors == [16], (
+        "a digest-pinned image names its major; refusing it reds four rows and "
+        "tells the author it does not name one (measured, round 12)"
+    )
 
 
 @pytest.mark.parametrize(
