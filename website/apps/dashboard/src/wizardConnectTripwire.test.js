@@ -1505,7 +1505,7 @@ test('#3218/#3232: every config-writing step-1 prompt installs the skills before
     assert.equal(tailLines[0], `Tell me when to restart ${HARNESS_NAMES[h]}.`,
       `${h}: the restart cue names the harness`)
     assert.deepEqual(tailLines.slice(1).filter((line) => line.trim() !== ''),
-      ['Docs: https://tortoise.premiselabs.co/docs'],
+      ['Docs: https://premiselabs.co/tortoise/docs'],
       `${h}: the restart cue must be the last actionable line — only the docs line may follow it`)
     assert.ok(!INSTALL.test(p.slice(iRestart)),
       `${h}: the restart-before-skills order must not come back`)

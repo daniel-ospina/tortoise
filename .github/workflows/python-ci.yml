@@ -4670,6 +4670,41 @@ jobs:
         # `[embeddings]`/torch are deliberately absent: this file needs neither
         # (measured — same run, 71s against 204s with the embedder installed).
         run: pip install -e '.[test,postgres]'
+      - name: Pin the PostgreSQL CLIENT to the servers' major (#12051)
+        # ⛔ THE DRILL'S CLIENT VERSION IS PART OF THE ARTIFACT'S CONTRACT.
+        # `record_backup.py` resolves `pg_dump`/`pg_restore` from PATH (the
+        # defaults are the bare names, `pg_dump: str = "pg_dump"`), so the D8
+        # artifact was produced by whatever client the runner image happened to
+        # ship. Measured 2026-11-12 (job `130998952949`): a **PG17** client
+        # emitted the PG17-only `SET transaction_timeout = 0;` preamble into the
+        # `pgvector/pgvector:pg16` scratch server, where `pg_restore` refuses
+        # with `unrecognized configuration parameter "transaction_timeout"` and
+        # D8 reds — on every tree, with no code change to blame.
+        #
+        # Both provisioned servers below are **pg16**, so the client is pinned to
+        # 16 and then ASSERTED. An inherited client version is a red job that
+        # waits for the runner image to change rather than for a diff, and the
+        # failure it produces (`the artifact did NOT restore`) reads as a defect
+        # in the record path. `tests/test_12051_ci_pg_client_matches_server.py`
+        # pins this step's major to the two image pins, and pins its POSITION:
+        # a `$GITHUB_PATH` prepend after the leg would not be consulted at all.
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+          # PREPENDED: the versioned binaries must win over the image's own
+          # client and over `postgresql-common`'s unversioned wrapper.
+          echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
+          for tool in pg_dump pg_restore; do
+            version="$("$tool" --version)"
+            printf '%s\n' "$version"
+            major="$(printf '%s\n' "$version" | sed -E 's/[^0-9]*([0-9]+)\..*/\1/')"
+            if [ "$major" != "16" ]; then
+              echo "::error::$tool is major $major, but BOTH provisioned servers are pg16 — an artifact dumped by a newer client carries a GUC the target cannot execute (#12051). The whole record leg would red for a reason that has nothing to do with the diff."
+              exit 1
+            fi
+          done
       - name: Provision a throwaway Postgres on an ephemeral host port (#9551)
         # NOT a `services:` block: `tests/test_runner_ports_6673.py` forbids one
         # in this workflow, because a fixed host port is ONE global namespace on

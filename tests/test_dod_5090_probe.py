@@ -7257,12 +7257,20 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # 152 — deleting that line left `3 failed, 148 passed, 1 skipped` in a scratch
     # copy, byte-identical to the UNMUTATED copy's three repo-context failures,
     # i.e. the removal redded NOTHING. ⛔ The count is SCOPED to that head rather
-    # than re-cut, because this file collects 166 now and no run of it can report
+    # than re-cut, because this file collects 171 now and no run of it can report
     # 152; an unscoped figure here would be the stale-measurement defect §6 of the
     # census doc exists to forbid. What closed the gap is the AST guard below —
-    # measured at this tree, deleting the same line reads `1 failed, 164 passed,
-    # 1 skipped`, the failure being
-    # `test_the_residual_pin_separates_the_claim_from_its_inverse`. The reason was
+    # measured at this tree, deleting the same line ADDS exactly one failure over
+    # the same run's own baseline, namely
+    # `test_the_residual_pin_separates_the_claim_from_its_inverse` (measured at
+    # `origin/main@0dca7fcad`, docker lane: baseline `3 failed, 167 passed,
+    # 1 skipped` → mutated `4 failed, 166 passed, 1 skipped`; those three are the
+    # same repo-context failures the paragraph above already names). ⛔ Stated as a
+    # DELTA on purpose, not as an absolute split: the split moves with the
+    # interpreter and the LANE — the docstring of
+    # `test_the_census_doc_collects_what_the_file_collects` (below) says so
+    # itself — so an absolute figure here is the same rot this row exists to
+    # forbid. The reason was
     # honest and unstated:
     # the row-set test above performs the same assertion on the real doc, so the
     # residual stays protected while the DORMANCY does not — a one-line refactor
