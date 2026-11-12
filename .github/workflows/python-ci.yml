@@ -4859,11 +4859,21 @@ jobs:
           # (`test_no_step_rewrites_the_client_path_to_another_major`) — and refusing a temp
           # file is a FALSE BLOCK there, so the step keeps no file at all rather than
           # widening that rule. One less artifact on a pool box.
+          # ⛔ `grep -F … >/dev/null`, NOT `grep -qF`. `-q` stops reading at the first
+          # match, which under `pipefail` makes the PRODUCER's fate part of this
+          # guard: apt still has rows to write (on the pinned `ubuntu-24.04` PGDG's
+          # 16.15-1 sorts ABOVE the archive's 16.15-0ubuntu, so the match is the
+          # FIRST row and the ubuntu rows follow it), apt dies of SIGPIPE (141),
+          # `pipefail` propagates 141, `!` reads it as "no match" and the step reds a
+          # CORRECT tree with the message that the origin did not supply the package.
+          # MEASURED, and reproduced 10/10 against a producer that writes the match
+          # then keeps writing; a reader that consumes the whole stream has no such
+          # coupling and still fires when the origin really is absent.
           # THIS BRANCH'S REMEDY IS NAMED FROM ITS OWN CAUSE, not from release
           # drift: a release PGDG does not publish (no suite) fails HARD at `apt-get update`,
           # i.e. the guard ABOVE, so the old `--repair-labels` advice here was advice that
           # could not change apt's answer.
-          if ! apt-cache policy postgresql-client-16 2>/dev/null | grep -qF 'apt.postgresql.org'; then
+          if ! apt-cache policy postgresql-client-16 2>/dev/null | grep -F 'apt.postgresql.org' >/dev/null; then
             echo "::error::apt.postgresql.org did not SUPPLY postgresql-client-16 for this codename [$identity] — either its index never LOADED (apt-get update only WARNS and exits 0 on a DNS/egress/5xx failure, and a failed fetch leaves the PREVIOUS lists in place — so a row can still appear from a STALE index; look for 'W: Some index files failed to download' above) or the suite '${VERSION_CODENAME:-unknown}-pgdg' carries no such package. BOTH provisioned servers are pg16 and the client major is part of the artifact's contract (#12051), so this drill cannot fall back to the image's own archive client. Check 'apt-cache policy postgresql-client-16': apt.postgresql.org must list this major."
             exit 1
           fi

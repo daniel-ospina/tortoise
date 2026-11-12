@@ -5050,14 +5050,24 @@ def test_a_loop_that_leaves_before_its_checks_is_refused(
 # --------------------------------------------------------------------------
 
 #: A (release -> PostgreSQL client major) fact table, PROVEN and not assumed.
-#: Which client a release's archive carries IS #12051 round 2: `ubuntu-latest`
-#: moved to `ubuntu-26.04`, whose archive ships `postgresql-client-18` and NO 16,
-#: so the pin died `E: Unable to locate package` before a single test ran. A new
-#: release must be MEASURED and added here before it is adopted — this map is the
-#: record of a measurement, not a shape check.
+#: ⚠️ WHAT A ROW RECORDS, after round 3: that the release's own `<codename>-pgdg` suite
+#: CARRIES the servers' major. The distro archive is NOT part of the measurement any
+#: more (and cannot be: `ubuntu-26.04`'s archive carries 18 and no 16, while
+#: `resolute-pgdg` carries 16) — an earlier cut of this comment recorded the ARCHIVE's
+#: candidate, which is the mechanism round 3 removes, so a reader measuring 26.04 that
+#: way would record 18 and red the table on a release the step handles correctly.
+#: Round 2's failure is still the reason the row exists: `ubuntu-latest` moved to
+#: `ubuntu-26.04`, whose archive ships `postgresql-client-18` and NO 16, so the pin
+#: died `E: Unable to locate package` before a single test ran. A new release must be
+#: MEASURED and added here before it is adopted — this map is the record of a
+#: measurement, not a shape check.
 KNOWN_GOOD_IMAGE_MAJOR = {
-    # `docker run --rm ubuntu:24.04 apt-cache policy postgresql-client-16`
-    #   -> Candidate: 16.15-0ubuntu0.24.04.1
+    # MEASURED from the suite the step installs from, not from the image's archive —
+    # `curl -fsSL https://apt.postgresql.org/pub/repos/apt/dists/noble-pgdg/main/\
+    # binary-amd64/Packages.gz | gunzip | grep -A3 '^Package: postgresql-client-16$'`
+    #   -> Version: 16.15-1.pgdg24.04+2
+    # (Round 2's archive reading on the same image, kept only as that round's record:
+    # `apt-cache policy postgresql-client-16` -> Candidate: 16.15-0ubuntu0.24.04.1.)
     "ubuntu-24.04": 16,
 }
 
@@ -5493,7 +5503,10 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "than letting the arm write the HOST's temp dir"
     )
     prefix = prefix.replace('key_file="$(mktemp)"', f'key_file="{key_file}"')
-    assert '-o "$key_file"' in code_only(prefix), (
+    # ⛔ THE FACT, NOT THE FLAG SPELLING: `curl -o` and `curl --output` are the same
+    # request, so pinning `-o` FALSE-REDDED the long form (MEASURED, #12051 review P3:
+    # `--output` left the whole file at `1 failed` with no defect present).
+    assert re.search(r'(?:^|\s)(?:-o|--output)\s+"?\$key_file', code_only(prefix)), (
         "the committed step does not fetch the key into `$key_file` — the file `install` "
         "copies must be the one the fetch wrote"
     )
@@ -5578,6 +5591,41 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     assert "REACHED_PAST_PRECONDITION" in present.stdout, (
         "the script never reached the line after the precondition even when the "
         "package resolved — the block is unconditional"
+    )
+
+    # ⛔ AND THE PRODUCER'S OWN EXIT IS NOT PART OF THIS GUARD (#12051 review, P1).
+    # The origin check reads `apt-cache policy … | grep …`, and under `pipefail` a
+    # READER that stops at the first match makes the PRODUCER's fate part of the
+    # answer: `grep -q` exits, apt still has rows to write — on the pinned
+    # `ubuntu-24.04` PGDG's `16.15-1` sorts ABOVE the archive's `16.15-0ubuntu`, so
+    # the match is the FIRST row and the ubuntu rows follow it — apt dies of SIGPIPE
+    # (141), `pipefail` propagates 141, `!` reads it as "no match", and the step reds
+    # a CORRECT tree with the message that the origin did not supply the package.
+    # MEASURED: 10/10 `GUARD-FIRES` with `-q`, 10/10 passes without it, and 0/10 with
+    # a reader that consumes the stream. The `present` arm above CANNOT see this (its
+    # stub's two `echo`s finish before the reader exits), so this row is the one that
+    # discriminates: the stub emits the match and then KEEPS WRITING.
+    match_then_noise = run_with(
+        "apt-cache() {\n"
+        '  printf "%s\\n" "  Candidate: 16.15-1.pgdg24.04+2"\n'
+        '  printf "%s\\n" "     500 https://apt.postgresql.org/pub/repos/apt noble-pgdg/main amd64 Packages"\n'
+        "  sleep 0.05\n"
+        "  for _ in 1 2 3 4 5; do\n"
+        '    printf "%s\\n" "     500 http://archive.ubuntu.com/ubuntu noble-updates/main amd64 Packages"\n'
+        "  done\n"
+        "}"
+    )
+    noise_combined = match_then_noise.stdout + match_then_noise.stderr
+    assert match_then_noise.returncode == 0, (
+        "the origin check FIRED on a tree where apt.postgresql.org DOES list the major — "
+        "the producer was still writing when the reader stopped, so `pipefail` turned "
+        "apt's SIGPIPE into this guard's verdict. A reader that consumes the whole "
+        "stream (`grep -F … >/dev/null`, NOT `grep -qF`) removes that coupling: "
+        f"{noise_combined!r}"
+    )
+    assert "REACHED_PAST_PRECONDITION" in match_then_noise.stdout, (
+        "a correct step was stopped after the origin check even though the candidate was "
+        f"listed by apt.postgresql.org: {noise_combined!r}"
     )
 
     # ⛔ THE SOFT FAILURE — the state a BARE probe cannot see, and the one the ORIGIN
@@ -5718,6 +5766,19 @@ _OR_SOURCE_RE = re.compile(
     re.MULTILINE,
 )
 
+#: The INSTALL guard in its second idiom, for the same reason `_OR_SOURCE_RE` exists
+#: for the source: `if ! cmd; then … exit 1; fi` and `cmd || { … exit 1; }` are the
+#: SAME behaviour, and this file's own rule is that "the SPELLING is deliberately not
+#: pinned, because equivalent rewrites are the same behaviour and a guard that reds
+#: them is a false block" (`_precondition`). MEASURED before this row existed: the
+#: short-circuit rewrite of the install line kept the step CORRECT and red
+#: `test_the_client_comes_from_pgdg_not_the_distro_archive` with "the install itself
+#: is unguarded", i.e. it told the maintainer to add the guard that is already there.
+_OR_INSTALL_RE = re.compile(
+    r"^\s*(?:sudo\s+)?apt-get\s+install[^\n]*\|\|\s*[({]?(?P<body>(?:[^\n]*\n){0,4}[^\n]*)",
+    re.MULTILINE,
+)
+
 
 def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     """⛔ DELETING THE PGDG BLOCK USED TO LEAVE THIS FILE GREEN.
@@ -5854,12 +5915,12 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
         r"^(\s*)if\s+!\s*(?:sudo\s+)?apt-get\s+install[^\n]*;\s*then(?P<body>.*?)^\1fi\s*$",
         code,
         re.DOTALL | re.MULTILINE,
-    )
+    ) or _OR_INSTALL_RE.search(code)
     assert guarded_install, (
         "the install itself is unguarded: `apt-get install` must be wrapped in an "
-        "`if ! … then … exit 1; fi` that NAMES the failure, because a resolved package "
-        "that cannot be installed (dpkg frontend lock, .deb fetch, disk) is not the same "
-        "defect as a missing one"
+        "`if ! … then … exit 1; fi` (or its equivalent `… || { … exit 1; }`) that NAMES "
+        "the failure, because a resolved package that cannot be installed (dpkg frontend "
+        "lock, .deb fetch, disk) is not the same defect as a missing one"
     )
     install_body = guarded_install.group("body")
     assert "::error::" in install_body and re.search(
@@ -5909,7 +5970,7 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
             f"the EXIT trap does not remove {artifact} ({why}), so a pool box keeps state "
             f"this step added: {cleanup!r}"
         )
-    key_target = re.search(r"curl\s[^\n]*?-o\s+\"?\$\{?(\w+)", code)
+    key_target = re.search(r"curl\s[^\n]*?(?:-o|--output)\s+\"?\$\{?(\w+)", code)
     assert key_target, (
         "the key fetch does not write to a variable (`curl -o \"$…\"`), so the EXIT trap "
         "has no path to remove — a fixed path is pre-creatable on a pool box"

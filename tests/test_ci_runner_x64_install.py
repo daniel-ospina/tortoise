@@ -3609,7 +3609,7 @@ _SHORTHAND_CITING_FILES = (*_TOOLS_CITING_THE_RUNBOOK, "docs/ops/batch-integrati
 #: that handle unambiguous (see `_last_md_ref`).
 _RUNBOOK_NAME = "ci-runner-x64.md"
 
-#: A backticked BARE handle — `:54-55`, `:793-799`. No file name, no digits before the colon.
+#: A backticked BARE handle — `:54-55`, `:801-807`. No file name, no digits before the colon.
 _SHORTHAND_RE = re.compile(r"`:(?P<start>\d+)(?:-(?P<end>\d+))?`")
 
 #: shorthand start line -> a regex the cited window must match (the sentence it names).
