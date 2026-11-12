@@ -288,16 +288,25 @@ CONSTANT_GUARD_RE = re.compile(
 )
 
 #: A command chain that is dead BY CONSTRUCTION, at the position where the dead
-#: command sits (#12069 review corrected the first cut, which red a correct line):
-#:   * `false && <cmd>` — `<cmd>` never runs. Refused in ANY command position,
-#:     because `&&` short-circuits on a false left operand wherever it appears.
+#: command sits (#12069 review corrected the first cut TWICE, each time on a
+#: correct line):
+#:   * `false && <cmd>` — `<cmd>` never runs. Refused after `^`, `;` or `&&`: those
+#:     are the positions where the `false` is the LEFT operand of the `&&` that
+#:     guards `<cmd>`, so the short-circuit is unconditional.
+#:     ⛔ NOT refused after `||`. `A || false && B` parses as `(A || false) && B`
+#:     (`&&` and `||` are the same precedence, left-associative), so `B` RUNS
+#:     whenever `A` succeeds — measured: `true || false && echo BODY` prints BODY.
+#:     The first cut refused it and red three rows on a line that executes the
+#:     write; the rationale "`&&` short-circuits on a false left operand wherever
+#:     it appears" is false exactly here, because the `&&`'s left operand is
+#:     `A || false`, not `false`.
 #:   * `true || <cmd>` — `<cmd>` never runs. Refused ONLY at a STATEMENT position
 #:     (`^` or after `;`). `cmd && true || <fallback>` is NOT a dead chain: the
 #:     fallback DOES run when `cmd` fails, and it was measured as a false RED.
 #: The HARMLESS spellings stay unmatched: `<cmd> || true` and `<cmd> && true`
 #: still RUN `<cmd>` (they only choose the exit status).
 DEAD_CHAIN_RE = re.compile(
-    r"(?:^|;|&&|\|\|)[ \t]*false[ \t]*&&"
+    r"(?:^|;|&&)[ \t]*false[ \t]*&&"
     r"|(?:^|;)[ \t]*true[ \t]*\|\|"
 )
 
@@ -851,8 +860,10 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     ⛔ AND THE REFUSAL IS SCOPED TO "NEVER RUNS" (#12069 review). The first cut of
     that scan refused any bare constant, so `while true; do … break; done` — the
     ordinary retry spelling, which RUNS — red this row on a correct tree. The
-    accepted set is now exactly the forms whose body is never entered, and the
-    polarity table in the mutation harness pins both directions.
+    accepted set is now exactly the forms whose body is never entered, and
+    `REFUSAL_POLARITY` / `test_the_refusal_polarity_is_never_runs` below pins
+    both directions — IN THIS MODULE, because a pin kept in `.worktree-report/`
+    is `.gitignore`d and pins nothing once the branch merges.
 
     STATED LIMIT: the branch must be FLAT (`FAIL_CLOSED_BRANCH_RE`) — a nested
     conditional inside it is refused rather than reasoned about, because a
@@ -1048,6 +1059,12 @@ REFUSAL_POLARITY: list[tuple[str, str, bool, str]] = [
     ("until-not-false", "until ! false; do", True, "negated constant -> body never entered"),
     ("until-not-true", "until ! true; do", False, "negated constant -> body runs"),
     ("dead-and", "false && echo x", True, "the right-hand command never runs"),
+    (
+        "harmless-or-false-and",
+        'sudo apt-get update -qq || false && echo "x"',
+        False,
+        "`(A || false) && B`: the right-hand command RUNS whenever A succeeds",
+    ),
     ("dead-or", "true || exit 1", True, "the right-hand command never runs"),
     (
         "dead-or-after-semicolon",
