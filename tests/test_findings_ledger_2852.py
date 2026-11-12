@@ -2389,6 +2389,11 @@ def test_a_sentence_quoting_the_tally_phrases_is_not_counted(tmp_path, monkeypat
     for quote in (
         ' stated both ways.) (The phrase "still read as written" names the complement.) ',
         ' stated both ways.) The words "no longer read as written" are the arm\'s subject. ',
+        # ⛔ A SINGLE-QUOTED span must be stripped too. Dropping the `'`-delimited half of
+        # `quoted` leaves every gate green and makes this legitimate quotation a RED
+        # (measured at e5a7ba2f) — the false-accusation direction, while the possessive
+        # test pins the opposite one.
+        " stated both ways.) They wrote 'seven of the twelve rows no longer read as written — **(c)**, **(d)**' verbatim. ",
     ):
         with monkeypatch.context() as patch:
             _mutated(
@@ -2538,6 +2543,12 @@ def test_every_spelling_of_a_second_tally_sentence_is_refused(tmp_path, monkeypa
         # alternative on its own (the decoy above also matches the pair form, so
         # without this one the run could be deleted green)
         "Three of the twelve rows no longer read as written: b, c, d.",
+        # ⛔ BOTH members come from ONE match (the plain head rule), so taking only the
+        # first regex group reads a two-member list as one member and the candidacy gate
+        # (`>= 2`) never fires — `Note: j or a no longer read as written.` then reads
+        # CLEAN (measured at e5a7ba2f). The `… and a …` spelling does NOT discriminate:
+        # another alternative carries it.
+        "Note: j or a no longer read as written.",
     )
     anchor = "is the exact defect #2795 D2 fixed. "
     for decoy in decoys:
