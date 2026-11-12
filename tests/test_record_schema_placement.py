@@ -2057,9 +2057,7 @@ def test_the_two_schema_readers_agree_on_every_record_table():
     silently: an independent parse that answers differently from the writer's is
     a pin that cannot hold.
     """
-    from tortoise.record_projection import table_columns
-
-    from tortoise.record_projection import column_types
+    from tortoise.record_projection import column_types, table_columns
 
     independent = parse_sql_columns()
     real = table_columns()
