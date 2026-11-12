@@ -1321,9 +1321,10 @@ def test_the_newest_block_body_starts_at_its_header_line() -> None:
     assert sum(1 for block in blocks
                if _CITATION_RE.search(block.split("\n", 1)[0])) == 0, (
         "a block's HEADER line now carries a comment citation, so the citing "
-        "COUNT the prose states is stale — re-measure it. (The extent itself only "
-        "moves if the newest block's header gains one, which is what the equality "
-        "above checks.)")
+        "COUNT the prose states is stale — re-measure the counts. (The equality "
+        "above is content-agnostic — both sides derive from the same spans — so it "
+        "cannot move on a changelog edit; what this assertion protects is the "
+        "counts, and therefore the prose that quotes them.)")
 
 
 def test_the_lifecycle_clause_extraction_ignores_the_rest_of_the_row() -> None:
@@ -1544,11 +1545,14 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     match the file, not that their argument is right.
     """
     doc = test_the_newest_block_recording_4_3_cites_a_comment_id.__doc__ or ""
-    # ⛔ THE UNIQUENESS SCAN IS THE WHOLE MODULE, not this one docstring: a fact
-    # restated in another docstring or comment is prose nothing checks, and the
+    # ⛔ THE UNIQUENESS SCAN IS THE WHOLE MODULE, not this one docstring: the
     # drift is one-directional — a lane re-measures, updates the copy it is reading,
     # and leaves the checked one stale (measured: the count appeared in this pin's
-    # own docstring too, and mutating THAT copy left every test green).
+    # own docstring too, and mutating THAT copy left every test green). What a
+    # SHAPE COUNT buys, exactly: these two patterns require bold, so the duplicate
+    # they can see is a BOLD one, and a bold duplicate whose numbers still match
+    # would pass the value sweep below — the count is what refuses it, and it also
+    # keeps a second patterned sentence from shadowing the one parsed below.
     # ⛔ WHITESPACE IS NORMALISED BEFORE MATCHING, in both the scan text and the
     # docstring: markdown line wrapping is not part of a fact, and a scan that
     # cannot see a re-wrapped sentence reds with a message denying the prose says
@@ -1569,8 +1573,9 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
         found = len(re.findall(pattern, module_source))
         assert found == 1, (
             f"{label} must appear exactly ONCE in this module (found {found}) — a "
-            "second copy is prose no pin reads, and a stale copy beside the checked "
-            "one is the defect this test exists to stop")
+            "second patterned copy can shadow the one parsed below, and a bold "
+            "duplicate whose numbers match would pass the value sweep, so the count "
+            "is what refuses both")
     stated = re.search(pair_pattern, flat_doc)
     versions = re.search(version_pattern, flat_doc)
     complement = re.search(complement_pattern, flat_doc)
@@ -1579,8 +1584,12 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
         "that makes the claim this pin checks")
     blocks = _block_bodies(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
     citing = [block for block in blocks if _CITATION_RE.search(block)]
-    # ⛔ AND EVERY RESTATEMENT, whatever its phrasing. Matching only the patterned
-    # sentence left the class open in the other direction: the count also appeared
+    # ⛔ AND EVERY BOLD `**N of M**` PAIR, plus every "the N blocks that cite
+    # nothing" and the ordinals below — the SHAPES the docstring enumerates, not
+    # "every phrasing" (measured: a plain "Only 3 of 39 blocks cite a comment id."
+    # is unswept and stays green, which is why the docstring says so). Matching only
+    # the patterned sentence left the class open in the other direction: the count
+    # also appeared
     # as `count is **N of M**` in THIS pin's docstring, and the complement as
     # `the N blocks that cite nothing`, so a stale copy could sit beside the
     # checked one (measured: editing this pin's own copy left all five tests green,
