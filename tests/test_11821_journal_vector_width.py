@@ -1795,8 +1795,9 @@ def test_the_envelope_collision_guard_keeps_add_documents_event_id_pin(tmp_path)
     #     api._emit("PointAdded", id="p1", content="c", event_id="forged-id")
     #       -> JOURNALLED {"event_id": "forged-id", …, "type": "PointAdded"}
     #
-    # `projection/__init__.py:8395` calls `event_id` "the only handle that locates
-    # the diverging journal line", and the record channel and all three splatting
+    # `projection._warn_entity_mutation_fold_miss`'s docstring calls `event_id`
+    # "the only handle that locates the diverging journal line", and the record
+    # channel and all three splatting
     # doors already refused it — this was the last open channel. Falsifier: drop
     # the `type_ != "DocumentCreated"` clause and the two rows below land while the
     # `add_document` assertions above still pass (measured).

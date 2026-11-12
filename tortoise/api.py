@@ -91,8 +91,9 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #: list under it contradicted that immediately.)
 #:
 #:   • `embedding_preserved` — payload-only metadata; the entry at
-#:     ``projection/entities.py:2392`` says "Never a node property" in as many
-#:     words. ⛔ What it does NOT do on this door is suppress an attestation, and
+#:     ``#5004 round-3`` note on the ``"embedding_preserved"`` entry (its words:
+#:     "Never a node property — the node's vector identity is not a fact about
+#:     the node") says exactly that. ⛔ What it does NOT do on this door is suppress an attestation, and
 #:     an earlier draft of this comment claimed exactly that (found independently
 #:     by two reviewers, `#11948` round 2): NEITHER channel of ``_emit`` attests
 #:     a record — the positional one stamps only a TOP-LEVEL ``embedding`` (so
@@ -534,8 +535,9 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     mint, a non-`str` declaration, a declaration over no vector (either width),
     a declaration over a value the seam can only DROP, a declaration over a
     vector carrying a NUMERIC SUBCLASS (the seam and the JSON encoder read such
-    an element by different paths — measured, `tortoise/embeddings.py:600` vs the
-    C encoder), or, for `f32` alone, one the values contradict. (The one DROP reason it does not reach under `f32`,
+    an element by different paths — measured, `_is_shortest_f32_text`'s
+    `[float(x) for x in vector]` vs the C encoder), or, for `f32` alone, one the
+    values contradict. (The one DROP reason it does not reach under `f32`,
     an implausibly long sequence, is a stated residual where it is
     implemented.) Which keys that
     leaves alone is measured, not assumed: the record doors legitimately carry
@@ -578,7 +580,8 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     declared width and re-running `stamp_journal_embedding`: that OVER-BLOCKS,
     because the seam's ``f32`` idempotency arm reads the marker itself, so
     stripping it re-decides ``f64`` for every already-narrowed payload. The
-    compatibility note below carries the measurement.
+    ``⛔ THE PREDICATE IS … NOT a re-stamp`` paragraph further down carries that
+    measurement.
 
     Measured before this guard, through the private channel only:
 
@@ -1586,7 +1589,8 @@ class EventAPI:
             # of these seven is a function of the values, so no verification can
             # exist for them — `embedding_verbatim` / `embedding_preserved` are
             # ownership claims (the first ALSO writes a declared node property,
-            # `projection/entities.py:2386`), `evidence_fold` is the replay's
+            # under the ``#5004 round-3`` note on ``projection/entities.py``'s
+            # ``"embedding_verbatim"`` entry), `evidence_fold` is the replay's
             # recreate anchor, `embeddingText` the text↔vector identity, and the
             # three source-ref keys provenance the `:Source` resolution asserts.
             # ⛔ AND THE KEYWORD CHANNEL IS NOT THE SAFER ONE, which is why both
