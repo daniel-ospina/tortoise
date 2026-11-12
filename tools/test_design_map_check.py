@@ -41,6 +41,16 @@ followed by a REAL delimiter and a raw `|` splits; a width the parser cannot
 interpret is an unreadable map, not a map that happens to be tidy, because
 `row[4]`/`row[6]` would then grade the wrong column and report clean.
 
+A row is a markdown table row at **0-3 leading spaces** (`MAX_TABLE_INDENT`):
+markdown renders a `|` line as part of the table up to three spaces in, so those
+are rows a reader sees and every arm grades them — blocks, seam discovery, the
+presence arm, the §1/§3/§4 row anchors. Four or more makes the line an indented
+CODE BLOCK, which markdown does not render as a table row, so it is not graded (and
+is not refused either: refusing it would red a docs-only code-block edit). #11415
+measured the pre-fix shape: `line.startswith("|")` put an indented row in no block
+at all, so the identical blanked crosswalk row graded `VIOLATION R5 zzz: names no
+surface` at column 0 and **CLEAN, exit 0**, with one leading space.
+
 **Exit codes:** `0` clean · `1` violations (printed, one per line) · `2` the map
 could not be read or a required section is missing (an unparseable map is not a
 clean one — same posture as the census's unreadable-catalogue refusal).
@@ -120,7 +130,57 @@ PLAN_SEAMS = (
     "§7",
 )
 
-SF_ROW = re.compile(r"^\|\s*\*\*(SF\d+)\*\*\s*\|")
+#: How many leading spaces a line may carry and still be a TABLE ROW.
+#:
+#: Markdown renders a `|` line as part of the table with up to THREE leading
+#: spaces; FOUR or more makes it an indented code block (`CommonMark` §5.1, and
+#: GFM tables inherit it). So 0-3 is the population of "rows a reader sees as
+#: rows", and it is the population this checker must grade. #11415: the builder
+#: used `line.startswith("|")`, so a row indented 1-3 spaces belonged to no block
+#: and reached no rule — measured, an identical 4-cell row appended inside §5
+#: graded `VIOLATION R5 zzz: names no surface` at column 0 and **CLEAN, exit 0**
+#: with one leading space (and with three). A row that is not read is not graded,
+#: and a map whose row was reflowed is not the map that was checked.
+#:
+#: The boundary is markdown's, not a tolerance knob: a 4+-space-indented `|` line
+#: is an indented CODE BLOCK, which the reader does not see as a table row at all,
+#: so grading it would refuse a docs-only edit that pastes a table example into §5
+#: (the false-RED class the `_is_foreign_table` negative control exists for). That
+#: residual is stated rather than hidden: it is the one shape this predicate does
+#: not call a row, and it is a shape markdown does not call a row either.
+MAX_TABLE_INDENT = 3
+
+
+def _is_table_line(line: str) -> bool:
+    """True when ``line`` is a markdown table ROW (0-3 leading spaces, then `|`).
+
+    ONE predicate for the block builder, the seam discovery and the presence arm,
+    so the three can never disagree about which lines are rows — the split between
+    them is what #11415 measured: the builder used `startswith("|")` while `cells()`
+    stripped leading whitespace, so the two halves of the parser disagreed about
+    indentation and the disagreement was silent.
+    """
+    indent = len(line) - len(line.lstrip(" "))
+    return indent <= MAX_TABLE_INDENT and line[indent:].startswith("|")
+
+
+def _carries_seam_token(line: str, seam: str) -> bool:
+    """True when a table row's FIRST cell STARTS WITH ``seam`` — discovery only.
+
+    Which block IS the crosswalk is discovered by the seam tokens its data rows
+    carry, and a reworded first cell (`| §5 row 1 (the default) |`) must still
+    identify the block, so this is a PREFIX match. The PRESENCE arm in `check()`
+    is the whole-cell one: the `§5 row 10` decoy is refused there, not here.
+
+    Indentation is handled by `_is_table_line`, not by this pattern, so a row
+    indented 1-3 spaces is discovery's row too (#11415).
+    """
+    if not _is_table_line(line):
+        return False
+    return re.match(rf"^ {{0,{MAX_TABLE_INDENT}}}\|\s*{re.escape(seam)}", line) is not None
+
+
+SF_ROW = re.compile(rf"^ {{0,{MAX_TABLE_INDENT}}}\|\s*\*\*(SF\d+)\*\*\s*\|")
 SF_ANY = re.compile(r"\bSF(\d+)\b")
 SECTION = re.compile(r"^##\s+(\d+)\.\s", re.MULTILINE)
 
@@ -309,7 +369,7 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
             (
                 line
                 for line in capability_section.splitlines()
-                if re.match(rf"^\|\s*\*\*{capability}\*\*", line)
+                if re.match(rf"^ {{0,{MAX_TABLE_INDENT}}}\|\s*\*\*{capability}\*\*", line)
             ),
             None,
         )
@@ -330,7 +390,10 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
             (
                 line
                 for line in child_section.splitlines()
-                if re.match(rf"^\|\s*\*\*C\d\*\*\s*\|\s*\*\*#{issue}\*\*", line)
+                if re.match(
+                    rf"^ {{0,{MAX_TABLE_INDENT}}}\|\s*\*\*C\d\*\*\s*\|\s*\*\*#{issue}\*\*",
+                    line,
+                )
             ),
             None,
         )
@@ -367,7 +430,7 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
             (
                 line
                 for line in crosswalk.splitlines()
-                if line.startswith("|") and cells(line)[:1] == [seam]
+                if _is_table_line(line) and cells(line)[:1] == [seam]
             ),
             None,
         )
@@ -382,9 +445,11 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
     # its seam token, so its violation message is unchanged. (A surface number
     # typed a digit OFF still lands on a real row, so R5 does NOT catch that; its
     # wording is "names a surface with no row in §1", and that is all it claims.)
-    # Grade EVERY `|` line in §5, and let a line out only as one of THREE classes (see
-    # #11415 for the ONE gap: a `|` line indented 1–3 spaces is in no block at all and
-    # so is graded by none of them): an
+    # Grade EVERY markdown table ROW in §5 — a `|` line at 0-3 leading spaces
+    # (`_is_table_line`; #11415 measured that a row indented 1-3 spaces belonged to no
+    # block and so was graded by nothing: the identical blanked 4-cell row graded
+    # `VIOLATION R5 zzz: names no surface` at column 0 and CLEAN, exit 0, with one
+    # leading space) — and let a line out only as one of THREE classes: an
     # alignment row (`|---|---|`), a line that IS the crosswalk header by SHAPE
     # (`_is_crosswalk_header`), or a line inside a whole WELL-FORMED block that is
     # provably some other table (`_is_foreign_table`: a different separator width, no
@@ -438,7 +503,7 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
     blocks: list[list[str]] = []
     current: list[str] = []
     for line in crosswalk.splitlines():
-        if line.startswith("|"):
+        if _is_table_line(line):
             current.append(line)
         elif current:
             blocks.append(current)
@@ -466,9 +531,7 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
         (
             block
             for block in blocks
-            if any(
-                re.match(r"^\|\s*" + re.escape(seam), line) for line in block for seam in PLAN_SEAMS
-            )
+            if any(_carries_seam_token(line, seam) for line in block for seam in PLAN_SEAMS)
         ),
         None,
     )
@@ -500,9 +563,7 @@ def check(text: str) -> tuple[list[str], dict[str, object]]:
         """
         if block is measured_from:
             return False
-        if any(
-            re.match(r"^\|\s*" + re.escape(seam), line) for line in block for seam in PLAN_SEAMS
-        ):
+        if any(_carries_seam_token(line, seam) for line in block for seam in PLAN_SEAMS):
             return False
         separator = _separator(block)
         if separator is None or separator == 0:
@@ -623,8 +684,10 @@ def _rewrite_row(text: str, sf: str, column: int, value: str) -> str:
 
 #: The surface-cell values a crosswalk HEADER carries. Matched by SHAPE (with the
 #: four-cell count and the `plan §` first cell) — there is NO positional condition:
-#: nothing here looks at the line above or below a candidate header. See #11415 for the
-#: one line class this predicate's block builder never reaches (an indented `|` row).
+#: nothing here looks at the line above or below a candidate header. Indentation is
+#: NOT part of the shape: `cells()` strips it, so an indented header is still the
+#: header (#11415 closed the block builder's `startswith("|")` blind spot with
+#: `_is_table_line`, which is the one predicate every row-reading arm shares).
 _HEADER_SURFACE_CELLS = frozenset({"surface(s)", "surfaces", "surface"})
 
 #: The crosswalk header's FIRST cell. The crosswalk maps `04-plan.md`'s seams, so
@@ -808,6 +871,41 @@ def _split_and_blank_crosswalk_row(text: str, seam: str) -> str:
     return "".join([*lines[:index], "\n", separator, blanked, *lines[index + 1 :]])
 
 
+def _indent_and_blank_inserted_row(text: str, spaces: int = 1) -> str:
+    """Insert a crosswalk row with a blank surface cell, INDENTED by ``spaces``.
+
+    The `#11415` shape, executed the way an editor produces it: a paste into a list
+    item (or a reflow) adds leading spaces to a row whose surface cell is empty. The
+    block builder selected rows with `line.startswith("|")`, so an indented row
+    joined no block and was graded by nothing — measured on the live map: the same
+    4-cell row with a blank surface cell graded `VIOLATION R5 zzz: names no surface`
+    (exit 1) at column 0 and **CLEAN, exit 0** with one leading space, and with three.
+
+    ⛔ The row is INSERTED rather than taken from the pinned population on purpose:
+    indenting a pinned row (§7, §6.4, …) would red the missing-seam arm even with the
+    hole open, so the case would pass for the wrong reason and prove nothing about
+    indentation. A non-pinned row can only be caught by GRADING it — which is exactly
+    the arm under test.
+
+    ⛔ This case is why the hole survived to `#11415`: all 21 pre-existing mutations
+    were written at column 0, so the self-test could only exercise the population the
+    bug already read. A mutator that cannot EXPRESS the failing shape is a rubber
+    stamp over that shape. It is RED before the fix (`expected violation, got clean`)
+    and green after.
+
+    One width is enough: every row-reading arm shares `_is_table_line`, so 1 and 3
+    spaces are the same code path (`MAX_TABLE_INDENT`), and 4+ is deliberately not a
+    row — markdown renders it as an indented code block.
+    """
+    if not 1 <= spaces <= MAX_TABLE_INDENT:
+        raise AssertionError(
+            f"indent of {spaces} space(s) is not a markdown table row — the mutation "
+            f"would express a shape that is an indented code block, not a row"
+        )
+    row = "| extra row | a row the gate must still read |  | note |"
+    return _insert_before(text, "| §6.4 |", " " * spaces + row)
+
+
 def _duplicate_section_decoy(text: str) -> str:
     """Append a SECOND `## 1.` section carrying a clean copy of the first — the decoy.
 
@@ -957,6 +1055,17 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
         "violation",
     ),
     (
+        # ⛔ `#11415`, and the case whose ABSENCE let the hole live: every other case
+        # in this tuple writes its row at column 0, so none of them could express the
+        # shape the block builder failed to reach. This one indents a blanked row by
+        # ONE space — markdown's own table indentation, so a reader still sees it as a
+        # row — and requires the checker to grade it. Measured pre-fix: CLEAN, exit 0;
+        # post-fix: `R5 extra row: names no surface`.
+        "insert a blanked crosswalk row INDENTED one space (a row the block builder never reached)",
+        lambda t: _indent_and_blank_inserted_row(t, 1),
+        "violation",
+    ),
+    (
         # The DELETE, not the blank: an editor that removes the `surface(s)` cell
         # leaves a 3-cell row whose note lands in the surface column, so the arm
         # below reads §6.4's own "**SF13 is the row a capstone must not skip**" and
@@ -1044,7 +1153,7 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
 #: exit 0 (measured), which is the false PASS this arm exists to prevent. The
 #: map's own residual covers a THREE-place edit (row + pin + case together), so
 #: the shrink that is two places short of that must still be loud.
-MIN_SELF_TEST_MUTATIONS = 21
+MIN_SELF_TEST_MUTATIONS = 22
 
 
 def self_test(text: str) -> int:
