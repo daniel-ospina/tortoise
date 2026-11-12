@@ -147,19 +147,28 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #: and every `get_point`-backed re-emit — `promote_point`, `DedupeRecorded`,
 #: `DedupeRejected`, the mitigation `PointAdded`), `evidence_fold` (the fold
 #: writer) and `embeddingText` (the capture snapshot). Those all go through
-#: ``sdk._emit_event(point=...)``, which appends to its own log and NEVER calls
-#: ``EventAPI._emit`` — a different DOOR, not a different channel of this one.
+#: ``sdk._emit_event``'s own snapshot channels (``point=`` for the fold and the
+#: graph lane, ``turns=`` for the record-first capture lane), which append to
+#: their own log and NEVER call ``EventAPI._emit`` — a different DOOR, not a
+#: different channel of this one.
 #: Which is why this is a separate set rather than
-#: `_SERVER_MANAGED_EMBEDDING_KEYS`: two of that set's members
-#: (`embedding_verbatim`, `embedding_preserved`) are refused on both channels
-#: already, but the rest are VERIFIED (`embedding_width`) or deliberately left to
-#: `add_point` (the identity triple), so folding them together would assert a
-#: treatment FOUR of its members do not get (`embedding_width` plus the identity
-#: triple).
+#: `_SERVER_MANAGED_EMBEDDING_KEYS`. The overlap is two keys
+#: (`embedding_verbatim`, `embedding_preserved`), and it is a HALF-overlap, not a
+#: duplicate: the KEYWORD channel already refused those two through
+#: `_SERVER_MANAGED_EMBEDDING_KEYS`, while on the POSITIONAL channel nothing did
+#: — measured at `main` (`31b29c3c`), both were accepted and journalled there,
+#: because that arm runs only the record-keys and envelope guards plus
+#: `_verify_record_vector_width`, which returns unless a declared ``f32``
+#: contradicts the values. So these two entries ADD that half. The other four
+#: members of the older set are VERIFIED (`embedding_width`) or deliberately left
+#: to `add_point` (the identity triple), which is why folding the sets together
+#: would assert a treatment those four do not get.
 #: ``EVIDENCE_FOLD_KEY`` is the READER's spelling (``projection/__init__.py``),
-#: imported here rather than retyped: the literal used to be its own copy, so a
-#: rename at the consumer would have left this guard refusing a name nobody reads
-#: and letting the new one through — a fail-open drift, not a style point.
+#: imported here rather than retyped: a retyped literal would leave this guard
+#: refusing a name nobody reads after a rename at the consumer, and letting the
+#: new one through — a fail-open drift, not a style point. (``add_point``'s
+#: ``_forged_keys`` still spells it out, which the funnel arm here catches
+#: downstream; that copy is the one to convert next, not a second authority.)
 _UNCALLERABLE_RECORD_KEYS = frozenset({
     "embedding_verbatim",
     "embedding_preserved",
