@@ -2905,6 +2905,7 @@ class PackRegistry:
         """
         from tortoise.kind_guards import (
             WHEN_PREDICATES,
+            _pattern_needs_compile,
             core_kind_names,
             kind_forms,
         )
@@ -2978,18 +2979,25 @@ class PackRegistry:
                     f"{where}.layer: must be one of "
                     f"{', '.join(LAYERS)} (got {layer!r})")
             elif isinstance(kind_ref, str) and kind_ref.strip():
-                declared_layer = _layer_of(kind_ref.strip())
-                if declared_layer is not None and declared_layer != layer:
+                # ⛔ The documentKinds refusal was DEAD CODE where it used to
+                # live — one `elif` further down, behind a branch that had
+                # already claimed every non-empty `kind_ref`, so a pack that
+                # declared `documentKinds: [contract]` AND a guard on `contract`
+                # validated CLEAN (round-2 review P2, measured). A document is a
+                # `:Source` (D10), not an entity layer, so there is nothing a
+                # guard could redirect; the check now runs FIRST, where it can
+                # fire.
+                if (":" not in kind_ref.strip()
+                        and kind_ref.strip() in (ont.get("documentKinds") or [])):
                     errors.append(
-                        f"{where}.layer: '{kind_ref}' is declared on the "
-                        f"{declared_layer} layer, not '{layer}'")
-            elif (isinstance(kind_ref, str) and ":" not in kind_ref
-                    # A documentKinds entry lands here: a document is a `:Source`
-                    # (D10), not an entity layer, so there is nothing to redirect.
-                    and kind_ref.strip() in (ont.get("documentKinds") or [])):
-                errors.append(
                         f"{where}.layer: '{kind_ref}' is a documentKind (a "
                         f":Source genre, D10) — not a guardable entity layer")
+                else:
+                    declared_layer = _layer_of(kind_ref.strip())
+                    if declared_layer is not None and declared_layer != layer:
+                        errors.append(
+                            f"{where}.layer: '{kind_ref}' is declared on the "
+                            f"{declared_layer} layer, not '{layer}'")
 
             confusions = entry.get("onConfusion")
             if not isinstance(confusions, list) or not confusions:
@@ -3012,7 +3020,12 @@ class PackRegistry:
                 pattern = c.get("pattern")
                 if not isinstance(pattern, str) or not pattern:
                     errors.append(f"{cw}.pattern: required non-empty string")
-                else:
+                elif _pattern_needs_compile(str(when)):
+                    # Only a REGEX predicate is compiled. `nameStartsWith` reads
+                    # its pattern as a LITERAL (the runtime does not compile it),
+                    # so compiling here refused a prefix that happens to contain
+                    # a metacharacter — a legal rule rejected at install while
+                    # the guard's own spec says the prefix is literal.
                     try:
                         re.compile(pattern, re.IGNORECASE)
                     except re.error as exc:

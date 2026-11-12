@@ -215,6 +215,7 @@ import contextlib
 import logging
 import re
 import threading
+import weakref
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -231,13 +232,25 @@ OVERRIDE_HINT = 'intent="as_declared"'
 #: construction: a regex over the NAME only. A guard that needs anything more
 #: (a model, an embedding, a graph read) is a different feature and must not be
 #: smuggled in here.
-WHEN_PREDICATES = ("nameMatches", "nameStartsWith")
+NAME_MATCHES = "nameMatches"
+NAME_STARTS_WITH = "nameStartsWith"
+WHEN_PREDICATES = (NAME_MATCHES, NAME_STARTS_WITH)
+#: The predicates whose `pattern` is a LITERAL, so it is never compiled. Kept
+#: beside `WHEN_PREDICATES` so a new literal predicate cannot be added without
+#: the compile gate seeing it (`_pattern_needs_compile`).
+LITERAL_PREDICATES = (NAME_STARTS_WITH,)
+
+
+def _pattern_needs_compile(when: str) -> bool:
+    """Does this predicate read `pattern` as a REGEX? (the ONE answer)"""
+    return when in WHEN_PREDICATES and when not in LITERAL_PREDICATES
 
 #: Skip reasons — a CLOSED vocabulary, so a client can branch on the value.
 SKIP_NAMESPACE_NOT_INSTALLED = "namespace-not-installed"
 SKIP_LINK_PREDICATE_UNIMPLEMENTED = "link-predicate-unimplemented"
 SKIP_DECLARING_PACK_NOT_INSTALLED = "declaring-pack-not-installed"
 SKIP_INSTALLED_SET_UNREADABLE = "installed-set-unreadable"
+SKIP_TARGET_LABEL_AMBIGUOUS = "target-label-ambiguous"
 SKIP_NO_USABLE_HOME = "no-usable-home"
 #: The door BENEATH the guard would refuse the redirected write. The guard may
 #: never cause that (the router one function away already refuses to), so it
@@ -472,7 +485,14 @@ class GuardDecision:
 
     @property
     def changed(self) -> bool:
-        return self.kind is not None
+        """Did this decision move the write? ``True`` only on a REDIRECT.
+
+        Keyed on the OUTCOME as well as the kind: a degraded/overridden decision
+        can carry a ``kind`` (the fallback it *would* have used) while the write
+        must still land as declared, so ``kind is not None`` alone would let a
+        caller "apply" a decision it should ignore.
+        """
+        return self.outcome == GuardOutcome.REDIRECT and self.kind is not None
 
 
 # ── resolution ────────────────────────────────────────────────────────────
@@ -514,13 +534,17 @@ def _matches(confusion: Confusion, name: Any) -> bool:
         return False
     if confusion.when not in WHEN_PREDICATES:
         return False
+    if confusion.when == NAME_STARTS_WITH:
+        # A LITERAL prefix, so a pack author cannot smuggle a regex into the
+        # cheaper predicate and get matching semantics they did not declare —
+        # and therefore NO compile: requiring one discarded any literal that
+        # happens to contain a regex metacharacter (`DRAFT (`, `issue [x]`,
+        # `a+b`), so the guard silently never fired and a validated manifest
+        # read as a working rule (round-2 review P2, measured).
+        return name.startswith(confusion.pattern)
     compiled = _compiled(confusion.pattern)
     if compiled is None:
         return False
-    if confusion.when == "nameStartsWith":
-        # A LITERAL prefix, so a pack author cannot smuggle a regex into the
-        # cheaper predicate and get matching semantics they did not declare.
-        return name.startswith(confusion.pattern)
     return bool(compiled.match(name))
 
 
@@ -606,9 +630,19 @@ def _undo_text(layer: str, to_layer: str) -> str:
     if layer == to_layer:
         return (f"none — the node was written with the kind the guard chose; to "
                 f"keep your own, re-issue the write with {OVERRIDE_HINT}")
-    return (f"none — the node was created at the redirected layer; to file it on "
-            f"the {layer.capitalize()} layer instead, re-issue the write with "
-            f"{OVERRIDE_HINT}")
+    # ⛔ "the node was created at the redirected layer" is a claim about THIS
+    # call, and it was reading as "nothing else exists". Identity is
+    # LABEL-SCOPED (#2489), so when the graph already holds this name under the
+    # layer the caller asked for, the write lands BESIDE it and the graph holds
+    # the name twice — the caller is the only one who can reconcile that, so the
+    # text says so instead of promising a clean undo. `create_entity` probes for
+    # that twin and adds the ids to the reply's `advisories`; this line is the
+    # part the caller reads even when the probe found nothing.
+    return (f"to file it on the {layer.capitalize()} layer instead, re-issue the "
+            f"write with {OVERRIDE_HINT}. ⚠️ identity is label-scoped, so if a "
+            f":{layer.capitalize()} of this name ALREADY existed, the graph now "
+            f"holds it under BOTH layers (#2489: nothing reconciles them for "
+            f"you) — retire the stale node explicitly")
 
 
 def resolve(name: Any, layer: str, declared_kind: Any = None, *,
@@ -750,7 +784,17 @@ def resolve(name: Any, layer: str, declared_kind: Any = None, *,
             skipped = {"rule": rule, "target": target, "reason": reason}
             fb = _usable_fallback(confusion, _layer_of_kind)
             fb_layer = _layer_of_kind(fb) if fb is not None else None
-            if fb is not None and fb_layer is not None and fb_layer != _layer:
+            # ⛔ NO `fb_layer != _layer` TERM. It silently withheld ladder
+            # step 1 for every guard whose fallback sits on the write's OWN
+            # layer — the commonest case, because a guard's reach covers both
+            # entity doors (`from_layers`) while its fallback names one kind.
+            # MEASURED (round-2 review P2): one pack guard, one name, and the
+            # object door skipped ("namespace-not-installed") while the subject
+            # door degraded to `core:WorkItem` — the same rule behaving two ways
+            # for no declared reason. A same-layer degraded redirect is fully
+            # supported by the AX message and the undo text, so there is nothing
+            # to withhold.
+            if fb is not None and fb_layer is not None:
                 return _redirect(confusion, declared=declared,
                                  declared_layer=_layer, target=fb,
                                  target_layer=fb_layer, degraded=True,
@@ -829,15 +873,33 @@ def abstain(decision: GuardDecision, reason: str, *,
     exists is that a wrong guard must be a number).
     """
     _layer = layer or decision.declared_layer or decision.layer
+    # ⛔ IDEMPOTENT, ONCE PER DECISION. The correction above is a statement about
+    # ONE redirect, so calling this twice with the same decision must not take a
+    # SECOND `accepted` off the tally: measured (round-2 review P2) the second
+    # call drove `accepted` to 0 and `skipped` to 3 for two writes, i.e. it ate
+    # the first write's redirect. A non-redirect decision has nothing to correct
+    # and is returned unchanged — this function is a module API a future door
+    # will call, and the failure mode is a silent undercount of a redirect that
+    # HAPPENED.
+    if decision.outcome != GuardOutcome.REDIRECT:
+        return decision
+    _already = _ABSTAINED.get(id(decision))
+    if _already is not None:
+        return _already
     _unrecord(decision.rule or "", decision.declared_kind, decision.kind or "",
               GuardOutcome.REDIRECT)
     skipped = {"rule": decision.rule, "target": decision.kind, "reason": reason}
     _record(decision.rule or "", decision.declared_kind, decision.kind or "",
             GuardOutcome.SKIPPED)
-    return GuardDecision(
+    _replacement = GuardDecision(
         outcome=GuardOutcome.SKIPPED, layer=_layer,
         declared_kind=decision.declared_kind, declared_layer=_layer,
         skipped=skipped, rule=decision.rule)
+    # Remembered as the REPLACEMENT, so a second `abstain` on the same redirect
+    # answers with the abstention it already produced instead of handing the
+    # caller back a redirect the door would then APPLY.
+    _ABSTAINED[id(decision)] = _replacement
+    return _replacement
 
 
 # ── the pack half ─────────────────────────────────────────────────────────
@@ -1028,6 +1090,16 @@ def _admit(label: str | None, seen: set[str]) -> str:
     return _l
 
 
+#: Decisions `abstain` has already corrected. A WEAK-VALUE map keyed on `id()`,
+#: not a `WeakSet`: `GuardDecision` carries dict payloads, so a value-based hash
+#: raises (`TypeError: unhashable type: 'dict'`) on exactly the decisions this
+#: has to track. Only the KEY is hashed here. The weak values are what make the
+#: recycled-id aliasing impossible: an entry dies with its decision, so a live
+#: object can never inherit a stale marker.
+_ABSTAINED: weakref.WeakValueDictionary[int, GuardDecision] = \
+    weakref.WeakValueDictionary()
+
+
 def _record(rule: str, from_kind: str | None, to_kind: str, outcome: str) -> None:
     """Tally one outcome. NEVER raises — the guard path must not fail a write."""
     try:
@@ -1103,9 +1175,13 @@ def guard_table(*, include_packs: bool = True) -> dict[str, dict]:
     is the honest state: a guard exists where a confusion was MEASURED, and
     `allowedLayers` is the declaration the write door honours for all of them.
 
-    A guard whose target `kind_layers` cannot route, or whose derived layer is
-    not among its declared layers, is omitted here and reported by
-    `guard_table_problems()` — never silently trusted.
+    A guard whose target `kind_layers` CANNOT route is still listed, with
+    ``layer: None`` and an empty ``allowedLayers`` — the honest shape for "this
+    kind sits where nothing routes it", and it is what `guard_table_problems()`
+    reports separately as an incoherence. (An earlier version of this docstring
+    claimed such a guard was OMITTED here; it never was — a docstring that
+    describes a filter the code does not apply is worse than no docstring, because
+    the next reader trusts it instead of calling `guard_table_problems()`.)
     """
     from tortoise.kind_layers import core_sections, routing_layers
 
@@ -1176,7 +1252,7 @@ def guard_table_problems(pack_confusions: Iterable[Confusion] | None = None, *,
     for c in confusions:
         if c.when not in WHEN_PREDICATES:
             problems.append(f"{c.rule}: unsupported predicate {c.when!r}")
-        if _compiled(c.pattern) is None:
+        if _pattern_needs_compile(c.when) and _compiled(c.pattern) is None:
             problems.append(f"{c.rule}: pattern does not compile")
         routed = _layer_of_kind(c.redirect)
         if routed is None:
@@ -1192,11 +1268,27 @@ def guard_table_problems(pack_confusions: Iterable[Confusion] | None = None, *,
                 problems.append(
                     f"{c.rule}: redirect {c.redirect!r} is not routed to one "
                     f"layer by kind_layers")
-        elif c.guarded_layer is not None and c.guarded_layer != routed:
-            problems.append(
-                f"{c.rule}: the declared layer {c.guarded_layer!r} disagrees with "
-                f"kind_layers, which routes {c.guarded_kind or c.redirect!r} to "
-                f"{routed!r}")
+        else:
+            # ⛔ `guarded_layer` describes `guarded_kind` — the kind the guard is
+            # DECLARED ON — never the redirect target, which is on the other
+            # layer by design (the core table redirects Subject→Object and the
+            # reverse). Comparing it to `routed` false-refused every legitimate
+            # CROSS-LAYER pack guard at install (round-2 review P1).
+            #
+            # The guarded kind is frequently invisible to this process (it
+            # belongs to the pack under validation and a pack's own kinds are
+            # resolved through the ambient catalog, not the dir being
+            # validated), so an unrouteable one says nothing: the manifest's
+            # declared pair is then the only answer available, and a check that
+            # cannot see its subject must not report a verdict.
+            guarded_routed = (_layer_of_kind(c.guarded_kind)
+                              if c.guarded_kind is not None else None)
+            if (c.guarded_layer is not None and guarded_routed is not None
+                    and c.guarded_layer != guarded_routed):
+                problems.append(
+                    f"{c.rule}: the declared layer {c.guarded_layer!r} disagrees "
+                    f"with kind_layers, which routes {c.guarded_kind!r} to "
+                    f"{guarded_routed!r}")
         if _usable_fallback(c, _layer_of_kind) is None:
             problems.append(
                 f"{c.rule}: fallback {c.fallback!r} is not a usable core kind")

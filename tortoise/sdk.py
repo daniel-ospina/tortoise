@@ -121,7 +121,8 @@ from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, UnaddressableEntityName, all_name_holder_ids,
-    entity_create_lock, resolve_document_target_id, resolve_entity_id)
+    ambiguous_holder_ids as _ambiguous_holder_ids, entity_create_lock,
+    resolve_document_target_id, resolve_entity_id)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
@@ -5623,7 +5624,8 @@ def _graph_installed_namespaces(sdk) -> frozenset[str] | None:
 
 
 def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
-                      installed_provider=None) -> tuple[str, object | None]:
+                      installed_provider=None,
+                      ambiguous_target=None) -> tuple[str, object | None]:
     """Resolve and APPLY the per-kind guard to an entity write (#12060).
 
     Returns ``(layer, decision)`` — the layer the write should now use, and the
@@ -5645,8 +5647,19 @@ def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
 
     Returns the decision unchanged when the guard only ABSTAINED or the caller
     OVERRODE it: in both cases the write must land exactly as declared.
+
+    ``ambiguous_target`` is a probe ``(label) -> bool`` the caller supplies,
+    answering "would a create on that label refuse because 2+ LIVE entities
+    already hold this name?". It is consulted ONLY when the guard moves the
+    write to the other entity label, which is the one way a guard can reach a
+    refusal the caller never asked for.
     """
-    from tortoise.kind_guards import SKIP_STATUS_NOT_LEGAL_ON_SUBJECT, abstain, resolve
+    from tortoise.kind_guards import (
+        SKIP_STATUS_NOT_LEGAL_ON_SUBJECT,
+        SKIP_TARGET_LABEL_AMBIGUOUS,
+        abstain,
+        resolve,
+    )
     from tortoise.kind_layers import KIND_PROP
     from tortoise.pack_state import _KIND_PROP_SPELLINGS
 
@@ -5663,7 +5676,10 @@ def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
         return t, None
     decision = resolve(name, t, declared, intent=intent,
                        installed_provider=installed_provider)
-    if decision.kind is None:
+    # `changed` is the ONE question this door asks of a decision — did it move
+    # the write? — so the check lives there rather than re-deriving it from
+    # `kind is not None` (a decision can carry a kind the write must NOT apply).
+    if not decision.changed:
         return t, decision
 
     # ⛔ A REDIRECT MUST NOT TURN A LEGAL WRITE INTO A REFUSAL (#1934) — the
@@ -5681,6 +5697,32 @@ def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
         if not (isinstance(_status, str) and _status in _SUBJECT_STATUS_VALUES):
             return t, abstain(decision,
                               SKIP_STATUS_NOT_LEGAL_ON_SUBJECT, layer=t)
+
+    # ⛔ THE OTHER WAY A REDIRECT CAN REFUSE A LEGAL WRITE: IDENTITY.
+    # The guard moves the write to the OTHER entity label, and entity identity
+    # is LABEL-SCOPED, so two live carriers of the name on the TARGET label —
+    # legal, and perfectly resolvable on the label the caller chose — make the
+    # door's `resolve_or_mint` raise `AmbiguousEntityName` (route-then-refuse,
+    # #3633). MEASURED (round-2 review P1): two `:Object`s named
+    # `daniel-ospina/agent-infra` plus a `create_subject(...)` of that name
+    # raised where the same write succeeds unguarded AND on `origin/main` — a
+    # refusal invented entirely by the guard, which #1934 and this feature's
+    # defining rule forbid. The probe is READ-ONLY and reuses the ONE identity
+    # predicate (`entity_identity.is_ambiguous`); a probe that fails is ignored
+    # (#1934: nothing here may fail a write).
+    if decision.layer != t and ambiguous_target is not None:
+        _target_label = _ENTITY_LAYER_LABEL.get(decision.layer)
+        try:
+            _would_refuse = bool(_target_label) and bool(
+                ambiguous_target(_target_label))
+        except Exception as _probe_exc:  # noqa: BLE001, RUF100 — never fails a write
+            _logger.warning(
+                "create_entity: the guard's target-label identity probe failed "
+                "(%s: %s) — the redirect is applied unprobed.",
+                _probe_exc.__class__.__name__, _probe_exc)
+            _would_refuse = False
+        if _would_refuse:
+            return t, abstain(decision, SKIP_TARGET_LABEL_AMBIGUOUS, layer=t)
 
     _entity_props = {KIND_PROP["subject"], KIND_PROP["object"]}
     for spelling, canonical in _KIND_PROP_SPELLINGS.items():
@@ -45471,9 +45513,11 @@ class TortoiseSDK:
             props.setdefault("intent", intent)
             intent = None
         try:
-            t, _guard = _apply_kind_guard(t, name, props, intent,
-                                          installed_provider=lambda: (
-                                              _graph_installed_namespaces(self)))
+            t, _guard = _apply_kind_guard(
+                t, name, props, intent,
+                installed_provider=lambda: _graph_installed_namespaces(self),
+                ambiguous_target=lambda _label: bool(_ambiguous_holder_ids(
+                    self._get_proj().g, _label, name)))
         except Exception as _guard_exc:  # noqa: BLE001, RUF100 — never refuses a write
             _logger.warning(
                 "create_entity: the kind guard could not be resolved (%s: %s) — "
@@ -45818,7 +45862,47 @@ class TortoiseSDK:
         # advisory used to claim "no data was lost" in exactly that case; probe
         # for the twin so it can name both ids instead. READ-ONLY and fail-open
         # (#1934): a probe that failed must never refuse a write that landed.
-        if _layer_note and _layer_note.get("code") == "kind_layer_routed":
+        # ⛔ THE GUARD PATH CROSSES LABELS BY DESIGN, so it needs the SAME twin
+        # probe the router does — and it had none (round-2 review P2): with a
+        # `:Subject` of the name already present, a guard redirect re-filed the
+        # write to `:Object`, the graph held the name under BOTH labels, and the
+        # reply carried NO advisory while the AX block said `undo: none`. The
+        # router's disclosure is suppressed here because the guard runs FIRST and
+        # leaves it a consistent write, so nothing else in this method would
+        # report the split. Reuses `_kind_layer_advisory`'s renderer (one wording)
+        # by shaping the note it expects; `_layer_note` wins when both exist,
+        # because a router note means the guard did not decide this write.
+        # ⚠️ `t` is already the REDIRECTED layer at this point (the guard's
+        # return value is what the door below writes), so the label the caller
+        # asked for is `_guard.declared_layer` — comparing against `t` here
+        # would ask whether the guard changed the layer, and it always has by
+        # definition.
+        if (_guard is not None and _layer_note is None and _guard.kind
+                and _guard.layer != _guard.declared_layer):
+            _guard_peer_label = _ENTITY_LAYER_LABEL.get(_guard.declared_layer)
+            _guard_written_id = node.get("id") or node.get("eventId")
+            try:
+                _guard_peer = next(
+                    (i for i in all_name_holder_ids(
+                        self._get_proj().g, _guard_peer_label, name)
+                     if i and i != _guard_written_id), None
+                ) if _guard_peer_label else None
+            except Exception as _guard_peer_exc:  # noqa: BLE001, RUF100 — advisory only
+                _logger.warning(
+                    "create_entity: the guard split probe failed (%s: %s) — the "
+                    "redirect is reported without it.",
+                    _guard_peer_exc.__class__.__name__, _guard_peer_exc)
+                _guard_peer = None
+            if _guard_peer:
+                _layer_note = {
+                    "code": "kind_layer_routed",
+                    "kind": _guard.kind,
+                    "layer": _guard.declared_layer,
+                    "actual": [_guard.layer],
+                    "split_peer_id": _guard_peer,
+                }
+        if (_layer_note and _layer_note.get("code") == "kind_layer_routed"
+                and not _layer_note.get("split_peer_id")):
             _written_id = node.get("id") or node.get("eventId")
             # `all_name_holder_ids` takes a LABEL and refuses anything else, so
             # map the note's LAYER through the one map instead of re-spelling.

@@ -664,6 +664,36 @@ def display_holder_ids(candidate_ids) -> list:
     return [c if c is not None else "<id-less>" for c in candidate_ids]
 
 
+def is_ambiguous(holders) -> bool:
+    """Would a create on this holder set REFUSE? — THE ONE predicate (#9876).
+
+    ``holders`` is the raw :func:`live_name_holder_ids` row list, id-less LIVE
+    rows INCLUDED (a name held by one id-carrying and one id-less entity is
+    still TWO holders). Extracted so the refusal sites and the non-fatal
+    PROBES that must predict them cannot answer differently — the threshold
+    ``len(holders) > 1`` used to be spelled inline in
+    :func:`refuse_if_ambiguous` only, and a second site re-deriving it is
+    exactly the drift #9876 closed.
+    """
+    return len(holders) > 1
+
+
+def ambiguous_holder_ids(g, label: str, name: str) -> list[str]:
+    """The holder ids a create on ``(label, name)`` would REFUSE on — else ``[]``.
+
+    The NON-RAISING, NON-RECORDING twin of :func:`refuse_ambiguous_create`, for
+    a caller that has to decide whether to AVOID a refusal rather than make one.
+    ``#12060``'s kind guard needs exactly that: it moves the write to the OTHER
+    entity label, where two live carriers of the name — perfectly legal on the
+    label the caller chose — would turn the guard's own redirect into the
+    refusal the feature exists to prevent. It reads, decides nothing, and
+    records nothing (there was no refusal to record), and it asks
+    :func:`is_ambiguous` for the threshold.
+    """
+    holders = live_name_holder_ids(g, label, name)
+    return display_holder_ids(holders) if is_ambiguous(holders) else []
+
+
 def refuse_if_ambiguous(label: str, name: str, holders) -> None:
     """Refuse a CREATE whose name 2+ LIVE entities hold — records and raises.
 
@@ -682,7 +712,7 @@ def refuse_if_ambiguous(label: str, name: str, holders) -> None:
     though the caller catches the exception — and it is why a pre-flight probe
     that short-circuits the door does not silently lose the record.
     """
-    if len(holders) > 1:
+    if is_ambiguous(holders):
         _refuse(label, name, display_holder_ids(holders))
 
 

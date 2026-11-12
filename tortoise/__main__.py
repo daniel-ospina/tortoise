@@ -12066,6 +12066,15 @@ def _cmd_pack_validate(args) -> int:
             if n_unresolved:
                 print(f"✗ {n_unresolved} unresolved reference(s) — a declared "
                       f"or referenced pack is not installed")
+            if guard_problems and not n_errors and not n_unresolved:
+                # ⛔ The guard section above is printed, then this block used to
+                # print a count ONLY for `errors`/`unresolved` — so when the
+                # guards were the sole reason `ok` is false, the output ended on
+                # the guard lines with NO verdict line at all (measured, round-2
+                # review P2). One count per reason, so the last line always says
+                # what failed.
+                print(f"✗ {len(guard_problems)} kind-guard problem(s) — the "
+                      f"table itself is incoherent (#12060)")
     return 0 if ok else 1
 
 

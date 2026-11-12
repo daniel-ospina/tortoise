@@ -609,7 +609,8 @@ class TestAcceptance4NoModelCalls:
             elif node.module and node.level == 0:
                 names.add(node.module.split(".")[0])
         assert names <= {"__future__", "collections", "contextlib", "logging",
-                         "re", "threading", "dataclasses", "typing"}, names
+                         "re", "threading", "weakref", "dataclasses",
+                         "typing"}, names
 
 
 # ══ 5. measurement ════════════════════════════════════════════════════════
@@ -932,6 +933,249 @@ class TestReviewFindingsClosed:
         r = _run_cli("pack", "validate", str(manifest.parent))
         assert r.returncode == 1
         assert "is declared on the object layer" in (r.stdout + r.stderr)
+
+
+# ══ review round 2 ═══════════════════════════════════════════════════════
+#
+# Every test here FAILED before the fix it names (verified by reverting the fix
+# in a scratch copy). Round 1's lessons held: the value of a review finding is
+# the test that stops it coming back.
+
+class TestReviewRound2Closed:
+    """The second review's findings, each pinned by its own reproduction."""
+
+    def test_a_GUARD_redirect_cannot_turn_a_legal_write_into_an_identity_refusal(
+            self, sdk, monkeypatch):
+        """R2 P1. The status abstain closed one refusal class; IDENTITY is the
+        other. Entity identity is LABEL-SCOPED, so two live carriers of the name
+        on the TARGET label — legal on the label the caller chose — made the
+        redirect raise `AmbiguousEntityName` where the same write lands unguarded
+        and on `origin/main`. MEASURED before the fix: this exact script raised
+        from `entity_identity._refuse`, `route-then-refuse` #3633."""
+        # Two live :Objects hold the name (a legal double carrier, D2/#8864).
+        sdk.create_entity("object", "daniel-ospina/agent-infra",
+                          objectKind="core:Project", _server_id="obj-a-1")
+        sdk.create_entity("object", "daniel-ospina/agent-infra",
+                          objectKind="core:Project", _server_id="obj-b-2")
+        # The guard must CROSS labels (a Subject write filed as an Object kind),
+        # because that is the only move that reaches the other label's identity.
+        guard = Confusion(
+            rule="acme:project", when="nameMatches",
+            pattern=r"^daniel-ospina/[a-z-]+$", redirect="core:Project",
+            fallback="core:WorkItem", reason="a project", declaring_pack="acme")
+        monkeypatch.setattr(kg, "_catalog_pack_guards", lambda: (guard,))
+        r = sdk.create_subject("daniel-ospina/agent-infra")   # must NOT raise
+        assert r.get("id"), "a guard turned a legal write into a refusal"
+        assert r["kind_redirect_skipped"]["reason"] == \
+            kg.SKIP_TARGET_LABEL_AMBIGUOUS
+        # …and the write landed where the caller filed it, unchanged.
+        assert _labels_kinds(sdk, r["id"])[0] == ["Subject"]
+        assert {x["outcome"] for x in kind_guard_counts()} == {"skipped"}
+
+    def test_a_guard_crossing_labels_discloses_an_existing_split_peer(
+            self, sdk, monkeypatch):
+        """R2 P2. A guard redirect crosses labels BY DESIGN, so it is the path
+        that can always split an entity — and it was the one that withheld the
+        disclosure (`_kind_layer_advisory`) while its AX block said `undo: none`.
+        MEASURED before the fix: the graph held the name under both labels and
+        the reply carried no advisory."""
+        sdk.create_subject("acme/corp")          # the peer on the OTHER label
+        guard = Confusion(
+            rule="acme:project", when="nameMatches", pattern=r"^acme/[a-z]+$",
+            redirect="core:Project", fallback="core:WorkItem",
+            reason="an org slash-name is a project", declaring_pack="acme")
+        monkeypatch.setattr(kg, "_catalog_pack_guards", lambda: (guard,))
+        r = sdk.create_subject("acme/corp")
+        assert r["kind_redirect"]["to"]["layer"] == "object"
+        blob = json.dumps(r.get("advisories") or [])
+        assert "ALREADY" in blob and "SECOND" in blob, r.get("advisories")
+        # the undo text no longer promises a lossless undo either.
+        assert "label-scoped" in r["kind_redirect"]["undo"]
+
+    def test_a_cross_layer_pack_guard_is_NOT_refused_at_install(self, tmp_path):
+        """R2 P1. `guard_table_problems` compared the manifest's `layer` (which
+        describes the GUARDED kind) against the layer of the REDIRECT — and a
+        guard redirects across layers by definition, so every legitimate
+        cross-layer pack guard was false-refused. MEASURED before the fix:
+        `pack validate` exited 1 on a guard `_validate_guards` accepts."""
+        cross = GOOD_GUARD.replace("redirect: core:WorkItem",
+                                   "redirect: core:role")
+        manifest = _write_pack(tmp_path / "packs", "acme", guards=cross)
+        r = _run_cli("pack", "validate", str(manifest.parent), "--json")
+        payload = json.loads(r.stdout)
+        assert payload["ok"] is True, payload
+        assert payload["guard_problems"] == [], payload["guard_problems"]
+        assert r.returncode == 0, r.stdout + r.stderr
+
+    def test_the_TABLE_check_reports_a_real_guarded_layer_disagreement(self):
+        """R2 P2 (a false green). The old test asserted the INSTALL gate's
+        message, so deleting `guard_table_problems`' layer branch left all 57
+        tests green. This one calls the table check with a kind the ambient
+        catalog CAN route, and fails if that branch is removed."""
+        from tortoise.kind_layers import entity_route
+
+        kind = "venture:investment"
+        assert entity_route(kind) == "object", entity_route(kind)
+        wrong = kg.pack_guards("venture", [{
+            "kind": "investment", "layer": "subject",     # the LIE
+            "onConfusion": [{"when": "nameMatches", "pattern": "^inv-[0-9]+$",
+                             "redirect": "core:WorkItem",
+                             "fallback": "core:WorkItem", "reason": "x"}]}])
+        problems = guard_table_problems(wrong, include_catalog=False)
+        assert any("declared layer 'subject' disagrees" in p for p in problems), \
+            problems
+
+    def test_R4_degrade_is_not_withheld_when_the_fallback_shares_the_layer(
+            self):
+        """R2 P2. `fb_layer != _layer` silently withheld ladder step 1 for every
+        guard whose fallback sits on the write's OWN layer — the commonest case,
+        since a guard's reach covers both entity doors. MEASURED before the fix:
+        one guard, one name, the object door SKIPPED while the subject door
+        degraded to `core:WorkItem`."""
+        compiled = kg.pack_guards("acme", [{
+            "kind": "concept", "layer": "object", "onConfusion": [{
+                "when": "nameMatches", "pattern": r"^dev-issue-[0-9]+$",
+                "redirect": "other:thing", "fallback": "WorkItem",
+                "reason": "a work item", "fromLayers": ["object"]}]}])
+        d = resolve(PACK_ONLY_NAME, "object", None, pack_confusions=compiled,
+                    installed=frozenset({"core", "acme"}))
+        assert d.outcome == GuardOutcome.REDIRECT, d.skipped
+        assert d.kind == "core:WorkItem"
+        assert d.redirect["degraded"] is True
+
+    def test_a_LITERAL_prefix_survives_a_regex_metacharacter(self):
+        """R2 P2. `_matches` compiled every pattern BEFORE branching on the
+        predicate, so a `nameStartsWith` prefix containing a metacharacter was
+        discarded — the guard silently never fired, and the install gate refused
+        it in the same breath, though the predicate promises literal semantics."""
+        c = Confusion(rule="acme:draft", when="nameStartsWith",
+                      pattern="DRAFT (", redirect="core:WorkItem",
+                      fallback="core:WorkItem", reason="a draft")
+        assert kg._matches(c, "DRAFT (a)") is True
+        d = resolve("DRAFT (a)", "subject", None, pack_confusions=(c,))
+        assert d.outcome == GuardOutcome.REDIRECT, d
+        # the prefix is still LITERAL: a regex reading would match `DRAFT a`
+        assert kg._matches(c, "DRAFT a") is False
+        assert guard_table_problems((c,), include_catalog=False) == []
+
+    def test_a_literal_prefix_pack_validates_clean(self, tmp_path):
+        """…and the INSTALL gate applies the same rule as the runtime."""
+        guard = """\
+  - kind: concept
+    layer: object
+    onConfusion:
+      - when: nameStartsWith
+        pattern: 'DRAFT ('
+        redirect: core:WorkItem
+        fallback: core:WorkItem
+        reason: 'a draft'
+"""
+        manifest = _write_pack(tmp_path / "packs", "acme", guards=guard)
+        r = _run_cli("pack", "validate", str(manifest.parent))
+        assert r.returncode == 0, r.stdout + r.stderr
+
+    def test_abstain_is_idempotent_per_decision(self):
+        """R2 P2. The tally correction is a statement about ONE redirect, so a
+        second `abstain` on the same decision must not take another `accepted`
+        off the tally. MEASURED before the fix: two writes produced
+        `accepted 0 / skipped 3` — the second correction ate the first write's
+        redirect, i.e. a silent UNDERCOUNT of a redirect that happened."""
+        d = resolve(ISSUE_NAME, "subject", None, pack_confusions=())
+        first = kg.abstain(d, "probe")
+        second = kg.abstain(d, "probe")
+        assert first == second, "the second abstain answered with a REDIRECT"
+        assert second.outcome == GuardOutcome.SKIPPED
+        rows = kind_guard_counts()
+        assert sum(r["count"] for r in rows if r["outcome"] == "skipped") == 1
+        assert not [r for r in rows if r["outcome"] == "accepted"]
+
+    def test_the_table_check_reports_from_the_DOCUMENTED_shape(self):
+        """R2 P2. `guard_table()`'s docstring claimed an unroutable guard was
+        OMITTED from the view; the code always listed it with `layer: None`. The
+        docstring now says what the code does, and this pins the pairing."""
+        # An unroutable target: the guard IS listed (with `layer: None`), and
+        # the problem is reported SEPARATELY — the view never pretends the guard
+        # is safe, and never claims it is absent.
+        unroutable = kg.pack_guards("acme", [{
+            "kind": "concept", "layer": "object", "onConfusion": [{
+                "when": "nameMatches", "pattern": "^thing-[0-9]+$",
+                "redirect": "core:notAKind", "fallback": "core:WorkItem",
+                "reason": "nobody can route this"}]}])
+        real = kg._catalog_pack_guards
+        kg._catalog_pack_guards = lambda: tuple(unroutable)
+        try:
+            table = guard_table()
+            entry = table["core:notAKind"]
+            assert entry["layer"] is None, entry
+            assert entry["allowedLayers"] == [], entry
+            assert entry["commonConfusions"], "the guard was silently omitted"
+            assert any("core:notAKind" in p for p in guard_table_problems()), \
+                guard_table_problems()
+        finally:
+            kg._catalog_pack_guards = real
+
+    def test_a_documentKind_guard_is_refused_at_install(self, tmp_path):
+        """R2 P2 (dead code). The documentKind refusal sat behind a branch that
+        had already claimed every non-empty `kind_ref`, so a pack declaring
+        `documentKinds: [contract]` AND a guard on `contract` validated CLEAN —
+        the comment said "a guard may not claim it" and nothing enforced it."""
+        p = tmp_path / "packs" / "acme"
+        p.mkdir(parents=True)
+        (p / "manifest.yaml").write_text("""\
+namespace: acme
+name: Acme Test Pack
+version: "0.1.0"
+tier: free
+ontology:
+  extends: core
+  documentKinds: [contract]
+  guards:
+    - kind: contract
+      layer: object
+      onConfusion:
+        - when: nameMatches
+          pattern: '^contract-[0-9]+$'
+          redirect: core:WorkItem
+          fallback: core:WorkItem
+          reason: 'a contract is a source genre'
+depends_on: []
+""")
+        r = _run_cli("pack", "validate", str(p))
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "documentKind" in (r.stdout + r.stderr)
+
+    def test_changed_is_FALSE_for_a_decision_the_write_must_ignore(self):
+        """R2 P2. `changed` had NO caller anywhere in the repo, and it asked
+        `kind is not None` — the same question the door asked inline, spelled
+        twice. It is now keyed on the OUTCOME (`REDIRECT`), documented as the one
+        question the door asks, and used there; this pins the contract. ⚠️ For
+        every outcome this module can produce today the two spellings agree (no
+        non-REDIRECT decision carries a `kind`), so this test does not
+        discriminate them — the outcome term is what keeps it right if one ever
+        does."""
+        assert resolve(ISSUE_NAME, "subject", None,
+                       pack_confusions=()).changed is True
+        over = resolve(ISSUE_NAME, "subject", None, intent=INTENT_AS_DECLARED,
+                       pack_confusions=())
+        assert over.outcome == GuardOutcome.OVERRIDDEN
+        assert over.changed is False
+
+    def test_pack_validate_still_prints_a_verdict_when_only_guards_are_wrong(
+            self, tmp_path):
+        """R2 P2. With `guard_problems` as the ONLY reason, `pack validate`
+        printed the guard lines and then NO summary at all — the reader was left
+        without a verdict line."""
+        bad = GOOD_GUARD.replace("redirect: core:WorkItem",
+                                 "redirect: core:notAKind")
+        manifest = _write_pack(tmp_path / "packs", "acme", guards=bad)
+        r = _run_cli("pack", "validate", str(manifest.parent))
+        out = r.stdout + r.stderr
+        assert r.returncode == 1
+        assert "kind guards" in out
+        # the VERDICT line itself — not merely a "✗" the guard section already
+        # prints, which is what made the first version of this test pass with
+        # the footer deleted (measured).
+        assert "kind-guard problem(s)" in out, out
 
 
 # ══ the safety properties ═════════════════════════════════════════════════

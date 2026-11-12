@@ -192,7 +192,7 @@ breaks that, and refuses a guard with no CORE `fallback`:
 ```text
 $ tortoise pack validate packs/mypack
   ✗ mypack:
-      guards[0].onConfusion[0].redirect: 'other:thing' targets namespace
+      ontology.guards[0].onConfusion[0].redirect: 'other:thing' targets namespace
       'other', which this pack neither owns nor declares in depends_on — either
       add the dependency or redirect to a core kind (R1/R3)
 ```
