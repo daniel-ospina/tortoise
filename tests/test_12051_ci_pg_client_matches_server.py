@@ -224,7 +224,7 @@ not a tenth spelling — it is the one a text guard cannot reach:
   command position.
 - **The directory arm reads a text, and a text can be laundered.** The destination
   is taken as the last POSITIONAL path token of the owning verb's command
-  segment, with redirect targets and `-`-prefixed options skipped. EIGHT
+  segment, with redirect targets and `-`-prefixed options skipped. SEVEN
   residuals
   are stated rather than claimed closed, and each spares or refuses for its OWN
   mechanism — they are not one: an option whose value is a SEPARATE token written
@@ -257,15 +257,13 @@ not a tenth spelling — it is the one a text guard cannot reach:
   the OPPOSITE direction —
   it is REFUSED (`d=$RUNNER_TEMP/tools; sudo chmod -R a+rX "$d/16/bin"` red, the
   same act on a literal path with an extra component green), which is fail-closed
-  and kept because a variable base cannot be resolved; a path RELATIVE to a `cd`
-  (`cd /usr/lib/postgresql && sudo rsync -a 17/bin/ 16/bin/`) names no client-dir
-  base at all, and this guard reads ONE LINE at a time — the `cd` may sit on an
-  earlier line or in an earlier step, which a line regex cannot model, so the arm
-  is not reached (measured GREEN; declared here rather than modelled, because
-  modelling it would mean carrying a working directory the text does not
-  guarantee); and an EXTRACTOR's destination is not graded at all (`tar -xf x.tgz -C "$b/16/bin"`, `unzip -o
+  and kept because a variable base cannot be resolved; and an EXTRACTOR's destination is not graded at all (`tar -xf x.tgz -C "$b/16/bin"`, `unzip -o
   x.zip -d "$b/16/bin"`, `dpkg-deb -x x.deb "$b/16/bin"`, `cpio -D "$b/16/bin"`
-  each overwrite every client). That last one is deliberate: the extractor verbs
+  each overwrite every client). ⛔ NOT listed here, because it has its own bullet
+  above: a RELATIVE directory replace (`cd /usr/lib/postgresql && sudo rsync -a
+  17/bin/ 16/bin/`) — same act, but it is stated as the sibling limit of the
+  two-component-up bullet rather than counted in this list, so the count stays
+  SEVEN. That last one is deliberate: the extractor verbs
   are absent from the mutation list by design (round 9 — `tar -czf …`,
   `unzip -l …` are reads), `dpkg-deb -x` takes no flag value, one shared flag set
   lets `unzip -x` shadow `-d`, `cpio` reads as command position, and `tar -C` is a
@@ -5194,7 +5192,13 @@ BINARY_MUTATION_POLARITY = [
         'sudo unzip -o pg17.zip -d "$b/16/bin"',
         False,
         "STATED RESIDUAL: an extractor's `-d` is not graded (see the docstring's "
-        "sixth residual); pinned so closing it is a deliberate edit (#12069 round 24)",
+        "EXTRACTOR residual — named, not ordinalised, because the list is "
+        "append-only and an ordinal drifts every time an entry is inserted; this "
+        "one said `sixth` and was correct when written at round 24, but the "
+        "variable-base and `cd`-relative rows inserted since moved the extractor "
+        "to eighth, which pointed a future round at a REFUSED direction instead "
+        "(#12069 r24, ordinal corrected r30); pinned so closing it is a deliberate "
+        "edit",
     ),
     (
         'sudo dpkg-deb -x x.deb "$b/16/bin"',
