@@ -140,8 +140,10 @@ def test_no_belief_stays_inside_its_invariants(sdk):
     discriminate, so the ranges are asserted. But WHICH defect they catch is
     direction-specific, and the earlier wording here named only ONE of the two
     directions — it said a mixed-population bug makes `no_belief` go negative
-    (true for a label-blind or narrower denominator), which is the direction the
-    ranges DO catch, and was silent on the other. Stated properly:
+    (true for a label-blind NUMERATOR or a narrower denominator — not a
+    label-blind denominator, which is the WIDER side and so falls under the
+    second bullet), which is the direction the ranges DO catch, and was silent
+    on the other. Stated properly:
 
     * a NARROWER denominator (or a label-blind numerator, measured -8.0) can push
       `no_belief` negative or the ratio above 1.0 — the ranges CATCH it;

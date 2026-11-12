@@ -32703,9 +32703,15 @@ class TortoiseSDK:
           ``IMPL|NAND`` edge to a live epistemic endpoint. Its OWN
           ``count(DISTINCT n)``, never ``_edged_claim_ids()``: that query is
           label-blind (``epistemic_disjunction`` admits Point|Subject|Object|
-          Event), so reusing it here would put a ``:Point`` numerator over a
-          wider denominator and yield ``belief_coverage_pct > 1`` and a
-          NEGATIVE ``no_belief`` (measured: 5.0 / -8.0).
+          Event), so pairing its label-blind BELIEF count with a
+          ``:Point``-scoped denominator mixes a WIDER numerator into a NARROWER
+          denominator — the direction that yields ``belief_coverage_pct > 1`` and a
+          NEGATIVE ``no_belief`` (measured: 5.0 / -8.0). ⛔ #12138 §2: this
+          bullet used to call the label-blind set a "wider denominator", which
+          is the OTHER mistake and the one the ranges cannot see (a wider
+          denominator lowers the ratio and raises ``no_belief``, both in range —
+          see the no-clamp note below). The two directions are distinct; only
+          the numerator/denominator SCOPE mix produces the 5.0 / -8.0 pair.
         - ``belief_present`` — the SAME population, counted through the shared
           presence predicate (`ep_has_belief_cypher`, #11702) rather than a
           private ``IS NOT NULL``: a stored (0,0) pair is not a belief and a
@@ -34326,10 +34332,17 @@ class TortoiseSDK:
 
         ⚠️ #11823: this query is **label-blind** — ``epistemic_disjunction``
         admits ``Point|Subject|Object|Event`` — so it is NOT the denominator for
-        a ``:Point``-scoped belief count. Mixing the two populations yields
-        ``belief_coverage_pct > 1`` and a negative ``no_belief``; the health
-        block's own denominator is a separate, ``:Point``-scoped
-        ``count(DISTINCT n)`` in :meth:`_propagation_counts`.
+        a ``:Point``-scoped belief count. ⛔ #12138 §2: the reason is the
+        POPULATION, not a visible range violation — this set is a SUPERSET of
+        the ``:Point``-scoped reach, so as a denominator it is WIDER, which
+        lowers the ratio and raises ``no_belief``, both still in range and
+        therefore invisible to the ranges the health block asserts (see R10 in
+        the #11823 plan). The ``belief_coverage_pct > 1`` / NEGATIVE ``no_belief``
+        pair belongs to the opposite scope mix — a label-blind NUMERATOR over a
+        ``:Point``-scoped denominator (measured: 5.0 / -8.0 at 10 beliefs over 2
+        point claims) — and this docstring previously attributed it to this,
+        wider, direction. The health block's own denominator is a separate,
+        ``:Point``-scoped ``count(DISTINCT n)`` in :meth:`_propagation_counts`.
         """
         proj = self._get_proj()
         edged_rows = proj.g.query(
