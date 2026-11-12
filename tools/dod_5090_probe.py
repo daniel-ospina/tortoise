@@ -543,6 +543,29 @@ UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
         "`other.encode_for_row(…)` reaches `gated` here too, which is why the register no longer "
         "says \"a bare call\"."
     ),
+    "a builder alias ESCAPES as an argument or a default (the builder arm keys on the NAME "
+    "being a call)": (
+        "the aliased-CLAUSE-BUILDER credit in `_writes_an_embedding` asks whether the alias NAME "
+        "appears as a bare `ast.Name` CALL, so a writer that PASSES the builder into a helper is "
+        "discovered only when that helper's parameter happens to be spelled like the module alias. "
+        "Measured on one fixture, only the callee parameter renamed — "
+        "`def render(b, name): return b(name)` then "
+        "`query(\"MATCH (y) SET y += $p\", {\"p\": render(_set, \"y\")})` — the writer is "
+        "`unresolved_write` with the parameter spelled `_set` and ABSENT from the population with "
+        "it spelled `builder`, `b` or `fn`; the same silence swallows "
+        "`functools.partial(_set, \"y\")` then `f()` and `{\"b\": _set}[\"b\"](\"y\")`. "
+        "`_EMBED_WRITE` cannot rescue any of them (`SET y += $p` is not in its pattern), so the "
+        "aliased call really is the only signal — a writer ABSENT from the census owes no "
+        "declaration at all, the fail-open direction `#11274` exists to close. Pre-existing "
+        "(identical on `origin/main`) and with NO live-tree instance (population 32, unchanged). "
+        "⛔ Named rather than repaired because the repair is a credit RULE, not a bug fix: crediting "
+        "an escaped alias is measured population-neutral on `tortoise/` but it is over-credit by "
+        "construction (any module that merely passes the builder around starts owing a "
+        "declaration), and it must not be bolted on in the same change that REVERTED a "
+        "shadow-aware arm for deleting writers — one identifier separates a correct credit from "
+        "silence here (`builder_alias_PASSED_INTO_a_shadowing_nested_scope` pins the correct "
+        "spelling), which is exactly why the blindness had to be named instead of assumed."
+    ),
 }
 
 

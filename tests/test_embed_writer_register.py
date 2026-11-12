@@ -647,6 +647,30 @@ ALIAS_FORMS_STILL_BLIND: dict[str, tuple[str, dict[str, str], str, str]] = {
         "into it and credits `factory`, a function that stores nothing, as `gated`",
         "closure-scoped alias",
     ),
+    # ⛔ `#12020` round 10 review (P2, PRE-EXISTING — measured on `origin/main` and this head alike).
+    # The builder-credit rule keys on the alias NAME appearing as a bare-`Name` CALL, so a writer
+    # that PASSES the builder in is discovered only when the callee's parameter happens to be
+    # spelled like the module alias. `_EMBED_WRITE` cannot see `SET y += $p`, so the aliased call
+    # really is the only signal and the writer is ABSENT — it owes no declaration at all, which is
+    # the fail-open direction `#11274` exists to close. Named in `UNDECIDABLE_WRITE_SHAPES` and
+    # pinned blind here; the day the escape is credited this row reds and the naming must be
+    # retired with it. ⛔ Spelling the parameter `_set` is the CORRECT case and is pinned
+    # separately (`builder_alias_PASSED_INTO_a_shadowing_nested_scope`) — one identifier separates
+    # a correct credit from silence, which is why this is named rather than left to be assumed.
+    "builder_alias_escapes_as_an_argument": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj):\n"
+        "    def render(b, name):\n"
+        "        return b(name)\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": render(_set, "y")})\n',
+        {},
+        "the aliased builder is PASSED INTO a helper whose parameter is spelled differently, so the "
+        "alias never appears as a call NAME: both the writer and its helper are ABSENT while the "
+        "write is real (fail-open). The same silence swallows `functools.partial(_set, \"y\")` and "
+        "`{\"b\": _set}[\"b\"](\"y\")` — pre-existing, no live-tree instance, named not repaired",
+        "ESCAPES as an argument",
+    ),
     # ⛔ The REACHABILITY axis, one over from scope. Measured at `b9a92e901a` while re-verifying the
     # round-7 scope fix: the alias resolves correctly here and only the REACH is credited. The row
     # below is the `def` spelling; the other two are pinned here too because the NAMING entry is

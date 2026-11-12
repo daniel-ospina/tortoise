@@ -270,11 +270,17 @@ claim and a slogan:
   enclosing function is credited `gated` in its place — a named residual, not a resolved case
   (`UNDECIDABLE_WRITE_SHAPES`, "closure-scoped alias"). ⛔ And a `global` rebinding of the alias —
   or any other route to the same MODULE binding from a nested scope, `globals()[…] = …` included —
-  is NOT captured: the shadow is threaded per scope, so it applies only
+  is NOT captured: for the SEAM spelling the shadow is threaded per scope, so it applies only
   INSIDE the subtree that rebinds, while the `global` statement's effect is on the MODULE binding
   the writer calls — measured `gated` (the writer owes nothing while never reaching the gate). That
   residual is named in `UNDECIDABLE_WRITE_SHAPES` ("`global` rebinding …") and pinned in the suite;
-  this bullet does not cover it. (`nonlocal` is NOT part of that residual and must not be read as
+  this bullet does not cover it. ⛔ THAT SHADOW IS NOT THREADED FOR A CLAUSE BUILDER, and must not
+  be read as if it were: for a builder the alias is the only discovery signal (`_EMBED_WRITE`
+  cannot see `SET y += $p`), so suppressing a shadowed call DELETES a real writer instead of
+  demoting it — measured, and the reason the builder arm is deliberately shadow-BLIND and
+  over-credits instead. Its residual has its own naming entry in `UNDECIDABLE_WRITE_SHAPES`
+  ("a builder alias ESCAPES as an argument") and its own two pins; this bullet is the SEAM's.
+  (`nonlocal` is NOT part of that residual and must not be read as
   one: a `nonlocal` naming a module-level alias does not compile — `SyntaxError: no binding for
   nonlocal … found` — so no runnable writer can be in that shape.) ⛔ The
   RESOLUTION IS OF CALLS, not of imports: an alias imported and never called is credited nothing —
