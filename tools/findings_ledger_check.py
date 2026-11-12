@@ -686,7 +686,17 @@ _NAMED_LETTER_RE = re.compile(
     r"|\*\(([a-l]{1,2})\)\*"  # *(a)*
     r"|\*([a-l]{1,2})\*"  # *a*
     r"|\(([a-l]{1,2})\)"  # (a) / (a), (b)
-    r"|(?:,\s*|\b(?:and|or|also|plus|&)\s+|&\s+|,\s*also\s+)([a-l])\b"  # ", f" / "and f" / "also f" / "& f"
+    # ⛔ A BARE MEMBER INTRODUCED BY A CONNECTOR IS EVIDENCE IN ITSELF; one introduced by
+    # a COMMA is not. Read the comma form with no further condition and English prose
+    # supplies row letters: measured, the shipped still-list with `(a)` removed and
+    # `, a claim §1 supports.` appended read CLEAN — a STALE complement list passing the
+    # arm's only comparison — and `, I think.` / `, e.g. today.` did the same for `i` and
+    # `e`. So every COMMA/`&`-introduced member must end like a list member (list
+    # punctuation or the end of the sentence), while `and` / `or` / `also` / `plus` keep
+    # the permissive form, because a connector is what makes `… **(j)**, also c still
+    # read as written.` a member rather than an article.
+    r"|(?:,\s*|&\s+)([a-l])\b(?=\s*(?:[,.;:)\u2014\u2013]|$))"  # ", f" / "& f"
+    r"|\b(?:and|or|also|plus|as well as|followed by|namely)\s+([a-l])\b"  # "and f"
     # ⛔ THE HEAD OF A PLAIN LIST. Matching a member only by its SEPARATOR (`, f` /
     # `and f`) never reads the FIRST member, so an honest `Only a, f, h, i and j still
     # read as written.` was compared as `['f','h','i','j']` — a false accusation that
@@ -771,6 +781,23 @@ def check_verdict_tally(text: str) -> list[str]:
     total = len(verdicts)
     total_word = COUNT_WORDS[total] if total < len(COUNT_WORDS) else str(total)
     expected = f"{COUNT_WORDS[len(non_still)]} of the {total_word} rows no longer read as written"
+    # Split into sentences: the non-STILL-TRUE letters live in the "no longer read
+    # as written" sentence, its complement in the "still read as written" one.
+    # Partitioning on the phrase instead does not work — "Only **(a)** … **(j)** "
+    # sits BEFORE the words it introduces, so the head swallowed the complement and
+    # the arm named all twelve (measured).
+    # ⛔ SPLIT ON A QUOTED FULL STOP *LAST*. A sentence that only QUOTES the phrase is
+    # already exempt (the `quoted` strips below), but the split ran FIRST, so a full stop
+    # INSIDE the quotation cut the sentence there and left the left-hand fragment with no
+    # closing quote — `quoted` could not see it, and the fragment became a second
+    # assertion: measured, `They wrote "seven of the twelve rows no longer read as written.
+    # It is wrong." verbatim.` red both the figure arm and the letter arm. Masking the
+    # periods INSIDE quoted spans before splitting keeps every letter (a quoted LETTER
+    # list is still a list) and every quote (so the phrase strips still work), and the
+    # sentence boundaries the arms split on are the ones outside quotations.
+    sentences = re.split(
+        r"(?<=\.)\s+", quoted.sub(lambda m: m.group(0).replace(".", "\u2024"), paragraph)
+    )
     # ⛔ A DERIVED FIGURE MUST BE ASSERTED BY THE SENTENCE A LANE QUOTES — a presence
     # test over the whole PARAGRAPH is defeatable by a decoy sentence, which is the same
     # defect the letter lists were cured of one arm up (#11902 review P1, third round on
@@ -783,7 +810,7 @@ def check_verdict_tally(text: str) -> list[str]:
     # page. Both figures therefore have to live in EXACTLY ONE sentence.
     figure_sentences = [
         s
-        for s in re.split(r"(?<=\.)\s+", paragraph)
+        for s in sentences
         if FIGURE_RE.search(quoted.sub(" ", s))
     ]
     if len(figure_sentences) != 1:
@@ -800,12 +827,6 @@ def check_verdict_tally(text: str) -> list[str]:
             f"({', '.join(non_still)}), so the stated count is not derived from it"
         )
 
-    # Split into sentences: the non-STILL-TRUE letters live in the "no longer read
-    # as written" sentence, its complement in the "still read as written" one.
-    # Partitioning on the phrase instead does not work — "Only **(a)** … **(j)** "
-    # sits BEFORE the words it introduces, so the head swallowed the complement and
-    # the arm named all twelve (measured).
-    sentences = re.split(r"(?<=\.)\s+", paragraph)
     # ⛔ EXACTLY ONE SENTENCE, not "every sentence that matches". Joining them let a
     # second compliant sentence anywhere in the paragraph supply the letter set, the
     # per-letter verdict attribution and the overtaken count while the sentence a lane

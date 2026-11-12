@@ -367,13 +367,17 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   one verdict cell to `STILL-TRUE` left the page asserting a superseded count with `--check` at
   **rc 0** — and that number is repeated in this repo's `ci.yml`, `config/ci-surfaces.yml`,
   `docs/00_index.md`, this module's docstring and the test module's, so a wrong one propagates well
-  past this page. It must also be the ONLY such paragraph: a decoy carrying a correct-looking tally,
+  proof. It must also be the ONLY such paragraph: a decoy carrying a correct-looking tally,
   inserted anywhere above §3, took the match while the real sentence was falsified (measured, rc 0),
   so more than one is a page defect — and the paragraph must likewise contain **exactly one sentence**
   carrying that phrase, because the arm locates its subject *by pattern*: it joined every matching
   sentence, so a second one in the same paragraph could supply the letters, the per-letter verdict
   attributions and the overtaken count while the sentence a lane quotes went stale (measured on the
-  pre-fix tool: falsifying the real sentence beside a compliant decoy returned `[]`). This is the §6
+  pre-fix tool: falsifying the real sentence beside a compliant decoy returned `[]`). ⛔ A sentence
+  that only QUOTES a figure or a letter list asserts nothing — the page discusses both phrases — so
+  quoted spans are removed before each phrase test and a quoted full stop does not end a sentence;
+  counting them reded a clarifying edit (measured), the false-accusation class these arms must not
+  create. This is the §6
   survivor arm's "keep exactly one" rule, one level down. ⛔ The SAME rule applies to the
   **complement** list ("still read as written"), which was joined across sentences and compared as a
   set-union: a second complement sentence could assert a STILL-TRUE letter the real sentence does not,
@@ -381,11 +385,15 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). Both arms count only a
   sentence that carries a **letter LIST** of two or more single letters — comma-joined
   (`b, c, d`) or a pair (`b and c`), each letter written bare, bold, code or italic, every form
-  bounded to the twelve letters §3's table can name. Markup around the PARENTHESES does not
-  decide candidacy (`**(c)**` and `(c)` are the same item), which is what stops a `**` from being
-  the difference between a red and a green; the two paren-less spellings this page and repo also use
-  (code, italic) are read as items too. The letter EXTRACTOR additionally reads a member its own
-  separator introduces (`and`, `or`, `also`, `plus`), which is what reaches `… **(j)**, also c`.
+  bounded to the twelve letters §3's table can name. A bare member introduced by a CONNECTOR
+  (`and`, `or`, `also`, `plus`, `as well as`) is read as written; one introduced only by a comma
+  or `&` must also end like a list member (list punctuation or the end of the sentence), because
+  a comma alone reads English prose as a member — measured, a stale complement list with `(a)`
+  removed passed while `, a claim §1 supports.` supplied a phantom `a` (and `, I think.` an `i`).
+  Markup around a member never decides candidacy (`**(c)**` and `(c)` are the same item), which is
+  what stops a `**` from being the difference between a red and a green; code, italic and
+  uppercase spellings are read too, and the letter EXTRACTOR reads the same spellings, so what
+  makes a sentence a candidate and what its list is compared against cannot diverge.
   A single parenthetical letter in prose is **not** a list — `row (c) still read as written` is a
   sentence, not a tally — and a
   sentence that merely QUOTES the phrase has no list to disagree with the table, so counting it reded

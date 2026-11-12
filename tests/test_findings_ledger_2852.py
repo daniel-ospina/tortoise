@@ -2425,6 +2425,44 @@ def test_a_quoted_letter_list_is_still_a_candidate(tmp_path, monkeypatch):
         ), f"a QUOTED letter list is still a letter list: {problems}"
 
 
+#: §3's shipped complement sentence VERBATIM, so a test can replace it whole instead of
+#: patching a fragment and passing for the wrong reason.
+_STILL_SENTENCE = (
+    "Only **(a)**, **(f)**,\n**(h)**, **(i)** and **(j)** still read as written."
+)
+
+
+def test_english_prose_cannot_supply_a_missing_member(tmp_path, monkeypatch):
+    """FAILS if a COMMA-introduced bare letter is read without a list-member ending.
+
+    The separator branch (`, ` / `and `) read the English article and the pronoun as row
+    letters, so a phantom member satisfied the complement arm's only comparison and a
+    STALE list passed: measured, the shipped still-list with `(a)` removed and
+    `, a claim §1 supports.` appended read CLEAN, and `, I think.` did the same for `i`
+    (the match is case-insensitive), `, e.g. today.` for `e`. A comma is not evidence that
+    a member follows; a connector (`and`, `or`, `also`, `plus`) is, which is why
+    `… **(j)**, also c still read as written.` must keep working.
+
+    ⛔ The HONEST spellings are asserted beside the offending one: a guard that refuses
+    correct prose to catch this would be the false-accusation class it exists to prevent.
+    """
+    stale = (
+        "Only **(f)**,\n**(h)**, **(i)** and **(j)** still read as written, {tail}"
+    )
+    for tail in ("a claim §1 supports.", "I think.", "e.g. today."):
+        with monkeypatch.context() as patch:
+            replacement = stale.format(tail=tail)
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, r=replacement: t.replace(_STILL_SENTENCE, r, 1),
+            )
+            problems = _doc_problems()
+            assert any(
+                "STILL-TRUE list names" in p for p in problems
+            ), f"English prose must not supply a member: {tail!r} -> {problems}"
+
+
 def test_a_quoted_figure_is_not_a_second_assertion(tmp_path, monkeypatch):
     """FAILS if either FIGURE arm counts a sentence that only QUOTES the phrase.
 
@@ -2448,6 +2486,14 @@ def test_a_quoted_figure_is_not_a_second_assertion(tmp_path, monkeypatch):
         (
             'They wrote "four of the seven were overtaken" verbatim. ',
             "overtaken figure",
+        ),
+        # ⛔ AND A QUOTED SENTENCE WITH ITS OWN FULL STOP. The split ran before the strip,
+        # so this decoy was cut inside the quotation, the left fragment had no closing
+        # quote for `quoted` to see, and it counted as an assertion (measured).
+        (
+            'They wrote "seven of the twelve rows no longer read as written. '
+            'It is wrong." verbatim. ',
+            "rows no longer read as written",
         ),
     ):
         with monkeypatch.context() as patch:
