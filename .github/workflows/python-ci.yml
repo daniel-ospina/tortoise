@@ -4831,7 +4831,17 @@ jobs:
           # regression, on exactly the pool-box class this cleanup exists for. On such a box
           # the operator's stanza already provides the index, so this step adds nothing; the
           # ORIGIN check below still proves apt.postgresql.org lists this major.
-          if grep -rqE '^[[:space:]]*(deb[[:space:]]|URIs:).*apt\.postgresql\.org' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+          # ⚠️ THE PROBE READS ONLY WHAT apt ACTUALLY READS: the legacy single file, and
+          # `sources.list.d/*.list` / `*.sources`. A recursive grep over the whole directory
+          # also matches the BACKUP names apt ignores (`pgdg.list.save`,
+          # `pgdg.list.distUpgrade` — both created by ordinary apt/dpkg operations), which
+          # would take this branch on a box with NO usable PGDG source, add nothing, and red
+          # at the ORIGIN check with a message about a stanza that is not in effect. ⚠️ STATED
+          # LIMIT: a deb822 `.sources` paragraph this file lists but that is disabled
+          # (`Enabled: no`) or carries `Types: deb-src` is still counted as present; deciding
+          # that needs a paragraph parser, and the consequence is a NAMED red (this step adds
+          # nothing and the ORIGIN check names the box), not a silent wrong client.
+          if grep -qE -e '^[[:space:]]*deb[[:space:]][^#]*apt\.postgresql\.org' -e '^[[:space:]]*URIs:[[:space:]]*[^#]*apt\.postgresql\.org' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null; then
             echo "apt.postgresql.org is already configured on this box [$identity] — reusing that stanza rather than adding a second one for the same suite (a duplicate with a different Signed-By makes apt refuse the whole source list, #12051)."
           else
             # ⚠️ `mktemp`, not a fixed `/tmp/pgdg.asc`: this job is pool-eligible and `curl -o`
