@@ -2046,17 +2046,21 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
                    JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
                   embedding="abc")
 
-    # ⛔ …AND THE BELT HAS ITS OWN ROW, which is the one shape that reds when it
-    #    is removed (#12000 mutation pass, agent-infra#3442 — measured: with the
-    #    post-stamp call disabled, every other arm above still passes, because
-    #    they are all refused by the PRE-stamp check). An EMPTY vector is the
+    # ⛔ …AND THE BELT HAS ITS OWN ROW, which is the one shape IN THIS TEST that
+    #    reds when it is removed (#12000 mutation pass, agent-infra#3442 —
+    #    measured: with the post-stamp call disabled, every other arm above still
+    #    passes, because they are all refused by the PRE-stamp check). ⛔ NOT the
+    #    belt's ONLY pin: `p-merged-lie` below reds on that same mutation and no
+    #    other arm can see it, because neither channel declared a width there
+    #    (measured, review round 18 — the earlier wording claimed "the one shape"
+    #    for the whole belt and was false). An EMPTY vector is the
     #    case that separates them: `_is_shortest_f32_text([])` is `True`
     #    ("representable at every width" — `tortoise/embeddings.py`), so the
     #    pre-stamp arm passes it truthfully, the seam then DROPS it to an owned
     #    `None`, and the belt is what refuses the resulting `f32` over `None`.
-    #    Without this row the belt is unexercised — a guard with no attributable
-    #    mutant, which is how five PRs in one night were reviewed clean over
-    #    restored bugs.
+    #    Without this row the belt is unexercised BY THIS TEST — a guard with no
+    #    attributable mutant here, which is how five PRs in one night were
+    #    reviewed clean over restored bugs.
     with pytest.raises(ValueError, match="declared over NO vector"):
         api._emit("PointAdded",
                   {"id": "p-empty", "content": "c",

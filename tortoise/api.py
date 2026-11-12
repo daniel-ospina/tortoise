@@ -791,10 +791,14 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         #     _emit("PointAdded", {"id": "p", "content": "c",
         #                          KEY: "f64"})   -> journalled `f64`
         raise ValueError(
-            f"{_KEY}={declared!r} is declared over NO vector: `{type_}`'s "
-            f"record carries no `embedding` and neither does its envelope, and "
-            f"a width without a vector is a state the journal contract says "
-            f"cannot exist (the seam POPS the key when there is no vector).")
+            f"{_KEY}={declared!r} is declared over NO vector: the MERGED view "
+            f"(`{{**payload, **record}}`, which is what the fold reads) carries no "
+            f"`embedding` for `{type_}`. A width without a vector is a state the "
+            f"journal contract says cannot exist (the seam POPS the key when there "
+            f"is no vector). ⛔ The merge matters when the two channels disagree: a "
+            f"record-carried `embedding: None` WINS over a vector on the envelope, "
+            f"so 'your envelope supplied one' is not a reason to expect this to land "
+            f"(#11996 review round 18, measured).")
     # ⛔ A ONE-SHOT ITERABLE IS READ ONCE (#11996 review round 14, measured).
     # Every arm below ASKS THE SEAM, and the seam reads with `list(raw)`
     # (`embeddings.py`); the STAMP further down then asks it a SECOND time. A
@@ -1125,7 +1129,11 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     # width. ⛔ GATED ON THE RECORD CARRYING THE VECTOR, because the ENVELOPE-carried
     # empty vector is the BELT's own row (`test_a_forged_width_cannot_ride_the_
     # funnels_positional_record`): refusing it here would refuse the shape before
-    # the stamp and take the belt's only attributable mutant with it. Only the two
+    # the stamp and take that row's mutant with it. ⛔ NOT "the belt's only mutant":
+    # the post-stamp call has an INDEPENDENT pin this gate cannot see — the
+    # merged-view lie (`p-merged-lie`), where the pre-stamp check early-returns
+    # because NEITHER channel declared a width, so the stamp mints `f32` and only
+    # the belt re-checks it against the merged vector (measured, round 18). Only the two
     # DROP reasons the questions above cannot see can reach this point — an EMPTY
     # or an implausibly long sequence (the non-numeric and non-finite ones are
     # already refused above) — and this checks the EMPTY one, which is the
