@@ -540,9 +540,12 @@ def test_add_operator_rejects_non_string_op_type():
             # a good-faith rewording that keeps the claim ("must be one of
             # 'NAND', 'IMPL'") would red this for nothing. Assert the CLAIM the
             # message exists to carry — a refusal that is this door's limit,
-            # naming the mechanisms it does accept — so nothing about wording,
-            # ORDER, quoting, separator or CASE is pinned (a prose reword that
-            # says `nand or impl` still names them).
+            # naming the mechanisms it does accept — so the SURROUNDING PROSE,
+            # ORDER, quoting, separator and CASE are free; only the two
+            # mechanism names themselves must appear, because they are the
+            # values this door accepts (a message that names them by ROLE —
+            # "a support or an attack mechanism" — or by POINTER alone is a
+            # different claim and is outside this pin).
             folded = msg.upper()
             assert "NAND" in folded and "IMPL" in folded, (
                 "the refusal must name the mechanisms this door DOES accept — "
