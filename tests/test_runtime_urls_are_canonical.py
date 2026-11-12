@@ -184,7 +184,7 @@ RETIRED_HOST_ALLOWLIST = {
     # PERMANENT 301 on the retired host (each measured 2026-11-12 below), so each
     # is a hop, not a break — which is why deferring is safe and why it must stay
     # VISIBLE: a sweep that deletes one of these must delete its reason too, and
-    # the deferred re-aim is tracked on #11767 rather than lost behind a green run.
+    # the deferred re-aim is tracked on #12057 rather than lost behind a green run.
     "website/apps/dashboard/public/invite-accept.html": (
         3,
         "#11767 item 5 — the page the emailed INVITE TOKEN lands on still links "
@@ -206,8 +206,10 @@ RETIRED_HOST_ALLOWLIST = {
         "#11767 item 4 — DEFAULT_BLOG_ORIGIN is still the retired host. ⛔ The "
         "hop lands on premiselabs.co/blog (301, measured 2026-11-12) — the blog's "
         "OWN canonical origin, NOT the premiselabs.co/tortoise product page an "
-        "earlier revision of this note named. Moving the origin is the blog "
-        "child's surface (#11764/#11765): premiselabs.co/blog is where it goes."),
+        "earlier revision of this note named. Moving it changes what the blog API "
+        "reads THROUGH, not just a link: the retired host's `/blog*` 301s with "
+        "`/blog/api/*` deliberately excluded from the map, so a base flip that "
+        "misses the exclusion turns a POST into a GET. The sweep is #12057's."),
     "website/apps/blog-admin/src/lib/blog-api.ts": (
         1,
         "#11767 item 4 — the admin client's blog origin; same deferral as the "
@@ -288,18 +290,23 @@ RETIRED_HOST_ALLOWLIST = {
 #:   website/apps/dashboard/src/overviewEmptyAction.js       2  SDK_DOCS_HREF + ONBOARDING_FUNNEL_HREF
 #:   website/apps/dashboard/src/billingCta.js                1  COMPARE_PLANS_URL
 #: None is a broken link (every one still 301s onto the canonical host); they are
-#: a SCOPE deferral — the blog origin and the dashboard deep links are outside this
-#: child's brief — and the sweep belongs to #11764/#12049.
+#: a SCOPE deferral, and ALL FOURTEEN files listed above ARE in
+#: `RETIRED_HOST_ALLOWLIST` with the same kind of reason — recording a count is not
+#: blessing the literal, it is what makes the deferral visible and what forces a
+#: sweep to update the record in the same commit.
 #:
-#: ⛔ ALL FOURTEEN ARE IN `RETIRED_HOST_ALLOWLIST` ABOVE, with their exact counts,
-#: their measured 301 and the child that owns the re-aim. An earlier revision of
-#: this paragraph said the OPPOSITE — that they were "deliberately NOT added",
-#: because blessing them "would turn a deferral into a decision" — while the map
-#: eleven lines up already carried them. Left standing, that instruction tells the
-#: next maintainer to delete the very entries that make this guard able to fail,
-#: and the count check then reds on entries nobody can explain. The map's contract
-#: is "to keep an occurrence, record WHY and who re-aims it" — which is exactly
-#: what a deferral with an owner is.
+#: ⛔ An earlier revision of this paragraph said the OPPOSITE — that they were
+#: "deliberately NOT added", because blessing them "would turn a deferral into a
+#: decision" — while the map eleven lines up already carried them. Left standing,
+#: that is an instruction to delete the very entries that make this guard able to
+#: fail, leaving a red count check nobody can explain.
+#:
+#: ⛔ OWNERSHIP — one owner, **#12057** (filed from review). An earlier revision
+#: said the sweep "belongs to #11764/#12049" and that the deferred re-aim was
+#: "tracked on #11767": all three are false. `#12049` covers only the pasted
+#: onboarding copy, `#11764`'s scoping is the product-page move, and `#11767`
+#: CLOSES with this PR, so a note deferring to it defers nowhere. Where a row above
+#: cites "#11764"/"#11765" it names the work the deferral RIDES.
 RUNTIME_FILES = (
     "tortoise/email_notify.py",
     "tortoise/abuse.py",
