@@ -3459,6 +3459,14 @@ assert_contains "$DOUT" "coverage is not the part that failed" \
   "118. … degraded is reported as backed-up coverage, per its own classification"
 assert_contains "$OUT" "RED: the aws CLI is missing" \
   "118. the terminal line names the cause, not just 'a broken pipeline'"
+# The unfiled notice must report the run's OWN detection, not assert the condition
+# (review P2): SWEEP_OFF_STALE's "pool unverifiable" arm fires BECAUSE the pool could
+# not be measured — its own body says freshness "cannot be established" — so a
+# universal "The condition is real" asserted a stale pool that was never listed.
+assert_contains "$OUT" "what this run measured" \
+  "118. the unfiled notice reports this run's own detection"
+assert_not_contains "$OUT" "The condition is real" \
+  "118. … instead of asserting a condition the 'pool unverifiable' arm never measured"
 # The heartbeat is the driver's audit record of its own r2_ok, and this run never
 # probed R2 (review P2): `false` would publish a reachability verdict the runner
 # could not take. Only a missing-CLI run produces null, so no other case can

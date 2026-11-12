@@ -892,8 +892,14 @@ file_alert() { # kind title body dedup_id
   # sends the operator after Cloudflare/IfNoneMatch. Refuse HERE, in the dependency's
   # own words, and never attempt a search-only dedup (the #3032 rule: a dedup that
   # cannot be verified must not degrade to a title search).
+  # ⛔ "The condition is real" (review P2) was a universal claim that one call site
+  # cannot support: the SWEEP_OFF_STALE "pool unverifiable" arm fires precisely
+  # because the pool could NOT be measured, and its own body says freshness "cannot
+  # be established" — so the notice would have asserted a stale pool this run never
+  # listed. Name the DETECTION instead; every caller logs what it measured
+  # immediately before this refusal, so the sentence is true at every kind.
   if [ "${AWS_CLI_MISSING:-0}" = "1" ]; then
-    fail "${kind} DETECTED but NOT FILED — the dedup object needs the aws CLI, which is missing on this runner (#12135). The condition is real and this run is RED; re-run once the CLI is installed."
+    fail "${kind} DETECTED but NOT FILED — the dedup object needs the aws CLI, which is missing on this runner (#12135). The finding logged above is what this run measured; this run is RED, and no incident can be filed or resolved until the CLI is installed."
     return 0
   fi
   tmp="$(mktemp)"
