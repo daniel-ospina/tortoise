@@ -1,4 +1,11 @@
-"""#11858: the :Source door may not declare an embedding marker.
+"""The :Source door may not declare an embedding marker.
+
+⛔ ATTRIBUTION: the door work here is the SDK-side instance of the unguarded-door
+class **#11948** records (that issue carries the `create_source` probe as measured
+evidence from a second door). **#11858** is the `_emit_event` `id=`/`**extra`
+width-stamp half, already on `main`, and it never named this door — the file
+keeps its name for the lane's continuity, not as a claim about which issue this
+fixes.
 
 The family (`_SERVER_MANAGED_EMBEDDING_MARKERS`) has TWO halves, and the refusal's
 reason differs between them: `embedding_width` / `embedding_model` /
@@ -42,11 +49,13 @@ write, because only the writer can derive it from the values".
 
 ⛔ WHY THE GUARD IS AT THE DOOR AND NOT IN `_emit_event`: the refusal must precede
 the write. `_emit_event` is called AFTER `_create_entity` has already MERGEd the
-`:Source`, so a refusal there would hand the caller a failure for a node that
-exists and a journal that has no record of it — the #2296 live-only divergence,
-which `rebuild_all` then destroys. `test_the_refusal_precedes_the_write` is the row
-that pins the ordering, and it is the reason this fix is not "one check in the
-funnel".
+`:Source`, so a refusal there would leave a LIVE-ONLY `:Source` — and, because the
+whole emission block is wrapped in `except Exception: _logger.warning(…)`
+(the `SourceCreated` emit's own guard), the caller would get **no failure at
+all**, only a warning, and
+`rebuild_all` would then destroy the node silently (the #2296 live-only
+divergence). `test_the_refusal_precedes_the_write` is the row that pins the
+ordering, and it is the reason this fix is not "one check in the funnel".
 """
 from __future__ import annotations
 
@@ -132,7 +141,8 @@ def test_the_refusal_precedes_the_write(tmp_path):
     the `:Source` and only then calls `_emit_event` (measured: the emit follows
     `_create_entity` in the same method body), so a guard in the funnel would pass
     this assertion for the record and FAIL it for the node — a live-only mutation
-    with a failure handed to the caller.
+    that the emission block's own `except Exception: _logger.warning(…)`
+    (the `SourceCreated` emit's own guard) would not report to the caller at all.
     """
     sdk, journal = _journal(tmp_path)
     url = "https://example.invalid/11858-order"
@@ -217,6 +227,19 @@ def test_a_caller_vector_still_gets_a_truthfully_minted_marker(tmp_path):
     about the door having no vector — and this row keeps the message honest: if
     the door ever stops minting for a caller vector, the message's remedy breaks
     and this reds.
+
+    ⚠️ WHAT THIS ROW DOES NOT PIN, stated because the row must not imply it: the
+    reader must not read "lands on the node AND on the record" as "the two agree".
+    They do for `[0.5]*4` (a value already in shortest-f32 form, so the stamp's
+    narrowing is a no-op) and they do NOT for a vector off the f32 text grid:
+    measured at this head with `0.001230153371579945`, the node keeps that value's
+    raw float64 form (read back as `0.00123015337157995` by the store) while the
+    record carries the narrowed `0.0012301534`, so a rebuild of the journal writes
+    the record's form back. That divergence is the
+    `_emit_event` stamp half's (#11858), it predates this PR, and asserting value
+    parity here would fail today — so it is recorded rather than pinned, and this
+    row pins only what the door owns: the marker's presence and its derived
+    width.
     """
     sdk, journal = _journal(tmp_path)
     try:
@@ -232,16 +255,28 @@ def test_a_caller_vector_still_gets_a_truthfully_minted_marker(tmp_path):
     assert "embedding" in record, (
         "`embedding=` is documented as the sanctioned route, so the record must "
         "carry the vector the message tells the caller to pass instead")
-    assert record.get("embedding_width") in ("f32", "f64"), (
-        "the writer must declare the width it derived; a vector with no marker is "
-        "the population #11821 P0 closed")
+    assert record.get("embedding_width") == "f32", (
+        "the writer must declare the width it DERIVED from this vector, and "
+        "`[0.5]*4` is on the float32 grid, so the seam's answer is deterministic: "
+        "`f32` (measured at this head). Pinning membership of `(\"f32\", \"f64\")` "
+        "instead would let a regression that stops NARROWING a non-verbatim caller "
+        "vector — declaring `f64` for everything — leave this row green, which is "
+        "the declaration half of #11821 P0")
 
 
-@pytest.mark.parametrize("door", [
+#: The public `**props` write doors OTHER than `create_source` — the census below.
+#: A module constant, not a literal inside the decorator, because
+#: `test_the_census_covers_every_public_props_door` has to be able to name the
+#: same set it drives: a hand-maintained list beside a hand-maintained dispatch
+#: chain is exactly the drift class this file exists to stop.
+CENSUS_DOORS = (
     "create_point", "create_entity", "create_document", "create_object",
     "create_subject", "create_event", "update_point", "update_entity",
     "update", "update_knowledge",
-])
+)
+
+
+@pytest.mark.parametrize("door", CENSUS_DOORS)
 def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
     """The census: the leak population is this one door, and starts that way.
 
@@ -332,7 +367,7 @@ def test_the_sdk_and_api_spellings_agree():
 
     The SDK set is a superset on purpose, and the reason is NOT that `api` lacks an
     intake to guard: `EventAPI.add_point` refuses `embeddingText` through its own
-    `_forged_keys` (`tortoise/api.py:1187-1195`). The name is absent from
+    `_forged_keys` (the set `add_point` subtracts before it emits). The name is absent from
     `_SERVER_MANAGED_EMBEDDING_KEYS` because it is the enriched TEXT — a payload
     field, not a marker (`api.py:58-60`) — and the SDK files it under the marker
     family because the SDK's own `_sanitize_props` must refuse it the same way.
@@ -347,3 +382,161 @@ def test_the_sdk_and_api_spellings_agree():
     assert not missing, (
         f"{missing} are refused by the API funnel but not by the SDK's — a "
         "caller can reach them through a props door")
+
+
+def test_the_census_covers_every_public_props_door():
+    """The census list must be the WHOLE `**props` population, not a literal.
+
+    ⛔ Without this row the door half of the file has the same defect the key half
+    had before `test_the_value_map_covers_the_whole_family`: `CENSUS_DOORS` is
+    hand-written, so a NEW public `**props` write door — `create_note(self, text,
+    **props)` forwarding to `_create_entity(..., _skip_sanitize=True)` like this
+    door does — would leave every row in this file green while the module
+    docstring's claim
+    ("`create_source` is the eleventh of the eleven `**props` write doors and the
+    only leak") silently became false.
+
+    The precedent is the KEY half, measured at `9459156eb` (#11858 review cycle 4,
+    P3): an eighth member added to the constant alone left 22 rows green, because
+    `MARKER_VALUES` was a second hand-maintained enumeration — fixed by
+    `test_the_value_map_covers_the_whole_family`, which is what this row is for the
+    DOOR half. The door-half drift itself was measured at `f063e01ffd` (cycle 5):
+    `"no_such_door_at_all"` added to the parametrize list stayed green because the
+    dispatch chain's bare `else:` re-ran `create_document`.
+
+    Derived from the class, never from a second list: 13 public methods carry a
+    `**kwargs`-style splat, and exactly TWO of them are reads — `query` and
+    `paginated_query`, whose splat is the filter bag `**filters` — so 11 write
+    doors remain. The derivation keys on the splat KIND, not on its name: a door
+    spelled `**kwargs` (or `**extra`, or reached through a `classmethod` or a
+    non-function descriptor) is a props door too, and keying on the literal name
+    `props` measured GREEN for both of those spellings (#11858 review round 3,
+    P1 — the row is only worth having if it sees the door the docstring above
+    hypothesises).
+    """
+    import inspect
+
+    from tortoise.sdk import TortoiseSDK
+
+    #: The two READ doors: their splat is `**filters`, and neither writes.
+    read_doors = {"query", "paginated_query"}
+    props_doors = {
+        name for name, member in inspect.getmembers(TortoiseSDK)
+        if not name.startswith("_") and callable(member)
+        and any(p.kind is inspect.Parameter.VAR_KEYWORD
+                for p in inspect.signature(member).parameters.values())
+    } - read_doors
+    assert props_doors == set(CENSUS_DOORS) | {"create_source"}, (
+        "the `**props` write-door population and this file's census disagree: "
+        f"uncensused={sorted(props_doors - set(CENSUS_DOORS) - {'create_source'})} "
+        f"stale={sorted(set(CENSUS_DOORS) - props_doors)} — a new door is how "
+        "'a rule stated at one door and silently absent at the next' recurs")
+
+
+@pytest.mark.parametrize("item_extra", [
+    {"embedding_width": "f16"},
+    # ⛔ The NESTED spelling is parametrised on purpose: the gate reads at the
+    # door depth (`_item_prop_at_depth`), and a regression to a top-level
+    # `if key in item:` leaves a top-level-only row green while the wrapped form
+    # reaches `create_source` and aborts mid-bundle (measured, #11858 review
+    # round 6, P1: the mutant gave "25 passed" and one live `:Source`).
+    {"props": {"embedding_width": "f16"}},
+], ids=["top-level", "nested-props"])
+def test_an_ingest_bundle_refuses_the_marker_before_it_writes(tmp_path, item_extra):
+    """The bundle route must abort in Phase 1, not after an earlier item wrote.
+
+    ⛔ The door guard alone was NOT enough, and this row is the measurement that
+    says so. `ingest` splats a `sources` item into the same door
+    (`self.create_source(url, source_kind, **item)`), so before the bundle gate
+    existed a marker on the SECOND source raised from the door while the FIRST
+    was already committed — measured (#11858 review round 5, P2):
+    `ingest({"sources": [ok, {… "embedding_width": "f16"}]})` raised a raw
+    `ValueError` and left one live `:Source` behind. Phase 1 is the zero-mutation
+    contract (INGEST_CONTRACT.md), so the refusal belongs with the other
+    server-managed bundle-item keys, not only at the door.
+
+    Asserts the CONTRACT, not the message: a `BundleValidationError` naming the
+    key, and NO `:Source` written by either item.
+    """
+    from tortoise.exceptions import BundleValidationError
+
+    sdk, journal = _journal(tmp_path)
+    first = "https://example.invalid/11858-bundle-ok"
+    forged = "https://example.invalid/11858-bundle-forged"
+    try:
+        with pytest.raises(BundleValidationError) as excinfo:
+            sdk.ingest({"sources": [
+                {"url": first, "sourceKind": "web"},
+                {"url": forged, "sourceKind": "web", **item_extra},
+            ]})
+        assert "embedding_width" in str(excinfo.value), (
+            f"the bundle refused for something other than the marker: "
+            f"{excinfo.value!r}")
+        proj = sdk._get_proj()
+        for url in (first, forged):
+            rows = proj.g.query(
+                "MATCH (s:Source) WHERE s.url = $u RETURN count(s)",
+                {"u": url}).result_set
+            assert rows[0][0] == 0, (
+                f"ingest wrote {url} despite refusing the bundle — the "
+                f"zero-mutation Phase-1 contract is broken")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+    assert not [r for r in _records(journal)
+                if r.get("type") == "SourceCreated"], (
+        "the refused bundle journalled a SourceCreated record")
+
+
+def test_the_refusal_precedes_the_adopt_on_touch_write(tmp_path):
+    """The guard must sit above the `documentKind` resolve, not just the MERGE.
+
+    ⛔ `nodes == 0` was NOT enough to prove "the refusal precedes every write".
+    The `documentKind` demotion check runs `_resolve_source_url` →
+    `source_identity.resolve_source_key`, which ADOPTS-ON-TOUCH — it writes
+    `s.canonicalUrl` and `s.urlAliases` onto a pre-canonical `:Source`. Measured
+    (#11858 review round 6, P3): with the guard below that check, a call carrying
+    BOTH `documentKind` and a marker returned `ValueError` while having written
+    both properties — a refused call that mutated the graph. Round 7 (P1) measured
+    that no row pinned the fix: moving the guard back below the check left all 26
+    rows green.
+
+    So this row drives exactly that pair against a pre-canonical node and asserts
+    the adoption did NOT happen. It reds if the guard ever moves back down.
+    """
+    sdk, journal = _journal(tmp_path)
+    stored = "https://example.invalid/11858-legacy"
+    try:
+        proj = sdk._get_proj()
+        # A pre-canonical Source: `canonicalUrl` / `urlAliases` unset, which is
+        # the state `resolve_source_key` rewrites on touch.
+        proj.g.query(
+            "CREATE (:Source {url:$u, sourceKind:'document'})", {"u": stored})
+
+        def adoption():
+            rows = proj.g.query(
+                "MATCH (s:Source {url:$u}) RETURN s.canonicalUrl, s.urlAliases",
+                {"u": stored}).result_set
+            return tuple(rows[0]) if rows else None
+
+        assert adoption() == (None, None), (
+            f"the fixture is not pre-canonical: {adoption()!r}")
+
+        with pytest.raises(ValueError) as excinfo:
+            sdk.create_source(f"{stored}?utm_source=x", "web",
+                              documentKind="document",
+                              embedding_width="f16")
+        assert "embedding_width" in str(excinfo.value), (
+            f"refused for something other than the marker: {excinfo.value!r}")
+        assert adoption() == (None, None), (
+            "the refusal landed AFTER the adopt-on-touch write: "
+            f"canonicalUrl/urlAliases = {adoption()!r}. `nodes == 0` cannot see "
+            "this — the guard must precede the `documentKind` resolve")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+    assert not [r for r in _records(journal)
+                if r.get("type") == "SourceCreated"], (
+        "the refused call journalled a SourceCreated record")

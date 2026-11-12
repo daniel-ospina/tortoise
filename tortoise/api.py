@@ -339,16 +339,36 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         # width (the seam mints only `f32`/`f64`), but that is not the same as
         # unobservable — a caller can SUPPLY one.
         #
-        # #11858: the SDK half of that residual is now CLOSED. `create_source`
-        # used to take `embedding_width` through its `_skip_sanitize` carve-out
-        # with no verifier behind it, so a live caller could journal a declared
-        # width over NO vector through that funnel (measured at `7e6baffc5d`: it
-        # did). It now refuses the whole marker family before it writes — see
-        # `sdk._SERVER_MANAGED_EMBEDDING_MARKERS` — and refuses beside a vector
-        # too. What remains open here is acceptance of a THIRD width on the
-        # EventAPI channel, which is #11948's class, not the SDK funnel's. The
-        # sentence above would become false only if someone widened it to "any
-        # other declared width is truthful".
+        # #11948 (SDK-side door): the SDK half of that residual is now CLOSED —
+        # the unguarded-door class #11948 records, on its second door.
+        # `create_source` used to take `embedding_width` through its
+        # `_skip_sanitize` carve-out with no verifier behind it, so a live caller
+        # could journal a declared width over NO vector through that funnel
+        # (measured at `7e6baffc5d`: it did). It now refuses the whole marker
+        # family before it writes — see `sdk._SERVER_MANAGED_EMBEDDING_MARKERS` —
+        # and refuses beside a vector too.
+        #
+        # ⛔ NOT #11858, and the distinction is recorded because citing an issue
+        # for work it does not contain is how this register stops answering
+        # "which doors were gated, and why". #11858's whole remedy (the
+        # `_emit_event` id=/`**extra` width stamp, the pin driving
+        # `_session_event_write` / `_embedding_repair_attempt`, and three
+        # corrected texts) landed on `main` before this change and never named
+        # this door. What this PR closes is the door class #11948 records.
+        #
+        # What remains open here is acceptance of a THIRD width on this
+        # channel's RECORD door (`_emit`'s positional record): measured at this
+        # head, `_emit("PointAdded", {"embedding_width": "f16", "embedding": …})`
+        # is ACCEPTED and journalled. That is the residual the block above states
+        # as "#12059 review, P3" — cited there, not a merged fix.
+        # ⛔ NOT `add_object`: #11948's recorded instance (a caller-set `point=`
+        # folding a lying width, and `type=` re-typing the record) is already
+        # closed on `main` by `_refuse_caller_named_funnel_keys` (the function
+        # `add_object` calls on its `props` before it emits);
+        # measured at this head, both `add_object(..., embedding_width="f16")`
+        # and a record-shaped `point=` are refused there. This note does not
+        # re-open it. The sentence above would become false only if someone
+        # widened it to "any other declared width is truthful".
         return
     try:
         truthful = _is_shortest_f32_text(values)

@@ -5078,7 +5078,12 @@ _RESERVED_ENVELOPE_PROPS = (
 #:   the writer READS (`tortoise/embeddings.py:539`, `:550`, `:692`) — a caller
 #:   value for those does not duplicate a derivation, it FORGES the reading.
 #:
-#: ONE spelling, TWO placements, and the second placement is the fix for #11858:
+#: ONE spelling, TWO placements. The second placement closes this door's instance
+#: of the unguarded-door class #11948 records (that issue carries the probe for
+#: `create_source` as measured evidence from a second door); `#11858` is the
+#: `_emit_event` `id=`/`**extra` stamp half, already on `main`, and is cited here
+#: only for the refusals this door now enforces — do not read this line as
+#: claiming the door work belongs to #11858 (see `tortoise/api.py`'s note):
 #:
 #: * `_sanitize_props` refuses them at prop INTAKE, which covers every SDK door
 #:   that passes through it;
@@ -5091,7 +5096,8 @@ _RESERVED_ENVELOPE_PROPS = (
 #: cycle 2, P2 — measured). `stamp_journal_embedding` WRITES `embedding_width`
 #: for every vector it stamps, and writes `embedding_model` /
 #: `embedding_revision` / `embedding_text_hash` only on `creating=True` records
-#: (`tortoise/embeddings.py:539-562`) — which a `SourceCreated` never is. It only
+#: (`tortoise/embeddings.py:539-562`; the WIDTH write is `:530`) — which a
+#: `SourceCreated` never is. It only
 #: READS `embedding_verbatim` / `embedding_preserved` / `embeddingText`
 #: (`:539`, `:550`, `:692`): those three are INPUTS the writer consults, so a
 #: caller value does not "duplicate a derivation" — it FORGES the reading (a
@@ -5100,7 +5106,10 @@ _RESERVED_ENVELOPE_PROPS = (
 #:
 #: The measured route the refusal names is therefore the WIDTH one: hand over the
 #: vector with `embedding=` and the writer declares `f32`/`f64` from the values
-#: it just stored. The other six have no route on this door by design — they are
+#: it JOURNALS (the narrowed ones it stamps — not the raw values the node keeps;
+#: measured just off the f32 TEXT grid — the input IS on the float32 grid, its
+#: narrowed TEXT is not — the record carries `0.0012301534` while the node reads
+#: `0.00123015337157995`). The other six have no route on this door by design — they are
 #: not the caller's to set, and the message says so instead of promising a mint
 #: that does not happen.
 #:
@@ -25565,6 +25574,27 @@ class TortoiseSDK:
                            f"server-managed (the dedup fold's own record "
                            f"flag) and cannot be set on bundle items",
             })
+        # #11858 review round 5, P2: the seven server-managed EMBEDDING markers.
+        # `create_source`'s door guard (added by the same change) refuses them,
+        # and step 1 splats a `sources` item straight into that door
+        # (`self.create_source(url, source_kind, **item)`) — so a bundle item
+        # carrying one raised INSIDE the step-1 write loop, AFTER the earlier
+        # items had committed: the exact partial-mutation class `evidence_fold`
+        # above exists to replace with a zero-mutation Phase-1 abort. Measured
+        # before this check: `ingest({"sources": [ok, {… embedding_width: "f16"}]})`
+        # raised `ValueError` from the door with the first Source already
+        # committed.
+        # Derived from the ONE constant (a second literal list here would be the
+        # drift `_SERVER_MANAGED_EMBEDDING_MARKERS` exists to stop) and read at
+        # the door depth, because a single-wrapped `props: {"embedding_width": …}`
+        # reaches the same door.
+        for _mk in sorted(_SERVER_MANAGED_EMBEDDING_MARKERS):
+            if _item_prop_at_depth(item, _mk, _door_depth)[0]:
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: {section}[{index}] {_mk} is "
+                               f"server-managed and cannot be set on bundle items",
+                })
         if section == "points":
             # #8400 review P2 (the refusal message used to offer it): `dedup` is
             # NOT a bundle item field. Step 2 writes every points item as
@@ -48541,6 +48571,91 @@ class TortoiseSDK:
         for _emit_name in (*_RESERVED_ENVELOPE_PROPS, *_RESERVED_EMIT_CALL_PROPS,
                            *_RESERVED_ACTOR_PROPS):
             ev.pop(_emit_name, None)
+        # ⛔ PLACEMENT (#11858 review round 6, P3): this sits ABOVE the
+        # `documentKind` demotion check below, because that check calls
+        # `_resolve_source_url` → `source_identity.resolve_source_key`, which
+        # ADOPTS-ON-TOUCH (`SET s.canonicalUrl`, `s.urlAliases`) — a real graph
+        # write. A guard placed after it refused the marker while still having
+        # mutated a pre-canonical `:Source` (measured), so the ordering claim
+        # "before every write" is literal only from here.
+        # #11948 (SDK-side door): the embedding MARKER family is not
+        # caller-writable on this door either — this is the SDK-side instance of
+        # the unguarded-door class #11948 records, not #11858's stamp half (see
+        # the constant's `ONE spelling, TWO placements` note and `api.py`'s
+        # residual note, which record the same distinction). This writer bypasses
+        # `_sanitize_props` entirely
+        # (`_skip_sanitize=True`), it is the ONE door measured to accept them,
+        # and it writes the node BEFORE it emits, so a refusal at `_emit_event`
+        # would land too late and leave a live-only `:Source` (the #2296
+        # divergence). Over the ASSEMBLED `ev`, so the guard follows the
+        # `**props` splat (folded into `ev` at the top of this method). It does
+        # NOT follow the explicit keyword arguments — those are assigned BELOW
+        # it — so the safety there is the NAME, not the provenance; the scope
+        # note below counts them and says why a new caller-facing keyword
+        # belongs above this line.
+        #
+        # Measured at `7e6baffc5d`, one `create_source` call per key, none of
+        # them carrying any vector — i.e. every marker describing NOTHING:
+        #
+        #     create_source(url, "web", embedding_width="f16")
+        #       -> OK, journalled SourceCreated with `embedding_width: "f16"`
+        #          and no `embedding` key anywhere (#11996 measured the same
+        #          through this door); `embedding_verbatim` / `_preserved` /
+        #          `_model` / `_revision` / `_text_hash` / `embeddingText`
+        #          land identically.
+        #
+        # The other public props doors were driven the same way in the same
+        # measurement — all TEN of them (the eleven `**props` write doors minus
+        # this one), not just the four this note first listed (#11858 review
+        # cycle 3, P3): `create_point`, `create_entity`,
+        # `create_document`, `create_object`, `create_subject`, `create_event`,
+        # `update_point` and `update_entity` refuse the name at intake; `update`
+        # and `update_knowledge` refuse on an EXISTING node and silently no-op
+        # on an unknown id (so a census row for those two must create its target
+        # first — a row without one asserts nothing). This door was the only
+        # leak, which is why the guard is here and why the test drives every
+        # door rather than this row alone.
+        # ⚠️ Scope of "covered": this guard sits above every `**props` ingress
+        # (that splat is folded into `ev` at the top of this method), so a
+        # `**props` key cannot arrive below it. That is NOT the whole caller
+        # surface: seven explicit-keyword assignments follow the guard
+        # (`is_episodic`, `source_path`, `rawState`/`rawStateAt`,
+        # `credibilityTier`, `sourceDate`, `_merge_run_id`) and then the two
+        # clock mints (`updatedAt` / `validFrom`).
+        #
+        # ⛔ THE SAFETY IS THE NAME, NOT THE PROVENANCE (#11858 review round 8,
+        # P2 — measured). Five of the seven are DOCUMENTED caller keywords —
+        # `is_episodic`, `source_path`, `rawState`, `credibilityTier` (from
+        # `tier`) and `sourceDate` — and `_merge_run_id` is the internal-route
+        # keyword a caller can still set (#5196); only `rawStateAt` is this
+        # door's own mint. So "everything below the guard is the door's own
+        # value" is FALSE, and it licenses exactly the re-opening it sounds
+        # like it forbids: a marker
+        # added below this line as a new keyword (`embedding_width: str | None =
+        # None` beside `is_episodic`) was measured ACCEPTED and journalled over
+        # NO vector, past a guard the reader had been told was safe. What holds
+        # is narrower: none of those nine names is in the marker FAMILY. A new
+        # caller-facing keyword belongs ABOVE this guard, exactly as the
+        # `**props` splat does.
+        #
+        # That the post-guard region still mints truthfully is pinned by
+        # `test_a_caller_vector_still_gets_a_truthfully_minted_marker`, which
+        # drives a post-guard SERVER mint through the same door and asserts the
+        # marker is ACCEPTED (it reds if the guard ever starts refusing what the
+        # writer mints), not by this comment.
+        _caller_markers = sorted(set(ev) & _SERVER_MANAGED_EMBEDDING_MARKERS)
+        if _caller_markers:
+            raise ValueError(
+                f"{_caller_markers} are server-managed embedding journal "
+                "fields and cannot be set by hand. On this door the writer "
+                "declares only the WIDTH, derived from the values it journals — "
+                "pass `embedding=` and it declares the truth; the rest are "
+                "either inputs the writer READS (a supplied value forges that "
+                "reading) or identity stamps it never mints on a `:Source`. A "
+                "marker supplied with NO vector describes NOTHING, which is "
+                "exactly what a later width/base64 migration trusts; beside the "
+                "vector the width is derived, never asserted (#11858)."
+            )
         # #5140 P1: the documents METER KEY is not caller-writable IN THE
         # DEMOTION DIRECTION. Runs BEFORE the journal append below, so a
         # refused write leaves no record to replay.
@@ -48595,64 +48710,11 @@ class TortoiseSDK:
         # from this door's one clock — so the cover is over caller ingress, not
         # over literally every later line. Stated because the earlier wording
         # "after every `ev` assignment … cannot bypass a guard that runs after
-        # all of them" was false as written, and #11858's guard below says why
+        # all of them" was false as written, and #11858's guard above says why
         # that distinction matters.)
         for _key, _value in ev.items():
             _reject_unrepresentable_number(_key, _value)
-        # #11858: the embedding MARKER family is not caller-writable on this
-        # door either — and the placement follows the two gates above for the
-        # same reason: this writer bypasses `_sanitize_props` entirely
-        # (`_skip_sanitize=True`), it is the ONE door measured to accept them,
-        # and it writes the node BEFORE it emits, so a refusal at `_emit_event`
-        # would land too late and leave a live-only `:Source` (the #2296
-        # divergence). Over the ASSEMBLED `ev`, so the guard follows every
-        # CALLER ingress of this door (the `**props` splat and the explicit
-        # keyword arguments) rather than a caller-argument list. It is NOT a
-        # claim that no `ev` assignment follows — two server-minted ones do, and
-        # the note below the guard names them.
         #
-        # Measured at `7e6baffc5d`, one `create_source` call per key, none of
-        # them carrying any vector — i.e. every marker describing NOTHING:
-        #
-        #     create_source(url, "web", embedding_width="f16")
-        #       -> OK, journalled SourceCreated with `embedding_width: "f16"`
-        #          and no `embedding` key anywhere (#11996 measured the same
-        #          through this door); `embedding_verbatim` / `_preserved` /
-        #          `_model` / `_revision` / `_text_hash` / `embeddingText`
-        #          land identically.
-        #
-        # The other public props doors were driven the same way in the same
-        # measurement — all TEN of them (the eleven `**props` write doors minus
-        # this one), not just the four this note first listed (#11858 review
-        # cycle 3, P3): `create_point`, `create_entity`,
-        # `create_document`, `create_object`, `create_subject`, `create_event`,
-        # `update_point` and `update_entity` refuse the name at intake; `update`
-        # and `update_knowledge` refuse on an EXISTING node and silently no-op
-        # on an unknown id (so a census row for those two must create its target
-        # first — a row without one asserts nothing). This door was the only
-        # leak, which is why the guard is here and why the test drives every
-        # door rather than this row alone.
-        #
-        # ⚠️ Scope of "covered": this guard sits above every CALLER ingress
-        # (`**props` is splatted into `ev` at the top of this method), so a
-        # caller key cannot arrive below it. It is NOT a claim that no `ev`
-        # assignment follows — two server-minted ones do (`updatedAt` /
-        # `validFrom` from the one clock), and they are this door's own values,
-        # not caller input. That distinction is pinned by the control test rather
-        # than by this comment (a marker injected after the guard is caught
-        # there; the guard itself never sees it).
-        _caller_markers = sorted(set(ev) & _SERVER_MANAGED_EMBEDDING_MARKERS)
-        if _caller_markers:
-            raise ValueError(
-                f"{_caller_markers} are server-managed embedding journal "
-                "fields and cannot be set by hand. On this door the writer "
-                "declares only the WIDTH, derived from the vector it stores — "
-                "pass `embedding=` and it declares the truth; the rest are "
-                "either inputs the writer READS (a supplied value forges that "
-                "reading) or identity stamps it never mints on a `:Source`. A "
-                "marker written here describes no values at all, which is "
-                "exactly what a later width/base64 migration trusts (#11858)."
-            )
         # #2782 (review Finding 3): the same reason, one field family over — and
         # the same placement discipline, over the ASSEMBLED ``ev`` so a later
         # keyword cannot bypass it. This door is the one props write that never
