@@ -724,16 +724,27 @@ class QueueHealth:
         to a fully measured reading at the same count (#12037 review).
 
         Emitted ONLY when `pr_running_unmeasured > 0`, so every fully-measured
-        reading's line is unchanged. Returns `""` in the fully-unmeasured case because
-        `census=unmeasured` already says it there, on a line that shows no discount.
+        reading's line is unchanged. In the fully-unmeasured case it emits
+        `census=unmeasured` — the token the docs promise for that shape — UNLESS the
+        `PR-UNWITNESSED` branch is already printing it.
         This is a disclosure token, not a verdict input: it changes no decision.
         """
         if not self.pr_running_unmeasured:
             return ""
         if self.pr_running_unmeasured >= self.pr_running:
-            # Every counted run is unmeasured — `census=unmeasured` is the token for
-            # that shape, and it is emitted by the `PR-UNWITNESSED` branch.
-            return ""
+            # Every counted run is unmeasured — the shape the docs describe as showing
+            # `census=unmeasured` on the state line.
+            #
+            # ⛔ ONLY THE `PR-UNWITNESSED` BRANCH EMITS THAT TOKEN, AND ONLY WHEN THE
+            # DEGRADATION FIRED: `pr_running_census_unwitnessed` is set by `read_health`
+            # for an `OK` it degraded (`verdict == OK` is part of its condition), so on
+            # every OTHER verdict — `PR-BACKLOGGED`, `PR-STARVED`, `FLOOD` — nothing
+            # else printed it, and a census made entirely of unmeasured runs rendered
+            # BYTE-IDENTICALLY to a census of MEASURED EXECUTING runs at the same count.
+            # That is the defect this token exists to remove, so the non-degraded shape
+            # names itself here. Guarded on the flag rather than emitted unconditionally
+            # so the `PR-UNWITNESSED` line cannot carry the token twice.
+            return "" if self.pr_running_census_unwitnessed else ", census=unmeasured"
         return f", unmeasured={self.pr_running_unmeasured}"
 
     @property
@@ -808,8 +819,13 @@ class QueueHealth:
             # field as witnessed while the verdict said a dimension was not. Plain
             # `feed=read, oldest=1000s` is byte-identical to a fully-measured reading
             # and to cause (b) at the same counts, leaving the distinguishing fact only
-            # in the payload. `census=unmeasured` is emitted ONLY when the degradation
-            # actually fired, so it never appears on a reading that measured its census.
+            # in the payload. `census=unmeasured` is emitted HERE only when the degradation
+            # actually fired, so this branch never claims a cause it did not diagnose. (The
+            # SAME token may also arrive from `_unmeasured_token`, which names a census that
+            # is fully unmeasured without the degradation — e.g. this branch reached by a cut
+            # feed. That is the same fact, not a second cause: in both cases not one counted
+            # run was measured, and the invariant the comment above exists to protect is "it
+            # never appears on a reading that MEASURED its census".)
             census = ", census=unmeasured" if self.pr_running_census_unwitnessed else ""
             return (
                 f"CI: PR-UNWITNESSED(queued={self.queued_total}, "

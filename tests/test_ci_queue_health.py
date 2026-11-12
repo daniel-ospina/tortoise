@@ -1046,8 +1046,9 @@ def test_a_pr_backlog_past_the_wait_budget_is_not_ok_while_pr_ci_is_serving():
     assert health.pr_queued == 20
     assert health.state_line == (
         "CI: PR-BACKLOGGED(queued=20, pr_running=2, pr_queued=20, pr_pending=0, "
-        "oldest=31620s)"
-    )
+        "oldest=31620s, census=unmeasured)"
+    ), ("serving_pr_runs() builds UNMEASURED runs, so the line must say the census was "
+        "not measured — it read identically to two MEASURED executing runs before")
 
 
 def test_a_backlogged_queue_has_no_action_so_it_exits_0_and_is_warned_not_red():
@@ -1434,8 +1435,8 @@ def test_the_PENDING_ONLY_state_line_NAMES_the_leg_that_witnessed_the_verdict():
     assert backlogged.verdict == Q.PR_BACKLOGGED
     assert backlogged.state_line == (
         "CI: PR-BACKLOGGED(queued=0, pr_running=1, pr_queued=0, pr_pending=1, "
-        "oldest=14400s)"
-    ), "the serving-state line names both wait legs too"
+        "oldest=14400s, census=unmeasured)"
+    ), "the serving-state line names both wait legs too, and that its census is unmeasured"
 
 
 def test_every_non_FLOOD_state_line_names_BOTH_wait_legs():
@@ -2109,8 +2110,10 @@ def test_an_unmeasured_pr_wait_while_pr_ci_executes_is_not_ok():
     # the state line must not hardcode `pr_running=0` for a queue that IS serving
     assert health.state_line == (
         "CI: PR-UNWITNESSED(queued=14, pr_running=1, pr_queued=4, pr_pending=0, "
-        "oldest=unmeasured, feed=read)"
-    )
+        "oldest=unmeasured, feed=read, census=unmeasured)"
+    ), ("this branch is reached by the UNREADABLE STAMP, not the census degradation — but "
+        "the census IS fully unmeasured (serving_pr_runs() leaves has_live_job None), so "
+        "the line must not read like one that measured it")
     assert Q.EXIT_FOR[Q.PR_UNWITNESSED] == Q.EXIT_OK
     assert any("wait budget cannot be applied" in reason
                for reason in health.reasons)
@@ -3679,6 +3682,32 @@ def test_a_partial_unmeasured_census_is_named_on_the_state_line():
     health = classify(queued, in_progress=runs, probe_attempted=True)
     assert health.pr_running == 3 and health.pr_running_unmeasured == 2
     assert "unmeasured=2" in health.state_line, health.state_line
+
+
+def test_a_fully_unmeasured_census_is_named_on_a_verdict_that_is_not_PR_UNWITNESSED():
+    # `pr_running_census_unwitnessed` is set only for an `OK` the degradation fired on, so
+    # on PR-BACKLOGGED / PR-STARVED / FLOOD nothing else prints `census=unmeasured`. Without
+    # this the all-unmeasured census read EXACTLY like a fully measured EXECUTING one.
+    queued = [run(1, "python-ci", event="pull_request", age_seconds=9000)]
+    runs = [run(7001, "python-ci", event="pull_request", has_live_job=None),
+            run(7002, "python-ci", event="pull_request", has_live_job=None)]
+    health = classify(queued, in_progress=runs, probe_attempted=True)
+    assert health.pr_running == 2 and health.pr_running_unmeasured == 2
+    assert health.verdict == Q.PR_BACKLOGGED, health.state_line
+    assert "census=unmeasured" in health.state_line, health.state_line
+    # …and the SAME line for two MEASURED executing runs must still differ from it.
+    measured = classify(queued, probe_attempted=True, in_progress=[
+        run(7001, "python-ci", event="pull_request", has_live_job=True),
+        run(7002, "python-ci", event="pull_request", has_live_job=True)])
+    assert measured.state_line != health.state_line
+
+
+def test_the_PR_UNWITNESSED_line_names_the_census_exactly_once():
+    # The guard that keeps the branch-local token and this one from both firing.
+    runs = [run(7001, "python-ci", event="pull_request", has_live_job=None)]
+    health = classify([], in_progress=runs, probe_attempted=True)
+    assert health.verdict == Q.PR_UNWITNESSED, health.state_line
+    assert health.state_line.count("census=unmeasured") == 1, health.state_line
 
 
 def test_a_fully_measured_census_keeps_its_line_byte_identical():
