@@ -150,11 +150,12 @@ EMBEDDED_LATENCY_BUDGET_S = 0.5
 # fixture, whose true count is 2: dropping the status clause 2→3, substituting
 # the excluded status (`<> 'draft'` → `<> 'archived'`) 2→3, narrowing the
 # alternation to `IMPL` 2→4, and un-negating the edge term 2→6 (removing that
-# term entirely 2→8). ⛔ A WIDENING of either vocabulary is INVISIBLE here —
-# measured: widening the alternation to `IMPL|NAND|INPUT` leaves the count at 2
-# and the test GREEN (the two counted nodes are edge-free, so no widening of a
-# negated pattern can touch them), as does excluding a status no node here
-# carries (`'archived'`). Before #12138 the test compared against a third
+# term entirely 2→8). ⛔ A WIDENING is INVISIBLE only for a value this fixture
+# does not CARRY: widening the alternation to `IMPL|NAND|INPUT` leaves the count
+# at 2 and the test GREEN (the two counted nodes are edge-free, so no widening of
+# the EDGE pattern can touch them), as does excluding a status no node here
+# carries (`'archived'`). Excluding one it DOES carry reddens — measured: also
+# excluding `'live'` gives 2→0. Before #12138 the test compared against a third
 # hand-copied literal and could not see this constant move at all.
 # Two of this constant's clauses are NOT observable on that fixture, measured:
 # every Point there carries an explicit status (so the `status IS NULL` arm is
