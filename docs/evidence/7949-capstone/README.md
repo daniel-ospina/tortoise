@@ -236,7 +236,7 @@ stamp**, and those are the numbers listed here — the ones that log rendered, e
 renders them: `sdk.py:12401` (the meta fold), `sdk.py:12682` (the
 references-edge writer), `sdk.py:2367` (`_TURN_WRITE_CYPHER`), `edges.py:467`
 (`_DERIVATION_REFERENCES_LABELS`), `edges.py:494-503` (`_anchor_on_create` / `_DERIVATION_ANCHOR_SET`,
-re-derived by this bundle to `774`/`782`), `edges.py:2168-2192` (`link_source_to_event`),
+re-derived by this bundle to `870`/`878`), `edges.py:2168-2192` (`link_source_to_event`),
 `tortoise/extractor_v2.py:8278-8285` (the **classify-later** surface, as the S2.3 cause string cites
 it), and `tortoise/extractor_v2.py:8288-8292` (the **VET** surface, as the S2.2 cause string cites
 it). **They no longer resolve at this head** — they are the stamp's, and a fresh `+N` bump of them
