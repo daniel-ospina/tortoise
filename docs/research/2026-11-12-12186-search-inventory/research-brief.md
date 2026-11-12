@@ -23,13 +23,16 @@ either this repo's committed artifact or an external primary source — none is 
 | rung | tool | outcome |
 |---|---|---|
 | 1 | `mcp__seo-intelligence__perplexity_search` | **UNAVAILABLE** — `mcp_catalog` lists no `seo-intelligence` server; `mcp_load` → `Unknown MCP server 'seo-intelligence'` |
-| 2 | `web_search` (`model="sonar"`, named explicitly) | **UNAVAILABLE** — `PERPLEXITY_API_KEY not set. Set it via PERPLEXITY_API_KEY env var, AGENT_MCP_ENV_PATH (path to .env file), or $AGENT_INFRA_PATH/../.env`. Neither `AGENT_MCP_ENV_PATH` nor `$AGENT_INFRA_PATH/../.env` exists on this box (`AGENT_INFRA_PATH=/home/cmux/agent-infra`) |
+| 2 | `web_search` (`model="sonar"`, named explicitly) | **UNAVAILABLE to the authoring pass** — `PERPLEXITY_API_KEY not set. Set it via PERPLEXITY_API_KEY env var, AGENT_MCP_ENV_PATH (path to .env file), or $AGENT_INFRA_PATH/../.env`; neither `AGENT_MCP_ENV_PATH` nor `$AGENT_INFRA_PATH/../.env` existed (`AGENT_INFRA_PATH=/home/cmux/agent-infra`). ⛔ **RE-RUN AT THIS HEAD: AVAILABLE** — the key resolves in a current session and the rung returns results. **§5.1 is the research that unblocked, and it retires the "largest hole" this document previously declared** |
 | 3 | `web_fetch` (primary sources) | **USED** — the brief's own preferred path. Every external claim below is a fetched primary source unless labelled otherwise |
 
-**Consequence stated honestly:** with no search engine, source *discovery* was limited to URLs reachable by
-construction (arXiv abs pages, GitHub raw files, known vendor blog paths). Mastra's primary write-up is the
-casualty: `mastra.ai/blog/how-observational-memory-reached-sota-on-beam` → **HTTP 404**, and
-`mastra.ai/blog/memory-benchmark` → **404**. See §5.
+**Consequence at authoring time, stated honestly:** with no search engine, source *discovery* was limited to
+URLs reachable by construction (arXiv abs pages, GitHub raw files, known vendor blog paths), and guessing at
+a vendor's path is not discovery. Both mastra.ai paths this pass guessed returned **HTTP 404**
+(`/blog/how-observational-memory-reached-sota-on-beam`, `/blog/memory-benchmark`); the posts in fact live at
+`/research/observational-memory` and `/blog/observational-memory`, which the authoring pass could not reach
+without a search rung. **§5.1 re-runs rung 2, reads those primary sources, and closes the gap.** §5 is kept
+as the record of what the authoring pass could not establish — **not as a limit on the reader.**
 
 ---
 
@@ -83,7 +86,7 @@ Status legend (verified, not inherited): **NEW** · **BUILT-OFF** · **BUILT-MIS
 |---|---|---|---|---|---|
 | **A1** fold the stored side | **Zep/Graphiti does not fold the stored name.** It builds a **second key at index time** — `_normalize_name_for_fuzzy` strips everything outside `[a-z0-9' ]` (`dedup_helpers.py:46-51`) — and indexes that. The stored `name` is never mutated. (`github.com/getzep/graphiti`, `graphiti_core/utils/maintenance/dedup_helpers.py`) | no isolated gain reported for the fold alone; it is a **blocking key**, not a scored lever | **no recorded decision** — but the *shape* the epic proposes (fold the stored side) is contradicted by the convergent implementation shape (add a key, never rewrite) | ≈0 (pure function, one extra key per node) | **NEW as specified, and the spec should change.** Our `_norm` (`extractor_v2.py:4225`) is `re.sub(r"\s+"," ",lower())` — **byte-identical to Zep's `_normalize_string_exact`** (`dedup_helpers.py:40-44`). We are missing Zep's **fuzzy** key, not a rewrite of the stored one. `#11901` measured 0.0 % attach on 419 variants — the fold is a **comparison-side** change (`#11901` comment 6826507139 §4 already says: *"separator fold in the comparison, not in `_norm`"*). |
 | **A2** alias / multi-key blocking, measure **pair completeness** | **Zep runs FOUR candidate sources and unions them**: identity-property key, exact-normalised-name key, MinHash/LSH shingle bands, and semantic search — `_collect_candidate_nodes` (`node_operations.py:456-484`). ER literature agrees blocking is *the* bounding mechanism and pair completeness is the metric (Papadakis et al., arXiv 1905.06167, in-repo §X1) | not reported as a score delta anywhere; it is an **architecture**, and GraphRAG has **no** variant resolution at all (in-repo §X8) | **no recorded decision** | cheap and deterministic; the LSH index is the only new structure | **NEW — confirmed twice**: no `hasAlias` predicate anywhere in the tree (searched), and no LSH/shingle index (`rg -i 'jaccard\|minhash\|lsh' tortoise/` → 0 hits outside prose). |
-| **A3** embed name + context (vector in Postgres) | Every comparable embeds **name + description**: Neo4j GraphRAG (name+description), GraphRAG (entity description), LightRAG `entities_vdb`, Zep `name_embedding` (**the name alone**, 1024-d). In-repo §12.2c table, HIGH confidence, 6+ systems | none isolates the entity vector's contribution to answer quality — **no ablation exists** (in-repo §12.2c: *"no measured ablation isolates an entity vector's contribution"*) | **§12.2c sequences it behind the extractor**; §14.3 V3's *carry* half is KEEP (owner, `#11395` `6781921075`) — so this is **not** a reopen, it is the ruled work | ~1 ¢/tenant/month on Postgres disk vs ~$2.26 as graph RAM (§12.1, §12.1a–c) | **NEW, and BLOCKED on a field that does not exist**: `Object.description` → **0 rows**, `Object.summary` → **0 rows** (measured 2026-09-24, §12.2c). "Name + context" has **no context to embed** until the extractor supplies one. Zep's precedent is the escape hatch: **it embeds the name alone.** |
+| **A3** embed name + context (vector in Postgres) | Every comparable embeds **name + description**: Neo4j GraphRAG (name+description), GraphRAG (entity description), LightRAG `entities_vdb`, Zep `name_embedding` (**the name alone**, 1024-d). In-repo §12.2c table, HIGH confidence, 6+ systems | none isolates the entity vector's contribution to answer quality — **no ablation exists** (in-repo §12.2c: *"no measured ablation isolates an entity vector's contribution"*) | **§12.2c sequences it behind the extractor**; §14.3 V3's *carry* half is KEEP (owner, `#11395` `6781921075`) — so this is **not** a reopen, it is the ruled work | **584×** rate ratio, graph RAM vs record disk for the same bytes (§17.4.4 `:1894`); measured record disk **$0.0240**/tenant/month at 0.1916 GB (§17.4.6 `:2043`) | **NEW, and BLOCKED on a field that does not exist**: `Object.description` → **0 rows**, `Object.summary` → **0 rows** (measured 2026-09-24, §12.2c). "Name + context" has **no context to embed** until the extractor supplies one. Zep's precedent is the escape hatch: **it embeds the name alone.** |
 | **A4** widen the window + pass the levers we own | **Zep: 15 candidates at cosine ≥ 0.6, then a verdict** (`NODE_DEDUP_CANDIDATE_LIMIT = 15`, `NODE_DEDUP_COSINE_MIN_SCORE = 0.6`, `node_operations.py:67-68`) — a **candidate-list length downstream of a similarity floor**, never a raw top-k | no isolated number; the LongMemEval gain (+18.5 %) is reported for the whole architecture (arXiv:2501.13956) | **no decision reached** — and `#11901` **refutes the lever**: widening 3→15 recovers 35 of 116 misses (30.2 %) while the matcher binds **0.0 %** of the 419-variant class at **every** width, and the effective candidate list is already **mean 40.4** (not 3) | 0 to widen; a wider window **without** a verdict is the recorded X7 regression | **BUILT-OFF, not "switch with no producer"** — `_entity_key_expansion_pass`/`_entity_key_dense_pass` `sdk.py:41408`/`:41466`. The window itself: `#11901` measured and **declined** the change. |
 | **A5** GraphRanker per-label dispatch | no comparable system has this defect class to copy — it is **ours alone**. Zep dispatches by entity type through typed Pydantic models, which is why the shape cannot occur there | n/a | no decision | a small refactor + a test | **BUILT-MISWIRED — verified at `tortoise/ranking.py:926-928`** (inside `GraphRanker._fetch_signals`, declared `:914`): two branches, everything that is not `event` silently receives point signals. `StateRanker._fetch_object_signals` is at **`:1773`** (`StateRanker` declared `:1206`) and is unreachable from `GraphRanker`. `#12184` is substantively accurate; **its locators have drifted** — see §6.1. |
 | **A6** session-hierarchy candidate expansion | HippoRAG (PPR), TiMem (ancestor propagation), Gar/TopoRAG — the in-repo census (`#4211`) finds four independent passes converging on **deterministic graph expansion fused in rank space** | in-repo `#4211`: a one-hop `CONTAINS` walk reaches **8/8** gold turns across all 5 window-miss questions | no decision | 2.2–12.1 ms measured, 0 LLM calls (`#4211`) | **NEW, and correctly specified already** — `#4211` carries a census, a design and four falsifiers. **Do not duplicate.** |
@@ -204,17 +207,18 @@ correctly.** This is already recorded twice in-repo and the epic contains neithe
 
 ## 5. What this lane could NOT establish (declared, never skipped)
 
-1. **No search engine.** Rungs 1 and 2 both failed (§0). **Mastra's primary source was not read** — both
-   candidate URLs 404 from this box. The counter-case (*top score without an entity graph*) is cited from
-   `#11395`'s own record (Mastra 94.87 %) and from `comparison-systems.md` §3.3; **I did not verify it against
-   Mastra's own writing.** The same applies to **Mem0's April-2026 algorithm** — its vendor blog returned
-   **HTTP 404** on the path I could construct; Mem0's numbers here are its **arXiv paper** (LoCoMo 92.5,
-   +26 % over OpenAI, graph memory **+2 %** over base) plus its own published 2026 report (**94.4 LongMemEval,
-   ~6,900 tokens/query**) — ⚠️ **both vendor self-reports, neither independently re-run by us.**
-2. **Letta/MemGPT, Cognee, Honcho, Supermemory: NOT read this lane.** I have no primary-source mechanism for
-   them beyond the in-repo record (Supermemory 41.5 % HaluMem write-path, QA-acc ~99 % flagged
-   experimental-not-production). **Do not treat their absence from §2/§3 as evidence they have nothing to
-   teach** — it is an unread surface, and it is the largest hole in this brief.
+1. **No search engine AT AUTHORING TIME** (rungs 1–2 failed, §0), so **Mem0's April-2026 algorithm was not
+   read** — its vendor blog returned **HTTP 404** on the only path this pass could construct. Mem0's numbers
+   here are its **arXiv paper** (LoCoMo 92.5, +26 % over OpenAI, graph memory **+2 %** over base) plus its own
+   published 2026 report (**94.4 LongMemEval, ~6,900 tokens/query**) — ⚠️ **both vendor self-reports, neither
+   independently re-run by us.** ⛔ **Mastra is no longer in this list:** §5.1 read its primary source and
+   verified the 94.87 % figure against it.
+2. **Cognee and Honcho remain unread — and this is now the largest hole.** §5.1 read **Mastra** and
+   **Letta/MemGPT** to primary sources, and added **Supermemory**'s numbers from Mastra's cross-system
+   leaderboard (a third-party *measurement* of it, not Supermemory's own write-up). **Cognee** (an
+extract → "cognify" → load graph pipeline) and **Honcho** (implicit user representation) were still not read
+   to a primary source. **Do not treat their absence from §2/§3 as evidence they have nothing to teach** — it
+   is an unread surface.
 3. **Every gain figure in §2 is someone else's, on a different harness.** We have **no LongMemEval number of
    our own** — `docs/benchmarks/comparison-systems.md` §0: `recall_all@5` is **PENDING — #2105, no number
    exists**, and the repo's own cautionary case is a 97.6 % headline that was any-hit (gbrain's erratum,
@@ -229,6 +233,46 @@ correctly.** This is already recorded twice in-repo and the epic contains neithe
    should say so rather than implying otherwise.
 6. **`hasAlias` searched, not exhaustively:** `rg 'hasAlias'` over `*.py|*.yml|*.json` → 0. A predicate
    declared in a non-matching file form would be missed.
+
+### 5.1 Follow-up pass at this head: rung 2 available, and the omitted lever is "do not search at all"
+
+Re-run at this head (`4d39a575c44a`, after the authoring pass): `web_search` (`sonar`) returns results, and
+both primary sources this brief previously declared casualties resolve. **What follows is read from them,
+not from `#11395`'s second-hand record.**
+
+**Mastra, Observational Memory — `mastra.ai/research/observational-memory` (primary).** Two background agents,
+an **Observer** and a **Reflector**, maintain a dense **observation log** that *replaces raw message history as
+it grows*; the context window is observations at the start and live messages at the end. The load-bearing
+property for this epic, quoted because it is the entire point:
+
+> *"No per-turn dynamic retrieval based on the user prompt. No dynamic injection. Just a stable log of what
+> happened."* — resting on its own contrast: *"Most memory systems change the prompt every turn by injecting
+> dynamically retrieved context; OM doesn't."*
+
+Scores on `longmemeval_s` (500 questions, ~57 M tokens, ~50 sessions per question), same page: **94.87 %** with
+gpt-5-mini (highest on record), **93.27 %** with gemini-3-pro-preview, **84.23 %** with gpt-4o (the official
+benchmark model). With gpt-4o it **beats the oracle** (82.4 %) — a configuration handed only the 1–3
+conversations containing the answer — by 2 points, while holding all ~50 in context.
+
+**The lever this names, which the inventory does not contain.** The best-scoring system on the benchmark this
+epic is organised around wins **without a retrieval step at all**: it moves the work to *context construction*
+— compress history into dense observations so that *"what do we retrieve"* never gets asked. Every item in the
+inventory (A1–A6, B1–B2, C1–C3) **assumes** the retrieval step and improves it. If OM generalises, the largest
+remaining gain is a **write/summarise path, not a better ranker** — the same direction
+`STORAGE-ARCHITECTURE.md` §12.2b (`:1280`) already argues from our own side: *"levers 1 and 2 are the same
+work — write less, and write things worth keeping."* ⚠️ **Its harness is Mastra's and the result is a vendor
+self-report** — so this is a **direction with a citation, not a measured gain on our corpus**; §6.1's
+discipline applies to it exactly as it applies to every number above.
+
+**Letta/MemGPT — `letta.com/blog/sleep-time-compute` (primary).** MemGPT's tiers are core memory (editable
+blocks held in context), archival memory (a searchable store) and recall memory (full history); **MemGPT 2.0
+adds a sleep-time agent** that runs during idle time, rewriting the memory state and turning *"raw context"*
+into *"learned context"* before the user asks. The same shape from the other side: the lever is
+**consolidation during downtime** — again, not a ranker.
+
+**Supermemory — numbers from Mastra's cross-system leaderboard** (a third-party measurement of it, not its own
+write-up): **85.20 %** (gemini-3-pro), **84.60 %** (gpt-5), **81.60 %** (gpt-4o) on the same `longmemeval_s`
+basis. For scale on that same board: Hindsight 91.40 % (gemini-3-pro), EmergenceMem Internal 86.00 % (gpt-4o).
 
 ---
 
@@ -258,7 +302,8 @@ This brief first repeated `#12184`'s locators (`tortoise/ranking.py:766-768` for
 
 - the dispatch is **`:926-928`**, inside `GraphRanker._fetch_signals` (declared `:914`, class at `:677`);
 - `StateRanker._fetch_object_signals` is **`:1773`** (`StateRanker` declared `:1206`);
-- `:766-768` sits inside `GraphRanker.rerank`'s contested-boost block, not the dispatch.
+- `:766-768` is the `signals_answered` bookkeeping inside `GraphRanker.rerank` (the `_fetch_signals` call is
+  `:764`; the contested-boost block is `:769-772`) — a *third* site, neither the dispatch nor the boost block.
 
 **The defect `#12184` describes is real and reproduces at this head** — only the line numbers drifted.
 Recorded because the discipline is the point: *a number on a published surface that no committed artifact
