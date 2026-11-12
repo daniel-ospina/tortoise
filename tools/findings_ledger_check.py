@@ -98,6 +98,7 @@ that no job supplies.
 from __future__ import annotations
 
 import argparse
+import bisect
 import re
 import subprocess
 import sys
@@ -542,6 +543,14 @@ def _has_evidence(cell: str, sections: set[int]) -> bool:
         return True
     for match in re.finditer(r"`[^`\n]+`", cell):
         body = match.group(0)
+        # ⛔ A BARE shorthand does not name what can be opened — its path lives in
+        # another cell or row (#11902 review P2). Measured: replacing §3 row (e)'s
+        # evidence cell with `:5` satisfied every arm, because the marker test
+        # accepted `:5` and `check_citations` resolved it against row (d)'s path.
+        # §1 says the tool "refuses the page if an evidence cell names none of
+        # `path:line`"; an anchor in a NEIGHBOUR is not this cell naming one.
+        if body.startswith("`:"):
+            continue
         # `CITATION_RE`'s path group is OPTIONAL, so `fullmatch` alone accepted the
         # marker-less `word:digits` spelling — measured: replacing an evidence cell with
         # `username:1234` (or `see row (c):3115`) left every gate green, i.e. the
@@ -1085,7 +1094,21 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
     seen: set[str] = set()
     n_resolved = 0
     anchor: str | None = None
+    section_ends = [m.start() for m in re.finditer(r"^## ", text, re.MULTILINE)]
+    section = None
     for match in CITATION_RE.finditer(text):
+        # ⛔ A shorthand resolves only within its own SECTION (#11902 review P2).
+        # Document-global anchoring is what let §5's in-prose full path be replaced
+        # by `:9` and still resolve — against a §3 row's test file that §5 never
+        # names. Per-ROW scoping was measured too and is too strict for this page:
+        # §4 row 2 says "**Cited by** the same WS-C plan, `:558-559`", whose anchor
+        # is deliberately the row above. A section is the unit the page's prose
+        # actually uses; a cell that names no path of its own is caught by the
+        # evidence floor instead (`_is_openable_evidence`), which is where §1 puts
+        # that rule.
+        here = bisect.bisect_right(section_ends, match.start())
+        if here != section:
+            section, anchor = here, None
         if _is_host_port(match.group(0)):
             continue
         raw = match.group(0)[1:-1]
@@ -1630,8 +1653,8 @@ def _empty_evidence_cells(text: str) -> str:
 MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
     (
         "an invented verdict",
-        lambda t: t.replace("| **STILL-TRUE** | `tortoise/sdk.py:16962`",
-                            "| **PROBABLY-TRUE** | `tortoise/sdk.py:16962`", 1)
+        lambda t: t.replace("| **STILL-TRUE** | `tortoise/sdk.py:17045`",
+                            "| **PROBABLY-TRUE** | `tortoise/sdk.py:17045`", 1)
                   .replace("**STILL-TRUE**", "**PROBABLY-TRUE**", 1),
         "closed vocabulary",
     ),
@@ -1657,8 +1680,8 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         # at `[]` with the invented verdict `FIXED-IT` in the page.
         lambda t: t.replace(
             "\n## 4. The artefact index",
-            "\n| **Z** | A stray row | `tortoise/sdk.py:16962` | **FIXED-IT** | "
-            "`tortoise/sdk.py:16962` |\n\n## 4. The artefact index",
+            "\n| **Z** | A stray row | `tortoise/sdk.py:17045` | **FIXED-IT** | "
+            "`tortoise/sdk.py:17045` |\n\n## 4. The artefact index",
             1,
         ),
         "outside its single table",
@@ -1694,10 +1717,10 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         "a shorthand citation pointing past the end of its anchor's file",
         # ⛔ The literal tracks the DOCUMENT: `main`'s `43db5c0f55` shifted
         # `_persist_extra_props`'s call site by 16 lines, so row (c)'s shorthand
-        # moved to `:3131` and this fixture stopped matching — the arm reported
+        # moved to `:3144` and this fixture stopped matching — the arm reported
         # "did not change the document" rather than going quiet, which is how it was
         # caught. Retarget, never delete.
-        lambda t: t.replace("`:3131`", "`:999999`", 1),
+        lambda t: t.replace("`:3144`", "`:999999`", 1),
         "out of range",
     ),
     (

@@ -293,8 +293,8 @@ def test_invented_verdict_is_rejected(tmp_path, monkeypatch):
         tmp_path,
         monkeypatch,
         lambda t: t.replace(
-            "| **STILL-TRUE** | `tortoise/sdk.py:16962`",
-            "| **PROBABLY-TRUE** | `tortoise/sdk.py:16962`",
+            "| **STILL-TRUE** | `tortoise/sdk.py:17045`",
+            "| **PROBABLY-TRUE** | `tortoise/sdk.py:17045`",
             1,
         ),
     )
@@ -312,8 +312,8 @@ def test_missing_verdict_is_rejected(tmp_path, monkeypatch):
         tmp_path,
         monkeypatch,
         lambda t: t.replace(
-            "| **STILL-TRUE** | `tortoise/sdk.py:16962`",
-            "| looks right | `tortoise/sdk.py:16962`",
+            "| **STILL-TRUE** | `tortoise/sdk.py:17045`",
+            "| looks right | `tortoise/sdk.py:17045`",
             1,
         ),
     )
@@ -397,10 +397,10 @@ def test_an_evidence_cell_naming_nothing_is_rejected(tmp_path, monkeypatch):
         tmp_path,
         monkeypatch,
         lambda t: t.replace(
-            "| **STILL-TRUE** | `tortoise/sdk.py:16962` —",
+            "| **STILL-TRUE** | `tortoise/sdk.py:17045` —",
             "| **STILL-TRUE** | checked, trust me —",
             1,
-        ).replace("`tortoise/sdk.py:17361`", "the call", 1),
+        ).replace("`tortoise/sdk.py:17478`", "the call", 1),
     )
     problems = _doc_problems()
     assert any("names no `path:line`, issue, command or §N" in p for p in problems), problems
@@ -503,7 +503,7 @@ def test_a_citation_with_a_space_after_the_colon_is_refused(tmp_path, monkeypatc
     _mutated(
         tmp_path,
         monkeypatch,
-        lambda t: t.replace("`tortoise/sdk.py:16962`", "`tortoise/sdk.py: 16962`", 1),
+        lambda t: t.replace("`tortoise/sdk.py:17045`", "`tortoise/sdk.py: 16962`", 1),
     )
     problems = _doc_problems()
     assert any("not a recognised citation" in p for p in problems), problems
@@ -549,7 +549,7 @@ def test_a_citation_with_a_trailing_character_is_refused(tmp_path, monkeypatch):
     does not even look mangled to a reader.
     """
     for old, new in (
-        ("`tortoise/sdk.py:36042-36046`", "`tortoise/sdk.py:36042-36046 `"),
+        ("`tortoise/sdk.py:36163-36166`", "`tortoise/sdk.py:36163-36166 `"),
         ("`tortoise/pipeline.py:16`", "`tortoise/pipeline.py:16 `"),
     ):
         _mutated(tmp_path, monkeypatch, lambda t, o=old, n=new: t.replace(o, n, 1))
@@ -559,7 +559,7 @@ def test_a_citation_with_a_trailing_character_is_refused(tmp_path, monkeypatch):
 
 def test_a_shorthand_with_a_trailing_character_is_refused(tmp_path, monkeypatch):
     """FAILS if a trailing space or period after a `:LINE` shorthand is skipped."""
-    for old, new in (("`:792`", "`:792 `"), ("`:3131`", "`:999999.`")):
+    for old, new in (("`:792`", "`:792 `"), ("`:3144`", "`:999999.`")):
         _mutated(tmp_path, monkeypatch, lambda t, o=old, n=new: t.replace(o, n, 1))
         problems = _doc_problems()
         assert any("not a recognised citation" in p for p in problems), (old, problems)
@@ -889,8 +889,8 @@ def test_a_stray_table_row_with_no_separator_is_rejected(tmp_path, monkeypatch):
     §1's closed vocabulary has no handling rule for.
     """
     stray = (
-        "| **Z** | a stray row | `tortoise/sdk.py:16962` | **FIXED-IT** |"
-        " `tortoise/sdk.py:16962` |\n\n"
+        "| **Z** | a stray row | `tortoise/sdk.py:17045` | **FIXED-IT** |"
+        " `tortoise/sdk.py:17045` |\n\n"
     )
     for anchor_heading in ("## 4. The artefact index", "## 7. What this changes"):
         _mutated(
@@ -1243,7 +1243,7 @@ def test_an_evidence_cell_of_prose_is_rejected(tmp_path, monkeypatch):
 
     `CITATION_RE`'s path group is OPTIONAL, so a `fullmatch` alone accepted any
     marker-less token ending in `:digits`. Measured: every §3 evidence cell replaced
-    with `username:1234` (or one cell with `see row (c):3131`) left `--check` at rc 0
+    with `username:1234` (or one cell with `see row (c):3144`) left `--check` at rc 0
     — the whole evidence column unopenable, while §1 and §8 promise each cell names
     something a reader can open. The marker test is the one `check_citations` already
     applies, so removing it from the evidence floor reds this test.
@@ -1433,12 +1433,12 @@ def test_shipped_shorthand_citations_are_matched_not_skipped():
     Reachable, and it is the pre-fix shape: `CITATION_RE` required `<path>.<ext>`
     before `:LINE`, so row (b)'s `:792` / `:1002` / `:429-438` (its only
     commitments about `tortoise/commit_schema.py` beyond `:395`), row (c)'s
-    `:3131` and row (e)'s `:66` were skipped entirely while §8 told the reader
+    `:3144` and row (e)'s `:66` were skipped entirely while §8 told the reader
     every `path:line` in §3/§5 is checked. Skipped evidence presents as checked
     evidence, which is the defect this page is about.
     """
     matched = {m.group(0) for m in flc.CITATION_RE.finditer(flc.read_doc(REPO))}
-    for shorthand in ("`:792`", "`:1002`", "`:429-438`", "`:3131`", "`:66`"):
+    for shorthand in ("`:792`", "`:1002`", "`:429-438`", "`:3144`", "`:66`"):
         assert shorthand in matched, f"{shorthand} is not matched, so it is not checked"
 
 
@@ -2285,3 +2285,43 @@ def test_a_second_tally_sentence_is_refused(tmp_path, monkeypatch):
             f"a decoy must not be able to take the tally match: {problems}"
         )
 
+def test_a_bare_shorthand_does_not_satisfy_the_evidence_floor(tmp_path, monkeypatch):
+    """FAILS if an evidence cell can name only `:LINE`, leaving its path in a neighbour.
+
+    Reachable by a lane trimming a row: the shorthand looks like a citation to a
+    reader and to the marker test, but the cell itself names nothing openable.
+    Measured before the fix, replacing §3 row (e)'s evidence cell with `` `:5` ``
+    returned `[]` from every arm — `_has_path_marker(":5")` is True and
+    `check_citations` resolved it against row (d)'s path, which is a different
+    row's evidence. §1 says the tool refuses a page whose evidence cell names none
+    of `path:line`; an anchor in a NEIGHBOUR is not this cell naming one.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "the code names the separation | `tortoise/pipeline.py:16`", "the code names the separation | `:5`", 1
+        ),
+    )
+    problems = _doc_problems()
+    assert any("names no `path:line`, issue, command or §N" in p for p in problems), problems
+
+
+def test_a_shorthand_cannot_resolve_across_a_section_boundary(tmp_path, monkeypatch):
+    """FAILS if a `:LINE` shorthand resolves against an anchor in ANOTHER section.
+
+    Measured: replacing §5's in-prose `docs/plans/…:558-559` with `` `:9` `` returned
+    `[]`, because the anchor was still §3 row (h)'s test file — a path §5 never
+    names. Scoping to the section is what makes "nearest PRECEDING" mean what §8
+    says it means. Per-ROW scoping was rejected: §4's second row says "Cited by the
+    same WS-C plan, `:558-559`" and deliberately anchors on the row above.
+    """
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(
+            "`docs/plans/2026-09-10-ws-c-numeric-normalization.md:558-559`\n", "`:9`\n", 1
+        ),
+    )
+    problems = _doc_problems()
+    assert any("shorthand with no preceding" in p for p in problems), problems
