@@ -327,9 +327,18 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
             f"a width without a vector is a state the journal contract says "
             f"cannot exist (the seam POPS the key when there is no vector).")
     if declared != _F32:
-        # A declared `f64` — and any other width that is not the seam's `f32` —
-        # is truthful about ANY values: it only forgoes narrowing, which the raw
-        # form is entitled to. Nothing left to verify on this channel.
+        # A declared `f64` is truthful about ANY values: it only forgoes
+        # narrowing, which the raw form is entitled to, so there is nothing left
+        # to verify on this channel.
+        #
+        # ⛔ NOT generalised to "any width" (#12059 review, P3 — measured). A
+        # declared width that is neither of the seam's two (`"f16"`, say) is
+        # ALSO returned here, and that is a named RESIDUAL, not a truthfulness
+        # claim: measured at this head, `embedding_width="f16"` beside a vector
+        # is ACCEPTED and journalled. No door mints a third width and the seam
+        # mints only `f32`/`f64`, so it is unobservable to a live caller — the
+        # sentence above would become false only if someone widened it to
+        # "any other declared width is truthful", which this line does not say.
         return
     try:
         truthful = _is_shortest_f32_text(values)

@@ -1636,6 +1636,22 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
         JOURNAL_VECTOR_WIDTH_KEY) == JOURNAL_VECTOR_WIDTH_F64, (
         "a declared f64 beside a vector is the seam's own raw answer and must land")
 
+    # 5c. ⛔ THE BELT'S OWN `f64` ROW (#12059 review, P3 — measured). Arm 5b
+    #     exercises the PRE-stamp site; this drives the POST-stamp one, which is
+    #     the only thing that catches a width left over a vector the seam DROPS.
+    #     A declared `f64` beside a non-numeric vector reaches neither refusal
+    #     above: the merged view still carries the junk (so it is not the
+    #     no-vector arm) and `f64` is not value-checked (so it is not the grid
+    #     arm). Measured — deleting the post-stamp `_verify_record_vector_width`
+    #     call reds THIS row and nothing else for `f64`; the `f32` analogue is
+    #     pinned by #12000 F1b's empty-vector row, which is why the belt looked
+    #     covered while its `f64` half was not.
+    with pytest.raises(ValueError, match="declared over NO vector"):
+        api._emit("PointAdded",
+                  {"id": "p-dropped-f64", "content": "c",
+                   JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64},
+                  embedding="abc")
+
     # 6. The merged view agrees when the vector is on the ENVELOPE and the
     #    record declares the width the seam would also declare for it.
     api._emit("PointAdded", {"id": "p-split-ok", "content": "c",
