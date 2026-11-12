@@ -1397,6 +1397,60 @@ def test_the_funnel_itself_refuses_an_envelope_key_from_any_future_door(tmp_path
     assert not journal.exists() or not journal.read_text().strip()
 
 
+def test_the_belief_door_reports_a_refused_pack_instead_of_logging_it_away(
+        tmp_path, monkeypatch):
+    """#11948 F2, the last family: the APPROVAL half is refused, not dropped.
+
+    It is the one payload-shape gate that still runs INSIDE `emit_belief`'s arm —
+    it needs a whole-graph read, and the door's eager call is pure by contract
+    (`graph_reads=False`, pinned by the outage row above). An `except
+    Exception` that logged it away therefore restored exactly the divergence F2
+    was filed for, one family over, measured at `8ee861cbaa`:
+
+        add_object(..., eventKind="marketing:campaign") -> raised
+        emit_belief(..., eventKind="marketing:campaign") -> journal EMPTY, log line
+
+    The arm now re-raises the NAMED refusal (`UnapprovedKindNamespace`) and
+    keeps swallowing everything else, which is what the row above pins — the two
+    rows are a pair, and a fix that bought either by deleting the other would
+    pass a one-sided test.
+    """
+    from tortoise import pack_state
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+    from tortoise.sdk import UnapprovedKindNamespace
+
+    class _ApprovedGraphProjection:
+        """A bound handle whose approval set is just `dev` — no `marketing`."""
+
+        class g:
+            pass
+
+    def _refuse(payload, approved, *, spells=None):
+        raise UnapprovedKindNamespace(
+            "eventKind='marketing:campaign' names an unapproved pack",
+            prop="eventKind", kind="marketing:campaign",
+            namespace="marketing", installed=approved)
+
+    monkeypatch.setattr(pack_state, "graph_approval_namespaces",
+                        lambda g: frozenset({"dev"}))
+    monkeypatch.setattr(pack_state, "payload_names_pack",
+                        lambda payload: {"eventKind": "marketing"})
+    monkeypatch.setattr(pack_state, "refuse_unapproved_kinds_in_payload", _refuse)
+
+    events = tmp_path / "belief-refused-pack"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor",
+                   projection=_ApprovedGraphProjection())
+
+    with pytest.raises(UnapprovedKindNamespace):
+        api.emit_belief("ConfidenceChanged", id="node-9",
+                        eventKind="marketing:campaign")
+    assert not journal.exists() or not journal.read_text().strip(), (
+        "a refused pack must leave NOTHING to replay AND must be reported")
+
+
 def test_the_belief_door_keeps_a_graph_outage_inside_its_own_arm(tmp_path):
     """#11948 round 2: the EAGER half must be the PURE half — no graph READ.
 

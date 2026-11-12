@@ -298,8 +298,13 @@ def _refuse_invisible_point_kinds_in_payload(payload: dict) -> None:
     from .sdk import _refuse_invisible_kind
     for kind_prop, value in kind_spellings_in_payload(payload):
         if kind_prop == "pointKind":
-            _refuse_invisible_kind("pointKind", value,
-                                   door="EventAPI.add_point")
+            # ⛔ NOT one door's name: this gate runs at the FUNNEL (`_emit`) for
+            # every write door, and eagerly at the doors that carry a payload
+            # (`add_point`, `emit_belief`), so naming one of them told a caller
+            # who came in through another to fix the wrong call — and on the
+            # `emit_belief` path this message is the caller's ONLY signal
+            # (nothing journalled, nothing logged).
+            _refuse_invisible_kind("pointKind", value, door="EventAPI")
 
 
 class EventAPI:
@@ -634,12 +639,21 @@ class EventAPI:
         landed in the ``except`` below — the belief record was DROPPED with a
         log line while the identical ``point=`` refusal raised. One class of
         malformed payload, two answers; the caller of a best-effort seam is the
-        only one who can react, so every payload-shape refusal is raised here,
-        BEFORE the arm that swallows I/O: the record-shaped, envelope, marker,
-        money and kind families — i.e. every gate `_emit` runs before its commit
-        point. That enumeration is not decorative: a family added to `_emit`
-        must be added here in the same commit, or the sentence goes back to
-        being a claim the code does not honour (it has twice).
+        only one who can react, so a payload-shape refusal is reported here,
+        BEFORE the arm that swallows I/O, wherever the gate is PURE enough to
+        run here: the record-shaped, envelope, marker and money families, and
+        the invisible-character half of the kind gate.
+
+        ⛔ THE APPROVAL half of the kind gate is the ONE exception, and it is
+        not a hole: it needs a whole-graph READ, and that read RAISES on a
+        bound-but-unreadable handle (an outage is not a caller's bug). Run
+        before the arm, it would be an I/O failure escaping ``ep.run()`` — the
+        thing this door's best-effort posture exists to prevent (measured at
+        `3f5c61601`). So it runs inside ``_emit``, and the ``except`` below
+        RE-RAISES its named refusal instead of logging it away: an outage stays
+        swallowed, a refused pack is reported. Stated as the split it is,
+        because the flat claim "every payload-shape refusal is raised here"
+        stopped being true the moment the pure-only call landed.
         """
         _refuse_caller_named_funnel_keys(payload, "`emit_belief`")
         # …and the MONEY family, which is the other gate `_emit` runs and this
@@ -672,6 +686,23 @@ class EventAPI:
         try:
             self._emit(type_, **payload)
         except Exception as exc:  # noqa: BLE001, RUF100
+            # ⛔ A DETERMINISTIC PAYLOAD REFUSAL IS NOT THE I/O FAILURE THIS ARM
+            # EXISTS TO SWALLOW. The approval half of the kind gate is the one
+            # payload-shape gate that still runs inside the arm (the eager call
+            # above is pure by contract), so logging-and-dropping it would
+            # restore exactly the F2 divergence one family over: the same
+            # payload raises at `add_object` and vanishes here. Measured at
+            # `8ee861cbaa`: `emit_belief("ConfidenceChanged", id=…,
+            # eventKind="marketing:campaign")` returned normally with the
+            # journal empty. `UnapprovedKindNamespace` is the type the SDK
+            # publishes for this distinction — its own docstring: a transport
+            # "can tell this DETERMINISTIC payload refusal from a transient
+            # graph failure WITHOUT parsing the message". An UNREADABLE handle
+            # raises OSError, not this, so an outage keeps its best-effort
+            # posture and the graph is still read once, inside `_emit`.
+            from .sdk import UnapprovedKindNamespace
+            if isinstance(exc, UnapprovedKindNamespace):
+                raise
             logger.warning(
                 "failed to append %s event to ingest log: %s", type_, exc)
 
@@ -1282,9 +1313,14 @@ class EventAPI:
         record reaches the replay's fold chain untested by that rule — so it is
         refused here for a message that names THIS door, and again at `_emit`
         (`_NESTED_RECORD_KEYS`), which is where the refusal is total. Nor may
-        it name an ENVELOPE field (`type=`, `event_id=`, `corrects=`, …): those
-        are the funnel's, and the collision re-types / re-identifies the record
-        (#11948).
+        it name an ENVELOPE field in ``**extra`` (`type=`, `ts=`,
+        `initiated_by=`, `corrects=`, `agent_id=`): those are the funnel's, and
+        the collision re-types / re-attributes the record (#11948). ⚠️
+        ``event_id=`` is NOT in that list HERE: it is this door's own first
+        parameter, re-emitted as the payload's ``id``, so it never travels
+        ``**extra`` and cannot collide — the passthrough set names it for the
+        doors whose ``id=`` means something ELSE (``add_object``'s
+        ``add_object(id=…, event_id=…)``).
         """
         _refuse_caller_named_funnel_keys(extra, "`add_event`")
         self._emit("EventRecorded",
