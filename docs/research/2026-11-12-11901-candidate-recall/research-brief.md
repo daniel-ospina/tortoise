@@ -268,19 +268,20 @@ selection accuracy falls as the candidate list grows. A wider window **without**
 regression; the measurement says the window is not even the right first lever.
 
 **2. The measured next changes, in this order, and none is shipped here:**
-  - **(2a) Measure phase 2 before changing anything else.** It is live in production, it is instructed to resolve
-    exactly the variant class, and it is handed 62.1 % of those variants at `limit=3`. **This is the biggest
-    unknown and it gates (2b) and (2c)**: if phase 2 binds them, the fold buys little; if it does not, that is the
-    measured loss.
-  - **(2b) The phase-1 matcher's normalisation** — a separator fold **in the identity comparison, never in
-    `_norm`** (whose other consumers assume its narrow contract): **0 % → 100 %** of in-window separator variants,
-    **0 % → 27.2 %** of all variants, and **+0.7 pts** available from widening `k`. Mode-independent (§4).
-  - **(2c) The class split in §3.1** — the dense leg *worsens* the definite-description class by 13.3 points while
-    improving identifiers by 25.6 and paths by 63.3. That is a fusion/weighting question (RRF competing
-    near-synonyms), not a width question, and it is where §12.2c's *resolution key* claim needs its own
-    measurement.
-  - **(2d) The article class** (179/419) — reached by neither the window nor a punctuation fold. Phase 2 or the
-    embedding rung, on the existing `DEFAULT_THRESHOLD = 0.72`, never a new constant.
+
+- **(2a) Measure phase 2 before changing anything else.** It is live in production, it is instructed to resolve
+  exactly the variant class, and it is handed 62.1 % of those variants at `limit=3`. **This is the biggest
+  unknown and it gates (2b) and (2c)**: if phase 2 binds them, the fold buys little; if it does not, that is the
+  measured loss.
+- **(2b) The phase-1 matcher's normalisation** — a separator fold **in the identity comparison, never in
+  `_norm`** (whose other consumers assume its narrow contract): **0 % → 100 %** of in-window separator variants,
+  **0 % → 27.2 %** of all variants, and **+0.7 pts** available from widening `k`. Mode-independent (§4).
+- **(2c) The class split in §3.1** — the dense leg *worsens* the definite-description class by 13.3 points while
+  improving identifiers by 25.6 and paths by 63.3. That is a fusion/weighting question (RRF competing
+  near-synonyms), not a width question, and it is where §12.2c's *resolution key* claim needs its own
+  measurement.
+- **(2d) The article class** (179/419) — reached by neither the window nor a punctuation fold. Phase 2 or the
+  embedding rung, on the existing `DEFAULT_THRESHOLD = 0.72`, never a new constant.
 
 **3. The index question, answered on the evidence rather than before it: NOT YET.** At the measured population a
 scan is exact. The hybrid sweep (300 names × 4 widths × 3 arms plus the harvest) completed in **390 s** against an
@@ -333,9 +334,9 @@ corpus is live). One unpinned sentence is the honest state; an unpinned TABLE is
 
 ## 10. Write-back
 
-`wrote: not written — the local graph this issue names is absent on this box (nothing listens on 16379; all six
+``wrote: not written — the local graph this issue names is absent on this box (nothing listens on 16379; all six
 cited ids answer GRAPH-EMPTY-RESULT), and the hosted graph REFUSED the write: `tortoise-graph.sh evidence …` →
-`{"error":"Team points limit reached (25000). Upgrade your plan to increase it.","code":-32006}`.`
+`{"error":"Team points limit reached (25000). Upgrade your plan to increase it.","code":-32006}`.``
 `edges: none — no hosted point on this topic exists to attach to (the topic lives on the absent local graph), so an
 edge would have been fabricated.` The finding lives in this document, in the two artifacts, and on #11901; the
 point that would have carried it is blocked on a quota, not on a decision.
