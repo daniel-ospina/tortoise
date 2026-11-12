@@ -2561,6 +2561,11 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str],
         # satisfied the row while nothing stored per iteration (measured: all three GREEN).
         hits = [n for outer in body for n in _walk_own_scope(outer)
                 if isinstance(n, ast.stmt) and _executes_a_call(n)
+                and _carrier_issues_a_call(n)
+                # ⛔ `#12020` review round 12: a CONTAINER's slice spans its body, so without this
+                # the `If label == "Point":` block inside the loop was the "store" whenever the real
+                # store statements had been replaced by discarded clauses — the row stayed GREEN.
+                and not isinstance(n, _COMPOUND_STATEMENTS)
                 and (_STORE_CARRIER.search(_slice_own_scope(lines, n))
                      or (merge_store
                          and _MERGE_STORE_CARRIER.search(_slice_own_scope(lines, n))))]
@@ -2673,7 +2678,24 @@ def _carrier_issues_a_call(statement: ast.stmt) -> bool:
     return True
 
 
-def _statements_that_store(root: ast.AST, lines: list[str]) -> list[ast.stmt]:
+#: `ast.stmt` subclasses that HOLD other statements without being a SCOPE. Their slice spans the
+#: whole body, so a store is never attributed to the container — the body's own statements are the
+#: carriers and `_walk_own_scope` yields them anyway.
+#: ⛔ `ast.Match` is the trap (`#12020` review round 12, P2): it is an `ast.stmt` that holds `case`
+#: bodies and is the ONLY one with no `.body` attribute, so the `hasattr(sub, "body")` test that
+#: stood here skipped every container EXCEPT the one whose body is spelled `cases`. Measured: a
+#: discarded clause wrapped in a `match` case satisfied both `bound_store` (`restore_graph`) and
+#: `assembly` (`_rebuild_all_replay`) on the real files, with the vector never written.
+_COMPOUND_STATEMENTS = tuple(
+    node for node in (
+        ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith, ast.Try,
+        getattr(ast, "TryStar", None), ast.Match,
+    ) if isinstance(node, type)
+)
+
+
+def _statements_that_store(root: ast.AST, lines: list[str],
+                           pattern: re.Pattern[str] = _STORE_CARRIER) -> list[ast.stmt]:
     """The statements in `root`'s OWN scope that both CARRY a store marker and ISSUE it.
 
     One definition, because three arms now ask this question (`store` via
@@ -2692,8 +2714,8 @@ def _statements_that_store(root: ast.AST, lines: list[str]) -> list[ast.stmt]:
         sub for sub in _walk_own_scope(root)
         if isinstance(sub, ast.stmt)
         and not isinstance(sub, _SCOPE_NODES)
-        and not hasattr(sub, "body")
-        and _STORE_CARRIER.search(_slice_own_scope(lines, sub))
+        and not isinstance(sub, _COMPOUND_STATEMENTS)
+        and pattern.search(_slice_own_scope(lines, sub))
         # ⛔ BOTH gates, and they are complementary rather than redundant — dropping either reopens a
         # measured hole. `_executes_a_call` catches the PROSE ASSIGNMENT (a constant string with no
         # call: `_NOTE = "… set_embedding_clause(" + "n, r.v)"`, measured GREEN again the moment it
@@ -2702,6 +2724,27 @@ def _statements_that_store(root: ast.AST, lines: list[str]) -> list[ast.stmt]:
         and _executes_a_call(sub)
         and _carrier_issues_a_call(sub)
     ]
+
+
+def _carrier_stores(statement: ast.stmt, view: str, lines: list[str],
+                    pattern: re.Pattern[str] = _STORE_CARRIER) -> bool:
+    """Does this CARRIER itself issue the store `pattern` names?
+
+    ⛔ A CONTAINER carrier is asked about its OWN SCOPE, not about its slice (`#12020` review round
+    12, P1). A container's slice spans its whole body, so reading the store off the container credits
+    a body whose only store statement has been replaced by a discarded clause — the exact vacuity
+    `_statements_that_store` forbids, and the way the `store`/`merge` arms still had it open after
+    round 11 fixed the other two. The live instance is `tortoise.sdk::_update_entity`, whose needle
+    sits in the `for` HEAD, so its carrier IS the container:
+
+        for label, _prop in _CANONICAL_ENTITY_ID_PROPS:      <- the carrier
+            ...  f"SET n += {{set_embedding_clause('n')}}"    <- evaluated, discarded, GREEN
+
+    `bound` is the one kind that never asks this (its store lives in its caller), so it stays out.
+    """
+    if isinstance(statement, _COMPOUND_STATEMENTS):
+        return bool(_statements_that_store(statement, lines, pattern))
+    return bool(pattern.search(view)) and _carrier_issues_a_call(statement)
 
 
 def _symbol_stores_in_own_scope(node: ast.AST, lines: list[str]) -> bool:
@@ -2812,8 +2855,7 @@ def _evidence_violation(source: str, symbol: str, needle: str,
             view = text + "\n" + "\n".join(
                 constant_text[name] for name in _constant_names_named_by(statement, constant_text)
             )
-            if claim == "bound" or (
-                    _STORE_CARRIER.search(view) and _carrier_issues_a_call(statement)):
+            if claim == "bound" or _carrier_stores(statement, view, lines):
                 carried.append(text)
             elif claim == "bound_store":
                 # `BOUND_STORE_LABEL_EVIDENCE`: the label is bounded by a constant seam, but the
@@ -2822,8 +2864,8 @@ def _evidence_violation(source: str, symbol: str, needle: str,
                 # the own-scope store is checked once, below, over the whole cited symbol.
                 if _symbol_stores_in_own_scope(node, lines):
                     carried.append(text)
-            elif (claim == "merge" and _MERGE_STORE_CARRIER.search(view)
-                    and _carrier_issues_a_call(statement)):
+            elif claim == "merge" and _carrier_stores(statement, view, lines,
+                                                      _MERGE_STORE_CARRIER):
                 # The declared weaker kind (`MERGE_STORE_CLAIM`): the store IS the map merge, whose
                 # vector content no syntax can attribute (`UNDECIDABLE_WRITE_SHAPES`). Kept as a
                 # NAMED claim so every other row is scored by the narrower `_STORE_CARRIER`.
@@ -3368,6 +3410,42 @@ def test_a_DISCARDED_clause_stores_nothing_on_EVERY_claim_kind() -> None:
     assert _statements_that_store(ast.parse(assembly_discarded).body[0],
                                   assembly_discarded.splitlines()) == [], (
         "a discarded clause is being counted as a store by a CONTAINER's slice")
+
+    # ── a CONTAINER CARRIER: the needle sits in the `for` HEAD (the live `_update_entity` shape) ──
+    # `#12020` review round 12 (P1): the carrier is then the `For`, and asking IT whether it stores
+    # read the whole body's text — so a body whose only store was a discarded clause passed. The
+    # `store`/`merge` arms now ask a container carrier about its OWN SCOPE.
+    container_control = (
+        'def w(g):\n'
+        '    for label, _prop in _CANONICAL_ENTITY_ID_PROPS:\n'
+        '        g.query("MATCH (n) SET n += $p", {"p": set_embedding_clause("n")})\n')
+    assert violation(container_control, "for label, _prop in _CANONICAL_ENTITY_ID_PROPS",
+                     "merge") is None, violation(container_control, "for label, _prop in "
+                                                   "_CANONICAL_ENTITY_ID_PROPS", "merge")
+    assert violation(
+        'def w(g):\n'
+        '    for label, _prop in _CANONICAL_ENTITY_ID_PROPS:\n'
+        "        f\"SET n += $p {set_embedding_clause('n')}\"\n",
+        "for label, _prop in _CANONICAL_ENTITY_ID_PROPS", "merge") is not None, (
+        "a CONTAINER CARRIER holding only a discarded clause satisfied the merge row — its slice "
+        "spans the body, so the carrier must be asked about its own scope, not its text")
+
+    # ── `ast.Match` is a container with NO `body` attribute (review round 12, P2) ────────────────
+    # The compound skip was spelled `hasattr(sub, "body")`, which skipped every container EXCEPT the
+    # one whose body is spelled `cases` — measured to satisfy `bound_store` and `assembly` on the
+    # real files with the vector never written.
+    match_discarded = (
+        'def w(g):\n'
+        '    match 1:\n'
+        '        case 1:\n'
+        "            f\"SET {set_embedding_clause('n', 'r.v')}\"\n"
+        '    g.query("MATCH (n:Point)")\n')
+    assert violation(match_discarded, "MATCH (n:Point)", "bound_store") is not None, (
+        "a discarded clause inside a `match` case satisfied `bound_store` — `ast.Match` holds "
+        "statements with no `.body`, so a `hasattr(sub, \"body\")` compound test never sees it")
+    assert _statements_that_store(ast.parse(match_discarded).body[0],
+                                  match_discarded.splitlines()) == [], (
+        "`ast.Match` is being counted as a store by its slice")
 
 
 def test_a_deleted_vector_write_reds_the_BOUND_STORE_row() -> None:
