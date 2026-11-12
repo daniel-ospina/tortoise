@@ -5095,16 +5095,19 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # whole sentence's three numbers, so a re-derivation of one cannot leave
         # its neighbours behind the way it did at `a08f7bce3d`.
         ("RECONCILE-A1-A2-A5.md", "`TortoiseSDK._extract_session_v2` at", (
-            # 17974 -> 18153: #12060 adds 179 net lines to sdk.py above this
-            # call, so every number in this table moved with it. The anchors are
-            # unchanged — that is the point of keying a row on the symbol.
-            ("18153", "relation_write = apply_relation_edges("),
+            # 17974 -> 18153 -> 18225. #12060 moved this three times: 179 net
+            # lines in the round-3 feature commits, then `51be1643`'s +72
+            # (`_landed_entity_facts` + the capture block) landed ABOVE this
+            # call and re-staled the number the *previous* commit had just
+            # re-derived. The anchors are unchanged — that is the point of
+            # keying a row on the symbol; only the number is re-derived.
+            ("18225", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("18152", "from tortoise.relation_write import apply_relation_edges"),
+            ("18224", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("18140", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("18212", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5114,8 +5117,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("6607", "def subject_binding_available(graph) -> bool:"),
         ), "search_engine"),
         ("00-plan.md", "consumed at `sdk.py:", (
-            ("9719", "subject_binding_available,"),
-            ("9772", "and not subject_binding_available(graph):"),
+            ("9758", "subject_binding_available,"),
+            ("9811", "and not subject_binding_available(graph):"),
         ), "sdk"),
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
             ("6607", "def subject_binding_available(graph) -> bool:"),
@@ -5124,13 +5127,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # row: a row carries ONE source key, and a mis-keyed cite must red with a
         # message rather than an IndexError (the guard below now says so).
         ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
-            ("9719", "subject_binding_available,"),
-            ("9772", "and not subject_binding_available(graph):"),
+            ("9758", "subject_binding_available,"),
+            ("9811", "and not subject_binding_available(graph):"),
         ), "sdk"),
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("17800", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("17872", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
         # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
