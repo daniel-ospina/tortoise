@@ -37,6 +37,12 @@ MIGRATIONS = [
     # to it (`UndefinedColumn` on the point INSERT). `tests/
     # test_7950_capstone_probe.py` pins this list to `RECORD_MIGRATIONS`.
     "20261018000001_record_point_money_value_2782.sql",
+    # #11827's FORWARD `ALTER TABLE public.point DROP COLUMN as_of`. It contributes
+    # no column and no refusal, so nothing the probe drives needs it for a PARSE —
+    # applied because the list is pinned to `RECORD_MIGRATIONS` in EQUALITY (#9550)
+    # and a DROP is a schema change like any other: omitting it stands up a Postgres
+    # that is not the one the shipped read runs against.
+    "20261110000001_record_point_retire_as_of_11827.sql",
     # FORWARD `ALTER TABLE public.session ALTER COLUMN capture_redactions TYPE
     # integer` (#9264). Same reason as the entry above: the probe drives the
     # SHIPPED projection, so a schema still declaring `jsonb` keeps refusing the

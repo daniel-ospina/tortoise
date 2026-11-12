@@ -72,6 +72,11 @@ MIGRATIONS = [
     # `record_projection.RECORD_MIGRATIONS` would measure five columns short.
     # Pinned by `tests/test_7950_capstone_probe.py`.
     "20261018000001_record_point_money_value_2782.sql",
+    # #11827's FORWARD `ALTER TABLE public.point DROP COLUMN as_of`. No column and no
+    # refusal — applied so this list stays EQUAL to
+    # `record_projection.RECORD_MIGRATIONS` (#9550), which is what keeps the measured
+    # row width the SHIPPED schema's.
+    "20261110000001_record_point_retire_as_of_11827.sql",
     # #9264's forward migration (the narrowed count column). The row width this
     # probe measures is the SHIPPED schema's, so the list must match.
     "20261022000001_record_session_capture_redactions_integer.sql",

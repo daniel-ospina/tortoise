@@ -55,6 +55,11 @@ RECORD_MIGRATIONS = [
     # is allowed to drift becomes a live lie the moment it is re-lit (#8976 P3).
     # Pinned by `tests/test_7950_capstone_probe.py`.
     "20261018000001_record_point_money_value_2782.sql",
+    # #11827's FORWARD `ALTER TABLE public.point DROP COLUMN as_of`, kept in step
+    # with the list that applies it (#9550's EQUALITY pin): no column and no
+    # refusal, so nothing here reads it — it is listed because a DROP is a schema
+    # change like any other and a dead copy that drifts becomes a live lie (#8976 P3).
+    "20261110000001_record_point_retire_as_of_11827.sql",
     # #9264's forward migration, kept in step with the list that applies them.
     "20261022000001_record_session_capture_redactions_integer.sql",
     # §9.1's narrative home (#9555 / R7): the shipped `SessionRecorded` replay
