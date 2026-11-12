@@ -296,3 +296,91 @@ def test_a_non_document_input_returns_the_full_disposition_shape(monkeypatch):
     assert out["held_subjects"] == [] and out["subjects_held_by_rule"] == {}
     assert out["mentions"] is None, (
         "mentions must be None (unanswerable here), never [] which reads clean")
+
+
+# ── 7. a RAISING cue is fail-open, and the failure is visible ──────────────
+
+def test_a_raising_cue_is_fail_open_and_reported(monkeypatch):
+    """A cue that raises must not abort the document pass (#12094 review P2).
+
+    Both v4 call sites wrap ``route_mentions`` in
+    ``except Exception … "candidates kept (fail-open)"``. This module's CALLER
+    (``tortoise/ingest.py``) turns an escaping exception into *"S7 entity
+    extraction failed"*, which discards every remaining Subject AND every Object
+    in the document — a far larger loss than the one non-referent the gate
+    exists to stop. So a raise is "judge could not answer": the surface MINTS
+    (pre-#12094 behaviour) and the failure is RECORDED, never swallowed.
+    """
+    monkeypatch.setenv(FLAG, "1")
+    api, proj, _log = _proj_api()
+    payload = {"subjects": [
+        {"name": "Organisation Design Team", "subjectKind": "team"},
+        {"name": "it", "subjectKind": "other"},
+    ], "objects": [{"name": "FalkorDB", "objectKind": "tool"}], "aboutEntities": []}
+
+    real_hold = extractor_mod._referentiality_hold
+
+    def _boom(surface):
+        if surface == "it":
+            raise RuntimeError("cue exploded")
+        return real_hold(surface)
+
+    monkeypatch.setattr(extractor_mod, "_referentiality_hold", _boom)
+    result = _extract(monkeypatch, payload, api)
+
+    # FAIL-OPEN: the surface minted, and the rest of the pass survived.
+    assert result["subjects_held"] == 0
+    assert result["subjects_minted"] == 2
+    assert result["objects"] == 1, (
+        "a raising cue must not take the Object loop down with it")
+    assert "it" in result["subject_names"]
+    rows = proj.g.query("MATCH (s:Subject) RETURN s.name").result_set
+    assert sorted(r[0] for r in rows) == ["Organisation Design Team", "it"]
+
+    # VISIBLE: the degradation is reported, not inferred from a count.
+    assert result["subjects_hold_failed"] == 1
+    assert result["hold_failures"] == [{
+        "surface": "it", "section": "Product Strategy",
+        "error": "RuntimeError: cue exploded",
+    }]
+
+
+# ── 8. the census buckets count the SAME unit ──────────────────────────────
+
+def test_the_census_counts_surfaces_while_the_records_count_occurrences(monkeypatch):
+    """``subjects_minted``/``subjects_held`` are SURFACE-level; records are not.
+
+    A surface the model returns in TWO sections is held twice (two records, two
+    spans) but is ONE held surface. The counters must not count occurrences: a
+    caller reading "minted + held" would otherwise be adding names to
+    occurrences, and the asymmetry used to be invisible because every gate test
+    used distinct surfaces inside a single section.
+    """
+    monkeypatch.setenv(FLAG, "1")
+    api, _proj, _log = _proj_api()
+    two_sections = (
+        "## Product Strategy\n"
+        "The Organisation Design Team adopted FalkorDB as the memory backbone.\n"
+        "## Open Questions\n"
+        "It is still unclear whether the adoption holds at scale.\n"
+    )
+    payload = {"subjects": [
+        {"name": "Organisation Design Team", "subjectKind": "team"},
+        {"name": "it", "subjectKind": "other"},
+    ], "objects": [], "aboutEntities": []}
+
+    monkeypatch.setattr(extractor_mod, "_SemanticStage", _FixedStage)
+    monkeypatch.setattr(_FixedStage, "payload", payload, raising=False)
+    ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
+    result = ext.extract_entities(two_sections, "strategy.md", api)
+
+    # The SAME payload for both sections: 1 minted name (deduped) + 1 held name.
+    assert result["subjects_minted"] == 1
+    assert result["subjects_held"] == 1, (
+        "subjects_held is SURFACE-level, like subjects_minted — one name, not one "
+        f"record per section (records: {result['held_subjects']})")
+    assert len(result["held_subjects"]) == 2, (
+        "held_subjects is OCCURRENCE-level: one record per (surface, section)")
+    assert {h["section"] for h in result["held_subjects"]} == {
+        "Product Strategy", "Open Questions"}
+    assert sum(result["subjects_held_by_rule"].values()) == result["subjects_held"]
