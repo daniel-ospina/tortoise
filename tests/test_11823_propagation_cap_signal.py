@@ -27,7 +27,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from tortoise.sdk import TortoiseSDK
+from tortoise.dream import TRIVIAL_STAMP_PREDICATE
+from tortoise.live import EPISTEMIC_LABELS
+from tortoise.sdk import (
+    DEFAULT_PROPAGATION_CENSUS_MAX_POINTS,
+    TortoiseSDK,
+)
+from tortoise.search_engine import ep_has_belief_cypher
 
 
 @pytest.fixture
@@ -64,7 +70,16 @@ def _prop(sdk):
 
 
 def test_counts_match_an_independent_query(sdk):
-    """The block's counts agree with queries written independently here."""
+    """Every population the block publishes is pinned against a query written
+    independently here — `ep_reachable_claims`, `belief_present` and
+    `points_edged` included.
+
+    #12138 §2: the RANGE assertions in
+    `test_no_belief_stays_inside_its_invariants` cannot see a WIDER denominator
+    (the ratio falls, `no_belief` rises, BOTH stay in range), so an inflated
+    `ep_reachable_claims` would pass them. Pinning each count against its own
+    query is what reddens on one.
+    """
     _chain(sdk, 3)
     _islands(sdk, 4)
     p = _prop(sdk)
@@ -74,19 +89,61 @@ def test_counts_match_an_independent_query(sdk):
         "AND (n.status IS NULL OR n.status <> 'draft') RETURN count(n)"
     ).result_set[0][0])
     assert p["graph_live_claims"] == live == 7
+    # The denominator's rule, spelled from the LABEL LIST rather than from
+    # `epistemic_disjunction`'s own text, so this is an independent statement of
+    # it. The presence half uses `ep_has_belief_cypher` ON PURPOSE: #11702 makes
+    # that predicate the ONE definition, and re-spelling it here would pin the
+    # test to a private copy instead of to the shared gate.
+    labels = "(" + " OR ".join(f"m:{label}" for label in EPISTEMIC_LABELS) + ")"
+    edged = int(g.query(
+        "MATCH (n:Point)-[:IMPL|NAND]-() "
+        "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+        "AND (n.status IS NULL OR n.status <> 'draft') "
+        "WITH DISTINCT n RETURN count(n)"
+    ).result_set[0][0])
+    reach = g.query(
+        "MATCH (n:Point)-[:IMPL|NAND]-(m) "
+        "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+        "AND (n.status IS NULL OR n.status <> 'draft') "
+        "AND (m.status IS NULL OR m.status <> 'draft') "
+        f"AND {labels} "
+        f"WITH DISTINCT n, ({ep_has_belief_cypher('n')}) AS has_belief "
+        "RETURN count(n), sum(CASE WHEN has_belief THEN 1 ELSE 0 END)"
+    ).result_set[0]
+    assert p["ep_reachable_claims"] == int(reach[0]) == 3
+    assert p["belief_present"] == int(reach[1]) == 1
+    assert p["operator_less_claims"] == live - edged == 4
+    assert p["unclassified_claims"] == edged - int(reach[0]) == 0
     assert p["unavailable"] is None
 
 
 def test_no_belief_stays_inside_its_invariants(sdk):
-    """RANGES, not an identity: a mixed-population bug makes `no_belief` go
-    negative (measured -8.0 with a label-blind denominator) or the ratio exceed
-    1.0. The identity `no_belief == reachable - belief_present` holds by
-    construction and cannot discriminate, so the ranges are what is asserted.
+    """RANGES catch ONE direction of a mixed population, not both (#12138 §2).
+
+    A NARROWER (or label-blind) denominator is the direction a range CAN see:
+    the numerator can exceed it, so `no_belief` goes negative (measured -8.0)
+    or the ratio exceeds 1.0.
+
+    The direction this fixture is about is the WIDER one, and it is INVISIBLE
+    to the ranges: with `belief_present` fixed, a larger denominator makes the
+    ratio FALL and `no_belief` RISE, and both stay inside
+    `0 <= no_belief <= ep_reachable_claims` / `0 <= pct <= 1` (measured: a
+    denominator inflated by 4 gives `pct 0.2`, `no_belief +4` — in range).
+
+    So the ranges are a cheap lower bound here, not the control: an inflated
+    denominator is caught by pinning both counts against independently written
+    queries in `test_counts_match_an_independent_query`. The identity asserted
+    below (`belief_present + no_belief == ep_reachable_claims`) holds by
+    construction and cannot discriminate either direction.
     """
     _chain(sdk, 3)
     _islands(sdk, 4)
-    # a live Point whose only edge points at a DRAFT point: neither stamped by
-    # the trivial-stamp path nor reachable by EP.
+    # A live Point edged only to a DRAFT far endpoint — the benign non-zero this
+    # instrument exists to over-report. ⛔ #12138: it IS reachable
+    # (`create_operator` routes the edge through an operator node, so the claim
+    # enters the denominator: measured 3 → 4), and it is not in the
+    # trivial-stamp population because it has an edge. So the fixture adds one
+    # belief-less claim INSIDE the denominator rather than beside it.
     live = _claim(sdk, "edged only to a draft")
     draft = sdk.create_point("statement", "draft neighbour", dedup=False,
                              status="draft")["id"]
@@ -341,12 +398,27 @@ def test_the_census_refuses_above_its_bound(sdk, monkeypatch):
 
 
 def test_the_census_bound_cannot_be_disabled_by_a_junk_value(sdk, monkeypatch):
-    """A malformed or non-positive override falls back to the default bound
-    rather than removing it."""
+    """A malformed or non-positive override RESOLVES to the default bound — it
+    does not remove it (#12138 §5).
+
+    ⛔ The first version asserted only `unavailable is None`, so a mutation that
+    turned a junk value into a DISABLING one (`sys.maxsize`) stayed green: the
+    test never read `_propagation_census_cap()`, so the bound could be gone with
+    nothing to notice. The resolved bound is therefore asserted BY VALUE for
+    every junk spelling, and then asserted to be LIVE by refusing at a lowered
+    cap — a `_propagation_census_cap()` that returned `sys.maxsize` fails both.
+    """
     _chain(sdk, 2)
-    for junk in ("not-a-number", "0", "-5", ""):
-        monkeypatch.setenv("TORTOISE_PROPAGATION_CENSUS_MAX_POINTS", junk)
-        assert _prop(sdk)["unavailable"] is None
+    env = "TORTOISE_PROPAGATION_CENSUS_MAX_POINTS"
+    for junk in ("not-a-number", "0", "-5", "", "  "):
+        monkeypatch.setenv(env, junk)
+        assert (sdk._propagation_census_cap()
+                == DEFAULT_PROPAGATION_CENSUS_MAX_POINTS), junk
+        assert _prop(sdk)["unavailable"] is None, junk
+    # …and the fallback did not disable the guard: above a lowered bound the
+    # census still refuses.
+    monkeypatch.setenv(env, "1")
+    assert "PropagationCensusRefused" in (_prop(sdk)["unavailable"] or "")
 
 
 def test_a_budget_zero_pass_is_recorded_not_absent(sdk):
@@ -616,12 +688,27 @@ def test_the_three_counts_partition_the_live_points(sdk):
 
 def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     """#12116 A-P3: the block's operator-less count IS `_trivial_stamp`'s
-    population — a VALUE agreement, checked against an independent query.
+    population — a VALUE agreement, checked against a query built from the
+    CONSTANT ITSELF.
 
-    ⛔ The first version made this a shared SPELLING (`TRIVIAL_STAMP_PREDICATE`)
-    and was reverted in review P2: that constant's negated pattern was the most
-    expensive read in the census. The guarantee is now the value, not the text —
-    so this test must keep measuring the value.
+    ⛔ Two earlier versions were wrong in opposite directions. The first made
+    this a shared SPELLING inside the census and was reverted in review P2:
+    that constant's negated pattern was the most expensive read in the census.
+    The second compared against a THIRD hand-copied literal (#12138 §6), so a
+    drift in `TRIVIAL_STAMP_PREDICATE` left this GREEN. ⛔ And building the
+    query from the constant is NOT sufficient by itself: a fixture whose only
+    draft Point is operator-mediated cannot observe the STATUS conjunct at all
+    (#12138 review P2 — measured: `'draft'` → `'archived'` and deleting the
+    status conjunct both stayed green, because the draft is excluded by
+    `NOT (n)-[:IMPL|NAND]-()` regardless of its status, and a fixture with no
+    NAND edge cannot observe the NAND half either). So the fixture now carries
+    the observables the constant's two vocabularies need: an UN-EDGED draft
+    Point (status drift reddens) and a NAND-only-edged claim (narrowing
+    `IMPL|NAND` to `IMPL` reddens).
+
+    The census keeps DERIVING its number (`graph_live - points_edged`, a
+    positive traversal): the negated pattern is a production cost, and a
+    handful of nodes is the only place it is affordable.
     """
     _chain(sdk, 3)
     _islands(sdk, 2)
@@ -629,16 +716,22 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     draft = sdk.create_point("statement", "draft neighbour", dedup=False,
                              status="draft")["id"]
     sdk.create_operator("IMPL", live, [draft])
+    # The STATUS observable: a draft with NO edge, so only the status conjunct
+    # can keep it out of the constant's population (a widened status vocabulary
+    # would count it and redden the equality below).
+    sdk.create_point("statement", "un-edged draft", dedup=False,
+                     status="draft")
+    # The NAND observable: a claim whose only `IMPL|NAND` edge is a NAND one, so
+    # narrowing the constant's edge alternation to `IMPL` counts it and reddens.
+    a, b = _islands(sdk, 2)
+    sdk.create_operator("NAND", a, [b])
     prop = _prop(sdk)
     rows = sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE "
-        "(n.is_operator IS NULL OR n.is_operator = false) "
-        "AND (n.status IS NULL OR n.status <> 'draft') "
-        "AND NOT (n)-[:IMPL|NAND]-() RETURN count(n)").result_set
+        f"{TRIVIAL_STAMP_PREDICATE} "
+        "RETURN count(n)").result_set
     # The block's number carries the SAME VALUE as `_trivial_stamp`'s own
-    # population (checked against the query below, which is written
-    # independently). #12116 review P2 reverted the shared-constant version:
-    # that constant's negated pattern was the most expensive read in the census.
+    # population, measured through the constant's own text.
     assert prop["operator_less_claims"] == int(rows[0][0]) == 2
     # A draft-edged claim is still edged, so it is NOT in this population — the
     # count is not "claims with no edges at all" by accident.
