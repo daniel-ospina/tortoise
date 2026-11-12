@@ -637,6 +637,23 @@ def test_the_briefs_restatements_all_recompute(report, control):
     assert f"hybrid, {caps} captures" in text, (
         f"§1's caption does not state the pooled denominator ({caps} captures)")
 
+    # ── §2's DRIFT INTERVAL, derived from each artifact's own clock: each run
+    # harvests at t0 and records `measured_at` at the END, so the harvest time is
+    # `measured_at − corpus.elapsed_s`. Round 5 found the fixed 427 s and 390 s
+    # unguarded — computable, therefore pinnable.
+    from datetime import datetime, timedelta
+
+    def _harvest_at(art):
+        return (datetime.strptime(art["measured_at"], "%Y-%m-%dT%H:%M:%SZ")
+                - timedelta(seconds=art["corpus"]["elapsed_s"]))
+
+    gap_s = int(round((_harvest_at(control) - _harvest_at(report)).total_seconds()))
+    assert f"the two harvests {gap_s} s apart" in text, (
+        f"§2 does not state the recomputed harvest-to-harvest interval ({gap_s} s)")
+    assert f"the hybrid sweep alone took {report['corpus']['elapsed_s']:.0f} s" in text, (
+        "§2 does not state the hybrid sweep's own wall clock, which is why the "
+        "interval cannot be the report gap")
+
     # ── §3's miss COUNT, which §3.1's crowding statistic is computed over.
     assert f"The {len(misses)} recorded hybrid k=3 misses" in text, (
         "§3 does not state the number of misses its crowding mean is taken over "
@@ -821,6 +838,17 @@ def test_main_writes_the_input_accounting_into_the_artifact_it_emits(tmp_path, m
             return _Proj()
 
         def tortoise_fts_query(self, *a, **kw):
+            # Every query for the FIRST name the arm asks about returns a hit, so
+            # the sample has BOTH a hit and a miss. With every query empty,
+            # `in_window == 0` and `exact_misses_total == recorded` under ANY
+            # formula — which is what made round 4's version of this assertion
+            # non-discriminating.
+            if not a or a[0] == "warm":
+                return []
+            self._target = getattr(self, "_target", a[0])
+            if a[0] == self._target:
+                return [{"id": "obj-1", "content": a[0],
+                         "kind": "point", "point_kind": "core:other"}]
             return []
 
         def close(self):
@@ -829,6 +857,12 @@ def test_main_writes_the_input_accounting_into_the_artifact_it_emits(tmp_path, m
     import tortoise.sdk as sdk_mod
     monkeypatch.setattr(sdk_mod, "TortoiseSDK", _Sdk, raising=True)
     monkeypatch.setattr(mod, "_has_embedder", lambda: False, raising=True)
+    # `run()` refuses a non-graph URI BEFORE the stub is ever constructed, so on
+    # the URI-less tier-2 lane this behavioural test would fail for a reason that
+    # has nothing to do with what it asserts. The gate checks the SCHEME only and
+    # nothing connects — every query goes to `_Sdk`.
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:@127.0.0.1:1/tortoise_test_matrix")
 
     out = tmp_path / "report.json"
     rc = mod.main(["--sessions-dir", str(corpus), "--population", "6",
@@ -844,5 +878,12 @@ def test_main_writes_the_input_accounting_into_the_artifact_it_emits(tmp_path, m
     assert rep["corpus"]["files"] == 1, (
         "corpus.files must come from the harvest, not a second glob of a live dir")
     assert rep["arms"]["exact_misses_recorded"] == len(rep["arms"]["exact_misses"])
-    assert rep["arms"]["exact_misses_total"] >= rep["arms"]["exact_misses_recorded"], (
-        "the artifact must state how many misses EXISTED beside how many it kept")
+    # The premise of the next assertion: at least one hit, or "total == recorded"
+    # holds for every formula and asserts nothing.
+    assert rep["arms"]["exact"]["3"]["in_window"] >= 1, rep["arms"]["exact"]["3"]
+    # The FORMULA, not a tautology: misses must be counted against the whole
+    # sample, not against the 200-cap list the artifact kept.
+    assert rep["arms"]["exact_misses_total"] == (
+        rep["corpus"]["sample"] - rep["arms"]["exact"]["3"]["in_window"]), (
+        "exact_misses_total must be sample − in_window, not len(sample) nor "
+        "len(exact_misses)")

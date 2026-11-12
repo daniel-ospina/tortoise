@@ -54,7 +54,9 @@ skipped. The write-back was attempted and refused — §10.
 Three consequences decide the shape of the measurement, and none of them was on the issue:
 
 1. **`limit=3` is not "3 candidates".** `search_graph` unions the rows of *every* derived query into one set.
-   **Measured at the `max_queries=15` budget** (hybrid, 20 captures — the whole sweep, not the k=3 case):
+   **Measured at the `max_queries=15` budget** (hybrid, 20 captures — the whole sweep, not the k=3 case; ⚠️ and each
+group is **15 consecutive names from ONE class block**, because the sample is built class by class, so these are not
+mixed-kind captures and the union is measured on the most self-similar groups the sample can form):
 
    | per-query `limit` | mean candidates | min | max |
    |---|---|---|---|
@@ -104,7 +106,7 @@ is written by the fleet's own capture hook; the two committed artifacts harveste
 **103,087** (control) distinct definite descriptions, a 0.18 % drift between two runs whose HARVESTS were ~7 minutes
 apart (not ~60 s: each run harvests first, and the hybrid sweep alone took 390 s — `measured_at − elapsed_s` puts the
 two harvests 427 s apart). ⛔ **That
-0.18 % is a floor from a 61-second gap, NOT a bound on between-run variation**, and this corpus is not monotone
+0.18 % is a floor from that 427-second gap, NOT a bound on between-run variation**, and this corpus is not monotone
 under this harvest: re-running the committed `harvest()` over the same nine files ~2 h later (16:37Z) returned
 **91,725** distinct definite descriptions — **−10.9 %** — *fewer* than the earlier artifact, which appends alone
 cannot produce. The mechanism is unidentified and this document makes no claim about it (the capture hook appends;
