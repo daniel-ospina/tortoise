@@ -1285,6 +1285,118 @@ def _block_bodies(changelog: str) -> list[str]:
             for a, b in itertools.pairwise([*starts, len(changelog)])]
 
 
+# ⛔ ONE ORDINAL RECOGNISER FOR BOTH SITES — the module-wide sweep and the pin's own
+# read of the SCOPE paragraph — accepting `file's` in EITHER position and case-blind.
+# ⛔ THE PATTERNS LIVE HERE SO BOTH READERS CAN NAME THEM: the pin parses with them,
+# and `test_every_declared_sweep_arm_refuses_a_stale_restatement` drives the
+# uniqueness scan with them. Re-spelling one in the test would create a SECOND
+# literal copy, which the scan itself refuses.
+_CITATION_PAIR_PATTERN = r"\*\*(\d+) of (\d+)\*\* blocks cite a comment id"
+_CITATION_VERSION_PATTERN = r"citing versions: (v[^—]+)"
+_CITATION_COMPLEMENT_PATTERN = r"\*\*(\d+) of (\d+)\*\* cite none"
+_D2_ORDINAL_PATTERN = (r"the (?:file's )?(first|second) of the (?:file's )?"
+                       r"two v3\.33 entries")
+
+
+def _citation_ids(text: str) -> list[str]:
+    """Every comment id `text` cites, in ANY form `_CITATION_RE` accepts."""
+    return [permalink or inline for permalink, inline in _CITATION_RE.findall(text)]
+
+
+def _refuse_a_duplicated_statement(text: str, pattern: str, label: str) -> None:
+    """Refuse a patterned statement that appears more than once in `text`.
+
+    ⛔ A HELPER SO THE ARM IS REACHABLE FROM SYNTHETIC TEXT: inline, deleting it left
+    the file green (measured) while the comment above it still promised the scan.
+    """
+    found = len(re.findall(pattern, text))
+    assert found == 1, (
+        f"{label} must appear exactly ONCE (found {found}) — a second patterned copy "
+        "can shadow the one parsed below, and a bold duplicate whose numbers match "
+        "would pass the value sweep, so the count is what refuses both")
+
+
+def _refuse_unresolvable_evidence(prose: str, block_texts: list[str], *,
+                                  carrier: str | None = None) -> None:
+    """Refuse a docstring permalink that no block can resolve — or that `carrier` lacks.
+
+    ⛔ A HELPER SO BOTH PERMALINK ARMS ARE REACHABLE FROM SYNTHETIC TEXT. Inline, they
+    were deletable in silence: measured at ``6dca05bd``, deleting either left the
+    file at 54 passed while the paragraph above still promised the sweep. The two
+    arms still differ — by the SCOPE OF ATTRIBUTION (`carrier`), never by the
+    spelling of the id.
+    """
+    resolvable = {identifier for block in block_texts
+                  for identifier in _citation_ids(block)}
+    cited = set(re.findall(r"#issuecomment-(\d{6,})", prose))
+    assert cited <= resolvable, (
+        f"these docstrings cite permalinks {sorted(cited - resolvable)}, which no "
+        "changelog block carries in any accepted form — an id a reader cannot resolve "
+        "to some block's evidence is the defect this pin exists to stop")
+    if carrier is not None:
+        carried = set(_citation_ids(carrier))
+        assert cited <= carried, (
+            f"this paragraph cites {sorted(cited - carried)}, but the block it "
+            f"points at carries {sorted(carried)}")
+
+
+def _assert_no_stale_citation_claim(text: str, blocks: list[str], citing: list[str],
+                                    *, lands_first: bool) -> list[str]:
+    """Refuse every STALE restatement of this changelog's citation measurement.
+
+    ⛔ WHY THE ARMS LIVE HERE. The double handful of sentences around this pin
+    enumerate what the sweep reads, and an INLINE arm cannot be checked for the shape
+    it claims: measured at head ``134495ba``, deleting the bold-pair arm (529
+    characters) or the complement arm (263) left the file at 54 passed, and the same
+    was still true at ``6dca05bd`` — the prose went on promising checks that no
+    longer ran, which is finding 1's class applied to the pin's own disclosure. As a
+    function of its TEXT, every arm is driven from synthetic input by
+    ``test_every_declared_sweep_arm_refuses_a_stale_restatement``.
+
+    THREE ARMS, each refusing one shape:
+
+    1. a BOLD count that RESTATES this measurement — its denominator is the number of
+       blocks, or the word ``blocks`` follows it (so a stale copy carrying a stale
+       denominator is still caught). ⛔ WHAT THIS COSTS, stated as the code performs
+       it: a bold count about something ELSE that is also counted in blocks-units (a
+       header count out of the same total) is REFUSED, because no reader can tell it
+       from a restatement — state such a count un-bolded. A bold pair counted in
+       other units is not read at all, and is asserted to pass.
+    2. ``the N blocks that cite nothing`` — the complement, restated in prose.
+    3. an ordinal sentence naming ``D2 — A``, recognised by ``_D2_ORDINAL_PATTERN``
+       (the same pattern the pin parses the SCOPE paragraph with), anchored so a true
+       remark about the OTHER v3.33 entry is not read as a misidentification.
+
+    Returns the ordinals it saw, so the caller can require that the module says which
+    of the two entries lands the block at all (a prose requirement, not a verdict).
+    """
+    measured_none = len(blocks) - len(citing)
+    allowed_bold = {(len(citing), len(blocks)), (measured_none, len(blocks))}
+    for match in re.finditer(r"\*\*(\d+) of (\d+)\*\*", text):
+        seen = (int(match.group(1)), int(match.group(2)))
+        if seen[1] != len(blocks) and not re.match(
+                r"\s+blocks?\b", text[match.end():]):
+            continue
+        assert seen in allowed_bold, (
+            f"this text states **{seen[0]} of {seen[1]}** somewhere; the detector "
+            f"measures {len(citing)} of {len(blocks)} citing a comment id and "
+            f"{measured_none} of {len(blocks)} citing nothing. A count that "
+            "restates this measurement must be one of those two — a stale copy "
+            "beside the checked one is the defect finding 1 was about")
+    for seen in re.findall(r"the (\d+) blocks? that cite nothing", text):
+        assert int(seen) == measured_none, (
+            f"this text restates the complement as 'the {seen} blocks that cite "
+            f"nothing'; measured {measured_none}")
+    ordinals = [word for sentence in re.split(r"(?<=[.)])\s+", text)
+                if "D2 — A" in sentence
+                for word in re.findall(_D2_ORDINAL_PATTERN, sentence, re.I)]
+    for word in ordinals:
+        assert (word.lower() == "first") == lands_first, (
+            f"this text calls the `D2 — A` block the {word.lower()} of the two v3.33 "
+            f"entries; measured, it is the {'first' if lands_first else 'second'}")
+    return ordinals
+
+
 def test_the_newest_block_body_starts_at_its_header_line() -> None:
     """The helper's documented extent IS what it returns: `_block_bodies(...)[0]`.
 
@@ -1561,21 +1673,16 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     module_source = re.sub(
         r"\s+", " ", Path(__file__).read_text(encoding="utf-8"))
     flat_doc = re.sub(r"\s+", " ", doc)
-    pair_pattern = r"\*\*(\d+) of (\d+)\*\* blocks cite a comment id"
+    pair_pattern = _CITATION_PAIR_PATTERN
     # ⛔ THE CAPTURE STARTS AT `v` so this pattern does not match its own source
     # line when the uniqueness scan runs over the module text (the pair and
     # complement patterns cannot self-match: their literals carry no digits).
-    version_pattern = r"citing versions: (v[^—]+)"
-    complement_pattern = r"\*\*(\d+) of (\d+)\*\* cite none"
+    version_pattern = _CITATION_VERSION_PATTERN
+    complement_pattern = _CITATION_COMPLEMENT_PATTERN
     for pattern, label in ((pair_pattern, "the count pair"),
                            (version_pattern, "the citing-version list"),
                            (complement_pattern, "the complement")):
-        found = len(re.findall(pattern, module_source))
-        assert found == 1, (
-            f"{label} must appear exactly ONCE in this module (found {found}) — a "
-            "second patterned copy can shadow the one parsed below, and a bold "
-            "duplicate whose numbers match would pass the value sweep, so the count "
-            "is what refuses both")
+        _refuse_a_duplicated_statement(module_source, pattern, label)
     stated = re.search(pair_pattern, flat_doc)
     versions = re.search(version_pattern, flat_doc)
     complement = re.search(complement_pattern, flat_doc)
@@ -1584,62 +1691,35 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
         "that makes the claim this pin checks")
     blocks = _block_bodies(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
     citing = [block for block in blocks if _CITATION_RE.search(block)]
-    # ⛔ AND EVERY BOLD `**N of M**` PAIR, plus every "the N blocks that cite
-    # nothing" and the ordinals below — the SHAPES the docstring enumerates, not
-    # "every phrasing" (measured: a plain "Only 3 of 39 blocks cite a comment id."
-    # is unswept and stays green, which is why the docstring says so). Matching only
-    # the patterned sentence left the class open in the other direction: the count
-    # also appeared
-    # as `count is **N of M**` in THIS pin's docstring, and the complement as
-    # `the N blocks that cite nothing`, so a stale copy could sit beside the
-    # checked one (measured: editing this pin's own copy left all five tests green,
-    # and a synthetic v3.35 release re-created the drift with the sibling
-    # re-measured but this copy left at the old pair). EVERY bold pair is a claim,
-    # and the rule below is the implemented one: a bold pair must be the measured
-    # citing count OR its complement, and any other pair is stale. The historical
-    # `3 of 39` the sibling narrates passes only because it is NOT bold (measured:
-    # bolding it reds this pin, as does any third value).
-    measured_pair = (len(citing), len(blocks))
-    measured_none = len(blocks) - len(citing)
-    # ⛔ BOTH measured values are accepted, because BOTH are TRUE statements about
-    # the file (4 of 39 cite, 35 of 39 do not) — refusing the complement's value
-    # over-blocked correct prose (measured: a true "The **35 of 39** blocks cite
-    # nothing" reds with a message telling the lane to re-measure a right number).
-    # What is refused is any OTHER pair: a number that matches neither measurement is
-    # a stale claim, and there is no third true value to confuse it with.
-    allowed_bold = {measured_pair, (measured_none, len(blocks))}
-    for seen in re.findall(r"\*\*(\d+) of (\d+)\*\*", module_source):
-        assert tuple(int(part) for part in seen) in allowed_bold, (
-            f"this module states **{seen[0]} of {seen[1]}** somewhere; the detector "
-            f"measures {measured_pair[0]} of {len(blocks)} citing a comment id and "
-            f"{measured_none} of {len(blocks)} citing nothing. Every bold "
-            "`**N of M**` pair must be one of the two measurements — a stale copy "
-            "beside the checked one is the defect finding 1 was about (a bold count "
-            "in another SHAPE is not swept; see the docstring's enumeration)")
-    for seen in re.findall(r"the (\d+) blocks? that cite nothing", module_source):
-        assert int(seen) == measured_none, (
-            f"this module restates the complement as 'the {seen} blocks that cite "
-            f"nothing'; measured {measured_none}")
-    # ⛔ ANCHORED TO SENTENCES THAT NAME `D2 — A`, so BOTH sites judge claims ABOUT
-    # that block only: a true statement about the OTHER v3.33 entry ("the second of
-    # the two v3.33 entries landed #11827") is not a misidentification of the
-    # lander, and over-blocking it is a false refusal (measured before the anchor:
-    # such a sentence placed before the SCOPE sentence redded it).
-    #
-    # ⛔ AND ONE RECOGNISER FOR BOTH SITES. The pin's own docstring uses the shape
-    # "the first of the file's two v3.33 entries", while an earlier cut of this
-    # sweep tolerated `file's` in the other position — so a truthful sentence was
-    # accepted by the sweep and refused by the pin (measured). This pattern accepts
-    # `file's` in EITHER position, and both sites read it.
-    ordinal_pattern = (r"the (?:file's )?(first|second) of the (?:file's )?"
-                       r"two v3\.33 entries")
-    d2_sentences = [re.sub(r"\s+", " ", sentence)
-                    for sentence in re.split(r"(?<=[.)])\s+", module_source)
-                    if "D2 — A" in sentence]
-    ordinals = [word for sentence in d2_sentences
-                for word in re.findall(ordinal_pattern, sentence, re.I)]
-    assert ordinals, (
-        "the module must say which of the two v3.33 entries lands `D2 — A`")
+    # ⛔ AND EVERY BOLD count that RESTATES this measurement, plus every "the N
+    # blocks that cite nothing" and the ordinals below — the SHAPES the docstring
+    # enumerates, not "every phrasing" (measured: a plain "Only 3 of 39 blocks cite a
+    # comment id." is unswept and stays green, which is why the docstring says so).
+    # Matching only the patterned sentence left the class open in the other
+    # direction: the count also appeared as `count is **N of M**` in THIS pin's
+    # docstring, and the complement as `the N blocks that cite nothing`, so a stale
+    # copy could sit beside the checked one (measured: editing this pin's own copy
+    # left all five tests green, and a synthetic v3.35 release re-created the drift
+    # with the sibling re-measured but this copy left at the old pair). ⛔ WHAT
+    # "RESTATES" MEANS, as the code decides it: a bold pair whose denominator is the
+    # block count, or which the word `blocks` follows. A bold count in OTHER units is
+    # not read at all — measured: an unrelated pair of two items out of three red
+    # with a message telling the lane to re-measure the changelog, a false block on a
+    # true sentence. A bold count about something else ALSO counted in blocks-units is
+    # refused and must be written un-bolded — no reader can tell it from a stale copy.
+    # The historical `3 of 39` the sibling narrates passes only because it is NOT bold
+    # (measured: bolding it reds this pin, as does any third value).
+    # ⛔ AND EVERY RESTATEMENT OF THIS MEASUREMENT — but only a restatement: the
+    # arms live in `_assert_no_stale_citation_claim` (bold count, complement, ordinal),
+    # and they are driven from synthetic text by
+    # `test_every_declared_sweep_arm_refuses_a_stale_restatement`. ⛔ DRIVING THEM IS
+    # HALF: `test_the_citation_pin_calls_every_arm_it_declares` reads THIS function's
+    # source and requires the call, because a helper test says nothing about whether
+    # the pin still reaches it (measured: deleting three call sites left the file at
+    # 55 passed). So deleting an arm OR its call site reds, instead of silently
+    # narrowing this sweep while the paragraph above still promises it. Both measured values are accepted by the bold arm, because BOTH are
+    # TRUE statements about the file; a count matching neither is stale, and a bold
+    # count about something counted in OTHER units is not read at all.
 
     assert (int(stated.group(1)), int(stated.group(2))) == (len(citing), len(blocks)), (
         f"the docstring states {stated.group(1)} of {stated.group(2)} blocks citing a "
@@ -1706,22 +1786,21 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
                      for sentence in re.split(r"(?<=[.)])\s+", doc)
                      if "D2 — A" in sentence]
     ordinal = next((match for match in
-                    (re.search(ordinal_pattern, sentence, re.I)
+                    (re.search(_D2_ORDINAL_PATTERN, sentence, re.I)
                      for sentence in doc_sentences)
                     if match), None)
     assert ordinal, (
         "the SCOPE paragraph must say WHICH of the two v3.33 entries it means — "
         "\"the first/second of the two v3.33 entries\" — so this pin can check it")
     lands_first = lands_d2[0] == v333[0]
+    ordinals = _assert_no_stale_citation_claim(
+        module_source, blocks, citing, lands_first=lands_first)
+    assert ordinals, (
+        "the module must say which of the two v3.33 entries lands `D2 — A`")
     assert (ordinal.group(1).lower() == "first") == lands_first, (
         "the SCOPE paragraph calls the `D2 — A` block the "
         f"{ordinal.group(1).lower()} of the two v3.33 entries; measured, it is the "
         f"{'first' if lands_first else 'second'}")
-    for word in ordinals:
-        assert (word.lower() == "first") == lands_first, (
-            f"this module calls the `D2 — A` block the {word.lower()} of the two "
-            f"v3.33 entries somewhere; measured, it is the "
-            f"{'first' if lands_first else 'second'}")
     # ⛔ AN ISSUE STATED BESIDE THE BLOCK'S PATH must be the issue that block
     # records. The claim this checks is the `(issue #<n>)` the prose puts NEXT TO
     # the path it cites — not the first `issue #<n>` anywhere in the docstring, and
@@ -1758,20 +1837,187 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
         filter(None, (ast.get_docstring(node) for node in ast.walk(tree)
                       if isinstance(node, (ast.Module, ast.FunctionDef,
                                            ast.AsyncFunctionDef, ast.ClassDef)))))
-    lander_ids = set(re.findall(r"#issuecomment-(\d{6,})", lands_d2[0]))
-    prose_ids = set(re.findall(r"#issuecomment-(\d{6,})", prose))
-    assert prose_ids <= lander_ids, (
-        f"these docstrings cite permalinks {sorted(prose_ids - lander_ids)} that the "
-        "block they point at does not carry — a permalink a reader cannot resolve to "
-        "the evidence is the defect this pin exists to stop")
-    named_permalinks = set(re.findall(r"#issuecomment-(\d{6,})", doc))
-    assert named_permalinks, (
+    # ⛔ RESOLUTION IS AGAINST EVERY CITATION FORM A BLOCK MAY CARRY, not only the
+    # permalink spelling. `_CITATION_RE` accepts four forms, and building the
+    # resolvable set from `#issuecomment-` alone refused a TRUE sentence that
+    # credited a block's INLINE-form id in permalink spelling — while telling the
+    # lane "the block they point at does not carry" it, which the block does carry
+    # (measured: the v3.32 block carries `comment 6667121779`, and a docstring naming
+    # it as a permalink red). The two arms below still differ — by the SCOPE OF
+    # ATTRIBUTION, never by the spelling of the id.
+    _refuse_unresolvable_evidence(prose, blocks)
+    # ⛔ SCOPED TO THE WHOLE SIBLING DOCSTRING, deliberately: that docstring is the
+    # paragraph that carries the claim, so a permalink written in it is read as
+    # evidence for the claim, and one belonging to another block is refused here
+    # (the module-wide arm above is the one that admits other blocks).
+    assert set(re.findall(r"#issuecomment-(\d{6,})", doc)), (
         "the sibling docstring must name the permalink it relies on")
-    assert named_permalinks <= set(
-        re.findall(r"#issuecomment-(\d{6,})", lands_d2[0])), (
-        f"the SCOPE paragraph cites {sorted(named_permalinks)} but the block it "
-        "points at carries "
-        f"{sorted(set(re.findall(r'#issuecomment-(\d{6,})', lands_d2[0])))}")
+    _refuse_unresolvable_evidence(doc, blocks, carrier=lands_d2[0])
+
+
+
+def test_every_declared_sweep_arm_refuses_a_stale_restatement() -> None:
+    """Every arm the sweep declares actually refuses — from synthetic text.
+
+    ⛔ THE ARMS PINNED THEIR OWN DISCLOSURE BY NOTHING. Measured at head
+    ``134495ba`` and again at ``6dca05bd``: deleting the bold-pair arm (529
+    characters) or the complement arm (263) left the file at 54 passed, and
+    deleting either permalink arm or the uniqueness scan did the same — while the
+    comments above them went on promising every one of those checks. That is finding
+    1's class (a stated measurement nothing keeps true) applied to the pin's own
+    disclosure, and it is the lesson this file already applied to ``_CITATION_RE``
+    via ``_REJECTED_CITATION_SHAPE``. Each arm is a function of its TEXT for exactly
+    this reason, and each is driven below with a value built from the measurements,
+    so removing or narrowing an arm reds HERE.
+
+    ⛔ AND THE OTHER DIRECTION, in both places where it was measured wrong. A bold
+    count about something counted in OTHER units must pass (the earlier rule refused
+    a true, unrelated sentence), and a permalink spelling of an id a block carries in
+    its INLINE form must pass (the earlier, lander-only set refused a true sentence
+    and called the id unresolvable). Both are asserted, so neither can re-widen
+    quietly.
+
+    ⛔ THE FIXTURES ARE BUILT AT RUNTIME, never written as literal text here: the
+    sweep reads this whole module, so a stale count spelled out in this file would be
+    refused against the FILE rather than against the synthetic text, and this test
+    would stop testing the arms.
+    """
+    blocks = _block_bodies(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
+    citing = [block for block in blocks if _CITATION_RE.search(block)]
+    # ⛔ THE LANDER IS WRITTEN IN TWO PIECES so this file does not read as a second
+    # claim about it to the module-wide ordinal sweep.
+    lands_d2 = [block for block in blocks if "D2 " + "— A" in block]
+    assert len(lands_d2) == 1, "exactly one block must land the decision"
+    v333 = [block for block in blocks
+            if _BLOCK_VERSION_RE.match(block).group(1) == "3.33"]
+    lands_first = lands_d2[0] == v333[0]
+    wrong_ordinal = "second" if lands_first else "first"
+    # ⛔ A NUMERATOR THAT IS STALE IN BOTH DIRECTIONS: `k + 1` collides with the
+    # complement when `k + 1 == n - k` (true at 19 citing of 39), and the case would
+    # then pass a value the arm is right to accept while reporting the arm dead.
+    stale_numerator = len(citing) + 1
+    if (stale_numerator, len(blocks)) in {(len(citing), len(blocks)),
+                                          (len(blocks) - len(citing), len(blocks))}:
+        stale_numerator += 1
+    stale_restatements = (
+        ("the bold-pair arm",
+         f"this text states **{stale_numerator} of {len(blocks)}** somewhere"),
+        ("the complement arm",
+         f"it restates the {len(blocks) - len(citing) + 1} blocks that cite nothing"),
+        ("the ordinal arm",
+         f"the {wrong_ordinal} of the two v3.33 entries landed `D2 " + "— A`"),
+        ("the ordinal arm, `file's` spelling",
+         f"the file's {wrong_ordinal} of the two v3.33 entries landed `"
+         + "D2 — A`"),
+    )
+    for label, stale in stale_restatements:
+        try:
+            _assert_no_stale_citation_claim(
+                stale, blocks, citing, lands_first=lands_first)
+        except AssertionError:
+            continue
+        raise AssertionError(
+            f"{label} refused nothing — {stale!r} is a stale restatement of the "
+            f"measured {len(citing)} of {len(blocks)}, and that arm exists to refuse "
+            "it. If the arm was removed or narrowed, the sweep's comment above now "
+            "claims a check that does not run.")
+    # ⛔ THE BOLD ARM'S FOLLOW-WORD CLAUSE, without which a stale copy that ALSO
+    # carries a stale total (its denominator is not the block count) would pass.
+    try:
+        _assert_no_stale_citation_claim(
+            f"stale: **{stale_numerator} of {len(blocks) + 3}** blocks cite a "
+            "different thing", blocks, citing, lands_first=lands_first)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(
+            "the bold arm's follow-word clause is gone — a stale copy that also "
+            "carries a stale total is no longer refused")
+    # ⛔ BOTH PERMALINK ARMS. An id no block carries is refused; an id a block
+    # carries only in its INLINE form is ACCEPTED; and a resolvable id the
+    # paragraph's own block does not carry is refused by the `carrier` arm.
+    unresolvable = "#issuecomment-" + "9" * 10
+    carried_elsewhere = [identifier for block in blocks
+                         if block != lands_d2[0]
+                         for identifier in _citation_ids(block)]
+    assert carried_elsewhere, (
+        "no block other than the lander carries a comment id, so the permalink "
+        "arm's accepting direction cannot be exercised — re-read this pin before "
+        "dropping it")
+    permalink_arm_cases = (
+        ("the module-wide permalink arm",
+         lambda: _refuse_unresolvable_evidence(unresolvable, blocks)),
+        ("the carrier arm",
+         lambda: _refuse_unresolvable_evidence(
+             f"``#issuecomment-{carried_elsewhere[0]}``", blocks,
+             carrier=lands_d2[0])),
+    )
+    for label, call in permalink_arm_cases:
+        try:
+            call()
+        except AssertionError:
+            continue
+        raise AssertionError(
+            f"{label} refused nothing — a docstring permalink no block can resolve "
+            "(or one another block carries) must be refused, or the arm is gone.")
+    _refuse_unresolvable_evidence(
+        f"its evidence is ``#issuecomment-{carried_elsewhere[0]}``", blocks)
+    # ⛔ THE UNIQUENESS SCAN, driven the same way: the same patterned sentence twice
+    # in one text must be refused, and a single copy accepted.
+    sentence = f"**{len(citing)} of {len(blocks)}** blocks cite a comment id"
+    try:
+        _refuse_a_duplicated_statement(
+            f"{sentence} and again {sentence}", _CITATION_PAIR_PATTERN,
+            "the count pair")
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(
+            "the uniqueness scan refused a duplicated count pair — a second copy is "
+            "prose no pin reads, which is the drift that scan exists to stop")
+    _refuse_a_duplicated_statement(sentence, _CITATION_PAIR_PATTERN, "the count pair")
+    # ⛔ THE OUT-OF-SCOPE DIRECTION for the bold arm, asserted rather than described:
+    # a pair counted in other units is not a restatement and must not be refused.
+    assert _assert_no_stale_citation_claim(
+        f"unrelated: **{len(citing)} of {len(citing) + 2}** fixtures carry a header",
+        blocks, citing, lands_first=lands_first) == [], (
+        "the bold arm refuses a pair counted in other units — a true sentence about "
+        "something else, which is the false block this arm was scoped to remove")
+
+
+
+
+def test_the_citation_pin_calls_every_arm_it_declares() -> None:
+    """The pin's own source must CALL each arm — a helper test proves only the helper.
+
+    ⛔ THE OTHER HALF OF THE PREVIOUS TEST, measured separately. Driving the helpers
+    from synthetic text pins the ARM; it says nothing about whether the pin still
+    reaches it. Measured at ``6dca05bd`` on the helper-based cut: deleting the
+    `_refuse_unresolvable_evidence(prose, …)` call, the `carrier=` call, or the
+    uniqueness call left the file at 55 passed — three silent unwirings of checks the
+    comments above them still promised. This reads the pin's SOURCE and requires each
+    call, so an unwiring reds here with the arm's name.
+
+    ⛔ A WIRING check, not a behaviour check: it does not prove the arm refuses the
+    right input (the previous test does), only that it is reached. Both are needed,
+    and neither substitutes for the other.
+    """
+    source = inspect.getsource(
+        test_the_citation_scope_docstring_states_the_measured_count)
+    required = {
+        "the sweep arms (bold, complement, ordinal)":
+            "_assert_no_stale_citation_claim(",
+        "the uniqueness scan": "_refuse_a_duplicated_statement(",
+        "the module-wide permalink arm":
+            "_refuse_unresolvable_evidence(prose",
+        "the carrier arm": "_refuse_unresolvable_evidence(doc",
+    }
+    missing = sorted(name for name, marker in required.items()
+                     if marker not in source)
+    assert not missing, (
+        f"the pin no longer calls {missing} — the sweep's comment above it still "
+        "claims those checks run, and no other test reads the call sites (a "
+        "helper-level test says nothing about whether the pin reaches it)")
 
 
 def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
