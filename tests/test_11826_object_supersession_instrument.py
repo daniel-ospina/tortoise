@@ -265,14 +265,17 @@ def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
     # ⛔ AND ``archived`` is a TRAP the string must warn about, not a repair it may
     # recommend: archiving clears this check's anchor while EP strips the input
     # exactly as before, so a re-audit reads CLEAN over a still-degenerate factor.
-    # Both halves are measured here so the warning cannot rot. ⛔ The arm is an
-    # OPERATOR: EP builds the factor and records the strip, so the clause must say
-    # that — not the direct-edge "excluded BEFORE evaluation" wording, which is true
-    # one mechanism over (#12111 review).
-    assert "does NOT clear this" in issue.fix, issue.fix
-    assert "EP still builds the factor" in issue.fix, issue.fix
-    assert "no skipped-factor record appears either way" not in issue.fix, \
-        "the operator arm DOES record a skip: " + issue.fix
+    # Both halves are measured here so the warning cannot rot.
+    # ⛔ Archiving costs nothing to the DEFICIT — and, measured below, it DOES clear
+    # the FINDING (the archived node leaves the anchor while EP still strips the
+    # input). The string must say exactly that, or a reader archives, sees a clean
+    # re-audit and stops. ⛔ It must NOT say "does NOT clear this" (#12111 review):
+    # the anchor is ``status='superseded'``, so archiving DOES clear the row.
+    assert "SILENCES THIS CHECK WITHOUT CLEARING THE DEFICIT" in issue.fix, issue.fix
+    assert "does NOT clear this" not in issue.fix, issue.fix
+    assert "ONE left is skipped as degenerate" in issue.fix, (
+        "this row is a two-input operator, so its archive clause must name the "
+        "arm that actually fires: " + issue.fix)
     sdk.update_entity(v1["id"], status="archived")
     assert _issues(sdk, "superseded_object_active_edges") == [], \
         "archiving did not clear the finding — the string's warning is now wrong"
@@ -380,6 +383,82 @@ def test_a_direct_edge_gets_the_direct_edge_upkeep(sdk):
     assert "skipped-factor record" in issue.detail, issue.detail
     assert "it is a DIRECT edge" in issue.fix, issue.fix
     assert "PRESERVES the edge idx" not in issue.fix, issue.fix
+
+
+def test_a_successorless_direct_edge_names_the_wiring_it_silences(sdk):
+    """The successorless arm's archive clause is SPLIT by mechanism, and both
+    halves must be true of their own row.
+
+    An OPERATOR input's factor is built and its terminal input stripped (the
+    ``degenerate`` record); a DIRECT edge builds no factor at all, because the row
+    is excluded before evaluation. Archiving silences this check in both cases —
+    the anchor is ``status='superseded'``, so the archived node leaves it — but only
+    the first loses a belief EP had actually assembled. One sentence covering both
+    was FALSE on one of them, so the clause branches and this pins the second arm
+    (the first is pinned by
+    ``test_a_successorless_object_is_repaired_by_naming_the_successor``, which
+    measures ``skipped_factors == ['degenerate']``).
+    """
+    o = _obj(sdk, "PolicyV1")
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    sdk.create_direct_edge("IMPL", p["id"], o["id"])
+    # SUPERSEDED with a successor name no Object answers: the successorless arm.
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
+            "o.supersededBy = 'PolicyGone'", {"i": o["id"]})
+
+    # The mechanism, measured: a direct edge into a terminal endpoint assembles
+    # NOTHING, so there is no skipped-factor record for the clause to appeal to.
+    run = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
+    assert not run.get("skipped_factors"), run.get("skipped_factors")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == o["id"]]
+    assert issues, "a successorless direct edge is still lost wiring"
+    fix = issues[0].fix
+    assert "No :Object answers the successor name" in fix, fix
+    assert "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING" in fix, fix
+    assert "EP still strips the terminal input" not in fix, (
+        "a direct edge builds no factor, so nothing is stripped: " + fix)
+    # Archiving does silence the CHECK (the finding goes away) — the clause says
+    # so, and this measures it rather than trusting the sentence.
+    sdk.update_entity(o["id"], status="archived")
+    assert _issues(sdk, "superseded_object_active_edges") == [], \
+        "archiving did not clear the finding — the clause's premise is wrong"
+
+
+def test_a_successorless_neutral_operator_loses_no_belief_by_archiving(sdk):
+    """The archive clause's NEUTRAL arm: nothing was carried, so nothing is lost.
+
+    The sibling neutral test has a RESOLVABLE successor and therefore pins the
+    ``fix`` arm of the resolvable path. The successorless path is a different
+    string, and it must not tell a reader that archiving costs a belief this
+    operator never transferred (``direction='-'`` returns from
+    ``_update_nary_factor`` before any pair math).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
+    assert _q(sdk, "MATCH (o {id:$i}) RETURN o.direction", {"i": op["id"]}) == \
+        [["-"]], "fixture drifted: the operator is not neutral"
+    # SUPERSEDED with a successor name no Object answers: the successorless arm.
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
+            "o.supersededBy = 'PolicyGone'", {"i": v1["id"]})
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues, "a successorless neutral operator is still leftover wiring"
+    fix = issues[0].fix
+    assert "No :Object answers the successor name" in fix, fix
+    assert "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING" in fix, fix
+    assert "transfers NO confidence by design" in fix, (
+        "a neutral operator carries nothing, so archiving cannot cost a belief: "
+        + fix)
+    assert "degenerate" not in fix, (
+        "neither leg flows, so no factor is stripped and nothing is degenerate: "
+        + fix)
+    sdk.update_entity(v1["id"], status="archived")
+    assert _issues(sdk, "superseded_object_active_edges") == [], \
+        "archiving did not clear the finding — the clause's premise is wrong"
 
 
 def test_a_supersession_chain_points_the_repair_at_the_live_head(sdk):
@@ -1344,6 +1423,52 @@ def test_an_operators_arity_is_not_asserted(sdk):
 
 
 # ── 3. the history surface stops hiding a terminal chain head ──────
+
+
+def test_a_flag_dead_operator_is_not_reported(sdk):
+    """EP's operator filter requires ``coalesce(outdated, false) = false``.
+
+    A FLAG-dead operator never builds a factor, so the Object's supersession
+    loses nothing through this edge and a HIGH finding would carry a causal claim
+    that is false of the node in front of the reader — the ``invalidate_point``
+    shape, which stamps only the legacy flag and leaves ``status`` alone.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    assert _issues(sdk, "superseded_object_active_edges"), \
+        "fixture broken: the live-operator case must report"
+    _q(sdk, "MATCH (o:Point {id:$i}) SET o.outdated = true", {"i": op["id"]})
+    assert _issues(sdk, "superseded_object_active_edges") == [], (
+        "a flag-dead operator was reported as an active factor — EP never builds "
+        "it (#7075's predicate is coalesce(outdated,false) = false)")
+
+
+def test_every_repair_names_the_section_3_1_triage(sdk):
+    """ONTOLOGY §3.1: a per-edge DISPOSITION, never a blanket re-point.
+
+    §3.1 requires carry / drop / **pend** per edge with the rationale recorded,
+    and a NAND that MOTIVATED the correction must not re-attach — the successor
+    would inherit the refutation its predecessor was retired in response to
+    (Case 2). The check cannot tell that case apart, so EVERY arm must name both,
+    say that `pend` has no door today, and warn that a raw write is not
+    rebuild-durable (IMPL/NAND are absent from ``STRUCTURAL_REPOINT_RELS``).
+    """
+    p = sdk.create_point("statement", "the gateway refutes the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_operator("NAND", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    issues = _issues(sdk, "superseded_object_active_edges")
+    assert issues, "fixture broken: the NAND defund was not reported"
+    for issue in issues:
+        assert "ONTOLOGY §3.1's per-edge triage" in issue.fix, issue.fix
+        assert "may CARRY" in issue.fix and "must NOT re-attach" in issue.fix, \
+            f"a repair prescribes attaching a NAND unconditionally: {issue.fix!r}"
+        assert "no door implements `pend` today" in issue.fix, issue.fix
+        assert "is not rebuild-durable" in issue.fix, issue.fix
 
 
 def test_historical_knowledge_reports_the_current_points_status(sdk):

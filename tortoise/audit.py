@@ -1070,6 +1070,109 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"{_quoted(_status_or_flag(status, s['carrier_outdated']))} "
                 f"and it {_head_fact(s)}")
 
+    def _triage(s: dict) -> str:
+        """ONTOLOGY §3.1's per-edge DISPOSITION, appended to every 4b repair.
+
+        ``§3.1`` requires one of carry / drop / **pend** per edge, with the
+        rationale recorded, and it states a case that every "re-point onto the
+        successor" wording above gets wrong on its own: a NAND that MOTIVATED the
+        supersession must **not** re-attach, because the successor would inherit
+        the very refutation its predecessor was retired in response to (Case 2).
+        This check cannot tell that refutation from one that still applies — the
+        rationale is not in the graph — so it names both arms rather than
+        prescribing the one that repairs a belief the reader may not hold.
+
+        ⛔ ``pend`` has no implementation (``docs/INGEST_CONTRACT.md``: the §3.1
+        triage "is not implemented and has no open tracker"), so the string
+        records the intent instead of naming a door that does not exist.
+
+        ⛔ The §3.1 sentence has THREE arms, not two — "a refutation that MOTIVATED
+        a correction never re-attaches; **a refutation that still applies is
+        kept**" (``docs/ONTOLOGY.md``). Naming only {drop, pend} would push the
+        reader holding a still-applicable NAND to drop it, which §3.1 forbids just
+        as clearly as it forbids the re-attach.
+
+        ⛔ The durability caveat rides here because it is true of EVERY repair
+        above: ``IMPL``/``NAND`` are not in ``STRUCTURAL_REPOINT_RELS``, so a raw
+        edge write is not replayed by ``rebuild_all`` and this finding returns
+        after the next rebuild — a repair that reads clean until then is exactly
+        the failure the sentence prevents.
+        """
+        return (
+            f" ⛔ Dispose of this {s['edge_type']} input by ONTOLOGY §3.1's "
+            "per-edge triage, not by a blanket re-point: an IMPL may CARRY to the "
+            "successor, and so may a NAND that STILL APPLIES (a refutation that "
+            "still applies is kept) — while a NAND that MOTIVATED the correction "
+            "must NOT re-attach; drop it, or record it as pending per §3.1 (no "
+            "door implements `pend` today). An unjournalled edge write is not "
+            "rebuild-durable: `rebuild_all` replays the event log, and this "
+            "finding returns after the next rebuild")
+
+    def _archive_clause(s: dict) -> str:
+        """What ``archived`` does to THIS row — and it is never the repair.
+
+        ⛔ ONE source for every arm that mentions archiving, because the mechanism
+        differs BY ROW and a single sentence about it was false on the rows it did
+        not fit (measured: an id-less DIRECT-edge row emitted a ``fix`` promising
+        "EP still strips its input … the same degenerate factor" beside a
+        ``detail`` that correctly said EP builds no factor for a direct edge at
+        all). The four mechanisms, in the same order ``_active_edge_detail``
+        spells them:
+
+          * a SHAPED non-``:Point`` endpoint is in NEITHER EP arm — no factor, no
+            skipped-factor record;
+          * a DIRECT edge is excluded before evaluation — same, nothing stripped;
+          * a NEUTRAL operator (``direction='-'``) transfers NO confidence by
+            design, so archiving loses no belief — only the stale edge survives;
+          * an OPERATOR input IS stripped, and the factor is re-scored over its
+            REMAINING inputs: ONE left is skipped as ``degenerate``, TWO OR MORE
+            run without it, and a DIRECTIONAL operator is skipped outright when
+            the stripped input is its idx-0 source (``source_stripped``). So
+            "degenerate" is the wording of a two-input bidirectional operator
+            only, and claiming it everywhere is the over-claim this arm replaces.
+
+        The CONSTANT is the conclusion: the archived Object leaves this check's
+        anchor (``status='superseded'``), so a re-audit reads CLEAN while the
+        wiring defect is untouched. The reader must not be able to archive, re-audit
+        and stop.
+        """
+        anchor = ("an archived Object leaves this anchor (it is anchored on "
+                  "``status='superseded'``), so a re-audit reads CLEAN")
+        lead = ((f"Archiving it instead — tortoise_update_entity({_quoted(s['sup_id'])}, "
+                 f"{{'status': 'archived'}}) — ")
+                if s["sup_id"] is not None else "Archiving it instead ")
+        if not s["is_operator"]:
+            if s["shape"]:
+                return lead + (
+                    "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: EP builds no "
+                    "factor for that endpoint in EITHER arm, so " + anchor + " "
+                    "over a claim whose support was never there — and the claim's "
+                    "support has to be wired through a :Point operator (or the "
+                    "shape cleared) regardless")
+            return lead + (
+                "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: this is a DIRECT "
+                "edge, so EP assembles no factor for it either way (the row is "
+                "excluded before evaluation while the endpoint is terminal, and no "
+                "skipped-factor record appears for it) — " + anchor + " over the "
+                "same unwired claim, which must still be deleted or re-pointed "
+                "onto whatever now carries it")
+        fwd, bwd = direction_flows(s["direction"])
+        if not (fwd or bwd):
+            return lead + (
+                "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: this operator's "
+                "direction transfers NO confidence by design, so archiving loses "
+                "no belief — but " + anchor + " over a stale edge that is still "
+                "there, and the successor inherits nothing until this input is "
+                "deleted or re-pointed onto it")
+        return lead + (
+            "SILENCES THIS CHECK WITHOUT CLEARING THE DEFICIT: EP still strips that "
+            "terminal input, so the factor is re-scored over its REMAINING inputs "
+            "— ONE left is skipped as degenerate, two or more run without it, and a "
+            "directional operator is skipped outright when this input is its idx-0 "
+            "source (``source_stripped``) — and " + anchor + " over a factor this "
+            "claim still does not fund. The edge must still be deleted or "
+            "re-pointed onto whatever now carries it")
+
     def _active_edge_fix(s: dict) -> str:
         """The repair for this row, chosen by the state the row carries.
 
@@ -1108,10 +1211,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"{_named(s['sup_name'])} (it carries no id, so "
                 "tortoise_update_entity cannot address it): give it one, then name "
                 f"the successor on it and re-point this {s['edge_type']} input onto "
-                "that successor, deleting the edge into the old endpoint. Archiving "
-                "it instead does NOT clear this: EP strips a terminal input either "
-                "way, so the edge must still be deleted or re-pointed onto whatever "
-                "now carries the claim")
+                "that successor, deleting the edge into the old endpoint. "
+                + _archive_clause(s))
         if not s["carrier_count"]:
             # ⛔ "Nothing to re-point onto" would be FALSE whenever a :Subject or
             # :Point carries the name: both are nodes EP accepts as an operator
@@ -1125,31 +1226,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"'<the successor name>'}}) — then re-point the input onto it and "
                 f"delete the edge into {q}. If a Subject or Point carries that "
                 f"name, re-point onto THAT node instead and delete this edge. "
-                # ⛔ THREE mechanisms, so the "archiving does not clear this" clause
-                # has to be three-way: a shaped non-:Point endpoint gets NEITHER arm
-                # (no factor at all), a genuine direct edge is excluded BEFORE
-                # evaluation (no factor, no record), and an OPERATOR still builds the
-                # factor and records the strip. One sentence for all three left the
-                # operator arm asserting a mechanism it does not have — measured:
-                # skipped_factors reason 'degenerate' appears in exactly that arm.
-                + (("Archiving it instead does NOT clear this: EP builds no factor "
-                    "for that endpoint in EITHER arm, so archiving only drops it out "
-                    "of this anchor — the claim's support has to be wired through a "
-                    ":Point operator (or the shape cleared) regardless")
-                   if (s["shape"] and not s["is_operator"]) else
-                   (f"Archiving it instead — tortoise_update_entity({q}, {{'status': "
-                    f"'archived'}}) — does NOT clear this: EP still builds the factor "
-                    f"and strips that terminal input, recording the skip (reason "
-                    f"'degenerate', or 'source_stripped' when this edge is its idx-0 "
-                    f"source), so the edge must still be deleted or re-pointed onto "
-                    f"whatever now carries the claim")
-                   if s["is_operator"] else
-                   (f"Archiving it instead — tortoise_update_entity({q}, {{'status': "
-                    f"'archived'}}) — does NOT clear this: the direct-edge row is "
-                    f"excluded BEFORE evaluation while the endpoint is terminal, so "
-                    f"no factor is built and no skipped-factor record appears either "
-                    f"way. The edge must still be deleted or re-pointed onto "
-                    f"whatever now carries the claim")))
+                # ⛔ ONE source for the archive clause (``_archive_clause``): the
+                # mechanism is a property of the ROW — a DIRECT edge assembles no
+                # factor at all, a NEUTRAL operator loses nothing, an OPERATOR
+                # input is re-scored over its remaining one — so a single sentence
+                # restated per arm was false on the rows it did not fit. It also
+                # states what archiving DOES (SILENCES the check) rather than
+                # "does NOT clear this": the anchor is ``status='superseded'``, so
+                # an archived Object leaves it and the finding goes away while the
+                # wiring defect stays.
+                + _archive_clause(s))
+
             if s["shape"] and not s["is_operator"]:
                 # ⛔ The SAME neither-arm fact the resolvable path states, in the
                 # successorless one: a shaped non-``:Point`` endpoint is in neither
@@ -1243,7 +1330,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             severity="high",
             node_id=str(s["sup_id"]) if s["sup_id"] is not None else str(s["sup_name"]),
             detail=_active_edge_detail(s),
-            fix=_active_edge_fix(s),
+            # ⛔ The §3.1 disposition is appended HERE, once, so no arm added
+            # later can re-point without it (the class of defect this check's
+            # strings kept producing).
+            fix=_active_edge_fix(s) + _triage(s),
         )
         for s in map(_4b_state, rows4b)
     ], count4b)

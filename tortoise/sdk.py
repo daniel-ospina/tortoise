@@ -25113,7 +25113,12 @@ class TortoiseSDK:
         check-consistency precedent).
 
         point_kinds: Optional list of pointKind values to scope the audit
-                     (default: all Points).
+                     (default: all Points). ⛔ The scope covers the POINT-anchored
+                     checks only: the two entity-anchored ones
+                     (``superseded_object_active_edges``, ``superseded_by_unresolvable``)
+                     read `:Object` nodes, and `pointKind` is a Point-only property,
+                     so scoping them would false-CLEAN every Object — they are
+                     global by construction (#11826).
         """
         from tortoise.audit import audit_graph
         proj = self._get_proj()
@@ -41004,7 +41009,11 @@ class TortoiseSDK:
             as every other read surface renders it (an absent status reads
             ``live``) and the shared lifecycle predicate EP itself uses. A
             consumer must branch on ``current.terminal`` before reading
-            ``current`` as the claim that stands today (#11826).
+            ``current`` as the claim that stands today (#11826) — and the two can
+            DISAGREE by design: a legacy point carrying ``outdated=true`` with no
+            stored status reads ``status="live"`` (#9974 R1's rendering rule)
+            beside ``terminal=True``. ``status`` is the stored word; ``terminal``
+            is the predicate.
           "ambiguous" — two or more windows cover it. ``ambiguous`` (True)
             and ``candidates`` are present and ``valid_point`` is ABSENT,
             but ``found`` is **True**: a candidate WAS found, just not a

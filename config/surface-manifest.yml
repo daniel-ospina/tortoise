@@ -375,7 +375,12 @@ response_fields:
     could branch on'
   unchanged_when_off: 'NO — not flag-gated. Every reply that reaches the chain gains both keys, so no pre-#11826
     reply that carried `current` is byte-identical (the keys are always present, never omitted). The other reply
-    branches (a missing asked point) return BEFORE the chain is built and carry no `current` at all, unchanged'
+    branches (a missing asked point) return BEFORE the chain is built and carry no `current` at all, unchanged.
+    ⛔ `current.status` and the reply-level `status` are DIFFERENT closed vocabularies in one payload (lifecycle
+    word vs found|ambiguous|absent) — never mirror the handling of the reply-level one onto the nested one. The
+    pair can also disagree BY DESIGN: a legacy `outdated=true` point with no stored status reads
+    `status="live"` beside `terminal=true`, because `status` is the stored word (the #9974 R1 rendering rule)
+    and `terminal` is the predicate.'
 # ⛔ FOUR rows stood here until #4282 deleted their carriers (2026-10-27), and they are recorded
 # here rather than dropped silently, because each named a REAL emitted field:
 #   • `sdk:capture_session` / `graph_ops` (#3561) — the capture's measured graph-operation count.
