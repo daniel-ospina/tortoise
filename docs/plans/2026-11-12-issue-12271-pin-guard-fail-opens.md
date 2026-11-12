@@ -1,0 +1,144 @@
+<!-- research-path: the `research: v1` comment on issue #12271 (comment id 6837561208) -->
+<!-- plan-review: cycles=2, status=threat-surface-covered, version=2.3.0 -->
+
+# #12271 — the #12051 pin guard's two/three undeclared fail-open spellings
+
+**Issue:** daniel-ospina/tortoise#12271 · **Class:** gate-enforcement (adversarial domain) · **Tier:** standard
+
+## Confirmed problem
+
+The `#12051` pin guard is a hermetic text model of shell semantics. Three of its
+own lexical rules are narrower than the shell's, so a spelling the shell accepts is
+read as something else — and because this guard's verdict IS the check, each gap is a
+**false PASS on a CI guard** (category A), not a false block:
+
+1. `_is_last_path_token` skips a `find`/`xargs` terminator by comparing the token
+   **verbatim** (`tests/test_12051_ci_pg_client_matches_server.py:1677` at `9828250732`).
+   `';'` and `";"` therefore become OPERANDS, the destination stops being "last", and
+   the complete replacement goes GREEN. POSIX says those characters "must be quoted",
+   so the guard was blind to the standard-correct spelling.
+2. `_run_commands` truncated at the first whitespace-then-`#` with **no quote
+   awareness** (`:1013`). A line that merely PRINTED a literal `#` lost everything
+   after it — a live `rsync` on the same line never reached any rule. Its own STATED
+   LIMIT (`:1008`) claimed this case "reds rather than silently passing"; measurement
+   said the opposite, so the documentation was part of the defect.
+3. `_strip_trailing_comment` implemented the **narrow** comment rule (whitespace only,
+   `:6421`) while the same file had already replaced that rule with the wide one in a
+   sibling function (`COMMENT_START_RE`, `:2764`, `#12069 review 16`). A tombstone
+   written `;#`, `&&#` or `|#` — all valid shell — survived into the scan.
+
+**Found in PLAN-VERIFY round 1 (both P1, both measured, both on the declared surface):**
+
+4. **`)$(` is not an operator boundary.** The first cut put `(`/`)` in a flat
+   character class, so `echo $(date)#12051; <live replacement>` lost everything after
+   the `#` and the replacement was GREEN. Bash ground truth:
+   `echo $(date +%s)#note ; echo AFTER` prints `<epoch>#note` **and** `AFTER` — the
+   `#` is part of the same word. A **group-closing** `)` *is* an operator
+   (`(echo x)#note ; echo AFTER` prints only `x`). The two are indistinguishable in a
+   flat class; closers are now tracked on a stack.
+5. **`find`'s expression tokens are not operands.** Skipping only the terminator
+   itself left `\)`, `\(`, `!` and `-o` free to become "the last path", so
+   `find … -exec cp {} "$b/16/bin/" ';' \)` went GREEN — on the **escaped** spelling
+   too. Fixed by ending the operand scan at the terminator (nothing after it can be
+   the destination of the exec'd verb).
+
+**Falsification check** (single falsifier, carried from the research block): if a
+quoted `;` after `find … -exec cp {} "$b/16/bin/"` already left the guard RED, fix 1
+would add rows without closing anything. Measured: GREEN → RED.
+
+⚠️ **The fixes are COUPLED, and the per-fix claim is stated as measured, not as
+isolation** (corrected after PLAN-VERIFY round 2 measured it): reverting the unquote
+reds `mut-108/109/111/113` (the T5 rows also carry a quoted terminator, so they depend
+on it too); reverting the per-primary model reds `mut-115/116`; reverting the quoted
+-terminator rule in `_is_command_position` reds `mut-116`; reverting each
+`_strip_trailing_comment` mechanism reds exactly its own unit test. **Confidence: 95.**
+
+## Alternatives considered
+
+- **A — widen each rule at the point it reads (chosen).** Unquote the terminator
+  compare; route `_run_commands` through the existing quote-aware stripper; share one
+  `COMMENT_START_CHARS` between the two comment rules. Smallest surface, each fix
+  maps to a measured bypass, and fix 3 removes a *drift* class rather than one call
+  site.
+- **B — build a real shell lexer (rejected).** Correct in principle, but this guard is
+  deliberately hermetic (no shell, no DB, no network) and its stated residuals are a
+  long, reviewed list; replacing the model mid-fix would invalidate 40+ rounds of
+  pinned rows and blow the change's blast radius. Better as its own issue if the
+  residual list ever grows without bound.
+- **C — delete the text guard and rely on the in-job `pg_dump --version` execution arm
+  (rejected).** That arm is exactly what #12051 proved insufficient: it runs in the PIN
+  step and is blind to a later `$GITHUB_PATH` append. Research confirmed no third-party
+  workflow linter models PATH resolution (actionlint validates syntax/expressions, not
+  which `pg_dump` a later step resolves).
+- **D — normalise the whole line before matching (rejected).** Blanking quotes/operators
+  destroys the offsets the arms need for attribution (each finding must name a step
+  index and a line); the codebase's own `_mask_quotes` keeps length for this reason.
+
+## Integration Surface Map
+
+| Surface | Change | Test layer |
+|---|---|---|
+| `_is_last_path_token` | terminator compare unquotes; each `-exec` primary's own last operand decides | unit + polarity table (`mut-108/109/111/112/113/115/116`) |
+| `_is_command_position` | a quoted/escaped terminator ends the walk-back | polarity table (`mut-116`) |
+| `_EXEC_PRIMARY_WORDS` | `-exec`/`-execdir`/`-ok`/`-okdir` open an operand list | polarity table (`mut-115/116/117`) |
+| `_run_commands` | quote-aware + operator-aware comment strip | unit (`test_a_quoted_hash_…`) + all line-unit arms |
+| `_strip_trailing_comment` | word-boundary scanner: quotes, escapes, substitution/assignment/group `)`, shares `COMMENT_START_CHARS` | unit (`test_a_substitution_closer_…`, `test_an_escaped_or_assignment_…`) + fail-closed message scan |
+| `_without_comment` | now DELEGATES to `_strip_trailing_comment` (one rule, not two) | `#12069 review 15/16` rows unchanged |
+| **row arms over the real workflow** | **`_run_commands` output changes on 18 of 85 `run:` steps of `python-ci.yml`** (measured by diffing main vs this change over every step) — **all restorations, no step is shorter**, and the guarded job's own PIN step is one of them | full module (372 tests) |
+
+## Wiring
+
+| Touch point | Type | Covered by | Status |
+|---|---|---|---|
+| `_run_commands()` — a single definition site; every caller (row arms, `_github_path_writes`, `_executed_lines`, pin-step reads) inherits the corrected text | in-file function | single `def`; the full module exercises the callers | ✅ |
+| `_is_command_position()` — `_owning_verb`'s walk-back, i.e. whether a line's verb is graded at all | in-file function | `mut-116` (quoted two-`-exec`) | ✅ |
+| `_strip_trailing_comment()` — `_run_commands` and the fail-closed message scan | in-file function | both asserted by the 372-test suite | ✅ |
+| `_without_comment()` — `_compared_variables` comparison path | in-file function → now delegates | `#12069 review 15/16` rows unchanged | ✅ |
+| `_replaces_a_client_binary()` — row arm, polarity table, wiring tests | in-file function | `mut-108/109/111/112/113` + wiring test | ✅ |
+| CI consumer — `python-ci.yml` `test (d)` runs this module | external workflow | module green locally; workflow untouched | ✅ |
+
+## Implementation steps (each with the test that proves it)
+
+1. Terminator compare → `text.strip("\"'") in {"+", "\\;", ";"}`, plus a CONTROL row
+   that a quoted terminator on a READ stays GREEN. **Test:** `mut-108`, `mut-109`, `mut-110`.
+2. `_run_commands` → `_strip_trailing_comment(line)`; rewrite the false STATED LIMIT.
+   **Test:** `test_a_quoted_hash_does_not_erase_the_live_command_after_it` (4 quoted
+   forms surviving + refusal of the replacement they precede).
+3. `COMMENT_START_CHARS` shared by the comment rules; `_without_comment` delegates.
+   **Test:** the same test's 7 operator-opener tombstone cases.
+4. A substitution closer is not a comment boundary; a group closer is.
+   **Test:** `test_a_substitution_closer_is_not_a_comment_boundary` (4 shapes refused
+   + a group-closer CONTROL that must strip).
+5. The operand scan ENDS at a `find`/`xargs` terminator. **Test:** `mut-111`, `mut-112`,
+   `mut-113` + the grouped-READ control `mut-114`.
+6. Mutation proof: revert each fix alone and show exactly its own rows red.
+
+## Review Scope Contract
+
+**Class:** gate-enforcement
+
+**Risk surface** — what this change can break, each with the check that would catch it:
+
+- **R1** A quoted terminator still becomes an operand → replacement GREEN (fail-open). → caught by `mut-108`/`mut-109` + mutation proof.
+- **R2** A quoted `#` still erases the live command after it → every rule blind on that line. → caught by `test_a_quoted_hash_does_not_erase_the_live_command_after_it`.
+- **R3** A tombstone after an operator (`;#`, `&&#`, `|#`) survives → a commented-out act satisfies a rule. → caught by the same test's operator cases.
+- **R4** The fix OVER-refuses: blanket-refusing every quoted `;` turns reads RED. → caught by `mut-110`/`mut-114` (reads with a quoted terminator stay GREEN) and the 372-test suite.
+- **R5a** **over-strip erases a live command (fail-open)** — the direction this change can genuinely move: a `)` or a token after a terminator read as inert. → caught by `test_a_substitution_closer_is_not_a_comment_boundary`, `test_an_escaped_or_assignment_closer_does_not_start_a_comment` and `mut-111/112/113`, each of which goes red if its mechanism is reverted (measured).
+- **R5b** false REDs in the fail-closed message scan, because the comment rule now reaches more arms. → caught by the full module (`372 passed`) + `ruff check`.
+- **R5c** applied to the REAL workflow: `_run_commands` now restores 18 of 85 `run:` step bodies (never truncates one). → caught by diffing `_run_commands` over every step of `python-ci.yml` on main vs this change; the full module re-asserts every row arm over the real job.
+
+**Threat classes** (gate-enforcement):
+- `T1` quoted `find`/`xargs` terminator (`';'`, `";"`) → must be REFUSED when the destination is the client dir.
+- `T2` quoted `#` (**either** quote style) introducing a live command on the same line → the command must be REFUSED.
+- `T3` comment after an operator (`;#`, `&&#`, `|#`) → the tombstone must NOT satisfy any rule.
+- `T4` substitution closer (`$(…)`, `$((…))`, `<(…)`, `>(…)`) followed by `#` → the word does NOT end, so the rest of the line must stay live; a **group** closer followed by `#` DOES end it and must be stripped.
+- `T5` `find` expression tokens (`\)`, `\(`, `!`, `-o …`) after a terminator → must not become "the last path"; and a **second** `-exec` primary's destination must still be read.
+- `T6` escaped character or assignment-value `)` before `#` → must NOT end the word (added after round 2, measured).
+
+**Out of scope — must NOT be raised** (note, file, do not chase): the guard's pre-existing stated residuals (extractor destinations, `sh -c` inner verbs, heredoc bodies, a separately-quoted base); `ruff format` drift that already exists on `main`; anything in the workflow YAML itself. **Backtick spans, ANSI-C `$'…'` strings and a terminator held in a variable are measured fail-opens on this surface and are FILED as #12276** — not chased here.
+
+**Acceptance:** every `R<n>` has its named evidence, and no open item remains on the declared surface.
+
+## Rounds
+
+**Rounds:** 2 (verifiers: 1 per round, class: gate-enforcement) — **disclosure:** the PLAN-VERIFY round was dispatched AFTER the build in this lane (a continuation lane whose defect was already measured and filed); it therefore reviewed plan + built diff together, which is wider, not narrower, than the pre-code round. Round 1 returned 2 P1s (both reproduced, both fixed) plus 2 P2s and 3 P4s; round 2, a FRESH verifier over the revised whole, returned **1 P1 + 1 P2 + 1 P3 + 2 P4** — the P1 being a regression round 1's `break` introduced (`mut-115/116`: a SECOND `-exec` primary's destination stopped being read) and the P2 another over-strip (escaped and assignment-value closers). All five were reproduced here, then fixed and mutation-proved. **`[ADVERSARIAL-BOUND] cycles=2 threats=6 covered=6 residuals=#12276`** — the exit is threat-surface coverage at the adversarial bound, not an unbounded clean, and the residual carriages (backtick spans, ANSI-C strings, a terminator in a variable) are filed as #12276 rather than chased.
