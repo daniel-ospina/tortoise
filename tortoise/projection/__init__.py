@@ -22755,7 +22755,13 @@ class FalkorProjection(
                 "substituted the IMPL potential. Their beliefs are computed by "
                 "EP (tortoise/ep.py), which prices all three mechanisms.",
                 sum(unpriceable.values()),
-                ", ".join(f"{m}×{n}" for m, n in sorted(unpriceable.items())),
+                # ⛔ `str(m)`: the keys are raw `o.op_type` values off the
+                # graph, and `op_type IS NULL` is an admitted shape — sorting a
+                # `None` key beside a `str` raises TypeError and turns this
+                # WARNING into a crashed belief read (#12067 review round 16).
+                ", ".join(f"{m}×{n}"
+                          for m, n in sorted(unpriceable.items(),
+                                             key=lambda kv: str(kv[0]))),
             )
 
         if degenerate_count > 0:

@@ -413,8 +413,13 @@ def _mechanism_for(predicate: str, semantics: str | None,
     was priced as SUPPORT — the silent inheritance of another mechanism's arm
     that #12067's closed set exists to make impossible. A fallback to a
     DIFFERENT mechanism is not a fallback, it is a substitution, so it is
-    refused here and the relation is DROPPED with a reason that names the real
-    cause (``_uncarriable_reason``).
+    refused here and the outcome is named by ``_uncarriable_reason``. WHICH
+    outcome depends on the arm (#12067 review round 16 — this paragraph used to
+    promise a drop unconditionally): a verb with NO write path is DROPPED with
+    that reason, while a verb that also has a STRUCTURAL path keeps its own bare
+    edge — whose rel type is the predicate, which carries no mechanism and is
+    never priced — and records nothing, because the drop channel's receipt
+    ("relation not written") cannot describe a write.
 
     ``registry`` is the SAME catalog ``plan_relation_edges`` was given (see
     :func:`_registry_seam`), so the leg reads ONE catalog — the mechanism and

@@ -15,10 +15,14 @@ ponytail: particles live in-memory per claim. No FalkorDB storage yet.
 """
 from __future__ import annotations  # noqa: I001
 
+import logging
+
 import jax.numpy as jnp
 import jax
 import jax.random as jrandom
 import numpy as np  # noqa: F401
+
+logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -436,13 +440,17 @@ class TortoiseSVBP:
                 refused[factor[1]] = refused.get(factor[1], 0) + 1
         if refused:
             _n = sum(refused.values())
-            _which = ", ".join(f"{m}×{n}" for m, n in sorted(refused.items()))
-            print(
-                f"TortoiseSVBP: {_n} factor(s) REFUSED — {_which}. This engine "
-                f"prices IMPL and NAND only; a third mechanism substituted onto "
-                f"the IMPL potential would price a necessity as support. Run EP "
-                f"(tortoise/ep.py) for it."
-            )
+            _which = ", ".join(f"{m}×{n}" for m, n in
+                               sorted(refused.items(), key=lambda kv: str(kv[0])))
+            # ⛔ A LOGGER, NOT `print` (#12067 review round 16): the extractor's
+            # decline of the same mechanism is a `logger.warning`, and a host that
+            # captures logs but not stdout would otherwise see factors vanish
+            # while `run()` still returns converged for the reduced problem.
+            logger.warning(
+                "TortoiseSVBP: %d factor(s) REFUSED — %s. This engine prices "
+                "IMPL and NAND only; a third mechanism substituted onto the IMPL "
+                "potential would price a necessity as support. Run EP "
+                "(tortoise/ep.py) for it.", _n, _which)
         factors = priced
         for iteration in range(self.max_iter):
             random.shuffle(factors)
