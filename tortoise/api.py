@@ -1556,8 +1556,12 @@ class EventAPI:
 
         ``**extra`` is a passthrough straight onto the ENVELOPE, so a caller can
         put a top-level ``embedding`` on the record here. That is allowed — a
-        vector is not an origin attestation — and ``_emit`` stamps every vector
-        that reaches it. A caller-set MARKER is a different matter: it is refused
+        vector is not an origin attestation — and ``_emit`` stamps THAT vector
+        (the ENVELOPE one). A record door's own vector is not stamped by this
+        funnel: the door that builds the record stamps it (``_point`` with
+        ``creating=True``, ``add_point`` with ``creating=False``) and ``_emit``
+        only re-verifies the width the record declares
+        (``_verify_record_vector_width``). A caller-set MARKER is a different matter: it is refused
         here AS WELL AS at the funnel, the same set in two placements
         (`_refuse_caller_named_markers`), so the message names the door the
         caller actually used and a newly added family cannot be wired at one

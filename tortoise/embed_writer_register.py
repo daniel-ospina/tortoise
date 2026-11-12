@@ -70,11 +70,13 @@ its CLASS cannot express (the `EXEMPT` docstring above says so in its own words:
 needs the difference must carry it"*). Each declaration therefore also carries `stores`: the graph
 labels the writer's vector is stored on, or :data:`NO_LIVE_VECTOR` / :data:`LABELS_AT_RUNTIME`.
 ⛔ It is declared here rather than derived by the instrument because the derivation does not reach
-most of them: of the twenty outside-gate writers, a `MERGE|CREATE (:Label` scan over the writer's own
-body names a single label for three and two conflicting labels for two, and no usable label for the
-other fifteen — and of those five readings the INSTRUMENT hands out only one
+most of them: over the outside-gate population the instrument reports (`WRITER_CENSUS` plus the
+one `ungated` writer it does not carry — read the population, never a count
+restated here), a `MERGE|CREATE (:Label` scan over the writer's own body names a single label for a
+few, two conflicting labels for a couple, and no usable label for the MAJORITY — and of those
+readings the INSTRUMENT hands out only one
 (`session_indexer::main`, the one `ungated` writer), because `_embedding_writers` short-circuits
-`unresolved_write` before its own-literal scan. ⚠️ Those fifteen fail for SEVERAL different
+`unresolved_write` before its own-literal scan. ⚠️ The no-label set fails for SEVERAL different
 reasons, so list none of them as "the" reason: the label sits in a `MATCH` the
 derivation deliberately does not credit, because a `MATCH` is a read (`_embedding_repair_attempt`
 writes `set_embedding_clause("e")` inside its own `MATCH (e:Event {eventId:$eid})`); or the store
@@ -83,14 +85,14 @@ executes `_TURN_WRITE_CYPHER`); or it is a property-map merge over a constant tu
 (`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`); or the store is delegated to another writer
 (`_index_process_unit` → `_session_event_write`); or the writer only BUILDS a clause
 (`set_embedding_clause`); or — one of them — the statement belongs to its caller
-(`_event_raw_write_door`). ⛔ Those six are a SAMPLE, NOT the set — the other NINE of the fifteen
-fail for reasons none of them names, and a list of six presented as complete leaves the majority
+(`_event_raw_write_door`). ⛔ Those six are a SAMPLE, NOT the set — the REST of the no-label set
+fails for reasons none of them names, and a list of six presented as complete leaves the majority
 unexplained: a carrier whose value a later pass stores (`add_point`, `_journal_event_raw_write`), a
 writer whose body issues no store at all — a read, a read into a dict, comment PROSE
 (`_compare_views`, `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), or
 a docstring QUOTING one (`_prewipe_synthetic_write_scope`, whose whole body is a `return`; the
-`SET n.embedding = NULL` it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these
-fifteen because its own Cypher names two labels), and a label interpolated at runtime
+`SET n.embedding = NULL` it quotes is `_rebuild_all_replay`'s, and that writer is NOT in the
+no-label set because its own Cypher names two labels), and a label interpolated at runtime
 (`restore_graph`'s `(n:{safe_labels})`) — which is why the `NO_LIVE_VECTOR` /
 `LABELS_AT_RUNTIME` dispositions below exist at all. ⚠️ `#11641` removed the last use of
 `LABELS_AT_RUNTIME`: a runtime label is no longer a dead end, because a writer can BOUND it at its
@@ -385,29 +387,31 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #: "where the vector ends up" re-declares those two entries and re-opens exactly the ambiguity
 #: `#11492`'s first review round closed.
 #:
-#: ⛔ Why this belongs in the declaration and NOT in a derivation inside the instrument: of the
-#: twenty outside-gate writers, a `MERGE|CREATE (:Label` literal scan over the writer's OWN body
-#: NAMES a single label for three and two conflicting labels for two, and **no usable label at all
-#: for the other fifteen** — and the instrument hands only ONE of those five readings out as a
-#: label: `_embedding_writers` short-circuits `unresolved_write` before that scan (the
-#: `unresolved_write` branch `continue`s ahead of the own-literal one), so four of the five reach
-#: `written_labels` flattened to `UNKNOWN(unresolved producer)` and only `session_indexer::main`
-#: (the one `ungated` writer) reaches it as a label. ⚠️ Those fifteen fail for SEVERAL reasons —
+#: ⛔ Why this belongs in the declaration and NOT in a derivation inside the instrument: over the
+#: outside-gate population (`WRITER_CENSUS` ∪ the one `ungated` writer it does not carry),
+#: a `MERGE|CREATE (:Label` literal scan over the
+#: writer's OWN body NAMES a single label for a few, two conflicting labels for a couple, and **no
+#: usable label at all for the MAJORITY** — and the instrument hands only ONE of those readings out
+#: as a label: `_embedding_writers` short-circuits `unresolved_write` before that scan (the
+#: `unresolved_write` branch `continue`s ahead of the own-literal one), so every other reading
+#: reaches `written_labels` flattened to `UNKNOWN(unresolved producer)` and only
+#: `session_indexer::main` (the one `ungated` writer) reaches it as a label. ⚠️ The no-label set
+#: fails for SEVERAL reasons —
 #: do not name one as "the" reason, and do not cite the two-label pair among them:
 #: `_event_plain_merge` and `_rebuild_all_replay` keep their `MERGE`s in their own bodies (that is
-#: exactly why their own Cypher NAMES TWO), while the fifteen include a label in a `MATCH` the
+#: exactly why their own Cypher NAMES TWO), while that set includes a label in a `MATCH` the
 #: derivation does not credit (`_embedding_repair_attempt`'s own `MATCH (e:Event {eventId:$eid})` +
 #: `set_embedding_clause("e")`), a store clause held in a module constant (`_write_capture_turns`
 #: executing `_TURN_WRITE_CYPHER`), a property-map merge over a constant tuple
 #: (`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`), a store delegated to another writer
 #: (`_index_process_unit` → `_session_event_write`), a writer that only BUILDS a clause
 #: (`set_embedding_clause`), and one whose statement is its caller's (`_event_raw_write_door`).
-#: ⛔ Those six are a SAMPLE, NOT the set — the other NINE fail for none of them: a carrier whose
+#: ⛔ Those six are a SAMPLE, NOT the set — the REST fail for none of them: a carrier whose
 #: value a later pass stores (`add_point`, `_journal_event_raw_write`), a writer whose body issues no
 #: store at all — a read, a read into a dict, comment PROSE (`_compare_views`, `_graph_fingerprint`,
 #: `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), or a docstring QUOTING one
 #: (`_prewipe_synthetic_write_scope`, whose whole body is a `return` — the `SET n.embedding = NULL`
-#: it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these fifteen), and a label
+#: it quotes is `_rebuild_all_replay`'s, and that writer is NOT in the no-label set), and a label
 #: interpolated at runtime (`restore_graph`'s `(n:{safe_labels})`). A
 #: second derivation in the grading instrument would be a second owner of the same fact; the field
 #: below makes the fact ONE declaration that every consumer reads (the policy-as-data shape `#11444`
@@ -881,6 +885,49 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "(`SET n.embedding = NULL`); a wipe is not a producer",
             "#10541",
             stores=NO_LIVE_VECTOR,  # `SET n.embedding = NULL` — a wipe stores no vector
+        ),
+    ),
+    (
+        "tortoise.api::_emit",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/api.py::_emit` — the instrument's match is COMMENT PROSE (`#12000`'s "
+            "measured record, quoted in the funnel's own body), not a clause: both hits are "
+            "whole-line comments, which no code path executes. The body issues no GRAPH store "
+            "clause of its own, and it does not stamp every vector that reaches it: it journals "
+            "the record (`seq = self.log.append(event)`, the commit point), and the two channels "
+            "differ — a KEYWORD-payload `embedding` is width-stamped by "
+            "`tortoise/embeddings.py::stamp_journal_embedding` (`creating=False`), while a "
+            "POSITIONAL-record vector is stamped by the DOOR that built the record — "
+            "`tortoise/api.py::_point` with `creating=True`, `tortoise.api::add_point` with "
+            "`creating=False` — and is only width-RE-VERIFIED here, by "
+            "`tortoise/api.py::_verify_record_vector_width`; `add_operator`'s record carries no "
+            "vector at all. It then forwards the record to "
+            "the live record row and folds it through `self.projection.apply` — the LIVE "
+            "projection, not a replay — where the graph store clause belongs to the fold's "
+            "carrier. A caller-supplied `embedding` is CARRIED under the `#5004` contract, not "
+            "attested: the same direction, and for the same reason, as "
+            "`tortoise.api::add_point`'s journal half",
+            "#5004",
+            stores=NO_LIVE_VECTOR,  # no store clause in this body; the record row and the fold are others'
+        ),
+    ),
+    (
+        "tortoise.api::_verify_record_vector_width",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/api.py::_verify_record_vector_width` — the instrument's matches are "
+            "PROSE: the measured example inside the function's own docstring, and two comments "
+            "quoting one (a payload `embedding=\"abc\"`, and the fold storing "
+            "`point.embedding = '123'`). The body READS the merged view's vector "
+            "(`{**payload, **record}.get(\"embedding\")`) and asks the seam's own questions "
+            "through `tortoise/embeddings.py::shortest_float32_vector`; its only effects are a "
+            "`ValueError` and a return. `#11835` added it to VERIFY a declared width, and "
+            "`#12000` made it read the MERGED view (`{**payload, **record}`) — which is also "
+            "what put it into the instrument's population, by quoting a measured record in its "
+            "prose — so it stores nothing and asks for no gate decision",
+            "#12045",
+            stores=NO_LIVE_VECTOR,  # a width VERIFIER: no store clause, only a refusal
         ),
     ),
     (

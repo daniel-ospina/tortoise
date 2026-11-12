@@ -434,17 +434,18 @@ def test_every_embedded_label_has_a_query_path():
 
 #: ── `#11492`: row 2 resolves labels from the SAME product register row 1 reads ──────────────
 #: The issue required the reading to be DECIDED, not assumed: the register classified writers but
-#: carried NO label (Case B), and the label is not derivable per writer either (15 of the 20
+#: carried NO label (Case B), and the label is not derivable per writer either (17 of the 22
 #: outside-gate writers name no USABLE label in their own Cypher, and they fail for SEVERAL
 #: different reasons — a `MATCH` the derivation does not credit, a module constant, a property-map
 #: merge over a constant tuple, a delegated store (`_index_process_unit` → `_session_event_write`),
 #: a clause builder (`set_embedding_clause`), or ONE carrying the caller's
-#: statement, and those six are a SAMPLE rather than the set: the other NINE are a carrier a later
+#: statement, and those six are a SAMPLE rather than the set: the REST fail for none
+#: of them: a carrier a later
 #: pass stores (`add_point`, `_journal_event_raw_write`), a body that issues no store at all — a
 #: read, a read into a dict, comment PROSE (`_compare_views`, `_graph_fingerprint`,
 #: `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), or a docstring QUOTING one
 #: (`_prewipe_synthetic_write_scope`, whose whole body is a `return`; the `SET n.embedding = NULL` it
-#: quotes is `_rebuild_all_replay`'s, and that writer is NOT among these fifteen), and a
+#: quotes is `_rebuild_all_replay`'s, and that writer is NOT among those seventeen), and a
 #: runtime-interpolated label (`restore_graph`) — so no single one of them may be named as "the"
 #: reason). So the product DECLARES it (`WriterClass.stores`) and this row reads that declaration.
 #: The tests below pin the three falsifiers the issue names, and the two guards implementation made
@@ -483,14 +484,14 @@ def test_row_two_reads_MET_when_the_register_resolves_every_writer(monkeypatch):
 
     Three ways a writer gets there, all present at once: through the gate (label derived), from a
     declared label, or by a declaration that it stores no live graph vector. ⛔ The third is what
-    makes `stored-without-a-query-path` a statement about STORES rather than about NAMES: ten of
-    this tree's twenty outside-gate writers issue no vector store of their own (reads, comment
+    makes `stored-without-a-query-path` a statement about STORES rather than about NAMES: twelve of
+    this tree's twenty-two outside-gate writers issue no vector store of their own (reads, comment
     prose — `_compare_views`, `_apply_one` — carriers, a store DELEGATED to `_session_event_write`
-    — `_index_process_unit` — a docstring QUOTING a wipe, the clause builder), and two more store on
-    a label chosen at RUNTIME — those two are held as
-    `PARTIAL`, never as `no-live-vector`, so twelve is the size of the two holds together and NOT
-    the count of writers that never store. A row that held those ten forever was measuring its own
-    vocabulary.
+    — `_index_process_unit` — a docstring QUOTING a wipe, the clause builder), and `#11641` bound
+    the two writers that used to store on a label chosen at RUNTIME. So `labels-at-runtime` is
+    empty and this population holds row 2 on nothing: `no-live-vector` is a RESOLUTION out of the
+    hold set, never a way of being held in it — a row that held a stale shortcut forever would be
+    measuring its own vocabulary.
     """
     monkeypatch.setattr(probe, "embedding_writers", _row_two_population)
     monkeypatch.setattr(probe, "declared_writers", _row_two_declarations)
@@ -3471,7 +3472,7 @@ def _no_register(monkeypatch) -> None:
     """Neutralise the product register so a row-1 test measures ONE clause.
 
     ⛔ `#11444` made row 1 READ `tortoise/embed_writer_register.py`. A test that
-    injects a tiny writer map and no register would otherwise see all twenty of
+    injects a tiny writer map and no register would otherwise see every one of
     this tree's real declarations as STALE (the injected population is not the
     tree's), and pass or fail for a reason it never names. Tests that ARE about
     the register inject it explicitly — so the closure is explicit in both

@@ -841,7 +841,7 @@ def test_a_stores_declaration_that_does_not_answer_is_refused():
     """`#11492`: every declaration answers row 2's question, and `load()` refuses a shrug.
 
     Row 2 is *"is every stored vector on a label the query leg can serve?"*, and the one fact it
-    needs — WHERE the vector lands — cannot be derived for most writers (15 of the 20 outside-gate
+    needs — WHERE the vector lands — cannot be derived for most writers (17 of the 22 outside-gate
     writers name no usable label in their own Cypher, because a store is not always a
     `MERGE|CREATE (:Label` in the writer's own body: the label may sit in a `MATCH` the derivation
     does not credit, in a module-level constant, behind a property-map merge, behind a store
@@ -851,7 +851,7 @@ def test_a_stores_declaration_that_does_not_answer_is_refused():
     `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), carry a value a
     later pass stores (`add_point`, `_journal_event_raw_write`), quote a wipe it does not own
     (`_prewipe_synthetic_write_scope`, whose whole body is a `return` — the `SET n.embedding = NULL`
-    it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these fifteen), or interpolate
+    it quotes is `_rebuild_all_replay`'s, and that writer is NOT among those seventeen), or interpolate
     the label at runtime (`restore_graph`)), so it is DECLARED. The refusals below are what keeps that
     declaration from degrading into a default: an empty tuple ("unspecified") and a missing field
     would both read to the grader as *nothing to compare*, i.e. a silent pass for the one writer

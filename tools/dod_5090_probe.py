@@ -422,6 +422,36 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "`clean.setdefault(\"embedding\", None)`, and `update_point`'s `emit_props` on the "
         "`PointRevised` record). Their gate-side half is `gated` and lies outside this "
         "census's population"),
+    "tortoise.api::_emit": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::_emit` — the instrument's match is COMMENT PROSE (the "
+        "measured record `#12000` quoted in the funnel's own body), not a write "
+        "clause. No GRAPH store clause in this body, and it does NOT stamp every "
+        "vector that reaches it: it journals the record (`seq = "
+        "self.log.append(event)`, the commit point), where a KEYWORD-payload "
+        "`embedding` is width-stamped by `stamp_journal_embedding` (`creating=False`) "
+        "while a POSITIONAL-record vector is stamped by the DOOR that built it and "
+        "is only width-re-verified here; it then forwards the record to the live "
+        "record row "
+        "(`record_writer.write_live_record`, whose vector column and HNSW index "
+        "belong to the record projection — `#11642`/`#4051` V1) and folds it "
+        "through `self.projection.apply`, the LIVE projection, where the graph "
+        "store clause belongs to the fold's carrier. A caller-supplied `embedding` "
+        "is CARRIED under the `#5004` contract, not attested — a CARRIER, the same "
+        "direction as `tortoise.api::add_point`'s journal half"),
+    "tortoise.api::_verify_record_vector_width": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::_verify_record_vector_width` — the instrument's "
+        "matches are PROSE (the measured example inside the function's own "
+        "docstring, and two comments quoting one), and the class is not inferred "
+        "from them: the body READS the merged view's vector "
+        "(`values = {**payload, **record}.get(\"embedding\")`) and asks the "
+        "seam's own questions through `shortest_float32_vector`. Its only effects "
+        "are a `ValueError` and a return — `#11835` added it to VERIFY a declared "
+        "width against the seam, and `#12000` made it read the MERGED view "
+        "(`{**payload, **record}`), which is also what put it into this "
+        "population, by quoting a measured record in its prose. It stores "
+        "nothing and asks for no gate decision"),
     "tortoise.consistency::_compare_views": (
         CENSUS_EXEMPT,
         "issues no write; the only WRITE-SHAPED text is a COMMENT in "
@@ -571,6 +601,14 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.api::add_point": (
         ("tortoise/api.py", "add_point",
          'p["embedding"] = fields["embedding"]'),),
+    "tortoise.api::_emit": (
+        ("tortoise/api.py", "_emit", "self.log.append(event)"),
+        ("tortoise/api.py", "_emit", "stamp_journal_embedding"),),
+    "tortoise.api::_verify_record_vector_width": (
+        ("tortoise/api.py", "_verify_record_vector_width",
+         'values = {**payload, **record}.get("embedding")'),
+        ("tortoise/api.py", "_verify_record_vector_width",
+         "shortest_float32_vector(values)"),),
     "tortoise.consistency::_compare_views": (
         ("tortoise/consistency.py", "_compare_views",
          "n.embedding=vecf32($embedding)"),),
@@ -1760,19 +1798,24 @@ def score_rule_bullet() -> Row:
 #: argument against the DERIVATION, not a claim that either writer is held — both are
 #: `unresolved_write`, so `written_labels` flattens their label to the unresolved sentinel before
 #: the hold set is computed and their DECLARATION is the reading this row scores), and no usable
-#: label for the other fifteen. ⚠️ Those fifteen fail for SEVERAL reasons — do not name one as
+#: label for the other fifteen. ⛔ THE COUNT MOVES as writers are declared: read the population from
+#: `embedding_writers()`, never from this sentence, which reports a measurement at that head
+#: (the module docstring's rule for `#5090`'s premise figures: re-measure, do not re-quote).
+#: ⚠️ That measurement's fifteen fail for SEVERAL reasons — do
+#: not name one as
 #: "the" reason: a label in a `MATCH` the derivation does not credit because a `MATCH` is a read
 #: (`_embedding_repair_attempt`'s own `MATCH (e:Event {eventId:$eid})`), a store clause held in a
 #: module constant (`_write_capture_turns` executing `_TURN_WRITE_CYPHER`), a property-map merge over
 #: a constant tuple (`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`), a store delegated to another
 #: writer (`_index_process_unit` → `_session_event_write`), a writer that only BUILDS a clause
 #: (`set_embedding_clause`), and one whose statement is its caller's
-#: (`_event_raw_write_door`). ⛔ Those six are a SAMPLE, NOT the set — the other NINE fail for none
+#: (`_event_raw_write_door`). ⛔ Those six are a SAMPLE, NOT the set — the other NINE of that
+#: fifteen fail for none
 #: of them: a carrier whose value a later pass stores (`add_point`, `_journal_event_raw_write`), a
 #: writer whose body issues no store at all — a read, a read into a dict, comment PROSE
 #: (`_compare_views`, `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`),
 #: or a docstring QUOTING one (`_prewipe_synthetic_write_scope`, whose whole body is a `return`; the
-#: `SET n.embedding = NULL` it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these
+#: `SET n.embedding = NULL` it quotes is `_rebuild_all_replay`'s, and that writer is NOT among that
 #: fifteen), and a label interpolated at runtime
 #: (`restore_graph`'s `(n:{safe_labels})`) — which is why `NO_LIVE_VECTOR` / `LABELS_AT_RUNTIME`
 #: exist. The two-label pair is NOT among them: `_event_plain_merge` and
