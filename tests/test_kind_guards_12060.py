@@ -521,8 +521,7 @@ class TestAcceptance3InstallGate:
         manifest = _write_pack(tmp_path / "packs", "acme", guards=bad)
         r = _run_cli("pack", "validate", str(manifest.parent))
         assert r.returncode == 1
-        assert "neither a core kind nor a kind this pack declares" in (
-            r.stdout + r.stderr)
+        assert "neither a core kind" in (r.stdout + r.stderr)
 
     def test_refuses_a_guard_on_the_wrong_layer(self, tmp_path):
         bad = GOOD_GUARD.replace("layer: object", "layer: event")
@@ -1176,6 +1175,177 @@ depends_on: []
         # prints, which is what made the first version of this test pass with
         # the footer deleted (measured).
         assert "kind-guard problem(s)" in out, out
+
+
+# ══ review round 3 ═════════════════════════════════════════════════════
+#
+# Same rule as every round: each test FAILED before its fix (mutation verified in
+# a scratch copy), and each docstring says which invariant it protects.
+
+class TestReviewRound3Closed:
+    """The third review's findings."""
+
+    def test_ingest_agrees_with_the_door_about_a_guard_redirected_item(
+            self, sdk, no_pack_guards):
+        """R3 P1. The bundle/item pre-flights predicted the landing label by
+        replaying the ROUTER only, and the guard runs BEFORE it. MEASURED
+        before the fix: with two live `:Subject` carriers of the guarded name,
+        `create_subject` SUCCEEDED (the guard moved the write to `:Object`, away
+        from the ambiguity) while `ingest` of the very same item raised
+        `BundleValidationError` claiming the create refuses — two doors of one
+        API, disagreeing about one write."""
+        carriers = "issue:daniel-ospina/tortoise#9"
+        for sid in ("s-a", "s-b"):
+            sdk.create_subject(carriers, intent=INTENT_AS_DECLARED,
+                               _server_id=sid)
+
+        door = sdk.create_subject(carriers)          # succeeds, redirected
+        assert door["kind_redirect"]["to"]["layer"] == "object"
+
+        out = sdk.ingest({"entities": [{"type": "subject",
+                                        "name": carriers}]})   # must not raise
+        assert out["created"]["entities"] == 0, out["created"]
+
+    def test_a_guarded_item_is_reported_created_ONCE(self, sdk, no_pack_guards):
+        """…and the existence probe asks the label the write LANDS on, so a
+        guarded item dedupes. MEASURED before the fix: `created.entities` was 1
+        on EVERY re-ingest while the graph held ONE node."""
+        name = "issue:a/b#1"
+        first = sdk.ingest({"entities": [{"type": "subject", "name": name}]})
+        second = sdk.ingest({"entities": [{"type": "subject", "name": name}]})
+        assert first["created"]["entities"] == 1, first["created"]
+        assert second["created"]["entities"] == 0, second["created"]
+        rows = sdk._get_proj().g.query(
+            "MATCH (n) WHERE n.name=$n RETURN labels(n)", params={"n": name}
+        ).result_set
+        assert [list(r[0]) for r in rows] == [["Object"]], rows
+
+    def test_a_bare_fromKinds_entry_matches_its_OWN_namespace_only(self):
+        """R3 P2. `fromKinds` was the fourth entry left out of the
+        qualify-the-reference convention (`redirect`/`fallback`/`guarded_kind`
+        all had it). MEASURED: a bare `fromKinds: [concept]` never fired for the
+        canonical `acme:concept` and DID fire for `core:concept` — a different
+        kind in another namespace."""
+        compiled = kg.pack_guards("acme", [{
+            "kind": "concept", "layer": "object", "onConfusion": [{
+                "when": "nameMatches", "pattern": r"^acme-[0-9]+$",
+                "redirect": "core:WorkItem", "fallback": "core:WorkItem",
+                "reason": "x", "fromKinds": ["concept"]}]}])
+        assert compiled[0].from_kinds == ("acme:concept",)
+        assert resolve("acme-42", "subject", "acme:concept",
+                       pack_confusions=compiled).outcome == \
+            GuardOutcome.REDIRECT
+        assert resolve("acme-42", "subject", "core:concept",
+                       pack_confusions=compiled).outcome == GuardOutcome.ACCEPT
+
+    @pytest.mark.parametrize("field,kind", [
+        ("documentKinds", "contract"),
+        ("actionKinds", "shipit"),
+    ])
+    def test_a_non_entity_kind_is_refused_in_BOTH_spellings(
+            self, tmp_path, field, kind):
+        """R3 P2. The round-2 documentKind refusal only fired for the BARE
+        spelling, so `kind: acme:contract` validated CLEAN against
+        `documentKinds: [contract]`; and `actionKinds` was never checked at all
+        (`_layer_of` returns None for both, and None meant "nothing to check")."""
+        for spelling in (kind, f"acme:{kind}"):
+            guard = f"""\
+  - kind: {spelling}
+    layer: object
+    onConfusion:
+      - when: nameMatches
+        pattern: '^x-[0-9]+$'
+        redirect: core:WorkItem
+        fallback: core:WorkItem
+        reason: 'a non-entity kind'
+"""
+            p = tmp_path / spelling.replace(":", "_") / "packs" / "acme"
+            p.mkdir(parents=True)
+            (p / "manifest.yaml").write_text(f"""\
+namespace: acme
+name: Acme Test Pack
+version: "0.1.0"
+tier: free
+ontology:
+  extends: core
+  {field}: [{kind}]
+  guards:
+{guard}depends_on: []
+""")
+            r = _run_cli("pack", "validate", str(p))
+            assert r.returncode == 1, (spelling, r.stdout + r.stderr)
+            assert "not a guardable entity layer" in (r.stdout + r.stderr)
+
+    def test_an_unimplemented_linkPredicate_is_refused_at_install(self, tmp_path):
+        """R3 P2. A `linkPredicate` the runtime does not implement makes the
+        guard abstain forever — an installable declaration that can never act."""
+        guard = GOOD_GUARD.replace(
+            "        reason: 'an issue identifier is a work item'",
+            "        reason: 'an issue identifier is a work item'\n"
+            "        linkPredicate: ownsStuff")
+        manifest = _write_pack(tmp_path / "packs", "acme", guards=guard)
+        r = _run_cli("pack", "validate", str(manifest.parent))
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "linkPredicate" in (r.stdout + r.stderr)
+
+    def test_a_guard_on_a_depends_on_peer_kind_is_allowed(self, tmp_path):
+        """R3 P3. R1 explicitly permits redirecting INTO a declared dependency,
+        and `kind` is documentation (the kind the guard is ABOUT), not a filter
+        on the write — refusing a peer kind made the field's meaning depend on
+        which namespace the author happened to spell."""
+        root = tmp_path / "packs"
+        _write_pack(root, "dev", guards="    []")
+        guard = GOOD_GUARD.replace("kind: concept", "kind: dev:issue")
+        manifest = _write_pack(root, "acme", guards=guard, depends_on="[dev]")
+        r = _run_cli("pack", "validate", str(manifest.parent), "--json")
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert json.loads(r.stdout)["ok"] is True
+
+    def test_an_unguarded_write_keeps_the_intent_token_as_DATA(self, sdk,
+                                                              no_pack_guards):
+        """R3 P2. The control token is consumed before the guard runs, so on a
+        write the guard does NOT touch it was silently dropped — MEASURED: the
+        same call stored `intent="as_declared"` on `origin/main` and nothing
+        here. A feature must not change what an UNGUARDED write stores."""
+        r = sdk.create_object("Widget with no guard", intent=INTENT_AS_DECLARED)
+        assert _node_props(sdk, r["id"])["intent"] == INTENT_AS_DECLARED
+        assert "kind_redirect" not in r and "kind_guard_overridden" not in r
+
+    def test_abstain_is_idempotent_even_when_the_caller_drops_the_result(self):
+        """R3 P2. The round-2 marker followed the REPLACEMENT, so a caller that
+        dropped the return value (the normal case) lost the marker and a second
+        `abstain` corrected the tally again: MEASURED one redirect, two
+        `skipped`, zero `accepted`."""
+        import gc
+
+        d = resolve(ISSUE_NAME, "subject", None, pack_confusions=())
+        kg.abstain(d, "probe")          # the return value is deliberately dropped
+        gc.collect()
+        kg.abstain(d, "probe")
+        rows = kind_guard_counts()
+        assert sum(r["count"] for r in rows if r["outcome"] == "skipped") == 1, rows
+
+    def test_an_EXPLICIT_id_write_is_not_reported_ambiguous(self, sdk,
+                                                           no_pack_guards):
+        """R3 P3. `resolve_or_mint` returns a caller-supplied `_server_id`
+        BEFORE counting holders, so it cannot refuse an explicit-id create —
+        abstaining on an ambiguity that cannot happen reported
+        `target-label-ambiguous` for a write that WOULD have landed (a data
+        field clients branch on)."""
+        for sid in ("x-a", "x-b"):
+            sdk.create_entity("object", "issue:a/b#7", objectKind="core:Project",
+                              _server_id=sid)
+        r = sdk.create_subject("issue:a/b#7", _server_id="explicit-1")
+        assert "kind_redirect_skipped" not in r, r.get("kind_redirect_skipped")
+        assert r["kind_redirect"]["to"]["kind"] == "core:WorkItem"
+
+    def test_the_undo_text_in_the_docs_matches_the_code(self):
+        """R3 P3. The docs' AX example was added by this PR and quoted the
+        PRE-round-2 `undo` wording — re-introducing the "undo: none" claim the
+        review removed, in the artifact pack authors copy."""
+        doc = (REPO_ROOT / "docs" / "EXPANSION_PACKS.md").read_text()
+        assert '"undo":     "none — the node was created' not in doc
+        assert "identity is label-scoped" in doc
 
 
 # ══ the safety properties ═════════════════════════════════════════════════

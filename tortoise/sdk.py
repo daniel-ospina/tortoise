@@ -5520,7 +5520,8 @@ def _door_relayed_props(etype: str, item: dict) -> dict:
     return relayed
 
 
-def _landing_entity_label(etype: str, props: dict) -> str | None:
+def _landing_entity_label(sdk, etype: str, props: dict,
+                          name: Any = None) -> str | None:
     """The label an ENTITY item's write actually LANDS on — ``"Subject"``/
     ``"Object"`` (``None`` for anything that is neither).
 
@@ -5541,17 +5542,40 @@ def _landing_entity_label(etype: str, props: dict) -> str | None:
     earlier POINTS already committed — the #2422/#7925 partial-mutation class
     the loop exists to close, re-opened one label over.
 
+    ⛔ THE KIND GUARD CAN MOVE THE WRITE TOO (#12060), and it runs BEFORE the
+    router in `create_entity`, so a prediction that only replays the router is
+    blind to it. MEASURED (review round 3, P1): with two live ``:Subject``
+    carriers of ``issue:repo#1``, ``create_subject`` succeeded (the guard
+    redirected the write to ``:Object``, away from the ambiguity) while
+    ``ingest`` of the same item refused with "2 LIVE entities already hold …" —
+    two doors of one API disagreeing about one write — and the existence probe
+    asked ``:Subject``, so every re-ingest of a guarded item reported ``created``
+    forever. ``name`` is what makes the guard resolvable (its premise is the
+    NAME); without it this is the router-only prediction it always was.
+
+    Asks `_kind_guard_decision` — the guard's own non-mutating twin, the same
+    function `create_entity` uses — so the prediction cannot drift from the
+    write.
+
     Fails open to the DECLARED label (#1934: a probe must never refuse a
     write).
     """
     try:
-        probe = _kind_layer_note(etype, _door_relayed_props(etype, props))[0]
+        relayed = _door_relayed_props(etype, props)
+        layer = etype
+        if isinstance(name, str) and name:
+            layer, _decision = _kind_guard_decision(
+                etype, name, relayed, None,
+                installed_provider=lambda: _graph_installed_namespaces(sdk),
+                ambiguous_target=lambda _label: bool(_ambiguous_holder_ids(
+                    sdk._get_proj().g, _label, name)))
+        probe = _kind_layer_note(layer, relayed)[0]
     except Exception:  # noqa: BLE001, RUF100 — probe only, never refuses a write
         probe = etype
     return _ENTITY_LAYER_LABEL.get(probe) or _ENTITY_LAYER_LABEL.get(etype)
 
 
-def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
+def _existing_entity_ids(sdk, etype: str, props: dict, name: Any) -> list:
     """The ids of the entity nodes this write will actually MERGE onto.
 
     ``etype`` is what the ITEM declared; the entity door re-labels the write by
@@ -5592,8 +5616,8 @@ def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
     """
     if not isinstance(name, str) or not name:
         return []
-    label = _landing_entity_label(etype, props)
-    return all_name_holder_ids(g, label, name) if label else []
+    label = _landing_entity_label(sdk, etype, props, name)
+    return all_name_holder_ids(sdk._get_proj().g, label, name) if label else []
 
 
 #: The ONE spelling of the guard override token in this module. It is compared
@@ -5623,36 +5647,38 @@ def _graph_installed_namespaces(sdk) -> frozenset[str] | None:
     return graph_installed_namespaces(sdk)
 
 
-def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
-                      installed_provider=None,
-                      ambiguous_target=None) -> tuple[str, object | None]:
-    """Resolve and APPLY the per-kind guard to an entity write (#12060).
+def _kind_guard_decision(t: str, name: str, props: dict,
+                         intent: str | None, *,
+                         installed_provider=None,
+                         ambiguous_target=None,
+                         explicit_id: str | None = None
+                         ) -> tuple[str, object | None]:
+    """Resolve the per-kind guard WITHOUT touching ``props`` — the NON-MUTATING
+    twin of :func:`_apply_kind_guard`.
 
-    Returns ``(layer, decision)`` — the layer the write should now use, and the
-    ``kind_guards.GuardDecision`` (``None`` when nothing could be computed).
-    On a redirect this MUTATES ``props``: every entity-layer kind spelling the
-    write carried is removed and the target kind is declared under the target
-    layer's canonical prop, so the fold writes the routed property and no stale
-    ``subject_kind``/``objectKind`` rides along (the same discipline
-    ``_kind_layer_note`` applies on its own routing path — extended here to a
-    NIL/blank spelling, because a ``subjectKind='other'`` must not ride along
-    onto a ``:WorkItem``).
+    Returns ``(layer, decision)``: the layer the write will use, and the
+    decision (``None`` when nothing could be computed). This is the ONE
+    authority for "which label does this write land on, guard included", so a
+    caller that must PREDICT a write (the ingest / bundle pre-flights) asks the
+    same question the door answers instead of re-deriving it — the #9876
+    round-14 / #9964 discipline, extended to the guard.
 
-    ``declaredKind``/``declaredLayer``/``kindRedirectRule`` are recorded on the
-    node (R5) so an override, a replay or a later audit can restore what the
-    caller asked for AND attribute the change to the rule that made it — a
-    payload that only lives in one response is not durable, and a redirect
-    nobody can attribute is the PostgreSQL "surprising interpretation" failure
-    with better manners.
+    ⛔ MEASURED (review round 3, P1) why a predictor must ask it: with two live
+    ``:Subject`` carriers of ``issue:repo#1``, ``create_subject`` SUCCEEDED —
+    the guard redirected the write to ``:Object``, away from the ambiguity —
+    while ``sdk.ingest`` of the very same item raised ``BundleValidationError``
+    claiming the create refuses. Two doors of one API, disagreeing about one
+    write; and every re-ingest of a guarded item reported ``created`` again,
+    because the existence probe asked the label the item DECLARED.
 
-    Returns the decision unchanged when the guard only ABSTAINED or the caller
-    OVERRODE it: in both cases the write must land exactly as declared.
+    ``props`` is read, never written.
 
-    ``ambiguous_target`` is a probe ``(label) -> bool`` the caller supplies,
-    answering "would a create on that label refuse because 2+ LIVE entities
-    already hold this name?". It is consulted ONLY when the guard moves the
-    write to the other entity label, which is the one way a guard can reach a
-    refusal the caller never asked for.
+    ``installed_provider`` answers "which pack namespaces does this graph have"
+    (R2) and ``ambiguous_target`` answers "would a create on that label refuse,
+    because 2+ LIVE entities already hold this name?" — the one way a guard can
+    reach a refusal the caller never asked for. ``explicit_id`` suppresses that
+    probe: an explicit ``_server_id`` cannot be refused, so there is nothing to
+    predict. Every probe fails open (#1934).
     """
     from tortoise.kind_guards import (
         SKIP_STATUS_NOT_LEGAL_ON_SUBJECT,
@@ -5660,8 +5686,6 @@ def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
         abstain,
         resolve,
     )
-    from tortoise.kind_layers import KIND_PROP
-    from tortoise.pack_state import _KIND_PROP_SPELLINGS
 
     named = _named_layer_kinds(props)
     declared = next((kind for _layer, _spelling, kind in named), None)
@@ -5710,7 +5734,8 @@ def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
     # defining rule forbid. The probe is READ-ONLY and reuses the ONE identity
     # predicate (`entity_identity.is_ambiguous`); a probe that fails is ignored
     # (#1934: nothing here may fail a write).
-    if decision.layer != t and ambiguous_target is not None:
+    if (decision.layer != t and ambiguous_target is not None
+            and not explicit_id):
         _target_label = _ENTITY_LAYER_LABEL.get(decision.layer)
         try:
             _would_refuse = bool(_target_label) and bool(
@@ -5723,6 +5748,49 @@ def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
             _would_refuse = False
         if _would_refuse:
             return t, abstain(decision, SKIP_TARGET_LABEL_AMBIGUOUS, layer=t)
+
+    return decision.layer, decision
+
+
+def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
+                      installed_provider=None,
+                      ambiguous_target=None,
+                      explicit_id: str | None = None) -> tuple[str, object | None]:
+    """Resolve and APPLY the per-kind guard to an entity write (#12060).
+
+    ``_kind_guard_decision`` decides; this APPLIES it — see there for the
+    contract, and for why a PREDICTOR must call that one instead. On a redirect
+    this MUTATES ``props``: every entity-layer kind spelling the write carried is
+    removed and the target kind is declared under the target layer's canonical
+    prop, so the fold writes the routed property and no stale
+    ``subject_kind``/``objectKind`` rides along (the same discipline
+    ``_kind_layer_note`` applies on its own routing path — extended here to a
+    NIL/blank spelling, because a ``subjectKind='other'`` must not ride along
+    onto a ``:WorkItem``).
+
+    ``declaredKind``/``declaredLayer``/``kindRedirectRule`` are recorded on the
+    node (R5) so an override, a replay or a later audit can restore what the
+    caller asked for AND attribute the change to the rule that made it — a
+    payload that only lives in one response is not durable, and a redirect
+    nobody can attribute is the PostgreSQL "surprising interpretation" failure
+    with better manners.
+
+    ⛔ ``explicit_id`` SKIPS the identity probe. ``resolve_or_mint`` returns a
+    caller-supplied ``_server_id`` BEFORE it counts holders, so it cannot refuse
+    an explicit-id create — abstaining on an ambiguity that cannot happen would
+    report ``target-label-ambiguous`` for a write that WOULD have landed
+    (review round 3, P3: a data field clients branch on, reported wrong).
+
+    Returns the decision unchanged when the guard only ABSTAINED or the caller
+    OVERRODE it: in both cases the write must land exactly as declared.
+    """
+    _layer, decision = _kind_guard_decision(
+        t, name, props, intent, installed_provider=installed_provider,
+        ambiguous_target=ambiguous_target, explicit_id=explicit_id)
+    if decision is None or not decision.changed:
+        return _layer, decision
+    from tortoise.kind_layers import KIND_PROP
+    from tortoise.pack_state import _KIND_PROP_SPELLINGS
 
     _entity_props = {KIND_PROP["subject"], KIND_PROP["object"]}
     for spelling, canonical in _KIND_PROP_SPELLINGS.items():
@@ -27288,7 +27356,7 @@ class TortoiseSDK:
             if _etype not in _ENTITY_LAYER_LABEL \
                     or not isinstance(_name, str) or not _name:
                 continue
-            _elabel = _landing_entity_label(_etype, dict(item))
+            _elabel = _landing_entity_label(self, _etype, dict(item), _name)
             if _elabel not in ("Subject", "Object"):
                 continue
             _live_n = _name_holders(_elabel, _name)[4]
@@ -29232,11 +29300,11 @@ class TortoiseSDK:
                 # ── #9964 review: probe the label the WRITE lands on, not the one
                 # the item declared (the door re-labels by the kind). See
                 # `_existing_entity_ids`.
-                existed = _existing_entity_ids(proj.g, etype, item, name)
+                existed = _existing_entity_ids(self, etype, item, name)
                 node = self.create_subject(name, **item)
                 canonical = node.get("id") or name
             elif etype == "object":
-                existed = _existing_entity_ids(proj.g, etype, item, name)
+                existed = _existing_entity_ids(self, etype, item, name)
                 node = self.create_object(name, **item)
                 canonical = node.get("id") or name
             elif etype == "event":
@@ -45512,18 +45580,34 @@ class TortoiseSDK:
                 and intent.strip().lower() == _KIND_GUARD_INTENT_AS_DECLARED):
             props.setdefault("intent", intent)
             intent = None
+        _control_token_spent = (
+            isinstance(intent, str)
+            and intent.strip().lower() == _KIND_GUARD_INTENT_AS_DECLARED)
         try:
             t, _guard = _apply_kind_guard(
                 t, name, props, intent,
                 installed_provider=lambda: _graph_installed_namespaces(self),
                 ambiguous_target=lambda _label: bool(_ambiguous_holder_ids(
-                    self._get_proj().g, _label, name)))
+                    self._get_proj().g, _label, name)),
+                explicit_id=_server_id)
         except Exception as _guard_exc:  # noqa: BLE001, RUF100 — never refuses a write
             _logger.warning(
                 "create_entity: the kind guard could not be resolved (%s: %s) — "
                 "the write proceeds UNGUARDED and nothing is refused (#1934).",
                 type(_guard_exc).__name__, _guard_exc)
             _guard = None
+        # ⛔ A CONTROL TOKEN THAT CONTROLLED NOTHING IS DATA AGAIN. The token is
+        # consumed before the guard runs (it has to be — it is an input to the
+        # decision), so a write the guard does NOT touch would silently lose a
+        # property that `origin/main` stores: MEASURED (review round 3, P2)
+        # `create_object("Widget", intent="as_declared")` stored NO `intent`
+        # here while storing `intent="as_declared"` on `main`. Restored exactly
+        # when no guard acted, so an unguarded write is byte-identical to before
+        # the feature — the same rule the non-token branch above applies, in the
+        # same direction.
+        if (_control_token_spent and _guard is not None
+                and not _guard.changed and _guard.outcome != "overridden"):
+            props.setdefault("intent", intent)
         # ── #9964: the KIND decides the layer, then REPORT the disagreement ───
         # One authority answers which layer a kind is declared on; a kind that
         # belongs exclusively to the other entity layer ROUTES this write there

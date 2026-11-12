@@ -883,9 +883,10 @@ def abstain(decision: GuardDecision, reason: str, *,
     # HAPPENED.
     if decision.outcome != GuardOutcome.REDIRECT:
         return decision
-    _already = _ABSTAINED.get(id(decision))
-    if _already is not None:
-        return _already
+    with _ABSTAINED_LOCK:
+        _entry = _ABSTAINED.get(id(decision))
+        if _entry is not None and _entry[0]() is decision:
+            return _entry[1]
     _unrecord(decision.rule or "", decision.declared_kind, decision.kind or "",
               GuardOutcome.REDIRECT)
     skipped = {"rule": decision.rule, "target": decision.kind, "reason": reason}
@@ -895,10 +896,21 @@ def abstain(decision: GuardDecision, reason: str, *,
         outcome=GuardOutcome.SKIPPED, layer=_layer,
         declared_kind=decision.declared_kind, declared_layer=_layer,
         skipped=skipped, rule=decision.rule)
-    # Remembered as the REPLACEMENT, so a second `abstain` on the same redirect
-    # answers with the abstention it already produced instead of handing the
-    # caller back a redirect the door would then APPLY.
-    _ABSTAINED[id(decision)] = _replacement
+    # Remembered as `(ref-to-the-DECISION, replacement)`, so a second `abstain`
+    # on the same redirect answers with the abstention it already produced
+    # instead of handing the caller back a redirect the door would then APPLY —
+    # and the marker expires with the DECISION, whichever of the two the caller
+    # keeps. Dead entries are pruned here: the map is a cache of live decisions,
+    # not a log.
+    try:
+        _ref = weakref.ref(decision)
+    except TypeError:  # a decision object that cannot be weakly referenced
+        _ref = None
+    with _ABSTAINED_LOCK:
+        for _stale in [k for k, (r, _v) in _ABSTAINED.items() if r() is None]:
+            _ABSTAINED.pop(_stale, None)
+        if _ref is not None:
+            _ABSTAINED[id(decision)] = (_ref, _replacement)
     return _replacement
 
 
@@ -978,8 +990,19 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                 fallback=(_qualify(str(c.get("fallback")).strip(), namespace)
                           if c.get("fallback") else ""),
                 reason=str(c.get("reason") or c.get("message") or rule),
-                from_kinds=tuple(str(k) for k in from_kinds
-                                 if isinstance(k, str)),
+                # ⛔ QUALIFIED, like `redirect`/`fallback`/`guarded_kind` — the
+                # FOURTH entry in this same asymmetry, and it was left in it
+                # (review round 3, P2, measured): a manifest's bare
+                # `fromKinds: [concept]` means THIS pack's kind (the manifest
+                # convention), but unqualified it compared against
+                # `kind_forms("concept")` — so the guard never fired for the
+                # canonical `acme:concept` declaration and DID fire for
+                # `core:concept`, a different kind in another namespace. Both
+                # halves are silent: one rule that cannot act, and one write
+                # changed that the rule never named.
+                from_kinds=tuple(
+                    _qualify(str(k).strip(), namespace) for k in from_kinds
+                    if isinstance(k, str) and str(k).strip()),
                 from_layers=tuple(str(layer).lower() for layer in from_layers
                                   if isinstance(layer, str)),
                 link_predicate=(str(c["linkPredicate"])
@@ -1090,14 +1113,22 @@ def _admit(label: str | None, seen: set[str]) -> str:
     return _l
 
 
-#: Decisions `abstain` has already corrected. A WEAK-VALUE map keyed on `id()`,
-#: not a `WeakSet`: `GuardDecision` carries dict payloads, so a value-based hash
-#: raises (`TypeError: unhashable type: 'dict'`) on exactly the decisions this
-#: has to track. Only the KEY is hashed here. The weak values are what make the
-#: recycled-id aliasing impossible: an entry dies with its decision, so a live
-#: object can never inherit a stale marker.
-_ABSTAINED: weakref.WeakValueDictionary[int, GuardDecision] = \
-    weakref.WeakValueDictionary()
+#: Decisions `abstain` has already corrected: ``id(decision) -> (ref, replacement)``.
+#:
+#: ⛔ A plain `set`/`WeakSet` cannot be used: `GuardDecision` carries dict
+#: payloads, so a VALUE-based hash raises (`TypeError: unhashable type: 'dict'`)
+#: on exactly the decisions this tracks — only the `id()` key is hashed here.
+#:
+#: ⛔ And the lifetime marker must follow the DECISION, not the replacement.
+#: A `WeakValueDictionary` keyed on `id()` and holding the REPLACEMENT was
+#: measured wrong (review round 3, P2): the caller usually drops the return
+#: value, so the marker died immediately and a second `abstain` corrected the
+#: tally AGAIN — one redirect, two `skipped`, zero `accepted`. Storing a
+#: `weakref` TO THE DECISION is what the docstring always claimed, and a dead
+#: ref is pruned on the next write (so the map is bounded by the live decisions
+#: a caller is holding, not by history).
+_ABSTAINED: dict[int, tuple[weakref.ref, GuardDecision]] = {}
+_ABSTAINED_LOCK = threading.Lock()
 
 
 def _record(rule: str, from_kind: str | None, to_kind: str, outcome: str) -> None:

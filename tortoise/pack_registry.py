@@ -2931,6 +2931,23 @@ class PackRegistry:
             for k in ont.get(kind_field, []) or []:
                 if isinstance(k, str) and k:
                     own_layer[k] = layer
+        # The axes that are NOT an entity layer, so a guard claiming one can be
+        # refused BY NAME rather than silently: a `documentKind` is a `:Source`
+        # genre (D10) and an `actionKind` is a verb on the action axis (#122
+        # retired its canonical status) — neither is a home a guard may
+        # redirect an ENTITY write into. Round 3 measured both escaping: the
+        # documentKind check ran only for the BARE spelling (`":" not in
+        # kind_ref`), so `kind: acme:contract` walked past it, and
+        # `actionKinds: [shipit]` + `kind: shipit` was never checked at all
+        # (`_layer_of` returns None for both and `None` meant "nothing to
+        # check"). ONE map, so a new non-layer axis cannot fall out of the rule
+        # the way `actionKinds` did out of `KIND_FIELDS`.
+        unguardable = {
+            str(k).strip(): axis
+            for axis in ("documentKinds", "actionKinds")
+            for k in (ont.get(axis) or [])
+            if isinstance(k, str) and str(k).strip()
+        }
         allowed_ns = {"core"} | {str(d).strip() for d in (depends_on or [])
                                  if isinstance(d, str) and d.strip()}
         if ns:
@@ -2964,34 +2981,50 @@ class PackRegistry:
                 errors.append(f"{where}: missing required 'kind'")
                 kind_ref = None
             else:
-                qualified, _kns = _resolve_ref(kind_ref.strip())
+                qualified, kns = _resolve_ref(kind_ref.strip())
                 bare = qualified.split(":", 1)[-1]
+                # ⛔ A `depends_on` PEER's kind is allowed (round 3, P3): R1
+                # explicitly permits redirecting INTO a declared dependency, and
+                # `kind` is documentation — it names the kind the guard is
+                # ABOUT, never a filter on the write (`kind_guards.Confusion`
+                # says so). Refusing `kind: dev:issue` while accepting the
+                # identical guard written with an own kind made the field's
+                # meaning depend on which namespace the author happened to
+                # spell, for no reason a reader could infer.
+                # ⚠️ NOT this pack's OWN namespace: a kind `acme:thing` that
+                # `acme` does not declare is exactly the error this check
+                # exists for, and `allowed_ns` contains `acme` by construction.
+                _peer_ns = (kns if kns and kns != ns and kns in allowed_ns
+                            else None)
                 if not (qualified in core_names
                         or f"core:{qualified}" in core_names
-                        or bare in all_pack_kinds):
+                        or bare in all_pack_kinds
+                        or _peer_ns is not None):
                     errors.append(
-                        f"{where}: kind '{kind_ref}' is neither a core kind nor "
-                        f"a kind this pack declares — a guard must be about a "
-                        f"kind the pack owns")
+                        f"{where}: kind '{kind_ref}' is neither a core kind, a "
+                        f"kind this pack declares, nor a kind in a pack named "
+                        f"in depends_on — a guard must be about a kind this "
+                        f"pack can name")
             layer = entry.get("layer")
             if layer not in LAYERS:
                 errors.append(
                     f"{where}.layer: must be one of "
                     f"{', '.join(LAYERS)} (got {layer!r})")
             elif isinstance(kind_ref, str) and kind_ref.strip():
-                # ⛔ The documentKinds refusal was DEAD CODE where it used to
-                # live — one `elif` further down, behind a branch that had
-                # already claimed every non-empty `kind_ref`, so a pack that
-                # declared `documentKinds: [contract]` AND a guard on `contract`
-                # validated CLEAN (round-2 review P2, measured). A document is a
-                # `:Source` (D10), not an entity layer, so there is nothing a
-                # guard could redirect; the check now runs FIRST, where it can
-                # fire.
-                if (":" not in kind_ref.strip()
-                        and kind_ref.strip() in (ont.get("documentKinds") or [])):
+                # ⛔ Checked by the BARE name, so the qualified spelling cannot
+                # walk past it (round 3: `kind: acme:contract` validated clean
+                # against `documentKinds: [contract]`). A document/action kind is
+                # not an entity layer, so there is nothing a guard could
+                # redirect; this runs FIRST, where it can fire.
+                _bare = kind_ref.strip().split(":", 1)[-1]
+                if _bare in unguardable:
                     errors.append(
-                        f"{where}.layer: '{kind_ref}' is a documentKind (a "
-                        f":Source genre, D10) — not a guardable entity layer")
+                        f"{where}.layer: '{kind_ref}' is a "
+                        f"{unguardable[_bare]} entry — "
+                        + ("a :Source genre (D10)" if unguardable[_bare]
+                           == "documentKinds" else
+                           "a verb on the action axis (#122)")
+                        + ", not a guardable entity layer")
                 else:
                     declared_layer = _layer_of(kind_ref.strip())
                     if declared_layer is not None and declared_layer != layer:
@@ -3030,6 +3063,19 @@ class PackRegistry:
                         re.compile(pattern, re.IGNORECASE)
                     except re.error as exc:
                         errors.append(f"{cw}.pattern: does not compile ({exc})")
+                _lp = c.get("linkPredicate")
+                if _lp is not None:
+                    # A predicate the runtime does not implement is a guard that
+                    # can NEVER act (it abstains on `link-predicate-unimplemented`)
+                    # — an installable declaration that lies (round 3, P2). The
+                    # runtime's own table is the authority for what exists.
+                    from tortoise.kind_guards import LINK_PREDICATES
+
+                    if not isinstance(_lp, str) or _lp not in LINK_PREDICATES:
+                        errors.append(
+                            f"{cw}.linkPredicate: {_lp!r} is not a known link "
+                            f"predicate ({', '.join(sorted(LINK_PREDICATES))}) "
+                            f"— a guard naming one can never act")
                 if not isinstance(c.get("reason"), str) or not c["reason"].strip():
                     errors.append(
                         f"{cw}.reason: required — a redirect the caller cannot "

@@ -172,7 +172,7 @@ rule id), *the exact override*, and *how to undo* — as data, never as English:
    "rule":     "repo-slug-is-not-a-person",
    "reason":   "owner/name names a repository, and a repository is not a person",
    "override": "intent=\"as_declared\"",
-   "undo":     "none — the node was created at the redirected layer; ...",
+   "undo":     "to file it on the Subject layer instead, re-issue the write with intent=\"as_declared\". ⚠️ identity is label-scoped, so if a :Subject of this name ALREADY existed, the graph now holds it under BOTH layers (#2489: nothing reconciles them for you) — retire the stale node explicitly",
    "degraded": false,
    "message":  "redirected: Subject (core:naturalPerson) → Object (core:Project) ..."}}
 ```
