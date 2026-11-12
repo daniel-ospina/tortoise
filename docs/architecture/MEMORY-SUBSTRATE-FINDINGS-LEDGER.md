@@ -413,7 +413,11 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   STILL-TRUE rows read CLEAN in both positions while the identical text inside the sentence red. So
   every sentence in the paragraph is asked one question — is everything before its negation verb
   nothing but letter items and separators? Yes ⇒ governed group, validated; a real word in that span
-  (`Rows (i) and (j) do not apply here.`) ⇒ prose, never accused.
+  (`Rows (i) and (j) do not apply here.`) ⇒ prose, never accused. Two further bounds, both measured:
+  the verb must govern READING — the text after it is the ellipsis (`do not.`), a form of `read`, or
+  `do` again (`no longer do.`), never something else (`… do not need re-reading.` states exactly what
+  the table says and was wrongly RED before that check); and `Only` — this page's own list label —
+  may open the span, since `Only **(i)** and **(j)** do not.` otherwise read CLEAN.
   ⚠️ **Residual, stated:** the
   "exactly one" rule is scoped to the tally's own paragraph, so a second complementary or "no longer"
   sentence **two newlines below** it is not counted. Widening it to the whole page is not available

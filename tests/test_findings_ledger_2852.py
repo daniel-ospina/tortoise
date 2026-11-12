@@ -3876,6 +3876,9 @@ def test_a_governed_group_in_its_own_sentence_is_validated(tmp_path, monkeypatch
         "are **DRIFTED**. — **(i)** and **(j)** do not. Only",
         "still read as written. — **(i)** and **(j)** do not. (Four",
         "are **DRIFTED**. — **(i)** and **(j)** no longer do. Only",
+        # ⛔ AND THE PAGE'S OWN LABEL MAY OPEN THE FRAGMENT (`Only **(a)** … still read as
+        # written` is the documented list label): without it this spelling read CLEAN.
+        "are **DRIFTED**. Only **(i)** and **(j)** do not. Only",
     )
     for spelled in contradicting:
         src = tail if spelled.startswith("are ") else complement
@@ -3889,6 +3892,18 @@ def test_a_governed_group_in_its_own_sentence_is_validated(tmp_path, monkeypatch
     for spelled in (
         "are **DRIFTED**. — **(c)** and **(d)** do not. Only",
         "are **DRIFTED**. Rows (i) and (j) do not apply here. Only",
+        # ⛔ A NEGATION MUST GOVERN *READING*, or the arm accuses a TRUE sentence
+        # (#11902 review, round 12): these all name STILL-TRUE rows and all state what the
+        # table says, and all three RED before the tail check existed.
+        "are **DRIFTED**. — **(a)**, **(f)**, **(h)**, **(i)** and **(j)** "
+        "do not need re-reading. Only",
+        "are **DRIFTED**. — **(a)**, **(f)**, **(h)**, **(i)** and **(j)** "
+        "did not move. Only",
+        "are **DRIFTED**. — **(a)**, **(f)**, **(h)**, **(i)** and **(j)** "
+        "no longer dispute the fix. Only",
+        # `Only` is this page's own list label, so it may open the governed span — and a
+        # real word after it still means prose.
+        "are **DRIFTED**. Only **(i)** and **(j)** do not apply here. Only",
     ):
         with monkeypatch.context() as patch:
             _mutated(tmp_path, patch, lambda t, b=spelled: t.replace(tail, b, 1))

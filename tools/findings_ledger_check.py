@@ -1667,11 +1667,28 @@ def check_verdict_tally(text: str) -> list[str]:
     # asked one question: is everything before its negation verb NOTHING BUT letter items
     # and separators? If yes it is the governed group and is validated; anything carrying a
     # real word (`Rows (i) and (j) do not apply here.`) is prose and is never accused.
+    # ⛔ AND THE NEGATION MUST GOVERN *READING* (#11902 review, round 12). Matching any
+    # negation verb read a TRUE sentence as its own contradiction: measured,
+    # `… — **(a)**, **(f)**, **(h)**, **(i)** and **(j)** do not need re-reading.` RED with
+    # "names ['a','f','h','i','j'] as NOT still reading as written" — the page saying exactly
+    # what its table says. So the text AFTER the verb must be the ellipsis (`do not.`), or a
+    # form of `read` (`do not read`, `no longer read as written`), or `do` again
+    # (`no longer do.`). Anything else negates something that is not this claim.
+    # ⛔ AND `Only` IS THIS PAGE'S OWN LIST LABEL (`Only **(a)** … still read as written`), so
+    # it may open the governed span: without that, the natural counterpart spelling
+    # `Only **(i)** and **(j)** do not.` still read CLEAN (measured).
     for candidate in sentences:
         verb = re.search(r"\b(?:do|does|did) not\b|\bno longer\b", candidate)
         if not verb or candidate is still_sentence:
             continue
-        head = candidate[: verb.start()]
+        tail = candidate[verb.end() :].strip()
+        if not re.fullmatch(
+            r"(?:(?:do|read|reads)(?:\s+as\s+written)?)?[\W_]*", tail, re.IGNORECASE
+        ):
+            continue
+        head = re.sub(
+            r"^[\W_]*(?:only|just)\b", "", candidate[: verb.start()], flags=re.IGNORECASE
+        )
         if not head.strip():
             continue
         residue = re.sub(_LETTER_ITEM_ANY, " ", head, flags=re.IGNORECASE)
