@@ -2107,10 +2107,68 @@ tier: free
 ontology{ont}
 depends_on: []
 """
-        for ont in (":\n", ": core\n", ": [1, 2]\n"):
+        for ont, kind in ((":\n", "NoneType"), (": core\n", "str"),
+                          (": [1, 2]\n", "list")):
             v = validate_manifest(base.format(ont=ont))
             assert v.ok is False, (ont, v.ok)
-            assert v.errors, (ont, v.errors)
+            # ⛔ AND THE MESSAGE NAMES THE FIELD — round-10 review P3: the first
+            # fix returned the registry's internal `AttributeError` text
+            # ("'NoneType' object has no attribute 'get'") as the whole
+            # diagnostic, which is a stack trace with a status code, and the
+            # assertion `v.errors` could not tell the difference.
+            joined = " ".join(v.errors)
+            assert "ontology must be a mapping" in joined, (ont, v.errors)
+            assert kind in joined, (ont, v.errors)
+
+    def test_the_catalog_load_reports_a_dead_guard_WITH_A_BARE_RULE_ID(self, tmp_path):
+        """`guard_warnings` attributes by `declaring_pack`, never by string prefix.
+
+        Round-10 review P2, measured: `check_guard_table` matched each problem
+        string against `"<ns>:"`, but the manifest's `rule` id is echoed VERBATIM
+        and a bare id is legitimate (the docs' own example is
+        `rule: repo-slug-is-not-a-person`) — so `rule: my-bare-rule` produced a
+        problem with no namespace prefix, found no owner, and was DROPPED:
+        `guard_warnings == {}` for a guard whose target cannot be routed. The
+        install gate caught it (`pack validate` scopes by `declaring_pack`); the
+        load-time report this feature adds said nothing.
+        """
+        from tortoise.pack_registry import PackRegistry
+
+        def registry(rule):
+            d = tmp_path / rule.replace(":", "_")
+            pack = d / "acme"
+            pack.mkdir(parents=True)
+            (pack / "manifest.yaml").write_text(f"""namespace: acme
+name: Acme
+version: "0.1.0"
+tier: free
+ontology:
+  extends: core
+  objectKinds: [concept]
+  guards:
+  - kind: concept
+    layer: object
+    onConfusion:
+      - when: nameMatches
+        pattern: '^thing-[0-9]+$'
+        rule: {rule}
+        redirect: core:WrokItem
+        fallback: core:WorkItem
+        reason: x
+depends_on: []
+""")
+            reg = PackRegistry(d)
+            reg.load_all()
+            reg.check_guard_table()
+            return reg.guard_warnings
+
+        bare = registry("my-bare-rule")
+        assert "acme" in bare, bare
+        assert any("not routed to one layer" in m for m in bare["acme"]), bare
+        # …and a QUALIFIED id reports the same thing, so the report does not
+        # depend on how the author spelled the rule
+        qualified = registry("acme:my-rule")
+        assert "acme" in qualified, qualified
 
     def test_a_fromKinds_scope_naming_no_CORE_kind_is_refused(self):
         """`core:WrokItem` is a typo the own-namespace arm cannot see.

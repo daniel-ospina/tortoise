@@ -137,8 +137,10 @@ error names every owner.
 > ⛔ **Self-hosted only, today.** A guard is compiled from the process
 > FILESYSTEM catalog, so a **hosted** (graph-native) tenant pack cannot use one:
 > `validate_manifest` refuses an `ontology.guards` block that it would install
-> and never read, with that limitation named. Everything below describes an
-> install under `TORTOISE_PACKS_DIR`, where `tortoise pack validate` is the gate.
+> and never read, with that limitation named. Everything below about a
+> **pack-declared** guard describes an install under `TORTOISE_PACKS_DIR`, where
+> `tortoise pack validate` is the gate. The **core** table is always in force, on
+> both surfaces — a hosted write still gets the issue-identifier redirect.
 
 A **guard** is a deterministic, token-free redirect for a write that is filed on
 the wrong *kind*. Measured before it existed: the hosted graphs held 453 nodes

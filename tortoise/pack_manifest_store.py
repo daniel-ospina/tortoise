@@ -340,6 +340,19 @@ def validate_manifest(
     # registry-isolation path already returned a clean `ok=False`. The sibling
     # `_tenant_fold_declarations` guards the same shape for the same reason.
     _ont = raw.get("ontology")
+    # `ontology:` present-but-null is the same authoring mistake as `ontology:
+    # core`, so the test is the KEY, not the value (#12060 round-11).
+    if "ontology" in raw and not isinstance(_ont, dict):
+        # ⛔ ITS OWN MESSAGE, not the registry's internal `AttributeError` text
+        # (round-10 review P3, measured: `ontology:` null / `core` / `[1, 2]`
+        # returned `"'NoneType' object has no attribute 'get'"` as the whole
+        # diagnostic, while an `objectKinds` typo gets a precise sentence). A
+        # verdict that names no field is a stack trace with a status code.
+        return ManifestValidation(
+            False, namespace=ns,
+            errors=["ontology must be a mapping (extends / objectKinds / "
+                    "documentKinds / guards / …) — got "
+                    f"{type(_ont).__name__}"])
     if isinstance(_ont, dict) and _ont.get("guards"):
         return ManifestValidation(
             False, namespace=ns,

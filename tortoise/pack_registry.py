@@ -3391,17 +3391,39 @@ class PackRegistry:
                 declared = getattr(self.packs[ns], "guards", None)
                 if declared:
                     confusions.extend(pack_guards(ns, declared))
+            if not confusions:
+                # ⛔ NO DECLARED GUARDS IS THE COMMON CASE, and the table compile
+                # is not free: `_layer_of_kind` builds its own registry to read
+                # the kind-index spec (measured +0.40 s per process on the 7-pack
+                # catalog, and two extra `load_all` calls — a fallback-chain test
+                # counts them). Nothing declared ⇒ nothing to report.
+                return self.guard_warnings
             kinds = {
                 ns: list(getattr(self.packs[ns], "object_kinds", None) or [])
                 + list(getattr(self.packs[ns], "document_kinds", None) or [])
                 for ns in self.packs
             }
+            # ⛔ ATTRIBUTED BY `declaring_pack`, NEVER BY STRING PREFIX (round-10
+            # review P2, measured): the manifest's `rule` id is echoed verbatim
+            # into every problem string and a BARE id is legitimate — the docs'
+            # own example is `rule: repo-slug-is-not-a-person` — so a prefix match
+            # on `"<ns>:"` found no owner and silently DROPPED the problem
+            # (`guard_warnings == {}` for a guard with an unrouted target). Asking
+            # the table one namespace at a time makes the attribution structural,
+            # and a problem that still names no owner is logged, never dropped.
+            for ns in sorted(self.packs):
+                own = [c for c in confusions if c.declaring_pack == ns]
+                if not own:
+                    continue
+                for problem in guard_table_problems(
+                        own, include_catalog=False, pack_kinds=kinds):
+                    self.guard_warnings.setdefault(ns, []).append(problem)
+            attributed = {p for problems in self.guard_warnings.values()
+                          for p in problems}
             for problem in guard_table_problems(
                     confusions, include_catalog=False, pack_kinds=kinds):
-                owner = next((ns for ns in sorted(self.packs, reverse=True)
-                              if problem.startswith(ns + ":")), None)
-                if owner is not None:
-                    self.guard_warnings.setdefault(owner, []).append(problem)
+                if problem not in attributed:
+                    log.warning("pack catalog: guard — %s", problem)
         except Exception as exc:  # noqa: BLE001, RUF100 — advisory, never raises
             log.debug("pack_registry: guard-table check skipped (%s)", exc)
             return self.guard_warnings
