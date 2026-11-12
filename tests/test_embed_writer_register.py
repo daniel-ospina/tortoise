@@ -1193,9 +1193,27 @@ LABEL_CONSTANTS: dict[str, tuple[str, str, frozenset[str]]] = {
 
 
 #: Rows whose needle is a SEAM THAT BOUNDS the label set rather than a store clause, because the
-#: store is deliberately un-nameable in their own body (`restore_graph` interpolates its labels,
-#: `_event_raw_write_door` executes its caller's). Their COMPLETENESS therefore rests on a constant,
-#: so every member here must also appear in `LABEL_CONSTANTS` — asserted, not implied.
+#: store is genuinely un-nameable in their own body (`_event_raw_write_door` executes its CALLER's
+#: statement). Their COMPLETENESS therefore rests on a constant, so every member here must also
+#: appear in `LABEL_CONSTANTS` — asserted, not implied.
+#: ⛔ `restore_graph` USED to sit here and does not belong: its store IS nameable — it is the
+#: `set_embedding_clause("n", "r.v")` in its own body, and `tortoise/embed_writer_register.py` says
+#: in terms that the row "is declared here off its `set_embedding_clause`". Only its LABEL is
+#: bounded. Graded `bound` it owed no store at all, so deleting that clause left the row GREEN
+#: (measured, `#12020` review round 6) — it now takes `BOUND_STORE_LABEL_EVIDENCE` instead.
+BOUND_LABEL_EVIDENCE = frozenset({
+    "tortoise.sdk::_event_raw_write_door",
+})
+
+#: Rows whose LABEL is bounded by a constant seam but whose STORE is nameable in their own scope.
+#: The claim is both halves: the needle is carried by a real statement (the bound half, as above)
+#: AND the cited symbol's own scope contains at least one store statement. That second half is what
+#: the `bound` kind could not express, and its absence was a false PASS — a row that survives its
+#: vector write being deleted.
+BOUND_STORE_LABEL_EVIDENCE = frozenset({
+    "tortoise.hosted_backup::restore_graph",
+})
+
 #: Rows whose store is carried by a MAP MERGE (`SET n += $p`) rather than a nameable vector clause.
 #: Exactly one row, and it is the row the probe itself classifies as undecidable — the exemption this
 #: row already relies on (`#4094`) is what makes the weaker evidence legitimate. ⛔ Do not grow this
@@ -1213,6 +1231,8 @@ def _claim_for(key: str) -> str:
     `claim` it defaulted to `store` for the one `merge` row and its OWN control failed, which is the
     drift this function prevents (`#12020` review round 5).
     """
+    if key in BOUND_STORE_LABEL_EVIDENCE:
+        return "bound_store"
     if key in BOUND_LABEL_EVIDENCE:
         return "bound"
     if key in ASSEMBLED_LABEL_EVIDENCE:
@@ -1220,11 +1240,6 @@ def _claim_for(key: str) -> str:
     if key in MERGE_STORE_CLAIM:
         return "merge"
     return "store"
-
-BOUND_LABEL_EVIDENCE = frozenset({
-    "tortoise.hosted_backup::restore_graph",
-    "tortoise.sdk::_event_raw_write_door",
-})
 
 #: Rows whose store clause is ASSEMBLED across neighbouring statements rather than issued in the one
 #: that names the label (`_rebuild_all_replay` names `:Point` in the query statement while
@@ -1265,7 +1280,8 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
     assert ITERATED_STORE_CLAIM, "no row carries an iterated-store claim — #11954's arm is unowned"
     stale = sorted(set(ITERATED_STORE_CLAIM) - set(LABEL_EVIDENCE))
     assert not stale, f"ITERATED_STORE_CLAIM names rows that no longer exist: {stale}"
-    unoffered = sorted(set(BOUND_LABEL_EVIDENCE | ASSEMBLED_LABEL_EVIDENCE)
+    unoffered = sorted(set(BOUND_LABEL_EVIDENCE | BOUND_STORE_LABEL_EVIDENCE
+                         | ASSEMBLED_LABEL_EVIDENCE)
                        - set(LABEL_EVIDENCE))
     assert not unoffered, f"a claim-kind table names rows that no longer exist: {unoffered}"
     labelled = {key for key, entry in EMBED_WRITER_CLASSES.items()
@@ -1292,7 +1308,7 @@ def test_every_declared_label_re_derives_at_this_head() -> None:
         violation = _evidence_violation(
             source, symbol, needle, iterated=ITERATED_STORE_CLAIM.get(key),
             claim=_claim_for(key))
-        if key in BOUND_LABEL_EVIDENCE:
+        if key in BOUND_LABEL_EVIDENCE or key in BOUND_STORE_LABEL_EVIDENCE:
             # A bound row's completeness IS the constant's label set, so the constant arm below has
             # to exist for it — otherwise "the writer is bounded" is a claim with no derivation.
             assert key in LABEL_CONSTANTS, (
@@ -2007,12 +2023,21 @@ def _constants_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:
 #:     `tortoise/consistency.py` already reads that shape as an `embedding: null` clear. The `\s*`
 #:     lives INSIDE the lookahead on purpose: written outside it, the engine backtracks the
 #:     whitespace and the lookahead then compares against a space, which matches.
+#: ⛔ `#12020` review round 6: `clear_then_set_prefix` is NOT a store either, and crediting it was
+#: the same false PASS the map-merge was. `tortoise/vector_write.py::clear_then_set_prefix` returns
+#: `FOREACH (_ IN CASE WHEN <v> IS NOT NULL THEN [1] ELSE [] END | REMOVE <alias>.embedding)` — it
+#: emits NO `SET`. Measured: rewrite `_event_plain_merge`'s two `set_embedding_clause(...)` terms so
+#: each becomes `clear_then_set_prefix("e")` — the writer now DELETES the vector and writes nothing —
+#: and the row stayed GREEN, because the clear guard matched the store pattern. That contradicted
+#: the paragraph above (`never the NULL wipe, which removes the property`) directly: `SET
+#: n.embedding = NULL` and `REMOVE n.embedding` are the same operation, and only one was excluded.
+#: The prefix is what clears the property BEFORE a real `SET` list; it is never the store itself.
 #: Both narrowings are pinned in `test_the_store_carrier_does_not_credit_a_comparison_or_a_wipe`.
 #: ⚠️ Residual, stated: this reads the carrier's SOURCE SLICE, so a string literal inside the carrier
 #: that quotes a store counts as one. Closing that needs AST-level clause detection, the same class
 #: of limit `_declared_symbol_bodies` records for trailing comments.
 _STORE_CARRIER = re.compile(
-    r"set_embedding_clause\(|clear_then_set_prefix\("
+    r"set_embedding_clause\("
     r"|\b\w+\.embedding\s*=(?!=)(?!\s*(?i:null)\b)"
 )
 
@@ -2287,6 +2312,24 @@ def _walk_own_scope(node: ast.AST):
                      if not isinstance(child, _SCOPE_LIKE))
 
 
+def _symbol_stores_in_own_scope(node: ast.AST, lines: list[str]) -> bool:
+    """Does `node`'s OWN scope execute a store anywhere?
+
+    The half `bound` could not express (`BOUND_STORE_LABEL_EVIDENCE`). It is deliberately
+    WHOLE-SYMBOL rather than per-statement: the label seam and the vector clause in
+    `restore_graph` are separate statements, which is why the row could not be graded `store` —
+    but "this symbol performs a vector write somewhere it actually executes" is exactly the
+    property a deleted write must break, and a per-statement rule could not see it.
+    Same own-scope rule as `_carrying_statements`/`_iterated_store_problem`: a store in a nested
+    scope `node` never calls is not a store this symbol performs.
+    """
+    return any(
+        _STORE_CARRIER.search(_slice_own_scope(lines, sub))
+        for sub in _walk_own_scope(node)
+        if isinstance(sub, ast.stmt)
+    )
+
+
 def _parent_map(root: ast.AST) -> dict[int, ast.AST]:
     """`id(node) -> node`'s parent, for every node under `root`."""
     parents: dict[int, ast.AST] = {}
@@ -2372,6 +2415,13 @@ def _evidence_violation(source: str, symbol: str, needle: str,
             )
             if claim == "bound" or _STORE_CARRIER.search(view):
                 carried.append(text)
+            elif claim == "bound_store":
+                # `BOUND_STORE_LABEL_EVIDENCE`: the label is bounded by a constant seam, but the
+                # STORE is nameable — so this arm requires BOTH. `bound` alone owed no store, which
+                # let a deleted vector write leave the row green (measured, `#12020` review round 6);
+                # the own-scope store is checked once, below, over the whole cited symbol.
+                if _symbol_stores_in_own_scope(node, lines):
+                    carried.append(text)
             elif claim == "merge" and _MERGE_STORE_CARRIER.search(view):
                 # The declared weaker kind (`MERGE_STORE_CLAIM`): the store IS the map merge, whose
                 # vector content no syntax can attribute (`UNDECIDABLE_WRITE_SHAPES`). Kept as a
@@ -2567,12 +2617,23 @@ def test_the_store_carrier_does_not_credit_a_comparison_or_a_wipe() -> None:
         "n.embedding = $v",                       # a live assignment, the form the alias rows use
         "SET n.embedding = nullify",               # a VALUE named nullify is a store, not a wipe
         "set_embedding_clause(n, vec)",
-        "clear_then_set_prefix(n)",
     }
     missed = sorted(s for s in stores if not _STORE_CARRIER.search(s))
     assert not missed, (
         "_STORE_CARRIER no longer sees a real store — the narrowing above went too far and the "
         f"statement arm now reds on rows that hold: {missed}")
+
+    # ⛔ `#12020` review round 6: `clear_then_set_prefix` is a CLEAR GUARD, not a store, and this is
+    # the pin that keeps it out. It returns
+    # `FOREACH (_ IN CASE WHEN <v> IS NOT NULL THEN [1] ELSE [] END | REMOVE <alias>.embedding)` —
+    # `REMOVE`, never a `SET`. It used to be credited here, and the cost was measured: rewrite
+    # `_event_plain_merge`'s two `set_embedding_clause(...)` terms as `clear_then_set_prefix("e")`
+    # and the writer DELETES the vector while writing nothing — yet the row stayed GREEN, because
+    # the clear guard matched. That is the same operation the paragraph above excludes as a wipe
+    # (`SET n.embedding = NULL`), so crediting one spelling and not the other was incoherent.
+    assert not _STORE_CARRIER.search("clear_then_set_prefix(n)"), (
+        "`clear_then_set_prefix` is credited as a store again — it emits only `REMOVE`, so a row "
+        "whose vector write was replaced by the clear guard stays green (measured)")
 
     # ⛔ `#12020` review round 5, Finding 2: the bare MAP MERGE is NOT a generic store, and this is
     # the pin that keeps it out. It used to be credited here, and the cost was measured: deleting
@@ -2669,6 +2730,55 @@ def test_a_deleted_vector_clause_or_an_UNCALLED_store_reds_the_row() -> None:
         "a store inside an UNCALLED nested scope still satisfies the row — that is a row which "
         "cannot fail, and it is the identical hole round 4 closed in the iterated arm")
 
+    # (3) `#12020` review round 6: the vector `SET` replaced by the CLEAR GUARD. `clear_then_set_prefix`
+    # emits `FOREACH (… | REMOVE <alias>.embedding)` — it DELETEs the property and writes nothing — so
+    # crediting it as a store was the map-merge false PASS in another spelling.
+    cleared = source.replace(
+        "+ set_embedding_clause(\"e\", preserve_on_null=False)", "+ clear_then_set_prefix(\"e\")", 1
+    ).replace("+ set_embedding_clause(\"e\")", "+ clear_then_set_prefix(\"e\")", 1)
+    assert cleared != source
+    assert "set_embedding_clause" not in _slice_own_scope(
+        cleared.splitlines(), _function_of(cleared, symbol)), (
+        "the mutation left a real clause in the body — the arm below would red for the wrong reason")
+    assert violation(cleared) is not None, (
+        "a store row stays GREEN when its vector write is replaced by the REMOVE-only clear guard "
+        "— the row then declares a store while the property is deleted")
+
+
+def test_a_deleted_vector_write_reds_the_BOUND_STORE_row() -> None:
+    """`#12020` review round 6: `restore_graph`'s store is NAMEABLE, so `bound` was too weak.
+
+    The `bound` kind exists for a writer whose store cannot be named — `_event_raw_write_door`
+    executes its CALLER's statement. `restore_graph` was filed there too, but only its LABEL is
+    bounded: the store is the `set_embedding_clause("n", "r.v")` in its own body, and
+    `tortoise/embed_writer_register.py` says in terms that the row "is declared here off its
+    `set_embedding_clause`". Graded `bound`, it owed no store at all — so deleting that write left
+    the row GREEN. It now takes `BOUND_STORE_LABEL_EVIDENCE`, which requires BOTH the bounded label
+    seam AND an own-scope store.
+    """
+    key = "tortoise.hosted_backup::restore_graph"
+    rel, symbol, needle, _labels = LABEL_EVIDENCE[key]
+    source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+    claim = _claim_for(key)
+    assert claim == "bound_store", (
+        f"{key} is graded {claim!r} — if it went back to plain `bound` it owes no store again and "
+        "this pin stops measuring anything")
+    # The other `bound` row genuinely has no nameable store, which is why the kind still exists.
+    assert _claim_for("tortoise.sdk::_event_raw_write_door") == "bound"
+
+    def violation(text: str) -> str | None:
+        return _evidence_violation(text, symbol, needle, claim=claim)
+
+    assert violation(source) is None, violation(source)
+
+    write = "+ \"SET \" + set_embedding_clause(\"n\", \"r.v\")"
+    assert write in source, "the vector write moved — re-derive this pin, do not delete it"
+    deleted = source.replace(write, "", 1)
+    assert deleted != source
+    assert violation(deleted) is not None, (
+        "the BOUND-STORE row stays GREEN with its vector write deleted — a bound LABEL was allowed "
+        "to excuse a store that is perfectly nameable")
+
 
 def test_a_bare_string_statement_is_not_a_carrier() -> None:
     """`#12020` review Finding 2: the docstring skip is LOAD-BEARING, and this is its only pin.
@@ -2709,8 +2819,11 @@ def test_a_bare_string_statement_is_not_a_carrier() -> None:
     # ⛔ `#12020` review round 2, Finding 2: a NESTED scope's body is not a carrier either. Skipping
     # only the `universe` ROOTS left this hole open one level down — measured: the same prose inside
     # a nested `def` satisfied the statement arm, because the nested `FunctionDef`'s slice contains
-    # the nested body's stores. The real nested statement is still found (asserted below), so the
-    # exclusion removes a body from being a "carrier", never the statements inside it.
+    # the nested body's stores.
+    # ⛔ CORRECTED in round 5 (review Finding 3): a real statement INSIDE a nested scope is NOT a
+    # carrier either — that sentence used to claim the opposite and the assertion below now inverts
+    # it (measured: wrapping the real carrier in an uncalled `def _dead()` kept the row GREEN).
+    # `_walk_own_scope` stops at the boundary, so both nested shapes answer `[]`.
     nested_prose = (
         "def _f() -> None:\n"
         "    def _inner() -> None:\n"
