@@ -1025,15 +1025,28 @@ def test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_
         "letting the pin cover nothing: "
         f"{clause[:240]!r}…")
     builder_sentence = clause[b_start:b_stop]
-    assert "shadow-blind" in builder_sentence, (
-        "the builder sentence no longer says the arm is deliberately shadow-BLIND — that word IS "
-        "the disposition (a shadow-aware arm DELETES a real writer, measured), and flipping it to "
-        "`shadow-AWARE` used to leave the whole battery green: "
+    assert "deliberately shadow-blind" in builder_sentence, (
+        "the builder sentence no longer says the arm is DELIBERATELY shadow-BLIND — the "
+        "deliberate-ness is the point (it tells a reader the blindness is a DECISION, not an open "
+        "bug whose 'repair' is the shadow-aware arm this lane measured DELETING a real writer), "
+        "and flipping or softening it used to leave the whole battery green: "
         f"{builder_sentence[:240]!r}…")
-    assert "shadow-aware" not in builder_sentence, (
-        "the builder sentence describes the arm as shadow-AWARE — the arm is deliberately "
+    # ⛔ ATTRIBUTIVE, not a bare token ban (`#12020` round 14 review, P3 — measured). `"shadow-aware"
+    # not in …` reds a TRUE sentence that NAMES the rejected alternative ("… deliberately shadow-BLIND
+    # rather than shadow-AWARE, and over-credits instead"), and then accuses the text of describing
+    # the arm as shadow-aware — the maintainer is told to "fix" a correct sentence. Naming the
+    # rejected form is this repo's own idiom (the probe says "REVERTED a shadow-aware arm for deleting
+    # writers"; the register ":283-284" says "documents the OPPOSITE direction"), so a blunt ban
+    # forbids the house style inside the one sentence that explains the decision. This matches an
+    # assertive ATTRIBUTION instead, and is measured GREEN on both honest negations and RED on all
+    # four flip spellings.
+    shadow_aware_claim = re.compile(
+        r"(?:is|are)\s+(?:deliberately\s+)?shadow-aware|shadow-aware\s+(?:arm|and)\b")
+    assert not shadow_aware_claim.search(builder_sentence), (
+        "the builder sentence ATTRIBUTES shadow-awareness to the arm — the arm is deliberately "
         "shadow-BLIND; the shadow-aware form is what was measured deleting `w` "
-        "(`{'tortoise.m::apply': ...}`) and reverted in `74d7b854cb`: "
+        "(`{'tortoise.m::apply': ...}`) and reverted in `74d7b854cb`. Naming it as the rejected "
+        "alternative (\"rather than shadow-AWARE\") is fine and must stay fine: "
         f"{builder_sentence[:240]!r}…")
     assert "never deletes" not in builder_sentence, (
         "the builder sentence inverts the measured direction — suppressing a shadowed call DELETES "
