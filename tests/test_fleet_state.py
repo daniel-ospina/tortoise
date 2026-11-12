@@ -3687,6 +3687,23 @@ def test_pi_processes_reads_the_untruncated_command_column(monkeypatch) -> None:
     assert argv[:2] == ["ps", "-ww"]
 
 
+def _row_for_pid(pid: int) -> str:
+    """The `command=` text a census would read for ONE pid — a DIAGNOSTIC, never an oracle.
+
+    Only ever called on a failure path (#12039): when the poll above times out, what
+    settles the cause in one run is whether the table holds the fixture at all, holds
+    it under a truncated argv[0], or does not hold it at all. `""` means the table has
+    no row for the pid.
+    """
+    import subprocess  # no module-level import in this file; the caller imports it too
+
+    out = subprocess.run(
+        ["ps", "-ww", "-p", str(pid), "-o", "command="],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    return out
+
+
 def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     """End-to-end MATCHER coverage: a real process named `pi` under a long path is found.
 
@@ -3721,13 +3738,34 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
         proc = subprocess.Popen([str(pi), "60"],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            procs, err = fs.pi_processes()
-            if err:
-                pytest.skip(f"the process table is unreadable here: {err}")
-            pids = [p["pid"] for p in procs]
+            # ⛔ A BOUNDED POLL, NOT ONE SAMPLE (#12039). `Popen` returns at FORK time;
+            # the census may then run before the child's `execve` completes, and until it
+            # does the child carries the PARENT's `command=` (the pytest worker's argv),
+            # whose basename is not `pi`. Measured on a 4-vCPU CI runner: `pids seen: []`
+            # — a healthy spawn reported invisible, on a REQUIRED check, which is also the
+            # false-PASS half (re-run until green is how a real regression here would be
+            # waved through).
+            #
+            # ⛔ IT DOES NOT WEAKEN THE `-ww` PIN. A census without `-ww` truncates the
+            # long argv[0] on EVERY sample, so it still matches nothing — it just takes the
+            # whole deadline instead of one attempt. Verified by removing `-ww` from
+            # `fleet_state.pi_processes` and re-running this test: still RED.
+            deadline = time.time() + 10.0
+            pids: list[int] = []
+            while True:
+                procs, err = fs.pi_processes()
+                if err:
+                    pytest.skip(f"the process table is unreadable here: {err}")
+                pids = [p["pid"] for p in procs]
+                if proc.pid in pids or time.time() >= deadline:
+                    break
+                time.sleep(0.1)
             assert proc.pid in pids, (
-                f"a lane whose argv[0] is {str(pi)!r} was invisible to the census "
-                f"(pids seen: {pids})")
+                f"a lane whose argv[0] is {str(pi)!r} was invisible to the census for "
+                f"{10.0:.0f}s of polling (pids seen: {pids}; the table's row for the "
+                f"fixture pid read {_row_for_pid(proc.pid)!r}) — a narrow/`-ww`-less "
+                f"census truncates the argv[0] on every sample, so this is either the "
+                f"flag removed or the process is genuinely not matchable on this box")
         finally:
             proc.terminate()
             proc.wait(timeout=10)

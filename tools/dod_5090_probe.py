@@ -29,7 +29,7 @@ deliberately mechanical so a later lane re-runs it instead of re-reading prose:
 
 | bullet | the command | what makes it `MET` |
 |---|---|---|
-| 1 | `uv run python tools/dod_5090_probe.py --json` (reads the two gate modules + counts the write seams that reach the gate) | a stated predicate exists, ONE rule set (identity, not a copy), AND every embedding write path reaches it with the gate ON by default |
+| 1 | `uv run python tools/dod_5090_probe.py --json` (reads the two gate modules + counts the write seams that reach the gate) | a stated predicate exists, ONE rule set (identity, not a copy), AND every embedding write path reaches it with the gate ON by default — where "by default" is read **per surface** and is `True` only when every EXISTING deployment surface arms it (`#11455`; see below) |
 | 2 | same (`written labels ⊆ served labels`) | every label a write path embeds is one `run_vector_query` serves |
 | 3 | same (forces all three mechanisms through `run_vector_query`) | `index` / `scan` / `scan_fallback` are distinguishable in the caller's trace |
 | 4 | same (searches for a V1 ruling) | **`MET` is unreachable here**: the bullet is *decided **and implemented***, and this row cannot measure implementation — a record at most carries it to `PARTIAL`, and no record is `NOT MET` |
@@ -42,6 +42,16 @@ which is **unset in every shipped configuration** — so at default the epic's
 `enforced` half is an opt-in, not the operative rule of the write path. `#5008`
 chose that ordering on purpose (*"the rate effect is measurable before it is
 trusted"*); the instrument records the consequence rather than re-deciding it.
+⛔ **`#11455` re-cut the "by default" half, and the sentence above was already
+stale when it was written.** `#11445` armed the flag in `.env.example`, so the
+any-surface bool this row used to publish read `True` while the surface
+`docker compose up` actually consumes (`docker-compose.yml`, which passes an
+explicit `environment:` and declares no `env_file:`) set nothing. The row now
+reads the DEPLOYMENT subset (`DEPLOYMENT_SURFACES`) and publishes every surface's
+state, so a reader can tell a measured `True` from one armed TEMPLATE. On the
+tree that change landed in, every deployment FILE — `docker-compose.yml`,
+`Dockerfile.hosted`, `Dockerfile.selfhost` — is silent, so row 1 goes back to
+`PARTIAL`, which is the reading `#11086` item 4 must not be ticked over.
 
 ## §12.2a — the distinct-predicate count
 
@@ -1252,6 +1262,18 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "chain — the same direction, and for the same reason, as "
         "`_journal_event_raw_write`: its record IS what the rebuild reads the "
         "vector back from (`#8488`), not a store reached around the gate"),
+    "tortoise.sdk::create_source": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::create_source` — the instrument's match is an operator-facing "
+        "REFUSAL message, not a write clause: the only `embedding=` in the body is the "
+        "`#11858` guard's own sentence, which names the keyword to say the "
+        "`_SERVER_MANAGED_EMBEDDING_MARKERS` family may NOT be set by hand. The door "
+        "computes no vector of its own: a caller-supplied `embedding` is CARRIED into "
+        "`_create_entity`'s `:Source` write — the `#5004` caller-vector contract, the same "
+        "disposition `tortoise.api::add_point` carries, and the reason "
+        "`tortoise/projection/entities.py::_upsert_source`'s passthrough legitimately stores "
+        "`s.embedding` for the vector retrieval leg to read. Exempt as a CARRIER — NOT "
+        "because no store is reachable through it"),
     "tortoise.sdk::ingest_corpus": (
         CENSUS_RECOGNISED,
         "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
@@ -1351,6 +1373,15 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.sdk::_write_capture_turns": (
         ("tortoise/sdk.py", "_write_capture_turns",
          '_turn_snapshot["embedding"] ='),),
+    "tortoise.sdk::create_source": (
+        # ⛔ The needle is the REFUSAL's own prose, which is what `_EMBED_WRITE` reads:
+        # re-deriving it is re-deriving the instrument's match. Deleting the guard (the
+        # `raise`) takes the needle AND the population entry away together, so a stale
+        # exemption cannot outlive what it exempts.
+        ("tortoise/sdk.py", "create_source",
+         "pass `embedding=` and it declares the truth"),
+        ("tortoise/sdk.py", "create_source",
+         "_SERVER_MANAGED_EMBEDDING_MARKERS"),),
     "tortoise.sdk::ingest_corpus": (
         ("tortoise/sdk.py", "ingest_corpus", "self._session_embedding("),
         ("tortoise/sdk.py", "ingest_corpus", "set_embedding_clause("),),
@@ -1756,6 +1787,85 @@ CONFIG_SURFACES: tuple[str, ...] = (
     ".github/workflows",
 )
 
+#: The subset of `CONFIG_SURFACES` a DEPLOYED PROCESS's environment can actually be
+#: built from — the population `#11455` requires the row-1 condition to speak for.
+#: The other three are kept in the walk (and reported per surface) but they cannot
+#: arm a deployment:
+#:
+#: * `.env.example` is a TEMPLATE. Compose reads `.env` for `${VAR}` interpolation
+#:   in the compose file and for nothing else; a variable reaches the CONTAINER
+#:   only through `environment:` or an `env_file:` entry — and this repo's
+#:   `docker-compose.yml` declares `environment:` with **no** `env_file:` (measured
+#:   2026-11-07: `rg -n 'env_file' docker-compose.yml` → no match). So the template
+#:   arming the flag says nothing about what `docker compose up` gets.
+#: * `config/` is repository/tooling configuration and documentation (the flag's
+#:   own description lives in `config/v4-mechanisms.yml`); nothing reads it into a
+#:   container's environment.
+#: * `.github/workflows` runs CI, not a deployment.
+#:
+#: ⛔ This is a READING of the six surfaces, not a removal from them: `#11455`
+#: forbids dropping `.env.example` from the walk, because a walk that skipped it
+#: would report `set ON in: none` over a tree that arms it.
+#:
+#: ⛔ **The reading is per FILE, not per surface root** (fresh review of PR #12016,
+#: P2). `Dockerfile` is a CLASS: this repo builds its two deployed images from
+#: `Dockerfile.hosted` (`deploy-hosted.yml` builds it) and `Dockerfile.selfhost`
+#: (`docker-compose.yml`'s `build.dockerfile`), and an exact-filename walk read
+#: NEITHER — the surface reported `ABSENT` while two image build files shipped,
+#: and `deployment["on"]` could read `True` off an armed compose file while the
+#: hosted image shipped the gate off: the `#11455` false PASS one surface-pair
+#: over, materialising the moment `#11086` arms the compose file.
+#:
+#: ⚠️ **The population is the deployment files that build/run THIS repo's Tortoise
+#: process — not every compose file and not every channel this repo has.** Three
+#: boundaries, all three deliberate:
+#:
+#: * `fly.toml`'s `[env]` table and `entrypoint.sh`'s `export`s DO shape the Tortoise
+#:   process's environment and are OUTSIDE `CONFIG_SURFACES` (measured:
+#:   `fly.toml:244` carries `TORTOISE_LOOP_STALL_HARD_EXIT_S` (inside the `[env]`
+#:   table that starts at `:211`), `entrypoint.sh:355-876`
+#:   exports runtime defaults). Latent today — all three walked files are silent, so
+#:   row 1 holds either way — and tracked by `#12022`, whose scope is the missing
+#:   channels; adding them here would change the declared surface set `#11455` and
+#:   its pins speak about, and needs a TOML `[env]` reader this module does not have.
+#: * Sub-application compose files — `apps/graph-viz/docker-compose.yml` (a FalkorDB
+#:   sidecar for the viz) and `integrations/crm/twenty/docker-compose.yml` (the
+#:   Twenty CRM stack) — deploy OTHER services; nothing in them runs the Tortoise
+#:   image or reaches `encode_for_row`, so they are not in the population. Named here
+#:   so the boundary is a decision rather than a missed glob.
+#: * The COMPOSE OVERRIDE family (`docker-compose.override.yml`, and any
+#:   `docker-compose.<stage>.yml`). Compose auto-merges it over the base, so it is a
+#:   deployment input — but it is a PATCH, not a second independent file: an override
+#:   that sets nothing INHERITS the base's `ENV` instead of disarming it. This walk
+#:   reads every deployment file as an independent "does this file arm it" question
+#:   (the reading the compose→image INHERITANCE above also needs), which is the wrong
+#:   question for a patch — globbing the family in would make a SILENT override red
+#:   the deployment reading while the merged view is armed. Doing it right needs
+#:   compose merge semantics, which is `#12022`'s shape (it already owns the other
+#:   channels a deployed process's environment comes from), so it is a named gap here
+#:   rather than a half-implemented glob. Latent today: `git ls-files | grep -iE
+#:   'compose\.(override|prod|dev|local)'` is empty.
+DEPLOYMENT_SURFACES: tuple[str, ...] = (
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "Dockerfile",
+)
+
+#: The files the `Dockerfile` surface stands for. An `ENV` in any image build file
+#: reaches the running container's environment, so each variant is a deployment
+#: input of its own — a single armed variant must not stand in for the rest.
+#:
+#: ⚠️ The glob is REPO-ROOT-scoped (`REPO_ROOT.glob`), and that is a boundary like
+#: the three above rather than an unstated truth: a NESTED image file
+#: (`docker/Dockerfile.prod`, which a compose `build.dockerfile:` can reference)
+#: is outside both this glob and the walk, so moving the images out of the root
+#: would leave the surface reading `ABSENT` while `deployment["on"]` could still
+#: read `True` off armed root files — the same false-PASS class the per-FILE
+#: reading exists for. Latent today: the only tracked image files are the two root
+#: ones (`git ls-files | grep -i dockerfile` → `Dockerfile.hosted`,
+#: `Dockerfile.selfhost`). Named here so a later move is visible rather than silent.
+IMAGE_BUILD_GLOB = "Dockerfile*"
+
 
 #: ⛔ There is deliberately NO truthy vocabulary in this module. The values a
 #: shipped config can use to switch a flag ON are `tortoise/env_truthy.py`'s
@@ -1814,9 +1924,11 @@ def _yaml_block_scalar_bodies(text: str) -> dict[int, str]:
     elsewhere. The caller therefore scans a body introduced by an executed key
     and skips (and REPORTS) the rest.
 
-    **Wrong outcome named:** `score_rule_bullet` computes `on_by_default =
-    ambient or shipped["on"]`, which is the clause separating bullet 1's
-    `PARTIAL` from `MET` once `#5090`'s remaining writers are resolved. This
+    **Wrong outcome named:** `score_rule_bullet` reads
+    `shipped["deployment"]["on"]` as `on_by_default` (since `#11455`; the
+    per-surface reading, never `shipped["on"]` alone and never the ambient env),
+    which is the clause separating bullet 1's `PARTIAL` from `MET` once `#5090`'s
+    remaining writers are resolved. This
     repo's documentation of THIS flag already lives in a `>-` block
     (`config/v4-mechanisms.yml:426-433`), so the natural edit (a usage line
     added inside that block) was the one shape that tripped it; and CI is where
@@ -1910,10 +2022,34 @@ def _assigned_value(line: str, flag: str) -> str | None:
 
 
 def flag_in_shipped_configs(flag: str) -> dict:
-    """Is ``flag`` switched ON by any configuration this repo ships?
+    """Is ``flag`` switched ON by any shipped configuration, and by WHICH surfaces?
 
     Returns ``{"on": bool, "files": [...], "searched": [paths],
-    "mentions": [paths], "unreadable": [paths]}``.
+    "mentions": [paths], "unreadable": [paths], "per_surface": {rel: {...}},
+    "armed": [rels], "silent": [rels], "absent": [rels], "unmeasured": [rels],
+    "deployment": {...}}``.
+
+    ⛔ **``on`` answers *any surface arms it* — it is NOT the question DoD row 1
+    asks, and reading it as one was the `#11455` defect.** Row 1 published
+    ``gate enabled by default: True`` from one bool over six surfaces while the
+    surface `docker compose up` actually uses sets nothing: `.env.example` is a
+    TEMPLATE that reaches a container only when the deployment declares
+    `env_file:`, and this repo's `docker-compose.yml` declares none. A reader could
+    then tick `#11086` item 4 (*"row 1's condition reads True"*) and infer item 1
+    (*"a deployment built from the shipped config rejects an identifier-only row
+    with no operator action"*), which is false for the compose path.
+
+    So the walk reports EVERY surface: `ON` (a read file assigns the flag a truthy
+    value), `OFF` (present and read, nothing arms it), `ABSENT` (the path does not
+    exist), or `UNMEASURED` (a file in it could not be read, so "silent" would be a
+    claim about a surface half of which was never seen). ``deployment`` carries the
+    reading row 1 USES: over `DEPLOYMENT_SURFACES` only, its ``on`` is `True`
+    **only when every existing deployment surface is armed** — never off one armed
+    template.
+
+    ``on`` is kept because dropping `.env.example` from the walk would re-open the
+    finding this walk was built for (`set ON in: none` over a tree that arms it):
+    the template is REPORTED and excluded from the DEPLOYMENT reading, not removed.
 
     ⛔ **`searched` is every path the walk READ; `mentions` is the subset whose
     text contains the flag.** They are different questions and the pre-fix code
@@ -1925,19 +2061,39 @@ def flag_in_shipped_configs(flag: str) -> dict:
 
     A flag set nowhere is a measured `False` **only** over the paths actually
     read; `unreadable` names any path the walk could not read (oversize, I/O
-    error) so "nowhere" cannot silently exclude a file that does set it.
+    error) so "nowhere" cannot silently exclude a file that does set it — and a
+    deployment surface holding an unreadable file is `UNMEASURED`, never silent.
     """
     from tortoise.env_truthy import is_truthy
+
+    def _candidates(rel: str) -> list[Path]:
+        """The files one `CONFIG_SURFACES` root stands for.
+
+        `Dockerfile` is a CLASS of file, not one filename (see
+        `DEPLOYMENT_SURFACES`): this repo ships `Dockerfile.hosted` and
+        `Dockerfile.selfhost` and no plain `Dockerfile`, so an exact match walked
+        none of the image build files while reporting the surface `ABSENT`.
+        """
+        if rel == "Dockerfile":
+            return sorted(p for p in REPO_ROOT.glob(IMAGE_BUILD_GLOB) if p.is_file())
+        target = REPO_ROOT / rel
+        return ([target] if target.is_file()
+                else sorted(target.rglob("*")) if target.is_dir() else [])
 
     hits: list[str] = []
     searched: list[str] = []
     mentions: list[str] = []
     unreadable: list[str] = []
     documented_only = 0
+    per_surface: dict[str, dict] = {}
     for rel in CONFIG_SURFACES:
         target = REPO_ROOT / rel
-        candidates = ([target] if target.is_file()
-                      else sorted(target.rglob("*")) if target.is_dir() else [])
+        candidates = _candidates(rel)
+        present = bool(candidates) or target.exists()
+        surface_hits: list[str] = []
+        surface_searched: list[str] = []
+        surface_unreadable: list[str] = []
+        surface_file_hits: dict[str, list[str]] = {}
         for path in candidates:
             if not path.is_file():
                 continue
@@ -1945,12 +2101,15 @@ def flag_in_shipped_configs(flag: str) -> dict:
             try:
                 if path.stat().st_size > 2_000_000:
                     unreadable.append(posix)
+                    surface_unreadable.append(posix)
                     continue
                 text = path.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 unreadable.append(posix)
+                surface_unreadable.append(posix)
                 continue
             searched.append(posix)
+            surface_searched.append(posix)
             if flag not in text:
                 continue
             mentions.append(posix)
@@ -1974,7 +2133,76 @@ def flag_in_shipped_configs(flag: str) -> dict:
                     # so a shipped `export FLAG=1` is a HIT, not a note.
                 value = _assigned_value(line, flag)
                 if value is not None and is_truthy(value):
-                    hits.append(f"{posix}: {line.strip()[:90]}")
+                    hit = f"{posix}: {line.strip()[:90]}"
+                    hits.append(hit)
+                    surface_hits.append(hit)
+                    surface_file_hits.setdefault(posix, []).append(hit)
+        if not present:
+            state = "ABSENT"
+        elif surface_hits:
+            # ⛔ A HIT is a POSITIVE measurement: this surface demonstrably arms the
+            # flag, because a file the walk READ assigned it a truthy value. An
+            # unreadable SIBLING file adds uncertainty about the files it could not
+            # read; it cannot un-measure an assignment the walk did read. Letting
+            # UNMEASURED supersede ON dropped a measured hit out of `armed` entirely,
+            # which then let the hold note publish "no surface the walk could READ arms
+            # it" over a root it had just read arming it (fresh review of PR #12016,
+            # P3). The unreadable file is still reported — in `unreadable:` and in this
+            # surface's own `UNMEASURED` accounting below — so nothing is hidden.
+            state = "ON"
+        elif surface_unreadable:
+            # A file this walk could not read could arm the flag, so "present and
+            # silent" would be a claim about a surface half of which was never
+            # read. UNMEASURED is the only honest state — never a quiet OFF.
+            state = "UNMEASURED"
+        else:
+            state = "OFF"
+        # Per FILE, so one armed build file cannot hide a silent sibling: the
+        # deployment reading below is computed at this granularity, not at the
+        # surface root's.
+        file_states = {
+            posix: {"state": "ON" if surface_file_hits.get(posix) else "OFF",
+                    "hits": surface_file_hits.get(posix, [])}
+            for posix in surface_searched
+        }
+        for posix in surface_unreadable:
+            file_states[posix] = {"state": "UNMEASURED", "hits": []}
+        per_surface[rel] = {"state": state, "hits": surface_hits,
+                            "files": file_states,
+                            "searched": surface_searched,
+                            "unreadable": surface_unreadable}
+
+    def _rels(state: str, pool: tuple[str, ...]) -> list[str]:
+        return [rel for rel in pool if per_surface[rel]["state"] == state]
+
+    # ⛔ The deployment population is the FILES, not the roots: `Dockerfile` reads
+    # two build files in this tree, and "every existing deployment surface armed"
+    # must mean every IMAGE and every compose file — not every filename literal.
+    deployment_files: dict[str, str] = {}
+    for rel in DEPLOYMENT_SURFACES:
+        for posix, entry in per_surface[rel]["files"].items():
+            deployment_files[posix] = entry["state"]
+    deployment_present = [posix for posix, state in deployment_files.items()
+                          if state != "ABSENT"]
+    deployment_unmeasured = [posix for posix in deployment_present
+                             if deployment_files[posix] == "UNMEASURED"]
+    deployment = {
+        "surfaces": list(DEPLOYMENT_SURFACES),
+        "files": deployment_files,
+        "present": deployment_present,
+        "armed": [p for p in deployment_present if deployment_files[p] == "ON"],
+        "silent": [p for p in deployment_present if deployment_files[p] == "OFF"],
+        "absent": _rels("ABSENT", DEPLOYMENT_SURFACES),
+        "unmeasured": deployment_unmeasured,
+        # MEASURED requires at least one deployment surface FILE to exist and every
+        # existing one to be READABLE: a tree that ships no deployment config
+        # cannot answer "what does a deployment get", and that is UNMEASURED —
+        # never a pass, and never a `False` that blames the product.
+        "measured": bool(deployment_present) and not deployment_unmeasured,
+    }
+    deployment["on"] = (deployment["measured"] and not deployment["silent"]
+                        and not deployment_unmeasured)
+
     return {"on": bool(hits), "files": hits, "searched": searched,
             "mentions": mentions, "unreadable": unreadable,
             # Reported, never silently dropped: how many assignment-shaped lines
@@ -1983,7 +2211,107 @@ def flag_in_shipped_configs(flag: str) -> dict:
             # `run:` body is not counted here — it is a setting, and it is
             # allowed to move `on`.
             "documented_only": documented_only,
-            "surfaces": list(CONFIG_SURFACES)}
+            "surfaces": list(CONFIG_SURFACES),
+            "per_surface": per_surface,
+            "armed": _rels("ON", CONFIG_SURFACES),
+            "silent": _rels("OFF", CONFIG_SURFACES),
+            "absent": _rels("ABSENT", CONFIG_SURFACES),
+            "unmeasured": _rels("UNMEASURED", CONFIG_SURFACES),
+            "deployment": deployment}
+
+
+def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
+    """Row 1's `gate enabled by default` note — a PER-SURFACE reading (`#11455`).
+
+    The row used to publish one bool over six surfaces, so an armed TEMPLATE read
+    as "the default is on" while the surface a `docker compose up` deployment
+    actually consumes set nothing. Every surface is now named with its state, the
+    armed/silent split is stated, and the DEPLOYMENT reading is spelled out
+    separately — a reader must be able to tell a measured `True` from a sampled one
+    without re-running the walk.
+
+    `ambient` is REPORTED here and never folded into the value: a lane's exported
+    flag is not a default (that is why `measure()` pins the switches OFF before
+    scoring, `#10996`). The value is `shipped["deployment"]["on"]`, which is `True`
+    only when every EXISTING deployment FILE arms the flag.
+
+    ⛔ `ambient` is a PARAMETER, not a second `os.environ` read (fresh review of
+    PR #12016, P3): re-reading the environment here let the reported value disagree
+    with the `embed_gate_enabled()` read the caller scored, and made the argument
+    dead. The caller samples both from one place.
+    """
+    deployment = shipped["deployment"]
+    on_by_default = deployment["on"]
+    # ⛔ Lead with UNMEASURED when the deployment population could not be read (no
+    # deployment file at all, or an unreadable one). Leading with `False` there is
+    # the old bool's defect in a new place: `False` is an answer, and this tree
+    # cannot give one — a reader lifting the leading value would quote a measurement
+    # the run never made (fresh review of PR #12016, P3).
+    reported = on_by_default if deployment["measured"] else "UNMEASURED"
+    per_surface_note = ", ".join(
+        f"{rel}={shipped['per_surface'][rel]['state']}" for rel in shipped["surfaces"]
+    )
+    deployment_surfaces_note = ", ".join(
+        f"{posix}={state}" for posix, state in deployment["files"].items()
+    ) or "none"
+    if not deployment["measured"]:
+        if not deployment["present"]:
+            deployment_reading = (
+                "UNMEASURED — no deployment surface exists in this tree, so there is "
+                "nothing a deployment is built from and 'silent' would be an answer "
+                "to a question the tree cannot ask"
+            )
+        else:
+            deployment_reading = (
+                f"UNMEASURED — unreadable deployment file(s) "
+                f"{deployment['unmeasured']}: an unread file could arm the gate, so "
+                "this is NOT a measurement of silence"
+            )
+    elif deployment["on"]:
+        deployment_reading = (
+            "every deployment file that builds the Tortoise process is armed "
+            f"({deployment['armed']})"
+        )
+    else:
+        # ⛔ Lead with the PER-FILE fact and frame the merge as this reading's SCOPE,
+        # never as a consequence asserted and then retracted (fresh review of PR #12016,
+        # P3 — #12070 item 4 cited the hold note, but this sibling had the same shape):
+        # the old wording opened "a deployment built from that file ALONE runs with the
+        # gate OFF" and took it back one sentence later, and the leading clause is what
+        # a reader quotes. It is not hypothetical here either: `docker-compose.yml`
+        # really does set `build.dockerfile: Dockerfile.selfhost`, so a compose
+        # deployment CAN carry an image build file's `ENV` today.
+        # ⛔ And NOTHING here may scope a DEPLOYMENT reading to `shipped["armed"]` —
+        # the ANY-SURFACE root list (`.env.example`, a TEMPLATE) — or negate the sentence
+        # above it. The clause that did ("This condition is SCOPED to the surface(s) that
+        # arm it … and is NOT a claim about a deployment built from the silent path(s)")
+        # named a population that cannot arm a deployment, and told the reader the row
+        # says nothing about `docker compose up` — the `#11455` anti-reading, inside the
+        # string the probe publishes (fresh review of PR #12016, P2).
+        deployment_reading = (
+            f"UNARMED deployment file(s) {deployment['silent']} declare no gate of "
+            "their own, so read from that file ALONE the gate is off — this reading is "
+            "PER FILE and does not model a compose file that BUILDS from an armed "
+            "image build file (it INHERITS that image's `ENV`), so it is not a claim "
+            "about such a deployment"
+            # ⛔ No trailing period: `shipped_default_note` joins this clause with a
+            # literal `"; files read: "`, so a period here published
+            # "… about such a deployment.; files read: 64" (fresh review of PR
+            # #12016, P3). The other three branches already end punctuation-free.
+        )
+    return (
+        f"gate enabled by default: {reported} (ambient "
+        f"{flag}={ambient!r}; "
+        f"shipped config surface walked: {len(shipped['surfaces'])} "
+        f"({', '.join(shipped['surfaces'])}); per surface: {per_surface_note}; "
+        f"armed: {shipped['armed'] or 'none'}; silent: {shipped['silent'] or 'none'}; "
+        f"absent: {shipped['absent'] or 'none'}; "
+        f"deployment surfaces that can arm a deployed process: "
+        f"{deployment_surfaces_note} — {deployment_reading}; files read: "
+        f"{len(shipped['searched'])}; unreadable: {shipped['unreadable'] or 'none'}; "
+        f"mentioning it: {shipped['mentions'] or 'none'}"
+        f"; set ON in: {shipped['files'] or 'none'})"
+    )
 
 
 #: ── The product's declared writer register (#11444) ───────────────────────
@@ -2308,7 +2636,22 @@ def score_rule_bullet() -> Row:
     # the SHIPPED config is where a default actually lives.
     ambient = embed_gate.embed_gate_enabled()
     shipped = flag_in_shipped_configs(embed_gate.ENV_FLAG)
-    on_by_default = ambient or shipped["on"]
+    # ⛔ `#11455`: the clause is the DEPLOYMENT reading, not `shipped["on"]`. The
+    # latter is `True` when ANY shipped surface arms the flag, and on this tree the
+    # only surface that armed it was `.env.example` — a template that reaches a
+    # container only through an `env_file:` the compose file does not declare —
+    # while the surface `docker compose up` DOES use declared nothing. Reading the
+    # any-surface bool published "gate enabled by default: True" over a deployment
+    # path with the gate off, which is the false-PASS class this instrument exists
+    # to prevent (and the reading `#11086` item 4 would have been ticked on).
+    deployment = shipped["deployment"]
+    # ⛔ And the value IS the deployment reading — `ambient` is REPORTED beside it and
+    # deliberately not folded in: a lane's exported flag is not a DEFAULT, which is
+    # why `measure()` pins the switches to an explicit OFF before scoring (`#10996`).
+    # An `ambient or …` here would let a shell-armed gate publish `enabled by
+    # default: True` over a shipped deployment that sets nothing — the `#11455`
+    # defect in its other direction.
+    on_by_default = deployment["on"]
     # ⛔ The population a DECLARATION is owed for: every writer the rule never sees,
     # `unresolved_write` AND `ungated` — the same tuple
     # `tests/test_embed_writer_register.py::NEEDS_A_DECLARATION` spells, and the
@@ -2386,6 +2729,7 @@ def score_rule_bullet() -> Row:
     violations_at = ", ".join(
         f"{w}: {'; '.join(why)}" for w, why in sorted(violations.items())
     )
+    gate_note = shipped_default_note(shipped, embed_gate.ENV_FLAG, ambient)
     notes = [
         f"stated: {stated} (predicate in embed_gate: {stated_in_gate}; "
         f"{SEAM} calls it: {seam_wired})",
@@ -2403,14 +2747,7 @@ def score_rule_bullet() -> Row:
            "be admissible, the entry must carry an owning issue `#<n>`, the `reason` must "
            "cite the writer, and a `recognised_producer` claim must be corroborated)"
            if ungated else ""),
-        f"gate enabled by default: {on_by_default} (ambient "
-        f"{embed_gate.ENV_FLAG}={os.environ.get(embed_gate.ENV_FLAG, '')!r}; "
-        f"shipped config surface walked: {len(shipped['surfaces'])} "
-        f"({', '.join(shipped['surfaces'])}); files read: "
-        f"{len(shipped['searched'])}; unreadable: "
-        f"{shipped['unreadable'] or 'none'}; mentioning it: "
-        f"{shipped['mentions'] or 'none'}"
-        f"; set ON in: {shipped['files'] or 'none'})",
+        gate_note,
         # ⛔ A module that will not parse is a HOLE in the measurement, not a
         # zero: its writers — gated or bypassing — are invisible to every row
         # (this tool's own review, P2).
@@ -2462,6 +2799,117 @@ def score_rule_bullet() -> Row:
         notes.append(
             "writer register UNREADABLE or MALFORMED (hold this row at PARTIAL — "
             f"UNMEASURED, never 'nothing declared'): {register_error}"
+        )
+    # ⛔ `#11455`'s two hold notes. The gate clause is held by `not on_by_default`
+    # too, but a hold must NAME its reason: "the gate is off" and "the gate's shipped
+    # default could not be read" are different statements, and reporting either as
+    # the other is the misattribution this file refuses on the register/census side.
+    if not deployment["measured"]:
+        notes.append(
+            "shipped default UNMEASURED (hold this row at PARTIAL — the deployment "
+            "reading covers "
+            f"{deployment['files']}: present {deployment['present'] or 'none'}, "
+            f"unreadable {deployment['unmeasured'] or 'none'}. A file that could "
+            "not be read is not a file that is silent, so the gate clause is "
+            "UNMEASURED, never True and never 'the config sets nothing')"
+        )
+    elif not deployment["on"]:
+        # ⛔ FOUR arms now, and the rule is that each one names ONLY what the walk
+        # MEASURED (fresh reviews of PR #12016, P2 then P3): an armed DEPLOYMENT file;
+        # else an armed non-deployment surface; else an armed-and-UNREADABLE surface;
+        # else nothing armed at all. The two middle arms inherit `#11455`, the two
+        # later ones are the shapes where "nothing arms it" would be a claim the walk
+        # cannot support. A surface that ARMS the flag and is itself a deployment file
+        # makes "the surfaces that do arm it do not deploy the container's environment
+        # on their own" the `#11455` false claim in its OTHER half — that build DOES
+        # carry the flag, and the row is held because this walk reads each file
+        # independently and does not model the merge.
+        # ⛔ The population this clause interpolates must be the PER-FILE one
+        # (`deployment["armed"]`, e.g. `Dockerfile.selfhost`), NOT an intersection
+        # with `deployment["surfaces"]` — that list holds surface ROOTS
+        # (`DEPLOYMENT_SURFACES` = `docker-compose.yml`/`.yaml`/`Dockerfile`), so the
+        # intersection named the CLASS `Dockerfile` and then published "a build that
+        # uses one of them carries the flag" over a walk that armed ONE VARIANT.
+        # A build from the silent sibling (`docker-compose.yml` really does set
+        # `build.dockerfile: Dockerfile.selfhost`) does not carry the flag, so the
+        # class wording claimed a wider population than the walk measured — the
+        # R7/R10 false-PASS class this PR exists to remove (fresh review of PR
+        # #12016, P3). `deployment["armed"]` is also the vocabulary `["silent"]`
+        # beside it already uses, so the two halves of the split finally agree.
+        armed_deployment_files = deployment["armed"]
+        # ⛔ THREE arms, because the else-arm was asserting a state the walk had just
+        # measured as ABSENT: on a tree where nothing arms the flag it published "the
+        # surfaces that do arm it (none) do not deploy the container's environment on
+        # their own" and closed "one armed TEMPLATE is not a shipped default" — naming
+        # a set as `none` while still speaking about "the surfaces that do arm it", and
+        # asserting a template where zero templates arm the flag. A published
+        # diagnostic must name ITS OWN state, not a neighbour's (fresh review of PR
+        # #12016, P3). The `#11455` reading moved into the arm where a template really
+        # does arm it, which is the only shape it describes.
+        if armed_deployment_files:
+            # ⛔ The population is stated ONCE, for exactly what it interpolates.
+            # `deployment["armed"]` is the per-FILE DEPLOYMENT subset, so calling it
+            # "the surface(s) that do arm it" claimed the WHOLE armed population was
+            # deployment files — false whenever a non-deployment surface arms it and no
+            # deployment file does, which is the arm-2 case immediately below (fresh
+            # review of PR #12016, P3). The old noun also produced a tautology
+            # ("deployment file(s) are themselves deployment files"), so it is gone
+            # rather than reworded around.
+            # ⛔ NO consequence is asserted from the assignment (fresh review of PR
+            # #12016, P3): the walk's per-file verdict is "some line of this file
+            # ASSIGNS the flag a truthy value", which is not "a build using this file
+            # carries the flag". Both divergence shapes are reachable and the walk
+            # reads them ON: an `ARG TORTOISE_EMBED_GATE=1` is build-time only and never
+            # reaches the container's environment, and `ENV …=1` followed by `ENV …=0`
+            # is last-wins, so a build from that file carries 0. The claim is deleted
+            # rather than qualified — a second arm here would be another sentence to
+            # falsify, and the per-FILE caveat below already carries the meaning.
+            armed_clause = (
+                f"the flag is armed in deployment file(s) "
+                f"({', '.join(armed_deployment_files)}) — this reading is per FILE and "
+                "does not model that merge"
+            )
+        elif shipped["armed"]:
+            # ⛔ NOT "a TEMPLATE": this arm is reached by ANY armed non-deployment
+            # surface, and `config/` and `.github/workflows` are IN that population —
+            # a template-only noun would name a population narrower than the arm's, so
+            # the consequence is stated for whatever actually armed. (Stated as a shape
+            # on purpose: on this tree BOTH of those read OFF, so asserting they arm it
+            # would be a measurement the walk did not make — the very defect class this
+            # PR removes; fresh review of PR #12016, P3.)
+            armed_clause = (
+                f"the surface(s) that do arm it ({', '.join(shipped['armed'])}) do "
+                "not deploy the container's environment on their own, so no armed "
+                "non-deployment surface makes this a shipped default (the `#11455` "
+                "reading)"
+            )
+        elif shipped["unmeasured"]:
+            # ⛔ "nothing arms it" over an UNREAD path is the exact doctrine
+            # `flag_in_shipped_configs` forbids: a file that could not be read is not
+            # a file that is silent. This arm exists because the absence claim below
+            # would otherwise be published over a path the walk never read (fresh
+            # review of PR #12016, P3).
+            armed_clause = (
+                "no surface the walk could READ arms it, but "
+                f"{', '.join(shipped['unmeasured'])} could not be read — so "
+                "'nothing arms it' is UNMEASURED here, not a measurement"
+            )
+        else:
+            armed_clause = (
+                "no shipped surface arms it at all, so there is no armed surface "
+                "for a deployment to inherit"
+            )
+        # ⛔ The per-FILE fact is stated FIRST and no deployment consequence is
+        # asserted then retracted (fresh review of PR #12016 P3, #12070 item 4): a
+        # reader quoting the leading clause of the old wording carried the false
+        # statement even though the parenthetical retracted it.
+        notes.append(
+            "shipped default NOT armed for every deployment file (hold this row "
+            "at PARTIAL — silent deployment file(s): "
+            f"{deployment['silent']} declare no gate. Read from that file ALONE the "
+            "deployment is unarmed; a compose file that builds from an ARMED image "
+            "build file INHERITS that image's `ENV`, so this is a per-FILE reading and "
+            f"not the merged view's; {armed_clause})"
         )
     if not stated or not shared or not gated:
         verdict = "NOT MET"
