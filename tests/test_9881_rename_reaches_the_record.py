@@ -77,16 +77,6 @@ from tortoise.record_writer import use_record_tenant
 from tortoise.sdk import TortoiseSDK
 
 
-#: The ONE record the producer emits for a rename, built exactly the way
-#: `sdk._journal_entity_mutation` builds it (`_update_entity`'s non-Point
-#: branch): identity as written, `state` = the write's own applied map.
-def _producer_rename(oid: str, new_name: str, label: str = "Object") -> dict:
-    applied = {"name": new_name}
-    return {"type": "EntityMutated", "ts": "2026-11-06T00:00:00Z",
-            "id": oid, "op": classify_entity_mutation_op(applied),
-            "label": label, "state": applied}
-
-
 @pytest.fixture(autouse=True)
 def _no_ambient_record_env(monkeypatch):
     """Hermetic against the record's four arming surfaces.
@@ -221,9 +211,16 @@ def _journal_records(path) -> list[dict]:
 
 
 def _object_rows(conn, tenant: tuple[str, str]) -> list[tuple]:
+    # `canonical_name` is selected DELIBERATELY (#12120 round-5 finding 1): the
+    # replay leg compares these rows, and without the fold in the projection a
+    # record that withheld it still compared EQUAL — leg (d) proved the row MOVED
+    # but not that the fold was right. Measured: replay's row kept the stale fold
+    # 'acme' while live held 'acmerenamed', and the two rows compared equal on
+    # `id, node_key, name`. With the fold here the leg discriminates the key it is
+    # cited for.
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, node_key, name FROM public.object "
+            "SELECT id, node_key, name, canonical_name FROM public.object "
             "WHERE org_id=%s AND graph_id=%s ORDER BY id", tenant)
         return [tuple(row) for row in cur.fetchall()]
 
@@ -242,8 +239,9 @@ def test_the_public_rename_door_moves_the_records_name_live_and_on_replay(
     * the write goes through the SDK's public `update_entity`, with the record
       ARMED as the application role and the tenant carried by the writer's own
       `use_record_tenant` (no probe module, no monkeypatched writer);
-    * the assertion is on the RECORD ROW — `select id, node_key, name` — so the
-      re-keyed key (`node_key = id`) and the moved column are both read back;
+    * the assertion is on the RECORD ROW — `select id, node_key, name,
+      canonical_name` — so the re-keyed key (`node_key = id`), the moved column,
+      and the fold it is compared on are all read back;
     * the REPLAY leg replays the same journal onto a tenant no other leg has
       used and requires the SAME row, which is what makes this "rebuild ==
       live" instead of "live wrote something".
@@ -285,14 +283,21 @@ def test_the_public_rename_door_moves_the_records_name_live_and_on_replay(
             "the rename was not journaled as `EntityMutated op=rename` on the "
             f"stable id — journal types: "
             f"{[(r.get('type'), r.get('op')) for r in records]}")
-        assert renames[0]["state"] == {"name": "AcmeRenamed"}, renames[0]
+        # #12120: a rename APPLIES the fold beside the surface name (the writer's
+        # key space is the folded union), so the record carries both — and the
+        # replay leg below is what proves that is right rather than noise: the
+        # same map lands the same row on a fresh tenant.
+        assert renames[0]["state"] == {"name": "AcmeRenamed",
+                                       "canonical_name": "acmerenamed"}, \
+            renames[0]
         assert renames[0]["label"] == "Object", renames[0]
 
         # ── (b) LIVE: the name moved, the key did not, the old name is GONE ──
         live_rows = _object_rows(conn, live)
-        assert live_rows == [(object_id, object_id, "AcmeRenamed")], (
+        assert live_rows == [(object_id, object_id, "AcmeRenamed",
+                              "acmerenamed")], (
             "the record did not apply the rename: the row must be keyed by its "
-            f"stable id and carry the NEW name (got {live_rows})")
+            f"stable id and carry the NEW name and its fold (got {live_rows})")
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT count(*) FROM public.object WHERE org_id=%s AND "

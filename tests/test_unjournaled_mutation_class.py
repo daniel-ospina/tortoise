@@ -537,6 +537,14 @@ class TestPropertyMutationRoundTrip:
         FAILS IF: the name change stops being journalled (the reversion this
         file exists to remove), the record stops being labelled `rename`, or
         the round trip loses the new name.
+
+        #12120: a rename now APPLIES two keys — the surface `name` and its fold
+        `canonical_name` (the writer's key space is the folded union, so a rename
+        that left the old fold behind described a node under a name it no longer
+        held). The record carries BOTH, because replay applies exactly the map it
+        is given: withholding the fold would rebuild a node whose `name` says "B"
+        and whose `canonical_name` still folds "a" — `rebuild == live` broken on
+        the very key the union resolves. The expectation therefore names both.
         """
         sdk, events = env
         oid = sdk.create_entity("object", name="A",
@@ -553,7 +561,8 @@ class TestPropertyMutationRoundTrip:
             "a `name` change must be journalled — withholding it reverts the "
             f"rename on every rebuild: {_mutations(events)[before:]}")
         assert recs[-1]["op"] == "rename", recs[-1]["op"]
-        assert recs[-1]["state"] == {"name": "B"}, recs[-1]["state"]
+        assert recs[-1]["state"] == {"name": "B", "canonical_name": "b"}, \
+            recs[-1]["state"]
         assert "NOT journaled" not in " ".join(r.getMessage()
                                                 for r in caplog.records), \
             "the retired #4769 withhold warning must not come back"
@@ -573,7 +582,10 @@ class TestPropertyMutationRoundTrip:
         halves instead of only the non-name ones.
 
         FAILS IF: the `name` is withheld again (a rebuild then reverts it), or
-        the sibling keys it journals alongside are dropped.
+        the sibling keys it journals alongside are dropped. #12120 added one
+        member to that map: a rename APPLIES the fold (`canonical_name`) beside
+        the surface name, so the record carries it — listing only `name` would
+        assert the very withhold this test exists to forbid.
         """
         sdk, events = env
         oid = sdk.create_entity("object", name="A",
@@ -589,7 +601,7 @@ class TestPropertyMutationRoundTrip:
         assert recs, "the write must journal"
         state = recs[-1]["state"]
         assert state == {"name": "B", "status": "archived",
-                         "confidence": 0.9}, state
+                         "confidence": 0.9, "canonical_name": "b"}, state
         assert recs[-1]["op"] == "rename", recs[-1]["op"]
 
         # The payload of this test: BOTH halves SURVIVE a rebuild.
