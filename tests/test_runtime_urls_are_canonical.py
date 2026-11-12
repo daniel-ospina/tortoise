@@ -424,8 +424,8 @@ RUNTIME_FILES = (
 #:     REDS the count check instead of leaving the surface silently.
 #:   * three DOCUMENTS a human copies — the two onboarding `SKILL.md` copies and
 #:     `.env.example` — which `test_documents_humans_copy_do_not_name_the_retired
-#:     _host` (above) pins by name and which must never name the retired host in any
-#:     form.
+#:     _host` (BELOW) pins by name and which must never name the retired host in
+#:     any form.
 #:
 #: ⛔ THIS BLOCK ASSERTS ONLY WHAT THE TEST BELOW RE-MEASURES: these nine paths are
 #: members of `RUNTIME_FILES`, and each carries 0 occurrences of `RETIRED_ORIGIN`
@@ -539,31 +539,48 @@ def test_the_runtime_surface_is_the_whole_population_it_claims():
     refuses ("this guard cannot report GREEN over a file it never opened"), on the
     very file whose docstring argues the point.
 
-    Both directions now red: an unexpected member moves the count, and a deleted
-    zero-count member drops out of `EXPECTED_ZERO_COUNT_FILES` and is NAMED. The
-    count alone would not name it, which is why the group assertion is separate.
+    Both directions now red. An unexpected member moves the count; a deleted
+    zero-count member leaves BOTH `EXPECTED_ZERO_COUNT_FILES` and the
+    no-allowlist-row set, so the equality below names it. The count alone would not
+    name it, which is why the group assertions come first.
     """
     duplicates = sorted({rel for rel in RUNTIME_FILES if RUNTIME_FILES.count(rel) > 1})
     assert not duplicates, (
         "a duplicated entry inflates the population count, so a DELETED member "
         f"could hide behind it: {duplicates}")
-    # ⛔ THE GROUP ASSERTION RUNS BEFORE THE COUNT ON PURPOSE. Every member is either
+    # ⛔ THE GROUP ASSERTIONS RUN BEFORE THE COUNT ON PURPOSE. Every member is either
     # allowlisted (14 — a deletion from the tuple reds `test_every_allowlisted
     # _occurrence_has_a_reason`'s `orphans` check, which NAMES it) or zero-count (9 —
-    # a deletion is invisible to `orphans` and to every count check, so this is its
-    # only detector). Asserting the count FIRST would mask this: the count moves for
-    # both classes, so it would fire first and never name the zero-count member.
-    missing = sorted(EXPECTED_ZERO_COUNT_FILES - set(RUNTIME_FILES))
-    assert not missing, (
-        "these files sit at ZERO retired-origin occurrences and carry no allowlist "
-        "row, so no count check can see them leave the surface — but they must stay "
-        f"IN it: {missing}. Deleting the line stops the guard OPENING the file, so "
-        "a literal coming back would no longer RED: that is #12144's false PASS."
+    # a deletion is invisible to `orphans` and to every count check, so this group is
+    # its only detector). Asserting the count FIRST would mask this: the count moves
+    # for both classes, so it would fire first and never name the zero-count member.
+    # ⛔ THE GROUP EQUALS "EVERY MEMBER WITH NO ALLOWLIST ROW", EXACTLY. Containment
+    # alone was not enough: the group's OWN membership was unpinned, so deleting a
+    # line from it left the suite GREEN — and the next deletion of that member from
+    # `RUNTIME_FILES` then red only as "22 members, not 23", naming nothing. Equality
+    # pins both roles at once, and it is the definition the group already has: a
+    # member with no row has an expected count of 0 (`test_retired_origin_literals
+    # _match_the_recorded_allowlist` looks the row UP, defaulting to 0).
+    zero_count_now = set(RUNTIME_FILES) - set(RETIRED_HOST_ALLOWLIST)
+    missing = sorted(EXPECTED_ZERO_COUNT_FILES - zero_count_now)
+    unexpected = sorted(zero_count_now - EXPECTED_ZERO_COUNT_FILES)
+    assert not missing and not unexpected, (
+        "EXPECTED_ZERO_COUNT_FILES no longer equals the set of RUNTIME_FILES members "
+        "with no allowlist row (the members whose expected count is 0)."
+        + (" LISTED BUT NO LONGER A ZERO-COUNT MEMBER: either the file LEFT the "
+           "surface — the #12144 regression, where the guard stops opening it — or "
+           f"it gained an allowlist row and is no longer zero-count: {missing}."
+           if missing else "")
+        + (" A ZERO-COUNT MEMBER IS NOT LISTED: it measures 0 today and carries no "
+           f"row, so add it — otherwise deleting it is only a count move: {unexpected}."
+           if unexpected else "")
+        + " A zero-count member is invisible to `orphans` and to every count check, "
+        "so this group is the only place a deletion of one can be NAMED: #12144."
     )
-    # ⛔ THE GROUP IS RE-MEASURED, NOT JUST DECLARED. Containment alone lets the
-    # constant silently stop being true: put a literal BACK in a member and add an
-    # allowlist row for it, and every other check here passes while this group still
-    # claims a zero it no longer measures.
+    # ⛔ AND THE GROUP IS RE-MEASURED, NOT JUST DECLARED. The equality above ties
+    # membership to the allowlist; this ties it to the TREE, so the constant's own
+    # claim ("expects to find ZERO occurrences") is falsified here rather than
+    # inferred from another test.
     counts = {rel: (REPO / rel).read_text(encoding="utf-8").count(RETIRED_ORIGIN)
               for rel in sorted(EXPECTED_ZERO_COUNT_FILES)}
     stale = [(rel, n) for rel, n in counts.items() if n]
