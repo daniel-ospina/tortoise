@@ -704,32 +704,33 @@ _LIST_SEP_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: A bare letter at the END of a run has nothing after it to prove membership, so `a`
-#: and `i` — the only single letters that are also ENGLISH WORDS — are read there only
-#: when the next thing is list punctuation, the end of the sentence, or a word the arm's
-#: own predicates use. ⛔ THE ENDING RULE IS SCOPED TO `a`/`i` ON PURPOSE. Applying it
-#: to every bare letter is what DROPPED a written member (`Only a, f, h, i, j still read
-#: as written.` lost its `j`, #12028), and applying no ending rule at all is what let
-#: prose SUPPLY one (`, and I think so.` / `, and a claim §1 supports.` closed a stale
-#: complement list, #12028). The other ten letters are not English words, so their run
-#: membership is evidence enough. `(?![-\w])` refuses `still-unsolved`, where `still`
-#: begins a hyphenated adjective rather than the list's predicate.
-#: ⚠️ STATED RESIDUAL: prose of the exact shape `, and a <predicate> …` — a verb phrase
-#: that STARTS with one of those words, placed directly after a list run — can still
-#: supply `a`/`i`. Closing it needs either a WIDER word list (the false-accusation risk
-#: #12028 rejects, and §8's accepted-spelling contract forbids) or refusing a documented
-#: trailing member; both trade a contrived false PASS for a false ACCUSATION on correct
-#: prose, and the residual additionally needs the phantom to be exactly the row the stale
-#: list omits.
+#: A bare `a`/`i` at the END of a run needs the text AFTER it to say so, and the only
+#: endings that do are the sentence's own: a full stop that does not begin an
+#: abbreviation, the end of the string, a CLOSING PARENTHESIS (`)` — the class is
+#: `[):—–]`, so `]` and `}` are NOT accepted), a colon or a dash, or one of the arm's own
+#: predicates as a whole word (`(?![\w-])`: `still read` yes, `still-unsolved` no).
+#: ⛔ NEITHER A COMMA NOR A SEMICOLON IS AN ENDING HERE, for the same reason: both are RUN
+#: SEPARATORS (`_LIST_SEP_RE`), so a separator after the run's last item means the run had
+#: NOT ended there — if no item follows it, the list is over and prose continues. So
+#: `Only a, f, h, i, and then some.` and `Only a, f, h, i; the rest` are prose continuing the
+#: sentence, and accepting either read a phantom `i` (the comma case measured by the
+#: verification gate at this head). `(?![A-Za-z])`
+#: refuses the `.` of `i.e.`.
 _PROSELIKE_LETTERS = frozenset("ai")
 _MEMBER_END_RE = re.compile(
-    r"\s*(?:[,;:)\u2014\u2013]"
+    r"\s*(?:[):\u2014\u2013]"
     r"|\.(?![A-Za-z])"
     r"|$"
     r"|(?:still|only|no\s+longer|read|reads|remain|remains|stand|stands|stood"
     r"|are|is|was|were|do|does|did|have|has|had)(?![-\w]))",
     re.IGNORECASE,
 )
+
+#: A separator that is PUNCTUATION ONLY — no connector word. This is what makes the
+#: documented bare spelling (`a, f, h, i, j`) evidence, and it is the whole difference
+#: between it and prose: `, and I,` carries a WORD beside the `a`/`i`, a bare list
+#: carries only `,` `;` or `&`.
+_PUNCTUATION_SEP_RE = re.compile(r"\s*[,;&]\s*")
 
 
 def _bare_list_members(masked: str) -> set[str]:
@@ -761,17 +762,77 @@ def _bare_list_members(masked: str) -> set[str]:
     for run in runs:
         if len(run) < 2:
             continue
-        for pos, (_start, end, letter) in enumerate(run):
+        for pos, (start, end, letter) in enumerate(run):
             if letter is None:  # a masked marked member — already counted
                 continue
-            if (
-                letter.lower() in _PROSELIKE_LETTERS
-                and pos == len(run) - 1
-                and not _MEMBER_END_RE.match(masked[end:])
+            if letter.lower() in _PROSELIKE_LETTERS and not _proselike_has_evidence(
+                masked, run, pos, start, end
             ):
                 continue
             out.add(letter.lower())
     return out
+
+
+def _proselike_has_evidence(
+    masked: str,
+    run: list[tuple[int, int, str | None]],
+    pos: int,
+    start: int,
+    end: int,
+) -> bool:
+    """Is this bare `a`/`i` — an English word — EVIDENCE of list membership here?
+
+    ⛔ BEING IN A RUN IS NOT ENOUGH FOR `a` AND `i`. Every other bare letter of the
+    page's alphabet is unambiguous, but `a` (article) and `i` (pronoun) are ordinary
+    English, so a run POSITION tells us nothing on its own — measured, #11902's review:
+    with `(i)` removed from the complement list,
+    `Only **(a)**, **(f)**, **(h)**, and I, **(j)** still read as written.` read CLEAN,
+    because `I` sat in an INTERIOR run position and the ending test was applied only to
+    the run's last item. The same held for `, and a, **(j)**`.
+
+    ⛔ WHICH SIDE IS EVIDENCE DEPENDS ON THE POSITION, and conflating them re-opens the
+    hole (measured by the verification gate at this head): testing `punctuation on the
+    left` FIRST returned True for a run TAIL whose left neighbour is a comma, so
+    `Only a, f, h, i foo bar.` and `Only a, f, h, i, and then some.` supplied a phantom
+    `i` — the left side of a tail is the list it just came from, never evidence about
+    what follows it:
+
+    1. **HEAD** (`pos == 0`) — a run's FIRST item. There is no item before it, so there is
+       no separator-side evidence to consult and the code reads it; in the documented bare
+       spelling the first member sits exactly here (`Only a, f, …`). ⛔ THIS IS A CHOICE,
+       NOT A PROOF — nothing to a head's left is examined at all, so prose can supply an
+       `a`/`i` here (see residual 4). It is also NOT true that the span before a head is
+       "prose ending in a word": a head can sit at the start of the string, after `(`, or
+       after a comma (`then x, I, j …`), and none of that is consulted.
+    2. **TAIL** (`pos == len(run) - 1`) — the RIGHT side decides, via `_MEMBER_END_RE`:
+       it is prose once the list is over.
+    3. **INTERIOR** — both sides are separators, and only a PUNCTUATION-ONLY left
+       separator (`,` `;` `&`, no connector word) makes it an item. That is what
+       separates the documented bare spelling (`a, f, h, i, j`) from prose: `, and I,`
+       carries the word `and` beside the letter.
+
+    ⚠️ RESIDUALS, stated rather than implied — NONE of them is closable in code, because
+    every one is byte-identical to a spelling §8 accepts:
+    * INTERIOR punctuation adjacency: `…, a, …` / `…, I, …` inside a run. A bare list item
+      and an English word between two commas are the same bytes.
+    * TAIL preceded by a connector, followed by an accepted ending: `, and a.`,
+      `, and I — the rest …`, `, and I: the rest …`. ⛔ THIS IS THE OXFORD-COMMA SPELLING:
+      `a, f, h, and i.` must read `i`, so refusing the connector-preceded tail would be
+      the false-accusation class #12028 rejects. The connector is refused only for an
+      INTERIOR item, where the left side is all there is to read.
+    * TAIL followed by one of the arm's own predicates can still be a verb phrase
+      (`, and a read of §4 shows …`); closing it needs a WIDER predicate list, which is
+      the same false-accusation trade.
+    * HEAD: prose `I`/`a` at a run's head is read (`I, j still read as written.`) — a run
+      begins at its first item, and nothing to its left can distinguish the two.
+    Every residual also needs the phantom to be exactly a row the stale list OMITS.
+    """
+    if pos == 0:  # a run's FIRST item — no separator-side evidence exists, so it is read
+        return True
+    if pos == len(run) - 1:  # the list's TAIL — what follows it is the evidence
+        return bool(_MEMBER_END_RE.match(masked[end:]))
+    # INTERIOR: only punctuation beside it, no connector word.
+    return bool(_PUNCTUATION_SEP_RE.fullmatch(masked[run[pos - 1][1] : start]))
 
 
 def _named_letters(sentence: str) -> set[str]:

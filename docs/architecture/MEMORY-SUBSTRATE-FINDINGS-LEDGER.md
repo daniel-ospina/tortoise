@@ -395,8 +395,26 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   `, and a claim §1 supports.` supply `a`; too tight, it DROPPED a member a sentence writes —
   `Only a, f, h, i, j still read as written.` lost its trailing `j`, and a bare `c` inside
   `, c and **(j)**` vanished so the compared set silently equalled the table's. `a` and `i` are the
-  only single letters that are also English words, so at the END of a run they are read only when
-  list punctuation, the sentence end, or one of the list's own predicates follows. Markup around a
+  only single letters that are also English words, so WHICH SIDE IS EVIDENCE DEPENDS ON
+  WHERE THE LETTER SITS: an INTERIOR `a`/`i` is read only when the separator to its left is
+  punctuation alone (`,` `;` `&`, no connector word) — that is the whole difference from
+  prose, since `, and I,` carries the word `and` beside the letter; the HEAD of a list is
+  read because a run's first item has no item before it, so there is no separator-side
+  evidence to consult — a choice, not a proof (see the residuals below);
+  and the END of a run is read only when the sentence's own ending follows — a full stop that
+  does not begin an abbreviation, the end of the sentence, a closing parenthesis (`)`; the
+  class is `[):—–]`, so `]` and `}` are not accepted), a colon or an em/en dash (a plain
+  hyphen is not accepted), or one of the list's own predicates as a whole word
+  (`still read` yes, `still-unsolved` no). ⛔ A bare comma is NOT an ending for the last item:
+  a comma there means the
+  run did not end, so `Only a, f, h, i, and then some.` must not read `i` (measured — an
+  ordering that tested the LEFT side first did read it). ⚠️ FOUR shapes remain readable and
+  none is closable in code, because each is byte-identical to a spelling §8 accepts: an
+  `a`/`i` inside a run between punctuation (`…, a, …`, indistinguishable from the bare
+  list); a connector-preceded TAIL with an accepted ending (`a, f, h, and i.` IS the
+  Oxford-comma spelling, so it must read); a TAIL followed by one of the arm's own
+  predicates (a verb phrase can start with one); and a prose `I`/`a` at a run's HEAD. Markup
+  around a
   member never decides candidacy (`**(c)**` and `(c)` are the same item), which is
   what stops a `**` from being the difference between a red and a green; code, italic and
   uppercase spellings are read too, and the letter EXTRACTOR reads every spelling the candidate
