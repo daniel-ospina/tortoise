@@ -2230,12 +2230,20 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
             f"({deployment['armed']})"
         )
     else:
+        # ⛔ Lead with the PER-FILE fact and frame the merge as this reading's SCOPE,
+        # never as a consequence asserted and then retracted (fresh review of PR #12016,
+        # P3 — #12070 item 4 cited the hold note, but this sibling had the same shape):
+        # the old wording opened "a deployment built from that file ALONE runs with the
+        # gate OFF" and took it back one sentence later, and the leading clause is what
+        # a reader quotes. It is not hypothetical here either: `docker-compose.yml`
+        # really does set `build.dockerfile: Dockerfile.selfhost`, so a compose
+        # deployment CAN carry an image build file's `ENV` today.
         deployment_reading = (
-            f"UNARMED deployment file(s) {deployment['silent']} — a Tortoise "
-            "deployment built from that file ALONE runs with the gate OFF. It is not "
-            "the OFF on every build: a compose file that builds from an image build "
-            "file INHERITS that image's `ENV`, so a silent compose file does not "
-            "unset what an armed `Dockerfile*` sets. This condition is "
+            f"UNARMED deployment file(s) {deployment['silent']} declare no gate of "
+            "their own, so read from that file ALONE the gate is off — this reading is "
+            "PER FILE and does not model a compose file that BUILDS from an armed "
+            "image build file (it INHERITS that image's `ENV`), so it is not a claim "
+            "about such a deployment. This condition is "
             "SCOPED to the surface(s) that arm it "
             f"({', '.join(shipped['armed']) or 'none'}) and is NOT a claim about a "
             "deployment built from the silent path(s)"

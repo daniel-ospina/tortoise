@@ -2335,7 +2335,7 @@ def test_the_gate_is_not_read_True_off_ONE_armed_surface(tmp_path, monkeypatch):
     # `Dockerfile*` inherits the image's `ENV`, so the deployment IS armed and the
     # unqualified "a deployment built from them runs with the gate OFF" published the
     # opposite of what the walk measured. Pin the qualification, not just the claim.
-    assert "deployment built from that file ALONE runs with the gate OFF" in note, note
+    assert "read from that file ALONE the gate is off" in note, note
     assert "INHERITS that image's `ENV`" in note, note
     assert "SCOPED to the surface(s) that arm it (.env.example)" in note, note
 
@@ -2344,16 +2344,17 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
         tmp_path, monkeypatch):
     """The `#11455` CLAUSE, SCORED — one armed TEMPLATE must not complete row 1.
 
-    ⛔ Fresh review of PR #12016 (P2): 31 of the 32 row-1 `score_rule_bullet()` call
-    sites feed a reading in which `shipped["on"]` and `shipped["deployment"]["on"]`
-    AGREE — `_fake_shipped` sets both from one argument, and `_row_one_fixture` arms
+    ⛔ Fresh review of PR #12016 (P2): of the 35 `probe.score_rule_bullet()` call sites
+    in this file (`grep -c` measures the population; the count is not `31 + 1`), 31
+    feed a reading in which `shipped["on"]` and `shipped["deployment"]["on"]` AGREE —
+    `_fake_shipped` sets both from one argument, and `_row_one_fixture` arms
     `docker-compose.yml`, which is both an any-surface and a deployment surface. The
-    32nd, `test_the_shipped_default_is_searched_not_assumed`, scores the REAL tree
-    where the two diverge, but asserts only the note and never `row.verdict`. So
-    reverting the one line `on_by_default = deployment["on"]` to `shipped["on"]`, or
-    folding `ambient` back into it, left the WHOLE suite green — and `row.verdict` is
-    the artefact `#11086` item 4 is ticked on, so the clause `#11455` exists for was
-    pinned nowhere.
+    four that DIVERGE are this test (twice), the `#11455` row-holds test below, and
+    `test_the_shipped_default_is_searched_not_assumed` — which scores the REAL tree but
+    asserts only the note, never `row.verdict`. So reverting the one line
+    `on_by_default = deployment["on"]` to `shipped["on"]`, or folding `ambient` back
+    into it, left the WHOLE suite green — and `row.verdict` is the artefact `#11086`
+    item 4 is ticked on, so the clause `#11455` exists for was pinned nowhere.
     """
     _row_one_fixture(tmp_path, monkeypatch)
     # The divergent shape: the TEMPLATE arms the flag, the deployment surface does not.
@@ -2375,8 +2376,9 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
     # must carry the template clause and NOT the deployment one. Without this the branch
     # selection could be inverted (`if shipped["armed"] else`) and the whole suite stayed
     # green — measured — while the real tree, the shape a reader actually reads, printed
-    # "the surface(s) that do arm it (['.env.example']) are themselves deployment files,
-    # so a build that uses one of them carries the flag".
+    # "the surface(s) that do arm it () are themselves deployment files, so a build that
+    # uses one of them carries the flag" (EMPTY parentheses: the clause interpolates the
+    # intersection, which the mutated condition never computes).
     assert "do not deploy the container's environment on their own" in hold, hold
     assert "themselves deployment files" not in hold, hold
 
@@ -2580,6 +2582,19 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
     hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
     assert "Read from that file ALONE the deployment is unarmed" in hold, hold
+    # ⛔ And the SIBLING note carries the same defect class (round-13 review, P3): the
+    # gate note led with "a deployment built from that file ALONE runs with the gate
+    # OFF" and retracted it a sentence later — and this shape makes it reachable, not
+    # hypothetical: `docker-compose.yml` really sets
+    # `build.dockerfile: Dockerfile.selfhost`, so a compose deployment can carry the
+    # image's `ENV`. The note must state the PER-FILE fact and name the merge as its
+    # scope, never assert the deployment consequence it then takes back.
+    gate_note = probe.shipped_default_note(
+        probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE"),
+        "TORTOISE_EMBED_GATE", False)
+    assert "read from that file ALONE the gate is off" in gate_note, gate_note
+    assert "does not model a compose file that BUILDS from an armed" in gate_note, gate_note
+    assert "a Tortoise deployment built from that file" not in gate_note, gate_note
     # ⛔ And the OTHER half of the same conflation (round-11 review, P2): with an armed
     # surface that IS a deployment file, the note must NOT claim that surface "does
     # not deploy the container's environment on their own" — a build using it carries
