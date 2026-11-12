@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import itertools
 import json
 import re
 import subprocess
@@ -1263,7 +1264,11 @@ def _block_bodies(changelog: str) -> list[str]:
     for 39 blocks, one of them a fragment starting at the quoted header.
     """
     starts = [m.start() for m in _BLOCK_VERSION_RE.finditer(changelog)]
-    return [changelog[a:b] for a, b in zip(starts, starts[1:] + [len(changelog)])]
+    # `pairwise` over the spans plus the end offset — the spans are DELIBERATELY
+    # one shorter than the pairs (B905's `strict=` would be a lie here), and it
+    # replaces the `+ [len(changelog)]` concatenation RUF005 rejects.
+    return [changelog[a:b]
+            for a, b in itertools.pairwise([*starts, len(changelog)])]
 
 
 def test_a_4_3_change_must_be_quoted_verbatim_by_some_changelog_block() -> None:
