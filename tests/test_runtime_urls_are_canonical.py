@@ -42,9 +42,10 @@ spell the host with no row at all — the `blog/api/notify-publish` POST in
 sweep must re-aim too (`tests/test_website_docs_consistency.py`'s `SITE_HOSTS` lists the
 retired host as LEGITIMATE, so a retired-host `<loc>` passes there) — because this guard
 counts what the RUNTIME emits in its own surface, not every occurrence in the tree. Every file that reads 0 has
-NO row and stays in `RUNTIME_FILES` — the four that lost a row (three to main's
-#12058 while this PR was open, `website/functions/blog/_lib.ts` to #11977's repoint
-of its `navHtml` hrefs) and the five that never carried one — so a literal coming back REDS the guard instead
+NO row and stays in `RUNTIME_FILES` — the three that lost a row (all to main's
+#12058 while this PR was open) and the six that never carried one, `website/functions/blog/_lib.ts` among
+them: #11977 repointed its three `navHtml` hrefs in the same commit that introduced this list, so the count
+reached 0 before a row could describe it — so a literal coming back REDS the guard instead
 of leaving the surface, and neither group is a leftover — which is why this guard
 cannot report GREEN over a file it never opened, and why a sweep that removes one of
 those literals must remove its recorded reason too.
@@ -66,17 +67,20 @@ non-deferral KEEP rows — `hosted_api.py`, the two Supabase edge functions and
 `supabase/config.toml` — name no follow-up issue on purpose: nothing is deferred
 there, so naming one would invent work that does not exist.)
 
-⛔ ONE ROW CHANGED UNDER THIS PR, AND THE CHANGE IS THE POINT OF THE EXACT COUNT.
-`website/functions/blog/_lib.ts` was 4 when this file was written; main's #11765
-(PR #11976, landed 2026-11-12 while this PR was open) flipped that file's
-`SITE_URL` to `premiselabs.co`, so the count was 3 — the three `navHtml`
+⛔ `_lib.ts` READ 4 WHEN THIS FILE WAS FIRST DRAFTED, AND "NO ROW" IS THE CORRECT
+LANDED RESULT. main's #11765 (PR #11976, landed 2026-11-12 while this PR was open)
+flipped that file's `SITE_URL` to `premiselabs.co`, leaving 3 — the three `navHtml`
 product hrefs, which #11976's own `tests/test_blog_seo_meta.mjs` kept on the
-retired host ON PURPOSE and assigned to #11764. This file was rebased onto that
-commit and the row followed it down to 3; #11764 then closed WITHOUT repointing
-them, so this PR emits the terminal forms and the row is now GONE (count 0). The
-file stays in `RUNTIME_FILES`, so a literal coming back REDS the guard. A count
-kept at 4 would have gone RED on a file nobody broke; a row deleted without the
-repoint would have un-pinned a deferral nobody owns.
+retired host ON PURPOSE and assigned to #11764. #11764 then closed WITHOUT
+repointing them, and #11977 did the repoint: its commit `7e6baffc5d` moved those
+three hrefs to the terminal forms AND introduced this allowlist, so the count was
+already 0 when the list first existed and no revision of it carried a `_lib.ts`
+row. ⛔ Measured, not inferred: the key set is the same 14 keys at `7e6baffc5d`
+and at this head, and `_lib.ts` is a key in neither. This PR changes no line of
+`_lib.ts` and no line of the blog guard — `git log 81269704..HEAD` over both files
+is empty. The file stays in `RUNTIME_FILES`, so a literal coming back REDS the
+guard. A count kept at 4 would have gone RED on a file nobody broke; a row added
+at 0 would have been a pin with nothing to pin.
 """
 from __future__ import annotations
 
@@ -286,23 +290,25 @@ RETIRED_HOST_ALLOWLIST = {
     # ⛔ The blog origin's ACTUAL source, missed by the first pass at this map: it
     # named the admin client and the dashboard Function but not `_lib.ts`, which is
     # what the blog's canonicals, OG tags, JSON-LD, sitemap and feed are built from.
-    # ⛔ THIS ROW IS GONE, and the removal is the deferral being PAID rather than
-    # moved. Two things happened under this PR: #11765 (PR #11976) re-aimed
-    # `SITE_URL` to `premiselabs.co`, and the three remaining occurrences were
-    # `navHtml`'s product hrefs, deferred to #11764. #11764 then CLOSED
+    # ⛔ THIS FILE HAS NO ROW, and that is the deferral being PAID rather than
+    # moved. Two landings did it, NEITHER of them in this PR's diff: #11765
+    # (PR #11976) re-aimed `SITE_URL` to `premiselabs.co`, leaving the three
+    # `navHtml` product hrefs deferred to #11764; #11764 then CLOSED
     # (2026-11-12T07:23:26Z, COMPLETED, by PR #12058) WITHOUT repointing them and
     # #12057 explicitly excludes this file — so the deferral pointed at a closed
     # issue, which this file's own OWNERSHIP note forbids ("a note deferring to it
-    # defers nowhere"). The destinations exist and were measured 2026-11-12
-    # (`premiselabs.co/tortoise/docs` answers 200; `/tortoise` is the product page;
-    # `/auth` 301s to the app origin), and the sibling blog guard moves with it:
-    # `tests/test_blog_seo_meta.mjs` pinned an UPPER BOUND (`<= 3`) only so it would
-    # "survive the repoint", and THIS PR flips it to `navRetired.length === 0` in a
-    # later commit — an exemption that outlives the deferral it excused is the
-    # false-PASS class that guard exists to refuse. So this PR emits the terminal
-    # forms and the count goes to 0. The file STAYS in `RUNTIME_FILES` on purpose:
-    # with no allowlist row its expected count is 0, so a literal coming back REDS
-    # this guard instead of silently leaving the surface.
+    # defers nowhere"). The repoint is #11977's: its commit `7e6baffc5d` moved
+    # those three hrefs to the terminal forms (`premiselabs.co/tortoise/docs`
+    # answers 200; `/tortoise` is the product page; `/auth` 301s to the app origin)
+    # and introduced this allowlist with NO `_lib.ts` row, because the count was
+    # already 0. The sibling blog guard lands with it, not with this PR: it pinned
+    # an UPPER BOUND (`<= 3`) only so it would "survive the repoint", and on this
+    # head's base `tests/test_blog_seo_meta.mjs:2286` pins
+    # `navRetired.length === 0` — an exemption that outlives the deferral it excused
+    # is the false-PASS class that guard exists to refuse. This PR changes neither
+    # file. The file STAYS in `RUNTIME_FILES` on purpose: with no allowlist row its
+    # expected count is 0, so a literal coming back REDS this guard instead of
+    # silently leaving the surface.
     "website/apps/dashboard/functions/admin/[[path]].ts": (
         1,
         "#11767 item 4 — the 403 page's `<a>← Back to the blog</a>` link (line "
@@ -373,7 +379,7 @@ RETIRED_HOST_ALLOWLIST = {
 #: follow) — a PROSE comment that merely names the host is not counted, which is
 #: why `[[path]].ts` is 1 and not 2 (line 12 is a comment, line 49 emits):
 #:   website/apps/dashboard/functions/blog/api/[[path]].ts   1  DEFAULT_BLOG_ORIGIN
-#:   website/functions/blog/_lib.ts                          0  navHtml repointed to the terminal forms (row removed)
+#:   website/functions/blog/_lib.ts                          0  navHtml repointed to the terminal forms (no row to remove)
 #:   website/apps/blog-admin/src/lib/blog-api.ts             1  DEFAULT_AUTHOR_IMAGE_URL avatar
 #:   website/apps/dashboard/functions/admin/[[path]].ts      1  the 403 page's ← Back to the blog link
 #:   website/apps/blog-admin/src/App.tsx                     1  header link to the PUBLIC BLOG
@@ -417,10 +423,10 @@ RETIRED_HOST_ALLOWLIST = {
 #: a sweep to update the record in the same commit.
 #: ⛔ The other FOUR files in the list above sit at 0 and are NOT in the map, for two
 #: different reasons, and the difference matters: `website/functions/blog/_lib.ts`
-#: is not a deferral at all — #11767 repointed its three `navHtml` hrefs to the
-#: terminal forms and DELETED the row (#11764 closed without doing it) — while
-#: `invite-accept.html`, `welcome.html` and `wizardPrompts.js` were re-aimed to 0 by
-#: main's #12058 and their rows deleted. All four stay in `RUNTIME_FILES` on purpose:
+#: never carried a row at all — #11977 repointed its three `navHtml` hrefs to the
+#: terminal forms in the same commit that introduced the map (#11764 closed without
+#: doing it) — while `invite-accept.html`, `welcome.html` and `wizardPrompts.js` were
+#: re-aimed to 0 by main's #12058 and their rows deleted. All four stay in `RUNTIME_FILES` on purpose:
 #: with no row the expected count is 0, so a literal coming back REDS this guard
 #: instead of leaving the surface.
 #: ⛔ COUNT THE TABLE, DO NOT TRUST A NUMBER HERE. An earlier revision of this
@@ -440,7 +446,7 @@ RETIRED_HOST_ALLOWLIST = {
 #: said the sweep "belongs to #11764/#12049" and that the deferred re-aim was
 #: "tracked on #11767": all three are false. `#12049` covers only the pasted
 #: onboarding copy, `#11764`'s scoping is the product-page move, and `#11767`
-#: CLOSES with this PR, so a note deferring to it defers nowhere. Where a row above
+#: is already CLOSED (by #11977's landing), so a note deferring to it defers nowhere. Where a row above
 #: cites "#11764"/"#11765" it names the work the deferral RIDES.
 RUNTIME_FILES = (
     "tortoise/email_notify.py",
