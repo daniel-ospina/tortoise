@@ -824,7 +824,7 @@ calls `worktree_report.py check` rather than re-implementing the format.
 >
 > ⛔ **On a cell / any box where nothing serves `localhost:6379`, do NOT use the
 > `docker://:falkordb@localhost:6379/…` URI below** — start the lane's own
-> container and let the tool export all three seam variables:
+> container and let the tool export all four seam variables:
 >
 > ```bash
 > uv run python tools/test_lane.py run -- tests/ -v    # the correct invocation
@@ -854,7 +854,7 @@ calls `worktree_report.py check` rather than re-implementing the format.
 > starting a gating run; a run that dies at 80% proves nothing about `main`.
 
 ```bash
-# Default — a private lane container, all three seam vars exported (#10399):
+# Default — a private lane container, all four seam vars exported (#10399):
 uv run python tools/test_lane.py run -- tests/ -v
 
 # …or the raw form on a box that already serves the docker lane on 6379:
@@ -882,10 +882,21 @@ uv run python tools/test_lane.py run -- tests/test_directional_impl_fix.py -v
 > container this tool refuses to address from any other lane, so no lane's run leaves
 > residue on another's target.
 > The container is not self-cleaning: it lives until an explicit `down`.
-> **Seam coverage (corrected, #10399):** the tool now exports ALL THREE variables the
-> suite resolves its target from — `TORTOISE_DB_URI`, `TORTOISE_TEST_DOCKER_PORT` and
-> `TORTOISE_TEST_DOCKER_PASSWORD=''` — so the `tests/_live_utils.py` path is covered
-> too, not only the `TORTOISE_DB_URI` path. The residual gap is narrower: a site that
+> **Seam coverage (corrected twice: #10399 for the docker axis, then for the legacy
+> axis):** the tool exports ALL FOUR variables a private lane must override for the
+> docker AND legacy URI builders — `TORTOISE_DB_URI`,
+> `TORTOISE_TEST_DOCKER_PORT`, `TORTOISE_TEST_DOCKER_PASSWORD=''` and
+> `TORTOISE_TEST_LEGACY_PORT` — so the `tests/_live_utils.py` docker AND legacy
+> URI builders are covered, not only the `TORTOISE_DB_URI` path. The legacy port
+> was the one still missing: `_live_utils.legacy_port()` falls back to the
+> historical literal `16379`, which nothing serves on a private lane, so a site that
+> resolves the legacy port without first consulting `TORTOISE_DB_URI` hit it — where
+> it dials directly it failed `Error 111 connecting to localhost:16379`, and where a
+> module probe gates it (`FALKORDB_AVAILABLE`) it SKIPPED instead, which is the same
+> defect in its silent form (measured 2026-11-12 on main at `e4703a286a`: the 5 direct
+> dials in `tests/test_directional_impl.py` failed alone and inside shard `(d)`, and
+> `5 passed` once the legacy port named the lane's container). The residual gap is
+> narrower: a site that
 > spells the shared URI as a **literal string**
 > (`docker://:falkordb@localhost:6379/…`) cannot be reached by a seam, so it still
 > addresses the shared instance until it is converted (#5084's remaining work).

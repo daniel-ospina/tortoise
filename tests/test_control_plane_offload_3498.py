@@ -390,6 +390,249 @@ def test_a_callable_raised_timeout_error_is_a_domain_error():
     )
 
 
+def _stall_the_loop_past(coro_factory, worker, started, bound, cap_s=5.0):
+    """Run ``coro_factory()``, stalling the loop so its bound fires LAST.
+
+    The bound's expiry and the submission's failure are two events on two
+    threads, so the ordering has to be CONSTRUCTED — on both sides:
+
+    1. the WORKER must have SETTLED before the loop runs the bound's timer.
+       ``started`` proves the submission was dequeued (hence that the pool's
+       in-flight register holds it: ``submit`` registers BEFORE it enqueues) and
+       ``worker.drain`` is the pool's own COMPLETION barrier, so "the worker has
+       finished" is a FACT rather than a hope that a fixed ``time.sleep`` was
+       long enough for it (#11962 review: a pool thread that had not run yet left
+       ``future_exc`` ``None`` and failed the test on the wrong arm);
+    2. the loop must ALSO stay blocked until the BOUND has expired. Without
+       that, the wait completes the ordinary way, the ``except TimeoutError`` arm
+       is never entered, and the test would pass on the PRE-FIX tree — vacuous.
+       So the stall is derived from ``bound``, never guessed.
+
+    The shape reproduced is the CI-observed one — a loaded runner deschedules
+    the loop past a short bound (measured on ``/v1/search`` in `test (h)` at PR
+    #11936) — without needing load.
+    """
+    async def _run():
+        began = time.monotonic()
+        task = asyncio.ensure_future(coro_factory())
+        await asyncio.sleep(0)      # the task SUBMITS, then enters its bound
+        assert started.wait(cap_s), (
+            f"the worker never dequeued the submission inside {cap_s}s — the "
+            "ordering this test needs cannot be constructed")
+        assert worker.drain(max(0.05, cap_s - (time.monotonic() - began))), (
+            f"the worker had not settled inside {cap_s}s — the pool is wedged")
+        remaining = (bound + 0.15) - (time.monotonic() - began)
+        if remaining > 0:
+            time.sleep(remaining)   # the loop cannot run the timer until this returns
+        return await task
+
+    return _run()
+
+
+def test_a_domain_failure_that_lands_with_the_bound_is_not_a_bound_miss(monkeypatch):
+    """The future is the third witness; a bare ``raise`` loses it (#11961).
+
+    ``run_control_plane_call`` disambiguates THREE ``TimeoutError``s by
+    inspecting the future, but a bare ``raise`` in the ``except TimeoutError``
+    arm re-raises the BOUND's expiry — the one this coroutine MINTS — so a
+    domain failure that merely landed as the bound fired is reported as the
+    seam's own bare ``TimeoutError`` (empty message, ``context=CancelledError``
+    — measured on the pre-fix bodies), and never as the
+    ``ControlPlaneOffloadError`` ("... exceeded its 0.05s bound") its bound-miss
+    path builds. The class is identical, so nothing upstream can
+    tell the two apart: ``_cp_offload`` maps only ``ControlPlaneOffloadError``,
+    so the mislabelled error escapes as a bare unlabelled 500 and skips every
+    arm the route declares (the measured case: ``/v1/search``'s
+    ``_ProjectionOpenError`` reached the client as an unhandled
+    ``TimeoutError``, reddening `test (h)` on PR #11936).
+
+    RED on the code this PR started from, for the right reason: there the
+    domain ``ValueError`` is replaced by the bound's empty-message
+    ``TimeoutError``.
+
+    Which tree reds HOW was measured rather than assumed, because it differs per
+    commit of this PR (#11962 review): on the pre-#11961 base it is the class
+    substitution above; on the PR's own ``ebfcdd57`` — which already propagated
+    the future's error, but ``from None`` — the propagated class IS the
+    ``ValueError`` and what reds is the ``__cause__`` assertion below
+    (``__cause__ is None``); on ``e1a642ee``'s plain ``raise`` this row is green,
+    and the gap that arm leaves — the bound still DISPLAYED as the failure's
+    context — is pinned by the sibling ``re_armed_bound`` row's
+    ``__suppress_context__`` assertion.
+
+    Two things the pre-fix arm gets wrong beyond the propagated class are pinned
+    here. (1) The domain error's OWN ``__cause__``: ``from None`` would wipe it,
+    and suppressing the BOUND's context is not licence to discard the domain
+    error's provenance. (2) The bookkeeping: the ``raise`` fires BEFORE
+    ``outcome = "bound_miss_running"``, so no saturation event was ever recorded
+    for this pool — and this assertion is what keeps it that way, because moving
+    the ``raise`` below that assignment would re-introduce a spurious
+    ``bound_miss_running`` while the class assertion stayed green.
+    """
+    bound = 0.05
+    worker = monitoring._SingleSlotWorker("test-11961-domain-race", workers=1)
+    monkeypatch.setattr(monitoring, "control_plane_worker",
+                        lambda pool="auth": worker)
+    started = threading.Event()
+
+    def _boom():
+        started.set()
+        try:
+            raise KeyError("db-down")
+        except KeyError as inner:
+            raise ValueError("store exploded") from inner
+
+    with pytest.raises(ValueError, match="store exploded") as caught:
+        asyncio.run(_stall_the_loop_past(
+            lambda: monitoring.run_control_plane_call(
+                _boom, op="domain-race", timeout=bound),
+            worker, started, bound))
+
+    assert isinstance(caught.value.__cause__, KeyError), (
+        "the domain exception's own chain was discarded — its __cause__ is "
+        f"{caught.value.__cause__!r}, not the KeyError it was raised from")
+    last = monitoring.control_plane_offload_records()[-1]
+    assert last[0] == "domain-race" and last[2] == "domain_error", (
+        f"the record is {last!r} — a domain failure that landed with the bound "
+        "stays domain_error; it is NOT a saturation event")
+
+
+def test_a_domain_failure_that_lands_with_a_re_armed_bound_is_not_a_bound_miss():
+    """The same witness rule on the re-await seam (#11961).
+
+    ``reawait_control_plane_call`` carries the same discrimination — and the
+    same bare ``raise`` — so a re-awaited read whose callable failed on its own
+    while the re-armed bound expired reported the BOUND's ``TimeoutError`` and
+    discarded the callable's own failure.
+
+    Pre-fix the recorded ``outcome`` stays ``domain_error``: the bare ``raise``
+    returns before ``outcome = "bound_miss_running"`` is assigned, so the
+    saturation child was never incremented for this ordering. That is why this
+    row pins the propagated EXCEPTION and not a ``bound_miss_running`` label —
+    that label is absent on BOTH trees, so asserting it would prove nothing.
+
+    What the label assertion below DOES pin is the ORDER of those two facts:
+    ``domain_error`` is only the outcome while the ``raise`` precedes
+    ``outcome = "bound_miss_running"``. Moving the ``raise`` under that
+    assignment would record a saturation event for a pool that was never
+    saturated — the documented hazard — and the class assertion would stay
+    green. This is the one line that reds if that ever happens.
+    """
+    bound = 0.05
+    worker = monitoring._SingleSlotWorker("test-11961-reawait-race", workers=1)
+    started = threading.Event()
+
+    def _boom():
+        started.set()
+        raise ValueError("store exploded")
+
+    future = worker.submit(_boom)
+
+    with pytest.raises(ValueError, match="store exploded") as caught:
+        asyncio.run(_stall_the_loop_past(
+            lambda: monitoring.reawait_control_plane_call(
+                future, op="reawait-domain-race", timeout=bound),
+            worker, started, bound))
+
+    # The domain error here has NO cause, so this is the case where a plain
+    # ``raise`` re-installs the bound as ``__context__`` with suppression OFF:
+    # every traceback would read ``TimeoutError`` → "During handling of the
+    # above exception…" → the real failure. RED under a plain ``raise``
+    # (measured). ``from None`` also suppresses it, but reds the sibling row on
+    # ``__cause__``; ``from future_exc.__cause__`` is the form that satisfies
+    # both — measured: this row is green on the ``from None`` tree and on the
+    # fixed one, red only where the context is left displayed.
+    assert caught.value.__suppress_context__ is True, (
+        "the bound's expiry is still DISPLAYED as this failure's context — the "
+        "artifact #11961 exists to delete: "
+        f"{caught.value.__context__!r}")
+
+    last = monitoring.control_plane_offload_records()[-1]
+    assert last[0] == "reawait-domain-race" and last[2] == "domain_error", (
+        f"the record is {last!r} — a domain failure that landed with the "
+        "re-armed bound stays domain_error, never a bound miss")
+
+
+def test_a_causeless_domain_failure_does_not_carry_the_bound_as_context(monkeypatch):
+    """#11962 review — ``from <the error's own cause>``, at the first seam.
+
+    ``raise future_exc`` keeps the future's error and its ``__cause__``, but
+    CPython re-installs the exception being HANDLED as the new one's
+    ``__context__`` unconditionally, with ``__suppress_context__`` False. For the
+    commoner shape — a domain failure with NO cause of its own — every traceback
+    and every logged 500 then still reads ``TimeoutError`` → "During handling of
+    the above exception…" → the real failure: a claim that OUR wait expired,
+    about an error that had nothing to do with it. That is the artifact #11961
+    exists to delete, so the remedy has to delete it too.
+
+    ``from None`` suppresses the context but wipes a ``__cause__`` the domain
+    error owns — pinned by the sibling row above, which reds under ``from
+    None``. This row reds under a plain ``raise`` (measured:
+    ``__suppress_context__`` is False there). ``from future_exc.__cause__`` is
+    the one form that satisfies both, which is why the two rows exist separately.
+    """
+    bound = 0.05
+    worker = monitoring._SingleSlotWorker("test-11962-context", workers=1)
+    monkeypatch.setattr(monitoring, "control_plane_worker",
+                        lambda pool="auth": worker)
+    started = threading.Event()
+
+    def _boom():
+        started.set()
+        raise ValueError("store exploded")
+
+    with pytest.raises(ValueError, match="store exploded") as caught:
+        asyncio.run(_stall_the_loop_past(
+            lambda: monitoring.run_control_plane_call(
+                _boom, op="domain-context", timeout=bound),
+            worker, started, bound))
+
+    assert caught.value.__cause__ is None, caught.value.__cause__
+    assert caught.value.__suppress_context__ is True, (
+        "the bound's expiry is still DISPLAYED as this failure's context, so a "
+        "causeless domain error keeps the 'during handling the above' note the "
+        f"whole fix removes: __context__={caught.value.__context__!r}")
+
+
+def test_a_caused_domain_failure_keeps_its_own_cause_at_the_re_armed_bound():
+    """#11962 review — the OTHER half of the remedy, at the second seam.
+
+    The sibling row above pins the half a plain ``raise`` gets wrong: the BOUND
+    must not be displayed as the domain error's context. This one pins the half
+    ``from None`` gets wrong: the domain error's OWN ``__cause__`` must survive,
+    because ``from None`` suppresses the bound by wiping that cause
+    (``__cause__ is None``). Both halves are why the remedy is
+    ``from future_exc.__cause__`` rather than either of those forms.
+
+    RED under ``from None`` at this site (measured): the propagated class is
+    still the ``ValueError``, and this assertion is the only thing that reds —
+    which is exactly why it is a separate row from the sibling's.
+    """
+    bound = 0.05
+    worker = monitoring._SingleSlotWorker("test-11962-reawait-cause", workers=1)
+    started = threading.Event()
+
+    def _boom():
+        started.set()
+        try:
+            raise KeyError("db-down")
+        except KeyError as inner:
+            raise ValueError("store exploded") from inner
+
+    future = worker.submit(_boom)
+
+    with pytest.raises(ValueError, match="store exploded") as caught:
+        asyncio.run(_stall_the_loop_past(
+            lambda: monitoring.reawait_control_plane_call(
+                future, op="reawait-domain-cause", timeout=bound),
+            worker, started, bound))
+
+    assert isinstance(caught.value.__cause__, KeyError), (
+        "the domain error's own chain was discarded at the re-await seam — its "
+        f"__cause__ is {caught.value.__cause__!r}, not the KeyError it was "
+        "raised from")
+
+
 def test_a_cancelled_await_is_recorded_as_cancelled():
     """#5840: cancellation is a terminal state and is recorded as its own.
 

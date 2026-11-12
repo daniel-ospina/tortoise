@@ -36,10 +36,34 @@ authenticate, because it starts without ``requirepass`` while the seam's default
 credential is ``falkordb`` (measured: `AuthenticationError: AUTH <password>
 called without any password configured`, which a module's `except Exception`
 turned into "Live FalkorDB (Docker) not available" → 14 skipped, rc=0).
-``uri`` therefore exports BOTH seam variables as well:
+``uri`` therefore exports the port/password seams as well:
 ``TORTOISE_TEST_DOCKER_PORT`` (the container's assigned port) and
 ``TORTOISE_TEST_DOCKER_PASSWORD=''`` (this container has no password configured,
-and `tests/_live_utils.docker_password` reads that seam). Still out of reach:
+and `tests/_live_utils.docker_password` reads that seam).
+
+It ALSO exports ``TORTOISE_TEST_LEGACY_PORT`` — the same class of gap on the
+PASSWORDLESS axis. ``_live_utils.legacy_port()`` resolves
+``TORTOISE_TEST_LEGACY_PORT`` → ``FALKORDB_PORT`` → the literal **16379**, the
+legacy family's HISTORICAL port. That literal is not what CI uses: since #6673
+the provision action starts the passwordless service on an EPHEMERAL port and
+exports ``TORTOISE_TEST_LEGACY_PORT`` for it (two CI jobs pass ``legacy:
+"false"`` and start no legacy service at all), so 16379 appears only as the
+fallback. A private lane publishes ONE passwordless container on an ephemeral
+port and used to name only the URI and the two docker-axis variables, so a site
+that resolves the legacy port WITHOUT first consulting ``TORTOISE_DB_URI`` hit
+the literal: where it dials directly it failed ``Error 111``, and where a module
+probe gates it (``FALKORDB_AVAILABLE``) it SKIPPED instead — the same defect in
+its silent form, and the arm this export also recovers. Measured on ``main`` at
+``e4703a286a`` (2026-11-12):
+``tests/test_directional_impl.py`` — ``5 failed``, every failure
+``ConnectionError: Error 111 connecting to localhost:16379``, and the same 5 in
+the same order alone and inside the shard; ``5 passed`` with the legacy
+port pointed at this container. Counts, not clock readings: the durations live in
+the lane's recorded ``WORKTREE-REPORT.md`` logs, where they belong. Since this
+container has no password, it IS a
+legacy service, so the extra export names the target rather than changing it.
+
+Still out of reach:
 sites that spell the shared URI LITERALLY (`docker://:falkordb@localhost:6379/…`)
 instead of going through ``_live_utils``; the seam cannot reach a hardcoded
 string, so those stay on the shared instance until they are converted.
@@ -242,7 +266,7 @@ USAGE
     uv run python tools/test_lane.py run -- tests/ -q   # start + export + run
     uv run python tools/test_lane.py down               # remove it
 
-``run`` is the spelling to prefer: it is the one place the three seam variables
+``run`` is the spelling to prefer: it is the one place the four seam variables
 (#5084) are APPLIED rather than printed, so no caller has to remember them, and
 bare ``run`` targets ``tests/`` rather than the rootdir. The two-step form below
 is for a shell that wants the variables itself:
@@ -3529,7 +3553,7 @@ def stop() -> str:
 
 
 def lane_seam_env(port: int, graph: str) -> dict[str, str]:
-    """The THREE seam variables that actually make this lane the target.
+    """The FOUR seam variables that actually make this lane the target.
 
     ONE definition, two consumers: ``cmd_up`` PRINTS these (so a shell can
     ``eval`` them) and ``cmd_run`` EXPORTS them to a pytest child. They must
@@ -3544,11 +3568,30 @@ def lane_seam_env(port: int, graph: str) -> dict[str, str]:
     ``''`` is a MEANINGFUL password there ("no ``requirepass`` configured"),
     distinct from ``None`` (no userinfo at all), which is why the value is a
     literal empty string and not an omission.
+
+    ``TORTOISE_TEST_LEGACY_PORT`` is the FOURTH axis, and it is the same seam
+    as the other three (#5084 remainder). ``_live_utils.legacy_port()`` falls
+    back to ``FALKORDB_PORT`` and then to the literal **16379** — the legacy
+    family's HISTORICAL port, and NOT where CI's passwordless service listens
+    (since #6673 the provision action assigns it an ephemeral port and exports
+    ``TORTOISE_TEST_LEGACY_PORT`` for it) — so without this export a test
+    that builds its target through ``legacy_uri()`` dials a port nothing serves
+    on a lane whose container is on an ephemeral port. Measured on ``main`` at
+    ``e4703a286a``
+    (2026-11-12): ``tests/test_directional_impl.py`` read
+    ``5 failed`` — every one ``redis.exceptions.ConnectionError:
+    Error 111 connecting to localhost:16379`` — and ``5 passed`` once
+    the legacy port pointed at the SAME private container. The identical 5
+    failed both alone and inside the shard, so it was never ordering: it is a
+    target this tool did not name. This container is passwordless, which is
+    exactly what the legacy family means, so pointing the legacy seam at it is
+    the correct target rather than a widening of the tool's scope.
     """
     return {
         "TORTOISE_DB_URI": uri_for(port, graph),
         "TORTOISE_TEST_DOCKER_PORT": str(port),
         "TORTOISE_TEST_DOCKER_PASSWORD": "",
+        "TORTOISE_TEST_LEGACY_PORT": str(port),
     }
 
 
@@ -3634,7 +3677,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     `E`s and no verdict (the population is not a fixed number: `tests/` collects
     41,842 tests at #10399's head, and a run that is killed mid-flight shows
     only as many as it reached — the batch's own log held 405 before its process
-    died). Hand-``eval``-ing the three exports works but is a step every caller
+    died). Hand-``eval``-ing the four exports works but is a step every caller
     can forget (and one did).
 
     This runs the child with ``sys.executable -m pytest`` — the interpreter
@@ -3769,13 +3812,27 @@ def cmd_run(args: argparse.Namespace) -> int:
             started = True
             # …and a container this run did not CREATE is never its to remove.
             created = _LAST_START_CREATED
-            env = {**os.environ, **lane_seam_env(port, args.graph)}
+            # ONE call, both consumers: `uri_for()` emits a DOCKER_HOST warning
+            # as a side effect, so rendering from a SECOND call printed it twice
+            # (review P2).
+            seam = lane_seam_env(port, args.graph)
+            env = {**os.environ, **seam}
             argv = [sys.executable, "-m", "pytest", *extra]
+            # The target line is RENDERED from the seam dict, never re-typed:
+            # a hand-written list is what left this line naming three of the
+            # four variables after the legacy axis was added (review P2), and
+            # the line's whole purpose is being the only record a killed run
+            # leaves behind — so it is PINNED by
+            # `test_run_names_EVERY_seam_variable_on_the_stderr_target_line`.
+            # `''` is the password's real value, so `repr` keeps it visible
+            # instead of rendering an empty span.
+            target = " ".join(
+                f"{key}={value if value else repr(value)}"
+                for key, value in seam.items()
+            )
             print(
-                f"test-lane: {name} on 127.0.0.1:{port} — "
-                f"TORTOISE_DB_URI={env['TORTOISE_DB_URI']} "
-                f"TORTOISE_TEST_DOCKER_PORT={env['TORTOISE_TEST_DOCKER_PORT']} "
-                f"TORTOISE_TEST_DOCKER_PASSWORD='' — invoking: {' '.join(argv)}",
+                f"test-lane: {name} on 127.0.0.1:{port} — {target} "
+                f"— invoking: {' '.join(argv)}",
                 file=sys.stderr,
             )
             sys.stderr.flush()
