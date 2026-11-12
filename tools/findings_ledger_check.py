@@ -1177,7 +1177,9 @@ def _raw_text_end(cell: str, start: int, name: str) -> int:
 
 
 #: What markdown-it requires after a link's label: a DESTINATION (angle-bracketed with no `<` or
-#: `>` inside, or a bare one with no `<`, `(` or space) and an optional title, then `)`. ⛔ The
+#: `>` inside, or a bare one that does not START with `<` and holds no `(` or space — a LATER `<`
+#: is legal and markdown-it percent-encodes it into the href, so `[a](b</template>)` IS a link)
+#: and an optional title, then `)`. ⛔ The
 #: distinction matters inside a raw-text body, where the destination's characters decide whether a
 #: `</script` ever reaches the tokenizer: `[b](</script>)` IS a link (markdown-it emits
 #: `<a href="/script">`, so nothing closes the element) while `[a](</script>VISIBLE)` is NOT (the
@@ -1185,7 +1187,7 @@ def _raw_text_end(cell: str, start: int, name: str) -> int:
 #: browser DOES close — both measured, eleventh review of this change).
 _RECOGNISED_LINK_TAIL = re.compile(
     r"^\("
-    r"\s*(?:<[^<>\n]*>|[^()<\s][^()<]*?)"
+    r"\s*(?:<[^<>\n]*>|[^()<\s][^()\s]*?)"
     r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?"
     r"\s*\)$"
 )

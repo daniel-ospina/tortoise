@@ -544,6 +544,8 @@ def test_a_blank_prose_cell_is_rejected(tmp_path, monkeypatch, cell, column, abs
         "<template><script></template></script>VISIBLE",  # a nested RAW-TEXT body swallows the close
         "<template><style></template></style>VISIBLE",
         "<template><textarea></template></textarea>VISIBLE",  # RCDATA body, likewise
+        "<template>[a](b</template>)VISIBLE",  # a BARE destination holds a literal `<` after one char
+        "<script>[a](b</script>)VISIBLE",
         "<script>[b](</script>)VISIBLE</script>",  # a RECOGNISED link re-emits its destination
         "<template><!-- </template>VISIBLE -->",  # PARSED but hidden: a comment's close is not one
         "[<br>](https://x)",  # a LINK LABEL renders; the destination does not
@@ -877,6 +879,8 @@ def test_a_correction_that_quotes_its_claim_and_adds_is_accepted():
         "<template>[a</template>b](u)VISIBLE",  # a link's LABEL is markup: the close tag is real
         "<textarea>VISIBLE</textarea>",  # RCDATA text is SHOWN
         "<textarea><!-- note </textarea>",  # …and so is a comment's text inside it
+        "<textarea><br></textarea>",  # the body is appended LITERALLY: `<br>` is the text shown
+        "<xmp><br></xmp>",
         "x Ложно",  # a placeholder beside a non-Latin word is not placeholders alone
     ],
 )
