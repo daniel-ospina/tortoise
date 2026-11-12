@@ -1271,7 +1271,7 @@ def _block_bodies(changelog: str) -> list[str]:
 
     ``^`` is load-bearing: a block's prose can QUOTE an older header
     (``> > **Changelog v3.7 …`` inside the v3.2 entry), and an unanchored
-    pattern counts that quote as a release — measured at this head: 40 pieces
+    pattern counts that quote as a release — measured at `7e6baffc5d`: 40 pieces
     for 39 blocks, one of them a fragment starting at the quoted header.
     """
     starts = [m.start() for m in _BLOCK_VERSION_RE.finditer(changelog)]
@@ -1332,8 +1332,11 @@ def test_a_4_3_bold_clause_change_must_be_quoted_verbatim_by_some_changelog_bloc
        exactly the span from `OBJECT_CLAUSE_START` to `OBJECT_CLAUSE_END` — the
        §4.3 `status` row's **bold** lifecycle sentence. The rest of that cell
        (including its opening sentence, which the v3.34 block itself records as
-       already WRONG about the code and parks on #9974) and **every other §4.3
-       row** are invisible to the comparison, so a lane can rewrite them with
+       already WRONG about the code — parked on #9974, whose replacement wording
+       is **still unlanded**: #9974 is CLOSED `COMPLETED` as of 2026-11-03, nine
+       days before v3.34 landed, and its own last comment records that indicator 2
+       remains unmet, so the pointer is NOT a delivered fix) and **every other
+       §4.3 row** are invisible to the comparison, so a lane can rewrite them with
        both pins green. `docs/ONTOLOGY.md:39`'s CRITICAL RULE would still want
        approval of those changes; this pin does not supply that check, and the
        earlier SCOPE paragraph claimed it did.
@@ -1412,8 +1415,8 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     ⛔ SCOPED TO A RELEASE THAT RECORDS §4.3, because the unconditional form was
     measured to false-block. Demanding a comment id in EVERY newest block reds
     the next release that touches §4.5 (verified with a synthetic `v3.35`), and
-    the file's practice does not support the demand: measured at this head with
-    this module's own `_block_bodies` and `_CITATION_RE`, **4 of 39** blocks cite
+    the file's practice does not support the demand: measured at `7e6baffc5d`
+    with this module's own `_block_bodies` and `_CITATION_RE`, **4 of 39** blocks cite
     a comment id — and only 3 of those cite it as their OWN approval: the v3.33
     block that landed `D2 — A` for this very question cites
     `#issuecomment-5619843002`, but on #2725 and in a passage withdrawing a
