@@ -264,7 +264,15 @@ def test_the_definite_description_class_is_not_held(monkeypatch, surface):
 def test_an_identifier_subject_is_left_to_the_value_gate(monkeypatch):
     """The identifier-only class has ONE owner (``value_gate``), and it is not
     this cue — ``referentiality.judge`` skips it by design so one phrase never
-    has two owners deciding two outcomes."""
+    has two owners deciding two outcomes.
+
+    ⛔ The flag is set for the HOLD's benefit, not ``judge``'s: ``judge`` does
+    not consult ``enabled()`` (measured — unset, ``judge("it")`` still returns
+    a rule), so what arms the cue on the write path is the ``enabled()`` check at
+    ``_referentiality_hold``'s call site. ``_referentiality_hold``'s docstring
+    records that split; this comment exists so the setenv here does not read as
+    "``judge`` needs the flag".
+    """
     monkeypatch.setenv(FLAG, "1")
     assert referentiality.judge("#4118") is None
     assert referentiality.judge("config/ci-surfaces.yml") is None
