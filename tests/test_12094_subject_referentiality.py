@@ -465,9 +465,11 @@ def test_the_held_subject_census_reaches_the_only_production_caller(capsys):
 def test_an_unarmed_run_says_nothing_about_holds(capsys):
     """The new line must not appear on a run that held nothing.
 
-    ``#5087`` plan R1: an unarmed run is byte-identical. A warning printed
-    unconditionally would be a new line on every default ingest, so the
-    presence of the message is pinned in BOTH directions.
+    ``#5087`` plan R1: an unarmed run PRINTS nothing about holds. ⛔ Not
+    "byte-identical" — the return dict carries the census keys unconditionally
+    (see `extractor.py`'s module note and section 4 above); what this pins is
+    that the ingest gains no new stdout LINE on every default run, so the
+    presence of the message is tested in BOTH directions.
     """
     from tortoise import ingest as ingest_mod
 
@@ -482,3 +484,49 @@ def test_an_unarmed_run_says_nothing_about_holds(capsys):
     out = capsys.readouterr().out
     assert "held" not in out.lower(), (
         f"nothing was held, so nothing may be reported as held; stdout was {out!r}")
+
+
+# ── 10. the recorded offset is the PHRASE's position, not a substring ───────
+
+def test_the_phrase_offset_is_a_word_boundary_match(monkeypatch):
+    """``phrase_offset`` must locate the SURFACE, not a substring inside a word.
+
+    ``body.find("it")`` is wrong for precisely the class this gate holds: the
+    pronoun ``it`` occurs INSIDE ``with``/``within``/``itself``, so the recorded
+    offset named a different word than the surface — measured at the #12102
+    review (``body[34:36] == 'it'`` inside "with"). A phrase that is genuinely
+    absent records ``None``, which is the honest answer; a nearby substring is
+    not.
+    """
+    monkeypatch.setenv(FLAG, "1")
+    api, _proj, _log = _proj_api()
+    payload = {"subjects": [{"name": "it", "subjectKind": "other"}],
+               "objects": [], "aboutEntities": []}
+
+    # (a) "it" appears ONLY inside other words → no offset at all.
+    no_standalone = (
+        "## Product Strategy\n"
+        "The team met with the vendor within itself, without a decision.\n"
+    )
+    monkeypatch.setattr(extractor_mod, "_SemanticStage", _FixedStage)
+    monkeypatch.setattr(_FixedStage, "payload", payload, raising=False)
+    ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
+    held = ext.extract_entities(no_standalone, "strategy.md", api)["held_subjects"]
+
+    assert len(held) == 1 and held[0]["surface"] == "it"
+    assert held[0]["phrase_offset"] is None, (
+        "a substring inside 'with'/'within' is not the phrase's position "
+        f"(got {held[0]['phrase_offset']})")
+
+    # (b) a STANDALONE occurrence is located exactly.
+    api2, _proj2, _log2 = _proj_api()
+    standalone = (
+        "## Product Strategy\n"
+        "The team met with the vendor and it was decided.\n"
+    )
+    body = standalone.split("\n", 1)[1]
+    expected = body.index(" it ") + 1
+    held2 = ext.extract_entities(standalone, "strategy.md", api2)["held_subjects"]
+    assert held2[0]["phrase_offset"] == expected, (
+        f"expected the standalone occurrence at {expected}, got "
+        f"{held2[0]['phrase_offset']}")
