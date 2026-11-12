@@ -1049,6 +1049,17 @@ def test_a_product_module_that_imports_the_archive_is_reported(tree: Path) -> No
         for problem in arch.package_violations(tree)
     )
 
+    # …the KEYWORD form is readable too — it is the documented spelling of `import_module`.
+    (tree / "tortoise" / "live.py").write_text(
+        "import importlib\n"
+        "_m = importlib.import_module(name=\"archive.modules.b1.tortoise.memory_scope\")\n",
+        encoding="utf-8",
+    )
+    assert any(
+        "imports `archive.modules.b1.tortoise.memory_scope`" in problem
+        for problem in arch.package_violations(tree)
+    ), "import_module(name=...) is a static literal, not a runtime-built name"
+
     # …but a module that merely STARTS with the letters (a legitimate `archive_utils` package)
     # is not the archive: the separator test is what keeps this arm from a false red.
     (tree / "tortoise" / "live.py").write_text(

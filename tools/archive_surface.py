@@ -306,7 +306,13 @@ def _imports_of_archive(root: Path) -> list[tuple[str, str]]:
                 # may import legitimately — flagging it reds a required check on a PR that
                 # touched nothing archived, and the message would assert a claim the gate cannot
                 # support (measured, round 11).
-                text = _literal_text(node.args[0]) if node.args else ""
+                # The keyword form is the DOCUMENTED spelling of `import_module(name=…)`, so
+                # reading only positional arguments left the idiomatic form unseen while the
+                # comment below claimed the readable class was covered (measured, round 12).
+                arg = node.args[0] if node.args else next(
+                    (kw.value for kw in node.keywords if kw.arg == "name"), None
+                )
+                text = _literal_text(arg) if arg is not None else ""
                 if text == "archive" or text.startswith("archive."):
                     out.append((rel, text))
     return out
