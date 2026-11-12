@@ -50,7 +50,9 @@ name: ci-queue-health
 # below the PR share) is an `::warning` at exit 0: the state is real, and the
 # reading reaches no trim. A trim-safe offender CAN be present when the queue is
 # merely PR-dominated, so its absence is NOT the bound.
-# `PR-BACKLOGGED` (PR CI IS executing, and a queued PR run has
+# `PR-BACKLOGGED` (PR CI is COUNTED as executing — `pr_running > 0`, and that count
+# may include runs whose jobs were never read, so it is not a proof — and a queued
+# PR run has
 # waited past the wait budget — the shape that used to print `CI: OK`, measured
 # 2026-10-28 on #10237) is an `::warning` at exit 0 for the same reason, and the
 # bound there is the CLAUSE ORDER, not the trim scope: the governor's block runs
@@ -71,7 +73,11 @@ name: ci-queue-health
 # opposite levers (round 13), and the payload reports which applies:
 # `pr_running_unmeasured_unprobed` is cleared by RAISING the budget, and
 # `pr_running_unmeasured_unread` by RETRYING the reading (a bigger budget only
-# probes more runs that fail the same way). NOT --max-pages either way.
+# probes more runs that fail the same way). NOT --max-pages for the CENSUS
+# dimension — ⛔ but NOT unconditionally (round 14): `truncated` is an INDEPENDENT
+# dimension and can be set in the SAME reading, in which case the cut feed still
+# needs --max-pages and the annotation must not forbid it. The arm therefore reads
+# `truncated` from the payload rather than hardcoding the refutation.
 # ⛔ And NOT "repair the frozen runs": a run whose every job is `completed` is the
 # PROOF that excludes it from `pr_running`, so it can never make the census
 # unmeasured, and neither /cancel nor /force-cancel accepts such a repair (409).
@@ -360,7 +366,14 @@ jobs:
               else
                 census_lever="the reading did not record which abstention it was (an older caller), so neither lever can be named from this payload"
               fi
-              echo "::warning::${state} — the RUNNING CENSUS was not witnessed: every run counted as executing was unmeasured, so the count is the pre-#12037 status-string census and PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here. ${census_lever}. NOT --max-pages; see the step summary for the dimension that was not measured."
+              # ⛔ AND THE REFUTATION IS NOT UNCONDITIONAL (round 14). `truncated` is an
+              # INDEPENDENT unwitnessed dimension and `classify_queue(…, truncated=True)`
+              # reaches THIS branch: a reading can have an all-unmeasured census AND a cut
+              # feed at once, and then --max-pages is the live lever for the cut leg while
+              # the census needs its own. Emitting the flat "NOT --max-pages" there sent the
+              # operator away from the only lever the cut leg has — the mirror of round 5.
+              pages_tail="$(python3 -c "import json; d=json.load(open('/tmp/ci-queue-health.json')); print('the FEED IS ALSO CUT in this same reading (feed=truncated), so it has a second unwitnessed dimension whose lever is --max-pages — pull both' if d.get('truncated') else 'NOT --max-pages for THIS dimension; see the step summary for the dimension that was not measured')" 2>/dev/null || echo 'NOT --max-pages for THIS dimension; see the step summary for the dimension that was not measured')"
+              echo "::warning::${state} — the RUNNING CENSUS was not witnessed: every run counted as executing was unmeasured, so the count is the pre-#12037 status-string census and PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here. ${census_lever}. ${pages_tail}."
             else
               echo "::warning::${state} — the PR wait was not witnessed (the queued feed was cut at the page cap, or the queued PR runs carry no readable timestamp), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; for a truncated feed raise --max-pages to read further back, and see the step summary for the dimension that was not measured."
             fi

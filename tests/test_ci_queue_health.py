@@ -3317,6 +3317,21 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
         for out in (budget_only, read_only, both):
             assert out.count("::warning::") == 1, out
 
+        # ⛔ AND THE "NOT --max-pages" REFUTATION IS CONDITIONAL (round 14). `truncated` is
+        # an INDEPENDENT unwitnessed dimension and it can be set in the SAME reading, so the
+        # flat refutation dropped the only lever a cut feed has — the mirror of the round-5
+        # defect. A cut feed must be NAMED, a complete one must stay refuted.
+        cut = census({"pr_running_unmeasured_unprobed": 3,
+                      "pr_running_unmeasured_unread": 0,
+                      "truncated": True})
+        assert cut.count("::warning::") == 1, cut
+        assert "NOT --max-pages" not in cut, cut
+        assert "--max-pages" in cut, cut
+        complete = census({"pr_running_unmeasured_unprobed": 3,
+                           "pr_running_unmeasured_unread": 0,
+                           "truncated": False})
+        assert "NOT --max-pages" in complete, complete
+
         # every other cause — flag false, key absent, payload absent, unparseable — selects the
         # WAIT lever and must never mention the census one
         for payload in ({"pr_running_census_unwitnessed": False},

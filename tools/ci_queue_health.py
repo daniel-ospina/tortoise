@@ -2102,7 +2102,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "The REPO-LEVEL CI queue state (#9115) — FLOOD names the workflow that "
             "is starving PR CI; PR-STARVED says PR CI is not running and the "
-            "dominance clause declined; PR-BACKLOGGED says PR CI IS running and the "
+            "dominance clause declined; PR-BACKLOGGED says PR CI is COUNTED as "
+            "running (`pr_running > 0`, which may include runs whose jobs were never "
+            "read — a count, not a proof) and the "
             "backlog behind it is past any measured wait (#10237). Exit: 0 "
             "OK/PR-STARVED/PR-BACKLOGGED, 1 FLOOD, 2 could not measure."
         ),
