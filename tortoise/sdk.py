@@ -5746,11 +5746,10 @@ def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
     refusal the caller never asked for.
     """
     from tortoise.kind_guards import (
-        SKIP_ROLE_HOLDER_NOT_LEGAL_ON_SUBJECT,
-        SKIP_STATUS_NOT_LEGAL_ON_SUBJECT,
         SKIP_TARGET_LABEL_AMBIGUOUS,
         abstain,
         resolve,
+        subject_only_prop_abstention,
     )
     from tortoise.kind_layers import KIND_PROP
     from tortoise.pack_state import _KIND_PROP_SPELLINGS
@@ -5777,33 +5776,18 @@ def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
     # ⛔ A REDIRECT MUST NOT TURN A LEGAL WRITE INTO A REFUSAL (#1934) — the
     # rule `_kind_layer_note` applies three lines below, applied one step
     # earlier because the guard is what moved the write. The Subject door
-    # validates `status` against ONTOLOGY §4.2 and the Object door validates
-    # nothing, so an object→subject redirect with an Object-only status
-    # (`status='active'`) would RAISE where the same write succeeded before the
-    # guard existed. MEASURED before this check: a pack guard redirecting to a
-    # §5 Subject kind raised `ValueError: Invalid status 'active' for a
-    # :Subject` on a write that lands unguarded. `_SUBJECT_STATUS_VALUES` is the
-    # ONE declaration of that lifecycle — never re-spelled here.
+    # validates props the Object door does not, so an object→subject redirect
+    # carrying an Object-only value would RAISE where the same write succeeded
+    # before the guard existed. MEASURED: a pack guard redirecting to a §5
+    # Subject kind raised `ValueError: Invalid status 'active' for a :Subject`,
+    # and the same redirect carrying `roleHolder` raised one prop later. Both
+    # arms live in `kind_guards.subject_only_prop_abstention`, handed
+    # `_SUBJECT_STATUS_VALUES` — the ONE declaration of that lifecycle — so the
+    # guard cannot disagree with this door about what is legal.
     if decision.layer == "subject" and t != "subject":
-        _status = props.get("status", "live")
-        if not (isinstance(_status, str) and _status in _SUBJECT_STATUS_VALUES):
-            return t, abstain(decision,
-                              SKIP_STATUS_NOT_LEGAL_ON_SUBJECT, layer=t)
-        # ⛔ THE SAME RULE, FOR THE OTHER PROP THAT DOOR VALIDATES. `roleHolder`
-        # (and its snake alias) is legal only on a `subjectKind='role'`; the
-        # OBJECT door stores it happily. So an object→subject redirect carrying
-        # `roleHolder` raised `ValueError: roleHolder is only valid on a Subject
-        # of subjectKind='role'` on a write that lands unguarded — measured, one
-        # prop away from the status arm this same block already covers, and the
-        # same forbidden class: a refusal the guard invented (#1934). The arm is
-        # enumerated rather than generalised because these are the two
-        # prop/kind validations the entity doors perform; a third would need its
-        # own abstention, which is why the check lives HERE beside them.
-        if (props.get("roleHolder") is not None
-                or props.get("role_holder") is not None) \
-                and named_kind(decision.kind) != "role":
-            return t, abstain(decision,
-                              SKIP_ROLE_HOLDER_NOT_LEGAL_ON_SUBJECT, layer=t)
+        _illegal = subject_only_prop_abstention(decision, props, t, _SUBJECT_STATUS_VALUES)
+        if _illegal is not None:
+            return t, _illegal
 
     # ⛔ THE OTHER WAY A REDIRECT CAN REFUSE A LEGAL WRITE: IDENTITY.
     # The guard moves the write to the OTHER entity label, and entity identity

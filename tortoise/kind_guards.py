@@ -991,6 +991,50 @@ def abstain(decision: GuardDecision, reason: str, *,
     return _replacement
 
 
+def subject_only_prop_abstention(
+        decision: GuardDecision, props: dict, declared_layer: str,
+        status_values: Any,
+) -> GuardDecision | None:
+    """The props the SUBJECT door validates and the OBJECT door does not.
+
+    Returns the abstention to apply, or ``None`` when every prop in the write is
+    legal on the kind the guard moved it to. ONE reason for both arms: a
+    redirect must never turn a legal write into a refusal (#1934).
+
+    * ``status`` — the Subject lifecycle (ONTOLOGY §4.2). MEASURED before the
+      arm existed: a pack guard redirecting to a §5 Subject kind raised
+      ``ValueError: Invalid status 'active' for a :Subject`` on a write that
+      lands unguarded. The Object door validates nothing, so the redirect — not
+      the caller — would have invented the refusal.
+    * ``roleHolder`` (and its snake alias) — legal only on a
+      ``subjectKind='role'``. MEASURED (round-3 review P2): the same redirect
+      raised ``ValueError: roleHolder is only valid on a Subject of
+      subjectKind='role'``, one prop away from the arm above and in the same
+      forbidden class.
+
+    ⛔ ENUMERATED, NOT GENERALISED. These are the two prop/kind validations the
+    entity doors perform today; a third needs its own arm HERE, beside them,
+    rather than a registry loop that would silently miss it.
+
+    ⛔ ``status_values`` is passed IN rather than imported. This module holds no
+    tortoise import at module scope (the header's rule), and — the reason that
+    matters here — the caller hands over the SAME object its door validates
+    against, so the guard can never form a second opinion about what is legal.
+    """
+    from tortoise.kind_fallbacks import named_kind
+
+    status = props.get("status", "live")
+    if not (isinstance(status, str) and status in status_values):
+        return abstain(decision, SKIP_STATUS_NOT_LEGAL_ON_SUBJECT,
+                       layer=declared_layer)
+    if (props.get("roleHolder") is not None
+            or props.get("role_holder") is not None) \
+            and named_kind(decision.kind) != "role":
+        return abstain(decision, SKIP_ROLE_HOLDER_NOT_LEGAL_ON_SUBJECT,
+                       layer=declared_layer)
+    return None
+
+
 # ── the pack half ─────────────────────────────────────────────────────────
 
 def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
