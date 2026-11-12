@@ -1192,6 +1192,142 @@ def test_a_dated_reading_is_not_the_rows_current_verdict(tmp_path, monkeypatch):
     )
 
 
+def test_a_contradicting_mention_is_read_in_every_spelling(tmp_path, monkeypatch):
+    """FAILS if a contradicting verdict repeat is only seen when written `**(x)**`.
+
+    §8 blesses four spellings — bold, code, italic and bare — and both the extractor
+    and the candidate gate read all of them. The MENTION scan did not: it carried its
+    own `\\*\\*\\(([a-z])\\)\\*\\*`, so a second, contradicting statement of a row's
+    verdict was invisible in three of the four. Measured at this head against the real
+    page, where `(d)` is SUPERSEDED-BY-FIX in §3:
+
+        Note **(d)** is **ADOPTED**.   -> red (caught)
+        Note (d) is **ADOPTED**.       -> `[]`  (the fail-open this test closes)
+        Note `d` is **ADOPTED**.       -> `[]`
+        Note *d* is **ADOPTED**.       -> `[]`
+
+    `**` must not be what decides whether a contradiction is seen, so every MARKED
+    spelling is asserted. ⛔ A bare `d` is deliberately NOT in this list — see
+    `test_a_bare_letter_outside_a_list_run_assigns_no_verdict` for that boundary.
+    """
+    anchor = "**(b)**, **(k)** and **(l)** are **DRIFTED**."
+    for spelling in ("**(d)**", "(d)", "`d`", "*d*"):
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, s=spelling: t.replace(
+                    anchor, f"{anchor} Note {s} is **ADOPTED**.", 1
+                ),
+            )
+            problems = _doc_problems()
+            assert any("assigns a different verdict" in p for p in problems), (
+                f"a contradicting mention spelled {spelling!r} must be read: {problems}"
+            )
+
+
+def test_a_bare_letter_outside_a_list_run_assigns_no_verdict(tmp_path, monkeypatch):
+    """PINS a deliberate boundary: a bare letter in prose is prose, not a verdict.
+
+    This is the OTHER direction of the test above, and it is a decision rather than an
+    accident. `a` and `i` are English words, so reading every bare `[a-l]` token as a
+    verdict claim would let ordinary prose assign one — the false-accusation class this
+    arm must not create either (`… as a rule …` claims nothing about row `a`). A bare
+    letter is therefore a member only inside a list RUN, which is the same rule
+    `_named_letters` applies to §3's letter lists.
+
+    ⚠️ STATED RESIDUAL: a page that wrote its contradicting repeat as `Note d is
+    **ADOPTED**.` — bare, outside any run — would still read CLEAN. The four MARKED
+    spellings are the ones §8 names as letter spellings and the ones this arm now reads.
+    """
+    anchor = "**(b)**, **(k)** and **(l)** are **DRIFTED**."
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace(anchor, f"{anchor} Note d is **ADOPTED**.", 1),
+    )
+    assert not any("assigns a different verdict" in p for p in _doc_problems()), (
+        "a bare letter outside a list run must not be read as a verdict claim"
+    )
+
+
+def test_the_class_first_spelling_is_read_in_every_spelling(tmp_path, monkeypatch):
+    """FAILS if the class-first assignment is only understood when written `**(x)**`.
+
+    The checker's own comment blesses the class-first form —
+    `**SUPERSEDED-BY-FIX**: (c), (d) and (g)` — and quotes it in PLAIN PARENTHESES,
+    which is exactly the spelling the attribution scan could not read. Measured at
+    this head: rewriting the shipped tally as class-first stayed CLEAN with `**(x)**`
+    and RED with `(x)`, `` `x` `` and `*x*`, all seven rows accused of stating no
+    verdict. That is a false accusation on a documented spelling, the class one arm
+    over says this guard must not create.
+    """
+    original = (
+        "**(c)**, **(d)** and **(g)** are **SUPERSEDED-BY-FIX**, **(e)** is\n"
+        "**ADOPTED**, and **(b)**, **(k)** and **(l)** are **DRIFTED**."
+    )
+    #: (spelling template, letters in that spelling) — same assignment, reworded.
+    for template in ("**({})**", "({})", "`{}`", "*{}*"):
+        rewritten = (
+            f"**SUPERSEDED-BY-FIX**: {template.format('c')}, {template.format('d')} "
+            f"and {template.format('g')}, **ADOPTED**: {template.format('e')}, and "
+            f"**DRIFTED**: {template.format('b')}, {template.format('k')} and "
+            f"{template.format('l')}."
+        )
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, r=rewritten: t.replace(original, r, 1),
+            )
+            problems = _doc_problems()
+            assert not any("assigns a different verdict" in p for p in problems), (
+                f"the class-first spelling {template!r} is the same assignment and "
+                f"must not be accused of a swap: {problems}"
+            )
+
+
+def test_the_complement_clause_is_read_in_every_spelling(tmp_path, monkeypatch):
+    """FAILS if the negated complement is only stripped when written `**(x)**`.
+
+    `_still_list_may_spell_its_own_complement` pins the CONSTRUCTION with the bold
+    spelling. The stripping rule carried its own `\\*\\*\\([a-z]\\)\\*\\*`, so the other
+    three documented spellings were not stripped and were then compared as part of the
+    STILL-TRUE list. Measured at this head, on the shipped sentence plus
+    `— <complement> do not.`:
+
+        **(c)**, **(d)**   -> CLEAN
+        `c`, `d`           -> "STILL-TRUE list names ['a','c','d','f','h','i','j']"
+        *c*, *d*           -> same
+        (c), (d)           -> same
+        c, d               -> same
+
+    A group ANCHORED to the clause end is the one place a bare letter is safe, so the
+    bare spelling is asserted here and only here.
+    """
+    anchor = "**(i)** and **(j)** still read as written."
+    for complement in (
+        "**(c)**, **(d)**",
+        "`c`, `d`",
+        "*c*, *d*",
+        "(c), (d)",
+        "c, d",
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, c=complement: t.replace(
+                    anchor, f"**(i)** and **(j)** still read as written — {c} do not.", 1
+                ),
+            )
+            problems = _doc_problems()
+            assert not any("STILL-TRUE list names" in p for p in problems), (
+                f"the complement spelled {complement!r} must be stripped, not counted: "
+                f"{problems}"
+            )
+
+
 def test_a_still_list_may_spell_its_own_complement(tmp_path, monkeypatch):
     """FAILS if the STILL-TRUE list swallows the letters its negation governs.
 

@@ -683,6 +683,52 @@ _NAMED_LETTER_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: The SAME letter spellings as ONE non-capturing alternative, for the two places that
+#: read letters out of a SPAN rather than out of the whole sentence: verdict ATTRIBUTION
+#: (which verdict class a letter sits beside) and the NEGATED COMPLEMENT clause
+#: (`— **(c)**, **(d)** do not`).
+#: ⛔ Both carried their own `\*\*\(([a-z])\)\*\*` — `**(x)**` ONLY — while
+#: `_NAMED_LETTER_RE` and §8 accept four spellings, so `**` was the difference between a
+#: red and a green in the very arm whose job is to refuse a contradiction. Measured at
+#: this head: `Note (d) is **ADOPTED**.` beside a `(d)` row read CLEAN (the fail-open),
+#: the class-first spelling §8 blesses (`**SUPERSEDED-BY-FIX**: (c), (d) and (g)`) was
+#: REFUSED as a swap the page had not made, and the documented `— `c`, `d` do not.`
+#: complement was REFUSED as a wrong STILL-TRUE list. One constant now feeds all three
+#: arms, so the spellings cannot drift apart again.
+_LETTER_ALT_MARKED = (
+    r"\*\*\([a-l]{1,2}\)\*\*"  # **(a)**
+    r"|\*\*[a-l]{1,2}\*\*"  # **a**
+    r"|`\(?[a-l]{1,2}\)?`"  # `a` / `(a)`
+    r"|\*\([a-l]{1,2}\)\*"  # *(a)*
+    r"|\*[a-l]{1,2}\*"  # *a*
+    r"|\([a-l]{1,2}\)"  # (a)
+)
+_LETTER_ITEM_MARKED = "(?:" + _LETTER_ALT_MARKED + ")"
+#: The marked spellings PLUS the bare one. Bare is safe ONLY where a group is ANCHORED to
+#: the clause end (the negated complement), which is why attribution does not use this:
+#: there, a bare letter is prose, and `a`/`i` are English words (#12028's own finding).
+_LETTER_ITEM_ANY = "(?:" + _LETTER_ALT_MARKED + r"|\b[a-l]\b)"
+
+
+def _letters_in_span(span: str) -> list[str]:
+    """The letters named in `span`, in every spelling the extractor accepts.
+
+    Used by verdict ATTRIBUTION, where each span is the prose between two verdict
+    tokens. Marked spellings are read unconditionally (the markup IS the claim); a BARE
+    letter is read only when it is a member of a list RUN, which is the same rule
+    `_named_letters` applies — so `, and **(j)**` assigns nothing to `j` twice while a
+    bare letter in `d, e are **ADOPTED**` is still read.
+    """
+    out: list[str] = []
+
+    def _take(match: re.Match[str]) -> str:
+        out.extend(g.lower() for g in match.groups() if g)
+        return _MEMBER_MASK
+
+    masked = _NAMED_LETTER_RE.sub(_take, span)
+    out.extend(sorted(_bare_list_members(masked)))
+    return out
+
 #: The placeholder that stands in for a member `_NAMED_LETTER_RE` already read, so the
 #: BARE scan below cannot re-read the letter inside `(a)` and so a marked member still
 #: COUNTS as one item of a list run (it is a `\u0000`, not a letter — it contributes no
@@ -1097,15 +1143,11 @@ def check_verdict_tally(text: str) -> list[str]:
         if tok.group(1) in VERDICTS
     ]
     for pos, token in enumerate(tokens):
-        for label in re.findall(
-            r"\*\*\(([a-z])\)\*\*", non_still_sentence[previous : token.start()]
-        ):
+        for label in _letters_in_span(non_still_sentence[previous : token.start()]):
             before[label] = token.group(1)
         previous = token.start()
         stop = tokens[pos + 1].start() if pos + 1 < len(tokens) else len(non_still_sentence)
-        for label in re.findall(
-            r"\*\*\(([a-z])\)\*\*", non_still_sentence[token.end() : stop]
-        ):
+        for label in _letters_in_span(non_still_sentence[token.end() : stop]):
             following.setdefault(label, token.group(1))
 
     # ⛔ TWO LEGAL ORDERINGS, and the arm must accept BOTH without going blind.
@@ -1165,7 +1207,12 @@ def check_verdict_tally(text: str) -> list[str]:
     # `\*\*([^*]+)\*\*` walk pairs the wrong markers and every letter lands in a
     # connector instead of being seen (measured — the first version of this block
     # returned clean because of exactly that).
-    LETTER_TOKEN = re.compile(r"\*\*\(([a-z])\)\*\*")
+    # ⛔ THE MENTION SCAN READS EVERY SPELLING THE EXTRACTOR DOES. This was
+    # `\*\*\(([a-z])\)\*\*` — `**(x)**` ONLY — so a contradicting repeat written
+    # `(d)`, `` `d` `` or `*d*` was invisible and the page read CLEAN: measured at this
+    # head on a `(d)` SUPERSEDED-BY-FIX row, `Note (d) is **ADOPTED**.` returned `[]`
+    # while the `**(d)**` spelling red. §8 blesses all four spellings, so `**` must not
+    # be what decides whether a contradiction is seen. See `_LETTER_ALT_MARKED`.
     VERDICT_TOKEN = re.compile(r"\*\*([A-Z][A-Z-]+)\*\*")
     # The mention scan covers the WHOLE paragraph, not only the sentence that carries
     # the letter list: a contradicting repeat in the closing sentence or in the
@@ -1174,11 +1221,18 @@ def check_verdict_tally(text: str) -> list[str]:
     # **DRIFTED**. Note **(d)** is **ADOPTED**.` returned `[]`). Only labels the table
     # calls non-STILL-TRUE can be misattributed, so the complement sentence
     # contributes no claims and needs no special case.
-    letters = list(LETTER_TOKEN.finditer(paragraph))
+    #: `(letter, start, end)` — one group per alternative, so the letter is flattened
+    #: here rather than read as `group(1)`, which was the bold-only assumption.
+    letters = [
+        (group.lower(), match.start(), match.end())
+        for match in _NAMED_LETTER_RE.finditer(paragraph)
+        for group in match.groups()
+        if group
+    ]
     tokens = [t for t in VERDICT_TOKEN.finditer(paragraph) if t.group(1) in VERDICTS]
     mentions: dict[str, set[str]] = {}
     for token in tokens:
-        before = [lt for lt in letters if lt.end() <= token.start()]
+        before = [lt for lt in letters if lt[2] <= token.start()]
         if before:
             nearest = before[-1]
             # A DATED reading is not a statement of the row's current verdict, and this
@@ -1196,17 +1250,17 @@ def check_verdict_tally(text: str) -> list[str]:
                 paragraph[token.end() :],
             ) or re.search(
                 r"(?i:as of|on)\s+(?:the\s+)?\d{4}-\d{2}-\d{2}\s*[,;—–-]?\s*$",
-                paragraph[: nearest.start()],
+                paragraph[: nearest[1]],
             )
             if not dated and COPULA_OR_ADVERB.fullmatch(
-                paragraph[nearest.end() : token.start()]
+                paragraph[nearest[2] : token.start()]
             ):
-                mentions.setdefault(nearest.group(1), set()).add(token.group(1))
-        after = [lt for lt in letters if lt.start() >= token.end()]
+                mentions.setdefault(nearest[0], set()).add(token.group(1))
+        after = [lt for lt in letters if lt[1] >= token.end()]
         if after:
             nearest = after[0]
-            if COLON_ONLY.fullmatch(paragraph[token.end() : nearest.start()]):
-                mentions.setdefault(nearest.group(1), set()).add(token.group(1))
+            if COLON_ONLY.fullmatch(paragraph[token.end() : nearest[1]]):
+                mentions.setdefault(nearest[0], set()).add(token.group(1))
     # The verdict the adopted map assigns is one more mention, so the agreement test
     # is never weaker than the arm was before this block.
     for label in non_still:
@@ -1242,7 +1296,9 @@ def check_verdict_tally(text: str) -> list[str]:
     # so the governed group is stripped from the end, separator and dash included.
     while True:
         governed = re.search(
-            r"(?:\s*(?:,|and|—|–|-)\s*)?\*\*\([a-z]\)\*\*\s*$", still_clause
+            r"(?:\s*(?:,|and|;|—|–|-)\s*)?" + _LETTER_ITEM_ANY + r"\s*$",
+            still_clause,
+            re.IGNORECASE,
         )
         if not governed:
             break
