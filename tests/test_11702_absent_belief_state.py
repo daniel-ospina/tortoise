@@ -5939,8 +5939,18 @@ def _ep_pass_claims(text: str) -> list[str]:
     return suspects
 
 
-def _cred_word_yields_075(text: str) -> list[str]:
+def _cred_word_yields_075(
+        text: str,
+        *,
+        window: re.Pattern[str] = _CRED_WORD_YIELDS_075,
+        exempt: re.Pattern[str] = _CRED_WORD_EXEMPT) -> list[str]:
     """Matches that ATTRIBUTE `0.75` to the `credibility` word.
+
+    `window`/`exempt` are a MUTATION SEAM, not a configuration: they default to
+    the shipped patterns so every caller reads the shipped guard, and they exist
+    only so `_cred_word_pins_a_boundary` can drive THIS function — not a copy of
+    it — with one token removed. A pin proved against a re-implementation proves
+    nothing about the guard (review cycle 15, P2).
 
     The exemption is read in the FINAL clause of the match's span — the clause
     that carries the NUMBER — not across the whole span. Two measurements set
@@ -5975,17 +5985,111 @@ def _cred_word_yields_075(text: str) -> list[str]:
       still decides), and conflating the two is what the cycle-9 finding was.
     """
     hits = []
-    for match in _CRED_WORD_YIELDS_075.finditer(text):
+    for match in window.finditer(text):
         cut = max((break_.end()
                    for break_ in _CLAUSE_BREAK.finditer(text[:match.start()])),
                   default=0)
         span = text[cut:match.end()]
         inner = [break_.end() for break_ in _CLAUSE_BREAK.finditer(span)]
         final_clause = span[inner[-1]:] if inner else span
-        if _CRED_WORD_EXEMPT.search(final_clause):
+        if exempt.search(final_clause):
             continue
         hits.append(match.group(0))
     return hits
+
+
+#: ⛔ ATTRIBUTION — the shapes `_cred_word_pins_a_boundary` splices out, one at a
+#: time. A must-not-fire row is a PIN only if SOME single removal here makes the
+#: guard report it; a row that survives every one of them is quiet for two
+#: reasons at once, asserts a tautology, and implies boundary coverage it does
+#: not have. Three review cycles in a row found rows of exactly that shape in
+#: the true-prose loop (~6211-6218) by hand, so the property is mechanical now.
+#: Each splice ASSERTS the text it edits rather than substituting blindly: a
+#: pattern reworded away from these spellings would otherwise yield an
+#: unchanged mutant — an inert mutant quietly certifying every row.
+_CRED_WORD_STOP_CLASS = "[^.;,–—]"
+_CRED_WORD_RELATIVIZER_GROUP = "(?:which|that|whose|where|who|but|rather)"
+_CRED_WORD_RELATIVIZERS = ("which", "that", "whose", "where", "who", "but",
+                           "rather")
+_CRED_WORD_EXEMPT_ALTERNATIVES = (
+    "not", "never", "isn'?t", "no\\s+longer", "\\bis\\s+no\\s+(?:0?\\.|75\\s*%)",
+    "dropped", "drops", "loses", "lost", "ignored", "discarded",
+    "overwritten", "superseded")
+_CRED_WORD_ANCHOR_HALVES = (("leading anchor", "(?<![A-Za-z_])"),
+                            ("trailing anchor", "(?!\\w)"))
+_CRED_WORD_LOOKAHEAD = ("digit lookahead", "(?!\\d)")
+
+
+def _cred_word_mutants() -> list[tuple[str, re.Pattern[str], re.Pattern[str]]]:
+    """(name, window, exempt) for every single-token removal of the guard.
+
+    Per SEGMENT, not per token: the stop class and the relativizer group each
+    appear twice (pre- and post-verb), so removing a token from one segment is a
+    different mutation from removing it from the other, and a row quiet in both
+    segments must be rung by at least one of them.
+    """
+    window = _CRED_WORD_YIELDS_075.pattern
+    exempt = _CRED_WORD_EXEMPT.pattern
+    assert window.count(_CRED_WORD_STOP_CLASS) == 2, (
+        "the stop class is not spelled twice in _CRED_WORD_YIELDS_075 any more — "
+        "fix _CRED_WORD_STOP_CLASS before trusting any attribution: "
+        + repr(window))
+    assert window.count(_CRED_WORD_RELATIVIZER_GROUP) == 2, (
+        "the relativizer group is not spelled twice in _CRED_WORD_YIELDS_075 "
+        "any more: " + repr(window))
+    head, middle, tail = window.split(_CRED_WORD_STOP_CLASS)
+    rel_head, rel_middle, rel_tail = window.split(_CRED_WORD_RELATIVIZER_GROUP)
+    mutants: list[tuple[str, re.Pattern[str], re.Pattern[str]]] = []
+    for char in ".;,–—":
+        trimmed = _CRED_WORD_STOP_CLASS.replace(char, "")
+        assert trimmed != _CRED_WORD_STOP_CLASS, (
+            f"{char!r} is not in the stop class any more")
+        for segment in ("pre", "post"):
+            pre = trimmed if segment == "pre" else _CRED_WORD_STOP_CLASS
+            post = trimmed if segment == "post" else _CRED_WORD_STOP_CLASS
+            mutants.append((f"{segment}-verb window without {char!r}",
+                            re.compile(head + pre + middle + post + tail,
+                                       re.IGNORECASE), _CRED_WORD_EXEMPT))
+    for token in _CRED_WORD_RELATIVIZERS:
+        narrowed = "(?:" + "|".join(
+            t for t in _CRED_WORD_RELATIVIZERS if t != token) + ")"
+        assert narrowed != _CRED_WORD_RELATIVIZER_GROUP
+        for segment in ("pre", "post"):
+            pre = narrowed if segment == "pre" else _CRED_WORD_RELATIVIZER_GROUP
+            post = narrowed if segment == "post" else _CRED_WORD_RELATIVIZER_GROUP
+            mutants.append((f"{segment}-verb relativizer {token!r} removed",
+                            re.compile(rel_head + pre + rel_middle + post
+                                       + rel_tail, re.IGNORECASE),
+                            _CRED_WORD_EXEMPT))
+    for alternative in _CRED_WORD_EXEMPT_ALTERNATIVES:
+        assert alternative in exempt, (
+            f"the exemption no longer spells {alternative!r} — a blind "
+            "substitution would be a no-op mutant: " + repr(exempt))
+        mutants.append((f"exemption alternative {alternative!r} removed",
+                        _CRED_WORD_YIELDS_075,
+                        re.compile(exempt.replace(alternative, "ZZZZ"),
+                                   re.IGNORECASE)))
+    for label, piece in (*_CRED_WORD_ANCHOR_HALVES, _CRED_WORD_LOOKAHEAD):
+        assert window.count(piece) == 1, (
+            f"{label} is not spelled once in _CRED_WORD_YIELDS_075 any more: "
+            + repr(window))
+        mutants.append((f"{label} removed",
+                        re.compile(window.replace(piece, ""), re.IGNORECASE),
+                        _CRED_WORD_EXEMPT))
+    return mutants
+
+
+_CRED_WORD_MUTANTS = _cred_word_mutants()
+
+
+def _cred_word_pins_a_boundary(text: str) -> list[str]:
+    """The single-token removals that make the guard REPORT `text`.
+
+    Empty means the row pins nothing: it is quiet under every one of the guard's
+    declared boundaries, so no edit to a boundary could ever ring it.
+    """
+    return [name for name, window, exempt in _CRED_WORD_MUTANTS
+            if _cred_word_yields_075(text, window=window, exempt=exempt)]
 
 
 def _cred_word_claims(rel: str) -> list[str]:
@@ -6207,15 +6311,11 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # …the RELATIVE-CLAUSE family, where the verb the number attaches to
             # belongs to the default or the pair, not to the word. All six
             # fired before the window stopped at a comma and at a relative
-            # pronoun (review cycle 3, P2).
-            "the ``credibility=`` word raises the Beta(3,1) default, which "
-            "reads 0.75",
-            "``credibility=`` is added on top of the Beta(3,1) default, which "
-            "reads 0.75",
+            # pronoun (review cycle 3, P2). Only `whose` is a single-stop pin
+            # here; the other five are MASKED TWICE and live in the MULTI-MASKED
+            # WORDING RECORD below, because inside this loop they asserted a
+            # tautology (review cycle 15, P2).
             "the credibility word raises a default whose mean is 0.75",
-            "the credibility word is ignored against a pair that reads 0.75",
-            "the credibility word is discarded against a pair that reads 0.75",
-            "the credibility word is overwritten by a pair that reads 0.75",
             # …the DASH and `but` forms, which the window now stops at (cycle 4).
             "the credibility word adds one weak body — the #2199 default "
             "alone reads 0.75",
@@ -6263,6 +6363,15 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             "the credibility word reads a body — 0.75 is the default's"):
         assert not _cred_word_yields_075(true_sentence), (
             f"the credibility guard fires on TRUE prose: {true_sentence!r}")
+        assert _cred_word_pins_a_boundary(true_sentence), (
+            "this must-not-fire row pins NO boundary: no single removal — a "
+            "stop char from one window segment, a relativizer from one "
+            "segment, an exemption alternative, an anchor half, or the "
+            "`(?!\\d)` lookahead — makes the guard report it, so the row is "
+            "quiet twice over and asserts a tautology. Move it to the "
+            "MULTI-MASKED WORDING RECORD below with the boundaries that mask "
+            "it, or reword it so its own boundary is the only stop: "
+            + repr(true_sentence))
     # ⛔ INERT WORDING RECORD — these two are NOT pins, and they were removed
     # from the loop above because they cannot exercise the guard at all:
     # `_CRED_WORD_YIELDS_075.findall(...)` returns [] for both, so inside that
@@ -6276,6 +6385,42 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
     #   • "the credibility word is dropped against an explicit pair, which reads
     #     0.75" — quiet three times over (pre-verb comma, post-verb `which`, and
     #     the `dropped` demoter); the demoter has its own rows above.
+    # ⛔ MULTI-MASKED WORDING RECORD — five TRUE sentences that sat in the loop
+    # above AS IF they pinned the relative-clause boundary, and pin NOTHING: each
+    # is masked TWICE, so NO single-token removal rings it — the helper
+    # `_cred_word_pins_a_boundary` returns `[]` for all five (measured; review
+    # cycle 15, P2) — and deleting any one of them, or all five, left the suite
+    # GREEN. They are kept here, asserted quiet — a false block on true prose is
+    # this guard's expensive direction — but their boundaries are pinned by the
+    # rows named, never by them, and the loop's attribution assert above now
+    # refuses to let one back in.
+    #   • "the ``credibility=`` word raises the Beta(3,1) default, which reads
+    #     0.75" and "``credibility=`` is added on top of the Beta(3,1) default,
+    #     which reads 0.75" — the `,` stops the POST-verb window before `which`
+    #     can; the post-verb comma is pinned by "the credibility word is one
+    #     body, so 0.75 stays…" and `which`-stops by "the credibility word reads
+    #     a default which is 0.75" (which rings BOTH segments), both in the loop
+    #     above.
+    #   • "the credibility word is ignored / discarded / overwritten against a
+    #     pair that reads 0.75" — the pre-verb `that` stops the window, and the
+    #     demoter would exempt the claim anyway; pre-verb `that` alone is pinned
+    #     by "the credibility word is a label that a pair reads 0.75 against" and
+    #     each demoter by "the credibility word is <demoter> when a pair reads
+    #     0.75", both in the loop above.
+    for multi_masked in (
+            "the ``credibility=`` word raises the Beta(3,1) default, which "
+            "reads 0.75",
+            "``credibility=`` is added on top of the Beta(3,1) default, which "
+            "reads 0.75",
+            "the credibility word is ignored against a pair that reads 0.75",
+            "the credibility word is discarded against a pair that reads 0.75",
+            "the credibility word is overwritten by a pair that reads 0.75"):
+        assert not _cred_word_yields_075(multi_masked), (
+            "a MULTI-MASKED true sentence started firing — the window was "
+            "widened past one of the boundaries that used to mask it; if that "
+            "was deliberate its own boundary may now be the only stop, so move "
+            "it into the must-not-fire loop above instead of leaving it here: "
+            + repr(multi_masked))
     # ⛔ KNOWN FALSE PASS, pinned as a BOUNDARY, not as correctness: a pre-verb
     # COMMA stops the window, so this false attribution is NOT reported today.
     # It gets its OWN row, outside the TRUE-prose loop above, because the only
