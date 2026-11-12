@@ -1320,11 +1320,11 @@ def test_the_newest_block_body_starts_at_its_header_line() -> None:
     # become false while the extent pin stayed green.
     assert sum(1 for block in blocks
                if _CITATION_RE.search(block.split("\n", 1)[0])) == 0, (
-        "a block's HEADER line now carries a comment citation, so the citing "
-        "COUNT the prose states is stale — re-measure the counts. (The equality "
-        "above is content-agnostic — both sides derive from the same spans — so it "
-        "cannot move on a changelog edit; what this assertion protects is the "
-        "counts, and therefore the prose that quotes them.)")
+        "a block's HEADER line now carries a comment citation, so the `0 of 39 "
+        "headers cite` justification the wider extent rests on is FALSE — restate "
+        "that claim. (The citing COUNTS are measured live by the citation pin, so a "
+        "header citation on an already-citing block does not move them, and this "
+        "guard is not their protector.)")
 
 
 def test_the_lifecycle_clause_extraction_ignores_the_rest_of_the_row() -> None:
@@ -1696,13 +1696,18 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     # accepted them), and a truthful sentence phrased outside them is a recogniser
     # gap to widen here — not evidence that the sentence is wrong.
     #
-    # ⛔ AND THE DOCSTRING'S CLAIM IS READ FROM ITS OWN `D2 — A` SENTENCE: an
-    # un-anchored first-match search elsewhere in the paragraph can pick up a true
-    # statement about the OTHER v3.33 entry and then red with a message denying
-    # what the paragraph says (measured).
+    # ⛔ AND THE DOCSTRING'S CLAIM IS READ FROM THIS DOCSTRING'S OWN `D2 — A`
+    # SENTENCE — scoped to `doc`, not to the module: a module-wide first match picks
+    # up THIS pin's docstring, 250 lines above the SCOPE paragraph, so the message
+    # below would deny what the paragraph says while the paragraph's own claim went
+    # unread (measured: deleting the SCOPE sentence outright left every pin green).
+    # `ordinals` above stays module-wide; this read does not.
+    doc_sentences = [re.sub(r"\s+", " ", sentence)
+                     for sentence in re.split(r"(?<=[.)])\s+", doc)
+                     if "D2 — A" in sentence]
     ordinal = next((match for match in
                     (re.search(ordinal_pattern, sentence, re.I)
-                     for sentence in d2_sentences)
+                     for sentence in doc_sentences)
                     if match), None)
     assert ordinal, (
         "the SCOPE paragraph must say WHICH of the two v3.33 entries it means — "
