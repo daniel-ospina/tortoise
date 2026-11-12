@@ -22718,7 +22718,7 @@ class FalkorProjection(
 
         factors = []
         degenerate_count = 0
-        unpriceable_count = 0
+        unpriceable: dict[str, int] = {}
         for op_id, op_type in op_types.items():
             input_ids = op_inputs.get(op_id, [])
             if op_type not in _SVBP_PRICED_MECHANISMS:
@@ -22732,7 +22732,14 @@ class FalkorProjection(
                 # production caller (#7927), so the honest move is to DECLINE the
                 # mechanism loudly rather than mis-price it silently; EP prices
                 # all three.
-                unpriceable_count += 1
+                #
+                # ⛔ THE WARNING NAMES THE MECHANISMS IT EXCLUDED, not the ones it
+                # can price (#12067 review round 15, P2): the first cut
+                # interpolated `_SVBP_PRICED_MECHANISMS` into the parenthetical,
+                # so it read "carry a mechanism this engine cannot price (IMPL,
+                # NAND) and were EXCLUDED" — naming exactly the two mechanisms it
+                # CAN price as the reason for exclusion.
+                unpriceable[op_type] = unpriceable.get(op_type, 0) + 1
                 continue
             if len(input_ids) >= 2:
                 weight = 3.0 if op_type == "NAND" else 1.0
@@ -22740,15 +22747,15 @@ class FalkorProjection(
             else:
                 degenerate_count += 1
 
-        if unpriceable_count > 0:
+        if unpriceable:
             logger.warning(
-                "extract_svbp_factors: %d operators carry a mechanism this "
-                "engine cannot price (%s) and were EXCLUDED — SVBP has IMPL and "
-                "NAND potentials only and would otherwise price them as IMPL. "
-                "Their beliefs are computed by EP (tortoise/ep.py), which prices "
-                "all three mechanisms.",
-                unpriceable_count,
-                ", ".join(sorted(_SVBP_PRICED_MECHANISMS)),
+                "extract_svbp_factors: %d operators were EXCLUDED because they "
+                "carry a mechanism this engine has no potential for (%s) — "
+                "SVBP prices IMPL and NAND only, so pricing them would have "
+                "substituted the IMPL potential. Their beliefs are computed by "
+                "EP (tortoise/ep.py), which prices all three mechanisms.",
+                sum(unpriceable.values()),
+                ", ".join(f"{m}×{n}" for m, n in sorted(unpriceable.items())),
             )
 
         if degenerate_count > 0:

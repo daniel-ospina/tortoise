@@ -418,6 +418,32 @@ class TortoiseSVBP:
         prev = {cid: self._get_posterior(cid) for cid in self.posteriors}
 
         import random
+        # ⛔ THE UNPRICEABLE MECHANISM IS REFUSED WHERE THE PRICE IS COMPUTED
+        # (#12067 review round 15, P2). `_tilt` maps EVERY non-NAND op_type onto
+        # the IMPL potential (`is_nand = 1.0 if op_type == "NAND" else 0.0`), so a
+        # caller that reaches this public `run()` with a `coherence` factor gets a
+        # necessity priced as SUPPORT — silently. The extractor's decline
+        # (`projection/__init__.py::extract_svbp_factors`) is the REPORTING layer
+        # and closes the in-tree feeders, but it is not the invariant: the
+        # invariant belongs on the one site that does the arithmetic, so drop the
+        # factor here too and say so, instead of inheriting the IMPL term.
+        priced = []
+        refused: dict[str, int] = {}
+        for factor in factors:
+            if factor[1] in ("IMPL", "NAND"):
+                priced.append(factor)
+            else:
+                refused[factor[1]] = refused.get(factor[1], 0) + 1
+        if refused:
+            _n = sum(refused.values())
+            _which = ", ".join(f"{m}×{n}" for m, n in sorted(refused.items()))
+            print(
+                f"TortoiseSVBP: {_n} factor(s) REFUSED — {_which}. This engine "
+                f"prices IMPL and NAND only; a third mechanism substituted onto "
+                f"the IMPL potential would price a necessity as support. Run EP "
+                f"(tortoise/ep.py) for it."
+            )
+        factors = priced
         for iteration in range(self.max_iter):
             random.shuffle(factors)
             for op_id, op_type, input_ids, weight in factors:

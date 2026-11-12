@@ -24902,21 +24902,52 @@ class TortoiseSDK:
                     # level, measured Δ = -0.009249 for Beta(3,7)=0.30 against a
                     # held Beta(10,1)=0.909 — a source the target outranks pulls
                     # it DOWN). Neither is "coherence with the sign flipped".
+                    # ⛔ AND THE CONTRAST NAMES NO SIDE, BECAUSE THE SIDE DEPENDS ON
+                    # THE DIRECTION (#12067 review round 15, P2). `phi_impl` is a
+                    # DIFFERENCE coupling, so which endpoint moves is the stored
+                    # direction's business: measured at `<-` (src 0.90, tgt 0.30)
+                    # the SOURCE moves (0.889061, Δ −0.010939) and the target does
+                    # not — the previous wording ("moves the TARGET toward the
+                    # SOURCE's own level") named the wrong side for every `<-`
+                    # write, reachable from one `semantics=` argument
+                    # (`produces` → `<-`). The claim that survives all three
+                    # propagating directions is the COUPLING SHAPE.
                     _contrast = (
-                        "an IMPL mechanism instead moves the target TOWARD the "
-                        "source's own level, so a source the target already "
-                        "outranks pulls it down"
+                        "an IMPL mechanism instead couples the two by a "
+                        "DIFFERENCE that can RAISE the side this direction "
+                        "moves — never merely hold it"
                         if _other == "IMPL" else
                         "a NAND mechanism instead lowers the attacked side on "
                         "the strength of the attack alone, with no necessary "
                         "condition involved")
-                    _inversion = (
-                        f"A coherence wire {_preamble} prices a NECESSARY "
-                        f"CONDITION: it cannot lift the condition's own belief "
-                        f"— only leave it where it is or lower it — and "
-                        f"the DEPENDENT loses confidence when the condition is "
-                        f"absent, whereas {_contrast}. Those are different "
-                        f"relations, not one relation with the sign flipped")
+                    # ⛔ `-` PRICES NOTHING, AND THE SENTENCE MUST SAY SO
+                    # (#12067 review round 15, P2). `_canonical_direction`
+                    # returns a present token VERBATIM, and `-` is one of them:
+                    # measured, a coherence write stored with `direction="-"`
+                    # moves NEITHER side (Δ = 0.000000 on both, every prior pair
+                    # on the grid) — so "the DEPENDENT loses confidence when the
+                    # condition is absent" is false for it. Reachable with no
+                    # explicit direction at all: `semantics="related"` derives
+                    # `-`. The direction is already resolved at this point (step 4
+                    # runs above), so the arm can be gated on it.
+                    if direction == "-":
+                        _inversion = (
+                            f"A coherence wire {_preamble} is stored with "
+                            f"direction `-`, which prices NOTHING: the "
+                            f"connection exists and no confidence transfers in "
+                            f"either direction, so the declaration is recorded "
+                            f"and nothing propagates. A one-way necessity is "
+                            f"`->` (first input the condition, second the "
+                            f"dependent); a mutual one is `<->`")
+                    else:
+                        _inversion = (
+                            f"A coherence wire {_preamble} prices a NECESSARY "
+                            f"CONDITION: it cannot lift the condition's own "
+                            f"belief — only leave it where it is or lower it — "
+                            f"and the DEPENDENT loses confidence when the "
+                            f"condition is absent, whereas {_contrast}. Those "
+                            f"are different relations, not one relation with "
+                            f"the sign flipped")
                 elif _from_meaning:
                     _inversion = (
                         "A NAND wire carrying an IMPL meaning (e.g. 'supports') "

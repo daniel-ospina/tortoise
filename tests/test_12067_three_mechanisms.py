@@ -1682,14 +1682,22 @@ def test_a_MIXED_contradiction_does_not_invent_a_meaning(sdk):
     assert "declared NAND" in text or "declares 'NAND'" in text, text
 
 
-def test_a_STRUCTURAL_verb_declaring_coherence_is_DROPPED_with_a_reason():
-    """⛔ THE STRUCTURAL ARM SKIPPED THE UNCARIABLE CHECK (#12067 round 14, P2).
+def test_a_STRUCTURAL_verb_declaring_coherence_KEEPS_its_edge():
+    """⛔ THE STRUCTURAL ARM KEEPS ITS EDGE AND RECORDS NOTHING (#12067 rounds 14-15).
 
-    `_uncarriable_reason` only ran when `paths` was empty, so `dependsOn` /
-    `hasPart` — the two verbs ONTOLOGY §8 itself names as necessity — wrote a
-    MECHANISM-LESS bare edge for a relation declaring `coherence`: not carried,
-    not dropped, not warned. `gatedBy` dropped with a reason and `dependsOn` was
-    silent, which is why a `gatedBy`-only pin could not see this branch.
+    Round 14 read this arm's silence as the defect and made it DROP the verb;
+    round 15 measured that the drop was worse. The silence is CORRECT here — the
+    edge written is the predicate's own (`dependsOn`), its rel type carries the
+    mechanism slot, and no factor ever prices it — while the DROP made the
+    DECLARATION decide whether a structural FACT is recorded (`mechanism: IMPL`
+    wrote the edge, `coherence` wrote nothing). And recording the loss on the
+    drop channel was worse still: the receipt counts `written + dropped + folded`
+    against the stated population, so a written edge there reads `written=1,
+    dropped=1` and the capture path pipes it out as "relation not written".
+
+    So what this pins is: the FACT survives, it carries no mechanism, and the
+    receipt reconciles — with the `gatedBy` block below pinning the OTHER arm,
+    where no write path exists and the drop (with its reason) is right.
     """
     from tortoise.relation_write import plan_relation_edges
 
@@ -1709,15 +1717,113 @@ def test_a_STRUCTURAL_verb_declaring_coherence_is_DROPPED_with_a_reason():
             return "probe"
 
     index = {"A": [("id-a", "subject")], "B": [("id-b", "subject")]}
-    for predicate in ("gatedBy", "dependsOn", "hasPart"):
+
+    # ⛔ A VERB WITH NO WRITE PATH IS DROPPED, with the mechanism as the reason.
+    edges, drops = plan_relation_edges(
+        [{"src": "A", "dst": "B", "predicate": "gatedBy"}],
+        index, registry=_OneRelationRegistry())
+    assert not edges, edges
+    assert drops and "coherence" in drops[0].reason, drops
+
+    # ⛔ A STRUCTURAL VERB KEEPS ITS EDGE AND RECORDS NOTHING (#12067 review
+    # rounds 14 and 15). Round 14 dropped these, which made the DECLARATION
+    # decide whether a structural FACT is recorded: `dependsOn` declaring IMPL
+    # still wrote the edge, declaring coherence wrote nothing — for a difference
+    # that changes no belief (a structural edge is not an operator and
+    # `ep._factor_pairs` never prices it), and the fact has no other carrier.
+    # Recording the loss on the DROP channel was wrong too: the receipt counts
+    # `written + dropped + folded` against the stated population on every arm
+    # (`relation_write.py`:136, :907) and the capture path prefixes each drop
+    # with "relation not written", so a WRITTEN edge there reported `written=1,
+    # dropped=1` for one statement and produced a self-contradicting warning.
+    # The mechanism's absence is the open follow-up (bare-edge carriage), stated
+    # once in `packs/_template/manifest.yaml`.
+    for predicate in ("dependsOn", "hasPart"):
         edges, drops = plan_relation_edges(
             [{"src": "A", "dst": "B", "predicate": predicate}],
             index, registry=_OneRelationRegistry())
-        assert not edges, (
-            f"{predicate} declaring coherence wrote a mechanism-less edge — "
-            f"neither carried nor dropped: {edges}")
-        assert drops, f"{predicate}: the drop is SILENT — edges={edges}"
-        assert "coherence" in drops[0].reason, drops[0].reason
+        assert edges, (
+            f"{predicate} declaring coherence lost its structural FACT — the "
+            f"declaration decided whether a mechanism-less edge is recorded")
+        assert not any(e.mechanism for e in edges), edges
+        assert not drops, (
+            f"{predicate}: the receipt counts this edge as a DROPPED relation "
+            f"— a written edge must reconcile as written: {drops}")
+
+
+def test_the_disclosure_is_TRUE_for_the_NEUTRAL_direction(sdk):
+    """⛔ `-` PRICES NOTHING, AND THE SENTENCE SAID IT DID (#12067 round 15, P2).
+
+    `_canonical_direction` returns a present token VERBATIM and `-` is one, but
+    the sentence asserted loss propagation unconditionally: measured, a coherence
+    write stored with `-` moves NEITHER side (Δ 0.000000 on both). It is
+    reachable with no explicit direction at all — `semantics="related"` derives
+    `-` — so the arm is now gated on the resolved direction.
+    """
+    a, b = _points(sdk)
+    out = sdk.create_operator(
+        "coherence", a, [b], label="competesWith", semantics="related")
+    msgs = [w for w in (out.get("warnings") or [])
+            if w.get("code") == "mechanism_mismatch"]
+    assert msgs, out.get("warnings")
+    text = msgs[0]["message"]
+    assert "prices NOTHING" in text, text
+    assert "DEPENDENT loses confidence" not in text, text
+
+    # …and a PROPAGATING direction still gets the necessity sentence.
+    c, d = _points(sdk)
+    out2 = sdk.create_operator(
+        "coherence", c, [d], label="competesWith", semantics="produces")
+    text2 = next(w["message"] for w in (out2.get("warnings") or [])
+                 if w.get("code") == "mechanism_mismatch")
+    assert "prices NOTHING" not in text2, text2
+    assert "NECESSARY CONDITION" in text2, text2
+
+
+def test_the_IMPL_contrast_names_no_SIDE(sdk):
+    """⛔ THE SIDE DEPENDS ON THE DIRECTION (#12067 review round 15, P2).
+
+    `phi_impl` is a DIFFERENCE coupling, so which endpoint moves is the stored
+    direction's business: measured at `<-` (src 0.90, tgt 0.30) the SOURCE moves
+    (0.889061, Δ −0.010939) and the target does not. "moves the TARGET toward the
+    SOURCE's own level" (round 14) named the wrong side for every `<-` write.
+    """
+    a, b = _points(sdk)
+    # `supports` declares IMPL, which is the branch whose contrast named a side
+    out = sdk.create_operator("coherence", a, [b], semantics="supports")
+    text = next(w["message"] for w in (out.get("warnings") or [])
+                if w.get("code") == "mechanism_mismatch")
+    assert "toward the source" not in text.lower(), text
+    assert "TOWARD" not in text, text
+    assert "DIFFERENCE" in text, text
+
+
+def test_phase1_and_the_DOOR_agree_on_a_REAL_write(sdk):
+    """⛔ PIN THE DOOR, NOT A COPY OF IT (#12067 review round 15, P2).
+
+    Round 14's pin compared `_effective_direction` against `door_stores`, a
+    re-implementation of the writer inside the test — so it would stay green if
+    the LIVE writer's step-4 rewrite changed. This drives `create_operator` and
+    reads the stored `direction` back.
+    """
+    from tortoise.sdk import TortoiseSDK
+
+    for token in (None, "->", "<-", "<->", "-", "unidirectional",
+                  "bidirectional"):
+        for semantics in (None, "produces", "related"):
+            a, b = _points(sdk)
+            out = sdk.create_operator("coherence", a, [b], direction=token,
+                                      semantics=semantics)
+            pid = out["id"]
+            row = sdk._get_proj().g.query(
+                "MATCH (o:Point {id:$i}) RETURN o.direction",
+                params={"i": pid}).result_set
+            stored = row[0][0] if row else None
+            predicted = TortoiseSDK._effective_direction(
+                "coherence", token, semantics)
+            assert stored == predicted, (
+                f"token={token!r} semantics={semantics!r}: the door stored "
+                f"{stored!r} but Phase 1 predicts {predicted!r}")
 
 
 def test_SVBP_declines_a_mechanism_it_cannot_price():
@@ -1733,3 +1839,30 @@ def test_SVBP_declines_a_mechanism_it_cannot_price():
 
     assert {"IMPL", "NAND"} == _SVBP_PRICED_MECHANISMS
     assert "coherence" not in _SVBP_PRICED_MECHANISMS
+
+    # ⛔ …AND THE REFUSAL HAPPENS WHERE THE PRICE IS COMPUTED (#12067 review
+    # round 15, VGATE: the extractor's decline is the REPORTING layer; a caller
+    # reaching the public `run()` with a coherence factor would still be priced
+    # with the IMPL potential). `_tilt` maps every non-NAND op_type onto the IMPL
+    # term, so the refusal has to be at `run()`.
+    import contextlib
+    import io
+
+    import pytest
+
+    svbp = pytest.importorskip("tortoise.svbp")
+    engine = svbp.TortoiseSVBP(n_particles=4, n_svgd_steps=1, max_iter=1)
+    buf = io.StringIO()
+    # one factor this engine CAN price, one it cannot; only the first is priced
+    with contextlib.redirect_stdout(buf):
+        engine.run([("op-impl", "IMPL", ["c1", "c2"], 1.0),
+                    ("op-coh", "coherence", ["c3", "c4"], 1.0)],
+                   evidence={"c1": (2.0, 2.0), "c2": (2.0, 2.0),
+                             "c3": (2.0, 2.0), "c4": (2.0, 2.0)})
+    out = buf.getvalue()
+    assert "REFUSED" in out, out
+    assert "coherence" in out, (
+        f"the refusal must NAME the mechanism it declined: {out!r}")
+    # the refused factor's claims are never touched by the tilt
+    assert "c3" not in engine.posteriors or engine.posteriors["c3"] == (
+        2.0, 2.0), engine.posteriors.get("c3")
