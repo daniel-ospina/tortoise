@@ -203,9 +203,18 @@ class TestAcceptance1RedirectAndOverride:
         assert _labels_kinds(sdk, r["id"])[0] == ["Subject"]
         assert r["kind_guard_overridden"]["rule"] == "issue-identifier-is-work-item"
 
-    def test_a_non_string_intent_is_a_caller_error(self, sdk, no_pack_guards):
-        with pytest.raises(ValueError):
-            sdk.create_subject(ISSUE_NAME, intent=1)
+    def test_a_non_token_intent_stays_a_data_property(self, sdk, no_pack_guards):
+        """⛔ Only the EXACT token is a control. `intent` is a plausible data key
+        and this door is reached by `**(props or {})` from the MCP tools, so
+        reserving the name unconditionally would silently DROP a legitimate
+        property — and a reserved-name refusal would be a refusal on a path that
+        must never refuse (#1934)."""
+        r = sdk.create_subject("Widget", intent="purchase")
+        assert "kind_guard_overridden" not in r
+        assert _node_props(sdk, r["id"])["intent"] == "purchase"
+        # …and the guard still fires, because a non-token is not an override
+        r2 = sdk.create_subject(ISSUE_NAME, intent="purchase")
+        assert r2["kind_redirect"]["rule"] == "issue-identifier-is-work-item"
 
     def test_the_alias_doors_surface_the_ax_fields(self, sdk, no_pack_guards):
         """The alias unwrapped ``result["node"]`` and dropped top-level keys —
@@ -307,12 +316,65 @@ class TestAcceptance2Abstention:
         # The SDK's installed-set reader is the one seam the ladder consults.
         monkeypatch.setattr("tortoise.sdk._graph_installed_namespaces",
                             lambda _sdk: frozenset({"core"}))
-        for name in (ISSUE_NAME, "the owner", "daniel-ospina/agent-infra",
-                     "Acme Corp"):
-            r = sdk.create_subject(name, subjectKind="core:naturalPerson")
+        # Every one of these exercises a different branch: a redirect (issue:),
+        # an abstention with no link predicate ("the owner", skipped BEFORE the
+        # installed-set check), a redirect from a declared person kind, and the
+        # silent path. NONE of them may raise, and every one must LAND.
+        for name, kind, expected_label in (
+                (ISSUE_NAME, None, "Object"),
+                ("the owner", None, "Subject"),          # abstains, unchanged
+                ("daniel-ospina/agent-infra", "core:naturalPerson", "Object"),
+                ("Acme Corp", None, "Subject")):
+            r = sdk.create_subject(name, subjectKind=kind)
             assert r.get("id"), name
-        # Nothing raised, and the three abstention-capable names are explained.
-        assert kind_guard_counts(), "the outcomes were not counted"
+            assert _labels_kinds(sdk, r["id"])[0] == [expected_label], name
+        # The abstention was reported, not swallowed...
+        assert resolve("the owner", "subject", None,
+                       pack_confusions=()).skipped["reason"].startswith(
+                           "link-predicate-unimplemented")
+        # ...and the outcomes were counted.
+        assert {r["outcome"] for r in kind_guard_counts()} == {"accepted", "skipped"}
+
+
+class TestNeverRefuses:
+    """A guard must never be the reason a write fails — the invariant, on its own."""
+
+    def test_the_guard_path_never_raises_whatever_the_input(self, no_pack_guards):
+        weird = (None, 1, "", " ", "issue:", "issue:a#", "issue:a#x",
+                 "issue:" + "a" * 5000 + "#1", "the", "the owner ", "a/b/c",
+                 "\x00", "issue:ä#1", "THE OWNER")
+        for name in weird:
+            for layer in ("subject", "object", "point", "event", "", "nonsense"):
+                for kind in (None, "", "other", "core:team", "x:y", 3):
+                    for intent in (None, "as_declared", "AS_DECLARED", 1, ""):
+                        d = resolve(name, layer, kind, intent=intent,
+                                    pack_confusions=())
+                        assert d.outcome in GuardOutcome.ALL
+                        if d.kind is not None:
+                            assert d.outcome == GuardOutcome.REDIRECT
+
+    def test_a_malformed_pack_guard_cannot_break_a_write(self):
+        """A broken install is a broken INSTALL (#1934) — the guard just cannot
+        fire, and the write is unaffected."""
+        bad = [
+            {"kind": "concept", "onConfusion": "not-a-list"},
+            {"kind": "concept", "onConfusion": [{"when": "nameMatches"}]},
+            {"kind": "concept", "onConfusion": [
+                {"when": "nonsense", "pattern": "x", "redirect": "concept"}]},
+            {"kind": "concept", "onConfusion": [
+                {"when": "nameMatches", "pattern": "^(unclosed",
+                 "redirect": "concept", "fallback": "core:WorkItem"}]},
+            "not-a-map",
+        ]
+        # Every entry that is not a usable guard is dropped…
+        assert kg.pack_guards("acme", bad[:3] + bad[4:]) == ()
+        # …and one whose PATTERN does not compile survives the compile step (so
+        # `guard_table_problems` can REPORT it) but can never fire, so the write
+        # is untouched.
+        compiled = kg.pack_guards("acme", [bad[3]])
+        assert len(compiled) == 1
+        d = resolve("acme-1", "subject", None, pack_confusions=compiled)
+        assert d.outcome == GuardOutcome.ACCEPT
 
     def test_the_role_guard_abstains_until_holdsRole_is_implemented(self):
         """The owner's #12060 comment: five ORPHAN roles are worse than one
@@ -499,8 +561,8 @@ class TestAcceptance4NoModelCalls:
                 names.update(a.name.split(".")[0] for a in node.names)
             elif node.module and node.level == 0:
                 names.add(node.module.split(".")[0])
-        assert names <= {"__future__", "collections", "logging", "re",
-                         "threading", "dataclasses", "typing"}, names
+        assert names <= {"__future__", "collections", "contextlib", "logging",
+                         "re", "threading", "dataclasses", "typing"}, names
 
 
 # ══ 5. measurement ════════════════════════════════════════════════════════

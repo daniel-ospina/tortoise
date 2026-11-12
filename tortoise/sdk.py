@@ -5595,6 +5595,13 @@ def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
     return all_name_holder_ids(g, label, name) if label else []
 
 
+#: The ONE spelling of the guard override token in this module. It is compared
+#: here (to decide whether `intent` is a control or a data property) and in
+#: `kind_guards.resolve` (to decide whether to suppress a redirect); re-spelling
+#: it in a third place is how the two would drift.
+_KIND_GUARD_INTENT_AS_DECLARED = "as_declared"
+
+
 def _graph_installed_namespaces(sdk) -> frozenset[str] | None:
     """This graph's INSTALLED pack namespaces, for the kind-guard path (#12060 R2).
 
@@ -45415,9 +45422,20 @@ class TortoiseSDK:
         # Fail-open (#1934): a guard that raised would refuse a write that
         # landed before it existed, so every failure degrades to "no guard".
         _guard = None
-        if intent is not None and not isinstance(intent, str):
-            raise ValueError(
-                "'intent' must be a string ('as_declared') or absent")
+        # ⛔ ONLY THE EXACT TOKEN IS A CONTROL; every other value stays a PROP.
+        # `intent` is a plausible data key (the battery envelopes carry one), and
+        # this door is reached by `**(props or {})` from the MCP tools and the
+        # ingest payloads — so making the name unconditionally reserved would
+        # SILENTLY DROP a legitimate property and neither store nor report it.
+        # Anything that is not `"as_declared"` is therefore put straight back
+        # where it came from, which makes this change byte-identical to the old
+        # behaviour for every existing caller (and, unlike a reserved-name
+        # refusal, it can never refuse a write — #1934).
+        if intent is not None and not (
+                isinstance(intent, str)
+                and intent.strip().lower() == _KIND_GUARD_INTENT_AS_DECLARED):
+            props.setdefault("intent", intent)
+            intent = None
         try:
             t, _guard = _apply_kind_guard(t, name, props, intent,
                                           installed_provider=lambda: (

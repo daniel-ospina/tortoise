@@ -203,6 +203,7 @@ unimplemented abstains (R4's shape) until `#12047` produces `holdsRole`; see
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import threading
@@ -892,13 +893,28 @@ def _catalog_pack_guards() -> tuple[Confusion, ...]:
         return ()
     if reg is None:
         return ()
+    # Compiled ONCE per registry object and attached to it: `resolve` runs on
+    # every entity write, and re-compiling every pack's guard list (and
+    # re-creating its `Confusion`s and regex lookups) per write is pure
+    # allocation on the hot path. The cache dies with the registry, which is
+    # itself replaced whenever the packs dir changes
+    # (`domain_loader._get_registry`), so it cannot serve a stale catalog.
+    cached = getattr(reg, "_kind_guard_confusions", None)
+    if cached is not None:
+        return cached
     out: list[Confusion] = []
     for ns in sorted(getattr(reg, "packs", {}) or {}):
         pack = reg.packs[ns]
         declared = getattr(pack, "guards", None)
         if declared:
             out.extend(pack_guards(ns, declared))
-    return tuple(out)
+    compiled = tuple(out)
+    # A cache miss is not a failure (a registry implementation without a
+    # writable __dict__ would just recompile next time): never let the cache
+    # itself be a way for a guard to fail a write.
+    with contextlib.suppress(Exception):
+        reg._kind_guard_confusions = compiled
+    return compiled
 
 
 # ── measurement ───────────────────────────────────────────────────────────
