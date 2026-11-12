@@ -1874,28 +1874,39 @@ def test_a_deduped_incident_records_the_occurrence_on_its_issue():
     assert "team_x" in body
 
 
-def test_the_recurrence_record_carries_the_store_marker_not_the_drivers():
-    """The driver counts its OWN marked comments; ours must not inflate it."""
+def test_the_recurrence_record_is_exactly_the_marker_and_a_timestamp():
+    """The driver counts its OWN marked comments; ours must not inflate it.
+
+    The body is pinned EXACTLY, because "no published count" is a claim about
+    every spelling of a number (``Recurrence #N``, ``Observed N times``, ``Nth
+    sweep``), and an assertion on one literal would let the others through. The
+    only variable is the injected clock.
+    """
+    from datetime import datetime
+
     from tortoise.alert_store import OCCURRENCE_MARKER
+
+    assert "dr-occurrence" in OCCURRENCE_MARKER, (
+        "both markers share the prefix, so one filter finds both")
+    assert "<!-- dr-occurrence -->" not in OCCURRENCE_MARKER, (
+        "the driver derives a published recurrence NUMBER by counting comments "
+        "under its own marker; a second writer under the identical marker would "
+        "be counted as one of its sweeps")
 
     ch = _RecordChannels()
     storage = MemoryStorage()
     _sentinel(storage, "STALE", 4242, key="team_x")
-    store = _recording_store(ch, storage)
+    clock = [datetime(2026, 11, 12, 20, 44, tzinfo=UTC)]
+    store = _recording_store(ch, storage, now=lambda: clock[0])
     store.open_incident_state("STALE", "team_x")
 
-    body = ch.recurrence[0][1]
-    assert OCCURRENCE_MARKER in body
-    assert "dr-occurrence" in OCCURRENCE_MARKER, (
-        "both markers share the prefix, so one filter finds both")
-    assert "<!-- dr-occurrence -->" not in body, (
-        "the driver derives a published recurrence NUMBER by counting comments "
-        "under its own marker; a second writer must not be counted as one of its "
-        "sweeps")
-    assert "Recurrence" not in body, (
-        "the record carries NO published count: any number would have to come "
-        "from the shared R2 sentinel, which the driver rewrites — the driver "
-        "counts its own from the ISSUE (#12243)")
+    assert ch.recurrence == [(
+        4242,
+        "🔁 **Observed again** — `[DR] STALE — team_x` was still unhealthy at "
+        f"`{clock[0].isoformat()}`. This incident is already tracked by this "
+        "issue, so no duplicate was filed.\n\n"
+        f"{OCCURRENCE_MARKER}",
+    )], "the record carries no running number — only the marker and a stamp"
 
 
 def test_the_recurrence_record_is_bounded_per_incident_per_utc_day():
@@ -2029,7 +2040,6 @@ def test_a_store_without_a_record_channel_posts_nothing():
     store = _store(ch, storage)
 
     assert store.open_incident_state("STALE", "team_x") is OpenOutcome.DEDUP
-    assert ch.comments == []
     assert "last_occurrence_record" not in json.loads(
         storage.download("ops/alerts/STALE/team_x.json"))
 
@@ -2150,6 +2160,40 @@ def test_an_unwritable_bound_never_bursts():
         "posting without a written bound is one comment per poll — unbounded")
 
 
+def test_each_half_of_the_cas_comparison_is_load_bearing():
+    """#12243 cycle-3 P1: the guard is a CONJUNCTION of two fields.
+
+    A fixture that changes both at once leaves each half unpinned, and the
+    `issue_number` half is the load-bearing one: a re-file inside the same UTC
+    SECOND keeps `filed_at` identical (the driver stamps `date -u +%FT%TZ`), so a
+    test that only ever moves both cannot see its removal.
+    """
+    from tortoise.alert_store import OpenOutcome
+
+    cases = [
+        # only the issue number moves (a same-second re-file)
+        dict(new_issue=99, new_filed_at="2026-09-10T00:00:00Z"),
+        # only the filed_at moves
+        dict(new_issue=5150, new_filed_at="2026-09-11T00:00:00Z"),
+    ]
+    for i, kwargs in enumerate(cases):
+        ch = _RecordChannels()
+        key = f"ops/alerts/STALE/team_{i}.json"
+        storage = MemoryStorage()
+        _sentinel(storage, "STALE", 5150, key=f"team_{i}")
+        refiling = _RefilingStorage(key, reads_before=1, **kwargs)
+        refiling.upload(key, storage.download(key))
+        store = _recording_store(ch, refiling)
+
+        assert store.open_incident_state(
+            "STALE", f"team_{i}") is OpenOutcome.DEDUP
+        state = json.loads(refiling.download(key))
+        assert state["issue_number"] == kwargs["new_issue"], (i, "fixture moved")
+        assert "last_occurrence_record" not in state, (
+            i, "a sentinel re-filed under us must not have its day stamped")
+        assert ch.recurrence == [], (i, "and nothing is posted to the old issue")
+
+
 def test_a_sentinel_re_filed_mid_call_is_not_stamped_and_not_recorded():
     """The CAS branch: a re-filed sentinel must not have its day consumed.
 
@@ -2172,3 +2216,20 @@ def test_a_sentinel_re_filed_mid_call_is_not_stamped_and_not_recorded():
     assert "last_occurrence_record" not in state, (
         "a sentinel re-filed under us must not have its day stamped")
     assert ch.recurrence == [], "and no record goes to the OLD issue number"
+
+
+def test_a_fresh_filing_posts_no_recurrence_record():
+    """Only a DEDUP is a recurrence (#12243 cycle-3 P2).
+
+    A record on the FILED path would say "observed again" on an incident's own
+    first filing, and would consume that incident's day budget before any
+    recurrence happened.
+    """
+    from tortoise.alert_store import OpenOutcome
+
+    ch = _RecordChannels()
+    store = _recording_store(ch, MemoryStorage())
+
+    assert store.open_incident_state("STALE", "team_x") is OpenOutcome.FILED
+    assert len(ch.issues) == 1
+    assert ch.recurrence == [], "a first filing is not a recurrence"

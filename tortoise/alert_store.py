@@ -652,9 +652,12 @@ class AlertStore:
         BEST-EFFORT, in BOTH directions, and each is bounded:
 
         * **Silence (lost record).** The day is claimed before the post, so a post
-          that fails -- or a claim that cannot be written -- costs that UTC day's
-          record for that incident. That is the price of the attempt bound below;
-          the alternative is an unbounded storm.
+          that fails costs that UTC day's record for that incident — the claim
+          landed, and it is the claim that bounds the attempts. A claim that
+          cannot be WRITTEN costs only that observation: nothing is posted while
+          the write keeps failing, and the first poll after it recovers records.
+          Both are the price of the attempt bound below; the alternative is an
+          unbounded storm.
         * **Over-report.** The day is a field on a sentinel object shared with the
           bash driver, which rewrites it with an unconditional GET->PUT (no ETag
           guard), so a lost update can re-record once later in the day, and two
@@ -732,13 +735,17 @@ class AlertStore:
         object still matches the snapshot, and not at all when it disappeared
         (resolved under us).
 
-        Never raises: it ANSWERS instead. A refusal (object gone, re-filed under
-        us, write failed) is logged and costs this observation's record, never the
-        poll.
+        Never raises: it ANSWERS instead. Every refusal is logged — a re-file or a
+        failed write at WARNING, a resolved sentinel at INFO — and costs this
+        observation's record, never the poll.
         """
         try:
             current = _read_json(self._storage, key)
             if not current:
+                logger.info(
+                    "recurrence record: %s is gone (resolved under us) — nothing "
+                    "to record", key,
+                )
                 return False
             if (current.get("issue_number") != state.get("issue_number")
                     or current.get("filed_at") != state.get("filed_at")):
