@@ -330,15 +330,42 @@ class TestDe2e6ReviewFixes:
     def test_no_double_nand_same_session(self, sdk, tmp_path):
         """P2: both sides of a contradictory pair carrying refute cues →
         exactly ONE NAND operator (was: wired twice, doubling the EP
-        penalty)."""
-        _mine(sdk,
-              "Alice: We decided to use port 16379.\nBob: We decided to revert to port 16380 because the port 16379 decision was wrong.\n",
-              "s-dbl", T1, str(tmp_path))
-        rows = sdk._get_proj().g.query(
+        penalty).
+
+        ⛔ #12067 UPDATE, and the reason the old expectation is now false: this
+        pair already carries an IMPL from the SAME mining pass, and the CLOSED
+        MECHANISM SET refuses a DIFFERENT mechanism on one pair — so the NAND is
+        not written at all (measured: 0 NAND, 1 IMPL) and the refusal is NAMED in
+        the mining report (`temporal_nand_refused`) instead of escaping
+        `_temporal_wire` into `mine`'s `except Exception`, which used to abandon
+        the whole temporal pass for the batch and zero every temporal key.
+
+        ⛔ WHAT THIS TEST DOES **NOT** PROVE, stated so a later lane cannot read
+        it as cover (review round 9, P3 — measured): the closure refuses only a
+        DIFFERENT mechanism on the pair (`_mechanism_conflicts_for_pairs` skips
+        `otype == mechanism`), so a SECOND NAND over one pair is still accepted.
+        The "wired twice" defect this test is titled for is therefore still
+        prevented by `wired_pairs` in `_temporal_wire`, NOT by the closure — and
+        this fixture cannot tell them apart, because the IMPL is already on the
+        pair, so both arms produce 0 NAND either way. Do not delete
+        `wired_pairs` on the strength of this test; the same-mechanism duplicate
+        needs its own pin.
+        """
+        report = _mine(
+            sdk,
+            "Alice: We decided to use port 16379.\nBob: We decided to revert to port 16380 because the port 16379 decision was wrong.\n",
+            "s-dbl", T1, str(tmp_path))
+        nand_rows = sdk._get_proj().g.query(
             "MATCH (op:Point {is_operator:true})-[:NAND]->(:Point) "
             "RETURN count(DISTINCT op)"
         ).result_set
-        assert rows[0][0] == 1, f"exactly one NAND operator expected, got {rows}"
+        assert nand_rows[0][0] == 0, nand_rows
+        mech = sdk._get_proj().g.query(
+            "MATCH (op:Point {is_operator:true}) RETURN op.op_type"
+        ).result_set
+        assert [r[0] for r in mech] == ["IMPL"], mech
+        assert report["temporal_wired"] == 0, report
+        assert report.get("temporal_nand_refused"), report
 
     def test_yaml_date_object_no_crash(self, sdk, tmp_path):
         """P2: unquoted YAML date (datetime.date) must not crash the pass —

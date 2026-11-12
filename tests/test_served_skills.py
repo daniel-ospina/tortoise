@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 
+from tests._legacy_mechanisms import legacy_nand_operator
 from tortoise.sdk import TortoiseSDK
 from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 from tests._embedded import skip_if_no_falkor
@@ -328,9 +329,13 @@ def test_1652_contradiction_reads_answer(sdk):
     edge into a superseded point, and the structure gate the skill requires."""
     left = sdk.create_point("statement", "we keep the shared connection pool")
     right = sdk.create_point("statement", "each tenant gets a dedicated pool")
-    # Edge-level: the same pair is BOTH implied and mutually excluded.
+    # Edge-level: the same pair is BOTH implied and mutually excluded. #12067
+    # closes the mechanism set, so this shape is written RAW — it exists in every
+    # graph written before the closure, and `review_connections` does no backfill
+    # by ruling, so the detection step must still answer (see
+    # tests/_legacy_mechanisms.py).
     sdk.create_operator("IMPL", left["id"], [right["id"]])
-    sdk.create_operator("NAND", left["id"], [right["id"]])
+    legacy_nand_operator(sdk, left["id"], right["id"], label="opposes")
     flags = sdk.review_connections(mode="prune")
     contradictory = [f for f in flags["prune"] if f["issue"] == "contradictory"]
     assert contradictory, (
