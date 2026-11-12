@@ -5322,8 +5322,8 @@ def test_update_entity_clearing_the_pair_clears_the_mirror(sdk, tmp_path):
 #    "IS the declared PRIOR mean" is false for exactly the row
 #    `set_point_baseline(3.0, 1.0)` + `update_point(confidence=0.9)`: the
 #    declared prior mean is 0.75 and the field reads 0.9. That sentence stood
-#    at `search_engine.py`:347 while the precedence at `search_engine.py`:5539
-#    (`elif mirror is not None:`) said otherwise — 5,192 lines away, not the
+#    at `search_engine.py`:347 while the precedence at `search_engine.py`:5540
+#    (`elif mirror is not None:`) said otherwise — 5,193 lines away, not the
 #    "nine hundred" an earlier revision of this note claimed. `origin/main`'s belief prose carried TEN unqualified matches
 #    (`search_engine.py` 6, `why.py` 2, `volunteer.py` 1, `sdk.py` 1 — the
 #    numbers this guard measures, not a count taken on trust), plus one
@@ -5676,19 +5676,39 @@ def _claim_sentence(window: str, claim_at: int = 0) -> str:
 #:    and a readable mirror leads it"                                   CERTIFIED
 #:   the `head_truncated` counterexample in `_qualified` with an `e.g.`
 #:   inserted inside the lookbehind                                    CERTIFIED
-#: `e.g.` is common in exactly this prose (`volunteer.py`:88 and
-#: `search_engine.py`:1487 both carry "e.g. the decide-part system default").
+#: `e.g.` is common in exactly this prose — `volunteer.py`:438 carries
+#: "``baseline=True``, e.g. the decide-part system default", and
+#: `search_engine.py`:2095 carries "e.g. the ask lane's decoration gate".
+#: ⚠️ CLOSED LIST, named residual (fail-OPEN for an untabled form): a form not in
+#: this table is still read as a sentence end, which cuts a restriction out of
+#: the claim's own sentence exactly as before. Measured bypass: `viz.`
+#: ("the mirror, ignored viz. whenever a pair exists, …" CERTIFIED). The set is
+#: the forms this prose style actually produces, re-measured over the five
+#: modules (`e.g.`, `i.e.`, `al.`, `etc.`, `resp.`); it is a tripwire over the
+#: wording the tree uses, not a grammar proof — the same standing as
+#: `_MIRROR_INVERSIONS`.
 _ABBREVIATED = re.compile(
-    r"(?:\be\.g|\bi\.e|\bcf|\bvs|\betc|\bal|\bapprox|\bresp|\bFig|\bEq)\.$",
+    r"(?:\be\.g|\bi\.e|\bcf|\bvs|\betc|\bal|\bapprox|\bresp|\bviz|\bpp|\bFig|\bEq)\.$",
     re.IGNORECASE)
 
 
 def _real_break(prose: str, at: int) -> bool:
     """Whether `prose[at]` ends a SENTENCE — punctuation, space, then a non-space.
 
-    `at` must be the punctuation itself. An ABBREVIATION is punctuation followed
-    by a space and a word, which is exactly the shape a naive boundary test
-    reads as a sentence end — so it is named here rather than assumed.
+    `at` must be the punctuation itself. A TABLED abbreviation is punctuation
+    followed by a space and a word — exactly the shape a naive boundary test
+    reads as a sentence end — so it is named here rather than assumed, and it is
+    a non-break only when the continuation is lowercase (a continuation).
+
+    ⚠️ BOTH directions are live, and this is the only place in the guard that
+    can lengthen a window (the fail-OPEN direction):
+      * a tabled abbreviation followed by a lower-case word is a CONTINUATION —
+        "…, ignored e.g. whenever a pair exists, …" — so it must NOT break;
+      * the same abbreviation followed by a capitalised word IS a sentence end —
+        "…, wasDerivedFrom, etc. These edges connect …" (`sdk.py`:22276-22277),
+        and the same shape at `sdk.py`:8423 — so it must break. Suppressing it
+        merged two sentences and let a qualifier in the second satisfy a claim
+        in the first (measured: window 652 chars where the true sentence is 567).
     """
     if at + 1 >= len(prose) or prose[at] not in ".!?":
         return False
@@ -5699,7 +5719,9 @@ def _real_break(prose: str, at: int) -> bool:
         k += 1
     if k >= len(prose):
         return True
-    return _ABBREVIATED.search(prose[:at + 1]) is None
+    if _ABBREVIATED.search(prose[:at + 1]) is None:
+        return True
+    return prose[k].isupper()
 
 
 def _last_break_before(prose: str, at: int) -> int:
@@ -5985,6 +6007,22 @@ def test_the_prior_mean_guard_refuses_a_fragment_at_the_window_head(monkeypatch)
                 "x" * 200, "x" * 190 + " e.g. " + "x" * 10, 1)), (
         "an `e.g.` inside the lookbehind silenced the head-edge check — a false "
         "PASS on the very counterexample this test pins")
+    # (f) …and an UNTABLED form is still a break, so the table is the closed list
+    # its note says it is. `viz.` was CERTIFIED before it was added (measured).
+    assert scan("The ``n.confidence`` mirror, ignored viz. whenever a pair exists, so "
+                + claim + ", and a readable mirror leads it.\n"), (
+        "an abbreviation outside the table was read as a continuation, cutting a "
+        "restriction out of the claim's own sentence — a false PASS")
+    # (g) …while an abbreviation at a REAL sentence end must still break, or the
+    # window LENGTHENS (the fail-open direction) and a qualifier in the NEXT
+    # sentence qualifies this one. Measured at `sdk.py`:22276-22277. The claim
+    # sits in the FIRST sentence and the mirror qualifier in the SECOND, so this
+    # discriminates the merge: without the break the two merge and it certifies.
+    assert scan("A prior-only claim's " + claim
+                + ", etc. A readable ``n.confidence`` mirror LEADS it.\n"), (
+        "a sentence ending in a tabled abbreviation was merged with the next "
+        "sentence, which lengthens the window and admits a cross-sentence "
+        "qualifier — a false PASS")
 
 
 def test_the_not_only_wording_flips_from_a_false_pass_to_a_false_block():
