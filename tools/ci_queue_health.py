@@ -533,14 +533,16 @@ class QueuedRun:
     #:
     #: Three-valued ON PURPOSE, and the asymmetry is the safety argument:
     #:
-    #:   * ``False`` — the jobs were READ, there was at least one, and EVERY one is
-    #:     `completed`, AND the run's own `updated_at` has been STILL for
-    #:     `JOB_SETTLE_SECONDS` (`_settled_still`). Only a positive observation may
-    #:     downgrade a run, and the job list alone is not one: a DYNAMIC matrix creates
-    #:     its shards only after its parent job completes, so a list containing nothing
-    #:     but the finished parent is a snapshot of a run that is about to expand, not a
-    #:     proof that it is executing nothing. The stillness test is what separates that
-    #:     seconds-wide window from the 7-day-frozen runs the clause exists for.
+    #:   * ``False`` — the jobs were READ, there was at least one, EVERY one is
+    #:     `completed`, the list is PROVABLY COMPLETE, AND the run's own `updated_at` has
+    #:     been STILL for `JOB_SETTLE_SECONDS` (`_settled_still`). Only a positive
+    #:     observation may downgrade a run, and the job list alone is not one: a DYNAMIC
+    #:     matrix creates its shards only after its parent job completes, so a list
+    #:     containing nothing but the finished parent is a snapshot of a run that is about
+    #:     to expand, not a proof that it is executing nothing. The stillness test separates
+    #:     that seconds-wide window from the 7-day-frozen runs the clause exists for, and the
+    #:     completeness test keeps a page whose unread remainder could hold the live shard
+    #:     from proving anything.
     #:   * ``True`` — at least one non-terminal job. Executing.
     #:   * ``None`` — NOT MEASURED: a failed jobs read, an empty jobs list, a malformed or
     #:     status-less job row, a payload whose jobs belong to a DIFFERENT attempt, a list
@@ -693,12 +695,14 @@ class QueueHealth:
     #: "the reason line says which" of the two remedies to pull, and the reason line only
     #: offered a disjunction — no field anywhere could answer it, because `has_live_job` is
     #: `None` in every abstention case by design.
-    #: ⛔ THE SECOND BUCKET NOW CARRIES THREE CAUSES, NOT ONE (review): the read FAILED, the
-    #: read returned `False` on a run that had not been still for `JOB_SETTLE_SECONDS`
-    #: (downgraded by `read_health`), or a proof whose completeness could not be
-    #: established. They share ONE remedy — RETRY once the run has settled — which is why
-    #: they share a bucket, and the emitted text names all of them rather than claiming the
-    #: read failed (it may have SUCCEEDED and simply proved nothing yet).
+    #: ⛔ THE SECOND BUCKET CARRIES EVERY ABSTENTION AN **ATTEMPTED** RUN CAN PRODUCE, and
+    #: they all share ONE remedy — RETRY once the run has settled — which is why they share a
+    #: bucket. The CANONICAL list lives in `read_run_live_job`'s Returns block; it is NOT
+    #: re-enumerated here on purpose. Three earlier revisions each restated it and each
+    #: restatement was incomplete (failed read only; then + settle gate; then + unusable
+    #: list), because the set is the CALLEE's and drifts every time the callee learns a new
+    #: abstention. If you are about to write the list here, add it to that block instead —
+    #: one list, one owner.
     #: These are `None` when the caller did not probe (nothing to distinguish), and the two
     #: ints otherwise; they always sum to `pr_running_unmeasured`.
     pr_running_unmeasured_unprobed: int | None = None
@@ -1915,13 +1919,13 @@ def read_run_live_job(
     """Does run ``run_id`` still have a job that has not COMPLETED? (#12037)
 
     The evidence a run's `status` string cannot give. A run whose every **VISIBLE** job is
-    `completed` **and whose own `updated_at` has been STILL for `JOB_SETTLE_SECONDS`** is
-    running NOTHING, no matter what `status` reports — measured on three runs frozen at
-    `in_progress` since 2026-11-05 while their only job completed the same day, and
-    unrepairable: `/cancel` and `/force-cancel` both answer 409 with contradictory
-    reasons. ⛔ The stillness half is NOT decoration — see the candidate-proof bullet in
-    the Returns block below: an all-`completed` list WITHOUT it can describe a dynamic
-    matrix that is about to expand.
+    `completed`, whose list is **PROVABLY COMPLETE**, and whose own `updated_at` has been
+    STILL for `JOB_SETTLE_SECONDS` is running NOTHING, no matter what `status` reports —
+    measured on three runs frozen at `in_progress` since 2026-11-05 while their only job
+    completed the same day, and unrepairable: `/cancel` and `/force-cancel` both answer 409
+    with contradictory reasons. ⛔ All THREE halves are load-bearing, and this summary is
+    the sentence a future caller is most likely to read and act on — see the candidate-proof
+    bullet in the Returns block below for why each one is required.
 
     Returns ``True`` (a non-terminal job exists), ``False`` (jobs READ, non-empty, all
     `completed`), or ``None`` when NOT MEASURED. ``None`` is
@@ -1930,18 +1934,22 @@ def read_run_live_job(
 
       * ⛔ ``False`` IS A **CANDIDATE** PROOF, NOT A FINAL ONE, AND THE CALLER MUST
         CORROBORATE IT. An all-``completed`` list does not by itself mean the run is
-        executing nothing: this repo's test matrix is DYNAMIC
-        (``python-ci.yml`` instantiates ``test``/``test-slow``/``test-carve-out`` from
-        ``fromJSON(needs.changes.outputs.*_matrix)``), so between the parent job
-        finishing and the shards being created, this function's own guards all pass on
-        a single ``completed`` row while the run is about to execute. The corroboration
-        is the run's own ``updated_at`` STILLNESS (``_settled_still`` /
-        ``JOB_SETTLE_SECONDS``), which only the caller can apply because only the
-        caller holds the run projection. A ``False`` that is not corroborated MUST be
-        treated as ``None`` — subtracting an unproven run manufactures ``PR-STARVED``,
-        which authorises a destructive cancel-then-rerun. ``read_health`` is the only
-        production caller and applies it; a SECOND caller that skips it reintroduces
-        the defect this module exists to remove.
+        executing nothing, for TWO independent reasons. (1) This repo's test matrix is
+        DYNAMIC (``python-ci.yml`` instantiates ``test``/``test-slow``/``test-carve-out``
+        from ``fromJSON(needs.changes.outputs.*_matrix)``), so between the parent job
+        finishing and the shards being created this function's own guards all pass on a
+        single ``completed`` row while the run is about to execute. (2) A returned page
+        can be entirely ``completed`` while an unread page holds the live shard — and
+        jobs are returned in creation order, so that is exactly the shape a growing
+        matrix produces. Requirement (2) is why this function refuses any list it cannot
+        PROVE complete; requirement (1) cannot be settled from inside this function at
+        all, because the corroborating evidence is the run's own ``updated_at``
+        STILLNESS (``_settled_still`` / ``JOB_SETTLE_SECONDS``) and only the caller holds
+        the run projection. A ``False`` that is not corroborated MUST be treated as
+        ``None`` — subtracting an unproven run manufactures ``PR-STARVED``, which
+        authorises a destructive cancel-then-rerun. ``read_health`` is the only
+        production caller and applies it; a SECOND caller that skips it reintroduces the
+        defect this module exists to remove.
 
       * the jobs read FAILED (``MeasureError``, a hang, a bad payload, auth) — swallowed
         here on purpose: one run's jobs surface is a refinement of one count, and raising

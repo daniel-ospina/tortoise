@@ -3220,8 +3220,10 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
     tell the causes part. Round 8 measured that nothing pinned the replacement. Round 10 measured
     that the *number* of annotations was unbounded. Round 13 measured that the flag alone is not
     enough either: "unmeasured" is either "the budget never reached the run" (raise
-    --max-job-probes) or "the jobs read failed" (retry — a bigger budget probes more runs that
-    fail the same way), and the arm must name the one that applies, not both.
+    --max-job-probes) or "the run's read did not PROVE it idle" (retry once it has settled —
+    a bigger budget probes more runs the same way), and the arm must name the one that
+    applies, not both. The canonical list of what "did not prove it idle" covers lives in
+    `read_run_live_job`'s Returns block; it is NOT re-enumerated here.
     """
     arm = _pr_unwitnessed_arm_and_branches()
 
@@ -3310,7 +3312,9 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
         assert "RETRY" not in budget_only, budget_only
         assert "--max-pages" not in budget_only.replace("NOT --max-pages", ""), budget_only
 
-        # the RETRY lever, ONLY when the reads themselves failed — a bigger budget cannot help
+        # the RETRY lever, ONLY when the reads did not prove the runs idle — a bigger budget
+        # cannot help (a failed read, an unusable list, or a run not yet still are all fixed by
+        # retrying once it has settled)
         read_only = census({"pr_running_unmeasured_unprobed": 0,
                             "pr_running_unmeasured_unread": 3})
         assert "RETRY the reading" in read_only, read_only
