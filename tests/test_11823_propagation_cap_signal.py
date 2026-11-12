@@ -738,8 +738,9 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     `NOT (n)-[:IMPL|NAND]-()` regardless of its status, and a fixture with no
     NAND edge cannot observe the NAND half either). So the fixture now carries
     the observables the constant's two vocabularies need: an UN-EDGED draft
-    Point (status drift reddens) and a NAND-only-edged claim (narrowing
-    `IMPL|NAND` to `IMPL` reddens).
+    Point (a REMOVED or RE-SPELLED status reddens; an ADDITIVE widening of the
+    vocabulary does not — see the body comment below) and a NAND-only-edged
+    claim (narrowing `IMPL|NAND` to `IMPL` reddens).
 
     ⛔ What that fixture CANNOT observe is named too, rather than implied away:
     every Point here carries an explicit status, so the constant's `status IS
