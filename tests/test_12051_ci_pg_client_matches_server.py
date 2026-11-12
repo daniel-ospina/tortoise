@@ -20,7 +20,7 @@ the diff caused it, and the message reads as a defect in the record path — whi
 is why the pin is ASSERTED in the job (`pg_dump --version` / `pg_restore
 --version`, `::error::` + `exit 1`) rather than merely hoped for.
 
-This guard pins FIVE things about `test-record-postgres`, none of which the
+This guard pins SIX things about `test-record-postgres`, none of which the
 other CI-surface guards cover:
 
 1. **The two image pins agree** (the record server and D8's scratch server must
@@ -39,6 +39,13 @@ other CI-surface guards cover:
 5. **The pin runs BEFORE the leg**, because `$GITHUB_PATH` only affects
    subsequent steps: a pin placed after the pytest step is inert, and the job
    would red for a reason no diff explains.
+6. **The refusal of an unreachable block fires on exactly the never-runs
+   forms and on nothing else** (`REFUSAL_POLARITY` /
+   `test_the_refusal_polarity_is_never_runs`). A scan that over-refuses reds a
+   correct workflow, which is as damaging as one that under-refuses: the first
+   cut here refused every bare constant, so `while true; do … break; done` (the
+   ordinary retry loop) and `cmd && true || fallback` were reported as dead code
+   that runs.
 
 A behavioural test of the mismatch itself would need two live servers and two
 client majors, so the assertion is made where the version is decided: the
@@ -56,12 +63,24 @@ producer, a nested branch, the leg's own PATH export, a non-literal client dir,
 a binary replaced out of the pinned directory). The class that REMAINS open is
 not a tenth spelling — it is the one a text guard cannot reach:
 
-- **Dead code reads as live.** A `$GITHUB_PATH` write inside `if false; then …
-  fi` or a `: <<'EOF'` heredoc is present in the text, so the rows that require
-  it stay green although nothing is appended (measured, round 9). Deciding
-  whether a shell line EXECUTES needs a shell, not a regex. The compensating
-  control is the pin's own in-job assertion: it prints `pg_dump --version`, so a
-  pin that never took effect is visible in the log of the step that tried.
+- **Dead code reads as live.** A `$GITHUB_PATH` write (or the fail-closed
+  branch) inside a `: <<'EOF'` heredoc, or inside a guard whose condition this
+  module cannot read as a literal — `if [ 1 -eq 2 ]; then`, a
+  runtime-derived test — is present in the text, so the rows that require it
+  stay green although nothing is appended. Deciding whether a shell line
+  EXECUTES needs a shell, not a regex.
+
+  ⛔ The BARE-CONSTANT spellings are no longer in this class (#12069):
+  `_unreachable_guards()` refuses an enclosing `if`/`elif`/`while` + `false`
+  (or `! true`), `until` + `true` (or `! false`), `false && …`, and a
+  statement-position `true || …` over `[pin, leg)` — and refuses NOTHING else,
+  because `if true; then`, `until false; do`, `if ! false; then` and
+  `while true; do … break; done` all RUN. Refusing those is a false RED, which
+  is the same defect class as passing a broken row; `REFUSAL_POLARITY` below
+  pins both directions as committed test cases. The compensating control for
+  whatever is still unreachable is the pin's own in-job assertion: it prints
+  `pg_dump --version`, so a pin that never took effect is visible in the log of
+  the step that tried.
 - **A path built at runtime is invisible.** `b=/usr/lib/postgresql; ln -sf
   "$b/17/bin/pg_dump" …/16/bin/pg_dump` names no major this guard can read. What
   IS refused is the mutating VERB carrying a client binary name, at or after the
@@ -418,10 +437,11 @@ def _unreachable_guards(steps: list[dict], start: int, end: int) -> list[str]:
     `if true; then` — refusing those reds a correct tree, which is the same
     defect class as passing a broken one. `CONSTANT_GUARD_RE` and
     `DEAD_CHAIN_RE` are therefore both scoped to the never-runs forms, and
-    `tests/test_12051_ci_pg_client_matches_server.py`'s own mutate.py carries the
-    polarity table that pins it.
+    `REFUSAL_POLARITY` at the foot of this module pins both directions as a
+    committed, parametrized test — deliberately NOT in an out-of-repo harness,
+    because `.worktree-report/` is gitignored and a pin that is not committed
+    pins nothing once the branch merges (#12069 review).
     """
-
     found: list[str] = []
     for index in range(start, end):
         if not 0 <= index < len(steps):
@@ -551,7 +571,7 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     assert not unreachable, (
         "a step between the client install and the record leg cannot RUN the "
         f"code it is graded on: {unreachable!r}. A guard whose condition is a "
-        "literal constant (`if false`, `elif true`, `while false`, `until "
+        "literal constant (`if false`, `elif false`, `while false`, `until "
         "true`) or a dead chain (`false && …`, `true || …`) makes the prepend "
         "and the fail-closed branch present AND inert, so the leg resolves on "
         "the runner image's own client while every row here stays green "
@@ -820,7 +840,19 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     skippable = [
         index
         for index in sorted(
-            {index for index, _, _ in _github_path_writes(steps)}
+            {
+                index
+                for index, _, _ in _github_path_writes(steps)
+                # ⛔ WINDOWED like `hits` (#12069 review). A PRE-PIN write of an
+                # unrelated directory cannot outrank the pin (later wins), and a
+                # post-leg write cannot reach the leg — so a best-effort prepend
+                # step before the pin that is ALLOWED TO FAIL is none of this
+                # row's business. Job-wide, that unrelated step red this row
+                # with a message saying it "carries the client pin and its
+                # assertion", which it carries neither of (measured), and which
+                # row 3's docstring explicitly documents as staying green.
+                if pin_index <= index < leg_start
+            }
             | {index for index, _ in hits}
         )
         if steps[index].get("continue-on-error")
@@ -902,3 +934,101 @@ def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
         f"{min(leg_indexes)} — a `$GITHUB_PATH` prepend after the leg is inert, "
         "so the leg would run on the runner image's own client"
     )
+
+
+#: The refusal's POLARITY, pinned where the guard SHIPS (#12069 review).
+#:
+#: `_unreachable_guards()` asks one question — "can the body this row grades ever
+#: be entered?" — and answers it, for a bare-constant condition, from the text.
+#: The contract is therefore "the body is NEVER ENTERED", not "the line names a
+#: constant": refusing a block that RUNS is a false RED, and a false RED is the
+#: same defect class as a false PASS, because it teaches the reader that a correct
+#: workflow is broken. The first cut of this scan refused every bare constant and
+#: got FIVE of the lines below wrong (`if true`, `until false`, `if ! false`,
+#: `while true … break`, and `cmd && true || fallback`) — each measured as a real
+#: red on a correct tree before it was corrected.
+#:
+#: ⛔ THIS TABLE IS A COMMITTED TEST, deliberately not an example in an external
+#: harness: the lane's harness lives under `.worktree-report/`, which `.gitignore`
+#: excludes, so a pin kept there evaporates the moment the branch merges and the
+#: next editor is free to widen the regexes back to the false-RED form with every
+#: row still green. Both directions are asserted, because only both directions
+#: describe the contract.
+REFUSAL_POLARITY: list[tuple[str, str, bool, str]] = [
+    # (id, line, must_be_refused, why)
+    ("if-false", "if false; then", True, "body never entered"),
+    ("if-true", "if true; then", False, "body ALWAYS runs - refusing this is a false RED"),
+    ("elif-false", "elif false; then", True, "body never entered"),
+    ("elif-true", "elif true; then", False, "body runs whenever reached"),
+    ("while-false", "while false; do", True, "body never entered"),
+    ("while-true", "while true; do", False, "body runs"),
+    (
+        "while-true-break",
+        "while true; do sudo apt-get update -qq && break; sleep 3; done",
+        False,
+        "the ordinary retry loop: it RUNS and it stops",
+    ),
+    ("until-true", "until true; do", True, "body never entered"),
+    ("until-false", "until false; do", False, "body runs (forever)"),
+    ("if-not-true", "if ! true; then", True, "negated constant -> body never entered"),
+    ("if-not-false", "if ! false; then", False, "negated constant -> body always runs"),
+    ("until-not-false", "until ! false; do", True, "negated constant -> body never entered"),
+    ("until-not-true", "until ! true; do", False, "negated constant -> body runs"),
+    ("dead-and", "false && echo x", True, "the right-hand command never runs"),
+    ("dead-or", "true || exit 1", True, "the right-hand command never runs"),
+    (
+        "dead-or-after-semicolon",
+        "sudo echo hi; true || exit 1",
+        True,
+        "statement position: the right-hand command never runs",
+    ),
+    (
+        "harmless-and-true-or-fallback",
+        'sudo apt-get update -qq && true || echo "update failed, continuing"',
+        False,
+        "the graded command RUNS and the fallback runs when it fails",
+    ),
+    ("harmless-or-true", "sudo apt-get update -qq || true", False, "the graded command still runs"),
+    (
+        "real-prepend",
+        'echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"',
+        False,
+        "the pinned write itself",
+    ),
+    (
+        "real-armed-branch",
+        'if [ "$major" != "16" ]; then',
+        False,
+        "the armed branch: a `[` test, whose truth no text can read",
+    ),
+    ("real-loop-head", "for tool in pg_dump pg_restore; do", False, "the real loop head"),
+]
+
+
+@pytest.mark.parametrize(
+    ("line", "must_be_refused", "why"),
+    [(line, must_be_refused, why) for _, line, must_be_refused, why in REFUSAL_POLARITY],
+    ids=[case_id for case_id, _, _, _ in REFUSAL_POLARITY],
+)
+def test_the_refusal_polarity_is_never_runs(line: str, must_be_refused: bool, why: str) -> None:
+    """The unreachable-block refusal fires on the never-runs forms and on NOTHING else.
+
+    Both directions, or the pin is worthless: an under-refusing scan restores the
+    #12051 defect (an enclosing `if false; then … fi` around the prepend left all
+    five rows green), and an over-refusing scan reds a correct workflow — which is
+    the same defect class, and is what the first cut of this scan did five times.
+    """
+    refused = bool(CONSTANT_GUARD_RE.match(line) or DEAD_CHAIN_RE.search(line))
+
+    assert refused is must_be_refused, (
+        f"`{line}` must be "
+        f"{'REFUSED as unreachable' if must_be_refused else 'ALLOWED as runnable'} "
+        f"({why}), but the scan {'refused' if refused else 'allowed'} it. "
+        "`CONSTANT_GUARD_RE` refuses only a body that is NEVER ENTERED — "
+        "`if`/`elif`/`while` + `false` or `! true`, `until` + `true` or `! false` — "
+        "and `DEAD_CHAIN_RE` only `false && …` (any position) and a "
+        "statement-position `true || …`. Widening either to 'any bare constant' "
+        "reds `while true; do … break; done`, which is the ordinary retry loop "
+        "(#12069 review)"
+    )
+
