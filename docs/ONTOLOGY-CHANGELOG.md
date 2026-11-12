@@ -125,9 +125,11 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > there is none —
 > `archived` **and** `superseded` both leave retrieval and belief (`TERMINAL_STATUS_VALUES` → `TERMINAL_EXCLUDED_STATUSES`), so a
 > third terminal word changes nothing a reader or a retriever would act on. ⚠️ That argument does not rest on terminal being
-> frozen: it is not — `update_entity`'s Point arms carry no lifecycle guard, so a `retracted` Point can be flipped to `live` and an
-> `archived` Object given `status='live'` (recorded at `docs/ONTOLOGY.md:1177`, tracked as #9649). Policy B therefore stays
-> **unimplemented**, and when it is built it needs a word *then*, with a producer and a revival path that respects #9649 — its own
+> frozen: it is not — `update_entity`'s Point arms carry no lifecycle guard, so a `retracted` Point can be flipped to `live`
+> (`docs/ONTOLOGY.md:1177`, tracked as #9649), and the `:Object` write path carries no status vocabulary guard at all, so an
+> `archived` Object can be given `status='live'` (`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md:1076`, tracked as #10371 — a
+> Point-arm fix cannot close it). Policy B therefore stays
+> **unimplemented**, and when it is built it needs a word *then*, with a producer and a revival path that respects both — its own
 > change, not this one. **`archived` does not close policy B**: it is the retirement route, not the replacement-not-yet-known one,
 > which is why the clause above is buildable without an expansion **and** why `sdk.py`'s over-block note still stands for that
 > shape (`:71-75`, and the owner's relay, `#11824` comment `6815950417`: *"`archived` does not close policy B"*).
