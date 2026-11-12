@@ -79,16 +79,28 @@ def test_counts_match_an_independent_query(sdk):
     (the ratio falls, `no_belief` rises, BOTH stay in range), so an inflated
     `ep_reachable_claims` would pass them. Pinning each count against its own
     query is what reddens on one.
+
+    ⛔ The fixture therefore carries an EDGED-BUT-UNREACHABLE claim (a direct
+    `IMPL` edge to a DRAFT endpoint). Without it `points_edged == ep_reachable`
+    and every number below is invariant under the canonical mixed-population
+    mutation (`reachable = points_edged`) — measured: this test stayed GREEN on
+    it and only `test_an_edged_but_unreachable_claim_is_not_invisible` reddened,
+    which is the §6 defect one file over (a test credited with a pin it does not
+    hold). With the claim present, that mutation reds HERE.
     """
     _chain(sdk, 3)
     _islands(sdk, 4)
+    unclassified = _claim(sdk, "direct edge to a draft")
+    draft = sdk.create_point("statement", "draft neighbour", dedup=False,
+                             status="draft")["id"]
+    sdk.create_direct_edge("IMPL", unclassified, draft)
     p = _prop(sdk)
     g = sdk._get_proj().g
     live = int(g.query(
         "MATCH (n:Point) WHERE (n.is_operator IS NULL OR n.is_operator = false) "
         "AND (n.status IS NULL OR n.status <> 'draft') RETURN count(n)"
     ).result_set[0][0])
-    assert p["graph_live_claims"] == live == 7
+    assert p["graph_live_claims"] == live == 8
     # The denominator's rule, spelled from the LABEL LIST rather than from
     # `epistemic_disjunction`'s own text, so this is an independent statement of
     # it. The presence half uses `ep_has_belief_cypher` ON PURPOSE: #11702 makes
@@ -113,7 +125,10 @@ def test_counts_match_an_independent_query(sdk):
     assert p["ep_reachable_claims"] == int(reach[0]) == 3
     assert p["belief_present"] == int(reach[1]) == 1
     assert p["operator_less_claims"] == live - edged == 4
-    assert p["unclassified_claims"] == edged - int(reach[0]) == 0
+    # THE discrimination §2 needs: `points_edged` (4) and the denominator (3)
+    # are DIFFERENT, so the mixed-population mutation cannot satisfy both.
+    assert edged == 4 > int(reach[0]) == 3
+    assert p["unclassified_claims"] == edged - int(reach[0]) == 1
     assert p["unavailable"] is None
 
 
