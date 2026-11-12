@@ -436,9 +436,12 @@ def test_every_embedded_label_has_a_query_path():
 #: `cache_projection.node_statement` stores its vector through an INTERPOLATED property name
 #: (`f", n.{prop} = {form}"`), which is one of the shapes `_EMBED_WRITE` and the AST pass cannot
 #: decide — so the writer was ABSENT from `embedding_writers()` and a `:Session` vector reached the
-#: graph while this row printed `MET` / `stored-without-a-query-path: none`. The two tests below
-#: are that hole's closure: the first pins that the row MEASURES the projection at all (and that
-#: the measurement is non-vacuous), the second that removing the guard turns the row RED.
+#: graph while this row printed `MET` / `stored-without-a-query-path: none`. The tests below are that
+#: hole's closure: the first pins that the row MEASURES the projection at all (and that the
+#: measurement is non-vacuous); the second that emptying the guard turns the row RED; the third that
+#: the probe's THIRD (directly-built `RecordNode`) door is measured; the fourth that the PLANTED
+#: property set is derived rather than the literal `embedding`; and the fifth that an unbuildable
+#: label HOLDS the row instead of crashing it.
 
 
 def test_row_two_MEASURES_the_cache_projection_by_running_it():
@@ -479,20 +482,20 @@ def test_re_introducing_the_session_vector_flips_row_two_to_NOT_MET(monkeypatch)
     assert "stored-without-a-query-path: ['Session']" in row.observed
 
 
-def test_deleting_ONLY_the_writers_check_still_reds_row_two(monkeypatch):
-    """The falsifier for the SECOND gate (`#11747` review, finding 5).
+def test_the_PROBES_direct_writer_door_is_what_this_pin_measures(monkeypatch):
+    """The falsifier for the probe's THIRD door (`#11747` review, finding 5).
 
-    ⛔ The pin ABOVE empties `UNSERVED_VECTOR_LABELS`, which disables BOTH gates at once — and
-    because the probe only entered through `node_from_row`, deleting `node_statement`'s check
-    ALONE left row 2 `MET`. That check is the ONLY guard on the directly-built `RecordNode`
-    door (`record_plan` is public), so a row that cannot see that door claims more than it
-    measures.
+    ⛔ WHAT THIS PIN MEASURES, stated plainly (`#11747` round-3 review, finding 4b): the probe's
+    DIRECTLY-BUILT `RecordNode` door, and nothing else. `record_plan` is public, so a caller may
+    hand the writer a node that never passed `node_from_row` — a row that cannot see that door
+    claims more than it measures.
 
-    So this pin removes just the WRITER's check and keeps the row→property drop intact (pinned
-    on the wrapper below, because both gates read the one declaration). `Session` can then reach
-    the measured set only through a node the CALLER built itself — which is why the row going
-    RED here proves the probe measures that door at all, and why removing the direct door from
-    `cache_projection_store_labels()` makes this test fail rather than pass.
+    ⚠️ It is NOT a falsifier for `node_statement`'s own check, which its old name and docstring
+    claimed. The `monkeypatch` below empties `UNSERVED_VECTOR_LABELS`, which disables BOTH gates at
+    once, and the wrapper re-applies the row→property drop by hand — so deleting
+    `node_statement`'s check from the source leaves this test GREEN. That check is pinned where it
+    is actually attributable:
+    `test_cache_projection.py::test_the_writer_refuses_a_directly_built_unserved_node`.
     """
     import tortoise.cache_projection as cp
 
@@ -525,6 +528,51 @@ def test_deleting_ONLY_the_writers_check_still_reds_row_two(monkeypatch):
     row = probe.score_path_bullet()
     assert row.verdict == "NOT MET", row.observed
     assert "stored-without-a-query-path: ['Session']" in row.observed
+
+
+def test_the_PLANTED_property_set_is_DERIVED_not_the_literal_embedding(monkeypatch):
+    """`#11747` round-3 review, finding 4a — the falsifier the derived planting was missing.
+
+    `planted = {prop: vector for prop in vector_props}` reads `cp.stored_vector_props()`, but that
+    set had exactly ONE member (`embedding`), so reverting the derivation to the old literal
+    `{"embedding": vector}` red NO row in the tree: the derivation was unfalsifiable and the
+    round-2 defect could have come back silently the day a second vector property joined the set.
+
+    So this pin MOVES the stored set to a property the literal would never plant, and keeps the
+    label served (otherwise the writer's own gate hides the store the probe must see). Nothing is
+    mocked into belief: the probe, `node_from_row` and `node_statement` all read the same patched
+    set, so the row's answer comes from the real derivation path.
+
+    ⛔ What reds: the assertion that `Session` is MEASURED. With the literal planting the row would
+    carry `embedding`, which is no longer a stored property — it lands in the `props` map, never in
+    `stmt.params` as a store clause — so the probe would see nothing and row 2 would keep printing
+    `stored-without-a-query-path: none`. The control at the end proves that half explicitly.
+    """
+    import tortoise.cache_projection as cp
+    import tortoise.record_projection as rp
+
+    monkeypatch.setattr(cp, "STORED_VECTOR_PROPS", frozenset({"embedding_v2"}))
+    monkeypatch.setattr(cp, "UNSERVED_VECTOR_LABELS", frozenset())
+
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert "Session" in measured["labels"], (
+        "the probe planted only the literal `embedding`: the projection's stored property is "
+        f"{sorted(cp.stored_vector_props())} and the store it emits was not inspected. "
+        f"Measured: {sorted(measured['labels'])}")
+    row = probe.score_path_bullet()
+    assert row.verdict == "NOT MET", row.observed
+    assert "stored-without-a-query-path: ['Session']" in row.observed, row.observed
+
+    # The control: the LITERAL planting is invisible to this row — it never reaches
+    # `stmt.params` as a store clause, which is what makes the assertion above a falsifier.
+    key_column = rp.snake(cp.KEY_PROPERTY["Session"])
+    literal = cp.node_statement(cp.RecordNode(
+        label="Session", key="dod-literal",
+        props={key_column: "dod-literal", "embedding": [0.5, 0.25]}))
+    assert "embedding_v2" not in literal.params
+    assert "embedding" not in literal.params
+    assert literal.params["props"]["embedding"] == [0.5, 0.25]
 
 
 def test_a_record_label_without_a_key_HOLDS_the_row_instead_of_crashing(monkeypatch):

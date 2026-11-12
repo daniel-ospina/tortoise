@@ -285,6 +285,51 @@ def test_a_homonymous_pair_bounded_between_labels_declares_partial():
         declaration, hits=0, key=cp.declared_key("Object", "acme")) == RESIDENCY_HOT
 
 
+def _view_with_an_unserved_vector():
+    """One `:Session` record row carrying a vector through the open-set `props` tail.
+
+    `public.session` has no `embedding` column and its `props` CHECK constrains nothing, so this
+    is the #11747 shape: a vector the cache must DROP (no query leg serves `Session`) — and the
+    one a rebuild has to REPORT, because the drop deletes something a previous cache held.
+    """
+    node = cp.node_from_row("Session", {"id": "s-1", "turn_count": 2,
+                                        "props": {"embedding": [0.5, 0.25]}})
+    assert node.dropped_vectors, node.props  # non-vacuity: the drop is in the view
+    return cp.RecordView(nodes=(node,), relations=())
+
+
+def test_a_REFUSED_rebuild_does_not_LOG_a_drop_it_never_made(caplog):
+    """`#11747` round-3 review, finding 2 — the log describes a run that RAN.
+
+    The drop warning used to sit ABOVE `_assert_destructive_confirmed` / `_assert_test_graph`, so
+    a REFUSED rebuild left a past-tense log line claiming vectors were dropped over a cache that
+    was never touched — a rebuild that lost nothing reading as one that deleted, the exact
+    false-signal class the report was added to remove.
+
+    ⚠️ Both directions, so neither half is vacuous: a refused run must log NOTHING, and the same
+    view authorised must log the drop and report the count.
+    """
+    import logging
+
+    proj = _projection()
+    view = _view_with_an_unserved_vector()
+
+    with caplog.at_level(logging.WARNING), pytest.raises(
+            RuntimeError, match="Graph guard: rebuild_from_record performs"):
+        proj.rebuild_from_record(view, confirm_destructive=False)
+    claimed = [r.getMessage() for r in caplog.records if "dropped" in r.getMessage()]
+    assert not claimed, (
+        "a REFUSED rebuild logged a drop it never made — the cache was not touched: "
+        f"{claimed}")
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        report = proj.rebuild_from_record(view, confirm_destructive=True)
+    assert report["dropped_vectors"] == 1, report
+    logged = [r.getMessage() for r in caplog.records if "#11747" in r.getMessage()]
+    assert logged, "an authorised rebuild dropped a vector and said nothing in the log"
+
+
 def test_rebuild_from_record_refuses_without_the_destructive_token():
     """L1 (#2944) is not bypassed by the new source.
 

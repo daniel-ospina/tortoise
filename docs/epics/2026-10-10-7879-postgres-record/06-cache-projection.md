@@ -161,21 +161,33 @@ labels get a VECTOR INDEX is §14.3 **V3** (`#11901`), and nothing here creates
 one. ⛔ Nor a narrowing of the 2026-11-10 ruling: `:Object` and `:Subject` are
 served, keep their embeddings, and are untouched.
 
-**Where the drop is REPORTED — three surfaces, because the first two are not
-enough on their own** (`#11747`'s review, finding 1: `Statement.dropped_vectors`
-only, which no production reader touched):
+**Where the drop is REPORTED — on every surface that must not read as clean**
+(`#11747`'s review, finding 1: `Statement.dropped_vectors` only, which no
+production reader touched):
 
 * the STATEMENT (`Statement.dropped_vectors`) and the VIEW
   (`RecordNode.dropped_vectors`, so a record read cannot advertise a vector the
   cache refuses);
-* the PLAN and the REPORT — `ProjectionPlan.dropped_vectors()` (read off the
-  statements, so a directly-built `RecordNode` is counted too) feeds
-  `ProjectionReport.dropped_vectors` / `dropped_vector_labels`; and
-* the RUN — `rebuild_from_record` returns both keys and logs a warning, and
-  `record_restore.RestoreOutcome` prints them on the operator's line and in
-  `as_dict()`. A rebuild that DELETES vectors a previous cache held must not read
-  the same as one that lost nothing, and no re-run can bring them back: the
-  record row is the only carrier and it is what the drop was applied to.
+* the PLAN — `ProjectionPlan.dropped_vectors()`, read off the statements, so a
+  directly-built `RecordNode` is counted too;
+* the RUN — `rebuild_from_record` returns the plan's `{label: count}` as
+  `dropped_vectors` / `dropped_vector_labels` beside its write counts and logs a
+  warning **after the write**, and `record_restore.RestoreOutcome` prints them on
+  the operator's line and in `as_dict()`. A rebuild that DELETES vectors a
+  previous cache held must not read the same as one that lost nothing, and no
+  re-run can bring them back: the record row is the only carrier and it is what
+  the drop was applied to. ⚠️ The log must describe a run that RAN — it sits
+  BELOW the destructive/L2 guards, because a refused rebuild that logged a drop
+  over an untouched cache is the same false signal in the other direction
+  (`#11747` review, finding 2); and
+* ⚠️ **`ProjectionReport.dropped_vectors` / `dropped_vector_labels` are
+  CALLER-FILLABLE, and no code path constructs a `ProjectionReport` today**
+  (`#11747` review, finding 3: this section used to claim the plan *feeds*
+  them, and nothing does). The dataclass is a rendering surface a caller may
+  fill; the operator-facing pin is the RUN's report →
+  `record_restore.RestoreOutcome`, which renders and serialises the drop under
+  its own tests. Stated as such so a later reader does not mistake an
+  unpopulated field for a wired one.
 
 ⚠️ **And it is DECLARED to the parity rule.** The drop happens in the row→property
 map, so the record ANSWER no longer carries the vector and a LEGACY cache node

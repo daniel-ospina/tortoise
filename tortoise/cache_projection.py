@@ -221,13 +221,14 @@ from pathlib import Path
 from typing import Any
 
 from . import record_projection as _rp
+from . import vector_write as _vector_write
 from .residency import (
     COVERAGE_COMPLETE,
     COVERAGE_PARTIAL,
     ResidencyDeclaration,
     declare_residency,
 )
-from .security import VALID_ENTITY_TYPES, entity_label, validate_rel_type
+from .security import validate_rel_type
 from .session_source_display import SESSION_SOURCE_SUMMARY_PREFIX
 from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
@@ -310,38 +311,35 @@ NODE_TABLES: dict[str, str] = {
     "Session": "session",
 }
 
-#: The served vocabulary, computed ONCE at import.
-#:
-#: ⛔ Read from :mod:`tortoise.security`, never restated here. That module is the
-#: single home of both halves `run_vector_query` applies: it validates the
-#: caller's ``entity_type`` against ``VALID_ENTITY_TYPES`` and then translates it
-#: with :func:`~tortoise.security.entity_label`. A second copy of the set in this
-#: module is exactly how a writer and the query leg start disagreeing about which
-#: labels exist — the disagreement `#5090` DoD row 2 scores.
-#:
-#: ⚠️ A MODULE-SCOPE constant computed from an import, and that is deliberate.
-#: This docstring used to argue the other way ("rather than a cached constant")
-#: while :data:`UNSERVED_VECTOR_LABELS` below did exactly this in the same module
-#: — a self-contradiction the `#11747` review measured. Both inputs
-#: (``VALID_ENTITY_TYPES``, ``entity_label``) are module-level DECLARATIONS, not
-#: file reads, and both are already imported at this module's top, so there is no
-#: import-order dependency to attach; computing it once means the served set and
-#: :data:`UNSERVED_VECTOR_LABELS` cannot be derived from two different reads of
-#: one vocabulary.
-_SERVED_VECTOR_LABELS: frozenset[str] = frozenset(
-    entity_label(t) for t in VALID_ENTITY_TYPES)
-
 
 def served_vector_labels() -> frozenset[str]:
-    """The labels the VECTOR query leg can reach — the runner's own vocabulary.
+    """The labels the VECTOR query leg can reach — DELEGATED to its ONE owner.
 
-    The SEAM a caller reads, so the name a probe or a parity rule depends on
-    survives a change in how the set is stored — the same pattern this module's
-    :func:`stored_vector_props` uses for the same reason (#8615). The VALUE is
-    :data:`_SERVED_VECTOR_LABELS`, computed once at import; see the note there
-    for why that is the honest shape rather than a per-call derivation.
+    ⛔ `#11641`: there is exactly ONE owner of this set,
+    :func:`tortoise.vector_write.served_store_labels` — the module `sdk` and
+    `hosted_backup` already import as *"the ONE bound on WHERE a vector may be
+    stored"*. This function does NOT compute the set; it asks that owner. A
+    second derivation here (a cached snapshot of `VALID_ENTITY_TYPES` +
+    `entity_label`, which is what this function used to be) is a second
+    DECLARATION of where a vector can be found, and the two could disagree with
+    nothing going red: the failure mode `#5090` DoD row 2 scores. The `#11747`
+    review measured exactly that — this module's docstring stated the one-owner
+    rule and then broke it one paragraph later.
+
+    The SEAM survives the move (the name a probe or a parity rule depends on),
+    and so does the shape: a caller reads a callable here, never the owner's
+    module, exactly as :func:`stored_vector_props` does for the same reason
+    (#8615) — so the owner can change how it DERIVES the set without every
+    reader following it.
+
+    ⛔ DELEGATED THROUGH THE MODULE, not `from .vector_write import …`
+    (`#11747` round-3 review, finding 1): a from-import binds the function OBJECT
+    at import time, so a per-label exception or a narrowed bound added to the
+    owner later would still be read here as the OLD function's answer — the copy
+    the `#11641` rule forbids, one indirection deeper. Reading the attribute
+    every call means the owner's answer is the answer this module gets.
     """
-    return _SERVED_VECTOR_LABELS
+    return _vector_write.served_store_labels()
 
 
 #: ⛔ `#11747` — the labels this projection can be handed a vector for and MUST
@@ -385,7 +383,7 @@ def served_vector_labels() -> frozenset[str]:
 #: declares it.** The alternative — moving the drop off the read door — would let
 #: a record read advertise a vector the cache refuses, which is the "live ≠
 #: rebuild" divergence that read exists to prevent.
-UNSERVED_VECTOR_LABELS: frozenset[str] = frozenset(NODE_TABLES) - served_vector_labels()
+UNSERVED_VECTOR_LABELS: frozenset[str] = frozenset(NODE_TABLES) - _vector_write.served_store_labels()
 
 
 def unserved_vector_declined_properties(label: str) -> frozenset[str]:

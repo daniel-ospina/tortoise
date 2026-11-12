@@ -989,22 +989,41 @@ def test_the_writer_refuses_a_directly_built_unserved_node():
     assert "embedding" in stmt.dropped_vectors
 
 
-def test_the_unserved_vector_label_class_is_derived_from_the_query_vocabulary():
+def test_the_unserved_vector_label_class_is_derived_from_the_query_vocabulary(monkeypatch):
     """Both directions, so neither side of the set can drift away unnoticed.
 
     * the DERIVED assertion pins the rule: the class is `NODE_TABLES` minus what
-      `run_vector_query` serves, read from `tortoise.security` — not a list here;
+      `run_vector_query` serves, read from the set's **ONE owner**
+      (`tortoise.vector_write.served_store_labels`, `#11641`) — not a list here,
+      and not a second derivation of `tortoise.security` in this module;
     * the LITERAL pins today's answer, so a record label ADDED without a query
       path (which would otherwise silently inherit the storing behaviour) or a
       served label DROPPED reds and sends the reader to the one place that must
       agree, rather than being absorbed by a derivation nobody reads.
+
+    ⛔ The DELEGATION arm is the one that can actually red on a divergence: this
+    module used to compute its own copy of the set, and a per-label exception
+    added to the OWNER (or a narrower restore bound reached through the
+    vector-write seam) then left every assertion above green, because both sides
+    read the SAME input. Moving the owner's answer is what tells a delegation
+    from a copy (`#11747` review, finding 1).
     """
+    from tortoise import vector_write as vw
     from tortoise.security import VALID_ENTITY_TYPES, entity_label
+    from tortoise.vector_write import served_store_labels
 
     served = {entity_label(t) for t in VALID_ENTITY_TYPES}
-    assert cp.served_vector_labels() == served
-    assert frozenset(cp.NODE_TABLES) - served == cp.UNSERVED_VECTOR_LABELS
+    assert cp.served_vector_labels() == served_store_labels() == served
+    assert frozenset(cp.NODE_TABLES) - served_store_labels() == cp.UNSERVED_VECTOR_LABELS
     assert sorted(cp.UNSERVED_VECTOR_LABELS) == ["Session"]
+
+    # The delegation arm: move the OWNER's answer and the projection must follow.
+    wider = frozenset(served | {"Batch"})
+    monkeypatch.setattr(vw, "served_store_labels", lambda: wider)
+    assert cp.served_vector_labels() == wider, (
+        "the projection kept its own copy of the served set: the owner now says "
+        f"{sorted(wider)} and this module still says "
+        f"{sorted(cp.served_vector_labels())}")
 
 
 @pytest.mark.parametrize("label", ["Point", "Event", "Source"])
@@ -1107,6 +1126,13 @@ def test_the_PLAN_reports_the_vectors_it_refuses():
     # And a plan that withholds nothing says so.
     assert cp.record_plan([clean]).dropped_vectors() == {}
     # The report carries it where an operator reads the run's result.
+    #
+    # ⚠️ `ProjectionReport` is CALLER-FILLABLE: nothing in the tree constructs
+    # one on a run path, so these three assertions pin the RENDERER's shape, not
+    # a wired surface (`#11747` review, finding 3). The operator-facing pin for
+    # the drop is
+    # `test_9556_record_restore_verb.py::test_the_human_line_names_the_DROPPED_vectors_and_denies_the_re_run`,
+    # which drives the real `rebuild_from_record` → `RestoreOutcome` path.
     report = cp.ProjectionReport(nodes_written=3, dropped_vectors=2,
                                  dropped_vector_labels=("Session",))
     assert "2 vector(s) DROPPED" in report.render(), report.render()
