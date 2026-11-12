@@ -574,17 +574,26 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         # also have exempted a future `_docker("exec", "falkordb-16379", ...)`
         # — every site in this file spells the name double-quoted, so quoting
         # narrows it against nothing. Declaring the statements is what keeps a
-        # future DIAL site a red instead of an exemption, which is the whole
-        # job of this file (same shape as `test_wipe_server.py` above).
+        # future LANE-PORT site a red instead of an exemption, which is the
+        # whole job of this file (same shape as `test_wipe_server.py` above).
+        #
+        # One consequence worth knowing: the first entry is the whole stripped
+        # statement INCLUDING its trailing comment, so it is anchored to that
+        # wording. Rewording `test_test_lane_tool.py:2087`'s comment would make
+        # the entry inert — and `test_every_seam_exemption_is_consulted` is the
+        # alarm for exactly that (it reds on an inert entry).
         #
         # The FOUR fixtures below are full statements for the SAME reason. The
         # two port-shaped ones especially: `127.0.0.1:<port>:6379` is exactly
         # the `docker run -p` publish spec and `127.0.0.1:6379/<graph>` exactly
         # the `docker://` URI tail, so the BARE literals would each have
         # exempted a real dial on the same line — the failure this guard
-        # exists to catch. No real dial exists in `tests/test_test_lane_tool.py`
-        # (every `_docker` is monkeypatched there), so the narrow spelling costs
-        # nothing and keeps a future one red.
+        # exists to catch. No dial to a LANE PORT exists in
+        # `tests/test_test_lane_tool.py` — every `_docker` call there is
+        # monkeypatched, and its two REAL TCP connects are `_ping_over_host`
+        # probes (`:1697`, `:1706`) to port 1 and to an ephemeral loopback
+        # server, neither carrying a lane-port literal. So the narrow spelling
+        # costs nothing and keeps a future one red.
         '"falkordb-16379",      # the orchestration graph instance',
         'for shared in ("falkordb", "falkordb-16379"',
         '_remove_and_describe("falkordb-16379")',
