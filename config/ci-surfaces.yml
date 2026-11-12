@@ -1563,11 +1563,12 @@ surfaces:
   # `tools/ci_selection.py --integrity` refuses every tree that carries it with
   # `manifest drift:` — a case no shard is told to run, and a red on the required
   # check for every PR whose diff touches `tests/` or this manifest, this one
-  # included. Registered in `core` because its subjects (`tortoise/pricing.py`'s
+  # included. DUAL-REGISTERED with `core`: its subjects (`tortoise/pricing.py`'s
   # two storage dimensions, the loader and the overage arithmetic) match no
-  # SOURCE_PATTERNS row and fall through to `core` — the same reason
-  # `test_pricing_tiers.py` above sits here. A main-red repaired here, not a new
-  # suite: the file is main's, only the registration is added.
+  # SOURCE_PATTERNS row and fall through to `core`, so this `api` row alone would
+  # never select it on a `tortoise/pricing.py`-only PR — the same reason
+  # `test_write_op_reachability.py` sits in both (#4495). A main-red repaired
+  # here, not a new suite: the file is main's, only the registration is added.
   - test_pricing_storage_dimensions.py
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (hosted_api + selfhost)
   - test_provisioning_edge_function.py
@@ -7240,6 +7241,7 @@ surfaces:
   # (the shared `sdk_factory` fixture is URI-aware), so it needs no `carve_out:` row and
   # no `TEST_NO_REDIRECT_STEMS` entry.
   - test_11822_goal_judgement.py
+  - test_pricing_storage_dimensions.py  # #11837: the `core` half of the DUAL-REGISTRATION — `tortoise/pricing.py` matches no SOURCE_PATTERNS row, so its subjects select `core` and the `api` row alone never runs it there (#4495 precedent)
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #11855: the ranker half of the unreadable-operand pins. `GraphRanker` and
