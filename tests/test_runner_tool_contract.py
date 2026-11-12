@@ -938,6 +938,14 @@ def test_a_merge_key_is_fail_closed():
     assert _contract_violations(aliased, scripts), (
         "an aliased step covered a job without a readable `run:` line"
     )
+    # …and an alias as a VALUE leaves the literal key readable, so it is judged normally.
+    # Pinned because the docstring says "the pin asserts it" about BOTH neighbouring
+    # spellings, and a coverage claim with no row behind it is the class round 4 fixed
+    # (#12167 review round 5). The key read is `split(":")[0]`, so this is the row that reds
+    # if someone starts resolving values before deciding the key.
+    value_alias = "  job:\n    steps:\n      - name: contract\n        if: *cond\n" + body
+    assert _step_defusers(value_alias.splitlines(), 4) == ["if"]
+    assert _live_contract_step(value_alias.splitlines()) is False
 
     # …and the SAME scan must not reach OUTSIDE the step. A bare `-` marker (the step's first
     # key on the next line) did not match `^      - `, so `step_start` stayed 0 and the JOB's
