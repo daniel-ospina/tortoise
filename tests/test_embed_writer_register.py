@@ -1922,8 +1922,15 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> s
             continue
         targets = [n.id for n in ast.walk(sub) if isinstance(n, ast.Name)
                    and isinstance(n.ctx, ast.Store)]
-        stores = [n for outer in body for n in ast.walk(outer)
-                  if isinstance(n, ast.stmt) and _STORE_CARRIER.search(_slice(lines, n))]
+        hits = [n for outer in body for n in ast.walk(outer)
+                if isinstance(n, ast.stmt) and _STORE_CARRIER.search(_slice(lines, n))]
+        # ⛔ The MINIMAL store statements: without this, the enclosing `for` itself matches (its text
+        # contains every store in its body) and any mention of the binding anywhere inside would
+        # satisfy the target check — i.e. the arm would degrade to "something in the loop names it".
+        stores = [
+            n for n in hits
+            if not any(other is not n and any(c is other for c in ast.walk(n)) for other in hits)
+        ]
         if not stores:
             continue
         # …and the TARGET drives it: the store statement must name the loop's binding, otherwise the
@@ -1941,7 +1948,7 @@ _COMPREHENSION_LIKE = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp
 
 
 def _parent_map(root: ast.AST) -> dict[int, ast.AST]:
-    """`id(child) -> child`'s parent, for every node under `root`."""
+    """`id(node) -> node`'s parent, for every node under `root`."""
     parents: dict[int, ast.AST] = {}
     for node in ast.walk(root):
         for child in ast.iter_child_nodes(node):
