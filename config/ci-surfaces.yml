@@ -2249,10 +2249,10 @@ surfaces:
   # `refs/pull/N/merge` — measured on #12002, `COMPLETED FAILURE` with the merge
   # blocked. ⚠️ That is HISTORY, not the current tree: #11837 (`3557a476e1`)
   # registered the file on `main` first, in the `api` block, and `--integrity`
-  # on `main` is green. So this row is not a main-red repair any more — it is the
-  # `core` arm main still does not carry, and the `api` block's row (not a second
-  # one here) is what covers `metering.py`. Two rows, one per surface: a second
-  # `api` row is a `duplicate entry` and reds the gate it was added to green.
+  # on `main` is green, and `main` DOES carry this `core` arm (since #12005,
+  # `d088425a7c`; #12035 then collapsed the extra copies). So this row is no
+  # longer a repair — it is the row both surfaces share, and the `api` block's
+  # own row covers `metering.py`: a second `api` row reds the gate it greens.
   # Same class as the `test_percent_value_11915.py` row directly above — which is
   # what #11978 was filed for 42 minutes before this drift landed (issue
   # 2026-11-12T00:47:22Z, `a3d20763ab` 01:29:58Z), not hours.
@@ -2269,18 +2269,16 @@ surfaces:
   # ⚠️ COVERAGE GAP — NOT created here, NOT closed here (#12006): this suite also
   # reads `product/pricing.json`, and a diff touching ONLY that artifact selects
   # no surface at all (measured `--changed-files product/pricing.json` ->
-  # surfaces [], 88 tier-1 files, this suite absent) because `product/` is a
+  # the tier-1 smoke set, this suite absent) because `product/` is a
   # `NON_PYTHON_PREFIXES` entry. Those four modules are what THIS row buys;
   # the artifact leg needs the #12006 decision, so do not read this row as
   # covering the rates.
   # ⛔ ONE ROW PER SURFACE, and re-measure before adding one (`grep -n
   # '^  - test_pricing_storage_dimensions.py' config/ci-surfaces.yml` must print
   # exactly TWO lines, one under `api` and one under `core`). It ALREADY HAD
-  # three `core` copies: three lanes each repaired this same drift and a
-  # conflict-free union splice kept all three (#10032/#10057), so `--integrity`
-  # refused `origin/main` itself on 2026-11-12 (`duplicate mapping key` in
-  # `durations`, then `duplicate entry … .surfaces.core[]`) and the extras were
-  # collapsed into this row — a main-red repair, not tidying.
+  # three `core` copies — three lanes repaired this drift and a conflict-free
+  # union splice kept all three (#10032/#10057), so `--integrity` refused
+  # `origin/main` itself until the extras were collapsed (#12035).
   - test_pricing_storage_dimensions.py
   # ⛔ `test_pack_hierarchy_11001.py` is registered ONCE, further down this list
   # beside the pack suites — three PRs (#11210, #11211, #11222) each independently
