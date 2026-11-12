@@ -99,6 +99,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import html
 import re
 import subprocess
 import sys
@@ -382,6 +383,137 @@ VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 #: class this arm exists for, at the one position no other arm can see.
 VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
 
+#: Placeholder cells: a §3 content cell whose every word is one of these records nothing —
+#: UNLESS the cell also carries a digit (`n/a 5`, `x = 2`), because a digit is content the guard
+#: reads as such everywhere else, and refusing it here refused a cell a reader can read.
+#: ⛔ This is deliberately NOT a word-count floor. A length floor on these two columns sits
+#: AT the page's own minimum, not far below it — measured across the twelve rows: the
+#: shortest retracted claim and the shortest correction are BOTH three words, so a
+#: three-word floor reds a correct page the moment a lane compresses a legitimate cell
+#: (row l's correction cut to `#2748, #1695, #1418 **closed**` names exactly what closed,
+#: is ONE content word, and was refused as "records nothing" by the first draft of this
+#: rule), and an ASCII-only word class counts a non-Latin correction as ZERO. So the rule
+#: refuses emptiness and placeholders instead of shortness: it closes the measured bypass
+#: (a blanked column) without ever accusing brief content of recording nothing.
+#:
+#: ⛔ IT IS A DECLARED DENYLIST, NOT A CLOSED CLASS, and §8 says so in those words. A
+#: placeholder outside this set is NOT refused — that is the arm's honest limit, and
+#: stating it is what stops a lane reading "placeholder" as "any placeholder".
+PLACEHOLDER_WORDS = frozenset(
+    {"na", "n", "tbd", "tba", "tbc", "todo", "none", "nil", "null", "xx", "x"}
+)
+
+#: A content word: a run of LETTERS, Unicode-aware (`**Ложно**` counts, `**False**` counts),
+#: so a dash, a bare number or an issue ref is not a word while `_upsert_point_props` is
+#: THREE (`upsert`, `point`, `props` — `_` separates, it is not part of a word).
+CONTENT_WORD_RE = re.compile(r"[^\W\d_]+(?:[-'\u2019][^\W\d_]+)*", re.UNICODE)
+
+#: A HTML tag or comment. Stripped BEFORE the words are counted, because a cell can render
+#: empty while testing non-empty: `<br>`, `<span>&nbsp;</span>` and `<!-- removed -->` all
+#: tokenise to letters and all read as a blank table cell. Measured at `c5990249c0`:
+#: `<br>` in every §3 correction cell left `--check` at rc 0 — the fail-open the blank-cell
+#: floor beside it could not see, because a tag is not whitespace.
+#: ⛔ TAG-SHAPED, not "any angle-bracket span". On its own that narrowing refuses nothing the
+#: wide pattern also refuses — a comparison cell carries letters or digits either way — so what
+#: it buys is the WORD LIST: `<[^<>]*>` swallowed `y` in `x < y > z` (`['x', 'z']`), and the
+#: word list is what the placeholder and copy tests read, so a comparison inside a §3 cell could
+#: shift a copy comparison. Pinned by
+#: `test_a_comparison_keeps_its_operand_words`; the comment form is matched on its own.
+#: A COMMENT, with the renderer's own alternation VERBATIM (`markdown_it.common.html_re`):
+#: `<!-->` and `<!--->` are the abrupt-closing empty forms; `<!---->` is the ORDINARY empty
+#: comment, matched by the general rule; and a comment's text "must not end with `-`", so
+#: `<!--a--->` and `<!----->` are literal TEXT rather than comments (measured by the seventh review
+#: of this change). Which of them a cell may hold is the content floor's business, not this
+#: matcher's: `<!--a--->` carries the letter `a`, while `<!----->` carries no letter or digit and is
+#: refused by the letter-or-digit rule. ⛔ Do NOT add a special empty-form alternative: a
+#: `<!---->?` branch matched the first four dashes of `<!----x-->`, cut a TERMINATED comment in
+#: half, and read its body as content — a blank-rendering cell in all four §3 columns
+#: (eighth review of this change).
+COMMENT_AT_RE = re.compile(r"<!---?>|<!--(?:[^-]|-[^-]|--[^>])*-->", re.DOTALL)
+
+#: A TAG, a DECLARATION, a CDATA section or a processing instruction — all of them render as
+#: nothing in a table cell. ⛔ THE GRAMMAR IS THE RENDERER'S, not `[^<>]*`: a QUOTED attribute
+#: value may contain `>`, a backtick or a backslash, and a loose pattern (plus per-segment
+#: stripping) meant such a tag was never matched — its own text was counted as content while the
+#: cell rendered blank, in all four §3 columns at once (measured by the sixth review of this
+#: change: 41 of 84 tag shapes). Consumed as a UNIT by `_rendered_cell_text`, before any backtick
+#: or escape inside it is classified. Comments are NOT in here: `_rendered_cell_text` scans for
+#: them, because an unterminated `<!--` is literal text.
+_TAG_ATTR = (
+    r"(?:\s+[A-Za-z_:][A-Za-z0-9:._-]*"
+    r"(?:\s*=\s*(?:[^\"'=<>`\x00-\x20]+|'[^']*'|\"[^\"]*\"))?)*"
+)
+TAG_RE = re.compile(
+    r"</[A-Za-z][A-Za-z0-9-]*\s*>"  # a CLOSE tag carries no attributes
+    r"|<[A-Za-z][A-Za-z0-9-]*" + _TAG_ATTR + r"\s*/?>"  # an OPEN tag may
+    r"|<![A-Za-z][^>]*>|<!\[CDATA\[.*?\]\]>|<\?.*?\?>",
+    re.DOTALL,
+)
+
+#: HTML RAW-TEXT and RCDATA element names. The BODY of one of these is not rendered at all, so a
+#: cell holding `<script>**STILL-TRUE**</script>` renders blank while the tag pattern alone leaves
+#: `**STILL-TRUE**` as ordinary text — a row could lose its verdict AND its citation with
+#: `check_document()` clean (measured, ninth review of this change). ⛔ `<textarea>` and `<xmp>`
+#: are NOT in the set: a browser SHOWS their text; and neither is `<plaintext>`, which shows
+#: everything after it as text too (the ninth review read the tokenizer switch as hidden content
+#: — a real browser renders `<plaintext>lorem ipsum` as the visible words, so dropping it was a
+#: FALSE accusation; tenth review).
+#: Elements whose content a browser PARSES as ordinary markup but never renders: `<template>`'s
+#: contents go to an inert fragment. ⛔ Its close tag therefore has the opposite
+#: spelling-sensitivity to a raw-text element's: `</template` inside a COMMENT, a TAG's quoted
+#: attribute, a code span, an escape or a recognised link does NOT close it, and treating them as
+#: closes made the guard READ text where a browser renders nothing — 9 measured fail-opens
+#: (eleventh review of this change).
+PARSED_BUT_HIDDEN_ELEMENTS = frozenset({"template"})
+
+RAWTEXT_ELEMENTS = frozenset(
+    {"script", "style", "title", "iframe", "noembed", "noframes", "noscript"}
+) | PARSED_BUT_HIDDEN_ELEMENTS
+
+#: Elements whose body is LITERAL TEXT — RCDATA (`textarea`, `xmp`) and `<plaintext>`, which
+#: swallows the rest of the input — and which a reader DOES see. Treating them as ordinary
+#: content stripped the tags and comments inside them, which is doubly wrong: the browser shows
+#: that text, so `<textarea><!-- </textarea> -->` was refused as blank although it reads
+#: `<!-- ` (measured, thirteenth review of this change).
+LITERAL_TEXT_ELEMENTS = frozenset({"textarea", "xmp", "plaintext"})
+
+#: Elements whose BODY swallows markup for the tokenizer, whether or not a reader sees it:
+#: RAW-TEXT and RCDATA bodies (`script`, `style`, `title`, `iframe`, `noembed`, `noframes`,
+#: `noscript`), plus the two whose text is shown but whose markup is not parsed (`textarea`,
+#: `xmp`) and `<plaintext>`, which swallows the rest of the input. A `</template` inside one of
+#: these is TEXT, which is why the `<template>` walk skips the body.
+_SWALLOWING_ELEMENTS = RAWTEXT_ELEMENTS | {"textarea", "xmp", "plaintext"}
+
+
+#: The element name of a matched OPEN tag, for the raw-text switch above.
+OPEN_TAG_NAME_RE = re.compile(r"<([A-Za-z][A-Za-z0-9-]*)")
+
+#: A TERMINATED character reference. CommonMark requires the semicolon, so `&nbsp` renders five
+#: visible characters — `html.unescape` applies HTML's LEGACY no-semicolon table and turned it
+#: into U+00A0, refusing a cell a reader reads (measured by the sixth review of this change).
+_ENTITY_RE = re.compile(r"&(?:#[0-9]+|#[xX][0-9a-fA-F]+|[A-Za-z][A-Za-z0-9]*);")
+
+#: ASCII punctuation a backslash can escape (CommonMark's escapable set).
+_ESCAPABLE_RE = re.compile(r"[!-/:-@\[-`{-~]")
+
+#: A backslash-escaped ASCII punctuation character, which renders as the character itself.
+ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
+
+#: What a reader actually SEES in a cell: tags and comments stripped, links reduced to their
+#: label, entities decoded. The content test is "does this carry a letter or a digit?" —
+#: ⛔ NOT "a letter" and not "a word": a bare date (`2026-09-10`) and an issue list
+#: (`#2748, #1695, #1418`) each record something a reader can read, and a letters-only class
+#: refused both while the error message claimed the cell was empty (measured by the review of
+#: this change), which contradicts §8's "a brief cell passes".
+VISIBLE_CHARACTER_RE = re.compile(r"[^\W_]", re.UNICODE)
+
+#: A markdown link or image, reduced to its LABEL. The label is what renders, so a cell whose
+#: label is empty renders blank while its URL still tokenises (`[](https://x)` -> `https`,
+#: `x`). `[the props doc](…)` keeps `the props doc`, which is why the label is KEPT rather
+#: than the whole link dropped. Measured at `c5990249c0`: `[](https://x)` in every §3
+#: correction cell left `--check` at rc 0 once tags were handled.
+LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+
 #: Floor on the mutation population. `--self-test` is the arm the page's own
 #: justification rests on (*"`--self-test` is what proves the rules still fire"*),
 #: and `MUTATIONS = ()` is a ONE-place edit: without a floor it printed
@@ -399,9 +531,14 @@ VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
 #: round's re-listing across rows and leading-zero re-spelling, then round 3's
 #: replacement by a number the index never carried, then round 8's two group-orientation
 #: mutants (a governed complement behind an adverb, a marked cross-reference certifying a
-#: member). Bump it with any arm added or
-#: removed — the population is what the pin compares.
-MIN_SELF_TEST_MUTATIONS = 49
+#: member), then THIRTEEN content-column arms (below) — an entity, a tag, a comment, an
+#: EMPTY-LABEL link, three placeholders (`n/a` joined, `TBC` whose twin was listed, and a
+#: MULTI-WORD pair that only the `all(...)` half sees), a correction that copies its claim in
+#: either case, a raw-text element's body (in mixed case, which also pins the case-insensitive
+#: matching), and the three columns beside them (a verdict and an evidence cell commented out,
+#: and a verdict hidden behind a commented-out one). Bump it with any arm added or removed —
+#: the population is what the pin compares.
+MIN_SELF_TEST_MUTATIONS = 62
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -497,6 +634,15 @@ def _split_row_cells(line: str) -> list[str]:
             escaped = False
             continue
         if char == "\\":
+            # ⛔ THE BACKSLASH IS KEPT. Suppressing the SPLIT is this function's whole job; if
+            # it also DELETED the backslash it rewrote the cell's markdown before every reader
+            # saw it, and one character defeated all four render-blank families: `\``<br>`` `
+            # reached the guard as a clean two-backtick span (accepted, CLEAN) while the
+            # renderer showed an escaped backtick and a real `<br>` element — a blank cell
+            # (measured by the fifth review of this change). The same rewrite refused the
+            # idiomatic literal-tag spelling `\<br>`, which §8 promises still counts.
+            # `_rendered_cell_text` collapses the escape the way the renderer does.
+            current.append(char)
             escaped = True
             continue
         if char == "|":
@@ -566,7 +712,11 @@ def check_verdicts(text: str) -> list[str]:
         cells = _split_row_cells(line)
         # | # | claim | correction | verdict | evidence | -> cells[0] == ''
         verdict_cell = cells[4] if len(cells) > 4 else ""
-        tokens = BOLD_TOKEN_RE.findall(verdict_cell)
+        # ⛔ Rendered text, not the raw cell: `<!-- **STILL-TRUE** -->` left
+        # `check_document()` at `[]` (measured by the review of this change) — a verdict
+        # inside a comment renders as nothing on the page. BOTH readers agree, because
+        # this is the same `_rendered_cell_text` the prose floor uses.
+        tokens = BOLD_TOKEN_RE.findall(_rendered_cell_text(verdict_cell))
         if not tokens:
             problems.append(
                 f"row ({label}): no bolded verdict — every correction row must "
@@ -596,6 +746,10 @@ def _has_evidence(cell: str, sections: set[int]) -> bool:
     have (`§9`) — measured, rc 0 — which is the "emptied evidence column" bypass
     wearing a section number.
     """
+    # ⛔ Reads what a READER sees, not the raw cell: an evidence cell holding
+    # `<!-- `tortoise/sdk.py:17109` -->` left `check_document()` at `[]` (measured by the
+    # review of this change) — the citation was there for a grep and invisible on the page.
+    cell = _rendered_cell_text(cell)
     if ISSUE_REF_RE.search(cell):
         return True
     # `_convertible` first: `int()` on an unbounded `\d+` raises `ValueError`, and the
@@ -636,6 +790,465 @@ def _has_evidence(cell: str, sections: set[int]) -> bool:
     return False
 
 
+def _content_cell_words(cell: str) -> list[str]:
+    """The content words in a §3 cell, casefolded, for the emptiness, placeholder and copy tests.
+
+    ⛔ HTML ENTITIES ARE DECODED BEFORE TOKENISING, and that is a measured fix rather than
+    tidiness: `&nbsp;` tokenises to `['nbsp']`, `&mdash;` to `['mdash']` and `&emsp;` to
+    `['emsp']`, so every one of them clears both the emptiness branch (one "word") and the
+    placeholder set — measured at `c5990249c0`: a correction cell of `&nbsp;` left
+    `check_document()` at `[]` while it RENDERS as a blank table cell to every reader.
+    `html.unescape` maps them to U+00A0 / U+2014 / U+2003, which carry no letter, so the
+    emptiness clause refuses them. A legitimate `R&amp;D` still works: the entity decodes to
+    `&` and the words beside it are untouched — a cell that is ONLY `&amp;` decodes to a
+    bare `&` and carries no word, so it is refused like any other empty cell (the boundary
+    is one word a reader can read, not "looks non-blank").
+
+    ⛔ TAGS AND COMMENTS ARE STRIPPED TOO, and that is the same measured lesson one spelling
+    out: decoding the ENTITY left the CLASS, so `<br>`, `<span>&nbsp;</span>` and
+    `<!-- removed -->` still tokenised to letters while rendering as an empty cell —
+    `<br>` in every §3 correction cell left `check_document()` at `[]` (measured at
+    `c5990249c0`). Tags go first, then entities, so `<span>&nbsp;</span>` collapses to a
+    non-breaking space and carries no word, while an ESCAPED tag (`&lt;br&gt;`) decodes to
+    the literal text a reader sees and still counts — the direction that must not
+    over-refuse a cell quoting markup.
+
+    A markdown link is reduced to its LABEL for the same reason: the label is what renders,
+    so `[](https://x)` is a blank cell whose URL still tokenises (measured at
+    `c5990249c0`, once tags were handled).
+    """
+    return [
+        w.casefold()
+        for w in CONTENT_WORD_RE.findall(_rendered_cell_text(cell).replace("`", " "))
+    ]
+
+
+def _copy_tokens(cell: str) -> list[str]:
+    """COPY-test tokens: letters AND digits, casefolded — what a row DERIVES from its claim.
+
+    ⛔ `CONTENT_WORD_RE` is letters-only, so using it here compared two cells with their
+    NUMBERS DELETED: a correction that fixes a count, a line number or a section number
+    (`has 8 fields` -> `has 10 fields`, `entities.py:2679` -> `entities.py:3162`) reduced to
+    its claim's own word list and was refused as "a COPY of its claim" (measured by the review
+    of this change). That is the dominant correction shape in this very page — rows (b), (k)
+    and (l) all correct a number — so the copy test reads digits and the placeholder test,
+    which is about the ABSENCE of content, keeps the letters-only reader.
+    """
+    return [
+        token.casefold()
+        for token in re.findall(r"[^\W_]+", _rendered_cell_text(cell).replace("`", " "))
+    ]
+
+
+def _rendered_cell_text(cell: str) -> str:
+    """What a READER sees in a cell: tags stripped, comments removed, links to their label, entities decoded.
+
+    One function, so the content test and the verdict/evidence readers cannot disagree
+    about what a cell renders as. ⛔ The verdict and evidence arms read the RAW cell until
+    the review of this change measured the hole: a verdict cell holding
+    `<!-- **STILL-TRUE** -->` and an evidence cell holding a citation wrapped in the same
+    comment each left `check_document()` at `[]` — a row that loses its verdict AND its
+    openable citation still passes §1 and §8's promise.
+
+    ⛔ IT SCANS LEFT TO RIGHT, and that is what makes both of these correct at once:
+
+    * a CODE SPAN is LITERAL — markdown renders `` `<br>` `` as the TEXT `<br>`, so nothing
+      inside one is a tag, a comment or an entity (refusing them was a false accusation:
+      `` `&nbsp;` `` is readable content, and the ESCAPED spelling `&lt;br&gt;` is accepted for
+      exactly that reason);
+    * a COMMENT renders as nothing, EVEN WHEN IT WRAPS A CODE SPAN — stripping comments
+      globally first re-opened the commented-out-citation hole, and protecting spans first
+      re-opened it from the other side.
+
+    Neither fixed order is right: whatever starts FIRST wins, which is what the renderer does.
+    So:
+
+    * an unmatched backtick run is LITERAL TEXT (CommonMark does not open a span without a
+      closing run), and treating it as code let `` ` <br> `` — a plain typo of the accepted
+      `` `<br>` `` — hide a tag from the strip and pass as content (measured by the fourth
+      review of this change);
+    * a run of N backticks closes only on a run of exactly N, so `` ``<br>`` `` is one span
+      (splitting on single backticks read its content as ordinary text and refused it);
+    * an unterminated `<!--` is literal text too, for the same reason as the unmatched run.
+    """
+    out: list[str] = []
+    i, n = 0, len(cell)
+    while i < n:
+        if cell[i] == "\\":
+            # A backslash escapes the ASCII punctuation after it, and BOTH characters render
+            # (as the punctuation). Consuming them together is what stops `\`` from opening a
+            # span and `\<` from opening a tag — the two shapes the splitter's retired rewrite
+            # used to hide (measured by the fifth review of this change).
+            if i + 1 < n and _ESCAPABLE_RE.match(cell[i + 1]):
+                out.append(cell[i + 1])
+                i += 2
+                continue
+            out.append(cell[i])
+            i += 1
+            continue
+        link = _link_at(cell, i)
+        if link is not None:
+            # ⛔ A LINK IS A UNIT, and its LABEL is what renders. Reducing links only inside
+            # each scanned chunk left them behind the moment cycle 6 moved tags out of the
+            # chunks: `[` starts no construct, so `[<br>](https://x)` reached `LINK_RE` as a
+            # fragment ending at the `<`, the link was never reduced to its label, and the
+            # DESTINATION's letters were counted as content — 109 of 156 measured
+            # fail-opens (seventh review of this change), inside the very family
+            # `[](https://x)` had already closed.
+            out.append(_rendered_cell_text(link[0]))
+            i = link[1]
+            continue
+        comment = COMMENT_AT_RE.match(cell, i)
+        if comment is not None:
+            # ⛔ The renderer's grammar, including HTML5's abrupt-closing empty forms
+            # (`<!-->` and `<!--->` are COMPLETE) and the rule that a comment's text may not
+            # end with `-`, so `<!--a--->` is literal text and stays readable.
+            out.append(" ")
+            i = comment.end()
+            continue
+        if cell.startswith("<!--", i):
+            # Unterminated: literal text — but LATER constructs still apply, so only the four
+            # characters are literal and the scan continues (handing the remainder to
+            # `_rendered_inline` ate the tags inside a code span that follows it).
+            out.append("<!--")
+            i += 4
+            continue
+        tag = TAG_RE.match(cell, i)
+        if tag is not None:
+            # Consumed WHOLE, before any backtick, escape or comment marker inside it — a
+            # tag's quoted attribute may contain all three.
+            out.append(" ")
+            i = tag.end()
+            opened = OPEN_TAG_NAME_RE.match(tag.group(0))
+            name = opened.group(1).casefold() if opened else ""
+            if name in LITERAL_TEXT_ELEMENTS:
+                # Shown as WRITTEN: no tag, comment or escape inside it is markup, and the text is
+                # what a reader sees — so it is appended literally (entities decoded, since RCDATA
+                # decodes character references) instead of being stripped away.
+                body_end, element_end = _literal_text_body_end(cell, i, name)
+                out.append(_ENTITY_RE.sub(lambda m: html.unescape(m.group(0)), cell[i:body_end]))
+                i = element_end
+                continue
+            if name in RAWTEXT_ELEMENTS:
+                # The BODY is not rendered: skip to the close tag the browser ACTUALLY sees,
+                # or to the end of the cell when there is none.
+                i = _raw_text_end(cell, i, name)
+                continue
+            continue
+        if cell[i] == "`":
+            span_end = _code_span_end(cell, i)
+            if span_end < 0:  # unmatched run: literal text
+                run_end = i
+                while run_end < n and cell[run_end] == "`":
+                    run_end += 1
+                out.append(cell[i:run_end])
+                i = run_end
+                continue
+            # A span's content is LITERAL, and the delimiters are KEPT: the evidence reader
+            # finds its citations by their backticks, and the content reader replaces the
+            # delimiters with spaces, so keeping them is what lets one rendered text serve
+            # both without either weakening the other.
+            out.append(cell[i:span_end])
+            i = span_end
+            continue
+        j = i
+        while j < n and cell[j] not in "`\\<[!" and not cell.startswith("<!--", j):
+            j += 1
+        if j == i:  # a `<`, `[` or `!` that opens no construct is literal text
+            out.append(cell[i])
+            i += 1
+            continue
+        out.append(_rendered_inline(cell[i:j]))
+        i = j
+    return "".join(out)
+
+
+def _code_span_end(cell: str, i: int) -> int:
+    """End of the code span starting at `i`, or -1 when its run is UNMATCHED.
+
+    A run of N backticks closes only on a run of exactly N, so `` ``<br>`` `` is one span; an
+    unmatched run opens nothing and renders as literal text (CommonMark). One function, because
+    the cell scanner and the raw-text body walk must agree about what a span is — the tenth
+    review of this change measured the body walk searching the RAW cell, so a `` `</script>` ``
+    inside a span closed a `<script>` that a browser keeps open (fail-open on all four §3
+    columns).
+    """
+    n = len(cell)
+    j = i
+    while j < n and cell[j] == "`":
+        j += 1
+    width = j - i
+    while j < n:
+        if cell[j] != "`":
+            j += 1
+            continue
+        k = j
+        while k < n and cell[k] == "`":
+            k += 1
+        if k - j == width:
+            return k
+        j = k
+    return -1
+
+
+#: The close tag a browser acts on inside a raw-text body: the element name, optional
+#: WHITESPACE, then `>`. ⛔ NOT `</name[^>]*>`: the tenth review of this change measured
+#: `</script foo=">**STILL-TRUE**">` opening a fail-open in every column, because a browser (and
+#: markdown-it, which escapes the spelling) never treats an attributed `</script …>` as the close
+#: — the body stays hidden while the guard read the attribute text as content.
+_RAW_TEXT_CLOSE = r"</{name}\s*>"
+
+
+#: How a `<script>` body keeps state, in the tokenizer's own vocabulary: `<script>` has an
+#: ESCAPED state entered by `<!--` and a DOUBLE-escaped state entered by a nested `<script`, and a
+#: `</script` closes the element only from `data` and `escaped`. `-->` leaves BOTH dash-dash states
+#: for `data`. ⛔ All three transitions are measured with a real browser (eleventh and twelfth
+#: reviews of this change): `<script><!-- </script>AFTER -->` SHOWS `AFTER -->` (escaped, so the
+#: close tag ends the element), `<script><!--<script></script>-->lorem</script>` renders BLANK (the
+#: inner close only returns to escaped … and then `-->` returns to data, after which there is
+#: nothing left to show), and `<script><!--<script>--></script>VISIBLE` SHOWS `VISIBLE` — omitting
+#: the `-->` transition refused that cell, a false accusation on a required job.
+_SCRIPT_START_RE = re.compile(r"<script(?=[\s/>])", re.IGNORECASE)
+
+
+def _mask_escapes_and_spans(cell: str, start: int) -> str:
+    r"""`cell[start:]` with the characters a browser never reads as markup blanked in place.
+
+    Markdown-it emits an ESCAPE and a CODE SPAN entity-escaped (`\</script>` and
+    `` `</script>` `` become `&lt;/script&gt;`), and re-emits a recognised link's DESTINATION into the
+    `href`, so a close tag inside any of the three is not one the tokenizer ever sees — measured.
+
+    ⛔ A LINK is masked at its DESTINATION ONLY, never whole: a LABEL is rendered as inline
+    markup, so `<template>[a</template>b](u)VISIBLE` really does close the template inside the
+    label and the browser shows `bVISIBLE` — protecting the whole link refused that cell
+    (thirteenth review of this change). A COMMENT is NOT masked at all: its text is emitted as one
+    comment, so a `</script` inside it IS seen by the tokenizer (measured — treating it as opaque
+    refused `<script><!-- </script>AFTER -->`, which a browser shows).
+    """
+    chars = list(cell[start:])
+    i, n = 0, len(chars)
+    while i < n:
+        if chars[i] == "\\" and i + 1 < n and _ESCAPABLE_RE.match(chars[i + 1]):
+            chars[i] = chars[i + 1] = " "
+            i += 2
+            continue
+        if chars[i] == "`":
+            span_end = _code_span_end(cell, start + i)
+            if span_end > 0:
+                for k in range(i, span_end - start):
+                    chars[k] = " "
+                i = span_end - start
+                continue
+            while i < n and chars[i] == "`":
+                i += 1
+            continue
+        link = _link_at(cell, start + i)
+        if link is not None and _RECOGNISED_LINK_TAIL.match(cell[link[2]:link[1]]):
+            for k in range(link[2] - start, link[1] - start):
+                chars[k] = " "
+            i = link[1] - start
+            continue
+        i += 1
+    return "".join(chars)
+
+
+def _literal_text_body_end(cell: str, start: int, name: str) -> tuple[int, int]:
+    """`(body_end, element_end)` for a body of LITERAL TEXT (`textarea`, `xmp`).
+
+    RCDATA has no constructs — a backtick, a comment or a tag inside it is text — so the body
+    ends at the first close tag and everything before it is shown as written. `<plaintext>` has no
+    close tag at all and swallows the rest of the cell.
+    """
+    if name == "plaintext":
+        return len(cell), len(cell)
+    close_re = re.compile(_RAW_TEXT_CLOSE.format(name=re.escape(name)), re.IGNORECASE)
+    match = close_re.search(cell, start)
+    return (match.start(), match.end()) if match is not None else (len(cell), len(cell))
+
+
+def _parsed_hidden_end(
+    cell: str, start: int, name: str, close_re: re.Pattern[str]
+) -> int:
+    """End of the body of an element whose content is PARSED as markup but never rendered.
+
+    `<template>` is the family: its content goes to an inert fragment, so a `</template` inside a
+    COMMENT, a TAG's quoted attribute, a code span, an escape or a recognised link closes nothing
+    (measured, eleventh review of this change) — and the element NESTS, so an inner
+    `</template>` closes only the inner one and the rest of the body stays hidden. Without the depth
+    count `<template><template>x</template>VISIBLE` read `VISIBLE` as content while a browser renders
+    the cell blank — a fail-open in all four §3 columns (twelfth review of this change).
+    """
+    body = _mask_escapes_and_spans(cell, start)
+    depth = 1
+    i, n = 0, len(body)
+    while i < n:
+        comment = COMMENT_AT_RE.match(body, i)
+        if comment is not None:
+            i = comment.end()
+            continue
+        close = close_re.match(body, i)
+        if close is not None:
+            depth -= 1
+            if depth == 0:
+                return start + close.end()
+            i = close.end()
+            continue
+        tag = TAG_RE.match(body, i)
+        if tag is not None:
+            opened = OPEN_TAG_NAME_RE.match(tag.group(0))
+            # ⛔ NO SELF-CLOSING EXEMPTION: HTML ignores a trailing `/` on a non-void element, so
+            # `<template/>` OPENS one, and treating it as self-closed read
+            # `<template><template/>VISIBLE</template>VISIBLE</template>` as content while a browser
+            # renders the cell blank (measured, twelfth review of this change).
+            if opened is not None and opened.group(1).casefold() == name:
+                depth += 1
+            elif opened is not None and opened.group(1).casefold() in _SWALLOWING_ELEMENTS:
+                # ⛔ A nested element whose BODY swallows markup hides its own close tag from the
+                # tokenizer, so a `</template` inside it is text: skipping the body is what stops
+                # `<template><script></template></script>VISIBLE` losing all four §3 columns while
+                # the cell renders blank (measured, thirteenth review of this change).
+                i = _raw_text_end(cell, start + tag.end(), opened.group(1).casefold()) - start
+                continue
+            i = tag.end()
+            continue
+        i += 1
+    return len(cell)
+
+
+def _raw_text_end(cell: str, start: int, name: str) -> int:
+    """End of the body of the raw-text element `name` whose content begins at `start`.
+
+    Four facts, each measured against a real renderer (tenth, eleventh and twelfth reviews of this
+    change):
+
+    * an ESCAPE and a CODE SPAN are entity-escaped by markdown-it, so a close tag inside one is not
+      a close tag the browser sees — hence `_mask_escapes_and_spans`;
+    * a COMMENT and a LINK are NOT protected — `<script><!-- </script>AFTER -->` and
+      `<script>[a](</script>VISIBLE)` both SHOW text, so treating either as opaque refused a cell a
+      reader can read; a LINK is skipped only where markdown-it actually parses one;
+    * `<script>` alone has the tokenizer's ESCAPED and DOUBLE-escaped states;
+    * an element that is PARSED but hidden (`<template>`) has the opposite close-tag spelling
+      sensitivity AND nests — hence `_parsed_hidden_end`.
+    """
+    close_re = re.compile(_RAW_TEXT_CLOSE.format(name=re.escape(name)), re.IGNORECASE)
+    if name in PARSED_BUT_HIDDEN_ELEMENTS:
+        return _parsed_hidden_end(cell, start, name, close_re)
+    body = _mask_escapes_and_spans(cell, start)
+    state = "data"
+    i, n = 0, len(body)
+    while i < n:
+        if name == "script":
+            if (
+                state == "data"
+                and body.startswith("<!--", i)
+                and COMMENT_AT_RE.match(body, i) is not None
+            ):
+                # ⛔ TERMINATED only: markdown-it passes a complete comment through raw but
+                # ESCAPES an unterminated one's `<`, so the tokenizer never leaves the data state
+                # for it — entering `escaped` from the source refused
+                # `<script><!--<script></script>VISIBLE`, which a browser shows (measured).
+                state = "escaped"
+                i += 4
+                continue
+            if state == "escaped":
+                if body.startswith("-->", i):
+                    state = "data"
+                    i += 3
+                    continue
+                if _SCRIPT_START_RE.match(body, i) is not None:
+                    state = "double"
+                    i += 1
+                    continue
+            if state == "double":
+                if body.startswith("-->", i):
+                    state = "data"
+                    i += 3
+                    continue
+                close = close_re.match(body, i)
+                if close is not None:
+                    state = "escaped"
+                    i = close.end()
+                    continue
+        close = close_re.match(body, i)
+        if close is not None:
+            return start + close.end()
+        i += 1
+    return len(cell)
+
+
+#: What markdown-it requires after a link's label: a DESTINATION (angle-bracketed with no `<` or
+#: `>` inside, or a bare one that does not START with `<` and holds no `(` or space — a LATER `<`
+#: is legal and markdown-it percent-encodes it into the href, so `[a](b</template>)` IS a link)
+#: and an optional title, then `)`. ⛔ The
+#: distinction matters inside a raw-text body, where the destination's characters decide whether a
+#: `</script` ever reaches the tokenizer: `[b](</script>)` IS a link (markdown-it emits
+#: `<a href="/script">`, so nothing closes the element) while `[a](</script>VISIBLE)` is NOT (the
+#: angle destination ends at the first `>`, so the stray `VISIBLE)` leaves it literal and the
+#: browser DOES close — both measured, eleventh review of this change).
+_RECOGNISED_LINK_TAIL = re.compile(
+    r"^\("
+    r"\s*(?:<[^<>\n]*>|[^()<\s][^()\s]*?)"
+    r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?"
+    r"\s*\)$"
+)
+
+
+def _link_at(cell: str, i: int) -> tuple[str, int, int] | None:
+    """`(label, end, destination_start)` for a markdown link or image at `i`, else None.
+
+    Bracket- and paren-depth matched, because a label may contain brackets
+    (`[![badge](img)](url)`) and a destination may contain balanced parens. A REFERENCE-style
+    link (`[label][ref]`) returns None: this page defines no reference definitions, so such a
+    cell renders its literal text (and accepting it is correct, not a limit).
+    """
+    j = i + 1 if cell.startswith("![", i) else i
+    if j >= len(cell) or cell[j] != "[":
+        return None
+    depth, k = 0, j
+    while k < len(cell):
+        char = cell[k]
+        if char == "\\":
+            k += 2
+            continue
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                break
+        k += 1
+    else:
+        return None
+    if depth != 0 or k + 1 >= len(cell) or cell[k + 1] != "(":
+        return None
+    label = cell[j + 1:k]
+    m, parens = k + 2, 1
+    while m < len(cell):
+        char = cell[m]
+        if char == "\\":
+            m += 2
+            continue
+        if char == "(":
+            parens += 1
+        elif char == ")":
+            parens -= 1
+            if parens == 0:
+                return label, m + 1, k + 1
+        m += 1
+    return None
+
+
+def _rendered_inline(text: str) -> str:
+    """Ordinary markdown text: tags stripped, links reduced to their label, entities decoded.
+
+    ⛔ Only TERMINATED character references are decoded (`_ENTITY_RE`): CommonMark requires the
+    semicolon, and the no-semicolon legacy table decoded `&nbsp` (five visible characters) into
+    U+00A0 and refused the cell as empty.
+    """
+    stripped = LINK_RE.sub(r"\1", TAG_RE.sub(" ", ESCAPE_RE.sub(r"\1", text)))
+    return _ENTITY_RE.sub(lambda m: html.unescape(m.group(0)), stripped)
+
+
 def check_evidence_cells(text: str) -> list[str]:
     """§3: every row must carry a claim, a correction, and openable evidence.
 
@@ -654,6 +1267,37 @@ def check_evidence_cells(text: str) -> list[str]:
     that was retracted nor the correction that replaced it, which is the same
     "a verdict with nothing behind it" hole the evidence floor exists to close, one
     and two columns to the left (measured: blanking either cell left the page CLEAN).
+
+    ⛔ AND THE PROSE FLOOR IS NOT A WHITESPACE TEST (#11902, second pass). `str.strip()`
+    sees a cell that is not blank; a READER sees a cell that renders blank. Measured at
+    `c5990249c0`, after the whitespace floor had landed: `&nbsp;`, `<br>`, `<!-- x -->`,
+    `[](https://x)`, `n/a` and `tbc` in a content cell each left `--check` at rc 0, and a
+    correction replaced by a verbatim copy of its own claim did too — the row goes on
+    asserting a verdict beside two columns that record nothing, which is the same hole one
+    dialect out. So the cell is read through `_content_cell_words` (tags stripped, links
+    reduced to their label, entities decoded) and refused when it carries nothing a reader can
+    read, when every word is a declared placeholder AND the cell carries no digit (a digit is
+    content everywhere else in this arm, so `n/a 5` passes), and — for the correction only —
+    when its token sequence equals its claim's (letters AND digits, so a derived count is a
+    correction rather than a copy).
+
+    ⛔ THE RULE IS EMPTINESS, NOT LENGTH. A three-word floor was written first and measured
+    false: the page's own shortest cells ARE three words, so it sat at the minimum instead
+    of below it, and a legitimate compression — `#2748, #1695, #1418 **closed**`, which
+    names exactly what closed — was refused as "records nothing". Over-refusal is the
+    false-accusation class this arm must not create (a guard that reds correct prose is a
+    guard a lane routes around, which is how a real drift later merges green), so a BRIEF
+    cell passes: the boundary is one character a reader can read. The EMPTINESS reader is
+    `VISIBLE_CHARACTER_RE` (a letter or a digit, Unicode-aware) — making IT ASCII-only reds the
+    non-Latin case at once — while `CONTENT_WORD_RE` is the WORD reader that the placeholder and
+    copy tests use, and it is Unicode-aware so a non-Latin word is a word (`x Ложно` is a
+    placeholder beside a non-Latin word, not a placeholder alone).
+
+    The copy test compares the WORDS, not the raw cells: a correction that repeats its claim
+    with different markup (`**Props are not durable by construction**`) or different case
+    (`PROPS ARE NOT DURABLE BY CONSTRUCTION`) is a copy in every reading that matters, and
+    raw equality passes both. Equality only, never containment: a correction that quotes the
+    claim and ADDS to it (`**False.** Props are not durable by construction`) passes.
     """
     problems: list[str] = []
     section = _region(text, "## 3. The corrections log", "## 4. The artefact index")
@@ -665,17 +1309,48 @@ def check_evidence_cells(text: str) -> list[str]:
         cells = _split_row_cells(line)
         # Cells: 0 = the empty cell before the leading `|`, 1 = label, 2 = the
         # retracted claim, 3 = the correction, 4 = verdict, 5 = evidence.
+        claim = cells[2] if len(cells) > 2 else ""
+        correction = cells[3] if len(cells) > 3 else ""
         for index, column, absence in (
             (2, "claim", "names no retracted claim"),
             (3, "correction", "states no correction"),
         ):
             value = cells[index] if len(cells) > index else ""
-            if value.strip():
-                continue
+            words = _content_cell_words(value)
+            # ⛔ A LETTER OR A DIGIT, not a word: a bare date and an issue list each
+            # record something a reader can read (measured by the review of this change —
+            # a letters-only class refused both and said the cell was empty).
+            rendered = _rendered_cell_text(value)
+            if not VISIBLE_CHARACTER_RE.search(rendered):
+                problems.append(
+                    f"row ({match.group(1)}) at §3 line {offset}: its {column} cell "
+                    f"carries nothing a reader can read — it {absence} once tags, "
+                    "comments, links and entities are stripped, so the row asserts a "
+                    "verdict with nothing beside it to have changed"
+                )
+            elif (
+                words
+                and not any(ch.isdigit() for ch in rendered)
+                and (
+                    all(w in PLACEHOLDER_WORDS for w in words)
+                    or "".join(words) in PLACEHOLDER_WORDS
+                )
+            ):
+                # `n/a` tokenises to ['n', 'a'] because `/` separates, so the JOINED form is
+                # tested too — otherwise the most likely placeholder spelling of all is the
+                # one the set does not see (measured: the self-test arm for it went uncaught
+                # until this line read the joined form).
+                problems.append(
+                    f"row ({match.group(1)}) at §3 line {offset}: its {column} cell is a "
+                    f"placeholder ({' '.join(words)!r}) — it {absence}, and a placeholder "
+                    "records nothing beside a verdict that still asserts a change"
+                )
+        claim_words = _copy_tokens(claim)
+        if claim_words and claim_words == _copy_tokens(correction):
             problems.append(
-                f"row ({match.group(1)}) at §3 line {offset}: its {column} cell is "
-                f"blank — {absence}, so the row asserts a verdict with nothing "
-                "beside it to have changed"
+                f"row ({match.group(1)}) at §3 line {offset}: its correction is a COPY "
+                "of its claim — a row that restates the claim it exists to correct "
+                "records no correction at all"
             )
         cell = cells[5] if len(cells) > 5 else ""
         if _has_evidence(cell, sections):
@@ -735,7 +1410,11 @@ def _verdicts_by_label(text: str) -> dict[str, str]:
             continue
         cells = _split_row_cells(line)
         verdict_cell = cells[4] if len(cells) > 4 else ""
-        tokens = BOLD_TOKEN_RE.findall(verdict_cell)
+        # ⛔ Rendered text, not the raw cell: `<!-- **STILL-TRUE** -->` left
+        # `check_document()` at `[]` (measured by the review of this change) — a verdict
+        # inside a comment renders as nothing on the page. BOTH readers agree, because
+        # this is the same `_rendered_cell_text` the prose floor uses.
+        tokens = BOLD_TOKEN_RE.findall(_rendered_cell_text(verdict_cell))
         out[match.group(1)] = tokens[0] if tokens else ""
     return out
 
@@ -2660,14 +3339,15 @@ def _empty_evidence_cells(text: str) -> str:
     return "".join(lines)
 
 
-def _blank_cell_of_first_correction_row(text: str, cell: int) -> str:
-    """Blank ONE prose cell of the first §3 row, keeping the row's SHAPE.
+def _rewrite_first_correction_cell(text: str, cell: int, replacement: str) -> str:
+    """Put `replacement` in ONE prose cell of the first §3 row, keeping the row's SHAPE.
 
-    Used by the two #11902-review arms that close the claim/correction floor. The
-    shape is deliberately preserved (`"|".join(cells)` round-trips the row exactly),
-    because a reshaped row would be caught by the row-shape arm instead — and an arm
-    that reds a NEIGHBOUR's assert rides a red it did not earn, which is how a rule
-    with no killing mutant reads as coverage (`MEMORY.md`'s `[pin-defensive-claim]`).
+    EVERY content-cell arm below comes through here, so the region lookup, the escaped-pipe
+    skip rule and the shape-preserving join cannot disagree between them. The shape is
+    deliberately preserved (`"|".join(cells)` round-trips the row exactly), because a
+    reshaped row would be caught by the row-shape arm instead — and an arm that reds a
+    NEIGHBOUR's assert rides a red it did not earn, which is how a rule with no killing
+    mutant reads as coverage (`MEMORY.md`'s `[pin-defensive-claim]`).
     """
     lines = text.splitlines(keepends=True)
     for i, line in enumerate(lines):
@@ -2676,10 +3356,95 @@ def _blank_cell_of_first_correction_row(text: str, cell: int) -> str:
             continue
         cells = _split_row_cells(row)
         if len(cells) > cell:
-            cells[cell] = " "
+            cells[cell] = replacement
             lines[i] = "|".join(cells) + "\n"
             return "".join(lines)
+        return text
     return text  # pragma: no cover - the §3 population pin refuses an empty region
+
+
+def _blank_cell_of_first_correction_row(text: str, cell: int) -> str:
+    """Blank ONE prose cell of the first §3 row, keeping the row's SHAPE.
+
+    Used by the two #11902-review arms that close the claim/correction floor, and by
+    `test_a_blank_prose_cell_is_rejected`. A thin wrapper over
+    `_rewrite_first_correction_cell` so every content-cell arm shares ONE traversal.
+    """
+    return _rewrite_first_correction_cell(text, cell, " ")
+
+
+def _first_correction_cell(text: str, cell: int) -> str:
+    """Read ONE prose cell of the first §3 row — the input side of the copy arms."""
+    for line in text.splitlines():
+        row = line.rstrip("\n")
+        if not CORRECTION_ROW_RE.match(row) or "\\|" in row:
+            continue
+        cells = _split_row_cells(row)
+        return cells[cell] if len(cells) > cell else ""
+    return ""  # pragma: no cover - the §3 population pin refuses an empty region
+
+
+def _content_cell_replacement(cell: int, replacement: str):
+    """A mutation arm that puts `replacement` in ONE prose cell of the first §3 row."""
+    def mutate(text: str) -> str:
+        return _rewrite_first_correction_cell(text, cell, replacement)
+
+    return mutate
+
+
+#: `&nbsp;` — a placeholder that RENDERS blank. It cleared the whitespace floor and then
+#: the word reader until entities were decoded (measured at `c5990249c0`).
+_claim_is_an_html_entity = _content_cell_replacement(2, " &nbsp; ")
+
+#: `<br>` — a TAG that renders blank while tokenising to letters: the same class one
+#: spelling out from the entity. `<!-- x -->` and `<span>&nbsp;</span>` are the sibling
+#: spellings `test_a_blank_rendering_cell_is_rejected` pins.
+_correction_is_markup_only = _content_cell_replacement(3, " <br> ")
+
+#: `<!-- x -->` — a COMMENT, which renders as nothing and tokenises to a letter.
+_correction_is_a_comment_only = _content_cell_replacement(3, " <!-- x --> ")
+
+#: `[](https://x)` — a markdown link with an EMPTY LABEL: it renders as nothing and its URL
+#: still tokenises — one dialect out from the tag family (measured at `c5990249c0`).
+_correction_is_an_empty_label_link = _content_cell_replacement(3, " [](https://x) ")
+
+#: `n/a` — an emptied cell backfilled with a placeholder, which is what a lane reaches for
+#: when the guard reds a blank one. `/` separates in the word class, so this tokenises to
+#: `['n', 'a']`; the joined-form test is what catches it.
+_correction_is_a_placeholder = _content_cell_replacement(3, " — n/a ")
+
+#: `TBC` — a placeholder whose twin `tba` WAS in the denylist while `tbc` was not, so a
+#: `TBC` correction cell left `--check` at rc 0; `tbc` is listed now, so this arm pins the
+#: LIST as it stands rather than the unlisted class (the class is §8's DECLARED limit, and
+#: `test_an_unlisted_placeholder_is_the_declared_limit` pins the acceptance it implies).
+_correction_is_a_twinned_placeholder = _content_cell_replacement(3, " TBC ")
+
+#: `<SCRIPT>lorem ipsum</SCRIPT>` — a raw-text element's body, in a mixed CASE. Two separate rules
+#: are needed and until the tenth review of this change neither had an arm: the RAW-TEXT switch
+#: itself (a body a browser never renders, so its letters are not content) and its CASE-INSENSITIVE
+#: matching (`casefold()` on the open tag and `re.IGNORECASE` on the close, because `<SCRIPT>` is
+#: the same element to a browser). Deleting either left the arm set green while a §3 correction
+#: cell holding this `<SCRIPT>` body passed as content.
+_correction_is_a_raw_text_body = _content_cell_replacement(3, " <SCRIPT>lorem ipsum</SCRIPT> ")
+
+#: ` x nil ` — MULTI-WORD placeholders. Every single-token placeholder above is caught by the
+#: JOINED form (`''.join(words) in PLACEHOLDER_WORDS`), so with only those the `all(...)`
+#: half of the rule could be deleted and every arm still passed (measured by the review of
+#: this change: a joined-only build left `--self-test` at PASS). This arm is the one that
+#: separates the two halves.
+_correction_is_only_placeholders = _content_cell_replacement(3, " x nil ")
+
+
+def _correction_copies_claim(text: str) -> str:
+    """`**False.** The props are durable` — the correction is the claim, restated."""
+    claim = _first_correction_cell(text, 2)
+    return _rewrite_first_correction_cell(text, 3, f" {claim.strip()} ")
+
+
+def _correction_copies_claim_shouted(text: str) -> str:
+    """The same copy with the CASE changed: an arm that does not case-fold passes it."""
+    claim = _first_correction_cell(text, 2)
+    return _rewrite_first_correction_cell(text, 3, f" {claim.strip().upper()} ")
 
 
 MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
@@ -3152,6 +3917,84 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         "a §3 row whose correction cell is blank",
         lambda t: _blank_cell_of_first_correction_row(t, 3),
         "states no correction",
+    ),
+    # #11902 review, second pass: the floor above refuses a cell that TESTS empty; a cell
+    # that RENDERS empty still passed. One arm per family, each the spelling a real author
+    # writes, so each rule has its own killing mutant rather than riding a neighbour's red.
+    (
+        "a §3 claim cell carrying only an HTML entity",
+        _claim_is_an_html_entity,
+        "carries nothing a reader can read",
+    ),
+    (
+        "a §3 correction cell carrying only markup",
+        _correction_is_markup_only,
+        "carries nothing a reader can read",
+    ),
+    (
+        "a §3 correction cell carrying only a comment",
+        _correction_is_a_comment_only,
+        "carries nothing a reader can read",
+    ),
+    (
+        "a §3 correction cell carrying an empty-label link",
+        _correction_is_an_empty_label_link,
+        "carries nothing a reader can read",
+    ),
+    (
+        "a §3 correction cell carrying a placeholder",
+        _correction_is_a_placeholder,
+        "is a placeholder",
+    ),
+    (
+        "a §3 correction cell carrying a placeholder whose twin was listed",
+        _correction_is_a_twinned_placeholder,
+        "is a placeholder",
+    ),
+    (
+        "a §3 correction cell carrying only multi-word placeholders",
+        _correction_is_only_placeholders,
+        "is a placeholder",
+    ),
+    (
+        "a §3 correction holding only a raw-text element's body",
+        _correction_is_a_raw_text_body,
+        "carries nothing a reader can read",
+    ),
+    (
+        "a §3 correction that copies its claim",
+        _correction_copies_claim,
+        "is a COPY of its claim",
+    ),
+    (
+        "a §3 correction that copies its claim in another case",
+        _correction_copies_claim_shouted,
+        "is a COPY of its claim",
+    ),
+    # The OTHER two columns of the same row read the RAW cell until the review of this
+    # change measured it: `<!-- **STILL-TRUE** -->` in the verdict cell and
+    # `<!-- `tortoise/sdk.py:17109` -->` in the evidence cell each left `check_document()`
+    # at `[]`, so a row could lose its verdict AND its openable citation while §1 and §8
+    # promised both. One arm each, so neither reader can be reverted by itself.
+    (
+        "a §3 verdict cell commented out",
+        _content_cell_replacement(4, " <!-- **STILL-TRUE** --> "),
+        "no bolded verdict",
+    ),
+    (
+        # The TALLY reader is the third `_rendered_cell_text` site, and the two arms above pin
+        # the other two: a verdict hidden BEHIND a rendered one makes the tally disagree with the
+        # paragraph, and a reader that took the RAW token would see the hidden `STILL-TRUE`
+        # first and agree (measured by the third review of this change: reverting this reader
+        # left `--self-test` at PASS).
+        "a §3 verdict hidden behind a commented-out one",
+        _content_cell_replacement(4, " <!-- **STILL-TRUE** --> **DRIFTED** "),
+        "assigns a different verdict than the row carries",
+    ),
+    (
+        "a §3 evidence cell commented out",
+        _content_cell_replacement(5, " <!-- `tortoise/sdk.py:17109` --> "),
+        "names no `path:line`, issue, command or §N",
     ),
     # #11902 review round 8: the group-orientation arms had no killing mutant, so
     # `--self-test` would have stayed green over the exact fail-opens that review found.

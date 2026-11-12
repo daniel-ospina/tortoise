@@ -4976,8 +4976,22 @@ _EPISTEMIC_LABELS: tuple[str, ...] = ("Point", "Subject", "Object", "Event")
 #: fold's literal, restated: an op_type the fold does not know mints no typed
 #: edge at all, only the reverse `INPUT`.
 _OPERATOR_REL_TYPES: dict[str, str] = {
-    "NAND": "NAND",
     "IMPL": "IMPL",
+    "NAND": "NAND",
+    # #12067: `coherence` is stored on the IMPL edge type — the mechanism of
+    # record is the node's `op_type`, and leaving the third mechanism out of this
+    # map made a REBUILT graph price it as inert (a P0: the replay map and the
+    # writer had drifted).
+    #
+    # ⛔ RESTATED HERE ON PURPOSE, and the restatement is CHECKED, not trusted:
+    # `tests/test_record_projection.py::test_the_operator_rel_type_map_is_the_folds_own`
+    # asserts this map equals `ep.MECHANISM_REL_TYPES` on every mechanism. A
+    # module-level `from tortoise.ep import MECHANISM_REL_TYPES` is NOT an option:
+    # this module is loaded STANDALONE (by file path, stdlib only, no venv) by
+    # `supabase/tests/pglite/validate.mjs`, where the `tortoise` package is not
+    # importable at all — and dragging it in would also pull numpy into a
+    # stdlib-only harness (#12067 review round 5, P1).
+    "coherence": "IMPL",
     # The four composition spellings all land the ONE `hasPart` predicate.
     "composedOf": "hasPart",
     "decomposesInto": "hasPart",

@@ -572,6 +572,16 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # registries are one set in two homes
     # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
     "test_mechanism_write_path_9963",
+    # #12067: the closed mechanism set's own write-door pins — the module builds
+    # `TortoiseSDK(db_path=<tmp_path>/mech.db)` and reads the stored mechanism
+    # back off that graph, so a URI-set lane would discard the path and grade a
+    # server this test never seeded. The `sdk` fixture in the file has no
+    # `embedded_only` marker, so the `carve_out:` routing alone is NOT enough
+    # protection: this entry is the redirect exemption that keeps it embedded
+    # when it is executed with an out-of-band URI. Mirror of the `carve_out:`
+    # entry in config/ci-surfaces.yml; the two registries are one set in two
+    # homes (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
+    "test_12067_three_mechanisms",
     # #3590 round-5 review F3: the minted-identity acceptance pins. The `sdk`
     # fixture builds `TortoiseSDK(<tmp_path>/t.db, event_log_path=…)` BY DB PATH
     # and its tests drive `rebuild_all(...)` against that store, so a URI-set
