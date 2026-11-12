@@ -5182,31 +5182,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         # and the section bounds
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # At this PR's HEAD: entry 9982, `carve_out:` opens 9856, `uri_requiring:`
-        # 10187 — so 9982 is inside the section, and the identical text also sits at
-        # 6082 and 8498, which is what the 5th element exists to refuse.
-        # ⛔ THE ANCHOR IS THE HEAD, NOT THE BASE, because four of the five are this
-        # PR's own numbers: at `9828250732` (the rebase base) the same five read
-        # 9943 / 9817 / 10148 / 6082 / 8459. Pairing a head-derived number with the
-        # base sha is the defect this comment keeps being caught in.
-        # The two causes are separable and measured: main's advance to `9828250732`
-        # inserts NINE lines above all of them (`#12159` and its neighbours), and THIS
-        # PR's own `core` registration adds THIRTY-NINE more above the entry and the
-        # second twin (9943 on main alone -> 9982 here). So the ENTRY and the SECOND
-        # twin are +48 on their `0e281a900b` values, while the FIRST twin is +9 and
-        # nothing more — it sits above that block, which is the row's point: an
-        # insertion ANYWHERE above a cite moves it, not only a nearby one.
-        # The file is tool-MAINTAINED, not generated
-        # from a source of truth: `tools/ci_selection.py::register_tests` reads the
-        # text, splices the new entry into the surface's block and writes every other
-        # line back verbatim, which is why it also carries hand-authored prose. Either
-        # way the property this row trips on holds: an insertion anywhere above the
-        # entry moves it. That is the class here — a line-number pin over a number
-        # another tool owns, not a citation anyone mis-copied.
-        # ⚠️ Both of the twins are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8264 at THIS head; `sdk:` is 8225 at `9828250732`) of
-        # `surfaces:`, so the
-        # resolver's nearest-column-zero-key rule reports the PARENT: a cite onto 8498 refuses
+        # At this head (rebase onto main `8cb6655976`): entry 9973, `carve_out:`
+        # opens 9847, `uri_requiring:` 10178 — so 9973 is inside the section, and
+        # the identical text also sits at 6073 and 8489, which is what the 5th
+        # element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
+        # (`core:` 2235, `sdk:` 8255) of `surfaces:`, so the resolver's
+        # nearest-column-zero-key rule reports the PARENT: a cite onto 8489 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
@@ -5244,7 +5225,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("705", "`plan_hierarchy_edges` returns one"),
         ), "relation_write"),
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            ("9982", "- test_pack_logic_writeprobe_11083.py"),
+            ("9973", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (

@@ -339,14 +339,8 @@ mechanisms:
       # set of files that happen to hold a resolvable symbol.
       - tortoise/extractor_v2.py
       - tortoise/sdk.py
-      # The EVIDENCE-PRESERVING half of a fold (move the duplicate's attachments,
-      # slots and refs onto the canonical before the delete, and refuse where it
-      # cannot) is implemented here — see this row's note. Without it the row's
-      # `code:` points a lane at modules with no such write in them.
-      - tortoise/capture_fold.py
     tests:
       - tests/test_capture_phase_d_dedup.py
-      - tests/test_capture_fold_evidence_9437.py
     symbols:
       - exact_hit_id
     note: >-
@@ -379,26 +373,8 @@ mechanisms:
       (`(canonical_id, overlap)`) and does NO graph I/O — it is pure by its own
       module docstring. The FOLD and the `DETACH DELETE` of the folded node's
       `aboutObject` happen in the SDK's capture seam (`sdk.py`), which calls
-      `rephrase_hit`, then writes. Attributing that write to the pure helper
-      would point a lane at a module with no write in it. ✅ That write is
-      EVIDENCE-PRESERVING since #9437: `tortoise/capture_fold.py` unions the
-      duplicate's `about*` links onto the canonical (the five permitted
-      Point-source triples, through `session_link.link_entity`, carrying the
-      binder's `confidence` where the link is new), fills its free
-      per-occurrence slots in one atomic write, keeps the canonical's own where
-      the slot is taken and REPORTS the difference (including `confidence`,
-      `pointKind`, `eventId`, `status` and a truthy `is_operator`), REPORTS BY
-      NAME any prop the duplicate holds
-      that this module does not declare (`undeclared` — #2795's open set: it
-      cannot carry what it has no slot for, so the receipt says what the delete
-      took instead of claiming the node had no evidence), and REFUSES the fold
-      — keeping both claims —
-      where the evidence cannot be moved (`unaddressable`, `uncarriable_attachment`,
-      `inbound_attachment`, `uncarried_source_ref`, `malformed_address`,
-      `link_not_carried`, `slot_write_failed`, `unreadable`, `unexpected_edge`,
-      `ambiguous_duplicate`, `internal_error`). So "the capture
-      seam DELETEs the loser" is no longer the whole story, and a lane reading
-      this row must not re-derive #9437 as open.
+      `rephrase_hit`, then writes — measured, tracked at #9437. Attributing that
+      write to the pure helper would point a lane at a module with no write in it.
 
   - id: near_dup_detect
     name: "S2.2a-β NEAR-DUP DETECT — the pair + the §16.4 never-across guard (NO fusion)"
@@ -428,10 +404,7 @@ mechanisms:
       inside `execute_embed`) calls the guard on the paraphrases it folds;
       (2) the capture seam: `dedup_classify.rephrase_hit` calls `fold_allowed` and
       returns the hit — it is pure and does NO graph I/O. The SDK's capture seam
-      (`sdk.py`) then FOLDS the loser — EVIDENCE-PRESERVINGLY since #9437: the
-      duplicate's attachments and free evidence slots are carried onto the
-      canonical first, and the fold is REFUSED (both claims kept) where they
-      cannot be moved (mechanism and refusal tokens on the `exact_dedup` row);
+      (`sdk.py`) then FOLDS and DETACH-DELETEs the loser (see #9437);
       (3) the temporal counting lane: `temporal_aggregation._restatement` calls
       `fold_allowed` when deciding whether two events are one restatement, which
       moves `count_distinct_events`' `n_events`. ⚠️ That COUNTING LANE has no

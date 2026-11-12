@@ -1036,53 +1036,15 @@ def _referentiality_hold(surface: str) -> tuple[str, str] | None:
     (``#3590`` D1) that mints when no live holder exists.
 
     So a pronoun or a discourse-generic head that the model returned as a
-    subject became a durable ``:Subject`` on the document path — through THIS
-    stage's write. The repair is NOT a new rule set — it is calling the SAME
-    leaf, under the SAME flag and under the SAME fail-open discipline, so the
-    two generations cannot disagree about a surface **this stage returns**,
-    including when the cue RAISES:
+    subject became a durable ``:Subject`` on the document path. The repair is
+    NOT a new rule set — it is calling the SAME leaf, under the SAME flag and
+    under the SAME fail-open discipline, so the two generations cannot disagree
+    about a surface, including when the cue RAISES:
 
-    ⛔ **THIS STAGE'S WRITE IS THE WHOLE SCOPE — state it that way, because a
-    wider claim is false.** The same document ingest reaches a SECOND
-    ``:Subject`` mint that this predicate does not gate: each Point's
-    ``aboutEntities`` is passed VERBATIM to ``api.add_point`` (``_run_document``,
-    below), which runs the rel-agnostic about* cascade and mints a Subject stub
-    (``_mint_subject_stub``) for a name that resolves to nothing. So this cue
-    does not make the *document* free of a minted non-referent, and an armed run
-    can leave that surface's Subject population unchanged — measured at the
-    #12102 review (``api.add_point(aboutEntities=["it", "the former"])`` then
-    ``MATCH (s:Subject) RETURN s.name, s.id`` →
-    ``[['it', 'it'], ['the former', 'the former']]``: each non-referent is a stub
-    whose id IS its name, and ``RETURN s.name`` alone → ``[['it'], ['the former']]``).
-    ⛔ Name the QUERY, not just the rows: two result columns sharing one name are
-    refused by the engine, so a copied row shape without the projection is not a
-    reproduction recipe.
-
-    ⛔ **It is DECLINED here, not fixed, and that is a decision with a reason.**
-    The construction the door lands in is a recorded design, not an oversight:
-    ``#8398`` deliberately WITHDREW the retirement of that stub, because *"a
-    name no producer registered lost its link on every replay"*, and journals
-    ``mint_if_absent: true`` so live and replay agree. So the open question is
-    not "add a missing predicate" — it is *"may a non-referent be an about*
-    target at all"*, which is that design's decision to take and not this cue's;
-    v4 answered it on its own path (``route_mentions`` strips held surfaces from
-    claim/event ``about_entities``) and v1 has NOT, which is the asymmetry.
-    Tracked as ``#12247``; siblings ``#12118`` (identifier class) and ``#12119``
-    (the v1 Object loop). Pinned by
-    ``test_the_point_about_entities_door_is_declined_and_still_mints``, so a
-    later fix here fails loudly and reads this paragraph first.
-
-    * the ``referentiality`` module owns the cue AND its flag, and they are TWO
-      objects: ``judge`` is the LEAF and ``enabled()`` is the flag check
+    * ``referentiality.judge`` owns the cue and its flag
       (``TORTOISE_REFERENTIALITY``, **OFF** by default per ``#5087`` plan R1 —
-      *unmeasured ⇒ fail open*). ⛔ ``judge`` does NOT consult the flag — measured:
-      with the variable unset, ``enabled()`` is ``False`` while ``judge("it")``
-      still returns ``('referentiality.pronoun', …)`` — so the check that makes an
-      unarmed run make the SAME MINT DECISIONS as the pre-#12094 code is the
-      ``enabled()`` call at THIS call site, not anything inside ``judge``. Say it
-      that way, because the other reading is the one a future caller cites when
-      skipping the check and arming the cue on an unarmed run. ⛔ Not the same
-      return value either: the census
+      *unmeasured ⇒ fail open*), so an unarmed run here makes the SAME MINT
+      DECISIONS as the pre-#12094 code. ⛔ Not the same return value: the census
       keys below (``subjects_minted`` … ``mentions``) are present
       unconditionally, which is why this docstring says *mint decisions* rather
       than borrowing ``route_mentions``' "byte-identical" promise — that
@@ -1101,9 +1063,9 @@ def _referentiality_hold(surface: str) -> tuple[str, str] | None:
     * the identifier-only class (``#4118``, a path) is deliberately NOT asked
       here: wiring it on this path would ship an unmeasured discard to a live
       document ingest and can drop a must-keep surface
-      (``config/ci-surfaces.yml`` is one of the surfaces ``#11021``'s must-keep
-      arm exists to protect). That is a different decision, on a different path,
-      and it is not this issue's.
+      (``config/ci-surfaces.yml`` is the row ``#11021``'s 12-row arm exists to
+      protect). That is a different decision, on a different path, and it is
+      not this issue's.
 
       ⛔ **Nothing DISCARDS this class on THIS path — stated as measured, not
       inferred.** The cue DOES consult ``value_gate``: ``judge`` calls
@@ -1118,11 +1080,8 @@ def _referentiality_hold(surface: str) -> tuple[str, str] | None:
       returns ``None``, while ``"#4118"`` and a path correctly resolve to
       ``reference``/``path``. So the 453 ``issue:<repo>#<n>`` Subjects #12060
       measured still mint on this path — tracked as ``#12118``, NOT discharged
-      by this cue. The same holds for the object loop in the same section walk
-      (``for o in entities.get("objects", [])``, also unclaimed, ``#12119``);
-      this PR is the S7 **Subject** mint only — not "the
-      one Subject mint on this path", which the ``aboutEntities`` door above
-      falsifies.
+      by this cue. The same holds for the Object loop ~20 lines below (also
+      unclaimed, ``#12119``); this PR is the Subject mint only.
 
     ``the owner`` / ``the founder`` / ``the user`` are NOT held by this
     predicate and must not become so: ``#2453``/``#4899`` measured them as real
@@ -1469,8 +1428,7 @@ class LLMExtractor:
         # the phrase's offset inside it. See the census in the return value.
         # ⛔ OCCURRENCE-level: one record per (surface, section), so a surface the
         # model returns in two sections yields two records. The COUNTERS below are
-        # SURFACE-level (``_held_only``, the filtered view of ``held_surfaces``)
-        # so they are comparable with
+        # SURFACE-level (``_held_surfaces``) so they are comparable with
         # ``subjects_minted``, which is name-deduplicated — a census whose buckets
         # count different units invites a caller to add them up.
         held_subjects: list[dict] = []
@@ -1553,9 +1511,8 @@ class LLMExtractor:
                     # index is wrong for exactly the class this gate holds: the
                     # pronoun `it` is found INSIDE "with"/"within"/"itself", so the
                     # recorded offset pointed at a different word than the surface
-                    # — measured at the #12102 review (`body[14:16] == 'it'` inside
-                    # "with" on the fixture body: a SUBSTRING match, which is exactly
-                    # what the word-boundary rule exists to refuse). `None` when the phrase is genuinely absent is the
+                    # — measured at the #12102 review (`body[34:36] == 'it'` inside
+                    # "with"). `None` when the phrase is genuinely absent is the
                     # honest answer, never a nearby match.
                     # ⛔ AND IT MATCHES THE PHRASE THE CUE JUDGED, not the raw model
                     # string (#12102 round-3 review P2): `referentiality.judge`
@@ -1575,20 +1532,9 @@ class LLMExtractor:
                     _offset = _match.start() if _match is not None else None
                     # ⚠️ COORDINATE BASE (#12102 review P3): `_offset` indexes
                     # THIS SECTION'S STRIPPED BODY (`body`, leading whitespace
-                    # removed), while `span` below is `[content_start,
-                    # content_end]` over `_document_sections`' text — which is
-                    # `_strip_frontmatter(transcript)` with fenced code rewritten,
-                    # NOT the original document. So it is not "document
-                    # coordinates" either: measured, a document carrying a 4-line
-                    # frontmatter puts its body at index 8 there and 35 in the
-                    # original, and a fence line is rewritten: an OPENING one goes
-                    # 3 chars -> 6 (`f"\n\n{text[i:i+3]}\n"`), a CLOSING one 3 -> 5
-                    # (`f"{fence_char}\n\n"`) — so later text shifts by +5 per
-                    # complete block (+3 on an unterminated one), PLUS +3 for each
-                    # `## ` line at line start INSIDE the block (mangled to
-                    # `#_# # `, 3 chars -> 6), measured on a two-fence body.
-                    # The two fields of this one record therefore cannot be
-                    # combined: do NOT compute
+                    # removed), while `span` below is DOCUMENT coordinates
+                    # `[content_start, content_end]`. The two fields of this
+                    # one record therefore cannot be combined: do NOT compute
                     # the document index as `span[0] + phrase_offset`. The gap is
                     # NOT a constant — it is the WIDTH OF THE STRIPPED PREFIX:
                     # measured 0 for a flush-left body and -3 for a body indented

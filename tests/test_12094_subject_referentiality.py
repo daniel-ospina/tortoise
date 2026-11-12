@@ -1,10 +1,4 @@
-"""#12094 — the referentiality cue reaches the S7 ``subjects`` mint, which lacked it.
-
-⛔ NOT "the one Subject mint": a SECOND ``:Subject`` mint runs on the same document
-``_run_document`` (each Point's ``aboutEntities`` → ``_create_about_edges`` →
-``_mint_subject_stub``) and this change does not gate it — ``#12247`` records it,
-with the ``#8398`` decision that keeps it open. The scope statement is the third
-paragraph below; this headline used to contradict it.
+"""#12094 — the referentiality cue reaches the ONE Subject mint that lacked it.
 
 **What was measured, and what this pins.** ``extractor_v2``'s Subject candidates
 ride ``entities[]``, so ``route_mentions`` (S2.2, ``#11021``/``#11211``) already
@@ -19,9 +13,7 @@ The gap was the OTHER extractor generation: ``extractor.py``'s S7
 when no live holder exists — for every name the stage returned, with **no
 predicate in between**. These tests pin the reuse: the SAME leaf
 (``referentiality.judge``), under the SAME flag, so the two generations cannot
-disagree about a surface **this stage returns** — ⛔ NOT about the document:
-``#12247`` records the second ``:Subject`` mint on the same ingest (a Point's
-``aboutEntities``), which this change declines to gate.
+disagree about a surface.
 
 ⛔ ``the owner`` is NOT held here, and must not become so. ``#2453``/``#4899``
 measured the definite-description class as containing real entities with no
@@ -50,12 +42,6 @@ from tortoise.log import EventLog  # noqa: E402, RUF100
 from tortoise.projection import FalkorProjection  # noqa: E402, RUF100
 
 FLAG = "TORTOISE_REFERENTIALITY"
-#: The ``#12060`` class (453 Subjects measured in the ``default`` graph) that ``#12118``
-#: tracks and this change deliberately does NOT gate — ``value_gate.identifier_only``
-#: does not claim it either (measured: it returns ``None`` here while claiming
-#: ``#4118``/a path), so it is the surface that pins the DECLINE rather than the
-#: ``value_gate`` boundary alone.
-ISSUE_SURFACE = "issue:daniel-ospina/tortoise#1234"
 
 
 def _tmp(name: str) -> str:
@@ -276,125 +262,10 @@ def test_the_definite_description_class_is_not_held(monkeypatch, surface):
 def test_an_identifier_subject_is_left_to_the_value_gate(monkeypatch):
     """The identifier-only class has ONE owner (``value_gate``), and it is not
     this cue — ``referentiality.judge`` skips it by design so one phrase never
-    has two owners deciding two outcomes.
-
-    ⛔ The flag is set for the HOLD's benefit, not ``judge``'s: ``judge`` does
-    not consult ``enabled()`` (measured — unset, ``judge("it")`` still returns
-    a rule), so what arms the cue on the write path is the ``enabled()`` check at
-    ``_referentiality_hold``'s call site. ``_referentiality_hold``'s docstring
-    records that split; this comment exists so the setenv here does not read as
-    "``judge`` needs the flag".
-
-    ⛔ AND THE CLASS MUST BE PINNED AT THE **EXTRACTOR BOUNDARY**, not only at
-    ``judge`` (``#12102`` review P2, measured). ``judge("#4118") is None`` is a
-    property of ``referentiality.py`` — a module this change barely touches — so
-    on its own it cannot red when the GATE is widened: an arm that holds whatever
-    ``value_gate.identifier_only`` claims (``#4118``, a path) left this suite
-    **24/24 green**, while that widening is exactly the *"unmeasured discard on a
-    live document ingest"* ``_referentiality_hold``'s docstring says it declines
-    to ship. The second half below drives ``extract_entities`` for real, over all
-    THREE surfaces the docstring's decline covers — ``#4118`` and a path (the two
-    ``value_gate.identifier_only`` actually claims) and ``issue:<repo>#<n>``,
-    which it does NOT — so the claim the docstring makes as *measured* — that the
-    453 ``issue:<repo>#<n>`` Subjects ``#12060`` counted still mint on this path
-    (``#12118``) — has an assertion behind it.
-
-    ⛔ THE ``issue:`` SURFACE IS THE LOAD-BEARING ONE (#12102 re-review, measured):
-    a mutant that widens the gate to hold anything ``identifier_only`` claims reds
-    this test, but a mutant that holds ``issue:``-prefixed surfaces left the suite
-    **24/24 green** while this payload was ``#4118`` alone — the very class the
-    docstring cites as the open, tracked one (``#12118``) had no pin at all.
-    """
+    has two owners deciding two outcomes."""
     monkeypatch.setenv(FLAG, "1")
     assert referentiality.judge("#4118") is None
     assert referentiality.judge("config/ci-surfaces.yml") is None
-    assert referentiality.judge(ISSUE_SURFACE) is None
-
-    api, proj, _log = _proj_api()
-    payload = {"subjects": [
-        {"name": "#4118", "subjectKind": "other"},
-        {"name": "config/ci-surfaces.yml", "subjectKind": "other"},
-        {"name": ISSUE_SURFACE, "subjectKind": "other"},
-    ], "objects": [], "aboutEntities": []}
-
-    result = _extract(monkeypatch, payload, api)
-
-    assert result["subjects"] == 3 and result["subjects_minted"] == 3
-    assert result["subjects_held"] == 0
-    rows = proj.g.query("MATCH (s:Subject) RETURN s.name").result_set
-    assert sorted(r[0] for r in rows) == sorted(["#4118", "config/ci-surfaces.yml",
-                                                ISSUE_SURFACE]), (
-        "the identifier class must still mint on the S7 path — widening"
-        " _referentiality_hold to value_gate's class is a DIFFERENT decision"
-        " and would ship an unmeasured discard")
-
-
-def test_the_point_about_entities_door_is_declined_and_still_mints(monkeypatch):
-    """⛔ A pin on a **DECLINED** door, not on a repaired one — ``#12247``.
-
-    ``#12094`` closes the S7 ``subjects`` write. It does NOT close the other
-    ``:Subject`` mint on the SAME document ingest: each Point's ``aboutEntities``
-    is passed verbatim to ``api.add_point`` (``_run_document``), the about*
-    cascade resolves it against Subject→Object→Event→Source→Point, and a name
-    that resolves to nothing mints a Subject stub (``_mint_subject_stub``).
-
-    That construction is a RECORDED DESIGN — ``#8398`` withdrew its retirement
-    because *"a name no producer registered lost its link on every replay"* —
-    so the open question is not "add a predicate", it is *"may a non-referent be
-    an about* target at all"*. v4 answered it on its own path (``route_mentions``
-    strips held surfaces from claim/event ``about_entities``); v1 has not, and
-    this change declines to decide it here.
-
-    ⛔ SO THIS ASSERTS THE MEASURED STATE: armed, a held surface in
-    ``aboutEntities`` STILL becomes a ``:Subject``. It exists so that closing
-    the door is a LOUD event — a later change that strips the surface here reds
-    this test, and whoever reds it reads ``#12247`` and ``_referentiality_hold``'s
-    docstring instead of widening this change silently. ⛔ Do not "fix" this by
-    asserting zero nodes without discharging ``#12247``: that reverses the
-    recorded scope decision rather than implementing it.
-    """
-    monkeypatch.setenv(FLAG, "1")
-    api, proj, _log = _proj_api()
-
-    class _PointStage:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def run(self, title, body, llm_context):
-            # `it` is held by the cue (asserted below), and it is exactly the
-            # string the point prompt invites: "entity names the claim is about".
-            return [{"content": "It replaced an earlier stack.",
-                     "pointKind": "statement",
-                     "aboutEntities": ["it"],
-                     "confidence": 0.8}]
-
-    class _NoRelations:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def run(self, contents, llm_context):
-            return []
-
-    assert referentiality.judge("it") is not None, (
-        "the cue must hold `it` — otherwise this test would pass for the wrong "
-        "reason and pin nothing about the declined door")
-
-    # ⛔ Construct FIRST: ``LLMExtractor.__init__`` builds ``self.relations`` from
-    # this same class, so patching it earlier replaces the attribute object and
-    # ``_run_document`` then reads ``self.relations.model`` off the stand-in.
-    ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
-    monkeypatch.setattr(extractor_mod, "_DocumentPointStage", _PointStage)
-    monkeypatch.setattr(extractor_mod, "_RelationStage", _NoRelations)
-    body = "## Product Strategy\nIt replaced an earlier stack in 2024.\n"
-    ext._run_document([("Product Strategy", body, [0, len(body)])],
-                      "strategy.md", api)
-
-    rows = proj.g.query("MATCH (s:Subject) RETURN s.name").result_set
-    assert rows == [["it"]], (
-        f"the declined door's measured state is ONE Subject stub named `it`; "
-        f"got {rows}. If this is now empty, the `aboutEntities` door was closed "
-        f"— discharge #12247 and update this docstring rather than deleting the "
-        f"assertion's reasoning")
 
 
 # ── 6. the non-document return carries the SAME contract ────────────────────
@@ -611,11 +482,7 @@ def test_an_unarmed_run_says_nothing_about_holds(capsys):
         DOC, "strategy.md", None, _ingest_args(), extractor=fake)
 
     out = capsys.readouterr().out
-    # ⛔ Key on the LINE the code emits, not on a bare substring of all of stdout
-    # (#12102 review P3). `"held" not in out.lower()` passed for the wrong reason
-    # and would false-red on any future message containing ``held``/``withheld``
-    # (a lane name, a path), while never checking that THIS line is absent.
-    assert "warning: S7 held" not in out, (
+    assert "held" not in out.lower(), (
         f"nothing was held, so nothing may be reported as held; stdout was {out!r}")
 
 

@@ -2061,10 +2061,10 @@ def test_every_cited_line_in_this_section_still_carries_the_prose_it_describes()
 
 
 #: §5 introduces some of its evidence with the SYMBOL the line declares:
-#: `` `_DOC_RETIRED_KEYS` (`projection/entities.py:2260`) ``. Those pointers rot the
+#: `` `_DOC_RETIRED_KEYS` (`projection/entities.py:2245`) ``. Those pointers rot the
 #: same way the `:Document` ones did — and one already had: §5 cited
 #: `projection/entities.py:1584` for `_DOC_RETIRED_KEYS`, which was right when the
-#: map was cut at `438a8924d1` and is at **2260** at this head, so the citation
+#: map was cut at `438a8924d1` and is at **2245** at this head, so the citation
 #: pointed at an unrelated comment about `_ingestedAtStored`. No pin noticed, because
 #: the guard above reads only `cache_eviction.py` citations.
 _SYMBOL_POINTER = re.compile(r"`([A-Za-z_][\w.]*)`\s*\(\s*`([\w./-]+\.py):(\d+(?:,\d+)*)`")
@@ -2075,7 +2075,7 @@ def test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names() -> Non
 
     Reachable — and it WAS the shipped state: §5's D10 evidence cited
     `projection/entities.py:1584` as `_DOC_RETIRED_KEYS`, whose declaration sat at
-    1974 when this pin was written and 2260 at this head (it was 1584 when the map
+    1974 when this pin was written and 2245 at this head (it was 1584 when the map
     was cut; that module has grown since). The citation therefore sent a reader
     re-examining the retirement mechanism to a comment about `_ingestedAtStored` —
     the exact class of stale evidence pointer the `:Document` pin next door closes
