@@ -166,7 +166,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `:459` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
    `pack validate` reads `declared_hierarchy`/`hierarchy_diagnostics`, not the planner).
    ⛔ **Superseded in the merged tree — but only for the PLANNER: `#11548` added a production caller
-   of `plan_hierarchy_edges`**, at `relation_write.py:631` (`planned = plan_hierarchy_edges(…)`) — see
+   of `plan_hierarchy_edges`**, at `relation_write.py:695` (`planned = plan_hierarchy_edges(…)`) — see
    the fifth-landing amendment in §0. It did **not** add a caller of the WRITER: `apply_hierarchy_edges`
    still has zero production callers (`git grep apply_hierarchy_edges -- tortoise/` → **two** hits,
    the `__all__` entry and the `def`, i.e. no call at all), so this item's
@@ -684,7 +684,7 @@ git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :948
 # A1 (§1) — the declaration reads, and a production caller outside its own module now writes it
 # ⛔ This header read "…and nothing production writes it" until #11548/#11237 landed
 # `relation_write.py` — `plan_hierarchy_edges` IS called from production at
-# `tortoise/relation_write.py:631` (`pack_hierarchy.py:459` is the same module's own internal
+# `tortoise/relation_write.py:695` (`pack_hierarchy.py:459` is the same module's own internal
 # call, which is why it is not a second consumer). §0 above records the change; do not argue A1
 # from the retired premise (that is the "second producer the epic forbids" argument).
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
@@ -698,13 +698,13 @@ git grep -n apply_hierarchy_edges -- tortoise/ tests/   # 12 lines on this merge
                                                           # command returns 20 across 8 files, including
                                                           # this record's own citations,
                                                           # its index row and tools/pack_relation_census.py
-git grep -n plan_hierarchy_edges -- tortoise/ tests/      # 19 lines on this merge: 9 + 2 across the two
+git grep -n plan_hierarchy_edges -- tortoise/ tests/      # 22 lines on this merge: 9 + 2 + 3 across the three
                                                           # test files, `:59/:78/:365/:459` in
                                                           # pack_hierarchy.py, and — the part this line
                                                           # used to omit — 4 in relation_write.py
-                                                          # (`:53 :589 :631 :636`), `:631` being the CALL
-                                                          # ⚠️ unscoped this command returns 26, because 7
-                                                          # docs lines match too — 6 of them in THIS
+                                                          # (`:53 :653 :695 :700`), `:695` being the CALL
+                                                          # ⚠️ unscoped this command returns 37, because 13
+                                                          # docs lines match too — 7 of them in THIS
                                                           # record, the self-match trap §1 names
 git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[:space:]]*\(' \
   tortoise/extractor_v2.py                                 # no output, exit 1 — the class must NOT
@@ -717,11 +717,11 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
                                                           # count is only as good as the base it was taken at
 # ⛔ THREE hits in this record's merged tree since #11548 landed the consumer (#11237):
 # extractor_v2.py:11524 (the comment that WAS stale, corrected in place by #11001's lane),
-# relation_write.py:7, sdk.py:18071.
+# relation_write.py:7, sdk.py:18308.
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
-# `sdk.py:18084` (`_capture_session` reaches it at `sdk.py:16215`). Of the three hits only ONE was still prose-about-absence (the stale comment at
+# `sdk.py:18321` (`_capture_session` reaches it at `sdk.py:16452`). Of the three hits only ONE was still prose-about-absence (the stale comment at
 # `extractor_v2.py:11524`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
 # ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:11524` was
@@ -741,7 +741,7 @@ git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merge
                                                           # consumes it" comment; CORRECTED in
                                                           # place — see the note above),
                                                           # relation_write.py:7 (the
-                                                          # CONSUMER's docstring) and sdk.py:18071 (the
+                                                          # CONSUMER's docstring) and sdk.py:18308 (the
                                                           # #10999 transport-only note). ⛔ NOT "no
                                                           # consumer": the second hit IS the consumer
                                                           # (§0 above). (⚠️ the `-- tortoise/` scope is
