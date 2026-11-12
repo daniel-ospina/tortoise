@@ -1123,14 +1123,16 @@ class TestReviewRound2Closed:
             "write's skipped rule/target as its own")
 
     def test_the_next_write_gets_its_own_correction_after_the_first_dies(self):
-        """…and the correction is per WRITE, not per process.
+        """A regression guard: the correction is per WRITE, not per process.
 
-        The pre-fix map served a hit without asking whether the entry was about
-        THIS decision, so the observable damage was a second write whose reply
-        carried the first write's `skipped` block while its own `accepted` was
-        left uncorrected — the counter reporting a redirect that did not happen.
-        Deterministic here (no allocator dependence): the first decision dies and
-        the second abstains, and both corrections must be present exactly once.
+        ⛔ NOT the discriminator for the recycled-id defect — `test_the_abstain_marker_dies_with_its_own_decision`
+        is, and it is measured RED on the pre-fix code. This one PASSES on the
+        pre-fix code too (measured 10/10), because the second `resolve()` does not
+        reliably land on the freed address, so the stale-entry path is not
+        exercised here. Its claim is narrower and still worth pinning: a second
+        write is neither served the first write's abstention NOR over-corrected —
+        the tally must end at exactly two skips and zero accepted, which is what
+        a too-eager eviction or a double `_unrecord` would break.
         """
         first = resolve(ISSUE_NAME, "subject", None, pack_confusions=())
         first_replacement = kg.abstain(first, "first write's reason")
