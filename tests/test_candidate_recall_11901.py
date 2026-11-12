@@ -30,6 +30,7 @@ DOC_DIR = (Path(__file__).resolve().parent.parent
 BRIEF = DOC_DIR / "research-brief.md"
 ARTIFACT = DOC_DIR / "measurement.json"              # hybrid — the product's read
 CONTROL = DOC_DIR / "measurement-fts-only.json"      # the lexical-only control
+TOOL = Path(__file__).resolve().parent.parent / "tools" / "candidate_recall_11901.py"
 
 
 # ── the artifact ─────────────────────────────────────────────────────────────
@@ -41,12 +42,24 @@ def report() -> dict:
 
 
 @pytest.fixture(scope="module")
+def tool_mod():
+    """The harness module, so a mode label is DERIVED rather than frozen."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "candidate_recall_11901", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture(scope="module")
 def control() -> dict:
     assert CONTROL.exists(), f"missing committed control {CONTROL}"
     return json.loads(CONTROL.read_text())
 
 
-def test_both_artifacts_declare_which_retrieval_mode_ran(report, control):
+def test_both_artifacts_declare_which_retrieval_mode_ran(report, control, tool_mod):
     """An FTS-only run is a DIFFERENT measurement from the fused read.
 
     `battery/runner/retrieval_preflight.py` records a keyword-only run published
@@ -58,14 +71,22 @@ def test_both_artifacts_declare_which_retrieval_mode_ran(report, control):
         "STORAGE-ARCHITECTURE sentence both rest on it being the fused read")
     assert report["retrieval"]["legs_seen"].get("vector") is True
     assert control["retrieval"]["has_embedder"] is False
-    assert "KEYWORD-ONLY" in control["retrieval"]["note"]
+    mod = tool_mod
+    assert (control["retrieval"]["note"]
+            == mod._mode_note(False, control["retrieval"]["legs_seen"])), (
+        "the control's note is not the one its own legs imply")
     # ⛔ The hybrid artifact's note must be the one its OWN legs imply: a note
     # that contradicts `has_embedder`/`legs_seen` is the false label
     # `retrieval_preflight` exists to prevent, and asserting only that the
     # control mentions "KEYWORD-ONLY" leaves it unguarded (round 5, F2).
-    assert report["retrieval"]["note"] == "hybrid", (
-        f"the hybrid artifact's note contradicts its legs: "
-        f"{report['retrieval']['note']!r}")
+    # ⛔ DERIVED, not frozen: `_mode_note` is the invariant, so a legitimate
+    # reword that regenerates the artifact is not read as a contradiction (the
+    # first version pinned the literal "hybrid", which made a correct two-line
+    # change fail with a FALSE diagnosis — review round 6, F3).
+    note = report["retrieval"]
+    assert note["note"] == mod._mode_note(note["has_embedder"], note["legs_seen"]), (
+        f"the hybrid artifact's note contradicts the legs it declares: "
+        f"{note['note']!r} vs {mod._mode_note(note['has_embedder'], note['legs_seen'])!r}")
     for name, art in (("hybrid", report), ("control", control)):
         vector = bool(art["retrieval"]["legs_seen"].get("vector"))
         if art["retrieval"]["has_embedder"] and vector:
@@ -106,7 +127,8 @@ def test_the_mode_note_is_derived_from_the_legs_not_from_availability():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    assert mod._mode_note(True, {"fts": True, "vector": True}) == "hybrid"
+    hybrid = mod._mode_note(True, {"fts": True, "vector": True}).lower()
+    assert "hybrid" in hybrid and "keyword-only" not in hybrid
     assert "KEYWORD-ONLY" in mod._mode_note(False, {"fts": True})
     misleading = mod._mode_note(True, {"fts": True, "vector": False})
     assert "DESPITE AN EMBEDDER" in misleading, (
@@ -180,6 +202,60 @@ def test_the_shipped_matcher_attaches_no_variant_at_any_width(request, artifact)
         # which is what makes it the measured next step rather than a guess.
         assert row["attached_folded"] > 0
         assert row["in_window_not_attached"] == row["in_window"]
+
+
+def test_search_graph_unions_the_derived_queries_into_one_id_keyed_dict(monkeypatch):
+    """The mechanism behind "`limit=3` is not 3 candidates", pinned in the CODE.
+
+    §1 consequence 1 and the "~40 vs 15" comparison rest on
+    `extractor_v2.search_graph` accumulating EVERY derived query's rows into one
+    id-keyed dict (`:3074`). The artifact's pooled arm re-implements that union,
+    so an artifact-side test cannot see the production mechanism changing —
+    §9 used to claim it was pinned when nothing read `search_graph` (round 6,
+    F4). This drives the real function with a stub client.
+    """
+    from tortoise import extractor_v2 as v2
+
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setenv("TORTOISE_API_URL", "https://api.example.test")
+
+    rows_by_query: dict[str, list[dict]] = {}
+    queries_asked: list[str] = []
+
+    class StubSDK:
+        # no `_get_proj`: the env label decides searchability (the documented
+        # mock path), and this pins the UNION, not the backend gate.
+        def tortoise_fts_query(self, query, *, entity_type, limit=3,
+                               include_terminal=False, **_ignored):
+            queries_asked.append(f"{entity_type}:{query}")
+            return rows_by_query.get(query, [])[:limit]
+
+    # Two DERIVED queries return the SAME node plus a distinct one each, which
+    # is what a widening-derived query set looks like in production.
+    shared = {"id": "obj-shared", "content": "the retrieval step", "point_kind": "core:plan"}
+    embed = {"entities": [{"name": "the retrieval step", "kind": "object"},
+                          {"name": "the citation graph", "kind": "object"}]}
+    res = v2.search_graph(StubSDK(), embed, "A story with a sentence.",
+                          max_queries=15, limit=3)
+    assert res["degraded"] is False, res.get("reason")
+    asked = [q.split(":", 1)[1] for q in queries_asked if q.startswith("object:")]
+    assert len(asked) >= 2, f"S3 ran fewer than two derived queries: {asked}"
+    for i, q in enumerate(asked):
+        # Two distinct rows per query, so a UNION must exceed `limit=3` — a
+        # list capped at the per-query width would hold at most 3.
+        rows_by_query[q] = [shared] + [
+            {"id": f"obj-distinct-{i}-{j}", "content": f"{q} v{j}",
+             "point_kind": "core:plan"} for j in (0, 1)]
+    # Re-drive now that every query answers, so the union is exercised.
+    res = v2.search_graph(StubSDK(), embed, "A story with a sentence.",
+                          max_queries=15, limit=3)
+    ids = [e["id"] for e in res["entities"]]
+    assert ids.count("obj-shared") == 1, (
+        f"the shared row was not deduplicated by id: {ids}")
+    assert len(ids) == len(set(ids)), f"duplicate ids survived the union: {ids}"
+    assert len(ids) > 3, (
+        "the candidate list is not the UNION of the derived queries — it looks "
+        f"capped at `limit`: {ids}")
 
 
 def test_the_pooled_set_is_wider_than_the_per_query_window(report):
@@ -493,7 +569,11 @@ def test_the_briefs_restatements_all_recompute(report, control):
     def pct(num, den):
         return f"{100 * num / den:.1f} %"
 
-    # ── §5: the duplicate-rate-as-measured table, all four pinned rows.
+    # ── §5: its definitional first row, then the four measured rows.
+    assert "| prior off (no link-before-create) | 0 % | n/a |" in text, (
+        "§5's definitional `prior off` row changed — it states the baseline the "
+        "other four rows are read against")
+
     for k in ("3", "15"):
         row = v[k]
         assert (f"| prior on, `limit={k}`, phase 1 | 0.0 % | "
@@ -525,6 +605,10 @@ def test_the_briefs_restatements_all_recompute(report, control):
     assert f"measured {report['arms']['pooled']['15']['set_sum'] / report['arms']['pooled']['15']['captures']:.1f}" in text, (
         "§7-1 does not state the recomputed pooled k=15 mean")
 
+    # ── §7-2a: how many variants phase 2 is handed.
+    assert (f"handed {pct(v['3']['in_window'], pairs)} of those variants") in text, (
+        "§7-2a does not state the recomputed share phase 2 receives")
+
     # ── §7-2b: the fold's two figures and the width's residual gain.
     fold3 = v["3"]["attached_folded"]
     assert f"0 % → {pct(fold3, pairs)}" in text, (
@@ -545,9 +629,11 @@ def test_the_briefs_restatements_all_recompute(report, control):
     assert f"+{gain:.1f} pts" in text, (
         f"§7-2b does not state the recomputed width residual (+{gain:.1f} pts)")
 
-    # ── §7-3: the sweep's wall clock.
+    # ── §7-3: BOTH clocks — the hybrid sweep's and the control's.
     assert f"completed in {report['corpus']['elapsed_s']:.0f} s" in text, (
-        "§7-3 does not state the artifact's own elapsed time")
+        "§7-3 does not state the hybrid artifact's own elapsed time")
+    assert f"the keyword-only control took {control['corpus']['elapsed_s']:.0f} s" in text, (
+        "§7-3 does not state the control artifact's own elapsed time")
 
     # ── §8: the hybrid zero-row claim is the artifact's, not prose.
     assert f"(`rows_zero` {report['arms']['exact']['3']['rows_zero']} in hybrid)" in text, (
