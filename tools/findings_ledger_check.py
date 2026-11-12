@@ -163,6 +163,26 @@ CITATION_SPACED_SHAPE_RE = re.compile(r"^[^`]*:\s+\d+(?:-\d+)?$")
 #: Trailing characters a code span may carry that are NOT part of the citation.
 SPAN_TRAILING_RE = re.compile(r"[\s.,;:)\]]+$")
 
+#: A `host:port` that must NOT be resolved as a citation — §8 promises this shape does
+#: not red the required context, and `_has_path_marker` sees the dot in `127.0.0.1` or
+#: `api.example.com` and calls it a path. Measured before this carve-out: swapping a
+#: real citation for `127.0.0.1:6379` red "127.0.0.1 does not exist in the tree"; so did
+#: `0.0.0.0:8000`, `api.example.com:443` and `db.internal:5432`. The shape is narrow on
+#: purpose — a dotted HOST (an IPv4 literal or a name ending in a known top-level
+#: label), a colon, and a port — because `tortoise/pipeline.py:16` also has a dot before
+#: its colon and IS a citation.
+HOST_PORT_RE = re.compile(
+    r"(?:\d{1,3}(?:\.\d{1,3}){3}"
+    r"|(?:[\w-]+\.)+(?:com|net|org|io|dev|ai|co|local|internal|localhost|test|example))"
+    r":\d{2,5}"
+)
+
+
+def _is_host_port(token: str) -> bool:
+    """Is this token a `host:port` rather than a `path:line`?"""
+    return bool(HOST_PORT_RE.fullmatch(token.strip("`")))
+
+
 #: `path/to/file.py 999999` — a citation whose DELIMITER is not `:`. Measured:
 #: rewriting a resolving `path:16` to `path 16` left the page CLEAN — including over an
 #: out-of-range line and over a path that does not exist — so one character of
@@ -753,9 +773,16 @@ def check_verdict_tally(text: str) -> list[str]:
             # STILL-TRUE+SUPERSEDED-BY-FIX" over a page whose table is untouched — a
             # false accusation on correct prose, which is the class this arm must not
             # create. The date marker is what distinguishes the two.
+            # The date may sit on EITHER side of the claim: "(d) was STILL-TRUE as
+            # written on 2026-09-10" and "As of 2026-09-10 (d) was STILL-TRUE" are the
+            # same historical statement, and guarding only the trailing form red the
+            # leading one with a false accusation (measured).
             dated = re.match(
                 r"\s+(?:as written\s+|as of\s+)?(?:on\s+)?(?:the\s+)?\d{4}-\d{2}-\d{2}",
                 paragraph[token.end() :],
+            ) or re.search(
+                r"(?i:as of|on)\s+(?:the\s+)?\d{4}-\d{2}-\d{2}\s*[,;—–-]?\s*$",
+                paragraph[: nearest.start()],
             )
             if not dated and COPULA_OR_ADVERB.fullmatch(
                 paragraph[nearest.end() : token.start()]
@@ -989,6 +1016,8 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
     exempted = 0
     anchor: str | None = None
     for match in CITATION_RE.finditer(text):
+        if _is_host_port(match.group(0)):
+            continue
         raw = match.group(0)[1:-1]
         start, end = int(match.group("start")), match.group("end")
         span = f"{start}{'-' + end if end else ''}"

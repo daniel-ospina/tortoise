@@ -391,17 +391,21 @@ follows `SUBSTRATE-REBUILD-MAP.md`'s ruling: *the tracker half is deliberately n
 dated and its command is recorded.* The command for §6 is `gh issue view <N> --json state`, and it
 was run per issue, not sampled.
 
-⚠️ **Two more are unguarded, and neither is out-of-repo — they are simply not armed yet (#11902).**
-§4's row population and the unnumbered opening's brief-count sentence are derivable from **this page
-alone**, so the ruling above does not reach them and a guard for them could not pass by not looking. Both numbers
-come straight out of §4's own table: count its rows (14) and its `**No copy of its content in-repo**`
-cells among the `research/` rows (3) — the same way the §6 arithmetic is already re-derived from its
-own table rather than trusted. Until an arm is added they are **hand-derived and unmeasured**, and
-that was measured: deleting the `<corpus>/2026-09-09-ontology-evidence.md` row — after which §4 has
-13 rows and covers 14 of the 15 artefacts `#2852` §3 lists — and reverting
-the opening to *"six of the eight"* both leave `--check` at exit 0 and the test file fully green.
-Re-derive
-both from §4's table before quoting them; `#2852` §3 is the population source, not the derivation.
+⚠️ **Five more are unguarded, and none is out-of-repo — they are simply not armed yet (#11902,
+#11957).** Every one is derivable from **this page alone**, so the ruling above does not reach them and
+a guard for them could not pass by not looking:
+§4's row population (count its rows: 14) and its `**No copy of its content in-repo**` cells among the
+`research/` rows (3); §6's own heading count (`4 of 40 open`); and §7's `36 of 40 have moved` and
+`two of the four survivors`. §4's two come straight out of its own table, the same way the §6
+arithmetic is already re-derived rather than trusted. Until arms are added they are **hand-derived and
+unmeasured**, and that was measured: deleting the `<corpus>/2026-09-09-ontology-evidence.md` row —
+after which §4 has 13 rows and covers 14 of the 15 artefacts `#2852` §3 lists — reverting the
+opening to *"six of the eight"*, restating §7 as `11 of 40 have moved`, and following this
+section's own §6 re-read workflow (OPEN 4→3, one row to CLOSED COMPLETED 32→33, survivors
+`four`→`three` so every CHECKED number reconciles) each leave `--check` at exit 0 and the test file
+green — the last one while §7 still reads `36 of 40`, i.e. it goes stale silently on the update
+this section prescribes. Re-derive all five from their own tables before quoting them; `#2852` §3 is
+the population source, not the derivation.
 
 ---
 
