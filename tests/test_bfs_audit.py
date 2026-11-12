@@ -93,8 +93,7 @@ def _code_lines_naming(path: Path, name: str) -> frozenset[int] | None:
             return None
         # No parser to ask, so the word boundary is the whole rule: it is a word
         # scan, never a syntax guess, and it errs LOUD on anything it cannot
-        # place. `re.split` on the parser's own line endings keeps the returned
-        # line numbers in the coordinate space `grep -rn` reports.
+        # place.
         word = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])")
         # Split on `\n` ALONE, because the caller's line number comes from
         # `grep -rn`, and grep counts only `\n`: on a file carrying a lone `\r`
