@@ -1009,9 +1009,11 @@ class TestReviewRound2Closed:
 
     def test_the_TABLE_check_reports_a_real_guarded_layer_disagreement(self):
         """R2 P2 (a false green). The old test asserted the INSTALL gate's
-        message, so deleting `guard_table_problems`' layer branch left all 57
-        tests green. This one calls the table check with a kind the ambient
-        catalog CAN route, and fails if that branch is removed."""
+        message, so deleting `guard_table_problems`' layer branch left the WHOLE
+        FILE green — stated without a case count on purpose: the count this
+        sentence used to carry was one of three disagreeing numbers in committed
+        artifacts (round-3 review P2). This one calls the table check with a kind
+        the ambient catalog CAN route, and fails if that branch is removed."""
         from tortoise.kind_layers import entity_route
 
         kind = "venture:investment"
@@ -1242,3 +1244,176 @@ class TestSafetyProperties:
                      "issue:foo/bar#x"):
             d = resolve(name, "subject", None, pack_confusions=())
             assert d.outcome == GuardOutcome.ACCEPT, name
+
+
+# ══ the third review's findings, each pinned by its own reproduction ═══════
+
+#: A conversation the capture door will not treat as blank (#4897's window and
+#: the marked-turn filter both drop short/empty turns).
+_CAPTURE_CONV = [
+    {"role": "user",
+     "content": "the repo daniel-ospina/agent-infra ships a per-kind guard"},
+    {"role": "assistant", "content": "noted, that is what the guard is for"},
+]
+
+
+def _capture_extractor(payload: dict):
+    """The extractor seam, monkeypatched to a fixed payload — no LLM, no network.
+
+    The entity/point WRITE phase of `_extract_session_v2` is reached only through
+    this seam (mirrors `tests/test_4716_capture_operator_ref_remap.py`).
+    """
+    def _run(_model, _conversation=None, *, session_id=None, **_kw):
+        return {"payload": payload, "errors": [], "warnings": [], "stats": {},
+                "noops": [], "chain_notes": [], "link_before_create": [],
+                "supersessions": [], "minted_kinds": [], "story_arc": "",
+                "search": {}, "error_census": {}}
+
+    return _run
+
+
+def _capture_payload(entity_name: str, entity_kind: str,
+                     content: str) -> dict:
+    import tortoise.extractor_v2 as ev2
+
+    return {
+        "session_id": "s12060_f1", "client_commit_id": "",
+        "captured_at": "2026-11-12T00:00:00Z",
+        "extractor": {"version": "t", "mode": "byok",
+                      "calibration_version": "v2"},
+        "summary": "", "story_arc": "", "provenance_refs": [], "sources": [],
+        "entities": [{"name": entity_name, "kind": entity_kind}],
+        "points": [{"id": ev2._content_id("pt", content), "content": content,
+                    "pointKind": "statement", "reason": "NEW",
+                    "confidence": 0.5, "c_cal": 0.5,
+                    "about_entities": [entity_name], "source_ref": "session.md",
+                    "quote": "", "status": "draft", "search_keys": []}],
+        "events": [], "operators": [], "supersessions": [],
+        "telemetry": {"counts": {"kept": 1}},
+    }
+
+
+class TestReviewRound3Closed:
+    """The third review's findings. F1 is the one that mattered: the guard's own
+    reply was DISCARDED by the only caller that mints entities in bulk."""
+
+    def test_a_capture_redirect_does_not_drop_the_claim_to_entity_edge(
+            self, sdk, monkeypatch):
+        """R3 P1. `_extract_session_v2` decided an entity's layer from a
+        PRE-WRITE guess, wrote, and kept the guess. `create_entity` can now MOVE
+        that write (the guard) or route it (#9964), and the reply says so — so
+        the spine suppressed the claim→entity edge as "a Subject the binder
+        owns" for a name that had just become an `:Object`, while
+        `bind_point_subjects` binds only a name that IS a Subject. The claim lost
+        its edge on EITHER channel.
+
+        MEASURED pre-fix (this exact payload, `_landed_entity_facts` neutered to
+        the declared facts): the node landed `:Object` / `core:Project` and the
+        edges query returned `[]`. Post-fix it returns `aboutObject`. The name
+        shape is the live `live-v4` case the module's own docstring quotes
+        (`daniel-ospina/agent-infra` filed as a `core:naturalPerson`), i.e. the
+        first cohort the feature exists for.
+        """
+        import tortoise.extractor_v2 as ev2
+
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+        name = "daniel-ospina/agent-infra"
+        monkeypatch.setattr(ev2, "extract_session_v2", _capture_extractor(
+            _capture_payload(name, "core:naturalPerson",
+                             "the repo ships a kind guard")))
+
+        r = sdk._capture_session(_CAPTURE_CONV, session_id="s12060_f1")
+        assert r.get("ok") is True, r
+
+        g = sdk._get_proj().g
+        # 1. the guard applied — the write is no longer the Subject it declared.
+        assert [list(row) for row in g.query(
+            "MATCH (o:Object {name:$n}) RETURN o.objectKind",
+            params={"n": name}).result_set] == [["core:Project"]]
+        assert not g.query(
+            "MATCH (s:Subject {name:$n}) RETURN s",
+            params={"n": name}).result_set
+        # 2. THE PIN: the claim still reaches the entity the guard filed it to.
+        assert [list(row) for row in g.query(
+            "MATCH (p:Point)-[rel:aboutObject|aboutSubject]->(x {name:$n}) "
+            "RETURN type(rel)", params={"n": name}).result_set] == [["aboutObject"]]
+
+    def test_a_capture_relation_uses_the_kind_the_node_actually_carries(
+            self, sdk, monkeypatch):
+        """R3 F1, second symptom. The same stale belief built `entity_index`,
+        whose kind the relation leg resolves endpoints with — so a stated
+        relation was planned from the DECLARED kind while the node carried the
+        redirected one (Layer-1 identity is `(name, kind)`, #11235)."""
+        import tortoise.extractor_v2 as ev2
+
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+        name = "daniel-ospina/agent-infra"
+        payload = _capture_payload(name, "core:naturalPerson",
+                                   "the repo ships a kind guard")
+        monkeypatch.setattr(ev2, "extract_session_v2",
+                            _capture_extractor(payload))
+        # `resolve` is what the capture commit builds the index with; drive the
+        # helper directly rather than re-deriving it from a graph read, so this
+        # pins the INDEX the relation leg consumes.
+        from tortoise.sdk import _landed_entity_facts
+
+        redirect = {"node": {"id": "obj-1"},
+                    "kind_redirect": {"from": {"kind": "core:naturalPerson",
+                                               "layer": "subject"},
+                                      "to": {"kind": "core:Project",
+                                             "layer": "object"}}}
+        assert _landed_entity_facts(redirect, "subject",
+                                    "core:naturalPerson") == (
+            "object", "core:Project")
+        # a re-route reports through the advisory channel instead …
+        routed = {"node": {"id": "obj-2"},
+                  "advisories": [{"code": "kind_layer_routed",
+                                  "kind": "core:Project",
+                                  "layer": "subject",
+                                  "actual": ["object"]}]}
+        assert _landed_entity_facts(routed, "subject", "core:naturalPerson") == (
+            "object", "core:Project")
+        # … and a write that did NOT move keeps the caller's declaration, which
+        # is what makes an abstained/overridden guard a no-op here.
+        assert _landed_entity_facts({"node": {"id": "x"}}, "subject",
+                                    "core:naturalPerson") == (
+            "subject", "core:naturalPerson")
+
+    def test_a_guard_on_an_actionKind_cannot_claim_an_unverifiable_layer(
+            self, tmp_path):
+        """R3 P3. `_validate_guards` builds its `own_layer` map from the
+        objectKinds/pointKinds/eventKinds axes, so for a kind declared ONLY under
+        `actionKinds` the kind check passed (`bare in all_pack_kinds`) while the
+        LAYER check was skipped — the one guard field nothing verified. MEASURED
+        pre-fix: this manifest validated CLEAN. `actionKinds` declares no layer
+        at all (ONTOLOGY v3.0 dissolved Action — it names a declared kind, never
+        a node label), so the same verdict the `documentKinds` refusal carries
+        applies."""
+        p = tmp_path / "packs" / "acme"
+        p.mkdir(parents=True)
+        (p / "manifest.yaml").write_text("""\
+namespace: acme
+name: Acme Test Pack
+version: "0.1.0"
+tier: free
+ontology:
+  extends: core
+  actionKinds: [fieldwork]
+  guards:
+    - kind: fieldwork
+      layer: object
+      onConfusion:
+        - when: nameMatches
+          pattern: '^fieldwork-[0-9]+$'
+          redirect: core:WorkItem
+          fallback: core:WorkItem
+          reason: 'a fieldwork handle is not an entity'
+depends_on: []
+""")
+        r = _run_cli("pack", "validate", str(p))
+        out = r.stdout + r.stderr
+        assert r.returncode == 1, out
+        assert "declares no layer" in out, out
+        assert "actionKind" in out, out

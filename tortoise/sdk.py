@@ -5774,6 +5774,45 @@ def _kind_guard_payloads(decision) -> dict:
     return out
 
 
+def _landed_entity_facts(reply: dict | None, door_layer: str,
+                         declared_kind: str | None) -> tuple[str, str | None]:
+    """The ``(layer, kind)`` an ENTITY write actually LANDED with (#12060 F1).
+
+    Two things can move an entity write away from what the caller asked for, and
+    BOTH report the move in the reply: the per-kind guard (#12060) re-labels it,
+    and ``_kind_layer_note`` (#9964) routes it by the kind it names. A caller
+    that keeps its own PRE-WRITE guess therefore acts on a belief the graph
+    contradicts — which is exactly what the capture spine did: it suppressed the
+    claim→entity edge for any name it believed was a Subject, while
+    ``bind_point_subjects`` can only bind a name that IS one, so after a
+    subject→object redirect the claim lost its edge on EITHER channel (#1370
+    skip + nothing to bind). MEASURED on the cohort this feature exists for:
+    ``daniel-ospina/agent-infra`` declared ``core:naturalPerson`` redirects to a
+    ``:Object`` / ``core:Project``, and the claim kept no edge at all.
+
+    Reads the REPLY, never the graph: ``kind_redirect.to`` for an applied guard
+    redirect, else the ``kind_layer_routed`` advisory for a kind-driven
+    re-route, else the caller's own declaration (a write that did not move lands
+    where it asked). An abstained/overridden guard carries no ``kind_redirect``
+    — by design, the write must land as declared — so it correctly falls
+    through.
+    """
+    _redirect = (reply or {}).get("kind_redirect")
+    if isinstance(_redirect, dict):
+        _to = _redirect.get("to") or {}
+        _layer = _to.get("layer")
+        if _layer in _ENTITY_LAYER_LABEL:
+            return _layer, _to.get("kind") or declared_kind
+    for _note in (reply or {}).get("advisories") or []:
+        if not isinstance(_note, dict) or _note.get("code") != "kind_layer_routed":
+            continue
+        _actual = _note.get("actual") or ()
+        _layer = _actual[0] if _actual else None
+        if _layer in _ENTITY_LAYER_LABEL:
+            return _layer, _note.get("kind") or declared_kind
+    return door_layer, declared_kind
+
+
 def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
     """Route/annotate an ENTITY write by the kind it names (#9964).
 
@@ -17426,6 +17465,15 @@ class TortoiseSDK:
         # wrote, so the S5 Job 1 relation leg can resolve a stated endpoint
         # name to the node it denotes (see the write leg below).
         entity_index: dict[str, list[tuple[str, str | None]]] = {}
+        # #12060 (review F1): every layer this capture's entity writes actually
+        # LANDED on, by name. `subject_entity_names` above is seeded from the
+        # payload's PRE-WRITE kind (an entity write can fail before any fact
+        # exists, and that provisional mark is the pre-existing behaviour), and
+        # then CORRECTED from this map — a guard redirect that moves a write to
+        # the other entity label changes which channel may carry the claim's
+        # edge, and the two consumers below (the claim attachment and the merge
+        # union) must ask the graph's answer, not the payload's guess.
+        _landed_layers: dict[str, set[str]] = {}
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
             if not name:
@@ -17456,8 +17504,21 @@ class TortoiseSDK:
                 # different kinds (an ambiguity it must refuse, not resolve —
                 # Layer-1 identity is `(name, kind)`, #11235).
                 _node_id = str((_written or {}).get("node", {}).get("id") or "")
+                # #12060 (review F1): take the belief from what LANDED, not from
+                # the pre-write guess above. Both redirect doors (the per-kind
+                # guard, and `_kind_layer_note`'s kind-driven re-route) report
+                # the move in the reply this call already holds.
+                _landed_layer, _landed_kind = _landed_entity_facts(
+                    _written, "subject" if _is_subject else "object", _ekind)
+                _landed_layers.setdefault(name, set()).add(_landed_layer)
                 if _node_id:
-                    entity_index.setdefault(name, []).append((_node_id, _ekind))
+                    # The LANDED kind, not the declared one: the node carries the
+                    # redirected kind, and Layer-1 identity is `(name, kind)`
+                    # (#11235) — the relation leg below resolves graph ids from
+                    # this index, so a stale kind here would plan an edge from a
+                    # kind the node does not carry.
+                    entity_index.setdefault(name, []).append(
+                        (_node_id, _landed_kind))
             except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
                 # old `except: pass` was indicator-4 hygiene — a swallowed
                 # create_entity failure silently stranding an Object a
@@ -17472,6 +17533,17 @@ class TortoiseSDK:
                 # pre-existing Objects.
                 entity_failures.append(
                     f"{type(exc).__name__}: entity write failed for {name}: {exc}")
+        for _ln, _llayers in _landed_layers.items():
+            # A name is a Subject for the consumers below only if a write for it
+            # LANDED as one. Monotonic per write, so a payload that names one
+            # entity twice under two kinds keeps the Subject when one landed
+            # there; a name whose only successful write was redirected AWAY from
+            # the subject label is dropped, which is what restores the
+            # claim→entity edge (#12060 review F1).
+            if "subject" in _llayers:
+                subject_entity_names.add(_ln)
+            else:
+                subject_entity_names.discard(_ln)
         if entity_failures:
             warnings.extend(entity_failures)
             warnings.append(

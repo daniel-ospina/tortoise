@@ -2922,8 +2922,16 @@ class PackRegistry:
         core_layer = {k: SECTION_LAYERS[sec]
                       for k, sec in core_sections().items()}
         # The pack's OWN declared kinds, by the axis that declares them. An axis
-        # IS a layer for the two entity/event axes; `documentKinds` is a SOURCE
-        # genre (D10), not a layer, so a guard may not claim it.
+        # IS a layer for the object/point/event axes. Two axes declare NO layer,
+        # and a guard may not claim one for a kind they own:
+        #   * `documentKinds` — a SOURCE genre (D10), not a layer;
+        #   * `actionKinds` — ONTOLOGY v3.0 dissolved Action, so a kind declared
+        #     there names a declared kind and never a node label (`VALID_ENTITY_
+        #     TYPES` records the same fact), and `kind_layers.LAYERS` has no
+        #     action layer to route it to.
+        # Leaving the second out of this map made the manifest's `layer` the one
+        # guard field NOTHING verified for such a kind — a wrong value installed
+        # clean (round-3 review P3).
         own_layer: dict[str, str] = {}
         for kind_field, layer in (("objectKinds", "object"),
                                   ("pointKinds", "point"),
@@ -2992,6 +3000,23 @@ class PackRegistry:
                     errors.append(
                         f"{where}.layer: '{kind_ref}' is a documentKind (a "
                         f":Source genre, D10) — not a guardable entity layer")
+                elif (":" not in kind_ref.strip()
+                        and kind_ref.strip() in (ont.get("actionKinds") or [])
+                        and kind_ref.strip() not in own_layer):
+                    # ⛔ The SAME shape as the documentKinds refusal above, and the
+                    # same verdict. `actionKinds` declares no layer — ONTOLOGY
+                    # v3.0 dissolved Action, so no door writes an action kind and
+                    # no layer can be verified for one — so a guard on a kind
+                    # declared ONLY on that axis claimed a layer nothing would
+                    # ever check (round-3 review P3, measured: a manifest whose
+                    # guard said `layer: object` for an `actionKinds` kind
+                    # validated CLEAN). A bare kind the pack ALSO declares on a
+                    # real axis keeps its ordinary layer check and is not refused
+                    # here — the refusal is only for a kind that axis alone owns.
+                    errors.append(
+                        f"{where}.layer: '{kind_ref}' is an actionKind — that "
+                        f"axis declares no layer (ONTOLOGY v3.0 dissolved "
+                        f"Action), so a guard cannot claim a layer for it")
                 else:
                     declared_layer = _layer_of(kind_ref.strip())
                     if declared_layer is not None and declared_layer != layer:
