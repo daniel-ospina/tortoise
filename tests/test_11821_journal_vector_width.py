@@ -2658,13 +2658,23 @@ def test_a_declared_width_reads_a_one_shot_iterable_exactly_once(tmp_path):
     `stamp_journal_embedding({"embedding": (x for x in [0.1, 0.2])})` returns
     `[0.1, 0.2]`. Both messages named a cause that is not the cause. Falsifier for
     the record rows: drop the `record.get("embedding") is values` write-back and
-    the two record rows red with those two belt refusals (measured).
+    the record rows red with those two belt refusals (measured).
 
-    ⛔ What is NOT pinned here is a RE-ITERABLE non-container (a numpy array):
-    the write-back is scoped to `iter(x) is x` on purpose, so that shape still
-    rides the seam arms and reaches the element check with its own element types —
-    the stated residual, unchanged. Materialising it too would turn the residual
-    into an over-block of a vector the envelope channel still accepts.
+    ⛔ What is NOT pinned here, stated rather than implied (review round 24,
+    measured) — `iter(x) is x` is the arm's CONSERVATIVE test for a one-shot
+    iterator, not the boundary of one:
+
+    * a CONTAINER whose `__iter__` hands out a CACHED iterator is also one-shot
+      (`iter(Shared([0.1, 0.2])) is not shared`) and is NOT caught, so the record
+      channel still raises the fabricated "the seam can only DROP" / "an EMPTY
+      vector" message for it while the same object lands on the envelope channel;
+    * a RE-ITERABLE non-container (a numpy array) is left as it is on purpose —
+      on the record channel it never reaches the element arm (that arm's container
+      test skips it) and fails later at the JSON encoder with `TypeError: not JSON
+      serializable`, while the envelope channel lands it.
+
+    Both are the stated residual `#11948-non-list-iterable`; materialising them
+    here would turn it into an over-block of a vector the envelope accepts.
     """
     from tortoise.api import EventAPI
     from tortoise.log import EventLog
@@ -2717,3 +2727,88 @@ def test_a_declared_width_reads_a_one_shot_iterable_exactly_once(tmp_path):
     assert records[4]["point"]["embedding"] == [0.1, 0.2], (
         "every one-shot iterator type must be written back, not only `generator` "
         f"— got {records[4]['point'].get('embedding')!r}")
+
+
+def test_the_two_one_shot_shapes_outside_the_write_back_keep_their_residual(tmp_path):
+    """The residual `#11948-non-list-iterable`, PINNED as a disposition.
+
+    `_verify_record_vector_width`'s record write-back is gated on
+    `iter(x) is x` — a CONSERVATIVE test for "a second read is EMPTY, not merely
+    redundant" (#11996 review round 24, measured). Two shapes fall outside it and
+    this row pins what happens to them, so the prose in that arm cannot go stale
+    the way "it reaches the element check" did:
+
+    1. a CONTAINER whose `__iter__` hands out a CACHED iterator — also one-shot,
+       `iter(Shared([0.1, 0.2])) is not shared`, so the gate does not catch it and
+       the record channel refuses a vector the seam ACCEPTS (the message it raises
+       names the wrong cause: the seam does not DROP it — that is the residual's
+       cost, not a guarantee of the arm);
+    2. a RE-ITERABLE non-container (a numpy array) — never reaches the element arm
+       on this channel (the arm's container test skips it), so it dies at the JSON
+       encoder instead.
+
+    BOTH land on the ENVELOPE channel, which is what makes this a CHANNEL
+    asymmetry rather than a rule about the value. Widening the write-back to cover
+    them is a deliberate decision, not a tidy-up: it would turn the residual into
+    an over-block of a vector the envelope channel journals today, so this row
+    reds on purpose if someone widens it — come here, re-measure, and update both
+    the arm's comment and this docstring.
+
+    FAILS IF: either shape starts LANDING on the record channel (the residual was
+    widened without the decision), or the envelope control stops landing (the
+    asymmetry claim itself is then false).
+    """
+    import numpy as np
+
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    class Shared:
+        """A one-shot vector that is NOT its own iterator (`iter(x) is not x`)."""
+
+        def __init__(self, values):
+            self._it = iter(values)
+
+        def __iter__(self):
+            return self._it
+
+    events = tmp_path / "residual-shapes"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    assert iter(Shared([0.1, 0.2])) is not api, "sanity: a fresh iterator is returned"
+    shared = Shared([0.1, 0.2])
+    assert iter(shared) is not shared, (
+        "the premise of the gate: a cached-iterator CONTAINER is not its own "
+        "iterator, so `iter(x) is x` cannot see it")
+
+    # 1. The cached-iterator container is REFUSED on the record channel…
+    with pytest.raises(ValueError):
+        api._emit("PointAdded", {"id": "p-shared-rec", "content": "c",
+                                 JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64,
+                                 "embedding": Shared([0.1, 0.2])})
+    # …and LANDS on the envelope channel.
+    api._emit("PointAdded", {"id": "p-shared-env", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64},
+              embedding=Shared([0.1, 0.2]))
+
+    # 2. The re-iterable non-container dies at the ENCODER on the record channel…
+    with pytest.raises(TypeError):
+        api._emit("PointAdded", {"id": "p-nd-rec", "content": "c",
+                                 JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64,
+                                 "embedding": np.array([0.1, 0.2])})
+    # …and LANDS on the envelope channel.
+    api._emit("PointAdded", {"id": "p-nd-env", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64},
+              embedding=np.array([0.1, 0.2]))
+
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert [r["point"]["id"] for r in records] == ["p-shared-env", "p-nd-env"], (
+        "only the envelope-channel controls may land; a record-channel LANDING "
+        "here means the residual was widened and this row must be re-decided, "
+        f"got {[r['point']['id'] for r in records]}")
+    assert records[0]["embedding"] == [0.1, 0.2], (
+        "the envelope channel must journal the materialised vector, not the "
+        f"one-shot object, got {records[0].get('embedding')!r}")

@@ -880,13 +880,27 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
             # channel that did NOT carry the vector would change what lands.
             if payload.get("embedding") is values:
                 payload["embedding"] = seam_values
-            # ⛔ THE RECORD NEEDS IT TOO, AND ONLY FOR A ONE-SHOT ITERATOR
-            # (#11996 review round 23, measured). `iter(x) is x` is what makes a
-            # second read EMPTY rather than merely redundant, so a RE-ITERABLE
-            # container is deliberately left as it is: that is the stated
-            # residual (a numpy array still rides the seam arms and reaches the
-            # element check with its own element types), and materialising it
-            # here would turn the residual into an over-block.
+            # ⛔ THE RECORD NEEDS IT TOO, AND ONLY WHEN THE ITERATOR IS ONE-SHOT
+            # (#11996 review round 23, measured). `iter(x) is x` is a
+            # CONSERVATIVE test for "a second read is EMPTY, not merely
+            # redundant": it catches the iterator ITSELF, which is the common
+            # one-shot shape (`generator`, `iter(...)`, `map`), and it is
+            # deliberately not widened past that.
+            #
+            # ⛔ WHAT THE GATE DOES NOT CATCH, stated so it is not read as an
+            # equivalence (review round 24, measured): a CONTAINER whose
+            # `__iter__` hands out a CACHED iterator is also one-shot
+            # (`iter(Shared([0.1, 0.2])) is not shared`) and keeps the residual
+            # disposition below — the record channel still refuses it with the
+            # fabricated "the seam can only DROP" / "an EMPTY vector" message
+            # while the SAME object lands on the envelope channel. And a
+            # RE-ITERABLE non-container (a numpy array) is left AS IT IS on
+            # purpose: on THIS channel it never reaches the element arm at all
+            # (that arm's container test skips it) and fails later at the JSON
+            # encoder with `TypeError: not JSON serializable`, while the envelope
+            # channel lands it. Both are the stated residual
+            # `#11948-non-list-iterable`; materialising them here would turn that
+            # residual into an over-block of a vector the envelope accepts.
             #
             # Measured before this arm — the round-14 write-back covered the
             # ENVELOPE only, so the record channel kept the exhausted iterator
