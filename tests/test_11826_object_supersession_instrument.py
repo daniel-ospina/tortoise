@@ -2203,3 +2203,31 @@ def test_the_source_stripped_claim_names_its_idx_precondition(sdk):
     for text in (issues[0].detail, issues[0].fix):
         assert "EVERY input edge carries an ``idx``" in text, (
             "the skip is conditional on EP's ``op_idx_known``: " + text)
+
+
+def test_a_non_canonical_live_spelling_is_still_live(sdk):
+    """EP's liveness is ``_live_only``, NOT the literal ``status = 'live'``.
+
+    ``create_entity(obj, status='Live')`` is a door (so are 'LIVE' and 'active'),
+    and EP's deny-list treats every one of them as LIVE — it builds the factor. A
+    hand-spelled ``(status IS NULL OR status = 'live')`` filter dropped the row
+    instead: a false CLEAN over the exact defect this check exists for (measured on
+    the shipped ``_live_only`` filter, the row is reported; re-spelled as the
+    literal, ``rows: []`` and ``count: 0``).
+    """
+    o = _obj(sdk, "PolicyV1")
+    # ``create_entity(status='Live')`` is the DOOR (``create_point`` validates the
+    # same value, so the spelling reaches the store only through this one).
+    p = sdk.create_entity("object", "AcmeGateway", objectKind="other",
+                          status="Live")["node"]
+    sdk.create_direct_edge("IMPL", p["id"], o["id"])
+    assert _q(sdk, "MATCH (n:Object {id:$i}) RETURN n.status", {"i": p["id"]}) == \
+        [["Live"]], "fixture drifted: the door must store the spelling verbatim"
+    _obj(sdk, "PolicyV2")
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == o["id"]]
+    assert issues, ("EP reads 'Live' as LIVE and builds the factor, so the row is "
+                    "real: a literal filter would report nothing here")
+    result = audit_graph(sdk._get_proj())
+    assert result.check_counts["superseded_object_active_edges"] >= 1

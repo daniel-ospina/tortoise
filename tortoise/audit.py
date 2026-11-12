@@ -858,6 +858,13 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # ``count4b`` counts. The strings therefore do not assert an arity — the
         # detail states the consequence as a ladder over whatever inputs remain
         # (including none, where EP builds no factor at all).
+        # ⛔ THE SUPERSEDED ENDPOINT'S OWN SHAPE, because its being EP-REFUSED
+        # changes the CONSEQUENCE: with a shaped input/anchor the belief was
+        # never carried, so "the claim silently loses that support" is FALSE on
+        # that row (measured: a direct edge into a LIVE-but-shaped Object holds
+        # 0 confidences, and 0 after the supersession — measured & cleared by
+        # review round 17, #12111). Columns of the already-bound ``sup``, so no
+        # fourth OPTIONAL MATCH and ``count4b``/SAMPLE_LIMIT are untouched.
         "RETURN DISTINCT sup.id, sup.name, sup.supersededBy, type(r), r.idx, "
         "coalesce(active.is_operator, false), active.op_type, active.direction, "
         # ⛔ THE EDGE's direction, because a DIRECT edge's direction lives HERE and
@@ -874,7 +881,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # ``create_direct_edge('IMPL', actor, obj)`` then
         # ``update_entity(actor, is_operator=True)``).
         "labels(active), "
-        f"{epistemic_identity('active')}, active.id, carrier_count, "
+        f"{epistemic_identity('active')}, active.id, "
+        # ⛔ The SUPERSEDED endpoint's own shape (columns of the bound ``sup``),
+        # because its being EP-REFUSED changes the CONSEQUENCE: with a shaped
+        # input/anchor the belief was never carried, so "the claim silently
+        # loses that support" is FALSE on that row (measured: a direct edge
+        # into a LIVE-but-shaped Object holds 0 confidences, and 0 after the
+        # supersession — review round 17, #12111). No fourth OPTIONAL MATCH,
+        # so ``count4b``/SAMPLE_LIMIT are untouched.
+        "coalesce(sup.is_operator, false), sup.op_type, "
+        "carrier_count, "
         "carrier_id, carrier_status, carrier_sb, carrier_is_operator, "
         "carrier_op_type, carrier_outdated, next_count, next_status, "
         "next_outdated, next_is_operator, next_op_type "
@@ -895,6 +911,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         """
         (sup_id, sup_name, sup_sb, edge_type, idx, is_op_flag, op_type,
          direction, edge_direction, active_labels, active_id, _active_nid,
+         _sup_flag, sup_op_type,
          carrier_count, _carrier_id, carrier_status, carrier_sb,
          carrier_is_operator, carrier_op_type, carrier_outdated, next_count,
          next_status, next_outdated, next_is_operator, next_op_type) = row
@@ -912,6 +929,13 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                         and (is_op_flag is True or op_type is not None))
         return {
             "sup_id": sup_id, "sup_name": sup_name, "sup_sb": sup_sb,
+            # ⛔ Was the SUPERSEDED endpoint itself one EP refuses? BOTH arms test the
+            # same shape on the input/anchor side (``_non_operator`` for an operator
+            # input, ``_non_op`` for a direct edge's endpoints), so one predicate
+            # answers it for both lanes: the flag is not ``false``, or an ``op_type``
+            # is set. Where it is true the belief was never carried, so the
+            # belief-LOSS arm of both strings is false.
+            "sup_refused": ((_sup_flag is not False) or sup_op_type is not None),
             "edge_type": edge_type, "idx": idx,
             # ⛔ EP's predicate is the flag OR ``op_type`` AND the ``:Point`` label
             # (its arms are ``(o:Point)-[:IMPL|NAND]->(c)`` and a non-operator check
@@ -1139,9 +1163,20 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # ⛔ ``_dropped_input`` again: "leaves the factor degenerate" is true at
             # two inputs, false at three (measured: two confidences, ``skipped:
             # None``).
+            # ⛔ SPLIT BY MECHANISM, like ``_archive_clause``: EP STRIPS a draft on
+            # the OPERATOR lane (``ep.py`` Batch 2, in Python, and the strip is
+            # recorded), but excludes the row on the DIRECT lane before evaluation
+            # (``ep.py`` Batch 3's ``live_a``/``live_b``, in Cypher, with no record) —
+            # so "EP strips like a terminal input" contradicted this row's own
+            # preceding clause ("the row is excluded before evaluation").
             return (f"; the successor it names is '{DRAFT_STATUS}', which EP "
-                    "strips like a terminal input (#780) — it needs promoting to "
-                    "live as well, or " + _dropped_input(s))
+                    + ("excludes from a direct edge before evaluation — the same "
+                       "exclusion a terminal endpoint gets, and no skipped-factor "
+                       "record exists (measured: no factor, no record): promote it "
+                       "to live instead of re-pointing onto it"
+                       if not s["is_operator"] else
+                       "strips like a terminal input (#780) — it needs promoting "
+                       "to live as well") + "; " + _dropped_input(s))
         if s["carrier_terminal"]:
             return ("; the successor it names is ITSELF "
                     f"{_quoted(_status_or_flag(s['carrier_status'], s['carrier_outdated']))}"
@@ -1223,12 +1258,13 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # NEITHER arm — see the ``shape`` note in ``_4b_state``.
             detail += (
                 " — the Object lane moved no edges on supersession, and EP builds NO "
-                "factor for this endpoint in EITHER arm: the operator arm needs "
-                "the :Point LABEL **and** (``is_operator = true`` or an "
-                "``op_type``) — a ``:Point`` carrying ``is_operator='false'`` is a "
-                "door and matches neither — while the direct-edge arm refuses an "
-                "operator-shaped endpoint. So the claim never counted this support "
-                "and no skipped-factor record exists (#9269/#11826)")
+                "factor for this endpoint in EITHER arm: the operator arm needs the "
+                ":Point LABEL **and** (``is_operator = true`` or an ``op_type``), "
+                "while the direct-edge arm refuses ANY operator-shaped endpoint "
+                "(``is_operator`` is not ``false``, or an ``op_type`` is set). A "
+                "node stored with ``is_operator='false'`` is a door and matches "
+                "neither, so the claim never counted this support and no "
+                "skipped-factor record exists (#9269/#11826)")
         elif s["is_operator"]:
             fwd, bwd = direction_flows(s["direction"])
             if not (fwd or bwd):
@@ -1244,6 +1280,18 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "confidence by design, so no belief is lost here and rewiring "
                     "the successor restores nothing that was ever carried. The "
                     "stale edge is leftover wiring, safe to delete (#11826)")
+            elif s["sup_refused"]:
+                # ⛔ An operator-shaped INPUT never entered the factor: EP's input
+                # selection excludes it (``_non_operator``), so nothing is stripped
+                # and nothing is lost — the "EP strips that terminal input" causality
+                # is FALSE on this row (measured: 2 confidences with a plain live
+                # input, 0 once the SAME live input is shaped).
+                detail += (
+                    " — the Object lane moved no edges on supersession, and EP's "
+                    "input selection never admitted this input (it is "
+                    "operator-shaped), so no confidence was ever carried through "
+                    "this edge and nothing is lost: the stale edge is leftover "
+                    "wiring (#11826)")
             else:
                 detail += (
                     " — the Object lane moved no edges on supersession, so EP "
@@ -1269,16 +1317,31 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # before the supersession as well, so nothing is lost and the stale edge
             # is leftover wiring.
             fwd_d, bwd_d = direction_flows(s["direction"])
+            # ⛔ The BELIEF-LOSS claim needs the belief to have existed, and the
+            # ORDER of these three rungs is the measurement: EP's direct arm refuses
+            # an operator-shaped endpoint on BOTH sides, so a shaped ANCHOR means the
+            # edge never carried anything (measured: 2 confidences into a plain live
+            # Object, 0 once that same live Object is shaped — the supersession
+            # changed nothing, so "the claim silently loses that support" is false
+            # there); a neutral edge carried nothing by design; only a flowing edge
+            # into an admitted endpoint lost real belief.
+            if s["sup_refused"]:
+                consequence = ("EP's direct-edge arm refuses this endpoint (it is "
+                               "operator-shaped), so no confidence was ever carried "
+                               "through this edge — the stale edge is leftover "
+                               "wiring (#11826)")
+            elif not (fwd_d or bwd_d):
+                consequence = ("this edge is " + _quoted(s["direction"]) +
+                               " (neutral), so no confidence ever transferred "
+                               "through it — the stale edge is leftover wiring "
+                               "(#11826)")
+            else:
+                consequence = "the claim silently loses that support (#11826)"
             detail += (
                 " — the Object lane moved no edges on supersession, and EP builds "
                 "NO factor for a direct edge ONCE its endpoint is terminal: the row "
                 "is excluded before evaluation, so there is no skipped-factor "
-                "record for it, and " + (
-                    "the claim silently loses that support (#11826)"
-                    if (fwd_d or bwd_d) else
-                    "this edge is " + _quoted(s["direction"]) + " (neutral), so "
-                    "no confidence ever transferred through it — the stale edge is "
-                    "leftover wiring (#11826)"))
+                "record for it, and " + consequence)
         if (not s["carrier_count"] and s["sup_id"] is not None
                 and s["sup_sb"] and s["sup_name"] == s["sup_sb"]):
             detail += ("; and its supersededBy names the Object ITSELF, so no OTHER "
@@ -1464,6 +1527,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "it restores none either, because a neutral edge carries nothing in "
                 "either direction. But " + anchor + " over a stale edge that is "
                 "still there, which is leftover wiring to clean up")
+        if s["sup_refused"]:
+            # ⛔ No belief to lose: EP refuses an operator-shaped input/anchor on
+            # both lanes, so this edge never carried anything (measured: 2 → 0 on
+            # the SHAPE update alone, before any supersession).
+            return lead + (
+                "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: EP refuses this "
+                "endpoint (it is operator-shaped) on either lane, so no confidence "
+                "was ever carried through this edge — " + anchor + " over a stale "
+                "edge. The edge must still be deleted, and the support it was "
+                "supposed to carry wired through a :Point operator")
         if not s["is_operator"]:
             return lead + (
                 "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: this is a DIRECT "
@@ -1615,6 +1688,18 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "superseded Object (measured: ``confidences {}``, and the row comes "
                 "back exactly as it was where the shape came from ``op_type``, "
                 "because the flag was already false)" + tail)
+        # ⛔ WHERE THE REPAIR SENDS THE EDGE, and the one place it must not: a
+        # successor EP REFUSES is named by the row's own `fix` as the destination
+        # while the same string says the belief is NOT moved and the §3.1 triage
+        # says DROP — performing the leading instruction produced exactly the false
+        # CLEAN this check exists to prevent (measured: re-pointing onto the shaped
+        # successor leaves ``confidences {}`` and the row quiet; review round 17,
+        # #12111). So the destination is a CLAIM successor and the named one is
+        # explicitly withdrawn.
+        refused = _succ_refused(s)
+        dest = (f"a CLAIM successor — NOT the one it names ({successor}), which EP "
+                f"refuses as a factor input" if refused
+                else f"the successor ({successor})")
         if not s["is_operator"]:
             # ⛔ The NEUTRAL test belongs HERE too, not only below: it used to sit
             # after this branch, so a `-` direct edge got "re-point it onto the
@@ -1641,11 +1726,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     f"to preserve and §3.1's disposition is DROP; re-pointing it "
                     f"onto the successor only keeps the same inert connection.")
             return prefix + (
-                f"Re-point this {s['edge_type']} edge off {q} onto the successor "
-                f"({successor}): it is a DIRECT edge, so there is no factor to "
-                f"re-point and no edge idx to preserve — write the equivalent "
-                f"edge from the same source onto the successor and delete this "
-                f"one." + tail)
+                f"Re-point this {s['edge_type']} edge off {q} onto {dest}: it is "
+                f"a DIRECT edge, so there is no factor to re-point and no edge idx "
+                f"to preserve — write the equivalent edge from the same source "
+                f"onto {'a CLAIM successor' if refused else 'the successor'} and "
+                f"delete this one." + tail)
         fwd, bwd = direction_flows(s["direction"])
         if not (fwd or bwd):
             # ⛔ A NEUTRAL operator transfers NO confidence **by design**, so
@@ -1655,15 +1740,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # renumbering (measured: posteriors identical before and after, with
             # the successor rewired and with the stale edge deleted).
             return prefix + (
-                f"Re-point this {s['edge_type']} input from {q} onto the "
-                f"successor ({successor}) if the claim should still be wired "
-                f"there, then delete the edge into {q}. ⛔ Nothing was LOST by "
+                f"Re-point this {s['edge_type']} input from {q} onto {dest} if "
+                f"the claim should still be wired there, then delete the edge "
+                f"into {q}. ⛔ Nothing was LOST by "
                 f"leaving it: this operator is '-' (neutral), so no confidence "
                 f"transferred through this edge either way (measured: posteriors "
                 f"identical before and after the supersession)" + tail)
         if s["idx"] == 0 and fwd != bwd:
             return prefix + (
-                f"Write the successor ({successor}) into the SOURCE slot: this "
+                f"Write {'a CLAIM successor' if refused else 'the successor (' + successor + ')'} "
+                f"into the SOURCE slot: this "
                 f"{s['edge_type']} edge is the operator's idx-0 source and the "
                 f"operator is {_quoted(s['direction'])}-directional, so EP drops "
                 f"the whole factor while that slot is terminal (WHERE EVERY input "
@@ -1677,18 +1763,21 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"on a two-input directional operator: after the delete, an EMPTY "
                 f"skip record and the survivor reads a bare prior); and an operator "
                 f"whose ONLY input this was has no factor to begin with. "
-                f"Re-point idx 0 onto the successor, then delete the edge into {q}." + tail)
+                f"Re-point idx 0 onto "
+                f"{'a CLAIM successor' if refused else 'the successor'}, then "
+                f"delete the edge into {q}." + tail)
         if s["idx"] is None:
             return prefix + (
-                f"Re-point this {s['edge_type']} input from {q} onto the successor "
-                f"({successor}): an explicit edge write against the successor's "
-                f"ID, then delete the edge into {q}. ⛔ This input edge carries NO "
+                f"Re-point this {s['edge_type']} input from {q} onto {dest}: an "
+                f"explicit edge write against "
+                f"{'a CLAIM successor' if refused else 'the successor'}'s ID, then "
+                f"delete the edge into {q}. ⛔ This input edge carries NO "
                 f"idx (a legacy or operator-less write), so stamp one — idx 0 is "
                 f"the source slot EP reads — or the source cannot be told from the "
                 f"targets. No SDK door rewires an operator's inputs" + tail)
         return prefix + (
-            f"Re-point this {s['edge_type']} input from {q} to the successor "
-            f"({successor}): an explicit edge write against the successor's ID "
+            f"Re-point this {s['edge_type']} input from {q} to {dest}: an "
+            f"explicit edge write against the successor's ID "
             f"that PRESERVES the edge idx (the slot EP reads), then delete the "
             f"edge into {q}. A successor that ALREADY carries an equivalent input "
             f"needs only that delete. No SDK door rewires an operator's inputs"
@@ -1796,12 +1885,19 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                      "so the name-keyed pointer names no successor at all — name the "
                      "real successor (#3590/#11826)")
                     if (bool(sb_name) and sb_name == sup_name) else
+                    # ⛔ The DETAIL states only what the check MEASURED — no
+                    # ``:Object`` carries that name — and leaves the
+                    # dangling/not-dangling conclusion to the parenthetical the
+                    # `fix` already carries, because the two disagreed on the same
+                    # row: a Subject/Point carrier makes the pointer resolvable, so
+                    # "the name-keyed pointer dangles" was false there (measured:
+                    # ``supersededBy='AcmeCorp'`` with a ``:Subject`` of that name,
+                    # review round 17, #12111).
                     (f"Superseded Object {_named(sup_name)} names successor "
                      f"{_named(sb_name)}, but NO Object carries that name "
                      "(a renamed successor, one that was deleted or never "
-                     "created, or a Subject/Point that this :Object anchor does "
-                     "not resolve — the name-keyed pointer dangles, "
-                     "#3590/#11826)")),
+                     "created, or a Subject/Point that this :Object anchor "
+                     "cannot see — #3590/#11826)")),
             # ⛔ The PROPS form is the door's own signature — ``tortoise_update_entity(
             # id, props)`` (``mcp_server.py``) takes the properties as ONE dict, so a
             # keyword spelling (``status='superseded'``) is a ``TypeError`` at the
