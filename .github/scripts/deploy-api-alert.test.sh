@@ -595,9 +595,20 @@ assert_eq "$(count_creates)" "1" "case 17e: and the ledger issue was filed"
 # one; this pin is what keeps the next caller from turning a decorative excerpt into a hang.
 mkfifo "$FIX/report-fifo"
 reset_case
-timeout 20 "$HELPER" --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/report-fifo" >/dev/null 2>&1
-assert_eq "$?" "0" "case 17f: a FIFO report does not hang the alert (a hang returns 124 here)"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "was not readable" "case 17f: and a FIFO is refused as not readable, which is true of it"
+# `timeout` is NOT on the fleet's macOS dev hosts (pyproject.toml records it absent from PATH,
+# /opt/homebrew/bin and /usr/local/bin; tools/ready_for_owner.py does its own bounding for the
+# same reason). A hard `timeout` here would red such a host on correct code — a host-dependent
+# red for a reason unrelated to the property, which is the class this PR exists to remove. The
+# pin stays unconditional in CI (ubuntu-latest has it); elsewhere the skip is DECLARED, not
+# silent. A hand-rolled `kill -9` fallback is deliberately not used: it loses `timeout`'s
+# process-group kill and would leave the blocked `tail` behind — reintroducing the hang.
+if command -v timeout >/dev/null 2>&1; then
+  timeout 20 "$HELPER" --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/report-fifo" >/dev/null 2>&1
+  assert_eq "$?" "0" "case 17f: a FIFO report does not hang the alert (a hang returns 124 here)"
+  assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "was not readable" "case 17f: and a FIFO is refused as not readable, which is true of it"
+else
+  ok "case 17f: SKIPPED on this host — no \`timeout\` binary (macOS); the FIFO guard is pinned by CI (ubuntu-latest)"
+fi
 
 # A job with no declared note still alerts, with an honest generic sentence
 # rather than a wrong one (the workflow's site set is pinned by pytest).
