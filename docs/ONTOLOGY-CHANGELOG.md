@@ -88,20 +88,23 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > **Why the clause became a definition rather than a narrower door rule (research, 2026-11-12).** These systems agree on the point this
 > clause is about, and do NOT agree on how history is kept — so only the narrow claim is made here. **None of them requires the CALLER
 > to name a successor** to mark something no-longer-current: Graphiti/Zep sets an edge's `invalid_at` to the invalidating edge's
-> `valid_at` and lets the SYSTEM link them; Cognee's `close_node()` stamps a validity end and takes no successor argument; mem0's
+> `valid_at` and lets the SYSTEM link them; Cognee's conflict review labels a contradicted fact `superseded` and its counterpart
+> `current` (`cognee/modules/conflicts/methods.py`), with no successor argument from the caller; mem0's
 > **Supersede** action ("marks an older fact as outdated when a newer one contradicts it", always on, all plans) infers both the
 > supersession and its replacement link in the background — `replaced_by`/`lifecycle_state` are written by the system, not
-> passed by a caller. ⚠️ **Two corrections to an earlier version of this paragraph, each falsified by review.** (a) It said *"Every
-> agent-memory system surveyed uses **soft revocation** rather than deletion"*; the study below says **"Many** agent-memory systems
+> passed by a caller. ⚠️ **Three corrections to an earlier version of this paragraph, each falsified by review.** (a) It said *"Every
+> agent-memory system surveyed uses **soft revocation** rather than deletion"*; arXiv 2609.08258v1 (*"Revoked but Still
+> Authoritative: An Empirical Study of Revocation Enforcement in Agent-Memory Systems"*) says **"Many** agent-memory systems
 > preserve history through soft revocation", and its §3.3 names two of the five it measures (cognee, langmem) as deleting the superseded
 > record outright under direct insertion — a universal claim is exactly wrong, and cognee is named three lines above. (b) It said
 > *"mem0 and Letta have no successor concept"*, which is false of mem0 (its Supersede feature carries a system-inferred replacement
-> pointer) and was never verified for Letta from a primary source. What survives both corrections is the narrower, load-bearing claim:
+> pointer) and was never verified for Letta from a primary source. (c) It named Cognee's `close_node()`, which cognee removed in 1.6.5
+> (2026-10-16) — an API that no longer exists. What survives all three is the narrower, load-bearing claim:
 > **the successor pointer is system-inferred, so no caller is required to supply it.** What practitioners argue
 > about is the opposite direction: *"a tombstone that says 'superseded' without recording what superseded it is a summary with a
 > timestamp"* — i.e. when the WORD means "replaced", the pointer is not optional. Both hold at once only if the word carries the
 > pointer and the successorless case is a different word — which is what this sentence now says. The same survey's measured
-> failure mode is the one already tracked here: a 2026 empirical study of five stores found *"no system enforces revocation by
+> failure mode is the one already tracked here: that study of five stores found *"no system enforces revocation by
 > default"* — the mark exists and retrieval ignores it, our #11825/#11826 exactly.
 >
 > ⚠️ **OWED, and deliberately not in this entry:** the vocabulary has no word for *no longer current, replacement not yet known* —
