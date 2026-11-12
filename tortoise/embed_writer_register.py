@@ -278,8 +278,12 @@ claim and a slogan:
   be read as if it were: for a builder the alias is the only discovery signal (`_EMBED_WRITE`
   cannot see `SET y += $p`), so suppressing a shadowed call DELETES a real writer instead of
   demoting it — measured, and the reason the builder arm is deliberately shadow-BLIND and
-  over-credits instead. Its residual has its own naming entry in `UNDECIDABLE_WRITE_SHAPES`
-  ("a builder alias ESCAPES as an argument") and its own two pins; this bullet is the SEAM's.
+  over-credits instead. ⛔ Its over-credit residual is NOT in `UNDECIDABLE_WRITE_SHAPES` — it is named
+  where it is implemented, `probe._writes_an_embedding`'s builder-arm comment, and pinned by two
+  arms; the table entry that reads like it ("a builder alias ESCAPES as an argument") documents the
+  OPPOSITE direction (a builder PASSED rather than called, so the writer is absent), and citing it
+  here sent a reader to a differently-signed shape (`#12020` round 8 cycle 5, P3). This bullet is
+  the SEAM's.
   (`nonlocal` is NOT part of that residual and must not be read as
   one: a `nonlocal` naming a module-level alias does not compile — `SyntaxError: no binding for
   nonlocal … found` — so no runnable writer can be in that shape.) ⛔ The

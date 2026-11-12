@@ -1647,7 +1647,23 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             # aliased `encode_for_row` reds the population as an unresolved producer (a false
             # declaration owed) and an aliased clause builder is a SILENT MISS (a false `bypass`
             # answer, the direction that matters).
-            aliases = {**module_aliases, **_import_aliases(node)}
+            # ⛔ ⛔ RANK ACROSS THE MERGE, not only within it (`#12020` round 8 cycle 5, P1). A plain
+            # `{**module_aliases, **writer_aliases}` lets a WRITER-scope binding overwrite the
+            # module's whatever its rank — and a writer-scope import is not automatically the live
+            # one: the PR's own pins use `if TYPE_CHECKING:` for exactly this idiom, so a DEAD
+            # writer-scope seam import beat a live module-level BUILDER alias and the writer measured
+            # `gated` (outside `NEEDS_A_DECLARATION`), a regression against `main`. Ranks are the
+            # same ones `_import_aliases` uses for a same-scope collision, so the resolution cannot
+            # depend on WHICH map a binding came from either.
+            aliases = dict(module_aliases)
+            for _name, _canon in _import_aliases(node).items():
+                _previous = aliases.get(_name)
+                # ⛔ `_previous is None` FIRST, not `rank(canon) > rank(aliases.get(name, ""))`: an
+                # absent key is not rank 0, it is "no binding" — and a SEAM alias IS rank 0, so the
+                # sentinel silently dropped every writer-level seam import (measured: the
+                # `closure_scoped_alias` blind shape flipped from `gated` to `{}`).
+                if _previous is None or _alias_credit_rank(_canon) > _alias_credit_rank(_previous):
+                    aliases[_name] = _canon
             # ⛔ `#12020` round 3: an alias the writer REBINDS is not that reach. Measured —
             # `from … import encode_for_row as _enc` followed by a writer-local `_enc = lambda p: p`
             # still credited `encode_for_row`, classing a writer that never reaches the gate as

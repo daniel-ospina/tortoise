@@ -4406,10 +4406,13 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
     # `NEEDS_A_DECLARATION`, i.e. it stopped owing a declaration. Neither binding is a "rebinding",
     # so no other rule saw the collision. Resolution is now ordered by what the CREDIT DOES to the
     # writer (builders > ungated > seam), so it does not depend on source order.
-    # ⛔ The three arms below are NOT three instances of one bug (round 8 cycle 4, P2):
-    # `GATE_then_a_BUILDER` and `TYPE_CHECKING_then_a_builder` were `gated` before the fix, while
-    # `BUILDER_then_a_GATE` was ALREADY `unresolved_write` — it is the reversed-order CONTROL, and it
-    # reds only under the opposite "prefer the gate" wrong fix, which is what its own note says.
+    # ⛔ The collision arms below are NOT instances of one bug, and this note deliberately states NO
+    # count (a "three arms below" here was wrong within one commit — round 8 cycle 5, P3):
+    # `GATE_then_a_BUILDER` and `TYPE_CHECKING_then_a_builder` were `gated` before the ranked fix;
+    # `BUILDER_then_a_GATE` was ALREADY `unresolved_write` — the reversed-order CONTROL, red only
+    # under the opposite "prefer the gate" wrong fix, which is what its own note says; the two
+    # `UNGATED…SEAM` arms were `gated` under the builder-only rule; and the two cross-scope arms
+    # were `gated`/`producer` while the module and writer maps were merged UNRANKED.
 
     # ⛔ `#12020` round 8 cycle 4 (P1) — the collision rule was BUILDER-ONLY, so a `SEAM_CALL` vs
     # `UNGATED_CALLS` collision (neither is a builder) still fell through to first-seen, which is
@@ -4418,6 +4421,36 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
     # the seam that never runs and the writer measured `gated`: HIDDEN, and a regression against
     # `main` for a writer whose live binding is ungated. Both orders must now resolve to `ungated`,
     # which is INSIDE `NEEDS_A_DECLARATION`.
+    # ⛔ `#12020` round 8 cycle 5 (P1) — the rank rule was applied INSIDE one `_import_aliases`
+    # call while the two maps were merged plainly (`{**module, **writer}`), so a WRITER-scope binding
+    # beat the module's whatever its rank — and a writer-scope import is not automatically the live
+    # one (`if TYPE_CHECKING:` is this PR's own idiom for a dead one). Measured: a dead writer-scope
+    # SEAM import beat a live module-level BUILDER alias → `gated`, a regression against `main`.
+    "a_dead_WRITER-SCOPE_seam_import_does_not_beat_a_live_MODULE_builder_alias": (
+        "from typing import TYPE_CHECKING\n"
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    if TYPE_CHECKING:\n"
+        "        from tortoise.embeddings import encode_for_row as _set\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": text})\n'
+        '    return _set("n")\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the rank rule lived only INSIDE one map, so this measured `gated` — the dead gate import "
+        "won the merge and hid a writer whose live binding is the builder",
+    ),
+    "a_dead_WRITER-SCOPE_ungated_import_does_not_beat_a_live_MODULE_builder_alias": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    if False:\n"
+        "        from tortoise.embeddings import encode_for_store as _set\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": text})\n'
+        '    return _set("n")\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the same cross-scope merge, one rank down: `producer`/`gated` here demoted a writer that "
+        "really calls the builder",
+    ),
     "one_local_name_bound_by_an_UNGATED_then_a_SEAM_import": (
         "from tortoise.embeddings import encode_for_store as _a\n"
         "from tortoise.embeddings import encode_for_row as _a\n"
