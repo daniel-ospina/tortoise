@@ -592,16 +592,18 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         # the `docker run -p` publish spec and `127.0.0.1:6379/<graph>` exactly
         # the `docker://` URI tail, so the BARE literals would each have
         # exempted a real dial on the same line — the failure this guard
-        # exists to catch. No dial to a LANE PORT exists in
-        # `tests/test_test_lane_tool.py`: every `_docker` call in the TEST
-        # PROCESS is monkeypatched, and its two REAL TCP connects are
-        # `_ping_over_host` probes (`:1697`, `:1721`) to loopback port 1 and to
-        # an ephemeral loopback server — neither carries a lane-port literal.
-        # (One real CHILD process exists, `:2899`'s shell-contract test; it runs
-        # the tool against `DOCKER_HOST=tcp://127.0.0.1:1`, so its `_docker`
-        # calls reach nothing and the declared `6379` URI is only ever WRITTEN
-        # into that script, never dialled.) So the narrow spelling costs
-        # nothing and keeps a future lane port red.
+        # exists to catch. No site in `tests/test_test_lane_tool.py` reaches a
+        # LANE port. Its real network use is `_ping_over_host` against loopback
+        # (`:1697` port 1, `:1721` an ephemeral listener), and docker is
+        # intercepted before any socket: `_docker` is stubbed at the calling
+        # sites, and where its REAL body runs (`:2362`, `:2381`, `:2399`,
+        # `:2934`) its own `subprocess.run` is stubbed instead. The one child
+        # that runs the TOOL (`:2899`) is pointed at
+        # `DOCKER_HOST=tcp://127.0.0.1:1`, so the declared `6379` URI is only
+        # ever WRITTEN into that script, never dialled; the file's other real
+        # children (`git init` decoys `:2199`/`:2225`, sleepers `:4922`/`:5553`)
+        # spawn no docker. So the narrow spelling costs nothing and keeps a
+        # future lane port red.
         '"falkordb-16379",      # the orchestration graph instance',
         'for shared in ("falkordb", "falkordb-16379"',
         '_remove_and_describe("falkordb-16379")',
