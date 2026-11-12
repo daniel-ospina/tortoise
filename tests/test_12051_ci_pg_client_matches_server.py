@@ -350,33 +350,13 @@ def _precondition(code: str) -> re.Match[str]:
 #: contains TWO `::error::`/`exit 1` pairs — the package precondition and this
 #: branch — so a whole-step search is satisfied by the precondition alone.
 #: MEASURED 2026-11-12 (fresh review of `eb8e4d7268`): the assertion this replaces
-#: stayed green with `if [ "$major" != "16" ]; then :; fi`.
-#:
-#: TWO patterns for the same FACT, the idiom `_precondition` already uses: a
-#: `[ … ]` test and a `test …` test are the same behaviour, and a guard that reds
-#: one is a false block — which teaches the next lane to widen the assertion
-#: instead of trusting it (MEASURED, review of `92155a0c5d`: a single-pattern
-#: version red-ed both `if test "$major" != "16"; then` and a `then` on the line
-#: after the condition, with a message asserting an unrestorable artifact that
-#: spelling change cannot cause). Quoting, `;`, and a newline before `then` are
-#: all accepted for the same reason.
-_VERSION_BRANCH_RES = (
-    re.compile(
-        r"^(?P<ind>[ \t]*)if\s+\[\s*\"?\$major\"?\s*!=\s*\"?(?P<major>\d+)\"?\s*\]"
-        r"\s*;?\s*then[ \t]*$",
-        re.MULTILINE,
-    ),
-    re.compile(
-        r"^(?P<ind>[ \t]*)if\s+test\s+\"?\$major\"?\s*!=\s*\"?(?P<major>\d+)\"?"
-        r"\s*;?\s*then[ \t]*$",
-        re.MULTILINE,
-    ),
+#: stayed green with `if [ "$major" != "16" ]; then :; fi`. FACTS only: the
+#: comparison is on `$major`, against a literal, inside `then … fi`.
+_VERSION_BRANCH_RE = re.compile(
+    r"^[ \t]*if\s+\[\s*\"?\$major\"?\s*!=\s*\"?(?P<major>\d+)\"?\s*\]\s*;\s*then"
+    r"(?P<body>.*?)^[ \t]*fi[ \t]*$",
+    re.DOTALL | re.MULTILINE,
 )
-
-
-def _closing_fi(indent: str) -> re.Pattern[str]:
-    """The branch END at the HEADER's own indent, so a nested `fi` cannot end it early."""
-    return re.compile("^" + re.escape(indent) + r"fi[ \t]*$", re.MULTILINE)
 
 
 def _version_branch(code: str, server_major: int) -> str:
@@ -387,37 +367,28 @@ def _version_branch(code: str, server_major: int) -> str:
     whole-step search reports a gutted branch as armed.
 
     ⚠️ STATED LIMIT: reachability of THIS branch is not provable from text, and
-    nothing in this file executes it — the executable arm below
+    nothing in this file executes it — the executable arm
     (`test_the_precondition_actually_fires_when_the_package_is_absent`) runs the
-    step's PREFIX for the precondition only, so a fail action wrapped in an
-    `if false` INSIDE this branch stays green here (measured, review of
-    `92155a0c5d`). Text cannot distinguish armed from present-but-dead, which is
-    why the step also prints `pg_dump --version` and fails on it: a dead branch
-    is visible in the job log even when no test reds.
+    step's PREFIX, which covers the precondition only. A fail action wrapped in
+    an `if false` INSIDE this branch therefore stays green here (MEASURED, review
+    of `92155a0c5d`). That is why the step also PRINTS `pg_dump --version` for
+    each tool: a dead branch is visible in the job log even when no test reds,
+    and the version is visible rather than asserted (a `sed` rewritten to a
+    constant extracts `16` and nothing below fails on it).
     """
-    match = None
-    for header in _VERSION_BRANCH_RES:
-        match = header.search(code)
-        if match:
-            break
+    match = _VERSION_BRANCH_RE.search(code)
     assert match, (
         "the pin has no `if [ \"$major\" != \"<major>\" ]; then … fi` block — a "
         "branch that cannot be FOUND is the same symptom as no branch at all: "
         "the job would carry on with a client whose major differs from the "
         f"servers' ({server_major}) and the artifact would be unrestorable"
     )
-    end = _closing_fi(match.group("ind")).search(code, match.end())
-    assert end, (
-        "the version branch's `if` has no closing `fi` — the branch is not a "
-        "block, so nothing in it is guaranteed to run"
-    )
-    body = code[match.end() : end.start()]
     assert int(match.group("major")) == server_major, (
         "the version branch compares the client's major with "
         f"{match.group('major')}, but BOTH provisioned servers are "
         f"{server_major} — a branch pinned to any other major can never fire"
     )
-    return body
+    return match.group("body")
 
 
 def _runs_on_labels(job: dict) -> list[str]:
