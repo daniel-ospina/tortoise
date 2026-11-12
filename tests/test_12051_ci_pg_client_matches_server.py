@@ -263,7 +263,7 @@ def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
 #: release is a sound place to run this job — measured by `<codename>-pgdg`
 #: carrying the client major, and by the release's own archive carrying it too.
 #: It does NOT decide where the client comes from: since #12051 round 3 the step
-#: INSTALLS `postgresql-client-<major>` from `apt.postgresql.org`, and the live
+#: INSTALLS `postgresql-client-<major>`, resolving it from `apt.postgresql.org`, and the live
 #: invariant is the in-step `pg_dump`/`pg_restore` assertion (major == the two
 #: `pgvector/pgvector:pg16` servers'), which no image can quietly change.
 #: ⛔ Do not read this table as "the archive supplies the client, so the PGDG
@@ -360,8 +360,10 @@ def _precondition(code: str) -> re.Match[str]:
 
 #: The version branch as a BLOCK, for the same reason `_precondition` is a block:
 #: a substring pin cannot tell an ARMED branch from a gutted one. The step now
-#: contains TWO `::error::`/`exit 1` pairs — the package precondition and this
-#: branch — so a whole-step search is satisfied by the precondition alone.
+#: contains SIX `::error::`/`exit 1` pairs — the five install-path guards and this
+#: branch — where `origin/main` carried TWO (the package precondition and this
+#: branch). So a whole-step search is satisfied by ANY of the five, which is why
+#: the fail action is read from this branch's own body.
 #: MEASURED 2026-11-12 (fresh review of `eb8e4d7268`): the assertion this replaces
 #: stayed green with `if [ "$major" != "16" ]; then :; fi`.
 #:
@@ -760,8 +762,8 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
 
     So this test RUNS the committed step's prefix — verbatim, from `run:`, up to
     (not including) the `apt-get install` line — under `bash`, with `sudo`,
-    `apt-get`, `apt-cache`, `install`, `curl` and `tee` stubbed. Hermetic: no
-    network, no apt, no sudo, and no write outside `tmp_path`.
+    `apt-get`, `apt-cache`, `install`, `mkdir`, `curl` and `tee` stubbed.
+    Hermetic: no network, no apt, no sudo, and no write outside `tmp_path`.
 
     ⛔ THE STUB SET MUST COVER EVERY PRIVILEGED/EFFECTFUL COMMAND IN THE PREFIX,
     not only the ones the guard itself calls. MEASURED 2026-11-12 on the rebase of

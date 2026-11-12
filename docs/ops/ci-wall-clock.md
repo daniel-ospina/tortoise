@@ -165,7 +165,7 @@ this job. The first response was to raise the cap to 50 over a SUM that included
 that arm is now VOID, because #11063 removed the save from this job.** It runs
 `actions/cache/restore@v4` with no post step, so nothing is charged against its cap but its own
 steps: **12 m in-step watchdog + ~1 m setup/provision ≈ 13 m; × 1.5 = 19.5 → 20**. Its own
-`.[test,postgres]` downloads (`python-ci.yml:4714` — the `Install package + the postgres extra` step
+`.[test,postgres]` downloads (`python-ci.yml:4720` — the `Install package + the postgres extra` step
 in `test-record-postgres`; `[embeddings]`/torch deliberately absent) are a rounding error beside the
 shared archive it now only restores. The cap is
 **20** — what `main` carried before #10962 raised it, re-derived here rather than inherited — keeping the raised
@@ -325,7 +325,7 @@ produces no runs — and because a warn-only step added to that workflow never e
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": a job that mounts `~/.cache/pip` on a WRITABLE
   shared key is not an arm-1 row, because on a key change its save IS the archive.
-  `test-record-postgres` mounts that path (`python-ci.yml:4706-4708` — its `Restore pip dependency
+  `test-record-postgres` mounts that path (`python-ci.yml:4712-4714` — its `Restore pip dependency
   caches (#7612, RESTORE-ONLY — #11063)` step's `with:` block) but is **restore-only since #11063**,
   so it pays no save: 20 is the ARM-2 SUM minus that term (13 m × 1.5 → 20), not an arm-1 reading,
   and its retained `max` 15.43 m is save-era (§1 predates #11063), so arm 1 would say 30 — re-measure.

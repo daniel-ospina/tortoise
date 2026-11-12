@@ -4611,14 +4611,20 @@ jobs:
     #     ⛔ That is NOT the old mechanism, and the old sentence here ("the
     #     archive has no PG16 client — so the in-step `apt-cache show`
     #     precondition is what fails closed") is why it is worth spelling out:
-    #     the client no longer comes from the box's ARCHIVE at all (#12051 round
-    #     3 installs from apt.postgresql.org), so a supported release needs no
-    #     fail-closed branch. The artifact contract is held by the in-step
+    #     the pin no longer DEPENDS on the box's ARCHIVE carrying the major
+    #     (#12051 round 3 makes `<codename>-pgdg` the source that RESOLVES it),
+    #     so a supported release needs no fail-closed branch. ⚠️ Not "the archive
+    #     is gone": it is still configured and apt merges both indexes — PGDG's
+    #     candidate wins on VERSION ORDER, not by exclusivity (measured on noble:
+    #     `16.15-1.pgdg24.04+2` over `16.15-0ubuntu0.24.04.1`) — but the
+    #     resolution no longer TURNS ON what the image ships, which is the class
+    #     that killed round 1. The artifact contract is held by the in-step
     #     `pg_dump --version` / `pg_restore --version` assertion, which is
-    #     box-independent. What still fails closed is AMONG: a release PGDG does
-    #     not publish (the named `apt-get update` guard), one whose os-release
-    #     carries no codename, a suite that resolves without this major, and the
-    #     install itself — and each of those names the RUNNER, not just the image
+    #     box-independent. What still fails closed is AMONG: a key fetch that
+    #     fails (egress/DNS/503), a release PGDG does not publish (the named
+    #     `apt-get update` guard), one whose os-release carries no codename, a
+    #     suite that resolves without this major, and a resolved package that
+    #     will not install — and each of those names the RUNNER, not just the image
     #     (`RUNNER_*` is set on BOTH classes while `ImageOS`/`ImageVersion` are
     #     hosted-only). #10289: a `=on` x64 box can carry this label.
     runs-on: ubuntu-24.04
@@ -4788,7 +4794,8 @@ jobs:
           sudo install -m 0644 /tmp/pgdg.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
           . /etc/os-release
           # ⛔ `${VERSION_CODENAME}` IS CHECKED, not left to `set -u`: an unbound-variable abort
-          # at the sources line is exactly the unnamed failure the three guards exist to replace,
+          # at the sources line is exactly the unnamed failure the repo-setup guards (the key
+          # fetch above and the `apt-get update` below) exist to replace,
           # and a box whose os-release carries no codename is a state this step can NAME.
           if [ -z "${VERSION_CODENAME:-}" ]; then
             echo "::error::/etc/os-release on this runner carries no VERSION_CODENAME [$identity] — the PGDG suite name cannot be derived, so the pg16 client this drill needs cannot be installed (#12051). A Debian/Ubuntu box always sets it; a non-apt-derived image does not."
