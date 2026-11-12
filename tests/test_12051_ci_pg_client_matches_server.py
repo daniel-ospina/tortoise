@@ -943,9 +943,27 @@ CAPSTONE_FILE = "test_9567_record_capstone.py"
 
 #: A line that RUNS the suite, not one that merely names it (#12069 review round
 #: 19). `pytest` bare, `python -m pytest`, any `python3.12` spelling, `py.test`.
+#:
+#: ⛔ A PATH-QUALIFIED OR QUOTED SPELLING IS STILL THE LEG (#12069 review round
+#: 20, measured false RED). The prefix class was `[\s;&|(`]`, so the two commonest
+#: real spellings were not invocations at all —
+#:
+#:     ./.venv/bin/pytest tests/test_9567_record_capstone.py
+#:     bash -c "pytest tests/test_9567_record_capstone.py"
+#:
+#: — and `_leg_indexes` returned `[]` for both. That is not a quiet miss: the pin
+#: row refuses the job with "the record capstone (D8) is not in any run step of
+#: this job" (untrue, it is in that step) and `_github_path_writes` crashed with
+#: `ValueError: min() iterable argument is empty`. Both measured.
 LEG_INVOCATION_RE = re.compile(
-    r"(?:^|[\s;&|(`])(?:(?:python|py)[\d.]*\s+-m\s+(?:pytest|py\.test)|pytest|py\.test)\b"
+    r"(?:^|[\s;&|(`\"'])"
+    r"(?:(?:\S*/)?(?:python|py)[\d.]*\s+-m\s+(?:pytest|py\.test)|(?:\S*/)?(?:pytest|py\.test))\b"
 )
+
+#: Verbs that change MODE or OWNERSHIP, never content: they cannot install
+#: another major's client, so naming the pinned dir after one is not a rewrite
+#: (#12069 review round 20, measured false RED on `sudo chmod -R 755 "$b/16/bin"`).
+_PERMISSION_WORDS = frozenset({"chmod", "chown", "chgrp"})
 
 
 def _leg_indexes(steps: list[dict]) -> list[int]:
@@ -963,16 +981,51 @@ def _leg_indexes(steps: list[dict]) -> list[int]:
     `_env_path_replacements`), so the real leg's `env: PATH: /usr/bin:/bin` fell
     outside every window and the job stayed green with the pin bypassed —
     measured GREEN, including `_env_path_replacements`'s own discriminating case.
-    A leg must INVOKE the suite: the filename AND a pytest invocation in ONE step.
-    The whole-file comment at the DRILL provision step never counts, because
-    `_run_commands` strips comments before this reads them.
+    A leg must INVOKE the suite: the filename AND a pytest invocation in ONE step,
+    and the invocation must be at a COMMAND POSITION on its line (round 20).
+
+    ⛔ `INVOCATION_RE.search()` ALONE STILL LET THE DECOY THROUGH (#12069 review
+    round 20, measured FAIL-OPEN). The conjunction was both-in-the-step, so the
+    comment above's own example — an `announce` step echoing prose that happens to
+    contain the WORD `pytest`:
+
+        - name: announce
+          run: echo "about to run pytest on tests/test_9567_record_capstone.py"
+
+    — still became the window end (`_leg_indexes -> [0, 1]`), the real leg's
+    `env: PATH` fell outside every window, and the pin bypass stayed green. The
+    word `pytest` inside `echo "…"` is an ARGUMENT, not a command, so the
+    invocation is now graded by `_is_command_position()` on its own physical line
+    (per line, because the walk crosses `\n` and an `echo` on an earlier line of
+    the same script would otherwise answer "operand" for a real leg below it).
+    Comments are stripped by `_run_commands()` before this reads anything, and a
+    `#` inline after a `;` (`echo hi;# pytest …`) is rejected by the same
+    command-position rule: `;#` is not a list separator, so the walk reaches
+    `echo` and answers "operand".
     """
 
     found: list[int] = []
     for index, step in enumerate(steps):
         commands = _run_commands(step)
-        if CAPSTONE_FILE in commands and LEG_INVOCATION_RE.search(commands):
-            found.append(index)
+        if CAPSTONE_FILE not in commands:
+            continue
+        for match in LEG_INVOCATION_RE.finditer(commands):
+            # The alternation consumes a SEPARATOR (`^`, a space, `\n`, `;`, a quote)
+            # when one is there, so the command word starts one character later.
+            # Reading the separator's own index answered "operand" for every
+            # invocation that was not at column 0 of the script (#12069 review
+            # round 21, measured: `echo pin` on line 1 of a step lost the leg on
+            # line 2).
+            begin = match.start()
+            if begin < len(commands) and commands[begin] in "\"' \t\n;&|(`":
+                begin += 1
+            line_start = commands.rfind("\n", 0, begin) + 1
+            line = commands[line_start:]
+            if CAPSTONE_FILE not in line:
+                continue
+            if _is_command_position(line, begin - line_start):
+                found.append(index)
+                break
     return found
 
 
@@ -1068,8 +1121,38 @@ def _replaces_a_client_binary(line: str) -> bool:
     # twice would move the row a correct tree is refused on.
     if "GITHUB_PATH" not in line and "GITHUB_ENV" not in line:
         for dir_match in CLIENT_DIR_ANY_BASE_RE.finditer(line, verb.end()):
-            if not _is_command_position(line, dir_match.start()):
-                return True
+            if _is_command_position(line, dir_match.start()):
+                continue
+            # ⛔ GRADE THE DESTINATION, NOT EVERY OPERAND (#12069 review round 20,
+            # measured false RED). `_is_command_position` answers "is this word an
+            # operand", so copying the pinned dir OUT (a backup before a rewrite)
+            # and fixing its MODE both read as REPLACEMENTS and refused a correct
+            # tree with "REPLACES a client binary":
+            #
+            #     sudo cp -a /usr/lib/postgresql/16/bin "$RUNNER_TEMP/pgbin-before"
+            #     sudo chmod -R 755 "$b/16/bin"
+            #
+            # A rewrite leaves the pinned dir LAST on its command; a mention with
+            # a further target after it is a SOURCE. A permission verb cannot
+            # install another major at all.
+            #
+            # STATED LIMITS (measured on this head, both GREEN — declared, not
+            # fixed, because each needs a shell evaluator this guard does not
+            # have): `sudo sh -c 'rsync -a "$b/17/bin/" "$b/16/bin/"'` — the
+            # verb walk meets `'rsync`, which `BINARY_MUTATION_RE` cannot match
+            # across the quote; and a destination built in two steps
+            # (`src="$b/17/bin"; dst="$b/16/bin"; rsync -a "$src/" "$dst/"`),
+            # where no `/bin` literal is left after the verb. Same population the
+            # rest of this file already declares for variable resolution.
+            if _segment_verb(line, dir_match.start()) in _PERMISSION_WORDS:
+                continue
+            # `CLIENT_DIR_ANY_BASE_RE` stops at `bin`, so the residue carries the
+            # rest of THIS token (a trailing `/`, a closing quote) — strip that,
+            # and only a residue that can start ANOTHER WORD is a second operand.
+            rest = re.sub(r"^[\"'/]+", "", line[dir_match.end() :]).lstrip()
+            if rest[:1] and (rest[0].isalnum() or rest[0] in "$\"'/\u007e.-_"):
+                continue
+            return True
     # ⛔ A NAME IN COMMAND POSITION IS BEING RUN, NOT WRITTEN (#12069 review 12,
     # measured). `BINARY_NAME_RE.search(line, verb.end())` accepted a name ANYWHERE
     # after the verb, so a mutating verb earlier on the line was enough — and with
@@ -1101,6 +1184,28 @@ _OPERAND_TAKING_WORDS = frozenset(
         "shred", "unlink", "patch", "tar", "unzip",
     }
 )
+
+
+def _segment_verb(line: str, start: int) -> str:
+    """The COMMAND word of the list element containing `start`, basename'd.
+
+    Used to ask what KIND of command an operand belongs to (`chmod` vs `rsync`) —
+    a question `_is_command_position` deliberately does not answer, because it only
+    reports whether a word is running or being operated on. Wrappers (`sudo`,
+    `env`, `exec`) and options are skipped, so `sudo chmod -R 755 …` reads as
+    `chmod`.
+
+    STATED LIMIT: the split is naive about quotes (`;` inside a quoted string ends
+    a segment early) and about a `VAR=value` prefix, which is why the caller uses
+    it only for a verb CLASS exemption, never to decide an offence.
+    """
+
+    segment = re.split(r"[;&|()`\n]", line[:start])[-1]
+    for token in segment.split():
+        if token in _WRAPPER_WORDS or "=" in token or token.startswith("-"):
+            continue
+        return token.rsplit("/", 1)[-1]
+    return ""
 
 
 def _is_command_position(line: str, start: int) -> bool:
@@ -2921,7 +3026,16 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     pin_index, _ = _pin_step(steps)
     # The window's upper bound is the step that RUNS the leg: a PATH set after a
     # leg that already ran cannot move it (#12069 round-15 review 2).
-    leg_start = min(_leg_indexes(steps))
+    # ⛔ ASSERT, DO NOT LET `min()` CHOOSE (#12069 review round 20, measured): an
+    # unrecognised spelling made this `min([])` and the row ERRORED with
+    # `ValueError: min() iterable argument is empty` instead of grading — the same
+    # shape the other three window consumers already guard.
+    leg_indexes = _leg_indexes(steps)
+    assert leg_indexes, (
+        "the record capstone (D8) is not in any run step of this job — see the "
+        "pin-step assertion above"
+    )
+    leg_start = min(leg_indexes)
 
     mentions = _github_path_writes(steps, job)
     assert mentions, (
@@ -4651,6 +4765,53 @@ def test_a_step_that_only_NAMES_the_capstone_is_not_the_leg() -> None:
         "the window the `env:`/`PATH` rows are graded over"
     )
 
+    # ⛔ THE WORD `pytest` IN PROSE IS STILL PROSE (#12069 review round 20, measured
+    # FAIL-OPEN). The round-19 fix required the filename AND an invocation in the
+    # step, so echoing a sentence that contains both satisfied it:
+    #
+    #     - name: announce
+    #       run: echo "about to run pytest on tests/test_9567_record_capstone.py"
+    #
+    # measured `_leg_indexes -> [0, 1]` — the decoy became the window end and the
+    # real leg's `env: PATH` fell outside every window, i.e. exactly the green the
+    # round-19 rule was written to prevent. `pytest` after `echo` is an ARGUMENT.
+    for prose in (
+        'echo "about to run pytest on tests/test_9567_record_capstone.py"',
+        "echo about to run python -m pytest tests/test_9567_record_capstone.py",
+        "echo hi;# pytest tests/test_9567_record_capstone.py",
+        "true # pytest tests/test_9567_record_capstone.py",
+    ):
+        assert _leg_indexes([{"run": prose}, steps[1]]) == [1], (
+            f"prose {prose!r} was read as an INVOCATION — the window end collapses "
+            "and the leg's own `env: PATH` goes ungraded"
+        )
+
+    # ⛔ AND A REAL LEG IS NOT REFUSED FOR ITS SPELLING (#12069 review round 20,
+    # measured false RED). Both of these returned `[]` before the fix: the prefix
+    # class excluded a quote and a path separator, so the pin row refused the job
+    # with "the record capstone (D8) is not in any run step of this job" (untrue)
+    # and `_github_path_writes` crashed with `ValueError: min() iterable argument
+    # is empty` rather than grading.
+    for spelling in (
+        "pytest tests/test_9567_record_capstone.py",
+        "./.venv/bin/pytest tests/test_9567_record_capstone.py",
+        "cd tests && ./.venv/bin/pytest tests/test_9567_record_capstone.py",
+        'bash -c "pytest tests/test_9567_record_capstone.py"',
+        "python3.12 -m pytest tests/test_9567_record_capstone.py",
+        "python -m py.test tests/test_9567_record_capstone.py",
+    ):
+        assert _leg_indexes([{"run": spelling}]) == [0], (
+            f"the real leg {spelling!r} was not recognised — the pin row then "
+            "refuses a correct tree and the `$GITHUB_PATH` row crashes"
+        )
+
+    # A real leg BELOW an `echo` line in the same script is still the leg: the
+    # command-position walk must not read the previous line's `echo` as this
+    # line's verb (that was the shape a naive per-script walk got wrong).
+    assert _leg_indexes([{"run": "echo pin\npytest tests/test_9567_record_capstone.py"}]) == [
+        0
+    ], "a multi-line step lost its leg because an earlier line began with `echo`"
+
 
 def test_a_step_env_outside_the_pin_leg_window_is_not_an_offender() -> None:
     """STEP-scope `env:` is windowed at BOTH ends; JOB scope is position-free.
@@ -5587,4 +5748,63 @@ def test_the_redirect_rule_reads_every_redirect_on_the_line() -> None:
     assert _replaces_a_client_binary(line), (
         "only the FIRST redirect on the line was graded, so a second one could "
         "rewrite the pinned binary with every row green (#12069 review P1)"
+    )
+
+
+#: A DIRECTORY-level replace names no binary, so the name rule cannot see it —
+#: and grading every OPERAND of the verb refuses a correct tree (#12069 review
+#: round 20, both directions measured on the head `0e93e40952`).
+#:
+#: The offence: `sudo rsync -a "$b/17/bin/" "$b/16/bin/"` overwrites every client
+#: in the pinned dir with another major's. The FALSE REDs the first cut produced:
+#: copying the pinned dir OUT (a backup before the rewrite) and fixing its mode
+#: both read as REPLACEMENTS, so a correct tree was refused with "REPLACES a
+#: client binary" — the same defect class as passing a broken one.
+DIRECTORY_REPLACE_POLARITY = [
+    # (line, must_be_refused, why)
+    ('sudo rsync -a "$b/17/bin/" "$b/16/bin/"', True, "the directory-level rewrite"),
+    ('sudo cp -a "$b/17/bin/" "$b/16/bin"', True, "`cp -a` with no trailing slash"),
+    (
+        "sudo cp -a /usr/lib/postgresql/17/bin/psql /usr/lib/postgresql/16/bin",
+        True,
+        "a literal base, one path component up",
+    ),
+    ('sudo rsync -a "$b/17/bin/" "$b/16/bin/" && echo ok', True, "a following `&&`"),
+    ('sudo rsync -a "$b/17/bin/" "$b/16/bin" > /dev/null', True, "a trailing redirect"),
+    ('sudo mv "$b/17/bin/" "$b/16/bin/"', True, "`mv` into the pinned dir"),
+    ('sudo ln -sfn "$b/17/bin" "$b/16/bin"', True, "`ln -sfn` over the pinned dir"),
+    (
+        'sudo cp -a /usr/lib/postgresql/16/bin "$RUNNER_TEMP/pgbin-before"',
+        False,
+        "a backup copies the pinned dir OUT: it is the SOURCE, not the target",
+    ),
+    ('sudo chmod -R 755 "$b/16/bin"', False, "a mode change installs no other major"),
+    ('sudo chown -R postgres "$b/16/bin"', False, "…and neither does an ownership change"),
+    ('mkdir -p "$RUNNER_TEMP/tools/bin"', False, "an ordinary scratch dir"),
+    ('rm -rf "$RUNNER_TEMP/tools/bin"', False, "a scratch dir whose token is a word"),
+    ('ls -la /usr/lib/postgresql/16/bin', False, "reading the pinned dir is not writing it"),
+]
+
+
+@pytest.mark.parametrize(
+    "line,refused,why",
+    DIRECTORY_REPLACE_POLARITY,
+    ids=[why.replace(" ", "-")[:32] for _, _, why in DIRECTORY_REPLACE_POLARITY],
+)
+def test_a_directory_level_replace_is_graded_on_its_DESTINATION(
+    line: str, refused: bool, why: str
+) -> None:
+    """A directory replace names no binary; its TARGET is what makes it one.
+
+    `_is_command_position` only answers "is this word an operand", so the first
+    cut refused `sudo cp -a /usr/lib/postgresql/16/bin "$RUNNER_TEMP/pgbin-before"`
+    (the pinned dir is a SOURCE there) and `sudo chmod -R 755 "$b/16/bin"` (a
+    permission verb cannot install another major) — both measured RED on a
+    correct tree at `0e93e40952`.
+    """
+
+    assert _replaces_a_client_binary(line) is refused, (
+        f"{'REFUSED' if refused else 'ALLOWED'} expected ({why}), but the rule "
+        f"{'allowed' if refused else 'refused'} {line!r}. The directory arm must "
+        "grade the DESTINATION of the mutating verb, not every operand"
     )
