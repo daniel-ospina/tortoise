@@ -797,10 +797,13 @@ class TestProbeDbBoundedAcquisition:
         message and its ``observed`` bit, because both are read from the FUTURE).
         When the acquisition SUCCEEDED inside the window, ``future.exception()``
         is None, and an arm that handles only the failure case has no answer to
-        hand over: it falls through with the acquisition reported as answer-less,
-        so the probe never runs against a handle that WAS built. Called directly
-        rather than through ``probe_db`` so the row asserts this arm's answer and
-        not the plumbing after it.
+        hand over: the handle is discarded and the phase is reported as a FAILURE,
+        so the probe never runs against a handle that WAS built. (WHICH failure
+        depends on how the arm degrades — an ``observed`` one claiming the string
+        ``'None'``, or the answer-less QUEUED spelling; both are enumerated
+        below, and "answer-less" here always means ``observed=False``.) Called
+        directly rather than through ``probe_db`` so the row asserts this arm's
+        answer and not the plumbing after it.
 
         RED with the success branch disabled (measured, both shapes of the
         mutant): the arm can then only report a FAILURE about a handle that
