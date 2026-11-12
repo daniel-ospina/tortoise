@@ -1344,12 +1344,12 @@ surfaces:
   # `undeclared_metric_findings()` nor `foreign_metric_findings()` (#5045 review
   # P1 — the same six-surface reasoning `test_7951_write_doors.py` carries).
   - test_cost_dimensions.py
-  # #11978 (instance 2): the `api` arm of the row the `core` block carries — that
-  # block's note states the measurement. `tortoise/metering.py` SELECTS `api`,
-  # and a named-surface match REPLACES the `core` fallback (#2938), so a
-  # `metering.py`-only diff runs `api` — and without this line that diff would
-  # never select the suite that pins `storage_overage_cost_usd`'s arithmetic.
-  - test_pricing_storage_dimensions.py
+  # #11978 (instance 2): NO `api` row for `test_pricing_storage_dimensions.py` here.
+  # The `metering.py` arm this block would carry arrived on `main` first —
+  # #11837 (`3557a476e1`) registered the file in this very block, and a second
+  # row here is a `duplicate entry` that reds `--integrity` on every PR. The
+  # `core` block carries this PR's arm; the two are the #10668/#9583 dual-
+  # registration idiom, one row per surface, not two rows on one.
   # #4241: the metering period-anchor repair's periodic caller. Registered with
   # `api` because the step (`_reconcile_metering_periods`) and both call sites
   # live in `tortoise/hosted_api.py`, which SELECTS `api` — a named-surface match
@@ -2234,27 +2234,26 @@ surfaces:
   - test_percent_value_11915.py
   # #11978 (instance 2, 2026-11-12): `tests/test_pricing_storage_dimensions.py`
   # landed in #11981 (`a3d20763ab`) with NO manifest row, so
-  # `tools/ci_selection.py --integrity` has reported
-  # `manifest drift: ['test_pricing_storage_dimensions.py']` from that merge on.
-  # The REQUIRED `manifest-integrity` leg (a `python-ci-gate.needs` entry) runs on
-  # `refs/pull/N/merge`, and there it is red — measured on #12002,
-  # `COMPLETED FAILURE` with the merge blocked. ⚠️ Precisely, because the deferred
-  # class fix (#11978) turns on the distinction: `main`'s OWN copy of the leg has
-  # no completed conclusion for this drift — the push run for `a3d20763ab` was
-  # CANCELLED and its successor on `e4703a286a` carried zero jobs — so "red on
-  # `main`" would be stating a CI state nobody observed. The merge ref is the
-  # observed red; `--integrity` on `main`'s manifest is the observed drift.
-  # Same class, and the same repair, as the `test_percent_value_11915.py` row
-  # directly above — which is what #11978 was filed for 42 minutes before this
-  # drift landed (issue 2026-11-12T00:47:22Z, `a3d20763ab` 01:29:58Z), not hours.
+  # `tools/ci_selection.py --integrity` refused every tree carrying it with
+  # `manifest drift: ['test_pricing_storage_dimensions.py']`, and the REQUIRED
+  # `manifest-integrity` leg (a `python-ci-gate.needs` entry) red on
+  # `refs/pull/N/merge` — measured on #12002, `COMPLETED FAILURE` with the merge
+  # blocked. ⚠️ That is HISTORY, not the current tree: #11837 (`3557a476e1`)
+  # registered the file on `main` first, in the `api` block, and `--integrity`
+  # on `main` is green. So this row is not a main-red repair any more — it is the
+  # `core` arm main still does not carry, and the `api` block's row (not a second
+  # one here) is what covers `metering.py`. Two rows, one per surface: a second
+  # `api` row is a `duplicate entry` and reds the gate it was added to green.
+  # Same class as the `test_percent_value_11915.py` row directly above — which is
+  # what #11978 was filed for 42 minutes before this drift landed (issue
+  # 2026-11-12T00:47:22Z, `a3d20763ab` 01:29:58Z), not hours.
   # `core` because THREE of this file's FOUR subjects select no named surface:
   # measured `--changed tortoise/pricing.py` -> ['core'],
   # `--changed tortoise/allowance_gate.py` -> ['core'] and
   # `--changed tortoise/cost_dimensions.py` -> ['core'] (that one is imported
   # DIRECTLY by the suite, not only through `pricing.storage_dimensions`). The
-  # FOURTH (`tortoise/metering.py`) DOES select `api`, so the `api` block carries its
-  # own row for that arm — the #10668/#9583 dual-registration idiom, the same
-  # `core`+`api` pair `test_allowance_gate.py` carries (NOT the six-surface
+  # FOURTH (`tortoise/metering.py`) DOES select `api`, where #11837 already
+  # registered it — which is why this PR adds THIS row only (NOT the six-surface
   # census `test_cost_dimensions.py` carries: this file pins two dimensions, not
   # a sweep over every tracked `.py`).
   # Hermetic: 31 cases, no DB, no graph, no network, no model call, no `gh`.
@@ -2265,10 +2264,12 @@ surfaces:
   # `NON_PYTHON_PREFIXES` entry. Those four modules are what THIS row buys;
   # the artifact leg needs the #12006 decision, so do not read this row as
   # covering the rates.
-  # ⛔ ONE ROW PER SURFACE, and re-measure before adding one (`grep -c
-  # '^  - test_pricing_storage_dimensions.py' config/ci-surfaces.yml` unless you
-  # mean the two surfaces above): the note below records three lanes that each
-  # repaired this same drift and left three copies of one row.
+  # ⛔ ONE ROW PER SURFACE, and re-measure before adding one (`grep -n
+  # '^  - test_pricing_storage_dimensions.py' config/ci-surfaces.yml` must print
+  # exactly TWO lines, one under `api` and one under `core`): the note below
+  # records three lanes that each repaired this same drift and left three copies
+  # of one row, and this file has already been red on a `duplicate entry` in
+  # `.surfaces.api[]` for exactly that reason.
   - test_pricing_storage_dimensions.py
   # ⛔ `test_pack_hierarchy_11001.py` is registered ONCE, further down this list
   # beside the pack suites — three PRs (#11210, #11211, #11222) each independently
