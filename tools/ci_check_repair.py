@@ -192,7 +192,7 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: THE BUDGET THIS FLOOR DEFERS TO, cited at each place for what it actually says:
 #: `docs/ops/ci-wall-clock.md` §1 line 50 is the MEASUREMENT (the table, 54 `python-ci`
 #: runs: p50 29.9 min, p95 77.0 min, max 81.9 min wait for a run's FIRST job);
-#: `tools/ci_queue_health.py:345` is the DERIVED VALUE,
+#: `tools/ci_queue_health.py:348` is the DERIVED VALUE,
 #: `DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0` (grep the symbol if the line has moved —
 #: it is the identifier that is load-bearing, the number is only a shortcut); and
 #: `docs/ops/ci-wall-clock.md` §6
@@ -222,7 +222,7 @@ QUEUED_STATUSES = frozenset({"queued", "waiting", "requested", "pending"})
 #: and the SAME BULLET, three lines later, supplies the 81.9 → 90 min derivation. Read
 #: as a denial of a queue-wait budget it is a misreading that then discards the one
 #: section that supports this floor. A lane re-deriving 5400 s follows §1
-#: (measurement) → §6 / `ci_queue_health.py:345` (budget).
+#: (measurement) → §6 / `ci_queue_health.py:348` (budget).
 #:
 #: WHY THE ORDERING IS LOAD-BEARING: the repair for this class evaluates to
 #: cancel-then-rerun, and cancelling a run that is merely waiting for a slot discards

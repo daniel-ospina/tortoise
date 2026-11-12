@@ -77,8 +77,10 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               here, which is a clean bill of health for a CI that is not running.)
   PR-UNWITNESSED
               per REPO — the PR WORK WAS NOT WITNESSED, for one of three reasons:
-              (a) a FEED WAS CUT AT ITS PAGE CAP, so the older runs — the end the
-              age clause needs — were never read. ⛔ THE ``pr_running == 0`` QUALIFIER
+              (a) a FEED WAS CUT AT ITS PAGE CAP, so its OLDEST runs were never read:
+              on the queued leg that is the end the AGE clause needs, and on the
+              in-progress leg it is part of the running census (they share this flag).
+              ⛔ THE ``pr_running == 0`` QUALIFIER
               COVERS THE QUEUED *AND* RUNNING LEGS, because those two ride ONE flag
               (``truncated = queued_truncated or running_truncated``): measured, a cut
               feed with an EXECUTING PR run present still returns ``OK``, so the
@@ -95,8 +97,9 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               (``read_health`` nulls a ``False`` whose ``updated_at`` has not been still
               for ``JOB_SETTLE_SECONDS`` — it, not the callee, holds the run
               projection); and the probe BUDGET. ⛔ NO ROUTE COUNT IS GIVEN:
-              only the LAYER count is stable (see `pr_running_unmeasured`), so that
-              count is an UPPER BOUND on executing work and cannot certify health.
+              only the LAYER count is stable (see `pr_running_unmeasured`). So the
+              ``pr_running`` count in this state is an UPPER BOUND on executing work and
+              cannot certify health.
               ⛔ AND NOT "the status-string census": that is what the BUDGET layer leaves
               (nothing was read about those runs), while a run the settle gate downgraded
               WAS read — naming the whole population that way is false for it, and it is
@@ -1737,12 +1740,17 @@ def classify_queue(
     def healthy() -> QueueHealth:
         """`OK` — but only when the PR wait was MEASURED and inside the budget.
 
-        ⛔ WITH ONE PINNED EXCEPTION (review P2, round 20): a TRUNCATED feed with an
-        EXECUTING PR run returns `OK` with `pr_wait_measured=False` (measured; pinned by
-        `test_a_truncated_feed_with_a_pr_run_executing_is_still_ok`). The wait is then
-        NOT measured, so this seam's `OK` is a statement about what was read — the
-        destructive gate stays shut on it (`congests_pr is None`), which is what the
-        sentinel exists for.
+        ⛔ AND THIS SEAM ALSO RETURNS `OK` WITH `pr_wait_measured=False` (review P2,
+        round 21). The condition is NOT truncation — it is `wait_runs` being EMPTY, and
+        there are several ways in (measured): a quiet queue through `no_flood()`, a flood
+        with an executing PR run that leaves no PR wait, and the truncated variant of that
+        last one. Truncation is therefore neither necessary nor sufficient: a truncated
+        feed whose queued PR wait WAS read returns `pr_wait_measured=True`
+        (`test_a_CUT_pending_leg_cannot_certify_the_queue_clear`'s sibling fixture pins
+        exactly that). In every `False` case this seam's `OK` is a statement about what was
+        READ, and the destructive gate stays shut on it (`congests_pr is None`) because the
+        `wait_runs`-empty clauses emit `pr_wait_measured=False` — the field, not "the
+        sentinel".
 
         Every `OK` EXCEPT the `not wait_runs` clause below returns through
         here. `OK` is a claim

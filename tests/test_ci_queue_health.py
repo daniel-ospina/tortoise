@@ -1340,7 +1340,7 @@ def test_a_PENDING_ONLY_wait_past_the_budget_cannot_clear_the_gate():
         "a measured, in-budget pending wait IS a clearance — otherwise this is "
         "fail-closed noise, not a measurement")
 
-    # C — the `no PR-event run is ...` clause must not swallow a pending-only wait.
+    # C — the `not wait_runs` clause must not swallow a pending-only wait.
     # This is the shape where that clause is REACHABLE (the offender clears the
     # dominance floor), so keying it on the queued leg alone hid the wait entirely.
     over_floor = classify(flood_queued(12),
@@ -2919,7 +2919,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # sentence, since a settle-downgraded run WAS read. No needle reached it: the suite was
         # GREEN with the two-route gloss and again with the three-route gloss plus the wrong
         # conclusion, so the presence pin is what keeps the conclusion honest.
-        ("module", "so that count is an UPPER BOUND on executing work and cannot"),
+        ("module", "count in this state is an UPPER BOUND on executing work and cannot"),
         # ⛔ AND THE GLOSSES THAT ONLY A MAINTAINER READS — pinned because the delta's own rule
         # is that a corrected claim needs a leg, and these had none (#12166 review round 16).
         # The `--help` one is EMITTED (argparse's description), i.e. operator-visible; a revert
