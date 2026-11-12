@@ -651,6 +651,15 @@ class QueueHealth:
     #: lever would then be prescribed for a wait defect. This flag is set by the clause
     #: that degrades, so it is about the census by construction.
     pr_running_census_unwitnessed: bool = False
+    #: OF THE UNMEASURED RUNS, HOW MANY THE PROBE NEVER REACHED (budget) versus NEVER READ
+    #: (the jobs read itself failed). #12037 review round 13: the census annotation promised
+    #: "the reason line says which" of the two remedies to pull, and the reason line only
+    #: offered a disjunction — no field anywhere could answer it, because `has_live_job` is
+    #: `None` in both cases by design (`read_run_live_job` swallows the failure into `None`).
+    #: These are `None` when the caller did not probe (nothing to distinguish), and the two
+    #: ints otherwise; they always sum to `pr_running_unmeasured`.
+    pr_running_unmeasured_unprobed: int | None = None
+    pr_running_unmeasured_unread: int | None = None
     #: Why the verdict is what it is, in one clause per clause of the rule, so a
     #: reader can check the decision instead of trusting it.
     reasons: tuple[str, ...] = ()
@@ -984,6 +993,10 @@ class QueueHealth:
             # Whether that abstention is what DEGRADED the verdict, so a consumer reads
             # the cause instead of inferring it from the two counts above.
             "pr_running_census_unwitnessed": self.pr_running_census_unwitnessed,
+            # ... and WHICH of the two abstentions it was, so the annotation can name one
+            # remedy instead of listing remedies that are each a no-op for the other cause.
+            "pr_running_unmeasured_unprobed": self.pr_running_unmeasured_unprobed,
+            "pr_running_unmeasured_unread": self.pr_running_unmeasured_unread,
             "pr_queued": self.pr_queued,
             # The other leg of the wait population, emitted so a consumer can see that
             # the clearance was not taken from the `status=queued` feed alone (#10641
@@ -1066,6 +1079,28 @@ def _project(raw: Iterable[Mapping[str, Any]]) -> list[QueuedRun]:
     return out
 
 
+def _unmeasured_because(unprobed: int | None, unread: int | None) -> str:
+    """Name WHICH abstention the unmeasured runs are, or admit that we cannot (#12037 13).
+
+    The two have opposite remedies — a run the budget never REACHED is fixed by raising
+    `--max-job-probes`; a run whose jobs read FAILED is fixed by retrying, and a bigger budget
+    only probes more runs that fail the same way. A disjunction is therefore not a diagnosis,
+    and an alert that lists both remedies hands the operator a coin flip. When the caller did
+    not probe (a legacy `classify_queue` call) there is nothing to distinguish, and this says
+    so rather than guessing.
+    """
+    if unprobed is None or unread is None:
+        return " (the probe budget did not reach them, or their jobs could not be read)"
+    parts = []
+    if unprobed:
+        parts.append(f"{unprobed} the probe budget never REACHED")
+    if unread:
+        parts.append(f"{unread} whose jobs read itself FAILED")
+    if not parts:   # defensive: says nothing false if a caller passes zeroes
+        return ""
+    return " (" + ", ".join(parts) + ")"
+
+
 def _executing_claim(pr_running: int, pr_running_unmeasured: int) -> str:
     """Say "executing" ONLY as strongly as the evidence allows (#12037 reviews 5, 8).
 
@@ -1104,6 +1139,8 @@ def classify_queue(
     pending: Sequence[QueuedRun] = (),
     pending_truncated: bool = False,
     probe_attempted: bool = False,
+    unmeasured_unprobed: int | None = None,
+    unmeasured_unread: int | None = None,
 ) -> QueueHealth:
     """The whole decision, PURE — no API calls — so it is unit-testable.
 
@@ -1353,9 +1390,14 @@ def classify_queue(
         )
         if census_unwitnessed:
             verdict = PR_UNWITNESSED
+            # ⛔ THE REASON LINE MUST SAY WHICH, WHEN THE CALLER CAN (#12037 review round 13).
+            # It used to offer only the disjunction "(the probe budget did not reach them, or
+            # their jobs could not be read)" — while the alert built on it promised to tell
+            # the operator which remedy to pull. The two need OPPOSITE actions (raise the
+            # budget vs retry the reading), so a disjunction is not a diagnosis.
             reasons.append(
                 f"PR-UNWITNESSED: all {pr_running} run(s) counted in pr_running were UNMEASURED "
-                "(the probe budget did not reach them, or their jobs could not be read), so "
+                f"{_unmeasured_because(unmeasured_unprobed, unmeasured_unread)}, so "
                 "the count is the pre-#12037 status-string census, not a census of executing "
                 "work; with no run PROVED to be executing, health is neither witnessed nor "
                 "disproved — not reported as OK, and no destructive caller may read it as clear"
@@ -1391,6 +1433,8 @@ def classify_queue(
             # lever for a wait defect. This flag is True only when the clause above
             # actually fired, i.e. it is about the CENSUS by construction.
             "pr_running_census_unwitnessed": census_unwitnessed,
+            "pr_running_unmeasured_unprobed": unmeasured_unprobed,
+            "pr_running_unmeasured_unread": unmeasured_unread,
             "pr_queued": len(pr_queued_runs),
             # The OTHER leg of the wait population: queued-adjacent PR runs the
             # `status=queued` feed cannot contain, read separately and counted so the
@@ -1973,14 +2017,30 @@ def read_health(
         (run for run in projected if run.is_pr),
         key=_probe_order_key,
     )
+    attempted = probe_order[:max_job_probes]
     probed = {
         run.id: read_run_live_job(repo, run.id, attempt=run.run_attempt)
-        for run in probe_order[:max_job_probes]
+        for run in attempted
     }
     running = [
         replace(run, has_live_job=probed[run.id]) if run.id in probed else run
         for run in projected
     ]
+    # ⛔ THE DISCRIMINATOR (#12037 review round 13). `has_live_job is None` means EITHER "the
+    # budget never reached this run" OR "its jobs read failed" — and the two have OPPOSITE
+    # remedies (raise the budget vs retry), so the count alone cannot answer "which lever do I
+    # pull?". Only this function knows the slice it spent, so only it can split the abstention.
+    # It must run over the MERGED list: `projected` still holds the pre-probe values, so
+    # reading it here would call a run "read-failed" merely because it was in the slice.
+    attempted_ids = {run.id for run in attempted}
+    unmeasured_unprobed = sum(
+        1 for run in running
+        if run.is_pr and run.has_live_job is None and run.id not in attempted_ids
+    )
+    unmeasured_unread = sum(
+        1 for run in running
+        if run.is_pr and run.has_live_job is None and run.id in attempted_ids
+    )
     # The legs the `status=queued` filter cannot contain. A failure here raises, like
     # every other read: an unmeasured queue is not a healthy one.
     pending, pending_truncated = read_runs(repo, "pending", max_pages)
@@ -2000,6 +2060,9 @@ def read_health(
         # The FACT, not an inference from the answers (see the clause in `classify_queue`).
         # Non-empty `probed` means the budget was spent on at least one run.
         probe_attempted=bool(probed),
+        # The split behind `pr_running_unmeasured`, so the alert can name ONE remedy.
+        unmeasured_unprobed=unmeasured_unprobed,
+        unmeasured_unread=unmeasured_unread,
     )
 
 

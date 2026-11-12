@@ -327,7 +327,34 @@ jobs:
             # tool emits `pr_running_census_unwitnessed`, set by the clause that degrades.
             census_n="$(python3 -c "import json; print(1 if json.load(open('/tmp/ci-queue-health.json')).get('pr_running_census_unwitnessed') else 0)" 2>/dev/null || echo 0)"
             if [ "${census_n:-0}" -eq 1 ]; then
-              echo "::warning::${state} — the RUNNING CENSUS was not witnessed: every run counted as executing was unmeasured, so the count is the pre-#12037 status-string census and PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here. The lever depends on WHY those runs went unmeasured, and the reason line says which: runs the probe budget did not REACH are reached by --max-job-probes; runs whose JOBS READ ITSELF failed need the reading retried, because a bigger budget probes more runs that fail the same way; runs GitHub has stopped driving (frozen in_progress, every job completed) are repaired on the API side. NOT --max-pages; see the step summary for the dimension that was not measured."
+              # ⛔ THE SPLIT IS READ FROM THE PAYLOAD, AND IT NAMES OPPOSITE REMEDIES (#12037
+              # review rounds 11 and 13). The census is unmeasured for one of exactly TWO
+              # reasons, and they are not interchangeable: a run the budget never REACHED is
+              # reached by raising --max-job-probes, while a run whose jobs read FAILED is
+              # fixed by RETRYING (a bigger budget only probes more runs that fail the same
+              # way). Emitting both remedies as alternatives would hand the operator a coin
+              # flip, so the tool reports the split (`pr_running_unmeasured_unprobed` /
+              # `_unread`) and this arm names only the remedy that applies.
+              #
+              # ⛔ AND THERE IS NO THIRD CAUSE NAMED HERE ANY MORE: "a run GitHub has stopped
+              # driving (frozen, every job completed)" is the OPPOSITE of unmeasured — all-jobs
+              # -completed is the PROOF that EXCLUDES a run from `pr_running` (see the
+              # `excluded` sentence), so it can never contribute to an unmeasured census. Such
+              # a run is identified BY being probed, which is the budget lever, and neither
+              # /cancel nor /force-cancel accepts a repair — so pointing an operator at an
+              # "API-side repair" sent them to an avenue the tool's own record calls closed.
+              unprobed_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured_unprobed') or 0)" 2>/dev/null || echo 0)"
+              unread_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured_unread') or 0)" 2>/dev/null || echo 0)"
+              if [ "${unread_n:-0}" -gt 0 ] && [ "${unprobed_n:-0}" -eq 0 ]; then
+                census_lever="the JOBS READ ITSELF FAILED for all ${unread_n} of them, so RETRY the reading — a bigger probe budget only probes more runs that fail the same way"
+              elif [ "${unprobed_n:-0}" -gt 0 ] && [ "${unread_n:-0}" -eq 0 ]; then
+                census_lever="the probe budget never REACHED all ${unprobed_n} of them, so raise --max-job-probes (oldest-first: the surplus is the NEWEST runs)"
+              elif [ "${unprobed_n:-0}" -gt 0 ] && [ "${unread_n:-0}" -gt 0 ]; then
+                census_lever="both causes are present — ${unprobed_n} run(s) the budget never REACHED (raise --max-job-probes) and ${unread_n} whose JOBS READ FAILED (RETRY the reading first, since a retry also re-probes the unread ones); if the count then stops moving, raise the budget"
+              else
+                census_lever="the reading did not record which abstention it was (an older caller), so neither lever can be named from this payload"
+              fi
+              echo "::warning::${state} — the RUNNING CENSUS was not witnessed: every run counted as executing was unmeasured, so the count is the pre-#12037 status-string census and PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here. ${census_lever}. NOT --max-pages; see the step summary for the dimension that was not measured."
             else
               echo "::warning::${state} — the PR wait was not witnessed (the queued feed was cut at the page cap, or the queued PR runs carry no readable timestamp), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; for a truncated feed raise --max-pages to read further back, and see the step summary for the dimension that was not measured."
             fi

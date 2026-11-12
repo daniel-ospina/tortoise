@@ -3189,11 +3189,14 @@ def _pr_unwitnessed_arm_and_branches():
 
 
 def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
-    """The three causes take different levers, and the arm must not mix them (rounds 5 and 8).
+    """The census is unmeasured for TWO reasons with OPPOSITE remedies (rounds 5, 8, 10, 13).
 
     Round 5 replaced a numeric selector with the payload's own flag because the counts cannot
-    distinguish the causes. Round 8 measured that nothing pinned the replacement: a typo in the
-    key, and deleting the branch outright, both survived the suite.
+    tell the causes part. Round 8 measured that nothing pinned the replacement. Round 10 measured
+    that the *number* of annotations was unbounded. Round 13 measured that the flag alone is not
+    enough either: "unmeasured" is either "the budget never reached the run" (raise
+    --max-job-probes) or "the jobs read failed" (retry — a bigger budget probes more runs that
+    fail the same way), and the arm must name the one that applies, not both.
     """
     arm = _pr_unwitnessed_arm_and_branches()
 
@@ -3207,57 +3210,55 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
         "one READER in the shell, so a second copy cannot drift from it "
         f"(comment mentions excluded): {code.count('pr_running_census_unwitnessed')}"
     )
+    # ... and the SPLIT it now reports is read from the payload too, once each
+    assert code.count("pr_running_unmeasured_unprobed") == 1
+    assert code.count("pr_running_unmeasured_unread") == 1
 
-    # 2. the census branch exists, and names ITS lever and not the wait one
-    census_i = arm.find('pr_running_census_unwitnessed')
-    camel = arm.find("RUNNING CENSUS was not witnessed")
-    assert camel > census_i, "the census branch is gone or detached from its selector"
-    census_branch = arm[camel:arm.find("else", camel)]
-    assert "--max-job-probes" in census_branch, census_branch
-    assert "--max-pages" in census_branch and "NOT --max-pages" in census_branch, (
+    # 2. the census region (selector → the wait `else`) has the census levers and refutes the
+    #    wait one. The lever text lives in the branch assignments, not in the echo, so the
+    #    region — not the echo — is what must carry it.
+    lines = arm.splitlines()
+    sel_i = next(i for i, ln in enumerate(lines) if "pr_running_census_unwitnessed" in ln)
+    wait_else_i = max(i for i, ln in enumerate(lines) if ln.strip() == "else")
+    census_region = "\n".join(lines[sel_i:wait_else_i])
+    assert "--max-job-probes" in census_region, census_region
+    assert "RETRY the reading" in census_region, census_region
+    assert "NOT --max-pages" in census_region, (
         "the census cause must actively REFUTE the wait lever, not merely omit it"
     )
 
-    # 3. the wait branch (the `else`) names the wait lever and not the census one
-    wait_branch = arm[arm.find("else", camel):]
+    # 3. the wait branch names the wait lever and not the census one
+    wait_branch = "\n".join(lines[wait_else_i:])
     assert "--max-pages" in wait_branch, wait_branch
     assert "--max-job-probes" not in wait_branch, (
         "the wait cause must not be handed the census lever"
     )
 
-    # 3b. ⛔ AND THE ARM RENDERS EXACTLY ONE ANNOTATION PER CAUSE (#12037 review round 10).
-    # The executed slice below starts at the selector, so an EXTRA `echo "::warning::"` placed
-    # anywhere else in the arm — e.g. an unconditional wait-lever warning above the selector —
-    # was outside it and survived: the reading then printed "raise --max-pages" AND
-    # "NOT --max-pages" together. Count the arm's annotation emits (comments excluded) here,
-    # and the rendered count in the executed section.
-    emits = [ln for ln in arm.splitlines()
+    # 3b. exactly two annotation echoes in code: one per cause, each inside its own branch.
+    # (Round 10: an extra unconditional echo above the selector printed "raise --max-pages" and
+    # "NOT --max-pages" for the same reading and survived.)
+    emits = [ln for ln in lines
              if not ln.lstrip().startswith("#") and 'echo "::warning::' in ln]
     assert len(emits) == 2, (
         "exactly two annotation echoes: one per cause, each inside its own branch — "
         f"got {len(emits)}: {emits}"
     )
 
-    # 4. ⛔ AND THE CONSTRUCTION IS EXECUTED, NOT SPELL-CHECKED (#12037 review round 9).
-    # Every string assertion above is satisfied by a file whose SELECTOR IS INVERTED —
-    # flipping `-eq 1` to `-eq 0`, or the `|| echo 0` fallback to `1`, inverts the
-    # cause→lever mapping on every real reading while changing no string this test reads
-    # (both survived the suite). The only way to pin polarity is to RUN the branch. The
-    # tool's hardcoded path is rewritten to a fixture so a concurrent run's
-    # `/tmp/ci-queue-health.json` is never touched, and `$state` is defined because the
-    # branch prints it.
+    # 4. ⛔ AND THE CONSTRUCTION IS EXECUTED, NOT SPELL-CHECKED (rounds 9, 10, 13). Every
+    # string assertion above is satisfied by a file whose SELECTOR IS INVERTED. The only way to
+    # pin polarity — and now the per-cause lever — is to RUN the branch. The tool's hardcoded
+    # path is rewritten to a fixture so a concurrent run's `/tmp/ci-queue-health.json` is never
+    # touched, and `$state` is defined because the branch prints it.
     import subprocess
     import tempfile
 
-    lines = arm.splitlines()
-    sel_i = next(i for i, ln in enumerate(lines) if "census_n=" in ln)
-    # the matching `fi` for the `if [` that follows the assignment
-    if_i = next(i for i, ln in enumerate(lines[sel_i:], start=sel_i)
+    sel_line = next(i for i, ln in enumerate(lines) if "census_n=" in ln)
+    if_i = next(i for i, ln in enumerate(lines[sel_line:], start=sel_line)
                 if re.match(r'^\s*if \[ ', ln))
     indent = len(lines[if_i]) - len(lines[if_i].lstrip())
     end_i = next(i for i, ln in enumerate(lines[if_i:], start=if_i)
                  if ln.strip() == "fi" and len(ln) - len(ln.lstrip()) == indent)
-    branch = "\n".join(ln.strip() for ln in lines[sel_i:end_i + 1])
+    branch = "\n".join(ln.strip() for ln in lines[sel_line:end_i + 1])
 
     with tempfile.TemporaryDirectory() as tmp:
         fixture = Path(tmp) / "ci-queue-health.json"
@@ -3274,25 +3275,40 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
             )
             return out.stdout
 
-        # a census cause selects the census lever, and MUST refute the wait one
-        census_out = rendered('{"pr_running_census_unwitnessed": true}')
-        assert "--max-job-probes" in census_out, census_out
-        assert "NOT --max-pages" in census_out, census_out
-        # ⛔ AND IT MUST BE THE ONLY ANNOTATION RENDERED (#12037 review round 10). Every
-        # assertion above is a substring check, so an extra unconditional wait-lever `echo`
-        # above the selector — which prints "raise --max-pages" AND "NOT --max-pages" for the
-        # same reading — survived the suite. One cause, one annotation.
-        assert census_out.count("::warning::") == 1, census_out
-        assert "raise --max-pages" not in census_out, census_out
+        def census(payload):
+            return rendered(json.dumps({"pr_running_census_unwitnessed": True, **payload}))
 
-        # every other cause — flag false, key absent, payload absent, payload unparseable —
-        # selects the WAIT lever and must never mention the census one
-        for payload in ('{"pr_running_census_unwitnessed": false}',
-                        '{"verdict": "PR-UNWITNESSED"}',
-                        "{}",
+        # the budget lever, ONLY when the budget is what missed them
+        budget_only = census({"pr_running_unmeasured_unprobed": 3,
+                              "pr_running_unmeasured_unread": 0})
+        assert "--max-job-probes" in budget_only, budget_only
+        assert "RETRY" not in budget_only, budget_only
+        assert "--max-pages" not in budget_only.replace("NOT --max-pages", ""), budget_only
+
+        # the RETRY lever, ONLY when the reads themselves failed — a bigger budget cannot help
+        read_only = census({"pr_running_unmeasured_unprobed": 0,
+                            "pr_running_unmeasured_unread": 3})
+        assert "RETRY the reading" in read_only, read_only
+        assert "--max-job-probes" not in read_only, read_only
+
+        # both present: name both, and say which to try first
+        both = census({"pr_running_unmeasured_unprobed": 2,
+                       "pr_running_unmeasured_unread": 1})
+        assert "--max-job-probes" in both and "RETRY the reading" in both, both
+        assert "RETRY the reading first" in both, both
+
+        # ... and every rendering is exactly ONE annotation
+        for out in (budget_only, read_only, both):
+            assert out.count("::warning::") == 1, out
+
+        # every other cause — flag false, key absent, payload absent, unparseable — selects the
+        # WAIT lever and must never mention the census one
+        for payload in ({"pr_running_census_unwitnessed": False},
+                        {"verdict": "PR-UNWITNESSED"},
+                        {},
                         "not json",
                         None):
-            out = rendered(payload)
+            out = rendered(payload if payload is None else json.dumps(payload))
             assert out.count("::warning::") == 1, (payload, out)
             assert "raise --max-pages" in out, (payload, out)
             assert "--max-job-probes" not in out, (payload, out)
@@ -3417,3 +3433,105 @@ def test_the_probe_budget_flag_reaches_read_health_from_the_CLI(monkeypatch):
     # ... and the parser's DEFAULT is the constant, so the documented arithmetic and the
     # shipped behaviour cannot drift apart.
     assert Q.build_parser().parse_args([]).max_job_probes == Q.DEFAULT_MAX_JOB_PROBES
+
+
+def test_the_unmeasured_count_is_SPLIT_into_never_reached_and_read_failed(monkeypatch):
+    """⭐ ROUND-13 P2: "the reason line says which" was false, because nothing recorded it.
+
+    The census annotation promised to tell the operator WHICH remedy to pull, but
+    `has_live_job is None` covers both "the budget never reached this run" and "the jobs read
+    failed" — by design, since `read_run_live_job` swallows the failure into `None`. The counts
+    could not separate them either: with budget 8, `pr_running_unmeasured == 8` is both "all 8
+    probes failed" and "4 failed + 4 never reached". Only `read_health` knows the slice it spent,
+    so it now reports the split, which always sums to `pr_running_unmeasured`.
+    """
+    rows = [
+        # three PR runs: the oldest two are probed, the third is past the budget
+        {"id": 1, "name": "python-ci", "event": "pull_request",
+         "created_at": "2026-11-05T00:00:00Z"},
+        {"id": 2, "name": "python-ci", "event": "pull_request",
+         "created_at": "2026-11-05T00:00:01Z"},
+        {"id": 3, "name": "python-ci", "event": "pull_request",
+         "created_at": "2026-11-05T00:00:02Z"},
+    ]
+    queued_rows = [{"id": 9, "name": "python-ci", "event": "pull_request",
+                    "created_at": (NOW - timedelta(seconds=1000)).strftime("%Y-%m-%dT%H:%M:%SZ")}]
+    monkeypatch.setattr(
+        Q, "read_runs",
+        lambda repo, status, max_pages=5: (queued_rows if status == "queued" else rows, False),
+    )
+    # EVERY read fails (the likeliest state under load), and the budget of 2 never asks id 3
+    monkeypatch.setattr(Q, "read_run_live_job", lambda repo, rid, attempt=None: None)
+
+    health = Q.read_health("o/r", NOW, max_job_probes=2)
+
+    assert health.pr_running == 3              # 2 read-failed + 1 never-reached
+    assert health.pr_running_unmeasured == 3
+    assert health.pr_running_unmeasured_unread == 2
+    assert health.pr_running_unmeasured_unprobed == 1
+    assert (health.pr_running_unmeasured_unread
+            + health.pr_running_unmeasured_unprobed) == health.pr_running_unmeasured
+    # ... and the reason line NAMES both instead of the old disjunction
+    claim = next(r for r in health.reasons if r.startswith("PR-UNWITNESSED"))
+    assert "never REACHED" in claim and "jobs read itself FAILED" in claim, claim
+    # ... and the payload carries the split too, because the ANNOTATION reads it from there
+    payload = health.to_dict()
+    assert payload["pr_running_unmeasured_unread"] == 2
+    assert payload["pr_running_unmeasured_unprobed"] == 1
+
+    # a legacy caller that never probed has nothing to distinguish, and says so rather than
+    # inventing a cause (it keeps the old disjunction verbatim, so its reading cannot change)
+    legacy = Q.classify_queue(
+        [*Q._project(queued_rows)],
+        [*Q._project(rows)],
+        NOW,
+    )
+    assert legacy.pr_running_unmeasured_unread is None
+    assert legacy.pr_running_unmeasured_unprobed is None
+    assert Q._unmeasured_because(None, None) == (
+        " (the probe budget did not reach them, or their jobs could not be read)"
+    )
+    # ... and the split is never emitted as a pair of zeroes when there is nothing to split
+    assert Q._unmeasured_because(0, 0) == ""
+
+
+def test_the_split_counts_the_MERGED_list_not_the_pre_probe_one(monkeypatch):
+    """The split must be taken AFTER the probe results are merged (#12037 review round 13).
+
+    Measured during this fix: counting over the projected list (which still holds the
+    pre-probe `None` for every run) reports a run as READ-FAILED merely because it was inside
+    the slice, so with one successful probe the split came out wrong — the case this fixture
+    covers and the all-fail one cannot, since both computations agree when every read fails.
+    """
+    rows = [
+        {"id": 1, "name": "python-ci", "event": "pull_request",
+         "created_at": "2026-11-05T00:00:00Z"},
+        {"id": 2, "name": "python-ci", "event": "pull_request",
+         "created_at": "2026-11-05T00:00:01Z"},
+        {"id": 3, "name": "python-ci", "event": "pull_request",
+         "created_at": "2026-11-05T00:00:02Z"},
+    ]
+    queued_rows = [{"id": 9, "name": "python-ci", "event": "pull_request",
+                    "created_at": (NOW - timedelta(seconds=1000)).strftime("%Y-%m-%dT%H:%M:%SZ")}]
+    monkeypatch.setattr(
+        Q, "read_runs",
+        lambda repo, status, max_pages=5: (queued_rows if status == "queued" else rows, False),
+    )
+    # id 1's read fails, id 2 is PROVED idle, id 3 is past the budget
+    monkeypatch.setattr(Q, "read_run_live_job",
+                        lambda repo, rid, attempt=None: False if rid == 2 else None)
+
+    health = Q.read_health("o/r", NOW, max_job_probes=2)
+
+    assert health.pr_running_excluded == (2,), "the successful probe proved id 2 idle"
+    assert health.pr_running == 2                 # id 1 (read failed) + id 3 (never reached)
+    assert health.pr_running_unmeasured == 2
+    assert health.pr_running_unmeasured_unread == 1, (
+        "only the run whose read FAILED is unread; a run whose read SUCCEEDED is not"
+    )
+    assert health.pr_running_unmeasured_unprobed == 1
+    # both counted runs are unmeasured, so the census degrades — with the split naming ONE of
+    # each cause, which is exactly what the annotation turns into a remedy
+    assert health.verdict == Q.PR_UNWITNESSED
+    claim = next(r for r in health.reasons if r.startswith("PR-UNWITNESSED"))
+    assert "1 the probe budget never REACHED" in claim and "1 whose jobs read itself FAILED" in claim, claim
