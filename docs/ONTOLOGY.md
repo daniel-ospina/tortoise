@@ -1268,14 +1268,17 @@ the other mechanism, in either write order — through one shared reader, over l
 (a draft is promoted, and the promotion re-checks nothing).
 
 ⛔ **The residual, stated rather than implied:** two BARE edges of different types on one pair
-(`:IMPL` beside `:NAND`) are still writable through `create_direct_edge`. They occupy separate
-message slots, so the last-writer hazard this closure is about does not arise, and refusing them would
-change a shape the engine has always allowed — so this table does not claim they are refused. That
-shape needs the operator-less `relation` route: a connection that carries `operator` writes an
-OPERATOR on every route, and an operator beside ANY existing mechanism (bare or operator) is refused —
-including through `ingest`, whose Phase 1 reports the refusal as a `violations` entry instead of
-raising mid-bundle (#12067). Not covered here at all: `EventAPI.add_operator` and the projection's
-own edge fold (`#10306`).
+(`:IMPL` beside `:NAND`) are still writable. They do NOT share a message slot — a slot is keyed to an
+actual edge (`(src, tgt, rel_type)`), so every shape here occupies its own — and the cost of leaving
+them writable is the SAME one the refusal above exists to prevent: two factors pricing one pair with
+different functional forms, i.e. an over-statement that looks like strong support. They are retained
+only because refusing them changes a shape the engine has always allowed, so this table does not
+claim they are refused and does not claim they are harmless. That shape needs the operator-less
+`relation` route: a connection that carries `operator` writes an OPERATOR on every route, and an
+operator beside ANY existing mechanism (bare or operator) is refused — including through `ingest`,
+whose Phase 1 reports the refusal as a `violations` entry instead of raising mid-bundle (#12067). Not
+covered here at all: `EventAPI.add_operator` (which accepts `IMPL`/`NAND` only, so the third
+mechanism is unreachable there) and the projection's own edge fold (`#10306`).
 
 ### Reification rule — when an edge gets an operator
 

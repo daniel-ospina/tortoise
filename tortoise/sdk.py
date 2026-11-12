@@ -24346,6 +24346,23 @@ class TortoiseSDK:
                         "An IMPL wire fed a relation declared NAND RAISES the "
                         "target's confidence where the declaration says it must "
                         "LOWER it")
+                elif op_type == "coherence":
+                    # ⛔ THE THIRD MECHANISM HAS ITS OWN ARM (#12067 review round
+                    # 5, P2). The two branches below name NAND, so a coherence
+                    # wire fell into the NAND examples — an agent-facing warning
+                    # that said "A NAND wire carrying an IMPL meaning" about a
+                    # COHERENCE wire, wrong twice (the wire is not NAND, and this
+                    # one was declared NAND). An agent acting on it would rewrite
+                    # a correct coherence wire into a NAND one. A coherence wire
+                    # prices a NECESSARY CONDITION: it lowers the condition's
+                    # confidence, which is the opposite direction from a support
+                    # meaning and a different quantity from an attack meaning.
+                    _other = "NAND" if "NAND" in _meaning_mechanisms else "IMPL"
+                    _inversion = (
+                        f"A coherence wire carrying a {_other} meaning prices a "
+                        "NECESSARY CONDITION — it LOWERS the condition's "
+                        "confidence where the meaning would have it RAISE the "
+                        "target's")
                 elif _from_meaning:
                     _inversion = (
                         "A NAND wire carrying an IMPL meaning (e.g. 'supports') "

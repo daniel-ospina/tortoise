@@ -1038,17 +1038,41 @@ class TortoiseEP:
         # exists for (#12067 review, P1: measured +0.00591 on the source, 0.0 on
         # the target). So for a coherence factor the slots swap with the
         # direction: `->` = "the FIRST input is necessary for the second",
-        # `<-` = "the SECOND is necessary for the first", `<->` keeps the stated
-        # order and flows both ways, `-` flows nothing.
+        # `<-` = "the SECOND is necessary for the first", `-` flows nothing.
+        #
+        # ⛔ AND `<->` IS NOT "THE `->` MESSAGE SENT BOTH WAYS" (#12067 review
+        # round 4, P1 — the one case the first fix missed). For a symmetric
+        # potential, sending the same message both ways IS the mutual reading.
+        # For an ASYMMETRIC one it is not: the slot-0 message of
+        # `phi(ca, cb)` is the CONTRAPOSITIVE ("the dependent is present, so
+        # raise its necessary condition"), which no reading of the mechanism
+        # licenses — `docs/ONTOLOGY.md` states "a met one never raises either
+        # side" for BOTH the one-way and the two-way row. Measured before the
+        # fix (condition Beta(0.5,9.5) = 0.05, dependent Beta(10,1) = 0.909):
+        # `->` left the condition at 0.050000, `<->` RAISED it to 0.054178
+        # (+8.4 %), and on the live run loop 0.0500 → 0.0551. So a mutual
+        # coherence factor is priced TWICE over the same marginals, once with
+        # the potential and once with its mirror image, and each message comes
+        # from the direction it actually describes.
         fwd_early, bwd_early = direction_flows(direction)
         _phi = _MECHANISM_POTENTIALS.get(op_type, phi_impl)
-        if op_type == "coherence" and bwd_early and not fwd_early:
-            phi = lambda ca, cb, w=1.0: _phi(cb, ca, w)  # noqa: E731
-        else:
-            phi = _phi
+        _asymmetric = op_type == "coherence"
+
+        def _mirrored(ca, cb, w=1.0, _p=_phi):
+            """``_phi`` with its two slots swapped — the potential read from the
+            OTHER end. Only a slot-asymmetric potential answers differently."""
+            return _p(cb, ca, w)
+
+        phi = _mirrored if (_asymmetric and bwd_early and not fwd_early) else _phi
         mom_a, mom_b = tilted_moments(
             alpha_a, beta_a, alpha_b, beta_b, weight, phi, self.n_quad
         )
+        if _asymmetric and fwd_early and bwd_early:
+            # The BACK message (to slot 0) is the mirrored potential's, while
+            # the forward one (to slot 1) stays the stated order's.
+            mom_a, _ = tilted_moments(
+                alpha_a, beta_a, alpha_b, beta_b, weight, _mirrored,
+                self.n_quad)
 
         new_alpha_a, new_beta_a = moments_to_beta(*mom_a)
         new_alpha_b, new_beta_b = moments_to_beta(*mom_b)

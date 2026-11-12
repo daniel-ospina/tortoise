@@ -482,8 +482,21 @@ def apply_payload_operators(proj, sdk, operators: list, *,
         t_op_type = _target_attr(t, "op_type") or "IMPL"
         op_id = target_op_ids.get((t_src, t_dst, t_op_type))
         if op_id is None:
+            # ⛔ THE BRIDGE MAY BE A COHERENCE OPERATOR (#12067 review round 4,
+            # P2). Both mechanisms are stored on the `:IMPL` edge type, so the
+            # EDGE half of this probe was always right and only the NODE filter
+            # (`op_type:'IMPL'`) excluded the third mechanism — every mitigation
+            # aimed at a necessity bridge missed its target and was dropped. The
+            # closed set guarantees AT MOST ONE of the two on a pair, so the
+            # widened match cannot double-resolve.
             rows = proj.g.query(
-                "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+                "MATCH (o:Point {is_operator:true}) "
+                "WHERE o.op_type IN ['IMPL', 'coherence'] "
+                # ⛔ THE `WITH o` IS LOAD-BEARING (#6976): without it the
+                # predicate is dropped by the planner and the query returns
+                # OTHER points' rows — the same shape the bounded-relationship
+                # pin refuses everywhere else.
+                "WITH o "
                 f"MATCH (o)-[:IMPL {{idx:0}}]->(s) WHERE {epistemic_disjunction('s')} AND s.id = $src "
                 f"MATCH (o)-[:IMPL {{idx:1}}]->(d) WHERE {epistemic_disjunction('d')} AND d.id = $dst "
                 "RETURN o.id LIMIT 1",
@@ -491,11 +504,11 @@ def apply_payload_operators(proj, sdk, operators: list, *,
             ).result_set
             op_id = rows[0][0] if rows else None
         if op_id is None:
-            # Deep-miss (DE2E-11 negative): the target IMPL edge is absent —
-            # the mitigation must NOT attach (support-edge-first convention).
+            # Deep-miss (DE2E-11 negative): the target mechanism edge is absent
+            # — the mitigation must NOT attach (support-edge-first convention).
             _logger.warning(
-                "MITIGATES target edge (%s,%s,IMPL) not found — "
-                "mitigation dropped", t_src, t_dst)
+                "MITIGATES target edge (%s,%s,%s) not found — "
+                "mitigation dropped", t_src, t_dst, t_op_type)
             continue
         reason = point_content_by_id(src) if point_content_by_id else ""
         if not reason:

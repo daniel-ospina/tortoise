@@ -420,7 +420,7 @@ fan-out respected; C8 holds.
 **The contradiction to adjudicate:** `#4889` ("the Subject layer is unpopulated in production") is
 **CLOSED**, and the owner measured **26 Subjects against 19,300 points**. One of those is false.
 **Produces:** the binder's attach rate (`bind_point_subjects`, `tortoise/subject_binding.py:341`, called
-from `sdk.py`'s point-creation path at `:17621` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
+from `sdk.py`'s point-creation path at `:17770` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
 `subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6607` and

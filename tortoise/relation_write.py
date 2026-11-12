@@ -369,19 +369,17 @@ def _registry_seam(registry: object) -> dict:
     return {} if registry is None else {"registry": registry}
 
 
-def _mechanism_for(predicate: str, semantics: str | None,
-                   registry: object = None) -> str | None:
-    """The mechanism this verb/semantics DECLARES, from the registry (never here).
+def _declared_mechanism_for(predicate: str, semantics: str | None,
+                            registry: object = None) -> str | None:
+    """The mechanism this verb/semantics declares FIRST, carriable or not.
 
-    A verb that IS a mechanism (``IMPL``/``NAND``) declares itself. Otherwise
-    ``pack_registry.declared_mechanisms`` answers — one lookup over the pack
-    rows and ONTOLOGY §8's map, so a second table here would be exactly the
-    re-derivation the issue forbids. Deterministic: the first declaration the
-    registry returns, in its own order.
-
-    ``registry`` is the SAME catalog ``plan_relation_edges`` was given (see
-    :func:`_registry_seam`), so the leg reads ONE catalog — the mechanism and
-    the hierarchy cannot answer from different ones.
+    ``pack_registry.declared_mechanisms`` returns the declarations in authority
+    order — the pack row named by ``predicate`` first (its own ``mechanism`` is
+    AUTHORITATIVE for that verb, up to and including the case where it differs
+    from what its ``semantics`` maps to), then the ONTOLOGY §8 meaning legs.
+    This returns that FIRST mechanism whatever it is, so a caller can tell
+    "declares nothing" apart from "declares something the bare-edge leg cannot
+    carry yet".
     """
     if predicate in _DIRECT_MECHANISMS:
         return predicate
@@ -391,9 +389,67 @@ def _mechanism_for(predicate: str, semantics: str | None,
     except Exception:  # noqa: BLE001, RUF100 — a registry read must never abort a write
         return None
     for mechanism, _source in found or ():
-        if mechanism in _DIRECT_MECHANISMS:
-            return mechanism
+        return mechanism
     return None
+
+
+def _mechanism_for(predicate: str, semantics: str | None,
+                   registry: object = None) -> str | None:
+    """The mechanism this verb/semantics DECLARES **and this leg can carry**.
+
+    A verb that IS a mechanism (``IMPL``/``NAND``) declares itself. Otherwise
+    ``pack_registry.declared_mechanisms`` answers — one lookup over the pack
+    rows and ONTOLOGY §8's map, so a second table here would be exactly the
+    re-derivation the issue forbids. Deterministic: the first declaration the
+    registry returns, in its own order.
+
+    ⛔ THE FIRST DECLARATION IS THE ONLY CANDIDATE (#12067 review). This used to
+    scan the whole list for the first CARRRIABLE mechanism, which meant a pack
+    row declaring ``mechanism: coherence`` — the authoritative declaration for
+    its predicate — was silently replaced by whatever its ``semantics`` mapped
+    to, i.e. ``IMPL``. Measured on a pack row `{predicate: gatedBy, mechanism:
+    coherence, semantics: dependsOn}`: the plan produced a direct **``IMPL``**
+    edge with no drop and no warning, so a package's stated NECESSITY relation
+    was priced as SUPPORT — the silent inheritance of another mechanism's arm
+    that #12067's closed set exists to make impossible. A fallback to a
+    DIFFERENT mechanism is not a fallback, it is a substitution, so it is
+    refused here and the relation is DROPPED with a reason that names the real
+    cause (``_uncarriable_reason``).
+
+    ``registry`` is the SAME catalog ``plan_relation_edges`` was given (see
+    :func:`_registry_seam`), so the leg reads ONE catalog — the mechanism and
+    the hierarchy cannot answer from different ones.
+    """
+    declared = _declared_mechanism_for(predicate, semantics, registry)
+    if declared is None:
+        return None
+    return declared if declared in _DIRECT_MECHANISMS else None
+
+
+def _uncarriable_reason(predicate: str, semantics: str | None,
+                        registry: object = None) -> str | None:
+    """The drop reason for a verb whose OWN declaration this leg cannot carry.
+
+    ``None`` when the declaration is carriable (or absent) — the caller then
+    falls back to its generic reason. Exists so the silent-drop reason names the
+    real cause: the old text said the verb "is neither in the structural
+    writer's predicate set nor bound to a mechanism", which is FALSE for a row
+    that declares ``coherence`` — it IS bound to a mechanism, just not to one a
+    bare edge can carry.
+    """
+    declared = _declared_mechanism_for(predicate, semantics, registry)
+    if declared is None or declared in _DIRECT_MECHANISMS:
+        return None
+    return (
+        f"`{predicate}` declares mechanism {declared!r}, which the "
+        f"operator-less direct-edge leg cannot carry (#12067): a bare edge's "
+        f"mechanism IS its rel type and there are two (IMPL, NAND), so this "
+        f"relation is NOT written. It is NOT silently re-spelled as IMPL "
+        f"either — that would price a necessity as support, which is the "
+        f"inheritance #12067 closes. Reach this relation as an operator "
+        f"(`create_operator(op_type={declared!r})`), or declare it IMPL/NAND. "
+        f"Carriage on the bare-edge leg is the open follow-up on #12067."
+    )
 
 
 def _declared_meaning_for(predicate: str, registry: object = None) -> str | None:
@@ -692,11 +748,18 @@ def plan_relation_edges(
                 drops, seen_drops, src=src, dst=dst, predicate=predicate,
                 semantics=semantics,
                 reason=(
-                    f"`{predicate}` binds no declared write path "
-                    f"(relation_write_paths() -> ()) — it is neither in the "
-                    f"structural writer's predicate set nor bound to a "
-                    f"mechanism, so nothing is written and nothing is "
-                    f"inferred in its place"))
+                    # #12067 review: a verb whose OWN declaration names a
+                    # mechanism this leg cannot carry must say so. The generic
+                    # text below claims it is "not bound to a mechanism", which
+                    # is false for a `coherence` row — and a false reason sends
+                    # the pack author to fix the one thing that is already right.
+                    _uncarriable_reason(predicate, semantics, registry)
+                    or (
+                        f"`{predicate}` binds no declared write path "
+                        f"(relation_write_paths() -> ()) — it is neither in the "
+                        f"structural writer's predicate set nor bound to a "
+                        f"mechanism, so nothing is written and nothing is "
+                        f"inferred in its place")))
             continue
         if RELATION_STRUCTURAL in paths and predicate in _VALID_EDGE_PREDICATES:
             key = (predicate, src_id, dst_id)

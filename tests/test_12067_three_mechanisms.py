@@ -951,3 +951,296 @@ def test_coherence_is_not_support_in_the_RISING_direction(sdk):
     # ... while support lifts the identical claim materially.
     assert res[t_sup] > baseline + 1e-3, (res[t_sup], baseline)
     assert res[t_sup] > res[t_coh] + 1e-3, (res[t_sup], res[t_coh])
+
+
+# ── ROUND 4: the doors that could still let the third mechanism be SILENT ──
+#          Each test below was written from a MEASURED defect, not from the
+#          design: the assertions name the number/behaviour that was observed
+#          before the fix.
+
+class _OneRelationRegistry:
+    """The minimum `pack_registry._declared_relation_rows` reads of a catalog."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def list_relations(self):
+        return list(self._rows)
+
+
+def test_a_pack_relation_declaring_coherence_is_NOT_silently_written_as_IMPL():
+    """⛔ THE PACK/CAPTURE ARM OF THE SAME SILENCE (#12067 review round 4, P1).
+
+    This PR widened pack validation to accept ``mechanism: coherence`` on a
+    relation. The operator-less direct-edge leg that CONSUMES a pack relation
+    carries only ``IMPL``/``NAND`` — and ``relation_write._mechanism_for`` used to
+    scan the declaration list for the first *carriable* mechanism, so a row
+    declaring ``coherence`` was replaced by whatever its ``semantics`` mapped to:
+
+        measured, `{predicate: gatedBy, mechanism: coherence, semantics:
+        dependsOn}` → a plan with ONE edge, ``write_path='direct'``,
+        mechanism ``IMPL``, and ZERO drops — a pack's stated NECESSITY priced as
+        SUPPORT, which is exactly the inheritance the closed set exists to make
+        impossible. And nothing anywhere said so.
+
+    The fix refuses the substitution: the declaration's OWN mechanism is the only
+    candidate, so this relation is DROPPED, with a reason that names it.
+    """
+    from tortoise.relation_write import plan_relation_edges
+
+    registry = _OneRelationRegistry([
+        {"pack": "probe", "predicate": "gatedBy", "mechanism": "coherence",
+         "semantics": "dependsOn"},
+    ])
+    edges, drops = plan_relation_edges(
+        [{"src": "tranche", "dst": "condition", "predicate": "gatedBy",
+          "semantics": "dependsOn", "pack": "probe"}],
+        {"tranche": [("id-t", "probe:tranche")],
+         "condition": [("id-c", "probe:condition")]},
+        registry, declared=[])
+
+    assert edges == [], [(e.predicate, e.write_path) for e in edges]
+    assert drops, "the relation vanished with no drop record — that IS the defect"
+    reason = drops[0].reason
+    # The reason must name the REAL cause. The pre-fix generic text claimed the
+    # verb was "neither … nor bound to a mechanism", which is false for this row.
+    assert "coherence" in reason, reason
+    assert "#12067" in reason, reason
+    assert "nor bound to a mechanism" not in reason, reason
+
+
+def test_a_pack_relation_declaring_IMPL_still_writes(sdk):
+    """The guard above must not become a blanket refusal: an IMPL row is
+    carriable and must keep landing a direct edge (the #8175 false-block class)."""
+    from tortoise.relation_write import plan_relation_edges
+
+    registry = _OneRelationRegistry([
+        {"pack": "probe", "predicate": "gatedBy", "mechanism": "IMPL",
+         "semantics": "dependsOn"},
+    ])
+    edges, drops = plan_relation_edges(
+        [{"src": "tranche", "dst": "condition", "predicate": "gatedBy",
+          "semantics": "dependsOn", "pack": "probe"}],
+        {"tranche": [("id-t", "probe:tranche")],
+         "condition": [("id-c", "probe:condition")]},
+        registry, declared=[])
+    assert [e.predicate for e in edges] == ["IMPL"], edges
+    assert drops == [], drops
+
+
+def test_ingest_refuses_two_mechanisms_from_the_SAME_bundle(sdk):
+    """⛔ PHASE 1 ASKED THE GRAPH AND NOT ITSELF (#12067 review round 4, P1).
+
+    `_check_pair_mechanisms` compared each connection against the graph, so a
+    conflict between two connections IN THE SAME BUNDLE was invisible to it: the
+    payload below passed Phase 1 clean, the bundle's point and the FIRST operator
+    committed, and the second connection raised `create_operator`'s bare
+    `ValueError` — no `violations` entry to skip, and a call that raised having
+    left mutations behind. That is the partial-mutation class Phase 1 exists to
+    prevent, one layer inside the door the previous round hardened.
+
+    Measured before the fix: `operators on pair == ['IMPL']` and the bundle's own
+    point present, on a call that RAISED.
+
+    `_check_duplicates` does not cover it: it only fires on a REVERSED pair.
+    """
+    from tortoise.exceptions import BundleValidationError
+
+    a, b = _points(sdk)
+    payload = {
+        "points": [{"content": "queued behind an intra-bundle conflict"}],
+        "connections": [
+            {"operator": "IMPL", "from": a, "to": b},
+            {"operator": "coherence", "from": a, "to": b},
+        ],
+    }
+    with pytest.raises(BundleValidationError) as exc:
+        sdk.ingest(payload)
+    violations = getattr(exc.value, "violations", []) or []
+    assert any(("TWO mechanisms" in (v.get("message") or "") or "SECOND mechanism" in (v.get("message") or ""))
+               for v in violations), violations
+    # NOTHING from the bundle committed — that is the whole point.
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.content = $c RETURN n.id",
+        params={"c": "queued behind an intra-bundle conflict"}).result_set
+    assert rows == [], rows
+    ops = sdk._get_proj().g.query(
+        "MATCH (o:Point) WHERE o.is_operator = true RETURN o.id").result_set
+    assert ops == [], ops
+
+    # ... and the SAME bundle re-stating ONE mechanism is not a conflict: the
+    # ingest path re-issues operators by design (the closure must not refuse it).
+    ok = sdk.ingest({"connections": [
+        {"operator": "IMPL", "from": a, "to": b},
+        {"operator": "IMPL", "from": a, "to": b},
+    ]})
+    assert ok["created"]["connections"] == 1, ok
+
+
+def test_the_mechanism_mismatch_message_names_the_THIRD_mechanism(sdk):
+    """⛔ AN AGENT-FACING WARNING THAT NAMES THE WRONG MECHANISM (#12067 review
+    round 4, P2).
+
+    The `#9963` disclosure's worked examples branched IMPL / else-NAND, so a
+    coherence wire fell into the NAND arms. Measured on
+    `create_operator("coherence", a, [b], semantics="refutes")`:
+
+        "op_type 'coherence' contradicts … A NAND wire carrying an IMPL meaning
+         (e.g. 'supports') LOWERS the target's confidence where the meaning says
+         it must RAISE it"
+
+    — wrong twice: the wire is not NAND, and this one was declared NAND. An agent
+    acting on it would rewrite a correct coherence wire into a NAND one.
+    """
+    a, b = _points(sdk)
+    warned = sdk.create_operator("coherence", a, [b], semantics="refutes")
+    msgs = [w for w in (warned.get("warnings") or [])
+            if w.get("code") == "mechanism_mismatch"]
+    assert msgs, warned.get("warnings")
+    text = msgs[0]["message"]
+    assert "A NAND wire" not in text, text
+    assert "coherence wire" in text, text
+    # The declared mechanism it names must be the one that actually contradicted.
+    assert "NAND declaration" in text or "declared NAND" in text.replace(
+        "declares 'NAND'", "declared NAND"), text
+
+
+# ── ROUND 4 continued: the two P1s the third round's fix left behind ──────
+
+def _mean_before(prior):
+    return prior[0] / (prior[0] + prior[1])
+
+
+def test_mutual_coherence_never_RAISES_the_necessary_condition():
+    """`<->` IS NOT "THE `->` MESSAGE SENT BOTH WAYS" (#12067 review round 4, P1).
+
+    The round-1 fix swapped the potential's slots for `<-` only, on the sound
+    reasoning that `phi_impl`/`phi_nand` are symmetric. `phi_coherence` is not,
+    so for `<->` BOTH messages came out of the same one-corner potential and the
+    back message was its CONTRAPOSITIVE — "the dependent is present, so raise its
+    necessary condition" — which no reading of the mechanism licenses and which
+    `docs/ONTOLOGY.md` forbids in words ("a met one never raises either side").
+
+    Measured before the fix (condition Beta(0.5,9.5) = 0.05, dependent
+    Beta(10,1) = 0.909): `->` left the condition at 0.050000 while `<->` RAISED
+    it to 0.054178 (+8.4 %), and on the live run loop 0.0500 -> 0.0551.
+
+    The route that reaches it by DEFAULT is the one the ONTOLOGY row invites: a
+    necessity meaning (e.g. `semantics="hasPart"`) resolves to direction `<->`,
+    so a caller who writes the shape the new table names lands here.
+    """
+    cond, dep = _beta(0.05), HELD
+    cond_before, dep_before = _mean_before(cond), _mean_before(dep)
+
+    for direction in ("->", "<-", "<->"):
+        src, tgt = _means_after("coherence", cond, dep, direction=direction)
+        # the state the two are in is genuinely bad: the dependent falls when
+        # the condition is absent (`->` and `<->`), the condition falls when the
+        # dependent is the necessary one (`<-`).
+        if direction in ("->", "<->"):
+            assert tgt < dep_before - 1e-4, (direction, src, tgt)
+        if direction == "<-":
+            assert src < cond_before - 1e-4, (direction, src, tgt)
+        # ... and NOTHING ever RAISES the necessary condition.
+        assert src <= cond_before + 1e-12, (
+            f"direction {direction!r} RAISED the necessary condition "
+            f"{cond_before:.6f} -> {src:.6f}", src, tgt)
+    # non-vacuity: on `<->` the condition really does MOVE (downward), so
+    # "did not raise" is not passing because the factor is inert.
+    src_mutual, _ = _means_after("coherence", cond, dep, direction="<->")
+    assert src_mutual < cond_before - 1e-4, src_mutual
+
+
+def test_a_mechanism_on_a_TARGET_SUBPAIR_is_a_Phase1_violation(sdk):
+    """THE DOOR JUDGES THE WHOLE INPUT SET; PHASE 1 JUDGED ONE TARGET AT A TIME.
+
+    (#12067 review round 4, P1.) `_mechanism_pair_conflicts` fires on any pair
+    sharing two or more endpoints, and `create_operator` passes its FULL input
+    set. `_check_pair_mechanisms` asked per `{src, tgt}`, so an existing
+    mechanism on a TARGET-TO-TARGET sub-pair was invisible to it and fatal at
+    the door.
+
+    Measured before the fix — existing NAND on (B,C), then
+    `ingest({points:[new], connections:[{IMPL, from:A, to:[B,C]}]})`:
+    Phase 1 passed clean, the bundle's new point COMMITTED, then
+    `create_operator` raised with no violation to skip.
+    """
+    from tortoise.exceptions import BundleValidationError
+
+    a, b, c = _points(sdk, 3)
+    sdk.create_operator("NAND", b, [c])
+    payload = {
+        "points": [{"content": "queued ahead of a target sub-pair conflict"}],
+        "connections": [{"operator": "IMPL", "from": a, "to": [b, c]}],
+    }
+    with pytest.raises(BundleValidationError) as exc:
+        sdk.ingest(payload)
+    violations = getattr(exc.value, "violations", []) or []
+    assert any("SECOND" in (v.get("message") or "") for v in violations), (
+        violations)
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.content = $c RETURN n.id",
+        params={"c": "queued ahead of a target sub-pair conflict"}).result_set
+    assert rows == [], rows
+
+
+def test_the_mechanism_set_is_one_tuple_everywhere():
+    """FOUR DECLARATIONS OF ONE SET, AND NOTHING PINNED THE FOURTH.
+
+    (#12067 review round 4, P2.) `sdk._MECHANISM_OP_TYPES` gates three
+    SILENT-SKIP guards: the #2351 derived-over-asserted check, the ingest
+    self-edge rule, and the ingest absorb guard. A fourth mechanism added to
+    `CORE_PREDICATES` + `_MECHANISM_POTENTIALS` but not there would silently
+    disable all three — the inertness class the tuple's own comment ("ONE
+    tuple") exists to prevent. The `<=` assertion in
+    `test_the_mechanism_set_is_three_and_closed` is one-directional and could
+    not see it.
+    """
+    from tortoise.sdk import _MECHANISM_OP_TYPES
+    assert set(_MECHANISM_OP_TYPES) == set(MECHANISM_VALUES), (
+        _MECHANISM_OP_TYPES, sorted(MECHANISM_VALUES))
+    assert set(MECHANISM_VALUES) == set(CORE_PREDICATES), (
+        sorted(MECHANISM_VALUES), sorted(CORE_PREDICATES))
+
+
+def test_a_mitigation_targets_a_COHERENCE_bridge_too(sdk):
+    """A MITIGATES AIMED AT A NECESSITY BRIDGE WAS DROPPED.
+
+    (#12067 review round 4, P2.) `extractor_v2` records the MECHANISM in
+    `emitted_edges` and the MITIGATES pass looked only for `(src, dst, "IMPL")`,
+    so a bridge emitted as `coherence` looked MISSING and the #2552
+    mint-before-wire arm materialized an IMPL twin over the same pair — which
+    the closed set refuses. Measured end-to-end at the commit layer: `operator
+    write REFUSED by the closed mechanism set`, then `MITIGATES target edge (...)
+    not found — mitigation dropped`, i.e. two warnings blaming a missing IMPL
+    edge for a twin the producer had just invented.
+
+    Both mechanisms are stored on `:IMPL` (the map `ep.MECHANISM_REL_TYPES`), so
+    the EDGE half of the key was always right; only the operator NODE's
+    `op_type` differs.
+    """
+    from tortoise.commit_ops import apply_payload_operators
+    from tortoise.extractor_v2 import _target_emitted
+
+    # the producer's own decision, as a unit:
+    assert _target_emitted("A", "B", {("A", "B", "coherence")}) is True
+    assert _target_emitted("A", "B", {("A", "B", "IMPL")}) is True
+    assert _target_emitted("A", "B", set()) is False
+
+    # ... and end-to-end through the commit layer, which is where it was lost.
+    a = sdk.create_point("statement", "mit condition")["id"]
+    b = sdk.create_point("statement", "mit dependent")["id"]
+    out = apply_payload_operators(sdk._get_proj(), sdk, [
+        {"src": a, "dst": b, "op_type": "coherence", "direction": "->"},
+        {"src": a, "dst": b, "op_type": "MITIGATES",
+         "target": {"src": a, "dst": b, "op_type": "coherence"},
+         "strength": 0.3},
+    ])
+    assert len(out) == 1, out
+    attached = sdk._get_proj().g.query(
+        "MATCH (:Point)-[:mitigated_by]->(m:Point) RETURN m.id").result_set
+    assert len(attached) == 1, attached
+    mechanisms = sdk._get_proj().g.query(
+        "MATCH (o:Point) WHERE o.is_operator = true "
+        "RETURN o.op_type").result_set
+    assert mechanisms == [["coherence"]], mechanisms

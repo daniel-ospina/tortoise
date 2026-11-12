@@ -9934,6 +9934,27 @@ def _assemble_relations(embed_list: dict, payload_entities: list[dict],
     return kept, dropped
 
 
+#: The mechanisms a MITIGATES bridge may sit on (#12067). Both are stored on
+#: the `:IMPL` edge type — `ep.MECHANISM_REL_TYPES` is what says so — so the
+#: target's src/dst pair is the same key either way; only the operator NODE's
+#: `op_type` differs.
+_MITIGATABLE_MECHANISMS = ("coherence", "IMPL")
+
+
+def _target_emitted(t_src, t_dst, emitted_edges) -> bool:
+    """Has this extraction already emitted an operator over the target pair?
+
+    ⛔ MECHANISM-AWARE (#12067 review round 4, P2). `emitted_edges` carries the
+    operator's MECHANISM, so asking only for `(src, dst, "IMPL")` answers "no"
+    for a pair the same pass emitted as `coherence` — and the #2552 arm then
+    minted an **IMPL twin over that pair**, which the closed set refuses at the
+    commit door. The mitigation was consequently dropped with two warnings that
+    both blamed a missing IMPL edge, when the real cause was the twin.
+    """
+    return any((t_src, t_dst, m) in emitted_edges
+               for m in _MITIGATABLE_MECHANISMS)
+
+
 def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   story_arc: str = "", summary: str = "",
                   extractor_version: str = "value@0.5.0+v2",
@@ -11417,9 +11438,23 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                             f"'{_clip(o.get('dst', ''), 40)}') "
                             "clamped")
             strength = min(0.50, max(0.10, strength))
+        # ⛔ THE TARGET IDENTITY IS MECHANISM-AWARE (#12067 review round 4, P2).
+        # `emitted_edges` now carries the MECHANISM (`(src, dst, 'coherence')`),
+        # but this pass looked only for `(t_src, t_dst, "IMPL")` — so a
+        # MITIGATES aimed at a pair the extractor had just emitted as
+        # `coherence` looked MISSING, and the #2552 mint-before-wire arm
+        # materialized an **IMPL twin over the same pair**. With the closed set
+        # in force that twin can never land: measured end-to-end, the commit
+        # warned "operator write REFUSED by the closed mechanism set", then the
+        # mitigation died on the IMPL-only fallback with "MITIGATES target edge
+        # (…) not found — mitigation dropped", i.e. TWO warnings that both blame
+        # a missing IMPL edge for a twin this function had just invented.
+        _target_mech = (
+            "coherence" if (t_src, t_dst, "coherence") in emitted_edges
+            else "IMPL")
         declared_target_missing = (
             bool(t_src and t_dst) and t_src != t_dst
-            and (t_src, t_dst, "IMPL") not in emitted_edges)
+            and not _target_emitted(t_src, t_dst, emitted_edges))
         if declared_target_missing:
             # #2552 mint-before-wire (the IMPL pair): the OUTPUT_CONTRACT
             # declares a MITIGATES as ONE operator entry carrying its
@@ -11433,18 +11468,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "src": t_src, "dst": t_dst, "op_type": "IMPL",
                 "direction": "unidirectional"})
             emitted_edges.add((t_src, t_dst, "IMPL"))
+            _target_mech = "IMPL"
             warnings.append(
                 "MITIGATES target edge materialized (#2552 mint-before-"
                 f"wire): the declared target IMPL ({t_src[:40]!r} → "
                 f"{t_dst[:40]!r}) was not emitted as its own operator "
                 "— added so the dampener has its target")
-        if not (t_src and t_dst and (t_src, t_dst, "IMPL") in emitted_edges):
+        if not (t_src and t_dst and _target_emitted(t_src, t_dst, emitted_edges)):
             warnings.append(f"MITIGATES target edge not emitted ({t_src!r}→{t_dst!r} "
-                            "IMPL) — dropped")
+                            "IMPL|coherence) — dropped")
             continue
         payload_operators.append({
             "src": src, "dst": dst, "op_type": "MITIGATES",
-            "target": {"src": t_src, "dst": t_dst, "op_type": "IMPL"},
+            "target": {"src": t_src, "dst": t_dst,
+                       "op_type": _target_mech},
             "strength": round(strength, 2)})
 
     # ── minted-endpoint prune (#2552 code-review P2) ──────────────────────
