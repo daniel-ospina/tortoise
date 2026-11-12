@@ -5415,6 +5415,73 @@ def test_a_continued_install_line_still_reads_as_the_install(job: dict) -> None:
     test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(continued)
 
 
+def _shell_function_body(code: str, name: str) -> str | None:
+    """`name`'s `() { … }` body, brace-matched with `${…}` expansions skipped.
+
+    A `trap <fn> EXIT` names its cleanup by FUNCTION and the artifacts live in that
+    function's body, so grading the trap LINE alone refused the ordinary
+    `cleanup() { sudo rm -f …; }; trap cleanup EXIT` (MEASURED, review cycle 14: two
+    rows red with "the step registers no EXIT cleanup trap"). That is the same false
+    block this head rejects for `curl -o`/`--output`, `install -D`, `if !`/`|| { …; }`
+    and `source`/`.`.
+
+    The closing brace cannot be matched naively — the cleanup removes
+    `${key_file:-}`, so the FIRST `}` in the body belongs to that expansion — and both
+    the one-line (`fn() { …; }`) and block spellings must resolve, so nested expansions
+    are counted as one unit.
+    """
+    opened = re.search(
+        rf"^\s*(?:function\s+)?{re.escape(name)}\s*\(\)\s*\{{", code, re.MULTILINE
+    )
+    if opened is None:
+        return None
+    depth = 1
+    index = opened.end()
+    while index < len(code):
+        if code.startswith("${", index):
+            inner = 1
+            index += 2
+            while index < len(code) and inner:
+                if code.startswith("${", index):
+                    inner += 1
+                    index += 2
+                    continue
+                if code[index] == "}":
+                    inner -= 1
+                index += 1
+            continue
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[opened.end():index]
+        index += 1
+    return None
+
+
+def _cleanup_trap(code: str) -> str:
+    """The registered `EXIT`/`0` trap, resolved through a named function.
+
+    Returns the trap's own text, with the body of a named cleanup function PREPENDED,
+    so every row below grades the shell that actually runs at exit. Raises the
+    "no trap" assertion the callers would otherwise each re-spell.
+    """
+    trap = [line for line in code.splitlines() if re.search(r"\btrap\b", line)
+            and re.search(r"\b(?:EXIT|0)\b", line)]
+    assert trap, "the step registers no EXIT cleanup trap — a pool box keeps its PGDG config"
+    assert len(trap) == 1, f"expected ONE cleanup trap, found {trap!r}"
+    named = re.search(r"\btrap\s+([A-Za-z_]\w*)\s+(?:EXIT|0)\b", trap[0])
+    if not named:
+        return trap[0]
+    body = _shell_function_body(code, named.group(1))
+    assert body is not None, (
+        f"the EXIT trap runs `{named.group(1)}`, but no such shell function is defined in "
+        "the step's code — the cleanup would be a no-op on the pool box"
+    )
+    return body + "\n" + trap[0]
+
+
 def test_the_cleanup_trap_owns_only_what_this_step_created(job: dict) -> None:
     """⛔ AN UNCONDITIONAL `rm` DELETES STATE THIS JOB NEVER WROTE, ON ANY LATER FAILURE.
 
@@ -5427,9 +5494,7 @@ def test_the_cleanup_trap_owns_only_what_this_step_created(job: dict) -> None:
     """
     _, pin = _pin_step(_steps(job))
     code = _run_code(pin)
-    trap = [line for line in code.splitlines() if line.lstrip().startswith("trap '")]
-    assert trap, "the step registers no EXIT cleanup trap — a pool box keeps its PGDG config"
-    assert len(trap) == 1, f"expected ONE cleanup trap, found {trap!r}"
+    trap = [_cleanup_trap(code)]
     # ⛔ THE FLAG'S VALUE MUST COME FROM THE REAL PATH, AND BE READ BEFORE THE WRITE.
     # Asserting only that the NAME appears leaves both halves of the property unpinned:
     # MEASURED, review cycle 13 — (i) turning each detection into a probe of a path that
@@ -5559,13 +5624,25 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # COUNT ON THE CODE, SUBSTITUTE IN THE PREFIX: the prefix runs verbatim, so it
     # carries comments too — and a comment that merely MENTIONS the source made a raw
     # count see two (MEASURED, review cycle 6 of `5ed3b1950b`).
-    sourced = code_only(prefix).count(". /etc/os-release")
-    assert sourced == 1, (
+    # ⛔ `.` AND `source` ARE ONE REQUEST HERE TOO (review cycle 14): counting only the
+    # dotted verb red a correct `source /etc/os-release` with "Re-derive the
+    # substitution" — the guard telling the maintainer to do work already done. The VERB
+    # is preserved and only the PATH is replaced, so the arm runs what the step spells.
+    source_hits = list(
+        re.finditer(
+            r"(?P<verb>(?:^|[\s;&|])(?:\.|source))\s+/etc/os-release", code_only(prefix)
+        )
+    )
+    assert len(source_hits) == 1, (
         "the prefix's CODE is expected to source `/etc/os-release` exactly once so "
-        f"this test can point it at a fixture; found {sourced}. Re-derive the "
+        f"this test can point it at a fixture; found {len(source_hits)}. Re-derive the "
         "substitution rather than letting the arm fall back to the HOST's file"
     )
-    prefix = prefix.replace(". /etc/os-release", f". {os_release}")
+    prefix = re.sub(
+        r"(?P<verb>(?:^|[\s;&|])(?:\.|source))\s+/etc/os-release",
+        lambda match: f"{match.group('verb')} {os_release}",
+        prefix,
+    )
 
     key_file = tmp_path / "pgdg.asc"
     key_sites = code_only(prefix).count('key_file="$(mktemp)"')
@@ -5723,6 +5800,18 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "the origin check stopped the step but named nothing — a soft index failure "
         f"must read as THIS defect, not as apt's own text: {not_pgdg_combined!r}"
     )
+    # ⛔ ATTRIBUTED. `"::error::" in …` alone is satisfied by ANY of the step's seven
+    # pairs, so this arm's own diagnostic was unpinned: MEASURED (review cycle 14),
+    # gutting it to `echo "::error::x"` left the whole file GREEN — on the one message
+    # the entire ORIGIN guard exists to produce.
+    assert "apt.postgresql.org did not SUPPLY" in not_pgdg_combined, (
+        "the run stopped at the origin check but not on ITS OWN named cause, so the one "
+        f"diagnostic this guard exists for is unpinned: {not_pgdg_combined!r}"
+    )
+    assert "apt-get update FAILED" not in not_pgdg_combined, (
+        "the run stopped at the UPDATE guard instead of the origin check, so the origin "
+        f"guard's own `exit 1` could be gutted with this arm still green: {not_pgdg_combined!r}"
+    )
 
     # ⛔ AND THE HARD FAILURE — `apt-get update` itself (repo, key or egress).
     update_failed = run_with(
@@ -5814,6 +5903,17 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "point of the guard is that it reads as THIS defect rather than as an "
         f"unbound-variable abort: {codename_combined!r}"
     )
+    # ⛔ ATTRIBUTED, and separated from the SOURCE guard that shares the word
+    # "os-release". MEASURED (review cycle 14): gutting this message to
+    # `echo "::error::x"` left the whole file GREEN.
+    assert "carries no VERSION_CODENAME" in codename_combined, (
+        "the run stopped but not on the CODENAME guard's own named cause, so the "
+        f"diagnostic that separates it from an unreadable file is unpinned: {codename_combined!r}"
+    )
+    assert "cannot be READ" not in codename_combined, (
+        "the run stopped at the SOURCE guard instead of the codename guard, so the "
+        f"codename guard's own `exit 1` could be gutted with this arm still green: {codename_combined!r}"
+    )
     # ⛔ THIS LINE IS THE DISCRIMINATOR. Without it the arm cannot tell the guard's own
     # `exit 1` from the `set -u` BACKSTOP one line later: the unguarded
     # `${VERSION_CODENAME}` in the sources line aborts with `unbound variable` and
@@ -5829,12 +5929,19 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
 #: spelling-tolerance `_precondition` uses). A bare `. /etc/os-release` aborts under
 #: `set -e` with bash's own text and no `::error::`, which is the unnamed-abort
 #: class the install-path guards exist to replace.
+#: ⛔ `.` AND `source` ARE THE SAME REQUEST. Pinning the dotted verb alone refused
+#: `if ! source /etc/os-release; then` — a CORRECT, guarded step — and refused it with
+#: `the step sources /etc/os-release UNGUARDED … Wrap the source itself`, a message that
+#: is actively false about what the maintainer wrote (MEASURED, review cycle 14). That is
+#: the spelling pin this file's own rule refuses (`_precondition`: "a guard that reds an
+#: equivalent rewrite is a false block"), and this head has now paid for it four times
+#: (`curl -o`/`--output`, `install -D`, `if !`/`|| { …; }`, and this).
 _IF_SOURCE_RE = re.compile(
-    r"^(\s*)if\s+!\s*\.\s+/etc/os-release[^\n]*;\s*then(?P<body>.*?)^\1fi\s*$",
+    r"^(\s*)if\s+!\s*(?:\.|source)\s+/etc/os-release[^\n]*;\s*then(?P<body>.*?)^\1fi\s*$",
     re.DOTALL | re.MULTILINE,
 )
 _OR_SOURCE_RE = re.compile(
-    r"^(\s*)\.\s+/etc/os-release[^\n]*\|\|\s*[({]?(?P<body>(?:[^\n]*\n){0,4}[^\n]*)",
+    r"^(\s*)(?:\.|source)\s+/etc/os-release[^\n]*\|\|\s*[({]?(?P<body>(?:[^\n]*\n){0,4}[^\n]*)",
     re.MULTILINE,
 )
 
@@ -6023,17 +6130,12 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     # sources file outliving its keyring turns the next job's `apt-get update` into the
     # very SOFT failure the ORIGIN check exists to catch. Pinned because deleting the
     # trap leaves every other row green.
-    traps = [
-        line
-        for line in code.splitlines()
-        if re.search(r"\btrap\b", line) and re.search(r"\b(?:EXIT|0)\b", line)
-    ]
-    assert traps, (
-        "the step never registers an EXIT trap, so it leaves "
-        "`/etc/apt/sources.list.d/pgdg.list` and its keyring on a POOL box — changing "
-        "apt resolution for every later job there, and leaving a source whose key is gone"
-    )
-    cleanup = traps[0]
+    # ⛔ THE SAME READ AS `test_the_cleanup_trap_owns_only_what_this_step_created`
+    # (`_cleanup_trap`, which also resolves a `trap <fn> EXIT`). Two rows grade the same
+    # trap, so they must grade the SAME text — a spelling accepted by one and refused by
+    # the other is the "two reads of one step disagree" defect this file has already
+    # paid for once (#12069's continued-install P1).
+    cleanup = _cleanup_trap(code)
     for artifact, why in (
         ("/etc/apt/sources.list.d/pgdg.list", "the PGDG source it added"),
         ("apt.postgresql.org.asc", "the keyring it installed"),
