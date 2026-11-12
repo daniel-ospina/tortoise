@@ -532,9 +532,9 @@ boost = similarity * ENTITY_BOOST_WEIGHT * memory_count_weight
 ```
 
 with `ENTITY_BOOST_WEIGHT = 0.5` (`mem0/utils/scoring.py:57`) and the fusion **additive and normalised**,
-not RRF: `combined = min((semantic + bm25 + entity_boost) / max_possible, 1.0)` (formula in
-`score_and_rank`'s docstring at `mem0/utils/scoring.py:72`; the **executable** line is `:118-119`; `:94-101` is the
-`max_possible` accumulation). The
+not RRF: `combined = min(raw_combined / max_possible, 1.0)` — the docstring at `mem0/utils/scoring.py:72`
+states the form **without** the clamp, the **executable** `:118-119` applies it; `:94-101` is the
+`max_possible` accumulation. The
 entity extractor is **deterministic spaCy-NER + heuristics**, not an LLM call
 (`mem0/utils/entity_extraction.py`: `_add_ner_candidates`, `_add_proper_name_candidates`,
 `_add_quoted_candidates`, `_add_topic_phrase_candidates`, `_resolve_candidates`).
