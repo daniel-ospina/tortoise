@@ -943,13 +943,23 @@ def test_a_remediation_message_is_not_read_as_a_gh_call_site():
     ⛔ CONVERGENCE WITH #12102, which repairs the same #12133 red: that PR carries its OWN
     copy of this test, and ITS PREDICATE IS **NOT** THE SAME — it has three conditions,
     this one has four (`_SUBSTITUTION`, added here because a printed substitution
-    EXECUTES; see the loop below). So keep **this** predicate and **this** test copy:
-    relative to #12102's, this one pins ten additional shapes (both in-repo substitutions,
-    leading space, mid-span, quoted argv, the three message-FIRST operator forms, the
-    backtick and `printf` forms), while #12102's additionally pins a `then`-prefixed
-    compound and the returned strings' positions. The second lander drops the other copy.
-    A duplicate same-named `def` is NOT a git conflict and pytest does not complain, but
-    `ruff check .` (a merge gate, pinned 0.16.4) reds it with F811 — never keep both.
+    EXECUTES; see the loop below). So keep **this** predicate and **this** test copy.
+
+    The two copies overlap but neither contains the other, so the list is WHICH SHAPES,
+    not a count (a count "ten additional" double-counted the one mergify substitution
+    both files pin): this copy additionally pins the `e2e-live-reconcile` substitution,
+    both process substitutions (`<(…)`/`>(…)`), the two `echo`-printed substitutions,
+    the leading-space and mid-span variants, the quoted argv word, the three
+    message-FIRST operator forms, and the backtick and `printf` forms. #12102's copy
+    additionally pins an `if`-prefixed compound whose `then` clause holds the
+    invocation, and the returned strings' positions (`hazards[2].startswith("if")`,
+    `len(hazards) == 4`).
+
+    The second lander drops the other copy. A duplicate same-named `def` is NOT a git
+    conflict and pytest does not complain (it binds the later definition), but
+    `uv run ruff check .` reds it with F811 under the pinned ruff 0.16.4 — and that is
+    run by the `lint` job and by `main-lint`, not listed in `REQUIRED_SET`, so it reds
+    the tree rather than gating the merge. Either way: never keep both.
     """
     scripts = _gh_executing_scripts()
 
