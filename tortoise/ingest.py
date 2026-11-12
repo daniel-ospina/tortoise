@@ -1053,13 +1053,20 @@ def _s7_document_entities(text, source_id, api, args, extractor=None):
     # holds are unobservable cannot produce the number that decision needs.
     # Mirrors the `failed_sections` warning above: a count, the rule breakdown
     # that says WHY each surface was held, and where the full record lives.
+    # ⚠️ "Where it lives" is THIS STAGE'S RETURN, not a durable surface: this
+    # function returns only `subject_names`, so an armed CLI run prints the
+    # count and the rule breakdown and then discards the per-surface records
+    # (#12102 review P3). Said plainly in the message rather than leaving an
+    # operator to hunt for a `held_subjects` that was never persisted.
     held = ent_stats.get("subjects_held") or 0
     if held:
         by_rule = ent_stats.get("subjects_held_by_rule") or {}
         print(f"warning: S7 held {held} subject surface(s) as non-referents "
               f"({', '.join(f'{rule} ×{n}' for rule, n in by_rule.items())}) "
               f"— not minted, and not wired to this document; their rule, "
-              f"section and span are on `held_subjects` in the census")
+              f"section and span are on `held_subjects` in this stage's "
+              f"return value (NOT persisted by this CLI — read the census "
+              f"directly if you need the per-surface records)")
     return ent_stats["subject_names"]
 
 
