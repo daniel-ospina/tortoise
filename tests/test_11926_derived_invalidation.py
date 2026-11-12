@@ -552,6 +552,59 @@ def test_a_dwell_window_cannot_span_the_definition_boundary(sdk):
     )
 
 
+def test_a_dwell_window_STRADDLING_the_boundary_retires_the_claim(sdk):
+    """⛔ REVIEW cycle 5, P2, reproduced. A `dwell=2` flip rests on BOTH readings it
+    inspected, but the claim carried only the NEWEST one's instant — so a boundary
+    landing INSIDE the window was invisible to the sweep: the derivation half then
+    refused to satisfy dwell post-boundary while the goal kept a `met` whose
+    justification was agreement drawn across two definitions. That is
+    design-of-record §3 row 9 — *"two readings under different definitions look like
+    a trend"* — surviving the very module that exists to detect it.
+
+    The claim now carries the OLDEST consumed instant (`readingWindowFrom`), and
+    this is the retirement-side pin the derivation-side dwell test never had."""
+    i, t, g = _world(sdk, tag="dwell-boundary", dwell=2)
+    _reading(sdk, i, 9.0, at="2026-11-11T10:00:00Z")   # OLD definition
+    _reading(sdk, i, 9.1, at="2026-11-11T11:00:00Z")   # NEW definition
+    # NOT `_judge` here: that helper mints its own reading, which would put a
+    # second instant at the head of the window and hide the one this test is about.
+    made = judge_and_record(sdk, goal_id=g["id"], indicator_id=i["id"],
+                            target=Target.from_node(t))
+    claim = sdk.get_entity(made["point_id"])
+    assert claim["dwell"] == 2
+    assert claim["readingAsOf"] == "2026-11-11T11:00:00Z"
+    assert claim["readingWindowFrom"] == "2026-11-11T10:00:00Z", (
+        "the claim does not say how far back its dwell window reached, so a "
+        "boundary inside the window cannot be seen")
+    mark_definition_change(sdk, i["id"], at="2026-11-11T10:30:00+00:00")
+    # the derivation half agrees the window no longer holds
+    assert judge(sdk, indicator_id=i["id"], target=Target.from_node(t),
+                 goal_id=g["id"]).dwell_satisfied is False
+    v = _only(verdicts(sdk, goal_id=g["id"]))
+    assert v.invalidation.reason == "definition-changed"
+    assert v.invalidation.effective_at == "2026-11-11T10:30:00+00:00"
+    report = invalidate_stale(sdk, goal_id=g["id"])
+    assert report["counts"]["retired"] == 1
+    assert sdk.get_entity(g["id"]).get("goalState") is None
+
+
+def test_a_dwell_window_ENTIRELY_after_the_boundary_stands(sdk):
+    """The negative control for the row above: every reading the window consumed
+    was taken under the current definition, so the claim must survive — otherwise
+    the fix would retire any dwell claim that outlives a definition change."""
+    i, t, g = _world(sdk, tag="dwell-after", dwell=2)
+    mark_definition_change(sdk, i["id"], at="2026-11-11T09:00:00+00:00")
+    _reading(sdk, i, 9.0, at="2026-11-11T10:00:00Z")
+    _reading(sdk, i, 9.1, at="2026-11-11T11:00:00Z")
+    made = judge_and_record(sdk, goal_id=g["id"], indicator_id=i["id"],
+                            target=Target.from_node(t))
+    assert made["written"] is True
+    assert sdk.get_entity(made["point_id"])["readingWindowFrom"] == "2026-11-11T10:00:00Z"
+    v = _only(verdicts(sdk, goal_id=g["id"]))
+    assert v.invalidation is None, v.invalidation
+    assert invalidate_stale(sdk, goal_id=g["id"])["counts"]["retired"] == 0
+
+
 def test_a_reading_that_names_no_instant_cannot_prove_it_is_comparable(sdk):
     """Fail-closed on the reading side: an undated reading cannot be shown to be
     after the boundary, so it is dropped rather than trended."""
@@ -737,7 +790,8 @@ def test_the_retirement_leaves_the_DURABILITY_gate_clean(tmp_path):
 
 
 def test_the_reading_as_of_prop_is_DECLARED_for_replay():
-    """``readingAsOf`` rides the `PointAdded` snapshot, so it must be declared on
+    """``readingAsOf``/``readingWindowFrom`` ride the `PointAdded` snapshot, so they
+    must be declared on
     the Point prop contract — undeclared, every rebuild of every judged point logs
     a FALSE ``"Point prop %r is not declared"`` drift warning, and that noise is
     what hides a genuine one. The same pin the #6110 (`key`) and docs-miner
@@ -749,7 +803,8 @@ def test_the_reading_as_of_prop_is_DECLARED_for_replay():
     warning while leaving a real live/replay divergence behind.
     """
     from tortoise.projection.entities import _EntityHandlers
-    assert "readingAsOf" in _EntityHandlers._POINT_DECLARED_PROPS
+    for prop in ("readingAsOf", "readingWindowFrom"):
+        assert prop in _EntityHandlers._POINT_DECLARED_PROPS
 
 
 def test_the_retirement_is_journalled_so_a_rebuild_cannot_resurrect_it(sdk):

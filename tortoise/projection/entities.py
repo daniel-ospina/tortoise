@@ -2593,6 +2593,11 @@ class _EntityHandlers:
         # faithful graph — `derived_invalidation` records that measurement and
         # returns the reason to its caller instead.
         "readingAsOf",
+        # #11926: the OLDEST reading instant a `dwell` window consumed, written only
+        # when the window decided the flip. Same declared-for-replay reason as the
+        # row above: undeclared, every rebuild of a dwell-flipped judgement logs a
+        # FALSE "Point prop %r is not declared" drift warning.
+        "readingWindowFrom",
         # #11827: `asOf` is RETIRED — a value carries no temporal slot of its
         # own, its instant is the carrier's `validFrom` — but it is still
         # DECLARED here, deliberately, for one reason: legacy nodes hold the

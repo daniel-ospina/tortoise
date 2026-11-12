@@ -600,6 +600,21 @@ class Judgement:
     dwell_satisfied: bool = False
     flipped: bool = False
     previous_state: str = "unknown"
+    #: The OLDEST reading instant the decision CONSUMED — set only when the
+    #: ``dwell`` window decided it (the flip row), because that is the only row
+    #: whose decision rests on more than the newest reading. ``None`` means "the
+    #: newest reading is the whole decision", which is every other row.
+    #:
+    #: ⛔ IT EXISTS SO A DEFINITION BOUNDARY INSIDE THE WINDOW IS VISIBLE (#11926
+    #: review cycle 5, MEASURED). A ``dwell=2`` judgement can flip on a window that
+    #: STRADDLES the boundary — r1 under the old definition, r2 under the new — and
+    #: the claim used to carry only the newest reading's instant, so the boundary
+    #: was invisible to the invalidation and the goal kept a state whose
+    #: justification was a trend drawn across two definitions (design of record §3
+    #: row 9, surviving the module whose job is to detect it). The retirement half
+    #: compares THIS instant with the boundary, so any consumed reading that
+    #: predates it retires the claim.
+    window_from: str | None = None
 
     def __post_init__(self) -> None:
         if self.state not in JUDGEMENT_STATES:  # pragma: no cover - closed set
@@ -736,6 +751,19 @@ def compare(
         )
     row = matches[0]
     state, flipped = row.outcome(inputs)
+    # ⛔ THE WINDOW IS CONSUMED ONLY BY THE FLIP ROW. `state-unchanged` decides on
+    # the newest reading alone (dwell gates a FLIP, nothing else — see the table),
+    # and `dwell-holding` explicitly declines to flip. Reporting a window for those
+    # rows would make the invalidation retire claims a single reading justified.
+    window_from: str | None = None
+    if flipped and target.dwell > 1:
+        # `readings` is newest-first, so the OLDEST consumed reading closes the
+        # slice. An undated one cannot widen the window backwards (there is no
+        # instant to compare), so it is skipped rather than treated as instant
+        # zero.
+        for r in readings[: target.dwell]:
+            if r.started_at:
+                window_from = str(r.started_at)
     return Judgement(
         state=state,
         reason=row.reason,
@@ -745,6 +773,7 @@ def compare(
         dwell_satisfied=dwell_ok,
         flipped=flipped,
         previous_state=previous_state,
+        window_from=window_from,
     )
 
 
@@ -1479,6 +1508,13 @@ def record_judgement(
         # fabricated instant is then what the derivation gets judged against.
         if judgement.reading.started_at:
             props["readingAsOf"] = judgement.reading.started_at
+    # ⛔ THE OLDEST INSTANT THE DECISION CONSUMED, when the dwell window decided it
+    # (see `Judgement.window_from`). Written beside `readingAsOf` so the claim
+    # stays self-describing about *what justified it*, not only about which reading
+    # happened to be newest — the difference that made a boundary inside a dwell
+    # window invisible to the invalidation (#11926 review cycle 5).
+    if judgement.window_from:
+        props["readingWindowFrom"] = judgement.window_from
 
     point = sdk.create_point(
         "statement", text, claim_class="derived", status="live", **props
