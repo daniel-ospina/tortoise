@@ -516,7 +516,7 @@ name, escalate straight to the LLM and never run fuzzy** (`:345-350`) → entrop
 fuzzy (`:356-380`, candidate universe from the LSH buckets at `:359-361`). So an **ambiguous** exact name is a *deliberate* LLM case; the fuzzy arm only ever sees
 the residual.
 
-### The highest-precision non-name signal in systems that have a graph is **candidate generation**, not overlap
+### The highest-precision non-name signal in systems that do **entity linking** (with or without a traversable graph) is **candidate generation**, not overlap
 
 Two mechanisms, both read from source or the paper, and neither is a pairwise neighbour-overlap feature:
 
@@ -665,7 +665,12 @@ Agent-generated facts are first-class. Entity linking into `{collection}_entitie
 pool**. ⭐ **And it deleted its graph**: *"we replaced external graph store support with built-in entity
 linking … The `relations` field from prior versions is gone. Entity relationships now influence retrieval
 ranking but **cannot be traversed directly**"* — a stated regression for graph-interface users, traded for
-deployment simplicity. Reported: LoCoMo 71.4 → **92.5**, LongMemEval 67.8 → **94.4**, ~6.8–7.0 K tokens/query
+deployment simplicity. Reported (⚠️ **vendor self-report**; the managed platform *"includes proprietary
+optimizations not available in the open-source SDK"*): **LoCoMo 71.4 → 92.5**, **LongMemEval 67.8 → 94.4**,
+**~6.8–7.0 K tokens per retrieval call** — where `71.4`/`67.8` are **Mem0's own previous algorithm**, the
+baseline column of the *same* table (not OpenAI and not full-context; the 2025 paper's OpenAI comparison is
+a different measurement). ⚠️ **The two citations stay split, per §7.5 #7:** the *2026* report carries these
+deltas; `arXiv:2504.19413` (2025) **does not** — Mem0 states the algorithm post-dates it.
 (⚠️ **vendor self-report; the managed platform "includes proprietary optimizations not available in the
 open-source SDK"**).
 → **Lesson for us:** the strongest evidence in the field that **entity-keyed boosting without traversable
@@ -733,7 +738,9 @@ retrieval graph at all**. Entity resolution is not a prerequisite for a top scor
 [letta.com/blog/sleep-time-compute](https://letta.com/blog/sleep-time-compute) — are **inherited, not
 re-verified this lane** — declared
 in §7.9. Mastra's observability route remains the counter-case for the whole retrieval-centric inventory;
-Hindsight (§7.2b, 91.4 % LongMemEval with Gemini-3 Pro per its ACL demo paper) is the counter-case to
+Hindsight (§7.2, item (b); 91.4 % LongMemEval with Gemini-3 Pro per its ACL demo paper —
+[aclanthology.org/2026.acl-demo.27](https://aclanthology.org/2026.acl-demo.27/), which also carries the
+83.6 % figure for its own open-source 20B model) is the counter-case to
 *"Mem0 deleted its graph because graphs don't help"*.
 
 ### The cross-cutting finding, which no single row shows
@@ -802,7 +809,7 @@ persists a merge.
 
 ### What we do NOT have, and it is cheap
 
-1. **No evidence on the link.** `apply_entity_merge` **returns** `method` and `similarity` (`:809-812`) but
+1. **No evidence on the link.** `apply_entity_merge` **returns** `method` and `similarity` (`:808-810`) but
    **writes neither** — the persisted properties are `resolved_from`, `dedup_reviewed`, `reviewed`, and
    `canonical_name` when it was empty. So *"why are these one entity"* is **not answerable after the fact**,
    and the caller's `method`/`similarity` live only in whatever the caller logged. → **M-9**.
@@ -934,7 +941,7 @@ still surface. ⚠️ **Deliberately NOT Mem0's construction:** copying the pool
 | Supermemory/Honcho/Mastra "no entity graph" | ⛔ would reverse §12.2c's entity-vector work and the KEEP ruling | ⛔ **not a candidate** — and note two of the three are *repository*-shaped systems, not identity-bearing ones |
 | "Widen the window" | `#11901`'s record says *not decided*; a wider window without a verdict is X7's known regression | ⛔ **not a candidate** until the paired decision is taken |
 | Any use of `read_ledger` as an admission-control signal | ⛔ §7 + §17.4.6 | ⛔ **not a candidate** — nothing here proposes it |
-| Row eviction / hot-cold row tiering | ⛔ hosted FalkorDB has no eviction; the unit is a projection-time window | ⛔ **not a candidate** |
+| Row eviction / hot-cold row tiering | ⛔ hosted FalkorDB shows no eviction **as far as this repo can establish**; the unit is a projection-time window (`STORAGE-ARCHITECTURE.md:188` — per-graph LRU offload is documented for **Enterprise self-managed** and *"not exposed on Cloud as far as we can establish"*) | ⛔ **not a candidate** |
 
 ---
 
