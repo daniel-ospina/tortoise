@@ -917,7 +917,9 @@ def test_point_when_is_the_one_date_contract_now(value):
     contract accepts (a bare ``YYYY-MM-DD``, which every row here that
     ``Point.when`` accepts also accepts)."""
     try:
-        _point(when=value).when
+        # Attribute access is part of what is being pinned (``Point.when`` must
+        # be readable), so it is bound rather than left as a bare statement.
+        _ = _point(when=value).when
         point_accepts = True
     except Exception:
         point_accepts = False
