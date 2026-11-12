@@ -1567,7 +1567,15 @@ def _unasserted_client_checks(code: str) -> list[int]:
     check_lines: list[int] = []
     for match in re.finditer(r"(--version|-V)\b", code):
         line_start = code.rfind("\n", 0, match.start()) + 1
-        word = _command_word(code[line_start : match.start()])
+        # ⛔ THE WORD IS NORMALISED EXACTLY AS `_version_checked_tools` DOES (#12069
+        # review, measured at 96363a09). Without the brace normalisation `"${tool}"
+        # reads as the empty command word, so the short-form filter SKIPPED it
+        # while the coverage rule CREDITED it — two single-tool loops spelling
+        # `"${tool}" -V` with one dedented branch asserted only the last tool and
+        # stayed GREEN (the fail-open this row exists to catch).
+        word = _command_word(
+            BRACED_VAR_RE.sub(r"$\1", code[line_start : match.start()])
+        )
         if word in PRINTING_COMMANDS:
             continue
         # ⛔ THE SHORT FORM NEEDS ITS OWN TOOL FILTER HERE (#12069 review, measured
@@ -1578,6 +1586,9 @@ def _unasserted_client_checks(code: str) -> list[int]:
         # version check that never asserts its major" — a false RED on a correct
         # step. The LONG form keeps its historical breadth: a check spelled with a
         # path (`/usr/lib/postgresql/16/bin/pg_dump --version`) must still count.
+        # The SHORT form accepts a `TOOLS` name, a variable that may name one, or
+        # nothing else — a path-spelled `-V` is refused outright (the long form's
+        # breadth is deliberately NOT extended to it).
         if match.group(1) == "-V" and word not in TOOLS and not word.startswith("$"):
             continue
         check_lines.append(code.count("\n", 0, match.start()))
@@ -4105,6 +4116,13 @@ PER_TOOL_ASSERTION_POLARITY = [
         'version="$(pg_restore -V)"\nif [ "$major" != "16" ]; then\n  exit 1\nfi',
         True,
         "the SHORT form `-V` is the same check, one armed branch per tool",
+    ),
+    (
+        'version="$(pg_dump -V)"\nversion="$(pg_restore -V)"\n'
+        'if [ "$major" != "16" ]; then\n  exit 1\nfi',
+        False,
+        "two SHORT-form checks, ONE branch: `-V` is a check like any other, so "
+        "the negative twin of the row above must still refuse it",
     ),
     (
         'version="$(pg_dump --version)"\nif [ "$major" != "16" ]; then\n  exit 1\nfi\n'
