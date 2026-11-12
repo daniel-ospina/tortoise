@@ -13,7 +13,7 @@ the retired value, and **TWO** tests pinned the default
 (`test_email_integration_resend.py::test_invite_link_contract_is_hermetic` via the
 cassette, and `test_welcome_url_consolidation.py::test_welcome_redirect_default_host`).
 An earlier revision of this paragraph said "exactly ONE", which was a miscount and
-omitted the second — and that second one is one of the two this PR had to change,
+omitted the second — and that second one is one of the two #11977 had to change,
 so the paragraph was understating its own surface.
 
 So the assertions here are on the ARTIFACT (the invite email's own body, the
@@ -43,16 +43,17 @@ sweep must re-aim too (`tests/test_website_docs_consistency.py`'s `SITE_HOSTS` l
 retired host as LEGITIMATE, so a retired-host `<loc>` passes there) — because this guard
 counts what the RUNTIME emits in its own surface, not every occurrence in the tree. Every file that reads 0 has
 NO row and stays in `RUNTIME_FILES` — the three that lost a row (all to main's
-#12058 while this PR was open) and the six that never carried one, `website/functions/blog/_lib.ts` among
+#12058, which landed before this branch's base) and the six that never carried one, `website/functions/blog/_lib.ts` among
 them: #11977 repointed its three `navHtml` hrefs in the same commit that introduced this list, so the count
 reached 0 before a row could describe it — so a literal coming back REDS the guard instead
 of leaving the surface, and neither group is a leftover — which is why this guard
 cannot report GREEN over a file it never opened, and why a sweep that removes one of
 those literals must remove its recorded reason too.
 
-⛔ THE COUNTS MOVED UNDER THIS PR, AND THAT IS THE POINT OF AN EXACT COUNT. main's
-#12058 ("serve the product at premiselabs.co/tortoise", which is what CLOSED
-#11764) re-aimed most of the dashboard set while this PR was open, so THREE rows
+⛔ THE COUNTS MOVED BEFORE THIS BRANCH'S BASE, AND THAT IS THE POINT OF AN EXACT
+COUNT. main's #12058 ("serve the product at premiselabs.co/tortoise", which is what
+CLOSED #11764) re-aimed most of the dashboard set before this branch was cut, so
+THREE rows
 went to ZERO and were removed (`invite-accept.html` 3 -> 0, `welcome.html` 1 -> 0,
 `wizardPrompts.js` 3 -> 0) and two SHRANK (`signup.html` 2 -> 1,
 `overviewEmptyAction.js` 2 -> 1). Their files STAY in `RUNTIME_FILES`, so a literal
@@ -67,20 +68,20 @@ non-deferral KEEP rows — `hosted_api.py`, the two Supabase edge functions and
 `supabase/config.toml` — name no follow-up issue on purpose: nothing is deferred
 there, so naming one would invent work that does not exist.)
 
-⛔ `_lib.ts` READ 4 WHEN THIS FILE WAS FIRST DRAFTED, AND "NO ROW" IS THE CORRECT
-LANDED RESULT. main's #11765 (PR #11976, landed 2026-11-12 while this PR was open)
-flipped that file's `SITE_URL` to `premiselabs.co`, leaving 3 — the three `navHtml`
-product hrefs, which #11976's own `tests/test_blog_seo_meta.mjs` kept on the
-retired host ON PURPOSE and assigned to #11764. #11764 then closed WITHOUT
-repointing them, and #11977 did the repoint: its commit `7e6baffc5d` moved those
-three hrefs to the terminal forms AND introduced this allowlist, so the count was
-already 0 when the list first existed and no revision of it carried a `_lib.ts`
-row. ⛔ Measured, not inferred: the key set is the same 14 keys at `7e6baffc5d`
-and at this head, and `_lib.ts` is a key in neither. This PR changes no line of
-`_lib.ts` and no line of the blog guard — `git log 81269704..HEAD` over both files
-is empty. The file stays in `RUNTIME_FILES`, so a literal coming back REDS the
-guard. A count kept at 4 would have gone RED on a file nobody broke; a row added
-at 0 would have been a pin with nothing to pin.
+⛔ `_lib.ts` HAS NO ROW, AND THE LANDED HISTORY IS WHY. #11764's deferral was the
+three `navHtml` product hrefs, and it closed WITHOUT repointing them (2026-11-12,
+by PR #12058 — which did not touch this file). The repoint is #11977's: its commit
+`7e6baffc5d` moved those three hrefs to the terminal forms AND introduced this
+allowlist, so the count was ALREADY 0 when the list first existed and no revision
+of it ever carried a `_lib.ts` row. ⛔ Measured, not inferred: 14 keys at
+`7e6baffc5d`, 14 at this head, the same set, and `_lib.ts` is a key in neither.
+This branch changes no line of `_lib.ts` and no line of the blog guard —
+`git log 81269704..HEAD` over both files is empty. #11976's own guard follows: on
+this head's base `tests/test_blog_seo_meta.mjs:2286` already pins
+`navRetired.length === 0`, so nothing here "flips" it. The file stays in
+`RUNTIME_FILES`, so a literal coming back REDS the guard. A count kept at 4 would
+have gone RED on a file nobody broke; a row added at 0 would have been a pin with
+nothing to pin.
 """
 from __future__ import annotations
 
@@ -259,7 +260,7 @@ RETIRED_HOST_ALLOWLIST = {
     # these must delete its reason too, and
     # the deferred re-aim is tracked on #12057 rather than lost behind a green run.
     # ⛔ `invite-accept.html`, `welcome.html` and `wizardPrompts.js` had rows here and
-    # no longer do: main's #12058 re-aimed all three to 0 while this PR was open
+    # no longer do: main's #12058 re-aimed all three to 0 before this branch's base
     # (measured on this tree). Their files stay in `RUNTIME_FILES`, so a literal
     # coming back REDS the guard instead of leaving the surface — which is the
     # difference between deleting a ROW and deleting a FILE.
@@ -347,7 +348,7 @@ RETIRED_HOST_ALLOWLIST = {
         "origin (`RETIRED_ORIGIN` carries the scheme), so it sees only this "
         "constant. The markdown-ish `:277` step used to carry a bare-host copy of "
         "the same docs URL and DOES NOT ANY MORE: main's #12058 re-aimed it to "
-        "`premiselabs.co/tortoise/docs#chatgpt` while this PR was open (verified: "
+        "`premiselabs.co/tortoise/docs#chatgpt` before this branch's base (verified: "
         "`git log -S'premiselabs.co/tortoise/docs#chatgpt' -- ` that file returns "
         "only `1cd4ac816826`). ⛔ An earlier revision of this row described `:277` "
         "as a deferred retired-host mention and argued a partial move would be "
@@ -583,9 +584,9 @@ def test_canonical_origin_set_is_what_the_runtime_may_emit():
     decided set (`CANONICAL_ORIGINS`) — never a second literal copy of that set.
     An earlier form asserted `{…the same five literals…} == CANONICAL_ORIGINS`, which
     is this file compared with itself: mutation-measured, it stayed GREEN under every
-    product revert its siblings caught (including the PR's own headline default-origin
+    product revert its siblings caught (including #11977's own headline default-origin
     revert) and could only fail by desyncing its own duplicate literal. A pin that
-    cannot fail on its regression is not a pin — the same defect class this PR fixes
+    cannot fail on its regression is not a pin — the same defect class #11977 fixed
     in `tests/test_onboarding_variants.py`.
     """
     from tortoise.hosted_api import _ALLOWED_ORIGINS
