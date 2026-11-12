@@ -1251,7 +1251,6 @@ def test_signup_acceptance_dom_structure(page: Page) -> None:
     assert struct["notInForm"], ".legal-accept must not be a descendant of the form"
 
     # ⛔ THE DESTINATION IS PINNED, NOT THE SPELLING (#12058). This page belongs
-    # ⛔ THE DESTINATION IS PINNED, NOT THE SPELLING (#12058). This page belongs
     # to the APP origin (`_app_url`), which is its own Pages project and hosts no
     # legal page of its own, so a root-relative `/tos` here answers 404 (measured)
     # — the reason the markup carries the company host ABSOLUTELY. Reading
@@ -1268,7 +1267,10 @@ def test_signup_acceptance_dom_structure(page: Page) -> None:
     # must NOT appear is a link OFF the company origin: the app origin (a
     # root-relative path there 404s) or the retired host (301-only, the property
     # #11762's move exists for). The PATH of an extra link is deliberately not
-    # pinned: the suite's own link crawl resolves them.
+    # pinned — and ⛔ NOT because something else checks it: the enumerated crawl
+    # (`CRAWL_PAGES`) is marketing-origin paths only, and the external crawl
+    # SKIPS `_PROJECT_OWNED_HOSTS`, so a company-host link to a path outside that
+    # list is not resolved by this suite either.
     links = page.evaluate(
         """() => [...document.querySelectorAll('.legal-accept a')].map(a => a.href)"""
     )

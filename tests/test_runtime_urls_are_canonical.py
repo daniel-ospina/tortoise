@@ -28,8 +28,9 @@ whose host moved while its dead `#appeal` fragment did not (#11939).
 ⛔ #11767's items 4 and 5 are IN THIS FILE'S SURFACE: the dashboard landing
 pages, the blog origin, and the dashboard's docs links used to spell the retired
 origin. Each is in `RETIRED_HOST_ALLOWLIST` with an EXACT occurrence count, the
-measured 301 that makes it a hop rather than a break, and the issue that owns the
-re-aim — so this guard cannot report GREEN over a file it never opened, and a
+TERMINATOR its own row records — a 301 hop, or a 200 where the retired host
+serves the bytes IN PLACE and there is no hop to save — and the issue that owns
+the re-aim, so this guard cannot report GREEN over a file it never opened, and a
 sweep that removes one of those literals must remove its recorded reason too.
 
 ⛔ THE COUNTS MOVED UNDER THIS PR, AND THAT IS THE POINT OF AN EXACT COUNT. main's
@@ -227,9 +228,12 @@ RETIRED_HOST_ALLOWLIST = {
     # ⛔ #11767 items 4 AND 5 — NOT re-aimed by this PR, and recorded here so the
     # guard COVERS these files instead of silently skipping them (fresh-context
     # review, P1: with a hand-list, the sweep could not fail for the ONE page the
-    # emailed invite token lands on). Every URL built from these answers a
-    # PERMANENT 301 on the retired host (each measured 2026-11-12 below), so each
-    # is a hop, not a break — which is why deferring is safe and why it must stay
+    # emailed invite token lands on). The retired host handles every URL built
+    # from these without a break, by one of TWO terminators (each measured
+    # 2026-11-12 below, and each row says which): a 301 onto a canonical origin,
+    # or SERVED IN PLACE with no redirect at all. ⛔ Not "every one 301s" — a
+    # literal whose row records 200 is a different sweep with a different risk
+    # (see (a)/(b) below). That is why deferring is safe and why it must stay
     # VISIBLE: a sweep that deletes one of these must delete its reason too, and
     # the deferred re-aim is tracked on #12057 rather than lost behind a green run.
     # ⛔ `invite-accept.html`, `welcome.html` and `wizardPrompts.js` had rows here and
@@ -362,7 +366,9 @@ RETIRED_HOST_ALLOWLIST = {
 #:   website/apps/dashboard/src/overviewEmptyAction.js       1  ONBOARDING_FUNNEL_HREF (app origin)
 #:   website/apps/dashboard/src/billingCta.js                1  COMPARE_PLANS_URL
 #: None of the TEN deferrals is a broken link, and no row is a silent leftover —
-#: every literal is one of two things, and its reason says which:
+#: every literal is one of two things, and its reason says which WHEREVER the
+#: terminator is anything but the default 301 onto `premiselabs.co` (see the
+#: `RUNTIME_FILES` note below):
 #:   (a) a 301 off the retired host onto a canonical origin — `premiselabs.co`, or
 #:       `app.premiselabs.co` for the one `/auth` literal (`_middleware.ts`
 #:       :403-406, which pins `/auth` BEFORE the product-host block) and
