@@ -75,10 +75,21 @@ IMAGE_RE = re.compile(r":(?:pg)?(\d+)(?:@sha256:[0-9a-fA-F]{64})?$")
 #: the re-spelled single install, six green on an appended `-y install … -18`).
 _APT_INSTALL = (
     r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*[ \t]+)*(?:sudo[ \t]+(?:-[A-Za-z]+[ \t]+)*)?"
-    r"apt(?:-get)?[ \t]+(?:\S+[ \t]+)*?install\b"
+    r"apt(?:-get)?[ \t]+"
+    # Option tokens may sit before the verb (`-y`, `-o Dpkg::Use-Pty=0`), but a
+    # SHELL OPERATOR may not: without the lookahead, `apt-get install … jq && echo
+    # postgresql-client-16` and `apt-get update && echo install
+    # postgresql-client-16` both answered as "the install" (MEASURED, review of
+    # `48370b8261` — the first would have hidden a real second install's major).
+    r"(?:(?!&&|[;|&])[^\s]+[ \t]+)*?install\b"
 )
 CLIENT_INSTALL_RE = re.compile(
-    r"^[ \t]*" + _APT_INSTALL + r"[^\n]*?\bpostgresql-client-(?P<major>\d+)\b",
+    # The package must be an ARGUMENT of this command, so no shell operator may
+    # appear between the verb and the package: `apt-get install -y jq && echo
+    # postgresql-client-16` installs `jq` and merely PRINTS the package name, yet
+    # it answered as an install of 16 (MEASURED, review of `48370b8261`).
+    r"^[ \t]*" + _APT_INSTALL
+    + r"(?:(?!&&|[;|&])[^\n])*?\bpostgresql-client-(?P<major>\d+)\b",
     re.MULTILINE,
 )
 
@@ -119,14 +130,18 @@ def _statements(line: str) -> str:
     return _SQUOTED_RE.sub("''", _DQUOTED_RE.sub('""', line))
 
 
-def _heredoc_tag(line: str) -> str | None:
-    """The tag of the first UNQUOTED `<<` heredoc opener on this line, if any.
+def _heredoc_tags(line: str) -> list[str]:
+    """Every UNQUOTED `<<` heredoc tag opened on this line, in order.
 
     A `<<` inside a quoted string is message text, not an opener: `search`ing the
     raw line made `echo "see <<EOF in the docs"` swallow the rest of the step, and
     the `exit 1` after it was reported missing (MEASURED, review of
-    `2547274eaa`).
+    `2547274eaa`). ALL openers are returned because bash reads one body per
+    opener in order — tracking only the first made a `cat <<A <<B` line leave the
+    SECOND body live, so an `exit 1` inside it counted as a fail action
+    (MEASURED, review of `48370b8261`).
     """
+    tags: list[str] = []
     quote: str | None = None
     index = 0
     while index < len(line):
@@ -142,9 +157,11 @@ def _heredoc_tag(line: str) -> str | None:
         elif line.startswith("<<", index):
             opener = _HEREDOC_RE.match(line, index)
             if opener:
-                return opener.group("tag")
+                tags.append(opener.group("tag"))
+                index = opener.end()
+                continue
         index += 1
-    return None
+    return tags
 
 
 def _strip_comments(text: str) -> str:
@@ -182,21 +199,20 @@ def _strip_comments(text: str) -> str:
 def _without_heredocs(text: str) -> str:
     """Drop heredoc bodies and their terminator lines: they are DATA, not shell.
 
-    STATED LIMIT: the LAST heredoc opened on a line is the one tracked — one
-    heredoc per line is what this workflow uses, and tracking several needs a real
-    shell tokenizer.
+    Every opener on a line is tracked, in order, because bash reads one body per
+    opener. STATED LIMIT: a terminator that is not the next line's whole content
+    (bash allows trailing tabs after it) is not recognised — this workflow uses
+    none.
     """
     kept: list[str] = []
-    terminator: str | None = None
+    pending: list[str] = []
     for line in text.splitlines():
-        if terminator is not None:
-            if line.strip() == terminator:
-                terminator = None
+        if pending:
+            if line.strip() == pending[0]:
+                pending.pop(0)
             continue
         kept.append(line)
-        tag = _heredoc_tag(line)
-        if tag:
-            terminator = tag
+        pending.extend(_heredoc_tags(line))
     return "\n".join(kept)
 
 
@@ -219,9 +235,16 @@ def _has_exit_1(text: str) -> bool:
 #: The `$GITHUB_PATH` write as ONE unit: the versioned dir IS the value written.
 #: `echo <dir> >> "$GITHUB_PATH"` — read the major from the
 #: write line itself, never from an `export` elsewhere in the step.
+#: One spelling of the identifier, shared by BOTH readers below: `$GITHUB_PATH`,
+#: `${GITHUB_PATH}`, quoted or not. They disagreed once — the count accepted
+#: `${GITHUB_PATH}` and the read did not, so the same expansion red as "never
+#: writes" (MEASURED, review of `48370b8261`).
+_GITHUB_PATH_REF = r"['\"]?\$\{?GITHUB_PATH\}?['\"]?"
+
 GITHUB_PATH_PREPEND_RE = re.compile(
     r"echo\s+(?P<quote>['\"]?)/usr/lib/postgresql/(?P<major>\d+)/bin(?P=quote)"
-    r"\s*>>\s*['\"]?\$GITHUB_PATH"
+    r"\s*(?:>>?|\|[ \t]*(?:sudo[ \t]+)?tee[ \t]+(?:-[A-Za-z]+[ \t]+)*)\s*"
+    + _GITHUB_PATH_REF
 )
 
 #: Any write to `$GITHUB_PATH`. Each line written to it is PREPENDED, so the LAST
@@ -230,13 +253,13 @@ GITHUB_PATH_PREPEND_RE = re.compile(
 #: (MEASURED, review of `f34c4fb741`: `echo …/16/bin >> $GITHUB_PATH` followed by
 #: `echo /usr/bin >> $GITHUB_PATH` passed all six).
 _GITHUB_PATH_WRITE_RE = re.compile(
-    # A redirect AND the canonical append spellings (`| tee -a`), so a second write
-    # cannot slip past the count in the spelling a shell script actually uses —
-    # MEASURED, review of `2547274eaa`: `echo "/usr/bin" | tee -a "$GITHUB_PATH"`
-    # left all six green.
-    r">>[ \t]*['\"]?\$\{?GITHUB_PATH\}?"
-    r"|\|[ \t]*(?:sudo[ \t]+(?:-[A-Za-z]+[ \t]+)*)?tee[ \t]+-a[ \t]+"
-    r"['\"]?\$\{?GITHUB_PATH\}?"
+    # ANY write: a truncating `>` erases the versioned entry (a harder revert than
+    # `>>`), `>>` appends, and `| tee [-a]` is the spelling a script actually uses.
+    # MEASURED, review of `48370b8261`: `> "$GITHUB_PATH"` was not counted at all,
+    # and previously `| tee -a` was not either.
+    r">>{0,2}[ \t]*" + _GITHUB_PATH_REF
+    + r"|\|[ \t]*(?:sudo[ \t]+(?:-[A-Za-z]+[ \t]+)*)?tee[ \t]+"
+    r"(?:-[A-Za-z]+[ \t]+)*" + _GITHUB_PATH_REF
 )
 
 
