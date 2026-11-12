@@ -420,9 +420,10 @@ rounding:**
   statuses in that arm and the `22`/`4` literals the count arm asserts — are a
   second copy of the same hand measurement, not an independent source, so a re-cut
   that moves the page and the pin together is not caught by anything here. The
-  tracker is an independent witness for whether an issue is still **OPEN**, never
-  for whether a defect is fixed (§1, and its four rows where the two disagree),
-  and the guard reads neither — so re-derive those literals from the tree on every
+  tracker records whether the *ticket* was closed, and §1's four rows show that
+  says nothing about the row in either direction — two of them are CLOSED in the
+  tracker over a defect this page calls `OPEN`, one is `OPEN` over a fixed defect.
+  The guard reads neither, so re-derive those literals from the tree on every
   re-cut; a re-cut that only makes the suite green has proven nothing about the
   statuses. The two halves are not equally dark, though: a moved **status** is
   uncaught, while a moved **count** reds six arms whose FIXTURES encode the
