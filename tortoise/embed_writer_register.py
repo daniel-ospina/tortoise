@@ -186,7 +186,7 @@ clause text a helper builds is read as text like any other, so a construct insid
 
 **Discovery, and the edge of the guard.** The guard's population comes from
 `tools/dod_5090_probe.py::embedding_writers()`, so the guard is exactly as wide as that discovery —
-no wider. Two write shapes are worth naming, because the difference is the difference between a
+no wider. Three write shapes are worth naming, because the difference is the difference between a
 claim and a slogan:
 
 * **Container keys are SEEN — the LITERAL-ASSIGNMENT form** (`record["embedding"] = …`), for every
@@ -245,6 +245,18 @@ claim and a slogan:
   mean). ⚠️ "Known" is load-bearing: the shape is undecidable by syntax (above), so neither this
   sentence nor the instrument can say these are the ONLY two — a reader scoping the residual must
   not read two as the complete population.
+* **An import ALIAS is the reach it names** — (`from tortoise.vector_write import set_embedding_clause
+  as _set`), DECIDED since `#11274`, not blind. Discovery decides a write from the writer's own
+  source TEXT (`_EMBED_WRITE`) and its CALL NAMES (`_callees`), and an aliased import renames BOTH,
+  so such a writer used to be ABSENT from the census entirely — measured: an empty map, i.e. neither
+  unclassified nor refused, which is the fail-open direction this whole module exists to close.
+  `probe._import_aliases` resolves the alias back to the primitive it names, so the writer lands in
+  `unresolved_write` and owes a declaration here; an aliased `encode_for_row` classes `gated`
+  instead, because it really does reach the gate and therefore owes nobody a declaration. ⛔ The
+  RESOLUTION IS OF CALLS, not of imports: an alias imported and never called is credited nothing —
+  crediting the import would fill the population with writers that store nothing, the cry-wolf
+  direction. Pinned, DRIVEN (a temp module per shape, through the real discovery filter), by
+  `tests/test_embed_writer_register.py::test_an_IMPORT_ALIAS_is_the_reach_it_names`.
 
 **Leaf, and it must stay one.** `04-plan.md` §5: a leaf must not live under `tortoise/projection/`,
 whose `__init__` is the head of the `projection → pack_state → sdk → projection` cycle where a

@@ -310,6 +310,23 @@ _EMBED_WRITE = re.compile(
 #: `#4094` exemption rather than being read as "no write".
 _EMBED_CONTAINER_KEY = "embedding"
 
+#: The clause BUILDERS whose name a writer can reach through an IMPORT ALIAS (`from
+#: tortoise.vector_write import set_embedding_clause as _set`). Named as data so `_import_aliases`
+#: can resolve an alias to the primitive it names — the same set `_EMBED_WRITE` matches by text plus
+#: `clear_then_set_prefix`, which renders the clear-then-SET pair and therefore stores too.
+#: ⛔ WHY AN ALIAS NEEDS THIS AT ALL (`#11274`): discovery decides a write from the writer's own
+#: SOURCE TEXT and its CALL NAMES. An aliased import renames BOTH, so the writer below was invisible
+#: to BOTH passes — not discovered, not reported, silently absent from the population the register
+#: is scored against:
+#:
+#:     from tortoise.vector_write import set_embedding_clause as _set
+#:     def _w(proj):
+#:         return proj.g.query("MATCH (n:Point) SET n += $p", {"p": _set("n")})
+#:
+#: It is decidable (`ast` sees the `ImportFrom` binding), so it is DECIDED rather than declared
+#: blind — the fail-open direction is the one the register's claim cannot survive.
+WRITE_CLAUSE_BUILDERS: tuple[str, ...] = ("set_embedding_clause", "clear_then_set_prefix")
+
 #: Write shapes discovery CANNOT decide, with the reason — named so the
 #: register's claim can be scoped to the mechanism rather than wider than it
 #: (`tests/test_embed_writer_register.py::test_the_register_names_the_shapes_its_discovery_cannot_see`).
@@ -327,7 +344,31 @@ UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
 }
 
 
-def _writes_an_embedding(node, source: str) -> bool:
+def _import_aliases(*roots: ast.AST) -> dict[str, str]:
+    """Local name -> the name it was IMPORTED AS, for the seams and clause builders (`#11274`).
+
+    Both scopes a writer can import in: the MODULE (`from … import X as Y` at module level) and the
+    WRITER'S OWN SUBTREE (a function-level import). ⛔ Deliberately over-inclusive in one direction:
+    an import inside a NESTED function contributes to its enclosing writer's map. That can only
+    credit a reach, which is the fail-closed direction here (the writer is discovered and owes a
+    declaration) — never hide one.
+
+    Only names in `WRITE_CLAUSE_BUILDERS`, `SEAM_CALL` and `UNGATED_CALLS` are resolved: an alias of
+    anything else says nothing about a vector write, and resolving it would be a guess.
+    """
+    known = set(WRITE_CLAUSE_BUILDERS) | {SEAM_CALL} | set(UNGATED_CALLS)
+    found: dict[str, str] = {}
+    for root in roots:
+        for sub in ast.walk(root):
+            if not isinstance(sub, ast.ImportFrom):
+                continue
+            for alias in sub.names:
+                if alias.name in known:
+                    found[alias.asname or alias.name] = alias.name
+    return found
+
+
+def _writes_an_embedding(node, source: str, aliases: dict[str, str] | None = None) -> bool:
     """Whether ``node`` writes a vector — by clause, by clause helper, or into a
     CONTAINER KEY (:data:`_EMBED_CONTAINER_KEY`).
 
@@ -336,6 +377,21 @@ def _writes_an_embedding(node, source: str) -> bool:
     """
     if _EMBED_WRITE.search(source):
         return True
+    # ⛔ `#11274`: a clause builder reached through an IMPORT ALIAS is the same write, and BOTH the
+    # text pass above and the container-key pass below are blind to it (the alias renames the call
+    # and the clause text lives in the builder).
+    aliased_builders = {
+        local for local, canonical in (aliases or {}).items()
+        if canonical in WRITE_CLAUSE_BUILDERS
+    }
+    if aliased_builders:
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Call):
+                continue
+            func = sub.func
+            name = getattr(func, "id", None) or getattr(func, "attr", None)
+            if name in aliased_builders:
+                return True
     for sub in ast.walk(node):
         if isinstance(sub, ast.Assign):
             targets = sub.targets
@@ -878,12 +934,21 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             })
             continue
         module_labels = {lab for _v, lab in _NODE_LABEL.findall(_strings(tree))}
+        # The MODULE's import aliases, computed once per FILE: an alias map rebuilt inside the
+        # per-function loop below would walk the whole tree once per writer (`#11274`).
+        module_aliases = _import_aliases(tree)
         file_src = path.read_text(encoding="utf-8")
         lines = file_src.splitlines()
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            called = _callees(node)
+            # ⛔ `#11274`: the writer's import ALIASES, so an aliased call is the reach it really is —
+            # both for the gate class below and for the write predicate above. Without this an
+            # aliased `encode_for_row` reds the population as an unresolved producer (a false
+            # declaration owed) and an aliased clause builder is a SILENT MISS (a false `bypass`
+            # answer, the direction that matters).
+            aliases = {**module_aliases, **_import_aliases(node)}
+            called = _callees(node) | {aliases[name] for name in _callees(node) if name in aliases}
             # The function's own text by LINE RANGE — `ast.get_source_segment`
             # re-splits the whole file per call, which cost 90 s on this tree.
             source = "\n".join(lines[node.lineno - 1:node.end_lineno])
@@ -899,7 +964,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # measured: reading only literals classed
                 # `session_indexer.main` (which does write) as a producer and
                 # hid a real ungated write path.
-                if not _writes_an_embedding(node, source):
+                if not _writes_an_embedding(node, source, aliases):
                     kind = "producer"  # computes it; another function writes it
             else:
                 # No recognised producer call: if it still WRITES an embedding,
@@ -907,7 +972,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # otherwise report `OUTSIDE the gate: 1` for a tree with three
                 # (review round 5, P2 — measured: 17 functions carry an
                 # embedding-write clause, 9 of them were absent from this map).
-                if kind is None and _writes_an_embedding(node, source):
+                if kind is None and _writes_an_embedding(node, source, aliases):
                     _put(f"{module}::{node.name}", {
                         "callee": "unrecognised",
                         "at": f"{rel}:{node.lineno}",

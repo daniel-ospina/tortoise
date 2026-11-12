@@ -2336,6 +2336,86 @@ def test_the_DISCOVERY_blind_spot_is_pinned_not_merely_documented(tmp_path):
         )
 
 
+#: The IMPORT-ALIAS shapes, one scratch module each — `#11274`'s breadth defect, DRIVEN.
+#: ⛔ Discovery decides a write from the writer's own SOURCE TEXT (`_EMBED_WRITE`) and its CALL
+#: NAMES (`_callees`), and an aliased import renames BOTH. Measured at the head that introduced this
+#: test: the two writers below produced an EMPTY MAP — not unclassified, ABSENT — so the register's
+#: "no undeclared writer can bypass" was false for any writer that imported the clause builder under
+#: another name. `(module body, {writer: expected kind}, note)`.
+ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
+    "module_level_alias": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (n:Point) SET n += $p", {"p": _set("n")})\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "a module-level alias of the clause builder: the write is real and the text pass sees "
+        "neither the builder's name nor its clause",
+    ),
+    "function_level_alias": (
+        "def w(proj):\n"
+        "    from tortoise.vector_write import clear_then_set_prefix as _clear\n"
+        '    return proj.g.query("MATCH (n:Point) " + _clear("n"))\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "a FUNCTION-level alias: the same reach, bound in the writer's own scope",
+    ),
+    "aliased_gate_call": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "\n"
+        "def w(text):\n"
+        "    return _enc(text, 384)\n",
+        {"tortoise.m::w": "gated"},
+        "an aliased GATE call: the gate IS reached, so a declaration is owed by nobody — classing "
+        "this as an unresolved producer would make the register declare a writer the rule already "
+        "covers (the false-declaration direction)",
+    ),
+    "plain_control": (
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "the unaliased control: the alias resolution must not change the ordinary spelling",
+    ),
+    "unrelated_alias_is_not_a_write": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(rows):\n"
+        "    return [r for r in rows]\n",
+        {},
+        "an aliased import that the writer never CALLS is not a write — crediting the import "
+        "rather than the call would fill the population with writers that assert nothing",
+    ),
+}
+
+
+def test_an_IMPORT_ALIAS_is_the_reach_it_names(tmp_path):
+    """`#11274`: discovery must not miss a writer because of how it IMPORTS or ALIASES (`#11398`).
+
+    Driven, not listed: each shape is a module written into `tmp_path` and walked by the real
+    `probe._embedding_writers`, so the assertion is about the DISCOVERY FILTER and not about set
+    arithmetic over an already-derived population (the distinction `#11274` finding 2 draws).
+
+    The fail-OPEN direction is the one that matters and it was live: the `unresolved_write` shapes
+    below were absent from the map entirely, so no register row could ever have been owed for them —
+    the "no silent bypass" claim was as wide as a spelling, not as wide as the code. The two
+    `gated`/`{}` arms bound the widening in the other direction, because a resolver that credits an
+    IMPORT instead of a CALL would manufacture declarations for writers that store nothing.
+    """
+    for shape, (body, expected, note) in ALIASED_IMPORT_SHAPES.items():
+        found = probe._embedding_writers(_scratch_root(tmp_path, shape, body))
+        kinds = {name: entry.get("kind") for name, entry in found.items()}
+        assert kinds == expected, f"{shape}: {note}\n  measured {kinds}, expected {expected}"
+    # …and the discovered writer reaches the REFUSAL, not just the map: a writer discovery now sees
+    # and the register does not declare is exactly what "no silent bypass" means here, so it is
+    # asserted through the register as well as through `kinds`.
+    aliased = set(probe._embedding_writers(
+        _scratch_root(tmp_path, "refusal", ALIASED_IMPORT_SHAPES["module_level_alias"][0])))
+    assert register.undeclared(aliased) == tuple(sorted(aliased)), (
+        "an aliased-import writer discovery now finds is not refused by the register — a "
+        "discovered writer that nobody declared must be a refusal, not a default")
+
+
 #: The name-collision criterion the register's `duplicate` parenthetical states, one scratch module
 #: each. `duplicate` requires BOTH defs to reach `_put`, and `_put` is only called for a def that
 #: discovery CLASSIFIES — not for every `def` the walk visits. Data, so the assertion reads as the
