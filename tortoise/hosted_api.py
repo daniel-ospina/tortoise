@@ -20950,7 +20950,7 @@ def _refuse_ambiguous_commit_entities(sdk, reconcile) -> None:
       different node set;
     * the PREDICATE is not re-implemented: ``refuse_ambiguous_create`` is the
       READ-ONLY twin of the door's own ``refuse_if_ambiguous``, over the same
-      ``live_name_holder_ids`` primitive — LIVE rows, id-less included, because
+      ``_live_holders_same_entity`` primitive — LIVE rows, id-less included, because
       a filter on truthy ids is exactly what let a 2+ LIVE carrier miss pass a
       guard (#8018);
     * it RECORDS the non-folded entry before raising (R8), which the door would

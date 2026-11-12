@@ -44490,7 +44490,7 @@ class TortoiseSDK:
         ``_update_entity`` takes both identity labels' locks (fixed order) around
         both.
         """
-        from .entity_identity import live_name_holder_ids
+        from .entity_identity import _live_holders_same_entity
         from .exceptions import NameAlreadyHeld
         g = self._get_proj().g
         # ⛔ LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id AND
@@ -44514,7 +44514,12 @@ class TortoiseSDK:
             stored = rows[0][0] if rows[0] else None
             if isinstance(stored, str) and stored == new_name:
                 continue
-            holders = live_name_holder_ids(g, label, new_name)
+            # #12047 review N3: count over the FOLDED key as well. Once the
+            # rename maintains `canonical_name` (below), two entities whose
+            # folded names collide are as create-poisoned as two whose raw names
+            # do — and `resolve_or_mint` will refuse every create of either
+            # spelling. Same evidence the create and the pre-flight probe use.
+            holders, _props = _live_holders_same_entity(g, label, new_name)
             # ⛔ Count HOLDERS (live rows), not truthy ids (#9876 review F1).
             # That list is deliberately row-per-holder and yields ``None`` for
             # an id-less LIVE row — the legacy / raw shape the create ADOPTS —
@@ -45117,27 +45122,32 @@ class TortoiseSDK:
         if isinstance(props.get("name"), str) and props["name"].strip():
             _rename_locks = (("Object", props["name"]),
                              ("Subject", props["name"]))
-            # ⛔ A RENAME MUST REFRESH THE FOLDED KEY (review P1).
+            # ⛔ A RENAME MUST REFRESH THE FOLDED KEY (review N3 / P1).
             # `_with_folded_entity_name` states the contract — "the fold is a
             # lookup key, so a rename changes it without changing who the entity
             # is" — but it only ran on the two CREATE doors, so a rename left the
             # old fold behind in `canonical_name`. Two measured consequences, both
             # silent: creating the NEW spelling missed both arms of
             # `resolve_or_mint` (name is case-sensitive, the fold was stale) and
-            # minted a twin beside the renamed node; and creating the OLD spelling
-            # still matched the stale fold, so the write resolved onto the renamed
-            # entity — a wrong-entity write, with `refuse_ambiguous_create`
-            # agreeing because it reuses the same helper.
+            # minted a twin beside the renamed node — the exact damage this issue
+            # removes, produced by this PR's own rung; and creating the OLD
+            # spelling still matched the stale fold, so the write resolved onto
+            # the renamed entity — a wrong-entity write, with
+            # `refuse_ambiguous_create` agreeing because it reuses the same
+            # helper (`_refuse_ambiguous_rename` below therefore counts the folded
+            # key too, so a rename ONTO a fold collision refuses instead of
+            # create-poisoning two entities).
             #
             # It rides the ordinary `SET n += $p`, whose applied map is the
             # journaled `EntityMutated.state`, so a rebuild restores it too (no
             # #7951 live-only key). A caller-supplied `canonical_name` in the same
-            # call still wins — this fills, never overwrites. A non-entity label
-            # renamed through here (a Point carrying `name`) just gains an inert
-            # property nothing reads.
-            if "canonical_name" not in props:
-                from .entity_resolver import normalize_entity_name
-                props["canonical_name"] = normalize_entity_name(props["name"])
+            # call still wins (`setdefault` semantics) — this fills, never
+            # overwrites. A non-entity label renamed through here (a Point
+            # carrying `name`) just gains an inert property nothing reads.
+            from .entity_resolver import normalize_entity_name
+            _folded_new = normalize_entity_name(props["name"])
+            if _folded_new:
+                props.setdefault("canonical_name", _folded_new)
         with contextlib.ExitStack() as _rename_lock_stack:
             for _lock_key in _rename_locks:
                 _rename_lock_stack.enter_context(
@@ -45591,7 +45601,7 @@ class TortoiseSDK:
                 # is a Subject id or name, and an unresolvable/ambiguous holder
                 # RAISES rather than wiring the role to a guess (#1370).
                 # ⛔ Every refusal above was checked BEFORE the write (review F5):
-                # `_role_holder_id` runs first, so a bad holder or a non-role kind
+                # `resolve_role_holder` runs first, so a bad holder or a non-role kind
                 # cannot leave a node + a `SubjectAdded` journal line behind while
                 # telling the caller the call failed — the atomicity rule
                 # `_update_entity` states for its own status change.

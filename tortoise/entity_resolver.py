@@ -780,6 +780,16 @@ def entity_pair_for(graph, candidate_id: str, *,
     ``limit=None`` — no truncation. The queue truncates ITS page; a verdict must
     not fail because the row sat past a bound this call chose.
     """
+    # SAME knobs as the queue (review N2): the queue defaults to
+    # `include_semantic=True`, so a merge that excluded it could not re-derive a
+    # `semantic` row it had just shown — the review surface would offer a
+    # decision and then refuse it with "no pair exists".
+    #
+    # And NO window (review N4/P2): a truncated recompute can report "no pair"
+    # for a candidate that lies outside it — a report false for the graph it
+    # describes. `limit=None` removes the truncation instead of failing closed on
+    # it, so the recompute is the queue's FULL selection whatever page the
+    # reviewer was shown.
     rows = entity_candidates(graph, limit=None, include_semantic=True,
                              encode_fn=encode_fn,
                              review_threshold=review_threshold)
@@ -832,7 +842,11 @@ def resolve_role_holder(sdk, holder: str, *, required: bool = True) -> str | Non
         raise ValueError("holdsRole needs a holder (a Subject id or name)")
     g = sdk._get_proj().g
     usable = ("name", "canonical_name")
-    entity_id = resolve_entity_id(g, "Subject", holder, name_props=usable)
+    # `record_misses=False` on the first, speculative attempt (review N6): the
+    # folded second call is the retry, and a success there must not leave a
+    # phantom `no-live-holder` refusal in the R8 record.
+    entity_id = resolve_entity_id(g, "Subject", holder, name_props=usable,
+                                  record_misses=False)
     if entity_id is None:
         # The raw spelling may not be the stored one; try the folded key over the
         # SAME props before concluding "no such Subject" (never a second query
@@ -863,4 +877,12 @@ def wire_holds_role(sdk, holder: str, role_id: str) -> dict:
     DECLARED by the caller (``create_subject(..., roleHolder=…)``).
     """
     holder_id = resolve_role_holder(sdk, holder)
+    if holder_id == role_id:
+        # A role is not its own holder (#1370's "no subject > wrong subject"):
+        # writing it would assert a category error as a fact, reported as success.
+        raise ValueError(
+            f"holdsRole: {role_id!r} cannot hold itself — a role needs a "
+            f"DIFFERENT person Subject as its holder. The role's name resolved "
+            f"onto the holder itself (the two folds collide), so give the role "
+            f"its own name (e.g. 'the owner role') rather than the person's")
     return sdk.create_edge("holdsRole", holder_id, role_id)

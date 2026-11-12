@@ -221,7 +221,8 @@ def live_name_holder_ids(g, label: str, name: str, *,
                             name_props=name_props)
 
 
-def _adopt_idless_holder(g, label: str, name: str, node_id: str, *,
+def _adopt_idless_holder(g, label: str, names: str | tuple[str, ...],
+                         node_id: str, *,
                          name_props: tuple = ("name",)) -> None:
     """Stamp a freshly minted ``node_id`` onto the single id-less LIVE holder.
 
@@ -249,13 +250,24 @@ def _adopt_idless_holder(g, label: str, name: str, node_id: str, *,
     # lookup that found an id-less holder via `canonical_name` used to hand
     # `_adopt_idless_holder` the folded VALUE but let it match `name` — so it
     # adopted nothing and the create minted a twin beside the legacy row.
+    if isinstance(names, str):
+        names = (names,)
+    # ⛔ The holder may have been found through EITHER spelling (the raw surface
+    # form or its fold) on EITHER property — the union `_live_holders_same_entity`
+    # counts. Matching only one of those pairs is the F4 defect again, one rung
+    # out (#12047 review N1): a legacy row named "Legacy" found by the raw arm was
+    # matched with the FOLDED value and nothing was adopted.
+    spellings = [s for s in dict.fromkeys(names) if s]
+    if not spellings:
+        return
+    arms = " OR ".join(f"n.{prop} IN $names" for prop in name_props)
     g.query(
         f"MATCH (n:{label}) "
-        f"WHERE {_name_predicate(False, name_props)} "
+        f"WHERE ({arms}) "
         f"AND {_terminal_excluded('n.status')} "
         "AND n.id IS NULL "
         "SET n.id = $id",
-        params={"name": name, "id": node_id})
+        params={"names": spellings, "id": node_id})
 
 
 #: One lock per ``(label, name)`` for the CREATE-side resolve-or-mint
@@ -342,20 +354,30 @@ def _live_holders_same_entity(g, label: str, name: str) -> tuple[list, tuple]:
     (review F4), or an id-less legacy row found via ``canonical_name`` is never
     adopted and the create mints a twin beside it.
     """
-    holders = live_name_holder_ids(g, label, name)
-    if holders:
-        return holders, ("name",)
     folded = normalize_entity_name(name)
+    raw = live_name_holder_ids(g, label, name)
     if not folded:
-        return [], ("name",)
-    # ⛔ NOT guarded on ``folded != name``: creating "owner" after "the owner"
-    # was written must find the holder whose FOLDED key is "owner" and whose name
-    # is "the owner" — the exact pair #12047 measured on the hosted graphs.
-    # ONE query over BOTH addressable spellings: a holder whose `name` is
-    # already the folded form ("owner") and a holder whose `canonical_name` is
-    # ("the owner" → "owner") are the same answer to the same question.
+        return raw, ("name",)
+    # ⛔ NOT guarded on ``folded != name``, and NEVER a substitution (review N1):
+    # a raw-name HIT must not short-circuit the folded count. Spelling the name in
+    # its folded form ("owner") with TWO live carriers of that folded identity
+    # ("owner" and "an owner") used to return the raw hit alone, so the create
+    # silently picked one — while the same create spelled "an owner" refused. The
+    # union is what makes "two live carriers is not a choice a create may make"
+    # true for EVERY spelling.
     props = ("name", "canonical_name")
-    holders = live_name_holder_ids(g, label, folded, name_props=props)
+    folded_hits = live_name_holder_ids(g, label, folded, name_props=props)
+    # Dedupe by id, keeping the id-less (None) row OUT of the set identity — a
+    # raw legacy row with no id is a holder in its own right (`refuse_if_ambiguous`
+    # counts rows, not truthy ids).
+    seen: set = set()
+    holders: list = []
+    for holder in list(raw) + list(folded_hits):
+        key = ("id", holder) if holder else (id(holder), None)
+        if key in seen:
+            continue
+        seen.add(key)
+        holders.append(holder)
     return holders, props
 
 
@@ -393,28 +415,33 @@ def resolve_or_mint(g, label: str, name: str, *,
     if explicit_id:
         return str(explicit_id), True
     with _holder_lock(label, name):
-        # #12047: ONE probe, both addressable spellings. `_live_holders_same_entity`
-        # runs the RAW-name query and only falls through to the FOLDED key when it
-        # finds nothing — so calling `live_name_holder_ids` here first would repeat
-        # that first query on every create (the 44k re-file this issue unblocks is
-        # a write loop, so a duplicated probe per row is real cost), and two copies
-        # of one question are a drift site besides.
+        # #12047: ONE probe answers both addressable spellings — the helper runs
+        # the raw-name query and the folded one, so calling
+        # `live_name_holder_ids` here first would repeat the raw query on every
+        # create (the 44k re-file this issue unblocks is a write loop, so a
+        # duplicated probe per row is real cost), and two copies of one question
+        # are a drift site besides.
+        #
+        # ⛔ The union is computed ALWAYS — never gated on a raw-name miss
+        # (review N1). The gate was the same defect one level up from
+        # `_live_holders_same_entity`'s own: a raw HIT short-circuited the folded
+        # count, so `create_subject("owner")` with two live carriers of the folded
+        # identity `owner` ("owner" by name, "an owner" by canonical_name) adopted
+        # one of them silently, while "the owner" refused. A create must answer
+        # the same question for every spelling of one entity.
         #
         # The FOLDED name is the second addressable spelling
         # (`_NAME_PROPERTIES` already declares `canonical_name` as one, and
-        # `mining` writes it). Without this lookup a near-duplicate mints a
-        # twin: "the fresh-context code reviewer" and "fresh-context code
-        # reviewer" are one entity, and the leading article carries no
-        # identity. This is the DETERMINISTIC rung only — a similarity score
-        # never resolves here (#2730 §6.7: auto-link only on an asserted or
+        # `mining` writes it). This is the DETERMINISTIC rung only — a similarity
+        # score never resolves here (#2730 §6.7: auto-link only on an asserted or
         # unambiguous deterministic transform; the review queue owns the rest).
         # ⛔ NOT guarded on ``folded != name``: creating "owner" after
         # "the owner" was written must find the holder whose FOLDED key is
-        # "owner" and whose name is "the owner" — the exact pair #12047
-        # measured on the hosted graphs. That guard made this branch inert
-        # for every already-folded spelling, which is the common case.
+        # "owner" and whose name is "the owner" — the exact pair #12047 measured
+        # on the hosted graphs. That guard made this branch inert for every
+        # already-folded spelling, which is the common case.
         # The returned props name the spelling that FOUND the holders, so
-        # `_adopt_idless_holder` below matches exactly what resolved (F4).
+        # `_adopt_idless_holder` below matches exactly what resolved (F4/N1).
         holders, _props = _live_holders_same_entity(g, label, name)
         # COUNT holders, REPORT holders (#9876 review, this head): the
         # earlier ``[h for h in holders if h]`` performed exactly the
@@ -452,9 +479,7 @@ def resolve_or_mint(g, label: str, name: str, *,
             # registration of its own: the caller's journal line is what makes
             # the adopted id replayable.
             adopted = ulid()
-            _adopt_idless_holder(g, label,
-                                 name if _props == ("name",)
-                                 else normalize_entity_name(name),
+            _adopt_idless_holder(g, label, (name, normalize_entity_name(name)),
                                  adopted, name_props=_props)
             return adopted, True
         # Zero live holders: mint an opaque id. The returned id is only half of
@@ -764,7 +789,9 @@ def refuse_if_ambiguous(label: str, name: str, holders) -> None:
 def refuse_ambiguous_create(g, label: str, name: str) -> None:
     """The **read-only** pre-flight twin of :func:`resolve_or_mint`'s refusal.
 
-    Same predicate, same evidence, ONE graph read — no lock, no mint, no write:
+    Same predicate, same evidence, the SAME two reads the door makes (the raw arm
+    then the folded arm — ``_live_holders_same_entity``) — no lock, no mint, no
+    write:
     a caller that must refuse an ambiguous create BEFORE its first write (the
     hosted commit path, where the create lands at step 6 of the write phase and
     everything before it has already been journaled) probes here instead of
@@ -833,7 +860,8 @@ def _record_if_any_holder(g, label: str, value: str,
 def resolve_entity_id(g, label: str, value: str | None, *,
                       case_insensitive_name: bool = False,
                       addressing: str | None = None,
-                      name_props: tuple = ("name",)) -> str | None:
+                      name_props: tuple = ("name",),
+                      record_misses: bool = True) -> str | None:
     """Route-then-refuse: the single live id for an id-or-name coordinate.
 
     Exact id match wins (returned regardless of status — an id is unambiguous
@@ -848,6 +876,12 @@ def resolve_entity_id(g, label: str, value: str | None, *,
     ``addressing`` (``ADDRESSING_SOURCE`` / ``ADDRESSING_TARGET``) makes the
     uniqueness check cover the CALLER's full endpoint-resolution space (see
     :func:`_endpoint_idents`).
+
+    ``record_misses=False`` (review N6): a SPECULATIVE probe — one the caller
+    will retry with another spelling — must not leave a `no-live-holder` refusal
+    in the R8 record. Without it a *successful* folded resolve recorded a phantom
+    refusal for the spelling that did not hit, inflating the refused-event set
+    with an event that did not happen.
 
     ``name_props`` names the properties the NAME arm matches (default
     ``("name",)``). A caller whose coordinate may be spelled by a deprecated
@@ -874,17 +908,26 @@ def resolve_entity_id(g, label: str, value: str | None, *,
                                   case_insensitive=case_insensitive_name,
                                   name_props=name_props)
     if len(by_name) > 1:
-        _refuse(label, value, display_holder_ids(by_name))
+        # ⛔ `record_misses=False` suppresses the RECORD, never the refusal: an
+        # ambiguous lookup is a real answer, and returning None would let a
+        # speculative probe read "two live carriers" as "no holder" and let the
+        # folded retry silently pick one (#12047 review N6/N1 boundary).
+        if record_misses:
+            _refuse(label, value, display_holder_ids(by_name))
+        raise AmbiguousEntityName(label, value, display_holder_ids(by_name))
     if by_name:
         if by_name[0] is None:
-            _record_unaddressable(label, value)
+            if record_misses:
+                _record_unaddressable(label, value)
+            return None
         return _require_unique_id(g, label, by_name[0], addressing=addressing)
     # No LIVE holder. D2's ``single_terminal_holder_reference`` vector refuses
     # a terminal-only reference (a resolver must never hand a caller a terminal
     # id). Record it so "the holder is terminal" is distinguishable from "no
     # such name" — both return None, but only one is a refusal (#3633 §B.1).
-    _record_if_any_holder(g, label, value, case_insensitive_name,
-                          name_props=name_props)
+    if record_misses:
+        _record_if_any_holder(g, label, value, case_insensitive_name,
+                              name_props=name_props)
     return None
 
 
