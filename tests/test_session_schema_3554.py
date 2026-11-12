@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import itertools
 import json
 import re
 import subprocess
@@ -1277,7 +1278,11 @@ def _block_bodies(changelog: str) -> list[str]:
     for 39 blocks, one of them a fragment starting at the quoted header.
     """
     starts = [m.start() for m in _BLOCK_VERSION_RE.finditer(changelog)]
-    return [changelog[a:b] for a, b in zip(starts, starts[1:] + [len(changelog)])]
+    # `pairwise` over the spans plus the end offset — the spans are DELIBERATELY
+    # one shorter than the pairs (B905's `strict=` would be a lie here), and it
+    # replaces the `+ [len(changelog)]` concatenation RUF005 rejects.
+    return [changelog[a:b]
+            for a, b in itertools.pairwise([*starts, len(changelog)])]
 
 
 def test_the_newest_block_body_starts_at_its_header_line() -> None:
@@ -1499,15 +1504,24 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     state the COUNT this detector measures, and the next release that changes the
     count must re-measure and restate it.
 
-    ⛔ WHICH SHAPES ARE SWEPT, STATED RATHER THAN IMPLIED. The scan is the whole
-    module, but a scan can only recognise the phrasings it names, so these are the
-    ones it covers: a bold ``**N of M**`` pair, ``the N blocks that cite nothing``,
-    ``the first/second of the two v3.33 entries``, and the three patterned sentences
-    below. A count restated in ANY OTHER shape (measured, and green here: *"Only 3
-    of 39 blocks cite a comment id."*, *"measured 3 blocks citing out of 39"*) is
-    prose this pin does not read. An earlier draft claimed it scanned EVERY
-    phrasing "whatever its phrasing"; that was false and is exactly the class of
-    overclaim finding 1 was about, so the limit is enumerated instead.
+    ⛔ WHAT IS SWEPT AND WHAT IS NOT, as implemented. THREE patterned sentences must
+    each appear exactly once: ``**N of M** blocks cite a comment id``,
+    ``citing versions: …``, and ``**N of M** cite none``. Around them the scan also
+    reads, everywhere in the module: every BOLD ``**N of M**`` pair (allowed values:
+    the measured citing count or the measured complement — this pin's own docstring
+    and the comment beside the sweep are swept too, which is why neither may quote a
+    stale number in bold), every ``the N blocks that cite nothing``, every
+    ``the first/second of the two v3.33 entries`` in a sentence that also names
+    ``D2 — A``, and every ``#issuecomment-<id>`` in a DOCSTRING (which must be a
+    permalink the landing block carries).
+
+    A count restated OUTSIDE those shapes is prose this pin does not read —
+    measured, and green: *"Only 3 of 39 blocks cite a comment id."*, *"measured 3
+    blocks citing out of 39"*. An earlier draft claimed the sweep covered EVERY
+    phrasing "whatever its phrasing" (false), and a later one claimed a second copy
+    is "a copy nothing checks" while the bold sweep was in fact reading it (also
+    false); both are the class of overclaim finding 1 was about, so the scope is
+    described as the code performs it.
 
     ⛔ WHAT THIS PIN CHECKS, stated exactly: the stated pair ``(blocks citing,
     blocks)``, the stated COMPLEMENT, the multiset of VERSIONS those blocks are
@@ -1518,13 +1532,13 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     the attribution half "cannot" be re-derived and left it as prose; measured,
     ``v3.31`` — a version that cites nothing — could be substituted for a citing
     one with the suite green, which is the second half of finding 1 reproduced
-    live). Each statement must appear EXACTLY ONCE in
-    the module: a second copy is a copy this pin does not read, and a stale one left
-    beside the checked one is the failure mode it exists to stop (measured: with a
-    duplicate, editing only the second copy's count left the module 54-green). What
-    remains unpinned is the PROSE that draws conclusions from those facts — this
-    pin checks that the sentence's facts match the file, not that its argument is
-    right.
+    live). The three patterned statements must each appear EXACTLY ONCE, and
+    every other BOLD count in the module is swept against the two measured values —
+    so a stale copy in bold cannot sit beside the checked one (measured before the
+    sweep: editing a second copy's count left the module green). What remains
+    unpinned is the PROSE that draws conclusions from those facts, and any count
+    written outside the swept shapes: this pin checks that the sentences' facts
+    match the file, not that their argument is right.
     """
     doc = test_the_newest_block_recording_4_3_cites_a_comment_id.__doc__ or ""
     # ⛔ THE UNIQUENESS SCAN IS THE WHOLE MODULE, not this one docstring: a fact
@@ -1568,28 +1582,41 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     # `the N blocks that cite nothing`, so a stale copy could sit beside the
     # checked one (measured: editing this pin's own copy left all five tests green,
     # and a synthetic v3.35 release re-created the drift with the sibling
-    # re-measured but this copy left at the old pair). The only tolerated
-    # exceptions are the QUOTED HISTORY — the false `3 of 39` the sibling narrates —
-    # and bold pairs that name a different file's size, which this module does not
-    # have today.
+    # re-measured but this copy left at the old pair). EVERY bold pair is a claim,
+    # so every bold pair must equal the measured citing count — the historical
+    # `3 of 39` the sibling narrates passes only because it is NOT bold (measured:
+    # bolding it reds this pin, as does any other bold pair, so there is no
+    # tolerated exception to state).
     measured_pair = (len(citing), len(blocks))
     measured_none = len(blocks) - len(citing)
-    # Both measured values, because the complement is bolded in the same shape.
-    allowed_pairs = {measured_pair, (measured_none, len(blocks))}
+    # ⛔ BOTH measured values are accepted, because BOTH are TRUE statements about
+    # the file (4 of 39 cite, 35 of 39 do not) — refusing the complement's value
+    # over-blocked correct prose (measured: a true "The **35 of 39** blocks cite
+    # nothing" reds with a message telling the lane to re-measure a right number).
+    # What is refused is any OTHER pair: a number that matches neither measurement is
+    # a stale claim, and there is no third true value to confuse it with.
+    allowed_bold = {measured_pair, (measured_none, len(blocks))}
     for seen in re.findall(r"\*\*(\d+) of (\d+)\*\*", module_source):
-        assert tuple(int(part) for part in seen) in allowed_pairs, (
+        assert tuple(int(part) for part in seen) in allowed_bold, (
             f"this module states **{seen[0]} of {seen[1]}** somewhere; the detector "
-            f"measures {measured_pair[0]} of {measured_pair[1]} citing and "
-            f"{measured_none} of {len(blocks)} citing nothing. Every restatement "
-            "must be re-measured with the sentence it sits in — a stale copy is the "
-            "defect finding 1 was about")
+            f"measures {measured_pair[0]} of {len(blocks)} citing a comment id and "
+            f"{measured_none} of {len(blocks)} citing nothing. Every bold count must "
+            "be one of the two measurements — a stale copy beside the checked one is "
+            "the defect finding 1 was about")
     for seen in re.findall(r"the (\d+) blocks? that cite nothing", module_source):
         assert int(seen) == measured_none, (
             f"this module restates the complement as 'the {seen} blocks that cite "
             f"nothing'; measured {measured_none}")
-    ordinals = re.findall(
-        r"the (first|second) of the (?:file's )?two v3\.33 entries",
-        module_source, re.I)
+    # ⛔ ANCHORED TO SENTENCES THAT NAME `D2 — A`, so the sweep judges claims ABOUT
+    # that block only: a true statement about the OTHER v3.33 entry ("the second of
+    # the two v3.33 entries landed #11827") is not a misidentification of the
+    # lander, and over-blocking it is a false refusal (measured before this anchor).
+    ordinal_sentences = [sentence for sentence in re.split(r"(?<=[.)])\s+", module_source)
+                         if "D2 — A" in sentence]
+    ordinals = [word for sentence in ordinal_sentences
+                for word in re.findall(
+                    r"the (first|second) of the (?:file's )?two v3\.33 entries",
+                    sentence, re.I)]
     assert ordinals, (
         "the module must say which of the two v3.33 entries lands `D2 — A`")
     # (each captured ordinal is compared with the MEASURED position below, once
@@ -1664,6 +1691,23 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     assert f"issue #{named_issue.group(1)}" in lands_d2[0].split("\n", 1)[0], (
         f"the SCOPE paragraph names issue #{named_issue.group(1)}, but the block it "
         "points at records " + repr(lands_d2[0].split("\n", 1)[0][:100]))
+    # ⛔ EVERY PERMALINK IN THE MODULE'S PROSE must belong to the block the prose
+    # points at — scoped to DOCSTRINGS so the synthetic ids in code comments (the
+    # negative-test fixtures) do not join the sweep. The pin's own docstring cited
+    # the permalink a second time and nothing read that copy (measured: editing it
+    # to a nonexistent id left the suite green), which is the failure the paragraph
+    # above says it closes.
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    prose = " ".join(
+        filter(None, (ast.get_docstring(node) for node in ast.walk(tree)
+                      if isinstance(node, (ast.Module, ast.FunctionDef,
+                                           ast.AsyncFunctionDef, ast.ClassDef)))))
+    lander_ids = set(re.findall(r"#issuecomment-(\d{6,})", lands_d2[0]))
+    prose_ids = set(re.findall(r"#issuecomment-(\d{6,})", prose))
+    assert prose_ids <= lander_ids, (
+        f"these docstrings cite permalinks {sorted(prose_ids - lander_ids)} that the "
+        "block they point at does not carry — a permalink a reader cannot resolve to "
+        "the evidence is the defect this pin exists to stop")
     named_permalinks = set(re.findall(r"#issuecomment-(\d{6,})", doc))
     assert named_permalinks, (
         "the SCOPE paragraph must name the permalink it relies on")
