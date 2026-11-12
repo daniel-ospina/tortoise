@@ -3362,7 +3362,14 @@ assert_not_contains "$OUT" "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" \
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
-export STUB_STATUS_BODY="$(status_body true null null)"
+# The fixture must make the driver DETECT something (review P2): with a healthy
+# /status the `file_alert` guard is never entered, so the two assertions below
+# ("no conditional write rejected", "no filing is attempted") would pass because
+# nothing was detected rather than because the guard held — deleting the guard
+# would leave them green. An enabled app reporting `storage_error` files
+# R2_UNLISTABLE at section 1b, which is the shape that used to reach
+# r2_put_once and produce the misleading dedup error.
+export STUB_STATUS_BODY="$(status_body true null '"storage broken"')"
 export STUB_SWEEP_BODY='{"status":"backed_up","graph_totals":{"attempted":1,"backed_up":1}}'
 # ⛔ The PATH must be CONTROLLED, not inherited (review P1): filtering only by
 # PREPENDING a directory still resolves a real `aws` from the caller's PATH, so on
@@ -3403,6 +3410,8 @@ assert_not_contains "$OUT" "command not found" \
   "118. no raw shell-level failure leaks from any aws call site"
 assert_not_match "$(cat "$LOG")" 'GH POST .*/issues' \
   "118. no filing is attempted (its dedup object cannot be written)"
+assert_contains "$OUT" "R2_UNLISTABLE DETECTED but NOT FILED" \
+  "118. the detected incident is reported as DETECTED-but-unfiled, in the dependency's own words"
 assert_contains "$OUT" "sweep status: backed_up" \
   "118. the SWEEP still ran — losing it would be a durability regression"
 assert_not_match "$(cat "$LOG")" 'GH PATCH .*/issues/4242' \
@@ -3444,6 +3453,14 @@ for v in PIN_SHA256_X86_64 PIN_SHA256_AARCH64; do
 done
 assert_file_match "$ENSURE" 'sha256sum --check --status' \
   "119. the installer source carries a digest check"
+# The workflow half needs its own pin (review P2): `continue-on-error` is what
+# keeps a failed install from skipping the hour's sweep, and nothing else in the
+# suite reads it — deleting the flag, or the step, used to leave the suite green.
+WF="$SCRIPT_DIR/../workflows/registry-backup-cron.yml"
+assert_file_match "$WF" '^        continue-on-error: true$' \
+  "119. the install step cannot fail the job and skip the hour's sweep"
+assert_file_match "$WF" 'run: bash \.github/scripts/ensure-aws-cli\.sh' \
+  "119. the workflow actually runs the installer"
 # The digest check must FAIL CLOSED on a tampered/incomplete archive, and it must
 # fail BEFORE anything lands on PATH (review P2: a source grep cannot tell that
 # ordering, and one stray commented line satisfies it). Drive the real code path
@@ -3477,6 +3494,25 @@ assert_eq "$TRC" 1 "119. a tampered archive exits non-zero (fail closed)"
 assert_contains "$TOUT" "sha256 MISMATCH" "119. … naming the digest failure"
 assert_eq "$([ -e "$FIX/toolcache/aws-cli-2.31.27-x86_64/bin/aws" ] && echo present || echo absent)" "absent" \
   "119. … and installs NOTHING (no aws on PATH from a rejected archive)"
+# A BROKEN cached tree must not be trusted either (review P1: a cancelled install
+# leaves $root/v2/<version> with no working bin/aws, and the installer then skips
+# the re-install, wedging the host forever). The probe must run the binary, not
+# just stat it — so a cache holding a broken `aws` must fall through to the
+# download (and here, to the digest failure).
+mkdir -p "$FIX/toolcache-broken/aws-cli-2.31.27-x86_64/bin"
+cat > "$FIX/toolcache-broken/aws-cli-2.31.27-x86_64/bin/aws" <<'BROKEN_EOF'
+#!/usr/bin/env bash
+exit 1
+BROKEN_EOF
+chmod +x "$FIX/toolcache-broken/aws-cli-2.31.27-x86_64/bin/aws"
+set +e
+BOUT="$(PATH="$FIX/tamper:$FIX/noaws" GITHUB_PATH="" RUNNER_TOOL_CACHE="$FIX/toolcache-broken" \
+  "$ENSURE" 2>&1)"
+BRC=$?
+set -e
+assert_eq "$BRC" 1 "119. a BROKEN cached tree is not reused (it falls through to a real install)"
+assert_contains "$BOUT" "downloading" \
+  "119. … the probe RUNS the cached binary instead of stat-ing it"
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

@@ -87,13 +87,24 @@ fi
 log "sha256 verified"
 
 unzip -q "${work}/${zip}" -d "$work"
+# ⛔ A prior attempt may have left a PARTIAL tree, and the installer will NOT repair
+# it (review P1): `aws/install` creates $root/v2/<version> BEFORE it copies
+# anything, so a cancelled / timed-out / OOM-killed run leaves a tree the reuse
+# probe above rejects but the installer then reads as already installed — it
+# prints "Found same AWS CLI version … Skipping install", exits 0, and the
+# post-check below fails. With continue-on-error on the step, that is a PERMANENT
+# wedge on that host that nothing else surfaces and no message names. Discard
+# whatever is there first — we only reach this line because it is not usable —
+# and only AFTER the download and digest check, so a network/tamper failure never
+# destroys a cache.
+rm -rf "$root"
 mkdir -p "${root}/bin"
 # The bundled installer writes ${root}/v2/<version> and symlinks ${root}/bin/aws
 # into it. `--update` is accepted for a repeat install into the same tree.
 "${work}/aws/install" --bin-dir "${root}/bin" --install-dir "$root" --update >/dev/null
 
 if ! "${root}/bin/aws" --version >/dev/null 2>&1; then
-  fail "the installer reported success but ${root}/bin/aws does not run"
+  fail "the installer reported success but ${root}/bin/aws does not run — remove ${root} and re-run (this step recreates it from the pinned archive)"
   exit 1
 fi
 log "installed — $("${root}/bin/aws" --version 2>&1 | head -1)"
