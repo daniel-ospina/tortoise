@@ -4852,7 +4852,66 @@ def _byref_sdk_source() -> str:
         "    def calls_the_leg_directly_inside_a_nested_CLASS(self):\n"
         "        class K:\n"
         "            hit = self.tortoise_fts_query('q', entity_type='object')\n"
-        "        return K\n")
+        "        return K\n"
+        # ── `#11397`: the OVER-report half — each of these BINDS the name in this scope, so a
+        # later mention of it is not a reach of the method, and declaring one is a caveat on a
+        # complete table (the cry-wolf direction).
+        "    def shadows_via_STAR_ARGS(self, *args, **kwargs):\n"
+        "        return _safe(_review_pool)\n"
+        "    def star_args_named_like_an_entrant(self, *_review_pool, **kw):\n"
+        "        return _safe(_review_pool)\n"
+        "    def lambda_param_named_like_an_entrant(self):\n"
+        "        return (lambda _review_pool: _safe(_review_pool))(1)\n"
+        "    def nested_def_name_named_like_an_entrant(self):\n"
+        "        def _review_pool():\n"
+        "            return 1\n"
+        "        return _safe(_review_pool)\n"
+        "    def match_pattern_named_like_an_entrant(self, v):\n"
+        "        match v:\n"
+        "            case _review_pool:\n"
+        "                return _safe(_review_pool)\n"
+        "        return None\n"
+        # ⛔ `del` ALONE binds the name (`del x` makes `x` local in CPython's compiler), so this
+        # arm is not satisfied by a preceding `x = v` — with the assignment present, the `Store`
+        # shadows the name and the `Del` half of the model goes UNPINNED (measured).
+        "    def del_binding_named_like_an_entrant(self):\n"
+        "        del _review_pool\n"
+        "        return _safe(_review_pool)\n"
+        # ── `#11397`: the UNDER-report half — each of these is a REAL in-module receiver the walk
+        # used to drop with no entry anywhere: `cls`, the enclosing CLASS NAME, and `self.__class__`
+        # (directly and through `getattr`).
+        "    def classmethod_cls_receiver(cls):\n"
+        "        return _safe(cls._review_pool)\n"
+        "    def class_name_receiver(self):\n"
+        "        return _safe(S._review_pool)\n"
+        "    def dunder_class_receiver(self):\n"
+        "        return _safe(self.__class__._review_pool)\n"
+        "    def dunder_class_getattr(self):\n"
+        "        return _safe(getattr(self.__class__, '_review_pool'))\n"
+        "    def cls_is_not_a_receiver_here(self, cls):\n"
+        "        return _safe(cls._review_pool)\n"
+        # ── `#11397` review: a LAMBDA parameter binds in the LAMBDA's scope, so it must not shade
+        # the enclosing body (that suppression is the under-report direction, and it was LIVE: see
+        # `lambda_param_does_not_shade_the_body`), while its DEFAULTS are evaluated in the enclosing
+        # scope and are real mentions (`lambda_default_is_the_enclosing_scope`).
+        "    def lambda_param_does_not_shade_the_body(self):\n"
+        "        f = lambda _review_pool: 1\n"
+        "        return _safe(_review_pool)\n"
+        "    def lambda_default_is_the_enclosing_scope(self):\n"
+        "        f = lambda v=_review_pool: v\n"
+        "        return f()\n"
+        # ── `#11397` review: `*. __class__` is only the ENCLOSING class when the base is an
+        # in-module receiver; a foreign object's class is not this module's method.
+        "    def foreign_dunder_class_receiver(self, other):\n"
+        "        return _safe(other.__class__._review_pool)\n"
+        # ── `#12020` round 6 review (P3): `type(…)` is the SAME receiver rule written a second way,
+        # and the arm accepted ANY call to `type` while its twin above refuses a foreign base. The
+        # pair is pinned together: `type(self)` is the enclosing class, `type(other)` is a FOREIGN
+        # object's class and must not be declared.
+        "    def type_of_self_is_a_receiver(self):\n"
+        "        return _safe(type(self)._review_pool, 'object')\n"
+        "    def type_of_a_FOREIGN_object(self, other):\n"
+        "        return _safe(type(other)._review_pool, 'object')\n")
 
 
 def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
@@ -4912,7 +4971,30 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
               "mentions_inside_a_nested_CLASS",
               # The outermost iterable is the ENCLOSING scope's, so this is a
               # real reach and must be declared (#11389 review, P3).
-              "mentions_the_OUTERMOST_iterable")
+              "mentions_the_OUTERMOST_iterable",
+              # ⛔ `#11397`: every in-module RECEIVER that is not literally `self`
+              # (`cls`, the enclosing class name, `self.__class__` and
+              # `getattr(self.__class__, …)`) is a real reach the walk dropped with no
+              # entry anywhere — the two `cls` arms measure both that the receiver is
+              # honoured when it IS the classmethod's, and that a plain parameter named
+              # `cls` is honoured the same way (it is the same spelling, and a receiver
+              # set of only `self` made BOTH invisible).
+              "classmethod_cls_receiver", "class_name_receiver",
+              "dunder_class_receiver", "dunder_class_getattr",
+              # ⛔ `#11397` review: a LAMBDA parameter binds in the LAMBDA's own scope, so a mention
+              # of the same name in the ENCLOSING body is still a reach — function-wide shadowing
+              # suppressed it (the silent-short-list direction). And a lambda DEFAULT is evaluated
+              # in the enclosing scope, so it is a reach too.
+              "lambda_param_does_not_shade_the_body",
+              "lambda_default_is_the_enclosing_scope",
+              # ⛔ `#12020` round 6 review (P3): `type(self)` is the receiver spelled through the
+              # type — the positive half of the pair whose NEGATIVE (`type(other)`) is asserted
+              # beside `other.__class__` above.
+              "type_of_self_is_a_receiver",
+              # the CONTROL for the star-arg half: `*args`/`**kwargs` bind THEIR names, and a
+              # mention of a different name is still a reach — without this row, "add every
+              # vararg name to `shadowed`" could shade the whole body and stay green.
+              "shadows_via_STAR_ARGS")
     for name in shapes:
         assert name not in methods, (
             f"{name} reaches the leg through a reference this scan cannot "
@@ -5013,13 +5095,39 @@ def test_a_leg_reach_passed_BY_REFERENCE_is_declared_not_dropped(
                       # (#11389 review round 2, P3).
                       "references_a_LATER_generators_target",
                       # An attribute BINDING is not a mention either.
-                      "assigns_the_attr", "augments_the_attr", "deletes_the_attr"):
+                      "assigns_the_attr", "augments_the_attr", "deletes_the_attr",
+                      # ⛔ `#11397`: the scope model's remaining OVER-report holes. Each
+                      # BINDS the name in the method's own scope, so publishing a later
+                      # mention as a by-reference reach puts a spurious caveat on a
+                      # complete caller table.
+                      "star_args_named_like_an_entrant",
+                      "lambda_param_named_like_an_entrant",
+                      "nested_def_name_named_like_an_entrant",
+                      "match_pattern_named_like_an_entrant",
+                      "del_binding_named_like_an_entrant",
+                      # …and the boundary of the `cls` receiver: a plain parameter named `cls`
+                      # on a method whose FIRST argument is `self` is a foreign object, not the
+                      # class — only the classmethod's own first parameter is the class receiver.
+                      "cls_is_not_a_receiver_here",
+                      # …and the `__class__` receiver only names the ENCLOSING class when its BASE
+                      # is an in-module receiver: `other.__class__._review_pool` is a foreign
+                      # object's class, and accepting any `*.__class__` put a spurious caveat on a
+                      # complete table (`#11397` review).
+                      "foreign_dunder_class_receiver"):
         assert shadowing not in declared, (
             f"a local shadowing an entrant's name was declared as a reach: "
             f"{shadowing} in {declared}")
     # A foreign receiver is not an in-module method either.
     assert "passes_a_FOREIGN_receiver" not in declared, (
         f"a call on a FOREIGN receiver was declared as an in-module reach: {declared}")
+    # ⛔ `#12020` round 6 review (P3): the receiver rule applies to `type(…)` exactly as it does to
+    # `*.__class__`. `type(self)` IS the enclosing class; `type(other)` is a FOREIGN object's class,
+    # and the arm above (`func.id in ("super", "type")` → True) accepted both — a spurious caveat
+    # on a complete caller table. Pre-fix this arm is DECLARED, so the assertion is non-vacuous.
+    assert "type_of_self_is_a_receiver" in declared, declared
+    assert "type_of_a_FOREIGN_object" not in declared, (
+        f"a call on `type(<a foreign object>)`'s helper was declared as an in-module reach — its "
+        f"twin `other.__class__._helper` is refused for exactly that reason: {declared}")
     # …and a method taking TWO helpers by reference must name BOTH: keeping one
     # target per method dropped the second with the entry still looking complete.
     assert "passes_two" in declared, declared
@@ -5449,8 +5557,8 @@ _NEGATION_GOVERNS = re.compile(
     r"(?:walk|visit|reach|report)(?:s|es|ed|ing)?\b")
 # ⛔ `_COVERAGE` is RETAINED DELIBERATELY AND IS CURRENTLY IMPLIED, and saying so
 # is the point (#11437 review, P3). Measured: `_NEGATION_GOVERNS` already requires
-# one of the same four verbs AFTER the negation, so on all 130 candidate sentences
-# (the 100 rows across the four sets — 49 / 13 / 22 / 16 — plus the 30 sentences of
+# one of the same four verbs AFTER the negation, so on all 133 candidate sentences
+# (the 100 rows across the four sets — 49 / 13 / 22 / 16 — plus the 33 sentences of
 # the real §3 under
 # this predicate's own `split(". ")` segmentation) there is no case where the
 # governance test hits and this one does not — dropping the term from

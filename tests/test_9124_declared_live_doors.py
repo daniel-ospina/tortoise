@@ -493,7 +493,20 @@ _UNRESOLVED = {
     # appends no record of its own, and writes nothing.
     "_capture_stamp_targets",
     "_read_capture_passthrough_props",
-    "_reachable_claim_count",
+    # #11823/#12116: both are pure READ censuses whose statements interpolate a
+    # shared predicate builder (`epistemic_disjunction`; `_propagation_counts`
+    # also `ep_has_belief_cypher`), so the resolver reports '<unresolved>' and
+    # cannot unfold them. Checked by hand: `_edged_claim_ids` is a
+    # `MATCH (n)-[r:IMPL|NAND]-(m) WHERE <predicates> RETURN DISTINCT n.id`
+    # read; `_propagation_counts` is three aggregate counts over live `:Point`s
+    # (`count(n)`, `sum(CASE …)`). Neither has a SET/CREATE/MERGE/DELETE/REMOVE,
+    # neither calls a write procedure, and neither appends a journal record —
+    # they exist to REPORT the propagation state, never to change it. The
+    # `_reachable_claim_count` row that used to sit here moved to
+    # `_edged_claim_ids` when the query was hoisted out of it (the function no
+    # longer touches the handle, so its row became stale).
+    "_edged_claim_ids",
+    "_propagation_counts",
     # #3590: `_refuse_ambiguous_rename` interpolates the LABEL into its probe
     # (`f"MATCH (n:{label} {{id: $id}}) RETURN n.name"` over a literal
     # `("Object", "Subject")` loop), so the resolver cannot unfold the

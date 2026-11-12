@@ -32,6 +32,18 @@ from .extractor import (
     _canonical_name,
 )
 from .ids import ulid, now_iso, content_hash  # noqa: F401
+from .entity_resolver import normalize_entity_name as _matching_key
+
+
+# #12047 review F6: `canonical_name` is the ONE addressable matching key for an
+# entity (``entity_identity._NAME_PROPERTIES``), and it must hold ONE fold. This
+# module used to write ``extractor._canonical_name`` — which KEEPS a leading
+# article and STRIPS punctuation rather than spacing it ("theowner"/"daniel-ospina/
+# agent-infra") — into the same slot the resolver queries, so a mining-written
+# Object and an SDK-written one could never be recognised as the same entity.
+# ``_object_id`` deliberately keeps the old derivation: mining's ids must not
+# churn, and identity is the opaque id anyway (#3590).
+
 
 logger = logging.getLogger(__name__)
 
@@ -691,7 +703,7 @@ class ConversationMiner:
                     continue
                 api.add_object(name, **self._kind_kwargs(ent),
                                id=self._object_id(name),
-                               canonical_name=_canonical_name(name), title=name)
+                               canonical_name=_matching_key(name), title=name)
                 wired += 1
             return wired
 
@@ -701,7 +713,7 @@ class ConversationMiner:
             name = ent["name"]
             if not self._reifiable_name(name, transcript):
                 continue
-            canonical = _canonical_name(name)
+            canonical = _matching_key(name)
             api.add_object(name, **self._kind_kwargs(ent),
                            id=self._object_id(name),
                            canonical_name=canonical, title=name)

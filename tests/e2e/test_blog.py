@@ -105,20 +105,45 @@ _BLOG_HOSTS_DIFFER = COMPANY != TORTISE
 # written from a target that does not serve it reads and asserts on the DEPLOYED
 # document, which is a false green plus an unintended production read.
 #
-#    premiselabs.co            serves the blog
-#    tortoise.premiselabs.co   what robots.txt names TODAY; 301s /blog* to the company
-#                              origin (`_middleware.ts:513-521`, `_lib.ts:63-68`). The
-#                              as-written arm FOLLOWS that hop rather than grading it
-#                              (see the note on the probe below); the hop's direction is
-#                              asserted in `test_host_isolation_blog`.
+#    premiselabs.co            serves the blog (robots.txt names THIS host's index)
+#    tortoise.premiselabs.co   the retired origin; 301s /blog* to the company origin
+#                              (`_middleware.ts:526-533`, `_lib.ts:63-68`). The as-written
+#                              arm FOLLOWS that hop rather than grading it (see the note on
+#                              the probe below); the hop's direction is asserted in
+#                              `test_host_isolation_blog`.
 #
-# Nothing else belongs here: `app.premiselabs.co` is also in robots.txt but only for
-# its own sitemap, which the `/blog/sitemap.xml` filter drops. Keying the mode on
+# Nothing else belongs here: since #11766 robots.txt names only the marketing host's
+# sitemap index, and `app.premiselabs.co` advertises its own sitemap from its own project's
+# file. Keying the mode on
 # `ALLOW_PROD` or on the scheme was wrong twice over — that flag says "https targets
 # are permitted", not "this target is production", and a preview is https too.
 # Membership is tested against `.hostname` (lower-case, port-stripped), not `.netloc`.
 # Keep in step with #11766's repoint.
 _PRODUCTION_ORIGIN_HOSTS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
+
+
+def _as_written_or_rebased(url: str) -> str:
+    """`url` fetched AS WRITTEN against a production origin, rebased onto `COMPANY` otherwise.
+
+    robots.txt (and a sitemap index inside it) names ABSOLUTE production URLs, so a run
+    against a local wrangler server, a Pages preview or a staging host cannot answer them:
+    fetching them verbatim read and asserted on the DEPLOYED document, which is a false green
+    plus an unintended production read (see `_PRODUCTION_ORIGIN_HOSTS`). Against a production
+    origin the URL is fetched as written — the only arm where the URL the file names is the
+    URL actually REQUESTED, so a host that does not resolve reds as a transport error.
+
+    Redirects are followed on that arm by design: an advertised URL is correct as long as its
+    document ANSWERS, so a 301 onto a sitemap document is accepted. The predicate is the
+    TARGET's identity, never `ALLOW_PROD` (which says "https targets are permitted") and never
+    the scheme (a preview is https too).
+    """
+    if urlparse(COMPANY).hostname in _PRODUCTION_ORIGIN_HOSTS:
+        return url
+    parsed = urlparse(url)
+    target = urljoin(f"{COMPANY}/", parsed.path.lstrip("/"))
+    if parsed.query:
+        target += f"?{parsed.query}"
+    return target
 if os.environ.get("ALLOW_PROD") != "1" and any(
     h.startswith("https://") for h in (COMPANY, TORTISE, APP)
 ):
@@ -302,36 +327,22 @@ def test_blog_feed_and_sitemap() -> None:
 
 
 def test_robots_txt_lists_blog_sitemap() -> None:
-    """robots.txt cross-submission includes the blog sitemap, and it RESOLVES.
+    """robots.txt LEADS a crawler to the blog sitemap, and that sitemap RESOLVES.
 
-    #11766 owns the HOST the sitemap is named on: `website/robots.txt` still ships
-    `Sitemap: https://tortoise.premiselabs.co/blog/sitemap.xml`, and the retired
-    host 301s it onto the canonical one, so naming either origin is legal today.
-    That makes a host EQUALITY here wrong (it would red on a correct system until
-    #11766 lands), which was previously resolved by dropping the host entirely and
-    asserting only the path — which is what removed the last assertion that could
-    catch a sitemap pointing at a document that does not answer at all (review P2).
+    ⛔ THE DISCOVERY IS FOLLOWED, NOT PATTERN-MATCHED (#11766). robots.txt now names the
+    sitemap INDEX — the shape Google documents for an index ("you don't need to include
+    each individual sitemap") — so the blog sitemap sits one hop further away than a
+    `/blog/sitemap.xml` substring in the file. A substring probe would red on the
+    recommended configuration; asserting nothing would lose the only check that an
+    advertised sitemap actually ANSWERS. So: read the `Sitemap:` lines, and for each one
+    that is a `<sitemapindex>`, follow its `<loc>`s. Either shape passes; a crawler that
+    cannot reach the blog sitemap does not.
 
-    So keep the host-agnostic shape and assert the property that actually matters
-    and that no deferral can invalidate: every blog-sitemap URL the file names
-    resolves to a 200. A path that moved, or a sitemap removed from its own host,
-    reds here, while #11766 can repoint the host freely.
-
-    ⛔ The HOST is graded only on a run against a production origin (#11976 review).
-    There the URL is fetched as written, so a wrong-host typo reds here too. Against
-    any other target — a local wrangler server, a preview deployment, staging — the
-    host is rebased onto `COMPANY`, because robots.txt names an ABSOLUTE production
-    URL those servers do not serve, and fetching it verbatim made the run call live
-    production and assert on the deployed document — around the module-level
-    `ALLOW_PROD` contract above, which only inspects the three ENV hosts and
-    therefore cannot see a URL parsed out of a fetched file. Stated as a limit
-    rather than an accident: against a non-production target this probe grades the
-    PATH, and the host is graded by a run against a production origin. The mode is
-    decided by the SERVER UNDER TEST being a production origin
-    (`_PRODUCTION_ORIGIN_HOSTS`), never by `ALLOW_PROD` and never by the scheme —
-    that flag says "https targets are permitted", not "this target is production",
-    and a preview deployment is https too (review rounds 4 and 5).
+    ⛔ The HOST is graded only on a run against a production origin (`_as_written_or_rebased`
+    carries the rationale: a non-production target rebases onto `COMPANY`, because robots.txt
+    names absolute production URLs those servers do not serve).
     """
+    ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
     r = SESSION.get(f"{COMPANY}/robots.txt", timeout=20)
     assert r.status_code == 200
     named = [
@@ -339,48 +350,39 @@ def test_robots_txt_lists_blog_sitemap() -> None:
         for line in r.text.splitlines()
         if line.lower().startswith("sitemap:")
     ]
-    blog_sitemaps = [u for u in named if "/blog/sitemap.xml" in u]
+    assert named, "robots.txt advertises no sitemap at all"
+    discovered = list(named)
+    for advertised in named:
+        document = SESSION.get(_as_written_or_rebased(advertised), timeout=20)
+        if document.status_code != 200:
+            # A dead advertised entry is `test_the_sitemap_index_and_robots_advertise…`'s
+            # subject on the tree side; here it simply contributes no children.
+            continue
+        try:
+            root = ET.fromstring(document.text)
+        except ET.ParseError:
+            continue
+        if root.tag == f"{ns}sitemapindex":
+            discovered.extend(
+                (loc.text or "").strip() for loc in root.iter(f"{ns}loc") if (loc.text or "").strip()
+            )
+    blog_sitemaps = [u for u in discovered if "/blog/sitemap.xml" in u]
     assert blog_sitemaps, (
-        f"robots.txt must cross-submit the blog sitemap; it names {named}"
+        f"robots.txt must lead a crawler to the blog sitemap — directly, or through the "
+        f"sitemap index it advertises. It names {named}",
     )
     for sitemap_url in blog_sitemaps:
-        # ⛔ A PRODUCTION ORIGIN GRADES THE HOST, EVERY OTHER TARGET REBASES. robots.txt
-        # names an ABSOLUTE production URL
-        # (`https://tortoise.premiselabs.co/blog/sitemap.xml` today, the company host
-        # once #11766 repoints it). Fetching that verbatim from a target that does not
-        # serve it made the run call live production and assert on the deployed
-        # document, around the `ALLOW_PROD` contract above — so against any
-        # non-production target the parsed path is rebased onto `COMPANY`, the server
-        # under test. Against a production origin the URL is fetched AS WRITTEN: that
-        # is the only run where the URL robots.txt names is the URL actually
-        # REQUESTED, so a host that does not resolve reds as a transport error. It is
-        # NOT a claim that the named host serves the document itself — redirects are
-        # followed on that arm by design (the retired host legitimately 301s to the
-        # canonical one, and a robots.txt entry is correct as long as the document
-        # answers), so a 301 onto a sitemap document is accepted. The predicate is the
-        # TARGET's identity (`_PRODUCTION_ORIGIN_HOSTS`), never `ALLOW_PROD` (which
-        # says "https targets are permitted") and never the scheme (a preview is https
-        # too).
-        as_written = urlparse(COMPANY).hostname in _PRODUCTION_ORIGIN_HOSTS
-        target = sitemap_url
-        if not as_written:
-            parsed = urlparse(sitemap_url)
-            target = urljoin(f"{COMPANY}/", parsed.path.lstrip("/"))
-            if parsed.query:
-                target += f"?{parsed.query}"
-        # Follow redirects on a production run: the retired host legitimately 301s
-        # to the canonical one, and a robots.txt entry is correct as long as the
-        # document answers.
+        target = _as_written_or_rebased(sitemap_url)
         got = SESSION.get(target, timeout=20)
         assert got.status_code == 200, (
-            f"robots.txt names {sitemap_url}, which resolves via {target} to "
+            f"the blog sitemap {sitemap_url} resolves via {target} to "
             f"{got.status_code} (final url {got.url!r}) — a sitemap entry that does "
             f"not answer is dead weight"
         )
         assert "<urlset" in got.text or "<sitemapindex" in got.text, (
             f"{sitemap_url} answered {got.status_code} but is not a sitemap document"
         )
-        if not as_written:
+        if urlparse(COMPANY).hostname not in _PRODUCTION_ORIGIN_HOSTS:
             # ⛔ THE REBASE ARM MUST STAY ON THE SERVER UNDER TEST. `requests`
             # follows redirects by default and the as-written arm WANTS that, so
             # the containment has to be asserted here rather than globally: a

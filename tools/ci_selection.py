@@ -495,13 +495,38 @@ SOURCE_PATTERNS = {
                    "website/sitemap.xml",
                    "website/sitemap-company.xml",
                    "website/sitemap-product.xml",
-                   # The APP origin's own sitemap (#11615). It is advertised by
-                   # `website/robots.txt` and resolved by the contract test, so it is a
+                   # ⛔ A PREFIX, not three concrete files (#11766 review P1). The guards
+                   # police the WHOLE `sitemap-*.xml` population (`_published_sitemaps`
+                   # derives it from the tree), and the tree-is-advertised guard exists
+                   # precisely for "a sitemap was added and nothing advertises it". Named
+                   # one-by-one, that diff selected NOTHING —
+                   # measured: `select(['website/sitemap-events.xml'])` -> `surfaces: []`,
+                   # guard ABSENT — so the mutation the guard was written for merged while
+                   # the guard slept, and the NEXT website diff got billed for it. A prefix
+                   # covers today's members and every future one; it does not match
+                   # `website/sitemap.xml` (no dash), which keeps its own row above.
+                   "website/sitemap-",
+                   # The APP origin's own sitemap (#11615). It is advertised by the app
+                   # project's OWN `apps/dashboard/public/robots.txt` — ⛔ NOT by
+                   # `website/robots.txt`, which since #11766 names only the index on its own
+                   # host — and resolved by the contract test, so it is a
                    # subject of the same guard — but it lives under `apps/`, not at
                    # `website/` top level, so the `sitemap-*.xml` population does not reach
                    # it. Without this row, a dashboard reorg that deletes or renames it
                    # merges with the guard ABSENT and then REDs the next `robots.txt` diff.
                    "website/apps/dashboard/public/sitemap.xml",
+                   # ⛔ THE ADVERTISEMENT IS A GUARD INPUT TOO — the same silent-drop class,
+                   # one row further out. Both tree-side guards now read this file for the
+                   # app sitemap's ONLY remaining `Sitemap:` line
+                   # (`test_every_advertised_sitemap_is_servable_from_this_tree`,
+                   # `test_every_sitemap_in_the_tree_is_advertised`), so deleting that line
+                   # is exactly the mutation those guards exist to red. Unnamed, the file
+                   # selected NO surface and the diff that deleted it merged with the guard
+                   # ABSENT — measured before this row:
+                   # `select(['website/apps/dashboard/public/robots.txt'])` -> surfaces=[],
+                   # guard not in `test_files`; after: surfaces=['onboarding'], guard present.
+                   # The sitemap row above does not cover it — they are different files.
+                   "website/apps/dashboard/public/robots.txt",
                    # #3673: the served skill documents and the installer belong to
                    # this surface. The parity contract between
                    # `tortoise/onboarding/SKILL.md` and its served mirror is
@@ -1586,6 +1611,29 @@ def is_record_migration_path(path: str) -> bool:
     if not path.startswith(RECORD_MIGRATION_DIR):
         return False
     return bool(_RECORD_MIGRATION_RE.match(path[len(RECORD_MIGRATION_DIR):]))
+
+
+FUNCTION_SITEMAP_DIR = "website/functions/"
+
+
+def is_function_sitemap_path(path: str) -> bool:
+    """True for a Pages Function that SERVES a sitemap (`website/functions/**/sitemap.xml.ts`).
+
+    #11766 review P1. `tests/test_website_docs_consistency.py::_function_sitemap_paths`
+    derives this population FROM THE TREE, so a NEW Function sitemap is policed the moment it
+    lands — but `select()` matches `SOURCE_PATTERNS` with `startswith` and has NO glob support,
+    and `website/functions/` is deliberately NOT registrable as a prefix (the module pins that
+    the directory over-selects: `website/blog/index.html` must stay unguarded). Only the one
+    member that exists today was named, so a new member selected NOTHING — measured before
+    this predicate: `select(['website/functions/events/sitemap.xml.ts'])` -> `surfaces: []`,
+    guard ABSENT, while adding that file reds the advertisement test. That is the #1349/#3332
+    silent-drop class the surrounding rows all close.
+
+    It is a PREDICATE for the same reason `is_record_migration_path` is: the population is a
+    FAMILY (any subdirectory, one reserved filename), not a directory, and a hand-kept list of
+    today's members is precisely how tomorrow's member ships unguarded.
+    """
+    return path.startswith(FUNCTION_SITEMAP_DIR) and path.endswith("/sitemap.xml.ts")
 
 
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
@@ -3135,6 +3183,30 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by tests/test_ci_selection.py::
              # test_problem_map_guard_runs_on_the_diffs_it_guards.
              "tools/problem_map_check.py",
+             # #2852 review F1: the findings ledger's drift guard has the SAME two
+             # arms and the same hole as its #5086/#2820 siblings. The row that
+             # registers `tests/test_findings_ledger_2852.py` was `core` ONLY, and
+             # a `core` row is classification, not selection: `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry with no SOURCE_PATTERNS match, so a
+             # `tools/findings_ledger_check.py`-only diff came back `changed == []`
+             # and took the docs-only early return, which emits tier-1 only.
+             # MEASURED before this entry (`select()` in-process, at the PR head):
+             # `select(["tools/findings_ledger_check.py"])` -> surfaces=[], 87 test
+             # files, the guard's pin ABSENT — the shape this entry closed.
+             # ⚠️ RE-MEASURED after the `tier1` row this same PR adds, because the
+             # entry is no longer the LIVENESS mechanism and an earlier revision of
+             # this comment said it was: without the entry -> surfaces=[], 89 files,
+             # pin PRESENT (`tier1` selects it); with the entry -> surfaces=['core'],
+             # 819 files. Both counts move with `main`; re-derive them with the
+             # `select()` one-liner rather than carrying them. The entry's job is WIDTH — a `tools/`-only diff runs the
+             # core surface rather than tier-1 smoke. The DOC half
+             # (`docs/architecture/MEMORY-SUBSTRATE-FINDINGS-LEDGER.md`) stays
+             # unclaimed here for the sibling reason (a docs-only diff must stay on
+             # the tier-1 path, which is why the file is dual-registered in
+             # config/ci-surfaces.yml's `tier1` block).
+             # Pinned by tests/test_findings_ledger_2852.py::
+             # test_test_file_is_selected_on_the_diffs_it_guards.
+             "tools/findings_ledger_check.py",
              # #10131 review P1: tools/ci_catch_history.py owns
              # tests/test_ci_catch_history.py — registered `core` (the registration this
              # PR adds) — but `tools/` is a flat NON_PYTHON_PREFIXES entry and no
@@ -4340,6 +4412,11 @@ def select(changed_files: list[str], event: str, manifest: dict,
         # selected `surfaces: []`).
         if is_record_migration_path(path):
             return True
+        if is_function_sitemap_path(path):
+            # #11766 review P1: a Pages Function that SERVES a sitemap. `website/` is in
+            # NON_PYTHON_PREFIXES, so without this a new member was DROPPED here and the
+            # match loop below never saw it at all.
+            return True
         return any(
             path.startswith(p)
             for surface, pats in SOURCE_PATTERNS.items()
@@ -4428,6 +4505,15 @@ def select(changed_files: list[str], event: str, manifest: dict,
         # means the enumeration above cannot fall behind a new migration.
         if is_record_migration_path(c):
             matched.add("core")
+            found = True
+        # #11766 review P1: the SAME shape for the Function-sitemap family. Without it a
+        # new `website/functions/<x>/sitemap.xml.ts` matched no SOURCE_PATTERNS row (the
+        # directory is deliberately not a registrable prefix) and selected NOTHING — while
+        # the guard that DERIVES this population from the tree would have reded on it. So
+        # the diff that adds a member ran no guard. Measured before this claim:
+        # `select(['website/functions/events/sitemap.xml.ts'])` -> `surfaces: []`.
+        if is_function_sitemap_path(c):
+            matched.add("onboarding")
             found = True
         if not found:  # noqa: SIM102
             if c.startswith("tortoise/") or c.startswith("tests/") or \
