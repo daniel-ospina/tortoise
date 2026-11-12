@@ -182,9 +182,13 @@ def test_mutation_population_is_pinned():
     `check_survivor_arithmetic`'s `len(matches) > 1` branch: deleting that branch left
     every other arm, every test and `--check` green (measured).
 
-    #11902's review added the 25th: a marker-less `host:port` prose token used to be
+    #11902's review added the arm where a marker-less `host:port` prose token used to be
     installed as the shorthand ANCHOR before the marker test ran, so inserting one in
-    front of a bad shorthand defused its red (measured green).
+    front of a bad shorthand defused its red (measured green). ⛔ No ordinal, by the rule
+    the sentence below states: the "25th" that stood here named arm 25, which is
+    `an evidence cell pointing at a section that does not exist` — the described arm is
+    arm 8. An ordinal is a count, and this one was already wrong when the sentence that
+    introduced it failed to bump the floor it had just moved (25 -> 26).
 
     #11952 added the 29th: the GitHub permalink spelling (path, `#`, `L`, line number)
     matched NO pattern in this module, so both an out-of-range and an in-range
