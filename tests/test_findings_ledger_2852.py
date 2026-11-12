@@ -534,6 +534,12 @@ def test_a_blank_prose_cell_is_rejected(tmp_path, monkeypatch, cell, column, abs
         "<script>x</script/>AFTER",  # …nor is a self-closed one
         "<script>a `</script>` b</script>",  # a close tag inside a CODE SPAN is escaped
         "<SCRIPT>lorem ipsum</SCRIPT>",  # the element name is CASE-INSENSITIVE
+        "&#32;",  # a NUMERIC character reference the whitespace family decodes
+        "&#9;",
+        "&#x20;",
+        '<script>x</script foo=">**STILL-TRUE**">',  # an ATTRIBUTED close tag closes nothing
+        "<script><!--<script></script>-->lorem</script>",  # DOUBLE-escaped: the inner close is not one
+        "<template><!-- </template>VISIBLE -->",  # PARSED but hidden: a comment's close is not one
         "[<br>](https://x)",  # a LINK LABEL renders; the destination does not
         "[<span></span>](https://x)",
         "[![](x)](https://x)",  # an image inside a label
@@ -819,6 +825,10 @@ def test_a_correction_that_quotes_its_claim_and_adds_is_accepted():
         "<plaintext>lorem ipsum",  # the tokenizer switch shows everything after it as TEXT
         "<script>x</SCRIPT>AFTER",  # the close tag is found CASE-INSENSITIVELY, so `AFTER` reads
         '<script><span title="</script>">VISIBLE',  # a close tag inside a TAG's attribute is real
+        "<script>[a](</script>VISIBLE)",  # NOT a recognised link, so the close tag is literal
+        "<script><!-- </script>AFTER -->",  # the escaped state ends at the close tag
+        "<template></template>VISIBLE",  # the body ends at its OWN close tag
+        "x Ложно",  # a placeholder beside a non-Latin word is not placeholders alone
     ],
 )
 def test_brief_rendering_and_non_latin_cells_are_accepted(cell):

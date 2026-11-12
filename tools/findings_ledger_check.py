@@ -458,9 +458,17 @@ TAG_RE = re.compile(
 #: everything after it as text too (the ninth review read the tokenizer switch as hidden content
 #: — a real browser renders `<plaintext>lorem ipsum` as the visible words, so dropping it was a
 #: FALSE accusation; tenth review).
+#: Elements whose content a browser PARSES as ordinary markup but never renders: `<template>`'s
+#: contents go to an inert fragment. ⛔ Its close tag therefore has the opposite
+#: spelling-sensitivity to a raw-text element's: `</template` inside a COMMENT, a TAG's quoted
+#: attribute, a code span, an escape or a recognised link does NOT close it, and treating them as
+#: closes made the guard READ text where a browser renders nothing — 9 measured fail-opens
+#: (eleventh review of this change).
+PARSED_BUT_HIDDEN_ELEMENTS = frozenset({"template"})
+
 RAWTEXT_ELEMENTS = frozenset(
-    {"script", "style", "title", "iframe", "noembed", "noframes", "noscript", "template"}
-)
+    {"script", "style", "title", "iframe", "noembed", "noframes", "noscript"}
+) | PARSED_BUT_HIDDEN_ELEMENTS
 
 #: The element name of a matched OPEN tag, for the raw-text switch above.
 OPEN_TAG_NAME_RE = re.compile(r"<([A-Za-z][A-Za-z0-9-]*)")
@@ -508,12 +516,13 @@ LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
 #: round's re-listing across rows and leading-zero re-spelling, then round 3's
 #: replacement by a number the index never carried, then round 8's two group-orientation
 #: mutants (a governed complement behind an adverb, a marked cross-reference certifying a
-#: member), then twelve content-column arms (below) — an entity, a tag, a comment, an
+#: member), then THIRTEEN content-column arms (below) — an entity, a tag, a comment, an
 #: EMPTY-LABEL link, three placeholders (`n/a` joined, `TBC` whose twin was listed, and a
 #: MULTI-WORD pair that only the `all(...)` half sees), a correction that copies its claim in
-#: either case, and the three columns beside them (a verdict and an evidence cell commented
-#: out, and a verdict hidden behind a commented-out one). Bump it with any arm added or
-#: removed — the population is what the pin compares.
+#: either case, a raw-text element's body (in mixed case, which also pins the case-insensitive
+#: matching), and the three columns beside them (a verdict and an evidence cell commented out,
+#: and a verdict hidden behind a commented-out one). Bump it with any arm added or removed —
+#: the population is what the pin compares.
 MIN_SELF_TEST_MUTATIONS = 62
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
@@ -967,48 +976,146 @@ def _code_span_end(cell: str, i: int) -> int:
 _RAW_TEXT_CLOSE = r"</{name}\s*>"
 
 
+#: How a raw-text body starts keeping state, in the tokenizer's own vocabulary: `<script>` has an
+#: ESCAPED state entered by `<!--` and a DOUBLE-escaped state entered by a nested `<script`, and a
+#: `</script` closes the element only from the first two. ⛔ Measured with a real browser (eleventh
+#: review of this change): `<script><!-- </script>AFTER -->` SHOWS `AFTER -->` (escaped state, so the
+#: close tag ends the element), while `<script><!--<script></script>-->lorem</script>` renders BLANK
+#: (double-escaped, so the inner close tag only returns to the escaped state).
+_SCRIPT_START_RE = re.compile(r"<script(?=[\s/>])", re.IGNORECASE)
+_COMMENT_CLOSE = "-->>"
+
+
+
+def _mask_escapes_and_spans(
+    cell: str, start: int, *, structured: bool = False, preserve: re.Pattern[str] | None = None
+) -> str:
+    r"""`cell[start:]` with ESCAPES and CODE SPANS blanked in place, so their characters cannot
+    match a tag.
+
+    With `structured=True` a COMMENT, a TAG (whole, with its quoted attributes) and a RECOGNISED
+    link are blanked too — the model `<template>` needs, because its content is parsed as markup.
+    ⛔ `preserve` keeps the close tag this body is looking for: blanking it made
+    `<template></template>VISIBLE` read as one long body and refused a cell a reader can read
+    (measured, eleventh review of this change).
+
+    markdown-it emits both entity-escaped (`\</script>` and `` `</script>` `` become
+    `&lt;/script&gt;`), so a close tag inside either is not one the browser ever sees — measured.
+    Nothing else is masked: a COMMENT and a LINK are emitted with their content, so a `</script`
+    inside them IS seen by the tokenizer (also measured — refusing those cells was this guard's
+    own false accusation until the eleventh review).
+    """
+    chars = list(cell[start:])
+    i, n = 0, len(chars)
+    while i < n:
+        if chars[i] == "\\" and i + 1 < n and _ESCAPABLE_RE.match(chars[i + 1]):
+            chars[i] = chars[i + 1] = " "
+            i += 2
+            continue
+        if chars[i] == "`":
+            span_end = _code_span_end(cell, start + i)
+            if span_end > 0:
+                for k in range(i, span_end - start):
+                    chars[k] = " "
+                i = span_end - start
+                continue
+            while i < n and chars[i] == "`":
+                i += 1
+            continue
+        if structured and (preserve is None or preserve.match(cell, start + i) is None):
+            comment = COMMENT_AT_RE.match(cell, start + i)
+            if comment is not None:
+                for k in range(i, comment.end() - start):
+                    chars[k] = " "
+                i = comment.end() - start
+                continue
+            tag = TAG_RE.match(cell, start + i)
+            if tag is not None:
+                for k in range(i, tag.end() - start):
+                    chars[k] = " "
+                i = tag.end() - start
+                continue
+            link = _link_at(cell, start + i)
+            if link is not None and _RECOGNISED_LINK_TAIL.match(cell[link[2]:link[1]]):
+                for k in range(i, link[1] - start):
+                    chars[k] = " "
+                i = link[1] - start
+                continue
+        i += 1
+    return "".join(chars)
+
+
 def _raw_text_end(cell: str, start: int, name: str) -> int:
     """End of the body of the raw-text element `name` whose content begins at `start`.
 
-    Walks the body with the cell scanner's own construct rules — an ESCAPE and a CODE SPAN are
-    escaped/literal in the emitted HTML, and a COMMENT's text is emitted as one comment — so a
-    close tag inside any of them is not a close tag the browser ever sees. Tags are NOT skipped:
-    a `</script` inside a start tag's quoted attribute IS seen by the tokenizer, because in the
-    script-data state the surrounding `<span title="` is text, not a tag (measured against a real
-    browser, tenth review of this change).
+    Three facts, each measured against a real renderer (tenth and eleventh reviews of this
+    change):
+
+    * an ESCAPE and a CODE SPAN are entity-escaped by markdown-it, so a close tag inside one is not
+      a close tag the browser sees — hence `_mask_escapes_and_spans`;
+    * a COMMENT and a LINK are NOT protected — `<script><!-- </script>AFTER -->` and
+      `<script>[a](</script>VISIBLE)` both SHOW text, so treating either as opaque refused a cell a
+      reader can read;
+    * `<script>` alone has the tokenizer's ESCAPED and DOUBLE-escaped states, so the first
+      `</script` after `<!--` closes while the one after a nested `<script` does not.
     """
     close_re = re.compile(_RAW_TEXT_CLOSE.format(name=re.escape(name)), re.IGNORECASE)
-    n = len(cell)
-    i = start
+    structured = name in PARSED_BUT_HIDDEN_ELEMENTS
+    body = _mask_escapes_and_spans(cell, start, structured=structured, preserve=close_re)
+    state = "data"
+    i, n = 0, len(body)
     while i < n:
-        if cell[i] == "\\" and i + 1 < n and _ESCAPABLE_RE.match(cell[i + 1]):
-            i += 2
+        link = _link_at(cell, start + i)
+        if link is not None and _RECOGNISED_LINK_TAIL.match(cell[link[2]:link[1]]):
+            # A recognised link's destination is re-emitted as an href, so a close tag spelled
+            # inside it never reaches the tokenizer — but only when markdown-it parses the link
+            # at all, which is what `_RECOGNISED_LINK_TAIL` decides.
+            i = link[1] - start
             continue
-        link = _link_at(cell, i)
-        if link is not None:
-            i = link[1]
-            continue
-        comment = COMMENT_AT_RE.match(cell, i)
-        if comment is not None:
-            i = comment.end()
-            continue
-        if cell[i] == "`":
-            span_end = _code_span_end(cell, i)
-            if span_end > 0:
-                i = span_end
+        if name == "script":
+            if state == "data" and body.startswith("<!--", i):
+                state = "escaped"
+                i += 4
                 continue
-            while i < n and cell[i] == "`":
-                i += 1
-            continue
-        close = close_re.match(cell, i)
+            if state == "escaped":
+                if body.startswith("-->", i):
+                    state = "data"
+                    i += 3
+                    continue
+                if _SCRIPT_START_RE.match(body, i) is not None:
+                    state = "double"
+                    i += 1
+                    continue
+            if state == "double":
+                close = close_re.match(body, i)
+                if close is not None:
+                    state = "escaped"
+                    i = close.end()
+                    continue
+        close = close_re.match(body, i)
         if close is not None:
-            return close.end()
+            return start + close.end()
         i += 1
-    return n
+    return len(cell)
 
 
-def _link_at(cell: str, i: int) -> tuple[str, int] | None:
-    """`(label, end)` for a markdown link or image starting at `i`, else None.
+#: What markdown-it requires after a link's label: a DESTINATION (angle-bracketed with no `<` or
+#: `>` inside, or a bare one with no `<`, `(` or space) and an optional title, then `)`. ⛔ The
+#: distinction matters inside a raw-text body, where the destination's characters decide whether a
+#: `</script` ever reaches the tokenizer: `[b](</script>)` IS a link (markdown-it emits
+#: `<a href="/script">`, so nothing closes the element) while `[a](</script>VISIBLE)` is NOT (the
+#: angle destination ends at the first `>`, so the stray `VISIBLE)` leaves it literal and the
+#: browser DOES close — both measured, eleventh review of this change).
+_RECOGNISED_LINK_TAIL = re.compile(
+    r"^\("
+    r"\s*(?:<[^<>\n]*>|[^()<\s][^()<]*?)"
+    r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?"
+    r"\s*\)$"
+)
+
+
+def _link_at(cell: str, i: int) -> tuple[str, int, int] | None:
+    """`(label, end, destination_start)` for a markdown link or image at `i`, else None.
 
     Bracket- and paren-depth matched, because a label may contain brackets
     (`[![badge](img)](url)`) and a destination may contain balanced parens. A REFERENCE-style
@@ -1047,7 +1154,7 @@ def _link_at(cell: str, i: int) -> tuple[str, int] | None:
         elif char == ")":
             parens -= 1
             if parens == 0:
-                return label, m + 1
+                return label, m + 1, k + 1
         m += 1
     return None
 
@@ -1101,9 +1208,11 @@ def check_evidence_cells(text: str) -> list[str]:
     names exactly what closed — was refused as "records nothing". Over-refusal is the
     false-accusation class this arm must not create (a guard that reds correct prose is a
     guard a lane routes around, which is how a real drift later merges green), so a BRIEF
-    cell passes: the boundary is one word a reader can read. `CONTENT_WORD_RE` is
-    Unicode-aware for the same reason — a non-Latin correction is content, and an ASCII-only
-    word class counted it as zero.
+    cell passes: the boundary is one character a reader can read. The EMPTINESS reader is
+    `VISIBLE_CHARACTER_RE` (a letter or a digit, Unicode-aware) — making IT ASCII-only reds the
+    non-Latin case at once — while `CONTENT_WORD_RE` is the WORD reader that the placeholder and
+    copy tests use, and it is Unicode-aware so a non-Latin word is a word (`x Ложно` is a
+    placeholder beside a non-Latin word, not a placeholder alone).
 
     The copy test compares the WORDS, not the raw cells: a correction that repeats its claim
     with different markup (`**Props are not durable by construction**`) or different case

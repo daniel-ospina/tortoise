@@ -586,9 +586,14 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   then `>`, so `</script foo=">**STILL-TRUE**">` closes nothing and its attribute text stays
   hidden, while a `` `</script>` `` inside a code span is escaped and closes nothing either
   (measured against a real browser; reading the attribute text as content was a fail-open in all
-  four columns). A browser SHOWS the text of `<textarea>`, `<xmp>` and `<plaintext>`, so those
-  count — refusing `<plaintext>` was this guard's own false accusation until the tenth review
-  measured a real render and found the words on screen.
+  four columns). `<script>` additionally has the tokenizer's ESCAPED and DOUBLE-escaped states, so
+  `<!-- </script>AFTER -->` SHOWS `AFTER -->` (escaped: the close tag ends the element) while
+  `<!--<script></script>-->lorem` shows nothing (double-escaped: the inner close only returns to
+  the escaped state). `<template>` is the mirror case — its content is PARSED as markup but never
+  rendered, so there a `</template` inside a COMMENT, a TAG's quoted attribute, a code span, an
+  escape or a recognised link closes nothing. A browser SHOWS the text of `<textarea>`, `<xmp>` and
+  `<plaintext>`, so those count — refusing `<plaintext>` was this guard's own false accusation
+  until the tenth review measured a real render and found the words on screen.
   A cell whose every word is a **declared placeholder** (`n/a`, `to do`, `tbc`) is
   refused too — unless it also carries a digit (`to do 5`, `x = 2`), because a digit is content
   everywhere else here. A correction whose casefolded token sequence — letters AND digits —
@@ -608,9 +613,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   ⚠️ **THREE DECLARED limits, not closed classes:** the placeholder denylist is a list (a placeholder
   outside it is not refused, pinned by `test_an_unlisted_placeholder_is_the_declared_limit`); the
   render-blank list is the five families above (a shape outside them — an element the browser
-  hides with CSS, `<span hidden>x</span>` say — renders blank and is not refused, while a
+  hides with CSS, `<span hidden>lorem ipsum</span>` say — renders blank and is not refused, while a
   REFERENCE-style link `[][ref]` is accepted because with no reference definition it renders its
-  literal text); and the copy test is
+  literal text, and a raw `<img alt="lorem ipsum">` is refused although the browser lays its alt
+  text out, because the tag family strips it); and the copy test is
   **equality**, so a NEAR-copy — the claim with one word added, dropped or swapped, including the
   word that inverts it — is not refused. Neither length nor truth is checked: a short true statement
   and a long false one both pass, because this arm asks whether a row records something, not whether
