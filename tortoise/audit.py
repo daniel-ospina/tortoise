@@ -1184,7 +1184,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "excludes from a factor's inputs "
                     "(#9269) — " + _dropped_input(s) + ", and a re-audit reads "
                     "CLEAN over it. Target a CLAIM successor")
-        if (s["carrier_status"] or "") == DRAFT_STATUS:
+        if (s["carrier_status"] or "") == DRAFT_STATUS and not s["carrier_terminal"]:
+            # ⛔ …and NOT when the legacy ``outdated`` flag already makes it TERMINAL:
+            # ``ep.py`` computes ``is_terminal = status in TERMINAL_EXCLUDED_STATUSES
+            # or bool(outdated)``, so a ``draft(outdated)`` successor is not repaired by
+            # a promotion at all (measured: ``status='live', outdated=true`` →
+            # ``iterations 0``, ``confidences {}``; clearing ``outdated`` alone →
+            # ``effective_n 2.5255``). The terminal arm below states it instead
+            # (#12210 review, P2).
             # ⛔ A DRAFT successor is not terminal, so without this arm it takes the
             # ordinary one — but EP strips a draft input exactly as it strips a
             # terminal input (#780). The re-point would then read CLEAN on a
@@ -1205,10 +1212,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     + ("excludes from a direct edge before evaluation — the same "
                        "exclusion a terminal endpoint gets, and no skipped-factor "
                        "record exists (measured: no factor, no record): promote it "
-                       "to live instead of re-pointing onto it"
+                       "to live **and then re-point onto it** — promotion alone "
+                       "repairs nothing, because the stale edge still ends at the "
+                       "superseded Object (measured: ``confidences {}`` with the "
+                       "promotion alone, ``effective_n 2.9296`` once the edge moves "
+                       "too)"
                        if not s["is_operator"] else
-                       "strips like a terminal input (#780) — it needs promoting "
-                       "to live as well") + "; " + _dropped_input(s))
+                       "strips like a terminal input (#780) — promote it to live "
+                       "**and then re-point onto it**: promotion alone leaves the "
+                       "stale edge where it is (measured: ``confidences {}``)") + \
+                    "; " + _dropped_input(s))
         if s["carrier_terminal"]:
             return ("; the successor it names is ITSELF "
                     f"{_quoted(_status_or_flag(s['carrier_status'], s['carrier_outdated']))}"
@@ -1435,7 +1448,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             return (f" ⛔ {succ} is OPERATOR-SHAPED " + _succ_test(s) +
                     ", which EP excludes from a factor's inputs (#9269): "
                     f"{_dropped_input(s)} — target a CLAIM successor")
-        if (status or "") == DRAFT_STATUS:
+        if (status or "") == DRAFT_STATUS and not s["carrier_terminal"]:
             # ⛔ SPLIT BY MECHANISM — the same split ``_successor_note`` already
             # carries: EP STRIPS a draft on the OPERATOR lane (``ep.py`` Batch 2, in
             # Python, with a record) and EXCLUDES the row on the DIRECT lane before
@@ -1444,21 +1457,33 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # a direct row: 2 confidences live, 0 after the supersession, ``skipped:
             # None``; so "EP strips the same way (#780)" was false there (round 19,
             # #12111).
-            # ⛔ …and on a row whose OWN endpoint is in neither EP arm, the promotion
-            # is NOT the repair: the support never counted, so promoting the successor
-            # leaves the belief exactly where it was (measured: promoting a draft
-            # successor on a shaped-endpoint row and writing the equivalent edge →
-            # ``confidences {}``; only clearing the SOURCE shape restores it)
-            # (#12210 review, P2).
+            # ⛔ SPLIT between the two rows: on a NEITHER-arm row the promotion is a
+            # PRECONDITION of the repair (measured: clearing the shape and moving the
+            # edge onto a draft → ``confidences {}``; the same plus ``status='live'``
+            # → ``effective_n 2.5255``), while on a readable-endpoint row it is a step
+            # the RE-POINT must accompany (measured: promotion alone → ``confidences
+            # {}``, because the stale edge still ends at the superseded Object;
+            # promotion + re-point → ``effective_n 2.9296``). Neither sentence may say
+            # promotion repairs on its own (#12210 review, P2/P3).
             if s["shape"] and not s["is_operator"]:
-                return (f" ⛔ {succ} is '{DRAFT_STATUS}', and promoting it does NOT "
-                        "repair this: " + _dropped_input(s))
+                # ⛔ On a NEITHER-arm row the promotion is a PRECONDITION, not a
+                # repair on its own: clearing the shape and moving the edge onto a
+                # draft builds no factor (measured ``iterations 0``, ``confidences
+                # {}``), and the same two steps plus ``status='live'`` DO (measured
+                # ``effective_n 2.5255``) — so the sentence names the order rather
+                # than denying the step (#12210 review, P2).
+                return (f" ⛔ {succ} is '{DRAFT_STATUS}', so promoting it to live is "
+                        "a PRECONDITION of this repair, not a substitute for it — "
+                        "promote it FIRST, then clear the shape and move the edge "
+                        "(moving onto it while it is a draft builds no factor: "
+                        "measured ``confidences {}``)")
             return (f" ⛔ {succ} is '{DRAFT_STATUS}', which EP "
                     + ("strips the same way (#780): promote it to live as well — "
                        if s["is_operator"] else
                        "EXCLUDES from a direct edge before evaluation — no factor, "
-                       "no skipped-factor record (measured), so promoting it to live "
-                       "is the repair: ")
+                       "no skipped-factor record (measured), so promote it to live "
+                       "AND re-point (promotion alone leaves the stale edge where it "
+                       "is): ")
                     + _dropped_input(s))
         if not s["carrier_terminal"]:
             return ""
@@ -1537,6 +1562,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # contradicting the destination on a draft that also carries the legacy
         # ``outdated`` flag (#12210 review, P2).
         unread = s["carrier_count"] == 1 and _succ_unread(s)
+        # ⛔ A neither-arm row is DROP *because nothing was assembled* — but once the
+        # shape is cleared the edge DOES carry, measured (clear shape + move →
+        # ``effective_n 2.5255``; before → ``confidences {}``), so where the destination
+        # is readable the disposition is CARRY, matching the repair the same string
+        # prescribes. Only a neither-arm row with nothing readable to carry onto is
+        # DROP (#12210 review, P3).
+        neither_drops = (neither_arm
+                         and (unread or s["carrier_count"] != 1))
         if s["carrier_count"] == 1 and _succ_refused(s):
             # ⛔ A CARRY needs a successor EP actually reads — and the check may only
             # say so when the name resolves to ONE carrier (an ambiguous name is the
@@ -1555,10 +1588,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "kept, not dropped: carry it where EP can read it (a :Point "
                 "operator the engine evaluates), never by re-attaching it to a "
                 "successor that cannot carry it")
-        elif neither_arm or neutral:
+        elif neither_drops or neutral:
             why = ("EP assembles no factor for this endpoint in either arm, so the "
                    "support never counted"
-                   if neither_arm else
+                   if neither_drops else
                    f"this edge is {_quoted(s['direction'])} (neutral), so no "
                    "confidence transfers through it by design")
             disposal = (

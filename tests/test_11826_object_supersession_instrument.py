@@ -2958,16 +2958,13 @@ def test_an_id_less_row_with_an_ambiguous_successor_asks_which_one(sdk):
         "the repair cannot pick one, so it must not name one: " + fix)
 
 
-def test_a_neither_arm_row_with_a_DRAFT_successor_keeps_DROP(sdk):
-    """On a "neither arm" row the support NEVER counted — promoting the draft is not the repair.
+def test_a_neither_arm_draft_row_names_the_promotion_as_a_precondition(sdk):
+    """On a neither-arm row the promotion is a PRECONDITION — not the repair, and not a denial.
 
-    The DRAFT disposition ran before the neither-arm DROP arm, so it asserted
-    "the same edge write builds the factor after the promotion (``effective_n
-    2.263``)" on a row where that measurement is false: measured — promote the draft
-    and write the equivalent edge onto it → ``confidences {}``, and only clearing the
-    SOURCE shape as well restores 2 confidences, while the disposition never mentions
-    the source. Following it exactly leaves `rows []` over an absent belief — the
-    false CLEAN this routing exists to prevent (#12210 review, P2).
+    Measured: clearing the shape and moving the edge onto a draft → `iterations 0`,
+    `confidences {}`; the same two steps plus `status='live'` → `effective_n 2.5255`.
+    So the sentence must name the ORDER, and must not claim (as an earlier revision
+    did) that "promoting it does NOT repair this" (#12210 review, P2).
     """
     actor = sdk.create_entity("subject", "AcmeCorp")["node"]
     v1 = _obj(sdk, "PolicyV1")
@@ -2981,12 +2978,35 @@ def test_a_neither_arm_row_with_a_DRAFT_successor_keeps_DROP(sdk):
                  if i.node_id == v1["id"])
     fix = issue.fix
     assert "EP builds NO factor in either arm" in fix, fix
+    assert "PRECONDITION of this repair" in fix, (
+        "clearing the shape alone builds no factor: " + fix)
+    assert "does NOT repair this" not in fix, (
+        "the promotion IS needed here, as a precondition: " + fix)
+    assert "ONCE PROMOTED" in fix, (
+        "and the §3.1 disposition says so too: " + fix)
+
+
+def test_a_neither_arm_row_with_a_TERMINAL_successor_keeps_DROP(sdk):
+    """A dead successor on a neither-arm row: nothing was assembled and nothing is readable.
+
+    Measured: the shape must be cleared AND the edge moved onto a LIVE carrier; a
+    terminal successor leaves `confidences {}` and a quiet re-audit, so the
+    disposition is DROP (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "EP builds NO factor in either arm" in fix, fix
     assert "the disposition here is DROP" in fix, fix
-    assert "ONCE PROMOTED" not in fix, (
-        "the source is in neither EP arm, so promotion restores nothing: " + fix)
-    assert "CARRY the IMPL" not in fix, fix
-    assert "promoting it to live is the repair" not in fix, (
-        "the source is in neither arm, so the promotion repairs nothing: " + fix)
+    assert "ONCE PROMOTED" not in fix, fix
 
 
 def test_a_draft_successor_carrying_the_legacy_outdated_flag_is_not_promoted(sdk):
@@ -3013,3 +3033,8 @@ def test_a_draft_successor_carrying_the_legacy_outdated_flag_is_not_promoted(sdk
     assert "NOT the one it names ('PolicyV2')" in fix, fix
     assert "ONCE PROMOTED" not in fix, (
         "a promotion does not clear the legacy terminal flag: " + fix)
+    # ⛔ …and NO promote instruction anywhere: measured, `status='live'` leaves the
+    # node reading ('live', True), `iterations 0` and ``confidences {}`` — the belief
+    # returns only once `outdated` is cleared too (#12210 review, P2).
+    assert "promot" not in fix.lower(), (
+        "a promotion cannot repair a successor the legacy flag keeps terminal: " + fix)
