@@ -284,6 +284,37 @@ def test_a_nand_counter_claim_written_as_an_event_is_surfaced(sdk):
 
 # ── 4. the :Point lane is unchanged ───────────────────────────────────────
 
+def test_two_distinct_event_counter_claims_are_both_surfaced(sdk):
+    """The fusion must dedupe on the INTERNAL node id, not on the emitted
+    ``point_id`` (review F1, measured).
+
+    ``epistemic_identity`` coalesces ``id`` and ``eventId``, and
+    ``_event_guarded_merge``'s suffix arm leaves two DISTINCT Events coalescing
+    to one value. Keying the conflict fusion on that value dropped a genuine
+    counter-claim, and which one survived was storage row order. Here the two
+    NANDers carry colliding DISPLAY identities (``{id:'C1'}`` and
+    ``{eventId:'C1'}``) and are distinct nodes.
+    """
+    claim = sdk.create_point("statement", "the weekly report is accurate")
+    g = sdk._get_proj().g
+    g.query("CREATE (e:Event {id:'C1', name:'first counter-claim', "
+            "eventKind:'note', status:'live'})")
+    g.query("CREATE (e:Event {eventId:'C1', name:'second counter-claim', "
+            "eventKind:'note'})")
+    g.query(
+        "MATCH (a:Event {id:'C1'}), (t) WHERE t.id = $t "
+        "CREATE (a)-[:NAND]->(t)", params={"t": claim["id"]})
+    g.query(
+        "MATCH (a:Event {eventId:'C1'}), (t) WHERE t.id = $t "
+        "CREATE (a)-[:NAND]->(t)", params={"t": claim["id"]})
+
+    block = assemble_why_blocks(sdk._get_proj(), [claim["id"]])[claim["id"]]
+    snippets = [n["content_snippet"] for n in
+                (block.get("conflicts") or {}).get("nands") or []]
+    assert sorted(snippets) == ["first counter-claim", "second counter-claim"], (
+        "two distinct counter-claims collapsed into one fusion entry: " + repr(snippets))
+
+
 def test_the_point_lane_gains_no_assessment_and_keeps_its_supersession(sdk):
     """A claim nothing judged gets NO ``assessment`` key, and still gets the
     Point-only supersession view it always had.

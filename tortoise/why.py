@@ -26,7 +26,7 @@ Contract invariants (plan §3.1.1/§3.1.3/§3.1.4/§6.1 + #2101):
   nothing existing is renamed/removed; flag-off emission is byte-identical
   to today.
 - **Budgets:** ≤ 3 support_chain entries, ≤ 2 NAND conflicts, 1 supersession
-  line, ≤ 3 dig_deeper pointers.
+  line, ≤ 3 dig_deeper pointers, ≤ 3 assessments (#11928).
 - **Deterministic dig-deeper labels:** ``{label, kind, target}`` derived from
   kind + target verb phrases (UXD 4), never LLM prose. Kinds:
   ``supports | nand | superseded | tradeoff`` (ONTOLOGY §5 vocabulary).
@@ -42,13 +42,23 @@ Contract invariants (plan §3.1.1/§3.1.3/§3.1.4/§6.1 + #2101):
   ``tradeoffs`` on a non-decision point). Clean empty is NEVER a
   degradation — this module raises nothing into the recall turn
   (fail-open: any assembly error degrades to "no enrichment keys").
-- **Bounded reads (S8):** the assembly issues a FIXED number of batch
-  Cypher queries (supports×2, conflicts, supersession, tradeoffs, plus one
-  dedicated persisted ep read — the single-node α/β read that never runs
-  full propagation), each covering the whole batch of point ids — never a
-  per-result loop. The ep read is DEDICATED (not riding the conflict query)
-  so the canonical ``ep`` block is real for every point, including points
-  with zero active NANDers.
+- **Bounded reads (S8):** the assembly issues a number of batch Cypher
+  queries that is FIXED for a given BATCH COMPOSITION and never grows with batch
+  SIZE or with result rows. The unit is the PRESENT EPISTEMIC LABEL, not the
+  whole batch (#11928): the existence anchor probes labels in
+  ``live.EPISTEMIC_LABELS`` order until every id resolves, then each dependent
+  read (supports×2, conflicts, tradeoffs, assessments) runs once per RESOLVED
+  label over THAT label's ids. So a Point-only batch — the overwhelming majority
+  of enriched recalls — costs exactly 7: one anchored ep read, six dependent
+  reads (supports×2, conflicts, tradeoffs, assessments, supersession). A batch
+  with four distinct labels costs at most 4 + 5×4 + 1 = 25. The counts are
+  pinned by ``tests/test_w4_why_enrichment.py::test_assembly_bounded_batch_reads``
+  (Point-only == 7, size-independent) and
+  ``tests/test_11928_why_explain_labels.py::test_the_batch_read_count_is_fixed_for_a_goal_batch``
+  (an ``:Object`` batch is bounded by the label count, not the batch size).
+  ⚠️ The ep read is DEDICATED (not riding the conflict query) so the canonical
+  ``ep`` block is real for every node, including nodes with zero active
+  NANDers.
 
 The W4 flag (``TORTOISE_W4_ENRICHMENT``) is honored on every enriched
 surface — a surface that emits the keys with the flag OFF, or drops them
@@ -179,18 +189,29 @@ def _severity(mean: float) -> str:
 
 
 def _assemble_supports(rows: list, by_id: dict[str, dict], *,
-                       merge: bool = False,
-                       operator_leg: bool = False) -> None:
+                       operator_leg: bool = False,
+                       seen: dict[str, dict[str, dict]] | None = None,
+                       rank: dict[tuple[str, str], tuple[str, str]]
+                       | None = None) -> None:
     """Fold support-chain rows into the blocks. Collect ALL candidates per
     point (dedup by point id), then sort by (weight desc, point_id) and
     truncate to the ≤3 cap — the selected subset is the strongest ≤3 and
     the ordering is deterministic regardless of Cypher row order.
 
-    ``merge=True`` (the second leg) ADDS the leg's candidates into the
-    chain the first leg already built instead of overwriting it — a point
-    with BOTH operator-mediated supports AND direct statement→statement
-    IMPL edges must surface the union of both legs (mixed-edge points were
-    silently dropping the operator-mediated leg before this fix).
+    ``seen`` is the fusion map, OWNED BY THE CALLER and SHARED BY BOTH LEGS
+    (``pid -> {internal node id: entry}``): a point with BOTH operator-mediated
+    supports AND direct statement→statement IMPL edges must surface the union of
+    both legs (mixed-edge points were silently dropping the operator-mediated leg
+    before #4081), and the union has to dedupe on a key that is actually unique.
+
+    ⛔ THE DEDUPE KEY IS THE INTERNAL NODE ID, never the emitted ``point_id``
+    (#11928 review F1). ``point_id`` is a DISPLAY identity — ``epistemic_identity``
+    coalesces ``id`` and ``eventId``, and ``_event_guarded_merge``'s suffix arm
+    leaves two DISTINCT Events coalescing to one value. Keying the fusion on it
+    dropped a real supporter, and which of the two survived was storage row
+    order: measured, two distinct ``:Event`` supporters of one claim produced ONE
+    chain entry. ``id(sup)`` is unique per node, so it is the key; the entry still
+    carries the display id for the consumer.
 
     ``operator_leg=True`` reads the FOUR extra columns of
     ``_SUPPORT_OP_CYPHER`` (the mediating operator's id / type / label and its
@@ -199,18 +220,21 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
     operator and passes ``operator_leg=False``; its entries still get all four
     keys set to ``None`` so every support entry has ONE shape (a present null
     is a measured "no operator", never an unread dimension — §3.1.3)."""
-    pending: dict[str, dict[str, dict]] = {}
+    pending: dict[str, dict[str, dict]] = seen if seen is not None else {}
     # The deterministic tie-break rank per (target, supporter) is kept OUT of
-    # the emitted entry so the block's key set stays exactly the contract's.
-    rank: dict[tuple[str, str], tuple[str, str]] = {}
+    # the emitted entry so the block's key set stays exactly the contract's, and
+    # it is SHARED WITH ``seen`` — they are one state: a supporter seen by the
+    # first leg and again by the second must be compared against the rank that
+    # already won. A per-call rank raised KeyError on exactly that row (measured).
+    ranks: dict[tuple[str, str], tuple[str, str]] = rank if rank is not None else {}
     for row in rows:
         if operator_leg:
             (pid, sup_id, content, sup_conf, pa, pb, ea, eb,
-             op_id, op_type, op_label, mitigation, mit_id) = row
+             op_id, op_type, op_label, mitigation, mit_id, sup_key) = row
         else:
-            pid, sup_id, content, sup_conf, pa, pb, ea, eb = row
+            pid, sup_id, content, sup_conf, pa, pb, ea, eb, sup_key = row
             op_id = op_type = op_label = mitigation = mit_id = None
-        if not pid or not sup_id:
+        if not pid or not sup_id or sup_key is None:
             continue
         # #11702: `weight` is the supporter's PERSISTED belief, or None when it
         # has none -- never the 0.5 the `coalesce(…, 1.0)` default produced.
@@ -244,13 +268,13 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
         # order, not from this rank; the sentinel exists so a future single-call
         # merge cannot silently invert it.
         key = (op_id or "\uffff", mit_id or "\uffff")
-        existing = pending.get(pid, {}).get(sup_id)
+        existing = pending.get(pid, {}).get(sup_key)
         if existing is None:
-            pending.setdefault(pid, {})[sup_id] = entry
-            rank[(pid, sup_id)] = key
+            pending.setdefault(pid, {})[sup_key] = entry
+            ranks[(pid, sup_key)] = key
             continue
-        # ONE entry per supporter (the ≤3 cap and the merge leg both dedup by
-        # point id), so a supporter mediated by MORE THAN ONE operator cannot
+        # ONE entry per supporter (the ≤3 cap and both legs dedup by the
+        # INTERNAL node id), so a supporter mediated by MORE THAN ONE operator cannot
         # be represented faithfully — and an operator mitigated MORE THAN ONCE
         # has the same shape. Pick the LOWEST (operator, mitigation) pair
         # rather than whichever row the storage layer returned first: row order
@@ -260,9 +284,17 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
         # was written first). #9962: the mitigation leg is read live-only, so
         # "more than once" here is several CURRENT mitigations; a withdrawn one
         # is not a candidate and can no longer win the tie-break.
-        if key < rank[(pid, sup_id)]:
-            pending[pid][sup_id] = entry
-            rank[(pid, sup_id)] = key
+        # The "no operator" sentinel is the WEAKEST rank, so a missing entry
+        # (a caller that shared ``seen`` without ``rank``) degrades to the
+        # original cross-leg ``setdefault`` semantics — first entry wins — rather
+        # than raising out of the whole support dimension.
+        if key < ranks.get((pid, sup_key), ("\uffff", "\uffff")):
+            pending[pid][sup_key] = entry
+            ranks[(pid, sup_key)] = key
+    # Re-derive the chain from EVERYTHING seen so far, for every point in the
+    # shared map — so the second leg's call re-sorts and re-caps across BOTH
+    # legs (deterministic strongest ≤3) without a separate merge branch, and a
+    # supporter reachable through both legs appears once (same key either way).
     for pid, chain_map in pending.items():
         # #11702: absent-supporter TIER -- `weight` is None for a supporter
         # with no persisted belief, and it sorts after EVERY weighted one so
@@ -272,19 +304,6 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
                        key=lambda s: (s["weight"] is None,
                                       -(s["weight"] or 0.0),
                                       s["point_id"]))
-        if merge and by_id[pid].get("support_chain"):
-            # Union with the first leg's already-selected candidates, then
-            # re-sort + re-cap across BOTH legs (deterministic strongest ≤3).
-            # Dedup by point_id first — a supporter reachable through both
-            # the operator-mediated and the direct edge must appear once.
-            by_sup: dict[str, dict] = {
-                s["point_id"]: s for s in by_id[pid]["support_chain"]}
-            for s in chain:
-                by_sup.setdefault(s["point_id"], s)
-            chain = sorted(by_sup.values(),
-                           key=lambda s: (s["weight"] is None,
-                                          -(s["weight"] or 0.0),
-                                          s["point_id"]))
         by_id[pid]["support_chain"] = chain[:W4_MAX_SUPPORT]
 
 
@@ -301,7 +320,12 @@ def _assemble_conflicts(rows: list, by_id: dict[str, dict]) -> None:
             continue
         pid = row[0]
         nid = row[1]
-        if nid not in pending.setdefault(pid, {}):
+        # #11928 review F1: the dedupe key is the INTERNAL node id (the last
+        # column), never the display id — two distinct Events can share one.
+        nkey = row[13]
+        if nkey is None or nid is None:
+            continue
+        if nkey not in pending.setdefault(pid, {}):
             text = row[2]
             # #11702: the counter-claim's PERSISTED belief -- a direct Point's
             # own columns, else the NAND operator's. `None` when neither has
@@ -315,7 +339,7 @@ def _assemble_conflicts(rows: list, by_id: dict[str, dict]) -> None:
                 weight = belief_value(
                     confidence=row[8], posterior_alpha=row[9],
                     posterior_beta=row[10], ep_alpha=row[11], ep_beta=row[12])
-            pending[pid][nid] = {
+            pending[pid][nkey] = {
                 "point_id": nid,
                 "content_snippet": _snippet(text),
                 "severity": None if weight is None else _severity(weight),
@@ -343,11 +367,14 @@ def _assemble_tradeoffs(rows: list, by_id: dict[str, dict]) -> None:
         pid = row[0]
         kinds.setdefault(pid, row[1] or "")
         alt_id = row[2]
-        if not alt_id:
+        # #11928 review F1: dedupe on the INTERNAL node id (row[12]), never on
+        # the display id — see _assemble_supports.
+        alt_key = row[12]
+        if not alt_id or alt_key is None:
             continue
         alts = pending.setdefault(pid, {})
-        if alt_id not in alts:
-            alts[alt_id] = {
+        if alt_key not in alts:
+            alts[alt_key] = {
                 "point_id": alt_id,
                 "label": _snippet(row[3]),
                 "kind": row[4] or "",
@@ -430,7 +457,8 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
     """Fold the dedicated persisted α/β read into the canonical ``ep``
     sub-block (flag-first pairing for agents — variance/contested ride the
     block; same formula as annotate_ep_batch / TortoiseEP). Every row is an
-    EXISTING :Point node (the query is the existence anchor). A point with NO
+    EXISTING epistemic node — any of the four labels, since #11928 — and the
+    query is the existence anchor. A point with NO
     persisted belief in any form carries ``confidence_mean: None`` and
     ``ep_state: "absent"`` (#11702) — never the Beta(1,1) mean 0.5, which
     admitted a never-measured claim through any floor at or under 0.5 as if it
@@ -749,7 +777,16 @@ _SUPPORT_OP_CYPHER = (
     # resolves deterministically (lowest mitigation id) instead of to whichever
     # row the storage layer returned first — the sibling of the operator
     # tie-break below, and the same defect shape.
-    "  op.id, op.op_type, op.label, mit.content, mit.id"
+    "  op.id, op.op_type, op.label, mit.content, mit.id, "
+    # ⛔ #11928 review F1 — THE LAST COLUMN IS THE DEDUPE KEY. The emitted
+    # ``point_id`` above is a DISPLAY identity (coalesce(id, eventId)) and is NOT
+    # unique: ``_event_guarded_merge``'s suffix arm leaves two distinct Events
+    # coalescing to one value. Keying the fusion on it dropped a real supporter
+    # (measured: two distinct :Event supporters, one in the chain, and which one
+    # survived was storage row order). The internal node id is unique, so the
+    # dedupe key is ``id(n)`` — the same split ``ranking.resolve_contested_relevance``
+    # made, and the rule ``live.epistemic_identity`` states.
+    "  id(sup)"
 )
 _SUPPORT_DIRECT_CYPHER = (
     "MATCH (n:{label}) WHERE n.id IN $ids "
@@ -759,7 +796,8 @@ _SUPPORT_DIRECT_CYPHER = (
     f"AND (sup.is_operator = false OR sup.is_operator IS NULL) AND {_exclude_status_clause('sup')} "
     f"RETURN n.id, {epistemic_identity('sup')}, {_text_expr('sup')}, "
     "  sup.confidence, sup.posterior_alpha, sup.posterior_beta, "
-    "  sup.ep_alpha, sup.ep_beta"
+    "  sup.ep_alpha, sup.ep_beta, "
+    "  id(sup)"  # #11928 review F1: the DEDUPE key (see _SUPPORT_OP_CYPHER)
 )
 # Conflicts (NANDer-only; the target ep read is the dedicated _EP_CYPHER).
 # The NANDer is either a direct statement (operator-less NAND edge) or a NAND
@@ -803,7 +841,12 @@ _CONFLICTS_CYPHER = (
     # and then took a real severity TIER on it.
     "  src.confidence, src.posterior_alpha, src.posterior_beta, "
     "  src.ep_alpha, src.ep_beta, "
-    "  c.confidence, c.posterior_alpha, c.posterior_beta, c.ep_alpha, c.ep_beta"
+    "  c.confidence, c.posterior_alpha, c.posterior_beta, c.ep_alpha, c.ep_beta, "
+    # #11928 review F1: the DEDUPE key, on the INTERNAL id of whichever node
+    # supplied the claim — the coalesced identity returned above is a display
+    # value and two distinct Events can share one (measured: a genuine
+    # counter-claim silently dropped).
+    "  coalesce(id(src), id(c))"
 )
 # Dedicated persisted ep read for every requested node (single-node α/β —
 # never full propagation). Runs unconditionally so the canonical ``ep`` block
@@ -867,7 +910,8 @@ _TRADEOFFS_CYPHER = (
     # an absent alternative `ep_weight` 0.5, which then SORTED it above a
     # measured 0.4 one (the same inversion the support chain just had fixed).
     "  alt.confidence, alt.posterior_alpha, alt.posterior_beta, "
-    "  alt.ep_alpha, alt.ep_beta"
+    "  alt.ep_alpha, alt.ep_beta, "
+    "  id(alt)"  # #11928 review F1: the DEDUPE key (display id above is not unique)
 )
 # Assessment (#11928): the DERIVED judgement that decides this belief, WITH the
 # reading, the target and the comparison that produced it. Without it a goal's
@@ -1064,17 +1108,24 @@ def assemble_why_blocks(
         #    id is assembled twice.
         try:
             for _label, _ids in resolved.items():
+                # ONE fusion map per label, shared by both legs: the union is
+                # re-derived and re-capped after each call (see _assemble_supports).
+                _seen: dict[str, dict[str, dict]] = {}
+                _rank: dict[tuple[str, str], tuple[str, str]] = {}
                 _assemble_supports(
                     g.query(_for_label(_SUPPORT_OP_CYPHER, _label),
                             params={"ids": _ids}).result_set,
                     blocks,
                     operator_leg=True,
+                    seen=_seen,
+                    rank=_rank,
                 )
                 _assemble_supports(
                     g.query(_for_label(_SUPPORT_DIRECT_CYPHER, _label),
                             params={"ids": _ids}).result_set,
                     blocks,
-                    merge=True,
+                    seen=_seen,
+                    rank=_rank,
                 )
         except Exception as e:  # noqa: BLE001, RUF100 — fail-open per dimension
             logger.warning("W4 support-chain read failed: %s", e)

@@ -1447,6 +1447,17 @@ def test_ontology_vocabulary_registered():
     sections_row = "why · conflicts · supersession · tradeoffs · dig_deeper · warnings"
     assert sections_row in text, \
         "ontology §5 why-block sections row drifted from the W4_KEYS vocabulary"
+    # ⛔ #11928 — `assessment` is a NEW emitted key and is NOT yet in the §5 row:
+    # registering it is an ONTOLOGY.md edit, which #11928's brief puts out of
+    # scope (the owner approves ONTOLOGY content). Leaving the row alone while
+    # W4_KEYS grew is EXACTLY the drift this test exists to catch, so the delta
+    # is asserted explicitly instead of being allowed to pass silently — and it
+    # fails the day a key is added or the row catches up, which is the point.
+    row_keys = {k.strip() for k in sections_row.split("·")}
+    assert set(W4_KEYS) == row_keys | {"assessment"}, (
+        "enriched-item keys and the ONTOLOGY §5 why-block sections row have "
+        "drifted by something other than #11928's unregistered `assessment`: "
+        f"keys={sorted(set(W4_KEYS))} row={sorted(row_keys)}")
 
 
 def test_bare_point_empty_conventions(w4_flag):
