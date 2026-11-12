@@ -32,7 +32,33 @@ _REQUIRED_LIMIT_KEYS = (
     "max_api_keys",
     "included_write_ops_per_month",
     "max_graph_nodes",
+    # #11758: the two purchasable storage dimensions. REQUIRED — a tier that
+    # publishes no storage allowance must fail LOUDLY here rather than read as
+    # "unlimited storage, free", which is the false-PASS this tuple exists to
+    # stop. `null` is an ALLOWED value (it is the recorded state for the
+    # free/anon record allowance); a MISSING key is not.
+    "max_postgres_storage_bytes",
+    "max_graph_storage_mb",
 )
+
+
+#: The dimension names ``billing.storage.dimensions`` is keyed by. They are the
+#: DECLARED registry names from ``tortoise.cost_dimensions.DIMENSIONS`` — not a
+#: second vocabulary. The customer-facing words live beside them in ``label``.
+#: Declared here as the artifact's contract; ``tests/test_pricing_storage_
+#: dimensions.py`` pins them to ``allowance_gate.ALLOWANCE_KEYS``, so the artifact,
+#: the loader and the gate cannot drift into three spellings. ⚠ A RUNTIME import
+#: of ``allowance_gate`` here is deliberately avoided: it imports ``quota``, which
+#: imports this module — the pin belongs in a test, not in a cycle.
+STORAGE_DIMENSIONS = ("postgres_storage", "graph_storage")
+
+#: Decimal, and it is pinned ON PURPOSE. The two meters publish DIFFERENT units
+#: (``postgres_storage`` in bytes, ``graph_storage`` in decimal MB), so a silent
+#: MiB/decimal mix is the measured error class
+#: ``docs/architecture/STORAGE-ARCHITECTURE.md`` records. One definition, one
+#: conversion, no per-caller factor. The artifact restates it in
+#: ``billing.storage.gb_definition`` and a test pins the two agree.
+BYTES_PER_GB = 1_000_000_000
 
 
 def _load() -> dict:
@@ -74,6 +100,71 @@ def tier_limits(tier: str) -> dict:
         "max_graph_nodes": t.get("max_graph_nodes"),
         "overage": bool(t.get("overage", False)),
     }
+
+
+def storage_limits(tier: str) -> dict:
+    """Return a tier's two storage allowances, keyed by the GATE's own keys (#11758).
+
+    ⛔ **DELIBERATELY NOT part of :func:`tier_limits`.** That dict is handed
+    around as "the org's limits" and reaches ``quota.enforce_org_limit``; the
+    allowance gate arms on *presence* — ``allowance_gate.enforce_allowances``
+    does ``if dim.limit_key not in limits: continue``
+    (``allowance_gate.py``:823). Both storage dimensions are currently
+    **BLOCKED** there (``postgres_storage`` has no per-org byte meter — a
+    per-org split would be an ALLOCATION, not a measurement; ``graph_storage``'s
+    own contract forbids capping on the ledger figure because the HNSW index is
+    under-reported 8.5x-21.7x). Putting either key into the dict every caller
+    treats as "the limits" is therefore one ``{**tier_limits(t), ...}`` away
+    from arming a blocked dimension and answering HTTP 500 on every gated
+    write. ``quota.py`` states the intended state: *"INERT BY DEFAULT: no
+    production resolver emits an ``ALLOWANCE_KEYS`` value"*. This accessor keeps
+    that true while letting the artifact carry the values a future resolver
+    will emit.
+
+    Returns ``{<allowance_key>: value | None}`` for every STORAGE dimension —
+    ``None`` meaning UNCONFIGURED (the gate's own reading of it), never 0-by-0.
+    Unknown tiers fall back to free, exactly like :func:`tier_limits`.
+    """
+    data = _load()
+    tiers = data.get("tiers", {})
+    t = tiers.get(tier) or tiers.get("free", {})
+    return {dim["allowance_key"]: t.get(dim["allowance_key"])
+            for dim in storage_dimensions().values()}
+
+
+def storage_dimensions() -> dict:
+    """The two purchasable storage dimensions, keyed by DECLARED name (#11758).
+
+    Each entry carries the per-GB-month rate, the cost basis it is priced above,
+    the allowance key that names its per-tier included amount, and the scope
+    (``account`` — unlimited graphs, nothing per graph). Raises ``KeyError`` when
+    the artifact is missing a declared dimension, so the artifact cannot quietly
+    shrink the offer to one dimension.
+    """
+    data = _load()
+    dims = data.get("billing", {}).get("storage", {}).get("dimensions", {})
+    missing = [name for name in STORAGE_DIMENSIONS if name not in dims]
+    if missing:
+        raise KeyError(
+            f"pricing.json billing.storage.dimensions missing declared "
+            f"storage dimension(s): {missing}")
+    return {name: dims[name] for name in STORAGE_DIMENSIONS}
+
+
+def storage_overage_rate(dimension: str) -> float:
+    """The sale rate for *dimension*, in USD per GB-month (decimal GB).
+
+    Read from the artifact, never hardcoded — the whole point of moving the
+    price of record into ``product/pricing.json``. Raises ``KeyError`` for an
+    undeclared dimension rather than returning a default rate: a default rate
+    would price a dimension nobody decided.
+    """
+    dims = storage_dimensions()
+    if dimension not in dims:
+        raise KeyError(
+            f"{dimension!r} is not a declared storage dimension "
+            f"(declared: {sorted(dims)})")
+    return float(dims[dimension]["overage_price_usd_per_gb_month"])
 
 
 def tier_price(tier: str) -> int:

@@ -14,6 +14,37 @@
    "pro",
    "team"
   ],
+  "storage": {
+   "_comment": "#11758 — the TWO purchasable storage dimensions, PER ACCOUNT, unlimited graphs, nothing per graph (owner 'ok', 2026-11-08, issue comment 6807826749). Each tier includes an amount (tiers.<t>.max_postgres_storage_bytes / tiers.<t>.max_graph_storage_mb); above it the customer buys more at the rate below. ⛔ There is deliberately NO per-graph and NO per-node allowance anywhere in this block: nodes were retired as the customer-facing pricing unit (#4495/#5331 — 'the node cap is replaced, not extended'), and the owner's correction on #11758 (comment 6805077325) is explicit that the shape is 'per account only'. The legacy max_graph_nodes columns on tiers remain, are NOT a pricing unit, and must not be extended.",
+   "dimensions": {
+    "postgres_storage": {
+     "label": "stored data",
+     "allowance_key": "max_postgres_storage_bytes",
+     "unit": "bytes",
+     "overage_price_usd_per_gb_month": 0.3,
+     "cost_basis_usd_per_gb_month": 0.125,
+     "market_anchor": "Pinecone $0.33/GB-month, Neon $0.35/GB-month (the two closest comparables) — #11758 comment 6807281064",
+     "margin_multiple": 2.4,
+     "scope": "account",
+     "decided_by": "#11758 comment 6807826749 (owner 'ok', 2026-11-08)"
+    },
+    "graph_storage": {
+     "label": "hot capacity",
+     "allowance_key": "max_graph_storage_mb",
+     "unit": "MB",
+     "overage_price_usd_per_gb_month": 85.0,
+     "cost_basis_usd_per_gb_month": 58.33,
+     "market_anchor": "Neo4j Aura ~$87.6 per GB of hot DATA ($65.70 per PROVISIONED GB x 1.33), FalkorDB ~$97 — #11758 comment 6807281064",
+     "margin_multiple": 1.46,
+     "scope": "account",
+     "decided_by": "#11758 comment 6807826749 (owner 'ok', 2026-11-08)",
+     "unit_trap": "The market quotes PROVISIONED RAM; a customer buys DATA HELD HOT, and 1 GB of data needs 1.33 GB provisioned (75% usable rule). Our cost is $43.75 provisioned / 0.75 = $58.33 per GB of hot DATA. Comparing our $85 to the market's $65.70/GB drops the 1.33 and understates the rate by a third."
+    }
+   },
+   "gb_definition": "1 GB = 1,000,000,000 bytes = 1,000 decimal MB. Pinned here because the two meters publish DIFFERENT units (postgres_storage in bytes, graph_storage in decimal MB) and a silent MiB/decimal mix is the measured 3.59x error class in docs/architecture/STORAGE-ARCHITECTURE.md. One definition, one conversion, no per-caller factor.",
+   "_included_amounts_status": "DERIVED, NOT OWNER-CONFIRMED. The per-tier included amounts are computed from the owner's 30%-of-price rule (docs/architecture/SEARCH-ARCHITECTURE.md section 8: solo $19 -> $5.70 budget -> ~77 MB hot window + ~1 GB record; pro/team rows are that document's generalisation of the rule, not a ruling on those tiers) and the rates above are set, but the OWNER has NOT confirmed the included amounts — #11758 comment 6807826749 lists them as explicitly NOT decided ('a product choice, not implied by the rates'). They are defaults of record, pending. Free/anon are the exception: hot capacity 0 is stated by the decision record; the included stored-data amount is 'small' with no number given, so it is null (= unconfigured = unlimited, which is today's behaviour) rather than an invented figure.",
+   "_per_graph_overhead": "NOT priced here. Per-graph fixed overhead (FalkorDB pre-allocates NODE_CREATION_BUFFER = 16,384 node slots per graph) is unmeasured and is OUR cost inside the 30%, not a customer-facing control; if it proves material the answer is an accounting floor counted into the account total, never a cap and never a per-graph control (#10743)."
+  },
   "reads_free": true,
   "integrations": "unlimited at ALL tiers — more integrations = more usage = more value; abuse controlled by connection rate-limit, not tier caps",
   "cost_basis": {
@@ -29,6 +60,8 @@
    "max_users_per_team": 1,
    "included_write_ops_per_month": 10000,
    "max_graph_nodes": 10000,
+   "max_postgres_storage_bytes": null,
+   "max_graph_storage_mb": 0,
    "max_api_keys": 2,
    "integrations": "unlimited",
    "overage": false,
@@ -44,11 +77,13 @@
    }
   },
   "solo": {
-   "price_usd_monthly": 9,
+   "price_usd_monthly": 19,
    "max_graphs_per_team": 2,
    "max_users_per_team": 1,
    "included_write_ops_per_month": 10000,
    "max_graph_nodes": 25000,
+   "max_postgres_storage_bytes": 1000000000,
+   "max_graph_storage_mb": 77,
    "max_api_keys": 5,
    "integrations": "unlimited",
    "overage": true,
@@ -70,6 +105,8 @@
    "max_users_per_team": 2,
    "included_write_ops_per_month": 50000,
    "max_graph_nodes": 100000,
+   "max_postgres_storage_bytes": 1300000000,
+   "max_graph_storage_mb": 102,
    "max_api_keys": 10,
    "integrations": "unlimited",
    "overage": true,
@@ -94,6 +131,8 @@
    "max_users_per_team": null,
    "included_write_ops_per_month": 200000,
    "max_graph_nodes": 600000,
+   "max_postgres_storage_bytes": 7800000000,
+   "max_graph_storage_mb": 615,
    "max_api_keys": 20,
    "integrations": "unlimited",
    "overage": true,
@@ -116,6 +155,8 @@
    "max_users_per_team": 1,
    "included_write_ops_per_month": 1000,
    "max_graph_nodes": 1000,
+   "max_postgres_storage_bytes": null,
+   "max_graph_storage_mb": 0,
    "max_api_keys": 1,
    "integrations": "unlimited",
    "overage": false,
