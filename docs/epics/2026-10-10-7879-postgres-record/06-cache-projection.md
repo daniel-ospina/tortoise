@@ -231,11 +231,15 @@ So the projection refuses it the same way, at the same two doors:
   from a record label by that prefix and a format spelled out at each site can drift and
   silently classify every entry as a node.
 
-The rule itself is `cache_projection.relation_vector_declined_properties`, which returns
-`stored_vector_props()` — and, stated precisely, that is **an import-time snapshot**, not
-something re-derived per call: `stored_vector_props()` returns this module's
-`STORED_VECTOR_PROPS`, bound once by `from .stored_form import …`. So the rule follows the
-store seam at the NEXT import, exactly as `UNSERVED_VECTOR_LABELS` does. It is a function
+The rule itself is `cache_projection.relation_vector_declined_properties`, which calls
+`stored_vector_props()` **on every call**, so a rebind of this module's
+`STORED_VECTOR_PROPS` moves the rule IMMEDIATELY — that is what the falsifier relies on.
+The one thing that IS bound at import is the owner→module binding itself
+(`from .stored_form import …`): rebinding `stored_form.STORED_VECTOR_PROPS` after
+import does NOT move it, exactly as with `UNSERVED_VECTOR_LABELS`. State the two
+separately — a reader who applies the natural repair for a "plain copy" (hoisting it to
+a module-level `frozenset` at import) breaks the falsifier and reds
+`test_the_declined_edge_property_set_is_DERIVED_not_a_second_list`. It is a function
 rather than a constant for three narrower reasons: there is no arithmetic to compute (so
 a constant would be a plain copy), both edge doors read ONE spelling of it, and the
 instrument's falsifier needs a name to replace. Which properties are vectors is still the
@@ -259,11 +263,26 @@ merges the map's keys and never REMOVEs one it does not carry, so a legacy cache
 already holds `r.embedding` keeps it however many times the edge is re-MERGEd from a view
 that no longer carries the vector. Nothing on the read side reports it either —
 `record_serve` has no relation read (`NOT_SERVED`), `parity_difference` is label-scoped
-and `record_reconcile` compares nodes. The ONE remedy is a full `record-restore`, whose
-whole-graph wipe takes the edges with it; that is the same residue §0.5b carries for
-nodes (there the module states it as "its write is additive … anything else needs an
-explicit property clear"), and an earlier draft of this section offered the root cause
-of the problem as the cure.
+and `record_reconcile` compares nodes.
+
+Do not quote a remedy without these three facts (an earlier draft of this section was
+wrong twice here, `#12015` review):
+
+1. **An edge property-clear route does exist in this tree** — `ep.py`'s message drop
+   emits `MATCH ()-[r:IMPL|NAND]->() REMOVE r.msg_alpha, …`, a named clause on an edge.
+   What does not exist is a verb that clears a *declined vector property* on an edge
+   (`#11070`'s explicit clear is the NODE pair's). Measured on FalkorDB,
+   `SET r += {embedding: null}` does clear the property, so either shape could be
+   built; neither is built today.
+2. **A full `record-restore` clears it, but is not an operator remedy on production**:
+   L2's `_assert_test_graph` refuses a server graph whose name does not start
+   `test_`/`tortoise_test`, which is every production cache. It is a remedy for a
+   disposable test graph and for embedded mode (which needs the per-call token).
+3. So on a production cache **no shipped route clears this residue**. An operator clears
+   the property explicitly (`MATCH ()-[r:TYPE]->() REMOVE r.embedding`) or re-reads the
+   cache from the record. The residue is reported, not promised away — the same shape
+   §0.5b carries for nodes, where the module says "its write is additive … anything
+   else needs an explicit property clear".
 
 ### 0.6 Verification
 

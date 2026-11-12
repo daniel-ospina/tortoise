@@ -1357,6 +1357,14 @@ def test_the_human_line_names_the_DROPPED_vectors_and_denies_the_re_run():
     assert "1 vector(s) were DROPPED" in line, line
     assert "Session" in line, line
     assert "re-running cannot bring the vectors back" in line, line
+    # ⛔ The NODE-only branch was asserted nowhere (`#12015` review, finding D —
+    # MEASURED: rewriting it to "The edges are restored" red nothing, because the only
+    # assertion on this wording lives in the edge arm and asserts it ABSENT). A
+    # node-only drop telling an operator the EDGES survived is the same wrong-survivor
+    # misstatement this PR's edge arm exists to prevent, one branch over.
+    assert "The nodes are restored" in line, line
+    assert "The edges are restored" not in line, (
+        f"no edge's vector was dropped here: {line}")
     # The machine-readable contract carries it too, not just the human line.
     assert dropped.as_dict()["dropped_vectors"] == 1, dropped.as_dict()
     assert dropped.as_dict()["dropped_vector_labels"] == ["Session"]

@@ -479,18 +479,27 @@ def _unserved_vector_reason(label: str) -> str:
 #: (`MERGE … SET r += $props`): `SET r += map` merges the map's keys and never
 #: REMOVEs one it does not carry, so a legacy cache that already holds
 #: `r.embedding` keeps it however many times the edge is re-MERGEd from a view that
-#: no longer carries the vector. No SHIPPED edge route clears an ARBITRARY property
+#: no longer carries the vector. No SHIPPED route clears an ARBITRARY edge property
 #: (`#11070`'s explicit clear is the NODE door's; the EP path's `REMOVE r.msg_*` in
-#: `tortoise/ep.py` clears only its own derived seeds). So the ONE remedy is a FULL
-#: `record-restore`,
-#: whose `MATCH (n) DETACH DELETE n` wipe takes the edges with it — which is exactly
-#: what the `#11747` node rule says about its own residue one screen up, and an
-#: earlier draft of THIS note offered the root cause of the problem as the cure.
-#: ⚠️ That is a fact about SHIPPED ROUTES, not an engine limit: measured on FalkorDB,
-#: `SET r += {embedding: null}` DOES clear the property, so a projection that emitted
-#: the null for a declined key could clear a legacy edge in place — the in-place route
-#: `#11070` uses for the node pair. No route does that today, which is why the operator
-#: remedy is the full restore; a future one may add it.
+#: `tortoise/ep.py` clears only its own derived seeds, which is why an edge clause can
+#: exist at all — see below).
+#: ⚠️ READ THE NEXT THREE POINTS BEFORE QUOTING A REMEDY (`#12015` review — an earlier
+#: draft of this note was wrong twice here):
+#: (1) An edge property-clear CLAUSE does exist in this tree — `ep.py`'s message drop
+#:     emits `MATCH ()-[r:IMPL|NAND]->() REMOVE r.msg_alpha, …` — so this is not "the
+#:     engine cannot". What does not exist is a verb that clears a DECLINED VECTOR
+#:     property on an edge. Measured on FalkorDB, `SET r += {embedding: null}` DOES
+#:     clear the property, so either shape could be built; neither is built today.
+#: (2) A FULL `record-restore` DOES clear it — its wipe takes the edges with it — but it
+#:     is NOT an operator remedy on a production cache: L2's `_assert_test_graph` refuses
+#:     a server graph whose name does not start `test_`/`tortoise_test`. It is a remedy
+#:     for a disposable TEST graph, and for embedded mode (which needs the per-call
+#:     token).
+#: (3) So the honest statement is: on a production cache NO shipped route clears this
+#:     residue. An operator who needs it clears the property explicitly
+#:     (`MATCH ()-[r:TYPE]->() REMOVE r.embedding`) or re-reads the cache from the
+#:     record; this note reports the residue rather than promising it away — an earlier
+#:     draft of it offered the root cause of the problem as the cure.
 #: Nothing on the read side reports the residue either — `record_serve` has no
 #: relation read at all (`NOT_SERVED`), `parity_difference` is label-scoped and
 #: `record_reconcile` compares nodes — so it is stated here rather than left to be
@@ -2806,8 +2815,11 @@ def relation_from_row(row: Mapping[str, Any]) -> RecordRelation:
     # ⛔ `#12015`: an edge carries the row's open-set tail VERBATIM, and
     # `chk_relation_props_no_derived` refuses only the four EP names — so
     # `embedding` is a legal key here and would land a vector on a RELATIONSHIP,
-    # where no query leg can reach it. Dropped in the row→view map BOTH directions
-    # read, exactly as the `#11747` node rule is (see
+    # where no query leg can reach it. Dropped HERE, in the row→view map, so the view
+    # cannot advertise bytes the writer refuses — NOT because "both directions read it"
+    # as the `#11747` node rule says of `node_from_row`: an edge view has ONE consumer
+    # (`relation_statement`), since `record_serve` has no relation read at all
+    # (`NOT_SERVED`). If a relation read is ever added it must keep this parity (see
     # :func:`relation_vector_declined_properties` for the rule, its residue and why
     # this is a drop rather than a refusal).
     dropped: dict[str, str] = {}

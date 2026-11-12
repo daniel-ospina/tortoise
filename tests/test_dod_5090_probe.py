@@ -7472,11 +7472,18 @@ def test_the_census_doc_collects_what_the_file_collects():
     statements = [int(n) for n in re.findall(r"this tree: (\d+) collected", text)]
     statements += [int(n) for n in
                    re.findall(r"collects \*\*(\d+) in the tree", text)]
-    statements += [int(n) for n in re.findall(r"= (\d+)\)", text)]
-    assert statements, (
-        "§6's run record no longer states the collected count of THIS tree. A "
-        "count stated against a branch head ('at #11337's head') describes a "
-        "measurement the row no longer matches as soon as a test is added")
+    # ⛔ The arithmetic total is written ``(`122 + … = 173`)`` — a BACKTICK follows the
+    # digits, never a paren (`#12015` review MEASURED the first spelling: it matched
+    # nothing, and a dead arm shrinks to the arms that still match, so `= 999` stayed
+    # green while the comment claimed all three were pinned).
+    statements += [int(n) for n in re.findall(r"= (\d+)`", text)]
+    assert len(statements) == 3, (
+        f"§6 states the collected count of THIS tree three times — the run line, the "
+        f"bold prose total, and the `122 + … = N` arithmetic — and this pin found "
+        f"{len(statements)}: {statements}. A pattern that matches nothing is a DEAD ARM "
+        f"(it shrinks to the arms that still match), and a count stated against a branch "
+        f"head ('at #11337's head') describes a measurement the row no longer matches as "
+        f"soon as a test is added")
     wrong = [n for n in statements if n != actual]
     assert not wrong, (
         f"§6 states {wrong} where the file collects {actual} (every statement must "

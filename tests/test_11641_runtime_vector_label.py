@@ -1950,3 +1950,22 @@ def test_an_unserved_vector_restores_when_it_carries_no_embedding(tmp_path) -> N
     assert proj.g.query(
         "MATCH (b:Batch {id:'b1'}) RETURN b.embedding"
     ).result_set[0][0] is None
+
+
+def test_the_EDGE_label_spelling_follows_its_ONE_owner(tmp_path, monkeypatch) -> None:
+    """`#12015` review — `dropped_vector_labels` reads `relationship_target`, not a literal.
+
+    A format spelled out here and composed by the projection is how the two drift: this
+    key is what an operator reads after a restore, so an edge entry that no longer
+    matches `is_relationship_target` is silently reported as a record LABEL. Rebinding
+    the owner is the discriminating arm — comparing the owner with itself is not.
+    """
+    from tortoise import cache_projection as cp
+
+    monkeypatch.setattr(cp, "relationship_target", lambda t: f"<rel:{t}>")
+    proj = _proj(tmp_path)
+    artifact = _dump_with_edge_props({"weight": 1.0, "embedding": VEC})
+    counts = restore_graph(proj.g, artifact, allow_unserved_vectors=True)
+    assert counts["dropped_vector_labels"] == ["<rel:SUPPORTS>"], (
+        "the DR report composes the edge key by hand instead of from "
+        f"`cache_projection.relationship_target`: {counts}")

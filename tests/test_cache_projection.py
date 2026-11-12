@@ -1229,6 +1229,19 @@ def test_the_PLAN_reports_an_edge_drop_as_a_relationship_type():
     node = _node("Session", {"props": {"embedding": [0.5, 0.25]}})
     mixed = cp.record_plan([node], [edge]).dropped_vectors()
     assert mixed == {"Session": 1, "<relationship:IMPL>": 1}, mixed
+    # ⛔ ASYMMETRIC on purpose (`#12015` review, finding B — measured MASKED): with a
+    # fixture where every statement drops exactly one vector, swapping the statement
+    # order still yields the right answer by coincidence, so the node loop's bound
+    # (`self.statements[len(self.nodes):]`) can drift unnoticed. Here the node drops
+    # NOTHING: if the edge's drop is credited to the node — or the edge arm reads the
+    # node slice — the answer names an object that dropped nothing and loses the edge
+    # key, which is the wrong-operator-message class this PR exists to remove.
+    clean_node = _node("Session", {"props": {"summary": "no vector here"}})
+    asymmetric = cp.record_plan(
+        [clean_node], [edge, cp.relation_from_row(_relation_row(src_key="op-9"))]
+    ).dropped_vectors()
+    assert asymmetric == {"<relationship:IMPL>": 1}, (
+        "a clean node must never be credited with an edge's drop: " f"{asymmetric}")
     # Two edges of the SAME type aggregate under one key.
     same = cp.record_plan([], [edge, cp.relation_from_row(_relation_row(
         src_key="op-2", props={"embedding": [0.5, 0.25]}))]).dropped_vectors()
@@ -1339,6 +1352,26 @@ def test_the_relationship_target_format_has_ONE_owner(monkeypatch):
     assert probe_mod._relationship_target("IMPL") == "<rel:IMPL>", (
         "the probe composes the report key by hand instead of from "
         "`cache_projection.relationship_target`")
+    # ⛔ …and so does the OPERATOR LINE (`#12015` review, finding E — measured
+    # UNPINNED: `record_restore.render()` rewritten to `t.startswith("<relationship:")`
+    # red nothing). This is the consumer with the worst failure mode: a destructive
+    # verb telling an operator the wrong object survived. Rebind the PREFIX, not the
+    # helper, because a hand-spelled literal keeps matching the old prefix.
+    from tortoise import record_restore as rrestore
+
+    monkeypatch.setattr(cp, "RELATIONSHIP_TARGET_PREFIX", "<rel:")
+    line = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_c",
+        record_nodes=1, record_relations=1, nodes_written=1,
+        relations_written=1, target_nodes_before=0,
+        nodes_selected=1, relations_selected=1, coverage="complete",
+        declared_keys=0, dropped_vectors=1,
+        dropped_vector_labels=("<rel:IMPL>",),
+    ).render()
+    assert "The edges are restored" in line, (
+        "`record_restore.render()` classifies an entry by a hand-spelled prefix "
+        f"instead of `is_relationship_target`, so it names the wrong survivor: {line}")
+    assert "The nodes are restored" not in line, line
 
 
 def test_is_verbatim_is_an_or_across_the_sides_it_is_given():

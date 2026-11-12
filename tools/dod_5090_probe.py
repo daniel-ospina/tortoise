@@ -2950,6 +2950,9 @@ def cache_projection_store_labels() -> dict:
                 "unmeasured": {}, "error": f"{type(e).__name__}: {e}"}
     stored: set[str] = set()
     edge_stored: set[str] = set()
+    #: The predicates this arm BUILT a statement for — appended where the build
+    #: succeeds, never derived from the input list (`#12015` review, finding C).
+    edge_probed: set[str] = set()
     unmeasured: dict[str, str] = {}
     for label in sorted(cp.NODE_TABLES):
         try:
@@ -3034,14 +3037,24 @@ def cache_projection_store_labels() -> dict:
         for _door, stmt in edge_statements:
             if _statement_stores_vector(stmt, vector_props):
                 edge_stored.add(rel_type)
-                break
+            # ⛔ A type counts as PROBED only when the planted vector REACHED a door and
+            # the door RECORDED refusing it (`#12015` review, finding C — MEASURED: a
+            # population derived from `edge_types` stayed full when the plant was
+            # disabled, and so did one derived from "a statement was built", because a
+            # door over an empty bag builds a statement too. The arm's own observation is
+            # the only signal that it planted something and saw the rule work).
+            if any(prop in getattr(stmt, "dropped_vectors", {})
+                   for prop in vector_props):
+                edge_probed.add(rel_type)
     return {"labels": frozenset(stored),
             "relationships": frozenset(edge_stored),
-            # ⛔ The POPULATION the edge arm actually planted on (`#12015` review). Without
-            # it, "no relationship stores a vector" and "no relationship was ever probed"
-            # are the same answer — the empty set — and deleting the whole edge block
-            # leaves the door's own test green. A caller can now assert the arm RAN.
-            "relationships_probed": frozenset(edge_types),
+            # ⛔ The POPULATION the edge arm actually PLANTED ON and saw refused
+            # (`#12015` review). Without it, "no relationship stores a vector" and "no
+            # relationship was ever probed" are the same answer — the empty set — and
+            # deleting the whole edge block leaves the door's own test green. It is
+            # recorded only where a door RECORDED A DROP of the planted vector, so an arm
+            # that stops planting cannot still report full coverage.
+            "relationships_probed": frozenset(edge_probed),
             "unmeasured": unmeasured, "error": None}
 
 
