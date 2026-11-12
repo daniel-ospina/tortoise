@@ -2010,9 +2010,10 @@ def test_a_LEGACY_claim_without_an_indicator_is_REPAIRED_not_refused(sdk):
     arrows into one goal, every repair call raising, so the double-count was
     unrepairable and the goal was unwritable.
 
-    The tolerance is ONE dimension, not a blanket "absent is fine": the second
-    half of this test pins that an absent `goalId`/`targetId` is STILL refused —
-    tolerating `goalId` is the cross-goal edge transfer of #6180.
+    The tolerance is narrow — only the dimensions whose pre-#11965 door was
+    `is None` while its writer was truthiness (`indicatorId` here, `targetId` in
+    the sibling test), never a blanket rule: an absent `goalId` is STILL refused,
+    because tolerating it is the cross-goal edge transfer of #6180.
     """
     indicator, target_node, goal = _world(sdk)
     target = Target.from_node(target_node)
@@ -2041,19 +2042,59 @@ def test_a_LEGACY_claim_without_an_indicator_is_REPAIRED_not_refused(sdk):
     assert live[0][0] == repaired["point_id"]
     assert sdk.get_entity(repaired["point_id"])["indicatorId"] == indicator["id"]
 
-    for missing in ("goalId", "targetId"):
-        props = {"judgementState": "met", "goalId": goal["id"],
-                 "targetId": target.target_id}
-        props.pop(missing)
-        foreign = sdk.create_point("statement", f"a claim with no {missing}",
-                                   claim_class="derived", **props)
-        with pytest.raises(ValueError) as exc:
-            _assert_supersession_scope(sdk, foreign["id"], goal["id"],
-                                       indicator["id"], target.target_id)
-        assert missing in str(exc.value), (
-            f"an absent {missing} was tolerated — the tolerance must be ONE "
-            "named dimension, never a blanket rule"
-        )
+    # ⛔ `goalId` is the ONE dimension that was never optional under #11942
+    # (`goal_id` was a required argument, written unconditionally), so its
+    # absence still means "not a judgement of this chain". Tolerating it would
+    # re-open the cross-goal edge transfer (#6180).
+    foreign = sdk.create_point("statement", "a claim with no goalId",
+                               claim_class="derived", judgementState="met",
+                               targetId=target.target_id)
+    with pytest.raises(ValueError) as exc:
+        _assert_supersession_scope(sdk, foreign["id"], goal["id"],
+                                   indicator["id"], target.target_id)
+    assert "goalId" in str(exc.value), (
+        "an absent goalId was tolerated — that is the cross-goal transfer the "
+        "guard exists to stop"
+    )
+
+
+def test_a_LEGACY_claim_without_a_TARGET_is_REPAIRED_too(sdk):
+    """The second dimension the pre-#11965 writer could omit, and the same defect.
+
+    Its DOOR checked `if target.target_id is None` while its WRITER checked
+    `if target.target_id:` — so `Target(..., target_id="")` passed the door, the
+    prop was dropped, and the module minted a judgement with `judgementState` and
+    `goalId` but NO `targetId`. MEASURED at the pre-fix head with such a claim
+    live and arrowed into the goal: the derived lookup could not see it (the
+    `p.targetId = $targetId` clause is always present now) and the explicit seam
+    refused it, so the goal kept 2 live claims and 2 IMPL arrows with belief
+    0.6920 against the single-chain 0.6502 — duplicate support, unrepairable.
+    """
+    indicator, target_node, goal = _world(sdk, tag="notarget")
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    legacy = sdk.create_point("statement",
+                              "judgement: met (pre-#11965, no target)",
+                              claim_class="derived", judgementState="met",
+                              goalId=goal["id"], indicatorId=indicator["id"])
+    assert sdk.get_entity(legacy["id"]).get("targetId") is None
+    sdk.set_point_baseline(legacy["id"], 9.0, 1.0)
+    sdk.create_operator("IMPL", legacy["id"], [goal["id"]], direction="->")
+    assert _impl_into(sdk, legacy["id"], goal["id"]) == 1
+
+    repaired = record_judgement(
+        sdk, goal_id=goal["id"],
+        judgement=judge(sdk, goal_id=goal["id"],
+                        indicator_id=indicator["id"], target=target),
+        target=target, indicator_id=indicator["id"],
+        previous_point_id=legacy["id"],
+    )
+    assert repaired["superseded_id"] == legacy["id"]
+    assert sdk.get_entity(legacy["id"])["status"] == "superseded"
+    live = [r for r in _judgement_points(sdk, goal["id"])
+            if r[1] not in {"superseded", "retracted"}]
+    assert len(live) == 1, f"the legacy claim was not collapsed: {live}"
+    assert sdk.get_entity(repaired["point_id"])["targetId"] == target.target_id
 
 
 def test_an_unscoped_write_is_refused_on_both_shapes(sdk):

@@ -10748,6 +10748,403 @@ def test_the_stale_case_count_guard_is_not_vacuous(tmp_path):
         ("test_gone.py", 4, None)]
 
 
+#: A chain entry is a CONTINUATION line whose comment opens with `-> <n>`.
+#:
+#: ⛔ Why the ANCHOR matters (#10032): a row legitimately cites `-> N` mid-sentence
+#: (`grep -c '^def test_'` -> 57, `27 -> 30 when …`) and a naive "the same number
+#: twice" rule reds **5 healthy rows on `main`** — `test_mcp_bridge.py` and
+#: `test_selection_step.py` cite one count with two instruments, `test_substrate_map.py`
+#: and `test_problem_map_2820.py` carry a `->` chain that revisits the count their
+#: citation already named, and `test_7949_capstone_measure.py`'s decimals
+#: (`0.2 -> 1.0`) match an unanchored `\d+`. The chain ENTRY — the line that opens
+#: with the arrow — is the only position where a repeat means one landing's entry was
+#: replayed beside another's, which is the defect. Measured with this file's own
+#: reader on `origin/main` at `e4703a286a`: 0 offenders across the 1328 rows
+#: `_durations_row_comments` returns there.
+_CHAIN_ENTRY_RE = re.compile(r"^#\s*->\s*(?P<n>\d+)(?!\.\d)")
+#: Any `-> N` in a comment line — the map's OTHER way of recording a move
+#: (`# 33 at <sha> … -> 39, 40, 41`), used only as evidence that a count DROPPED.
+_MID_LINE_ARROW_RE = re.compile(r"->\s*(?P<n>\d+)(?!\.\d)")
+#: An issue reference (`#11904`) — the token a union splice's two halves share when
+#: the branch and `main` fixed the same landing.
+_ISSUE_TOKEN_RE = re.compile(r"#(\d{3,5})\b")
+
+
+def _durations_rows_with_a_duplicated_chain_count(text: str):
+    """`(key, count)` for every row whose note names ONE chain count TWICE.
+
+    ⛔ The defect this names (#10032): `config/ci-surfaces.yml` is declared
+    `merge=union` (`.gitattributes:21`), so a conflict-FREE merge of `main` into a
+    branch appends both sides' lines into the same comment block. Measured on the
+    union of PR #11958's head `1ae5cd37c4` into `origin/main e4703a286a`, the
+    `test_problem_map_2820.py` row came out carrying
+
+        # -> 57 once #11904's pin landed
+        …
+        # -> 57 once #11904's re-cut control landed
+
+    — two landings' entries for the same count, so the row asserts two histories. No
+    mapping key changed, so the duplicate-key loader is green, `yaml.safe_load` is
+    green and `--integrity` is green. The paren guard (#10055) caught THIS instance
+    only because the same splice also orphaned a parenthesis; a balanced-paren splice
+    reds nothing.
+
+    The scan mirrors `_durations_row_comments`' span rules — indented comments only,
+    one contiguous block per row, and a block whose first line OPENS a note is NOT
+    this row's note and is left untouched (`tools.ci_timing._row_continuation_lines`
+    words it the same way). It also reads the row line's OWN comment tail, because
+    the reader seeds the note with it: `test_x.py: 2.0  # -> 41 once …` followed by
+    a union-appended `# -> 41 once …` continuation is the same defect (0 such rows
+    on `main` at `e4703a286a`, so this closes a latent miss rather than a live one).
+    A guard reading a different span than the reader it protects is how #10055's cut
+    came to orphan a paren nobody counted.
+
+    ⛔ A repeat is reported only when NOTHING DIFFERENT sits between the two
+    occurrences (in either direction, entry or mid-line) OR the two entries cite a
+    common issue number: this map records
+    count-REDUCING landings too (`#10452`'s lane dropped a duplicate arm), so both
+    `-> 43`, `-> 42 once a duplicate arm was dropped`, `-> 43 once its replacement
+    landed` and `-> 57`, `-> 58 once an arm landed`, `-> 57 once a duplicate arm was
+    dropped` are coherent histories, not replays. Adjacent equal entries with
+    nothing in between are the replay. 0 live instances at `e4703a286a`; the
+    exclusion is here so the guard does not red one when it arrives.
+
+    ⛔ RESIDUALS, measured at `e4703a286a` and stated so the next reader does not
+    assume more: (a) a multi-line union splice — two landings' entries separated by
+    another arrow — is caught only when both halves cite the SAME `#NNNN`; the
+    shared token is what distinguishes it from a coherent return, and a splice whose
+    prose cites no issue number stays invisible; (b) a coherent chain that returns
+    to a count while citing the same issue twice is reported (0 such rows today).
+    """
+    from tools.ci_timing import _starts_a_new_note
+
+    out: list = []
+    lines = text.splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines) if ln.strip() == "durations:")
+    except StopIteration:  # pragma: no cover — the map always declares the block
+        return out
+    end = next((i for i in range(start + 1, len(lines))
+                if _DURATIONS_TOP_KEY_RE.match(lines[i])), len(lines))
+    key = None
+    opened = False
+    # (value, is_entry, text) per arrow seen in the note: entries are the chain's
+    # own positions; mid-line arrows are the map's other way of recording a move,
+    # and they still count as EVIDENCE OF A CHANGE between two entries.
+    items: list = []
+
+    def flush() -> None:
+        if key is None:
+            return
+        seen: dict = {}
+        for i, (n, is_entry, text) in enumerate(items):
+            if not is_entry:
+                continue
+            if n not in seen:
+                seen[n] = i
+                continue
+            _, _, prev_text = items[seen[n]]
+            moved = any(v != n for v, _, _ in items[seen[n] + 1:i])
+            # A union splice is TWO landings' entries for one count. When another
+            # arrow sits between them (a multi-line splice) `moved` is true and the
+            # repeat would be excused as a coherent return — so the same ISSUE TOKEN
+            # on both entries is what still identifies it. Residual, stated in the
+            # docstring: a splice whose two halves cite no issue number is invisible.
+            same_issue = bool(set(_ISSUE_TOKEN_RE.findall(prev_text))
+                              & set(_ISSUE_TOKEN_RE.findall(text)))
+            if not moved or same_issue:
+                out.append((key, n))
+                break
+            # The repeat was EXCUSED; judge the next one from here, not from the
+            # first occurrence (otherwise a replay after a reduction stays invisible).
+            seen[n] = i
+
+    def add(stripped: str) -> None:
+        entry = _CHAIN_ENTRY_RE.search(stripped)
+        if entry is not None:
+            items.append((int(entry.group("n")), True, stripped))
+            return
+        for mid in _MID_LINE_ARROW_RE.finditer(stripped):
+            items.append((int(mid.group("n")), False, stripped))
+
+    for i in range(start + 1, end):
+        m = _DURATIONS_ROW_RE.match(lines[i])
+        if m is not None:
+            flush()
+            key, opened, items = m.group("key"), False, []
+            tail = (m.group("tail") or "").strip()
+            if tail:
+                add(tail)
+            continue
+        stripped = lines[i].strip()
+        if stripped.startswith("#") and lines[i][:1].isspace():
+            if key is None:
+                continue
+            if not opened and _starts_a_new_note(lines[i]):
+                flush()
+                key, opened, items = None, False, []
+                continue
+            opened = True
+            add(stripped)
+            continue
+        if stripped:
+            flush()
+            key, opened, items = None, False, []
+    flush()
+    return out
+
+
+#: A pytest summary line — the shapes a row's own prohibition names. The status-list
+#: form (`58 passed, 2 warnings in 12.51s`) is what `pytest -q` prints whenever
+#: anything but a clean pass occurs, so it is at least as likely to be copied as the
+#: bare form; `IGNORECASE` covers `58 PASSED in …`. The trailing unit is `s\b` or
+#: `sec…`, NOT a bare `\s*s`: measured at head `3a08343c90`, `\s*s` matched the first
+#: letter of an ordinary word (`58 passed in 2 shards`, `… 3 surfaces`, `… 2 suites`)
+#: and would have red the required leg over prose that is not a wall clock.
+_WALL_CLOCK_QUOTE_RE = re.compile(
+    r"\d+\s+(?:tests?\s+)?passed\b(?:,\s*\d+\s*[A-Za-z]+)*\s+in\s+"
+    r"(?:(?:\d+\s*[mh]\s*)?\d+(?:\.\d+)?\s*(?:s\b|sec(?:onds?)?\b)"
+    r"|\d+:\d{2})", re.IGNORECASE)
+_NO_WALL_CLOCK_CLAUSE_RE = re.compile(
+    r"no\s+wall-clock\s+seconds\s+are\s+quoted", re.IGNORECASE)
+
+
+def _durations_rows_quoting_a_wall_clock_beside_its_own_prohibition(text: str):
+    """`(key, quotes)` for every row that forbids a wall-clock quote and carries one.
+
+    ⛔ #11938 added the prohibition — *"⛔ No wall-clock seconds are quoted beside
+    this row"* — to the `test_problem_map_2820.py` row, because a wall-clock reading
+    is a datum at ONE head and a shard-layout input must not carry it. The union
+    merge of #11958's head into that `main` put `58 passed in 12.51s` back
+    underneath it: the row's own sentence, contradicted by the row's own text, with
+    every structural guard green. This is the general shape — a row's prohibition
+    checked against the row — narrowed to the ONE prohibition the map states in
+    those words.
+
+    ⛔ THE BOUNDARY IS DELIBERATE AND IS NOT "every wall-clock claim". Two live
+    shapes are therefore OUT of scope: a row that forbids a local reading in other
+    words (`⛔ A LOCAL wall-clock reading is deliberately NOT stated …`), and a row
+    quoting a reading with no prohibition at all. Widening the clause to the general
+    form reds **19 rows on `main`** (measured at `e4703a286a`), every one a
+    legitimate historical quote, so the arm names this sentence and nothing else; a
+    future prohibition in new words is a new arm, not a silent widening.
+    """
+    out: list = []
+    for key, note in _durations_row_comments(text):
+        if _NO_WALL_CLOCK_CLAUSE_RE.search(note) is None:
+            continue
+        quotes = _WALL_CLOCK_QUOTE_RE.findall(note)
+        if quotes:
+            out.append((key, quotes))
+    return out
+
+
+def test_no_durations_row_names_one_chain_count_twice():
+    """#10032: a union merge must not replay one landing's chain entry beside another's."""
+    offenders = _durations_rows_with_a_duplicated_chain_count(
+        cs.MANIFEST.read_text(encoding="utf-8"))
+    assert offenders == [], (
+        "a durations row names ONE chain count TWICE — two `-> N` chain entries in "
+        f"one note, i.e. two landings' entries spliced into one block: {offenders}. "
+        "This is the union-merge shape (`config/ci-surfaces.yml` is `merge=union`, "
+        "so a conflict-free merge APPENDS both sides). Keep ONE entry and restore "
+        "one coherent history; do not re-number to dodge the guard.")
+
+
+def test_no_durations_row_quotes_a_wall_clock_beside_its_own_prohibition():
+    """#10032: a row's `no wall-clock seconds` clause must hold for its own text."""
+    offenders = _durations_rows_quoting_a_wall_clock_beside_its_own_prohibition(
+        cs.MANIFEST.read_text(encoding="utf-8"))
+    assert offenders == [], (
+        "a durations row forbids wall-clock seconds and then quotes one — the row "
+        f"contradicts its own text: {offenders}. The prohibition exists because a "
+        "wall-clock reading is a datum at ONE head and this map is a shard-layout "
+        "input; cite the testcase sum or the CI weight instead of a local run.")
+
+
+def test_the_union_merge_prose_guards_are_not_vacuous():
+    """Both guards above must bite on the spliced shape and stay quiet on its siblings."""
+    spliced = (
+        "durations:\n"
+        "  test_dup.py: 1.0  # #1: the row.\n"
+        "  # -> 7 once #10's arm landed\n"
+        "  # (`test_a`: the arm).\n"
+        # An OPENER-SHAPED continuation between the two entries. `_NOTE_OPENER_RE`
+        # matches `[A-Z]`/`#NNNN`, so this line looks like a new note; only the
+        # block's FIRST line may be treated as one. A mutant that applies the
+        # opener test to EVERY line cuts the note here and stops seeing the replay
+        # below — measured: it returns `[]` on the real union tree, i.e. the guard
+        # silently dies on the exact merge it was written for.
+        "  # The block continues past an opener-shaped line.\n"
+        "  # -> 7 once #11's re-cut landed\n"
+        "  # (`test_a`: the SAME arm, landed twice).\n"
+        "  test_tail.py: 1.5  # -> 41 once #12 landed\n"
+        "  # -> 41 once #13's replay landed\n"
+        "  test_clock.py: 3.0  # #2: ⛔ No wall-clock seconds are quoted beside"
+        " this row: measured `58 passed, 2 warnings in 12.51s`, then `58 passed in"
+        " 1m 12s`, and once `58 passed in 00:12` on the slow leg; a rerun printed"
+        " `58 tests passed in 4.00 s` and one CI leg prints `58 PASSED in 12.5S`.\n"
+        # The LIVE shape: clause and quotes on CONTINUATION lines of a wrapped note
+        # (measured on the union of #11958's `1ae5cd37c4` into `e4703a286a` with
+        # `git merge-file --union`: in the `test_problem_map_2820.py` note the clause
+        # sits at offset 6803 and the quote `58 passed in 12.51s` at 7403 — ~600
+        # characters AFTER it, the same direction the guard's docstring records as
+        # "put back underneath it"). A helper that read only the row line would be
+        # blind to the clause, the quote, or both; this fixture is what notices.
+        "  test_clock_cont.py: 3.5  # #23: a prohibition stated on a continuation.\n"
+        "  # (`test_a`: the arm this row covers).\n"
+        "  # ⛔ No wall-clock seconds are quoted beside this row: measured"
+        " `58 passed in 12.51s` on the slow leg,\n"
+        "  # and re-measured `58 passed in 1m 12s` after the arm landed.\n"
+        # A mid-line DECIMAL arrow must not become evidence of a change: without the
+        # `(?!\.\d)` lookahead this reads 4.5 -> 4.0 as two moves and excuses the
+        # adjacent replay below (measured). The superseded `(?![\d.])` spelling is
+        # history: it also swallowed a period-terminated `-> 57.`, which the block
+        # below (and its entry in the expected-offender list) asserts must count.
+        # A sentence-ending PERIOD after the count must still be an entry: `-> 57.`
+        # is a count, `-> 4.0` is not. A lookahead that rejects both hides this replay.
+        # A MULTI-LINE union splice: the same landing token on both halves (the shape
+        # the live #11904/#11958 merge has), with another arrow between them.
+        "  test_multiline_splice.py: 2.66  # #19: the same landing splices twice.\n"
+        "  # -> 57 once #11904's pin landed\n"
+        "  # -> 58 once #11800's arm landed\n"
+        "  # -> 57 once #11904's re-cut control landed\n"
+        # …and a THREE-digit landing token. Latent, disclosed rather than claimed
+        # live: 0 three-digit tokens sit in any of the 1332 notes `_durations_row_
+        # comments` returns for `main` at `e991d8d3fe`, so nothing reds today — but
+        # this map is free to cite one, and a token pattern narrowed to 4–5 digits
+        # silently loses that splice. Every three-digit token in the file sits
+        # OUTSIDE a note the reader returns: `#669` :1522, `#331`/`#325` :2797,
+        # `#330` :3512, `#548` :4565 (all in `surfaces:`) and, in `durations:`,
+        # `#548` only inside the block the reader drops at :11881–:11889.
+        "  test_splice_3digit.py: 2.67  # #20: a three-digit landing splices twice.\n"
+        "  # -> 9 once #548's pin landed\n"
+        "  # -> 10 once an arm landed\n"
+        "  # -> 9 once #548's re-cut landed\n"
+        "  test_period_entry.py: 2.65  # #15: an entry that ends a sentence.\n"
+        "  # -> 57. The pin landed with the arm.\n"
+        "  # -> 57 once the SAME pin was replayed\n"
+        "  test_decimal_midline.py: 2.7  # #12: a decimal reading between two entries.\n"
+        "  # -> 57 once the pin landed\n"
+        "  # 4.5 -> 4.0 s for this file on the slow leg\n"
+        "  # -> 57 once the SAME pin was replayed\n"
+        # A replay AFTER a reduction: the reduction excuses the FIRST repeat, and the
+        # second repeat has nothing lower between it and its predecessor, so it is
+        # reported. A guard that keeps comparing against the FIRST occurrence misses
+        # this (measured: [7, 5, 7, 7] -> [] under that bug).
+        "  test_replay_after_drop.py: 2.6  # #11: a replay after the drop.\n"
+        "  # -> 7 once the arm landed\n"
+        "  # -> 5 once a duplicate arm was dropped\n"
+        "  # -> 7 once a partial restore landed\n"
+        "  # -> 7 once the SAME partial restore was replayed\n"
+        # The `durations:` block must END at the next top-level key; the decoy below
+        # fails if the scanner keeps reading past it (`_DURATIONS_TOP_KEY_RE` does
+        # not match `surfaces: []`, which is why the terminator is spelled bare).
+        "surfaces:\n"
+        "  test_decoy.py: 1.0  # #8: NOT a durations row.\n"
+        "  # -> 5 once a\n"
+        "  # -> 5 once b\n")
+    healthy = (
+        "durations:\n"
+        "  test_ok.py: 2.0  # #3: a chain that only ever increases.\n"
+        "  # -> 3 once #20 landed\n"
+        "  # -> 4 once #21 landed\n"
+        # The ANCHOR: two MID-SENTENCE `-> 9` citations, one per continuation line.
+        # `search` is bounded by the `^` in the pattern, so no entry is read; a guard
+        # whose pattern lost the `^` counts these and reds this healthy row — so the
+        # fixture pins the anchor rather than merely describing it.
+        "  test_cite.py: 2.5  # #4: two INSTRUMENTS naming one count, mid-sentence.\n"
+        "  # `pytest --collect-only -q` gives -> 9 here, and\n"
+        "  # `grep -c '^def test_'` gives -> 9 here too — same count, two tools.\n"
+        # …and a MID-LINE `# -> 9` inside prose must not count either: two of them,
+        # so a pattern that keeps the `#` but loses the `^` reads both and reds here.
+        "  # a quoted literal `# -> 9` inside prose counts nothing.\n"
+        "  # and a second `# -> 9` literal, so the `^` anchor is load-bearing.\n"
+        "  test_free.py: 4.0  # #5: no prohibition, so a quoted reading is its basis"
+        " (`12 passed in 3.40s`).\n"
+        # A count that DROPS and comes BACK is a coherent history, not a replay
+        # (this map records a real count-reducing landing: #10452 dropped a
+        # duplicate arm).
+        "  test_restore.py: 2.2  # #9: a chain that steps back down and returns.\n"
+        "  # -> 43 once the arm landed\n"
+        "  # -> 42 once a duplicate arm was dropped\n"
+        "  # -> 43 once its replacement landed\n"
+        # …and the reduction recorded MID-LINE, which is how the map's own rows also
+        # write history (`# 33 at <sha> … -> 39, 40, 41`). Judging only line-opening
+        # entries reds this coherent chain.
+        "  test_restore_midline.py: 2.4  # #10: the reduction written mid-line.\n"
+        "  # -> 43 once the arm landed\n"
+        "  # 43 -> 42 once a duplicate arm was dropped\n"
+        "  # -> 43 once its replacement landed\n"
+        # …and the MIRROR: a coherent REDUCTION that lands on a count the chain
+        # already cited. Counting only lower values between reds this.
+        "  test_reduce_cited.py: 2.5  # #13: a reduction to a previously cited count.\n"
+        "  # -> 57 once #11904's pin landed\n"
+        "  # -> 58 once #11800's arm landed\n"
+        "  # -> 57 once a duplicate arm was dropped\n"
+        # …and entry-shaped DECIMALS: `4.0` is not the count `4` (pins the entry
+        # lookahead — without it these two lines are duplicate entries).
+        "  test_decimal_entry.py: 2.8  # #14: decimal readings on entry-shaped lines.\n"
+        "  # -> 4.0 s per shard on this box\n"
+        "  # -> 4.5 s after the arm landed\n"
+        # …and a reduction whose mid-line evidence ends a SENTENCE: `-> 42.` is a
+        # count, so the exception must see it (the old lookahead read it as a decimal
+        # and red the coherent chain).
+        "  test_period_reduce.py: 2.9  # #16: the reduction ends a sentence.\n"
+        "  # -> 43 once the arm landed\n"
+        "  # 43 -> 42. A duplicate arm was dropped.\n"
+        "  # -> 43 once its replacement landed\n"
+        # …and a row that forbids wall clocks while quoting SHARDS: `2 shards` is not
+        # a unit, so the arm must stay quiet (pins the `s\\b` narrowing).
+        "  test_shard_prose.py: 3.1  # #17: ⛔ No wall-clock seconds are quoted"
+        " beside this row: the run fits `58 passed in 2 shards` of the slow leg.\n"
+        # …and a row that forbids a local reading in OTHER WORDS while quoting one.
+        # This is the live shape at `config/ci-surfaces.yml:11275`; it must stay quiet,
+        # because widening the clause matcher to `wall-clock` would red it (measured).
+        "  test_local_reading.py: 2.3  # #18: ⛔ A LOCAL wall-clock reading is"
+        " deliberately NOT stated here; the leg's recorded history is"
+        " `2 passed, 34 deselected in 12.82s`.\n"
+        # A block whose FIRST continuation OPENS a note is not this row's note: the
+        # reader drops it, and so must the guard. Both entries below are inside the
+        # dropped block, so a guard that kept reading would invent a replay.
+        "  test_cut.py: 3.3  # #21: a note opener follows.\n"
+        "  # The next block opens a new note and is not this row's.\n"
+        "  # -> 9 once #30 landed\n"
+        "  # -> 9 once #31 landed\n"
+        # …and COLUMN-0 prose between rows is the map's header/method text, never a
+        # row's note: attributing it is how one row's note became 122 lines of header.
+        "  test_col0.py: 3.4  # #22: column-0 prose follows.\n"
+        "# -> 9 once this method note belongs to no row\n"
+        "# -> 9 once neither does this one\n"
+        # A row that mentions wall clocks in a LOOSER phrasing while quoting one: the
+        # clause matcher must require its `no … are quoted` form, or this reds.
+        "  test_loose_clause.py: 3.6  # #24: wall-clock seconds are quoted by CI's own\n"
+        "  # junit, so this row repeats none; the leg's history is"
+        " `2 passed, 34 deselected in 12.82s`.\n"
+        # per-ROW scoping: two different rows may each start a chain at the same
+        # count. A helper that forgot to reset per row reds these and stays green on
+        # `main` (whose chain entries all live in one row), so this pair is what pins
+        # the "one row's comment block" claim in the function's own name.
+        "  test_two_a.py: 3.0  # #6: one row's chain.\n"
+        "  # -> 9 once #30 landed\n"
+        "  test_two_b.py: 3.5  # #7: another row's chain, same starting count.\n"
+        "  # -> 9 once #31 landed\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_duplicated_chain_count(spliced) == [
+        ("test_dup.py", 7), ("test_tail.py", 41), ("test_multiline_splice.py", 57),
+        ("test_splice_3digit.py", 9), ("test_period_entry.py", 57),
+        ("test_decimal_midline.py", 57), ("test_replay_after_drop.py", 7)]
+    assert _durations_rows_with_a_duplicated_chain_count(healthy) == []
+    assert _durations_rows_quoting_a_wall_clock_beside_its_own_prohibition(
+        spliced) == [("test_clock.py", [
+            "58 passed, 2 warnings in 12.51s", "58 passed in 1m 12s",
+            "58 passed in 00:12", "58 tests passed in 4.00 s",
+            "58 PASSED in 12.5S"]),
+            ("test_clock_cont.py", ["58 passed in 12.51s", "58 passed in 1m 12s"])]
+    assert _durations_rows_quoting_a_wall_clock_beside_its_own_prohibition(
+        healthy) == []
+
+
 #: One note carrying TWO `grep -c` claims: a CORRECT one first, a STALE one second.
 #:
 #: ⛔ THE SHAPE THE `.search` VERSION COULD NOT SEE (#10610 review at `fdff8f432`,

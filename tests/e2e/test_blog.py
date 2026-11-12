@@ -4,7 +4,8 @@ Covers the epic's high-level E2E scenarios that are verifiable against a
 deployed surface:
 
   E2E-1  /blog + /blog/<slug> server-rendered (200, content present, SEO head)
-  E2E-7  host isolation — premiselabs.co /blog* → 301 tortoise host;
+  E2E-7  host isolation — the blog is served on its CANONICAL origin
+         (premiselabs.co) and the product host 301s /blog* to it in one hop;
          /blogpost /blog-extra NOT redirected
   E2E-11 /blog/feed.xml + /blog/sitemap.xml valid XML (published-only)
   E2E-12 /admin/* → 302 /auth?next=<path> (no session; no content leaked;
@@ -54,6 +55,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import xml.etree.ElementTree as ET
 from urllib.parse import parse_qs, urljoin, urlparse
 
@@ -78,7 +80,45 @@ TORTISE = os.environ.get("TORTISE_HOST", "http://127.0.0.1:8788").rstrip("/")
 # server (APP_HOST=http://127.0.0.1:8788), in which case the host split does not
 # exist and the cross-host leg is skipped (see `_SEPARATE_HOSTS`).
 APP = os.environ.get("APP_HOST", "https://app.premiselabs.co").rstrip("/")
-_SEPARATE_HOSTS = APP != TORTISE
+
+# ⛔ RE-DERIVED EXPLICITLY (#11765). This used to read `APP != TORTISE`, which was
+# a trap: TORTISE is being retired as the blog's origin, so any lane that repointed
+# it (or that pointed BASE_URL at it) would silently change whether the three
+# ADMIN-GATE probes below run or skip — a gate changing its own population without
+# anyone touching it. The property those probes actually need is "APP is a DIFFERENT
+# server from the ones this suite drives", because a local run points every host at
+# one wrangler server, whose `/admin` branch redirects to the hardcoded APP_ORIGIN
+# and therefore does NOT serve the gate. Expressed against BOTH other origins, that
+# stays true no matter which host this epic decides to serve the blog from.
+_SEPARATE_HOSTS = APP not in (COMPANY, TORTISE)
+
+# The blog's own cross-host property, kept separate on purpose: it asks whether the
+# CANONICAL origin and the retired one are different servers, which is what makes the
+# 301 leg assertable at all. A local run points both at 127.0.0.1:8788, where the same
+# URL cannot be both 200 and a 301, so that leg self-skips.
+_BLOG_HOSTS_DIFFER = COMPANY != TORTISE
+
+# ⛔ THE TWO ORIGINS THIS SUITE GRADES robots.txt's SITEMAP HOST AGAINST (#11976 review).
+# A run pointed at one of these fetches the sitemap URL robots.txt names AS WRITTEN.
+# Any other target — a local wrangler server, a Pages preview, a staging host — grades
+# its own PATH instead: robots.txt names an ABSOLUTE production URL, so fetching it as
+# written from a target that does not serve it reads and asserts on the DEPLOYED
+# document, which is a false green plus an unintended production read.
+#
+#    premiselabs.co            serves the blog
+#    tortoise.premiselabs.co   what robots.txt names TODAY; 301s /blog* to the company
+#                              origin (`_middleware.ts:513-521`, `_lib.ts:63-68`). The
+#                              as-written arm FOLLOWS that hop rather than grading it
+#                              (see the note on the probe below); the hop's direction is
+#                              asserted in `test_host_isolation_blog`.
+#
+# Nothing else belongs here: `app.premiselabs.co` is also in robots.txt but only for
+# its own sitemap, which the `/blog/sitemap.xml` filter drops. Keying the mode on
+# `ALLOW_PROD` or on the scheme was wrong twice over — that flag says "https targets
+# are permitted", not "this target is production", and a preview is https too.
+# Membership is tested against `.hostname` (lower-case, port-stripped), not `.netloc`.
+# Keep in step with #11766's repoint.
+_PRODUCTION_ORIGIN_HOSTS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
 if os.environ.get("ALLOW_PROD") != "1" and any(
     h.startswith("https://") for h in (COMPANY, TORTISE, APP)
 ):
@@ -94,8 +134,21 @@ SESSION.headers["User-Agent"] = "tortoise-blog-e2e"
 
 
 def test_blog_index_ssr() -> None:
-    """E2E-1: /blog is server-rendered HTML with the blog chrome."""
-    r = SESSION.get(f"{TORTISE}/blog", timeout=20)
+    """E2E-1: /blog is server-rendered HTML with the blog chrome.
+
+    Fetched on the CANONICAL origin (#11762/#11763, landed as #12031). The retired
+    product host now 301s every /blog path here, and `requests` follows redirects
+    by default — so probing TORTISE would still return this document while grading
+    the redirect rather than the SSR, and would stop being a test of the host the
+    epic declares. Repointed when #12031's inversion landed (review P2).
+
+    #12031's Pages deploy has since completed, so `{COMPANY}/blog` now answers 200
+    directly and the single hop this request used to follow is gone. The DESTINATION
+    contract is deliberately not asserted here even so: it is owned in ONE place —
+    `test_host_isolation_blog`, which asserts it strictly and is the reason a
+    half-applied move cannot pass silently. This test grades the DOCUMENT.
+    """
+    r = SESSION.get(f"{COMPANY}/blog", timeout=20)
     assert r.status_code == 200
     assert "text/html" in r.headers.get("content-type", "")
     body = r.text
@@ -107,17 +160,16 @@ def test_blog_index_ssr() -> None:
 def test_blog_article_ssr() -> None:
     """E2E-1: an article page (when a published post exists) renders SSR +
     sanitized (E2E-14) + JSON-LD."""
-    r = SESSION.get(f"{TORTISE}/blog", timeout=20)
+    r = SESSION.get(f"{COMPANY}/blog", timeout=20)
     if r.status_code != 200:
         pytest.skip("blog index unavailable")
-    import re
 
     slugs = re.findall(r'href="/blog/([a-z0-9]+(?:-[a-z0-9]+)*)"', r.text)
     slugs = [s for s in slugs if s not in ("feed.xml", "sitemap.xml")]
     if not slugs:
         pytest.skip("no published posts seeded")
     slug = slugs[0]
-    a = SESSION.get(f"{TORTISE}/blog/{slug}", timeout=20)
+    a = SESSION.get(f"{COMPANY}/blog/{slug}", timeout=20)
     assert a.status_code == 200
     body = a.text
     assert "application/ld+json" in body  # BlogPosting schema
@@ -136,45 +188,213 @@ def test_blog_article_ssr() -> None:
 
 
 def test_host_isolation_blog() -> None:
-    """E2E-7: company host 301s /blog* to the tortoise host; prefix
-    false-positives NOT redirected."""
-    for path in ("/blog", "/blog/", "/blog/any-slug"):
-        r = SESSION.get(f"{COMPANY}{path}", timeout=20, allow_redirects=False)
-        assert r.status_code == 301, f"{path} → {r.status_code}"
-        assert r.headers.get("location", "").startswith(f"{TORTISE}/blog"), (
-            f"{path} location: {r.headers.get('location')}"
+    """E2E-7: /blog is served on its CANONICAL origin (the company host) and the
+    retired product host 301s to it — prefix false-positives NOT redirected.
+
+    ⛔ THE DIRECTION IS THE EPIC'S DECISION, NOT A MEASUREMENT (#11762, owner
+    2026-11-10): the blog is content marketing, so it lives at
+    ``premiselabs.co/blog`` and ``tortoise.premiselabs.co`` is a PERMANENT 301 to
+    it. This asserts the DESTINATION state rather than accepting whichever way the
+    redirect currently points — a test that accepts either direction cannot fail
+    when the move is undone, which is the fail-open shape the epic's own review
+    flagged in a legacy-URL probe. The consequence, stated so the red is never a
+    mystery: while the redirect INVERSION (#11763) is unmerged, or if this lands
+    before it, this test reds — and that red is TRUE, because a canonical naming a
+    URL that 301s back to the page is a loop, not a move.
+    """
+
+    def _expect_one_hop(src: str, path: str, target_suffix: str) -> None:
+        r = SESSION.get(f"{src}{path}", timeout=20, allow_redirects=False)
+        assert r.status_code == 301, f"{src}{path} → {r.status_code} (expected 301)"
+        location = r.headers.get("location", "")
+        assert location == f"{COMPANY}{target_suffix}", (
+            f"{src}{path} must 301 to {COMPANY}{target_suffix} in ONE hop — got {location!r}"
         )
-    for path in ("/blogpost", "/blog-extra", "/blogpost/x"):
+
+    # The canonical origin SERVES the index. A 301 here would mean the move has not
+    # happened; a 404 would mean it was pointed at a target that does not exist (the
+    # 301→404 failure #11762 records).
+    for path in ("/blog", "/blog/"):
         r = SESSION.get(f"{COMPANY}{path}", timeout=20, allow_redirects=False)
-        assert not r.is_redirect and "location" not in r.headers, (
-            f"{path} should NOT redirect (got {r.status_code})"
+        assert r.status_code == 200, (
+            f"{COMPANY}{path} → {r.status_code}; the blog's canonical origin serves it "
+            "(#11762 decision), so this is not a redirect source"
         )
+
+    # ⛔ A SLUG-SHAPED path is a DIFFERENT contract, and asserting 200 on it was FALSE
+    # on a correct system (#11976 review F1). `any-slug` is not a published post, so
+    # the SSR catch-all answers 404 BY CONSTRUCTION (`[[path]].ts` `SLUG_RE.test(slug)`
+    # → then `if (!post) return notFound()` → `_lib.ts` `status: 404`). Measured on the
+    # live product host: `/blog` → 200, `/blog/` → 200, `/blog/any-slug` → 404. The old
+    # triple only worked while ALL THREE were 301, because a redirect happens in the
+    # MIDDLEWARE, before any slug is read.
+    #
+    # So the honest claims are: the canonical origin ANSWERS this path instead of
+    # redirecting it (a 301 is the move undone), an unknown slug is a 404 rather than
+    # an empty 200, and a REAL post taken from the index is served at 200 — read from
+    # the index the way `test_blog_article_ssr` does, so the leg cannot be satisfied by
+    # a slug that only exists in this file, and it self-skips when nothing is published.
+    unknown = SESSION.get(f"{COMPANY}/blog/any-slug", timeout=20, allow_redirects=False)
+    assert unknown.status_code == 404, (
+        f"{COMPANY}/blog/any-slug → {unknown.status_code}; the canonical origin serves the "
+        "blog (a 301 is the move undone) and an unpublished slug is a 404, not an empty 200"
+    )
+    slugs = [
+        s
+        for s in re.findall(
+            r'href="/blog/([a-z0-9]+(?:-[a-z0-9]+)*)"',
+            SESSION.get(f"{COMPANY}/blog", timeout=20).text,
+        )
+        if s not in ("feed.xml", "sitemap.xml")
+    ]
+    if slugs:
+        real = SESSION.get(f"{COMPANY}/blog/{slugs[0]}", timeout=20, allow_redirects=False)
+        assert real.status_code == 200, (
+            f"{COMPANY}/blog/{slugs[0]} → {real.status_code}; a published post must be "
+            "SERVED on the canonical origin, not redirected off it"
+        )
+
+    # The retired host sends every /blog path to the canonical one. Trailing slashes
+    # are normalised by the middleware (`/blog/` → `/blog`), which is why the expected
+    # target is spelled per path rather than concatenated.
+    if _BLOG_HOSTS_DIFFER:
+        for path, suffix in (("/blog", "/blog"), ("/blog/", "/blog"), ("/blog/any-slug", "/blog/any-slug")):
+            _expect_one_hop(TORTISE, path, suffix)
+
+    # Direction-independent, and asserted on EVERY origin: the prefix rule is exact,
+    # so these must never be redirected. This is the half that protects unrelated
+    # pages from the /blog rule, and it is the half a sloppy inversion breaks.
+    for origin in {COMPANY, TORTISE}:
+        for path in ("/blogpost", "/blog-extra", "/blogpost/x"):
+            r = SESSION.get(f"{origin}{path}", timeout=20, allow_redirects=False)
+            assert not r.is_redirect and "location" not in r.headers, (
+                f"{origin}{path} should NOT redirect (got {r.status_code})"
+            )
 
 
 def test_blog_feed_and_sitemap() -> None:
-    """E2E-11: feed + sitemap are valid XML (published-only URLs)."""
-    feed = SESSION.get(f"{TORTISE}/blog/feed.xml", timeout=20)
+    """E2E-11: feed + sitemap are valid XML (published-only URLs).
+
+    Fetched on the CANONICAL origin (#11765) — the retired host only 301s now, so
+    asserting there would grade the redirect, not the document.
+    """
+    feed = SESSION.get(f"{COMPANY}/blog/feed.xml", timeout=20)
     assert feed.status_code == 200
     assert "application/rss+xml" in feed.headers.get("content-type", "")
     root = ET.fromstring(feed.text)  # raises on malformed XML
     items = root.findall(".//item")
     for item in items:
         link = item.findtext("link") or ""
-        assert link.startswith(f"{TORTISE}/blog/"), f"feed link not absolute: {link}"
+        assert link.startswith(f"{COMPANY}/blog/"), f"feed link not absolute on the canonical host: {link}"
+        guid = item.findtext("guid") or ""
+        # A guid on the RETIRED host is a new item to every reader that re-subscribes.
+        assert guid.startswith(f"{COMPANY}/blog/"), f"feed guid not on the canonical host: {guid}"
 
-    sitemap = SESSION.get(f"{TORTISE}/blog/sitemap.xml", timeout=20)
+    sitemap = SESSION.get(f"{COMPANY}/blog/sitemap.xml", timeout=20)
     assert sitemap.status_code == 200
     sm = ET.fromstring(sitemap.text)
     ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
     urls = [u.findtext(f"{ns}loc") or "" for u in sm.findall(f"{ns}url")]
-    assert any(u.startswith(f"{TORTISE}/blog") for u in urls), "sitemap has no blog URLs"
+    assert urls, "the blog sitemap lists at least one URL"
+    assert all(u.startswith(f"{COMPANY}/blog") for u in urls), (
+        f"every sitemap loc is on the canonical host — got {urls}"
+    )
 
 
 def test_robots_txt_lists_blog_sitemap() -> None:
-    """robots.txt cross-submission includes the blog sitemap."""
-    r = SESSION.get(f"{TORTISE}/robots.txt", timeout=20)
+    """robots.txt cross-submission includes the blog sitemap, and it RESOLVES.
+
+    #11766 owns the HOST the sitemap is named on: `website/robots.txt` still ships
+    `Sitemap: https://tortoise.premiselabs.co/blog/sitemap.xml`, and the retired
+    host 301s it onto the canonical one, so naming either origin is legal today.
+    That makes a host EQUALITY here wrong (it would red on a correct system until
+    #11766 lands), which was previously resolved by dropping the host entirely and
+    asserting only the path — which is what removed the last assertion that could
+    catch a sitemap pointing at a document that does not answer at all (review P2).
+
+    So keep the host-agnostic shape and assert the property that actually matters
+    and that no deferral can invalidate: every blog-sitemap URL the file names
+    resolves to a 200. A path that moved, or a sitemap removed from its own host,
+    reds here, while #11766 can repoint the host freely.
+
+    ⛔ The HOST is graded only on a run against a production origin (#11976 review).
+    There the URL is fetched as written, so a wrong-host typo reds here too. Against
+    any other target — a local wrangler server, a preview deployment, staging — the
+    host is rebased onto `COMPANY`, because robots.txt names an ABSOLUTE production
+    URL those servers do not serve, and fetching it verbatim made the run call live
+    production and assert on the deployed document — around the module-level
+    `ALLOW_PROD` contract above, which only inspects the three ENV hosts and
+    therefore cannot see a URL parsed out of a fetched file. Stated as a limit
+    rather than an accident: against a non-production target this probe grades the
+    PATH, and the host is graded by a run against a production origin. The mode is
+    decided by the SERVER UNDER TEST being a production origin
+    (`_PRODUCTION_ORIGIN_HOSTS`), never by `ALLOW_PROD` and never by the scheme —
+    that flag says "https targets are permitted", not "this target is production",
+    and a preview deployment is https too (review rounds 4 and 5).
+    """
+    r = SESSION.get(f"{COMPANY}/robots.txt", timeout=20)
     assert r.status_code == 200
-    assert f"{TORTISE}/blog/sitemap.xml" in r.text
+    named = [
+        line.split("Sitemap:", 1)[1].strip()
+        for line in r.text.splitlines()
+        if line.lower().startswith("sitemap:")
+    ]
+    blog_sitemaps = [u for u in named if "/blog/sitemap.xml" in u]
+    assert blog_sitemaps, (
+        f"robots.txt must cross-submit the blog sitemap; it names {named}"
+    )
+    for sitemap_url in blog_sitemaps:
+        # ⛔ A PRODUCTION ORIGIN GRADES THE HOST, EVERY OTHER TARGET REBASES. robots.txt
+        # names an ABSOLUTE production URL
+        # (`https://tortoise.premiselabs.co/blog/sitemap.xml` today, the company host
+        # once #11766 repoints it). Fetching that verbatim from a target that does not
+        # serve it made the run call live production and assert on the deployed
+        # document, around the `ALLOW_PROD` contract above — so against any
+        # non-production target the parsed path is rebased onto `COMPANY`, the server
+        # under test. Against a production origin the URL is fetched AS WRITTEN: that
+        # is the only run where the URL robots.txt names is the URL actually
+        # REQUESTED, so a host that does not resolve reds as a transport error. It is
+        # NOT a claim that the named host serves the document itself — redirects are
+        # followed on that arm by design (the retired host legitimately 301s to the
+        # canonical one, and a robots.txt entry is correct as long as the document
+        # answers), so a 301 onto a sitemap document is accepted. The predicate is the
+        # TARGET's identity (`_PRODUCTION_ORIGIN_HOSTS`), never `ALLOW_PROD` (which
+        # says "https targets are permitted") and never the scheme (a preview is https
+        # too).
+        as_written = urlparse(COMPANY).hostname in _PRODUCTION_ORIGIN_HOSTS
+        target = sitemap_url
+        if not as_written:
+            parsed = urlparse(sitemap_url)
+            target = urljoin(f"{COMPANY}/", parsed.path.lstrip("/"))
+            if parsed.query:
+                target += f"?{parsed.query}"
+        # Follow redirects on a production run: the retired host legitimately 301s
+        # to the canonical one, and a robots.txt entry is correct as long as the
+        # document answers.
+        got = SESSION.get(target, timeout=20)
+        assert got.status_code == 200, (
+            f"robots.txt names {sitemap_url}, which resolves via {target} to "
+            f"{got.status_code} (final url {got.url!r}) — a sitemap entry that does "
+            f"not answer is dead weight"
+        )
+        assert "<urlset" in got.text or "<sitemapindex" in got.text, (
+            f"{sitemap_url} answered {got.status_code} but is not a sitemap document"
+        )
+        if not as_written:
+            # ⛔ THE REBASE ARM MUST STAY ON THE SERVER UNDER TEST. `requests`
+            # follows redirects by default and the as-written arm WANTS that, so
+            # the containment has to be asserted here rather than globally: a
+            # target that 301s this path to the live origin (a staging domain
+            # that redirects to prod is a common setup) would otherwise read and
+            # assert on the DEPLOYED document while PASSING — the exact false
+            # green the rebase exists to prevent, reached through a redirect
+            # instead of a URL that was written out. Compares `.hostname`
+            # (lower-cased, port-stripped) on both sides, like the predicate.
+            assert urlparse(got.url).hostname == urlparse(COMPANY).hostname, (
+                f"{target} left the server under test: {COMPANY} redirected to "
+                f"{got.url!r}, so this run graded the deployed document instead of "
+                f"the host it was pointed at"
+            )
 
 
 @pytest.mark.skipif(
@@ -472,12 +692,14 @@ def test_publish_lifecycle_crawler_visibility() -> None:
         assert r.status_code == 200, f"publish → {r.status_code} {r.text[:200]}"
 
     def article_visible() -> tuple[int, str]:
-        a = SESSION.get(f"{TORTISE}/blog/{slug}", timeout=20)
+        # Document probe → the CANONICAL origin. On the retired product host every
+        # /blog path is a 301 now, so probing it here would grade the redirect.
+        a = SESSION.get(f"{COMPANY}/blog/{slug}", timeout=20)
         return a.status_code, a.headers.get("x-robots-tag", "")
 
     def article_in_feed_sitemap() -> tuple[bool, bool]:
-        feed = SESSION.get(f"{TORTISE}/blog/feed.xml", timeout=20).text
-        sitemap = SESSION.get(f"{TORTISE}/blog/sitemap.xml", timeout=20).text
+        feed = SESSION.get(f"{COMPANY}/blog/feed.xml", timeout=20).text
+        sitemap = SESSION.get(f"{COMPANY}/blog/sitemap.xml", timeout=20).text
         return slug in feed, slug in sitemap
 
     try:
@@ -560,7 +782,7 @@ def test_delete_refuses_a_published_post() -> None:
         assert refused.json().get("error") == "published", refused.text[:200]
 
         # The refusal must be REAL: the published article is still served.
-        live = SESSION.get(f"{TORTISE}/blog/{slug}", timeout=20)
+        live = SESSION.get(f"{COMPANY}/blog/{slug}", timeout=20)
         assert live.status_code == 200, (
             f"published post gone after a refused DELETE ({live.status_code}) — the guard deleted it anyway"
         )

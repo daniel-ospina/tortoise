@@ -299,8 +299,9 @@ def _assert_supersession_scope(
         )
     for key, want in (("goalId", goal_id), ("indicatorId", indicator_id),
                       ("targetId", target_id)):
-        # ⛔ Presence AND equality, in BOTH directions, with ONE named exception
-        # — an ABSENT `indicatorId`. `want is not None and have is not None and
+        # ⛔ Presence AND equality, in BOTH directions, with TWO named exceptions
+        # — an ABSENT `indicatorId` or `targetId` (see below; those two, and only
+        # those two). `want is not None and have is not None and
         # have != want` was an escape that let `indicator_id=None` skip the check
         # entirely (measured: a SECOND live claim and a doubled operator count),
         # so `have != want` is the rule.
@@ -308,8 +309,9 @@ def _assert_supersession_scope(
         # ⛔ BUT `have is None` on `indicatorId` is NOT "another chain": it is a
         # claim written by the module that shipped in #11942, where
         # `indicator_id` defaulted to `None` and the writer stored the prop only
-        # for a truthy id. Such a claim carries `judgementState`/`goalId`/
-        # `targetId` and no `indicatorId`, and the DERIVED lookup can never see
+        # for a truthy id. Such a claim carries `judgementState` and `goalId` —
+        # and it may have no `targetId` either (see the second exception below) —
+        # and the DERIVED lookup can never see
         # it — `latest_judgement` adds `p.indicatorId = $indicatorId` to its WHERE
         # clause only when the argument is not `None`, and `indicator_id` is now
         # REQUIRED, so the clause is always present and a Point carrying no
@@ -323,13 +325,30 @@ def _assert_supersession_scope(
         # of the same goal+target — the supersession transfers its arrow, #6180 —
         # is exactly the collapse this module exists to produce.
         #
-        # `goalId` and `targetId` stay STRICT: this module has ALWAYS written
-        # them, so their absence means the Point is not a judgement of this chain
-        # at all. The tolerance is one named dimension, never a blanket rule —
-        # tolerating `goalId` would re-open the cross-goal transfer (#6180) this
-        # guard exists to stop.
+        # `goalId` stays STRICT: this module has ALWAYS written it (with
+        # `goal_id` a required argument, unconditionally), so its absence means
+        # the Point is not a judgement of this chain at all — and tolerating it
+        # would re-open the cross-goal transfer (#6180) this guard exists to
+        # stop.
+        #
+        # ⛔ `targetId` may ALSO be absent on a legacy claim, for the SAME reason
+        # as `indicatorId` and by the same mechanism: the pre-#11965 writer's
+        # DOOR checked `if target.target_id is None` while its WRITER checked
+        # `if target.target_id:` — so `Target(..., target_id="")` passed the door
+        # and the prop was dropped, minting a judgement with `judgementState` +
+        # `goalId` and NO `targetId`. MEASURED on this head with such a claim:
+        # invisible to the derived lookup (the `p.targetId = $targetId` clause is
+        # always present now), the explicit seam REFUSED it, and the goal kept two
+        # live claims and two IMPL arrows with belief 0.6920 against the
+        # single-chain 0.6502 — the same duplicate-support defect, one dimension
+        # over. The falsy spelling is closed on the WRITE side now; claims
+        # already written are this seam's to retire.
+        #
+        # So the tolerance is TWO named dimensions, never a blanket rule, and
+        # both are the ones whose pre-#11965 door was `is None` while its writer
+        # was truthiness. `goalId` is the one that was never optional.
         have = node.get(key)
-        if have is None and key == "indicatorId":
+        if have is None and key in ("indicatorId", "targetId"):
             continue
         if have != want:
             raise ValueError(
