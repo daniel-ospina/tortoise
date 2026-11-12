@@ -1549,6 +1549,11 @@ def test_an_operator_shaped_successor_is_not_a_working_repair(sdk):
     assert "OPERATOR-SHAPED" in issues[0].detail, issues[0].detail
     assert "excludes from a factor's inputs" in issues[0].detail, issues[0].detail
     assert "OPERATOR-SHAPED" in issues[0].fix, issues[0].fix
+    # ⛔ The QUOTED test follows the LANE, like the predicate that fires the arm: a
+    # parenthetical naming ``op_type`` here would state a disqualifier that is not in
+    # force on an operator row and steer the reader off a successor EP reads.
+    assert "or an ``op_type`` is set" not in issues[0].detail, issues[0].detail
+    assert "or an ``op_type`` is set" not in issues[0].fix, issues[0].fix
 
     # The clause is load-bearing, and the measured consequence is STRONGER than
     # "still degenerate": EP excludes the operator-shaped node from the input
@@ -1565,6 +1570,50 @@ def test_an_operator_shaped_successor_is_not_a_working_repair(sdk):
     assert [i for i in _issues(sdk, "superseded_object_active_edges")] == [], (
         "the prescribed repair must leave the check reading CLEAN — that is exactly "
         "why the string has to refuse it")
+
+
+def test_an_op_type_only_successor_is_read_by_the_operator_arm(sdk):
+    """The two EP successor predicates disagree, so the row's LANE picks the test.
+
+    ``_non_operator`` (the OPERATOR-INPUT arm) refuses only the FLAG, so an
+    ``op_type``-only successor IS read there — measured: two confidences after the
+    prescribed re-point, ``skipped: None``. Applying the direct arm's stricter
+    ``_non_op`` to this lane announced "OPERATOR-SHAPED … target a CLAIM successor"
+    about a successor EP reads perfectly, i.e. it told the reader to abandon a
+    repair that works. ⛔ Without this test the per-lane split can be reverted
+    (``_succ_refused``/``_next_refused`` back to the shape test) with the whole
+    file still green — measured.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyA")
+    # Only ``op_type``: the flag stays NULL/false, so the FLAG test admits it.
+    _obj(sdk, "PolicyB", op_type="IMPL")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyA", "PolicyB")
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyB'}) "
+                   "RETURN o.status, o.is_operator, o.op_type", {}) == \
+        [[None, None, "IMPL"]], "fixture drifted: not the op_type-only shape"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues, "fixture drifted: the stale edge must be reported"
+    assert "OPERATOR-SHAPED" not in issues[0].detail, (
+        "EP's operator arm reads an op_type-only successor, so this arm must not "
+        "fire: " + issues[0].detail)
+    assert issues[0].fix.endswith("target a CLAIM successor") is False, issues[0].fix
+
+    # The consequence the arm would have claimed is measurably FALSE: the ordinary
+    # re-point onto PolicyB leaves the factor running.
+    _q(sdk, "MATCH (o {id:$i})-[r:IMPL]->() MATCH (s:Object {name:$s}) "
+            "MERGE (o)-[nr:IMPL]->(s) SET nr.idx = 0 DELETE r",
+       {"i": op["id"], "s": "PolicyB"})
+    run = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert run["confidences"], (
+        "EP refused the op_type-only successor, so the stricter test was right "
+        f"after all: {run}")
+    assert not [i for i in _issues(sdk, "superseded_object_active_edges")
+                if i.node_id == v1["id"]], (
+        "the prescribed repair must clear the finding")
 
 
 def test_an_unnamed_object_is_not_reported_as_the_string_none(sdk):
@@ -1981,6 +2030,38 @@ def test_the_successorless_shaped_arm_does_not_promise_the_flag_restores(sdk):
     assert [i for i in _issues(sdk, "superseded_object_active_edges")
             if i.node_id == v1["id"]], (
         "fixture drifted: the flag-clearing step must not clear the finding")
+
+
+def test_an_integer_one_flag_is_an_operator_input(sdk):
+    """``is_operator=1`` is a door, and this engine compares ``1 = true`` as TRUE.
+
+    ``update_entity(p, is_operator=1)`` stores the INTEGER ``1`` (measured) and
+    ``RETURN 1 = true`` → ``True``, so EP's operator arm builds the factor (measured:
+    two confidences before the supersession, one after, ``skipped: None``). A
+    ``is_op_flag is True`` test is FALSE for ``1``, so the row took the neither-arm
+    lane and announced "EP builds NO factor … no skipped-factor record exists" over a
+    factor that runs — then forbade the repair that works. ⛔ ``0`` stays
+    neither-arm: this engine does not compare ``0 = false`` (measured).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    sdk.update_entity(p["id"], is_operator=1, direction="->")
+    assert _q(sdk, "MATCH (a:Point {id:$i}) RETURN a.is_operator", {"i": p["id"]}) \
+        == [[1]], "fixture drifted: the flag is not the integer 1"
+    before = sdk.compute_confidence(factors=[p["id"]], require_calibration=False)
+    assert before["confidences"], (
+        "fixture drifted: EP builds no factor for an integer-1 flag: "
+        + repr(before.get("skipped_factors")))
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues, "fixture broken: the stale edge must be reported"
+    assert "in EITHER arm" not in issues[0].detail, (
+        "EP reads an integer-1 flag as an operator input, so the neither-arm lane "
+        "is wrong here: " + issues[0].detail)
 
 
 def test_the_zero_live_input_rung_is_stated(sdk):

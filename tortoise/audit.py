@@ -898,8 +898,18 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
          carrier_count, _carrier_id, carrier_status, carrier_sb,
          carrier_is_operator, carrier_op_type, carrier_outdated, next_count,
          next_status, next_outdated, next_is_operator, next_op_type) = row
+        # ⛔ ``is_op_flag is True`` misses the INTEGER ``1``: ``update_entity(p,
+        # is_operator=1)`` is a door (measured — the property then holds ``1``), and
+        # this engine compares ``1 = true`` as True, so EP's operator arm builds the
+        # factor while an ``is True`` test sent the row to the neither-arm lane and
+        # announced "no factor … no skipped-factor record" over a factor that runs
+        # (measured: two confidences before the supersession, one after,
+        # ``skipped: None``). ``== 1`` also accepts the boolean, and still rejects
+        # ``'false'`` (a string, measured) and ``0`` (which this engine does NOT
+        # compare equal to false, so EP's direct arm refuses it).
         _is_operator = ("Point" in (active_labels or [])
-                        and (is_op_flag is True or op_type is not None))
+                        and (is_op_flag is True or is_op_flag == 1
+                             or op_type is not None))
         return {
             "sup_id": sup_id, "sup_name": sup_name, "sup_sb": sup_sb,
             "edge_type": edge_type, "idx": idx,
@@ -939,8 +949,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             "direction": (direction if _is_operator else edge_direction), "active_id": active_id,
             "carrier_count": carrier_count, "carrier_status": carrier_status,
             "carrier_sb": carrier_sb,
-            # ``coalesce(..., false)``: operator-SHAPED means anything EP's
-            # ``_non_operator`` refuses, i.e. NOT the boolean ``false``.
+            # ``coalesce(..., false)``: the SHAPE means anything EP's "_non_op"
+            # refuses, i.e. the flag is NOT the boolean "false" **or** "op_type"
+            # is set. "_non_operator" is the weaker OPERATOR-INPUT test and
+            # refuses only the first of those (see "carrier_is_operator" above).
             # ⛔ SHAPE, not the raw flag: EP's DIRECT-edge arm uses the stricter
             # ``_non_op`` (flag false/NULL AND ``op_type`` NULL), so an
             # ``op_type``-only node is REFUSED there even though the operator-input
@@ -1001,6 +1013,19 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         """``_succ_refused`` for the successor's OWN successor (the second hop)."""
         return s["next_is_shaped"] if not s["is_operator"] else \
             s["next_is_operator"]
+
+    def _succ_test(s: dict) -> str:
+        """The EP test that makes ``_succ_refused``/``_next_refused`` fire, QUOTED.
+
+        ⛔ ONE SOURCE, and it must agree with ``_succ_refused``: the two lanes use
+        different predicates, so a single parenthetical on all three sites stated a
+        disqualifier that is NOT in force on the operator lane — where an
+        ``op_type``-only node is read — and steered a reader off a successor EP
+        reads perfectly. (``is_operator='false'``/``0`` rows reach the neither arm,
+        so the shape text belongs to the direct lane only.)
+        """
+        return ("``is_operator`` is not ``false``" if s["is_operator"]
+                else "``is_operator`` is not ``false`` — or an ``op_type`` is set")
 
     def _dropped_input(s: dict) -> str:
         """What EP does when the re-point sends this input where EP will not read it.
@@ -1092,8 +1117,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # is NOT ``= true``, so "(is_operator=true)" named a value the node does
             # not hold and a reader checking with ``= true`` found nothing.
             return ("; the successor it names is itself OPERATOR-SHAPED "
-                    "(EP's shape test: ``is_operator`` is not ``false`` — or an "
-                    "``op_type`` is set), which EP "
+                    "(EP's shape test: " + _succ_test(s) + "), which EP "
                     "excludes from a factor's inputs "
                     "(#9269) — " + _dropped_input(s) + ", and a re-audit reads "
                     "CLEAN over it. Target a CLAIM successor")
@@ -1162,11 +1186,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # re-audit reads CLEAN).
         if _next_refused(s):
             return (f"names the next link ({_quoted(s['carrier_sb'])}), which is "
-                    "OPERATOR-SHAPED (EP's shape test: ``is_operator`` is not "
-                    "``false`` — or an ``op_type`` is set) — EP excludes it from a "
-                    "factor's inputs (#9269), so targeting it leaves the operator "
-                    "with NO factor and a re-audit reading CLEAN: target a CLAIM "
-                    "successor")
+                    "OPERATOR-SHAPED (EP's shape test: " + _succ_test(s) + ") — EP "
+                    "excludes it from a factor's inputs (#9269), so "
+                    + _dropped_input(s) + ", and a re-audit reads CLEAN over it: "
+                    "target a CLAIM successor")
         if (s["next_status"] or "") == DRAFT_STATUS:
             return (f"names the next link ({_quoted(s['carrier_sb'])}), which is "
                     f"'{DRAFT_STATUS}' — EP strips a draft input like a terminal one "
@@ -1196,8 +1219,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "factor for this endpoint in EITHER arm: the operator arm needs "
                 "the :Point LABEL **and** (``is_operator = true`` or an "
                 "``op_type``) — a ``:Point`` carrying ``is_operator='false'`` is a "
-                "door and matches neither — while "
-                "the :Point label, and the direct-edge arm refuses an "
+                "door and matches neither — while the direct-edge arm refuses an "
                 "operator-shaped endpoint. So the claim never counted this support "
                 "and no skipped-factor record exists (#9269/#11826)")
         elif s["is_operator"]:
@@ -1276,9 +1298,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         succ = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "the successor"
         if _succ_refused(s):
             return (f" ⛔ {succ} is OPERATOR-SHAPED (EP's shape test: "
-                    "``is_operator`` is not ``false`` — or an ``op_type`` is set), "
-                    "which EP "
-                    "excludes from a factor's inputs (#9269): "
+                    + _succ_test(s) +
+                    "), which EP excludes from a factor's inputs (#9269): "
                     f"{_dropped_input(s)} — target a CLAIM successor")
         if (status or "") == DRAFT_STATUS:
             return (f" ⛔ {succ} is '{DRAFT_STATUS}', which EP strips the same way "
@@ -1549,9 +1570,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                         "still ends at the superseded Object, so what restores the "
                         f"support is the wiring, not the flag: {_shape_repair} AND "
                         "wire the claim through a :Point operator, or delete this "
-                        "edge (measured: clearing the flag alone leaves "
-                        "``msg_alpha`` None and this finding returns as a "
-                        "direct-edge row)")
+                        "edge (measured: ``confidences {}``, and the row comes back "
+                        "exactly as it was where the shape came from ``op_type``, "
+                        "because the flag was already false)")
             elif not s["is_operator"]:
                 fix += ("; and this is a DIRECT edge, so there is no factor to "
                         "re-point — write the equivalent edge onto that successor "
