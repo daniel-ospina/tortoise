@@ -559,6 +559,23 @@ export const onRequest: PagesFunction = async (context) => {
       // before #11762, so a strict contract here breaks no existing URL.
       return new Response("Not Found", { status: 404, headers: HSTS });
     }
+    // ⛔ ONE URL PER PAGE, INSIDE the prefix too.
+    // `rest` strips `.html`, leading and trailing slashes, so without this,
+    // `/tortoise/docs.html`, `/tortoise/docs/` and `/tortoise//docs` would all
+    // answer 200 alongside `/tortoise/docs` — four indexable copies of one page,
+    // which is the duplicate-canonical condition this change exists to remove, at
+    // the URLs the change CREATES. `_redirects` cannot fix it: this rewrite returns
+    // before the static rules run (measured — `/docs/` on the company host is a
+    // single middleware hop today). A 301 onto the canonical form is safe because
+    // no row of the map targets a `.html` or trailing-slash URL, and
+    // `/tortoise/<page>` is a 200 in this same deploy.
+    const canonical = rest === "" ? PRODUCT_PREFIX : `${PRODUCT_PREFIX}/${rest}`;
+    if (url.pathname !== canonical) {
+      return new Response(null, {
+        status: 301,
+        headers: { Location: url.origin + canonical + url.search, ...HSTS },
+      });
+    }
     // ⛔ FETCH THE EXTENSIONLESS PATH, never `<rest>.html`.
     // `env.ASSETS.fetch` RE-ENTERS the asset router, where `_redirects` DOES
     // apply (measured — `MEMORY.md` `[deploy]`; the admin gate treats a 3xx from

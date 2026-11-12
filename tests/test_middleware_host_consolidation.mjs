@@ -271,9 +271,7 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
 {
   const rows = [
     ["/tortoise", "/product.html"],
-    ["/tortoise/", "/product.html"],
     ["/tortoise/docs", "/docs.html"],
-    ["/tortoise/docs.html", "/docs.html"],
     ["/tortoise/faq", "/faq.html"],
     ["/tortoise/self-hosted", "/self-hosted.html"],
     ["/tortoise/security", "/security.html"],
@@ -290,6 +288,25 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
       `company ${from} serves ${asset} (got ${body.slice(0, 40)})`,
     );
   }
+  // ⛔ ONE URL PER PAGE INSIDE THE PREFIX TOO. `.html`, a trailing slash and a
+  // doubled slash are all the same document; serving them alongside the canonical
+  // form is four indexable copies of one page, and `_redirects` cannot collapse
+  // them because this rewrite returns before the static rules run. Each must be a
+  // single 301 onto the canonical form — which is itself a 200 in this deploy.
+  for (const [from, to] of [
+    ["/tortoise/", "/tortoise"],
+    ["/tortoise/docs.html", "/tortoise/docs"],
+    ["/tortoise/docs/", "/tortoise/docs"],
+    ["/tortoise//docs", "/tortoise/docs"],
+    ["/tortoise/investors.html", "/tortoise/investors"],
+  ]) {
+    const res = await onRequest(ctx(`https://${COMPANY}${from}`));
+    assertEq(res.status, 301, `${from} canonicalises (one hop), it is not a second 200`);
+    assertEq(res.headers.get("location"), `https://${COMPANY}${to}`, `${from} → ${to}`);
+    const landed = await onRequest(ctx(res.headers.get("location")));
+    assertEq(landed.status, 200, `${from}'s canonical form is a 200 in the same deploy`);
+  }
+
   // A prefix match must not turn into a wildcard 200: an unknown product page
   // is a 404, never a redirect onto a 404.
   const missing = await onRequest(ctx(`https://${COMPANY}/tortoise/nope`));
