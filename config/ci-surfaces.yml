@@ -7410,6 +7410,30 @@ surfaces:
   # (the shared `sdk_factory` fixture is URI-aware), so it needs no `carve_out:` row and
   # no `TEST_NO_REDIRECT_STEMS` entry.
   - test_11822_goal_judgement.py
+  # #11825: an `:Event` carries NO lifecycle, so the TERMINAL half of the status
+  # vocabulary (and a true `outdated`) is refused at every write door —
+  # `_update_entity`, `create_entity(type='event')` / `create_event`,
+  # `EventAPI.add_event`, and `EventAPI.emit_belief("EventRecorded", …)` — while a
+  # NON-terminal `status` still lands (the #2788 prop lane `_promote_incident_operators`
+  # gates on, #7853/#10828). The composition lives in ONE place,
+  # `tortoise/live.py::is_terminal_status`, which is the same predicate `ep.py`
+  # applies and which `live.py`-only diffs resolve to through the `tortoise/`
+  # fallback — so `core` is the RIGHT home and the only one that helps (`select()`
+  # REPLACES the `core` fallback on a named-surface match, so registering it under
+  # `sdk`/`api` would run it on none of the diffs that can break it). It landed with
+  # NO row here, so `tools/ci_selection.py --integrity` redded (`manifest drift:
+  # ['test_11825_event_terminal_status_refused.py']`) and `manifest-integrity` —
+  # which IS in `python-ci-gate.needs` — held the merge red while the pins ran in NO
+  # lane. Same class and same remedy as `test_11821_journal_vector_width.py` and
+  # `test_journal_growth.py` above. The pins are the ones that would have caught the
+  # #11825 defect: each refusal test is RED at the parent head if the guard is
+  # removed (measured, table in PR #12108's evidence comment), and
+  # `TestTheGuardDoesNotOverBlock` is the other half — a Point, a Subject and a
+  # non-terminal Event status must still be written. Hermetic in the sense that
+  # matters here (the shared URI-aware `sdk_factory` fixture, so it runs on the
+  # docker lane AND under `TORTOISE_TEST_CARVE_OUT=1`), so it needs no `carve_out:`
+  # row and no `TEST_NO_REDIRECT_STEMS` entry.
+  - test_11825_event_terminal_status_refused.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #11855: the ranker half of the unreadable-operand pins. `GraphRanker` and
