@@ -480,8 +480,13 @@ same step with the same tail is the investigation.
     There is deliberately **no** "repair the frozen run" remedy here, and that is not an
     omission: a frozen run — `in_progress` with every job `completed` **and its own
     `updated_at` motionless for `JOB_SETTLE_SECONDS` (300 s)** — is the *proof* that EXCLUDES
-    it from `pr_running` (see the `excluded` sentence) once it has been PROBED, so a probed
-    frozen run can never make the census unmeasured. ⛔ "Once probed" is load-bearing and
+    it from `pr_running` (see the `excluded` sentence) once it has been PROBED **and its jobs
+    read back all-`completed`**, so a frozen run that was read cleanly can never make the
+    census unmeasured. ⛔ BOTH qualifiers are load-bearing. "Once probed" alone was still too
+    wide: probing is necessary but NOT sufficient — a frozen run whose jobs read FAILS (a
+    transient 5xx), or whose list does not prove complete, abstains into `_unread` before the
+    settle gate is ever consulted (`_settled_still` runs only `if live is False`), and so it
+    DOES make the census unmeasured. ⛔ "Once probed" is load-bearing and
     was missing: the budget is spent oldest-first over `DEFAULT_MAX_JOB_PROBES` runs, so once
     more runs are frozen than the budget allows, the surplus is never probed, keeps
     `has_live_job = None`, and DOES land in `pr_running_unmeasured` (as `_unprobed`) — the

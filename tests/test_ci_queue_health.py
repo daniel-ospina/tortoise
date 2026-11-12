@@ -2360,11 +2360,15 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         needle. The leading comment marker of every line is stripped first, so the
         comparison is on the prose an operator reads, however it is wrapped or indented.
 
-        ⛔ NOR ARE CASE, BACKTICKS AND EMPHASIS CONTENT (review P2-2, P3-1). All three were
-        MEASURED to hide a revert: the same retracted claim, re-typed lower-case, passed the
-        whole suite, and these docs emphasise tokens INSIDE the very sentences guarded here
-        ("is the *proof* that EXCLUDES", and the pre-fix doc's "*by being probed*"), so a
+        ⛔ NOR ARE CASE, BACKTICKS AND ASTERISK EMPHASIS CONTENT (review P2-2, P3-1). All three
+        were MEASURED to hide a revert: the same retracted claim, re-typed lower-case, passed
+        the whole suite, and these docs emphasise tokens INSIDE the very sentences guarded
+        here ("is the *proof* that EXCLUDES", and the pre-fix doc's "*by being probed*"), so a
         revert that bolds a word inside a needle span would otherwise be invisible.
+        ⛔ UNDERSCORE EMPHASIS IS NOT NORMALISED, and that is a stated limit, not an oversight:
+        `_` is a token character in this module (`job_settle_seconds`, `pr_running`), so
+        stripping it would mangle the very needles it was meant to protect. A revert that
+        italicises with `_` or `__` therefore walks through — measured.
         """
         lines = [re.sub(r"^\s*(?:#:|#)\s?", "", ln) for ln in text.splitlines()]
         return re.sub(r"\s+", " ", " ".join(lines)).replace("`", "").replace("*", "").lower()
@@ -2383,8 +2387,11 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     def hits(hay: str, needle: str) -> bool:
         """Does ``needle`` occur where the second half is NOT also stated nearby?
 
-        The passage is the needle's OWN SENTENCE, capped at 300 characters back so an
-        unpunctuated bullet list cannot reach an unrelated clause.
+        The passage STARTS at the needle's own sentence — unless no terminator appears in the
+        300 characters before it, in which case it starts 300 characters back, which is
+        (measured) a different clause: in an unpunctuated bullet list, a previous item that
+        mentions `updated_at` will disarm a hit in the item below it. That cap is a bound on
+        how far back the search may cost, NOT a promise that the passage is one sentence.
 
         ⛔ NO LOOKAHEAD INTO THE NEXT SENTENCE, and that is measured, not stylistic (review P2).
         A one-sentence lookahead disarms the REAL revert: a revert re-adds the retracted
@@ -2594,7 +2601,11 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # vacuously (every correct sentence carries the stillness half, so any hit on one is
     # disarmed). This is the leg with teeth: it catches the real risk of narrowing — a needle
     # taken so far down that the sentence it exists to catch walks past it. These are the
-    # phrasings that actually SHIPPED (pre-fix, from `origin/main`), one per guarded site.
+    # phrasings that actually SHIPPED — pre-fix on `origin/main` for 13 of them, plus TWO
+    # sentences that shipped only mid-branch at `6c05aeb903` (the merged closed-avenue claim,
+    # later retracted), ONE truncation of a shipped sentence to its shortest true instance,
+    # and ONE declared RE-TYPED variant. Several guarded sites carry more than one entry, so
+    # this is not one-per-site.
     pre_fix = [
         # to_dict + the two field docs + classify_queue's comment + its returned-dict twin
         "the runs read out because EVERY job of them was `completed` (a proof of "
@@ -4203,8 +4214,14 @@ def test_the_UNMEASURED_token_is_rendered_by_EVERY_arm_that_can_carry_it():
     assert ", unmeasured=" not in exclusive, exclusive
 
 
-def test_the_unread_bracket_names_ALL_THREE_causes():
-    """The `unread` bucket's text must cover every cause it stands for (review P2).
+def test_the_unread_bracket_names_the_THREE_causes_it_names():
+    """The bracket must name the causes it NAMES — not claim to cover every one (review P2).
+
+    ⛔ THIS IS NOT AN EXHAUSTIVENESS PIN (round 8). The bucket also holds a run whose list
+    could not be PROVEN complete — a `total_count` that is PRESENT and not an int, on a
+    SHORT page — which is none of empty/partial/malformed/other-attempt and which the
+    emitted sentence does not name (issue #12219). The docstring used to say "every cause it
+    stands for", which the code contradicts.
 
     The settle gate gave this bucket a third cause — a read that SUCCEEDED while its list
     proved nothing (truncated, or jobs stamped for another attempt, where the stamp can be

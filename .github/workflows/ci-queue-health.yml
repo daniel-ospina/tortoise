@@ -86,7 +86,8 @@ name: ci-queue-health
 # scoped to the FROZEN population, while a run whose stillness is merely UNPROVEN may still
 # be working — the DYNAMIC matrix's pre-expansion window, a run that has just finished
 # every job, or one whose stamp cannot be read or is future-dated (`_settled_still` answers
-# False for all four) — and /cancel on THAT would be ACCEPTED, so it is the one thing here
+# False for all four) — and /cancel on THAT may be ACCEPTED (it may also still answer 409:
+# the 409 evidence covers only a run whose stillness is PROVEN), so it is the one thing here
 # an operator must not be told is a closed avenue.
 # Neither can block a merge, because a
 # `schedule`-event run is a NON-CODE event: the merge rail's own `NON_CODE_EVENTS`

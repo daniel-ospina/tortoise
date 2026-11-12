@@ -692,13 +692,15 @@ class QueueHealth:
     #: disproved. The causes come from three layers — the callee's read routes, the caller's
     #: settle gate, and the caller's probe budget — and the ATTRIBUTION (which layer each
     #: cause comes from) is owned by `pr_running_unmeasured_unprobed` below; the set itself is
-    #: deliberately not re-enumerated here. ⛔ NO COUNT OF ROUTES IS GIVEN, deliberately: this
-    #: comment has carried one (as "three causes" and then as "FOUR causes, ONE bucket", both
-    #: shipped) and each was a route short — most recently after the callee gained a third
-    #: completeness route (an int `total_count` above the page, a PRESENT-but-not-an-int
-    #: count, and no count on a full page). Layers are not routes: three layers is stable, a
-    #: route count is not. The `has_live_job` field doc above carries the callee's half;
-    #: re-derive the routes from it, never from here.
+    #: deliberately not re-enumerated here. ⛔ NO COUNT OF THE WHOLE ROUTE SET IS GIVEN,
+    #: deliberately: this comment has carried one (as "three causes" and then as "FOUR
+    #: causes, ONE bucket", both shipped) and each was a route short. The one count below is
+    #: the SUB-RULE that grew — completeness, which now has three routes (an int
+    #: `total_count` above the page, a PRESENT-but-not-an-int count, and no count on a full
+    #: page) — and it is named only because that is the growth that falsified the last
+    #: numerals. Layers are not routes: three layers is stable, a route count is not. The
+    #: `has_live_job` field doc above carries the callee's half; re-derive the routes from
+    #: it, never from here.
     #: Abstaining toward executing is what keeps an unread jobs surface from manufacturing
     #: `PR-STARVED` — a `STARVING_VERDICT` that authorises a destructive cancel-then-rerun.
     #: Reported so the abstention is visible.
