@@ -838,13 +838,24 @@ def _one_successor_spelling(names, default: str) -> str:
     live successor — the #5370 harm, re-created from the reader side. Storing the
     candidate's OWN spelling keeps the property resolvable by all of them.
 
-    ⛔ Only when the candidates AGREE. Two visible carriers spelled differently
-    under one folded key make "the" successor spelling a choice, and choosing one
-    by row order is the backend-order dependence #2164 P2-2 forbids. Then the
-    record's own spelling is kept (it names both, so it resolves either way).
+    ⛔ Two visible carriers spelled differently under one folded key make "the"
+    successor spelling a choice, and choosing one by ROW ORDER is the
+    backend-order dependence #2164 P2-2 forbids — so the tie is broken
+    deterministically, and the record's OWN spelling is used only when a node
+    actually carries it. It is never used as a blind fallback: the record's
+    spelling is whatever the extractor wrote, and when no node is spelled that way
+    the stored value names nothing, so `audit`'s ``superseded_by_unresolvable``
+    fires and the renderer reports "no successor record found" about a live
+    successor — measured with a merged carrier under one folded key (review
+    round 9, P2; a merged entity contributes BOTH spellings once the gate reads
+    its carriers, which is what narrowed this from "candidates agree").
     """
     spellings = {str(n) for n in names if n}
-    return spellings.pop() if len(spellings) == 1 else default
+    if not spellings:
+        return default
+    if default in spellings:
+        return default
+    return min(spellings)
 
 
 def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
@@ -893,6 +904,18 @@ def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
     UNCHANGED when there is no pointer, otherwise merges duplicate-id nodes into
     one \"entity\"). Duplicates reached only through the survivor FETCH are caught
     there (``LIMIT 2``).
+
+    ⛔ ``with_groups=True`` returns ``(representative, entity_key, members)``
+    instead of the representative alone, and the SUCCESSOR side needs that: its
+    questions are asked at two levels. *Is this candidate a different entity than
+    the target* is entity-level (a merged carrier is not a second candidate), but
+    *is anything under that name VISIBLE* is node-level — `recall_state` and the
+    render probe show a live carrier even when the entity's survivor has since
+    been retired. A survivor-only representative answered the second question with
+    the survivor's own status, so a retired survivor beside a live carrier refused
+    a fold that used to apply (review round 8). ``representative`` is ``None`` when
+    the survivor is GONE: the group still carries its members, because a live
+    carrier is exactly what the visibility question must see (review round 9).
     """
     if not rows:
         return []
@@ -951,20 +974,34 @@ def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
                 # see it). Returning both hands the caller the same ambiguity it
                 # counts for its own rows; taking `fetched[0]` would pick the
                 # representative by backend row order — the #2164 P2-2 defect.
-                out.extend(fetched)
+                # ⛔ The SHAPE must match the caller's: a group-aware caller
+                # unpacks `(rep, key, members)`, so a bare row here raised
+                # `not enough values to unpack` out of `apply_supersessions` — a
+                # corrupt-id graph must be REFUSED, never an exception that
+                # aborts the rest of the batch (review round 9, P1).
+                if with_groups:
+                    out.extend((dup, key, [dup]) for dup in fetched)
+                else:
+                    out.extend(fetched)
                 continue
             rep = fetched[0] if fetched else None
         if rep is None:
             # The survivor is not fetchable (deleted while the `resolved_from`
-            # pointer stayed): the only row left is a RETIRED CARRIER, and
-            # folding onto it is the defect this collapse exists to prevent
-            # (review round 5). Dropping the group means the caller sees NO
-            # candidate from this arm, and each caller reports that in its own
-            # words: the two SUCCESSOR probes report "dangling successor" (the
-            # record never reaches a fold), while the two REF probes fall through
-            # to the Subject lane — which reports "ref is not a Subject" for a ref
-            # that IS a live Object, so `apply_supersessions` names the true reason
-            # before that fallback (`"ref carrier's survivor is gone"`).
+            # pointer stayed). The REPRESENTATIVE must not be invented — falling
+            # back to `group[0]` is the RETIRED CARRIER, and folding onto it is
+            # the defect this collapse exists to prevent (review round 5) — but
+            # the group is not empty of EVIDENCE either: its members are exactly
+            # the carriers the graph holds, and a live one is what `recall_state`
+            # shows. A REF probe addresses the representative, so it keeps
+            # dropping the group and reporting (the two REF probes then fall
+            # through to the Subject lane, whose refusal
+            # `"ref carrier's survivor is gone"` names the true reason); a
+            # GROUP-AWARE caller is handed `(None, key, group)` and decides for
+            # itself — dropping it refused a fold the pre-widening raw arm
+            # applied whenever the carrier was still live (review round 9, P2).
+            if not with_groups:
+                continue
+            out.append((None, key, group))
             continue
         out.append((rep, key, group) if with_groups else rep)
     return out

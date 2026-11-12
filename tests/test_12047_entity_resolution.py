@@ -2979,6 +2979,126 @@ class TestThe12120ReviewRound8:
             sdk.close()
 
 
+class TestThe12120ReviewRound9:
+    """Round 9: the group-aware shape must survive corruption, a GONE survivor
+    must not hide a live carrier, and a recorded spelling must resolve by name."""
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r9",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_a_duplicate_survivor_id_refuses_instead_of_raising(self, sdk_factory):
+        """A corrupt id is a REFUSAL, never an exception out of the batch."""
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            # Two nodes claim one id, and neither is among the probe's rows for
+            # the folded key — the ambiguity is reached only through the
+            # survivor FETCH. A live carrier points at it.
+            g.query(
+                "CREATE (a:Object {id:'r9-dup', name:'Duplicated', "
+                "objectKind:'document', status:'live'}) "
+                "CREATE (b:Object {id:'r9-dup', name:'Duplicated', "
+                "objectKind:'document', status:'live'}) "
+                "CREATE (c:Object {id:'r9-carrier', name:'Widget', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'widget', resolved_from:'r9-dup'})")
+            sdk.create_object("Old Co", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Co", "supersedes_by": "Widget",
+                 "evidence": "test"}])
+            # Either outcome is acceptable EXCEPT an exception, and the batch
+            # must still have been judged: the record is accounted for.
+            assert applied in (0, 1), (applied, skips, msgs)
+            assert applied == 1 or skips, (
+                "the record was neither applied nor reported: "
+                f"{(applied, skips, msgs)!r}")
+            # The rest of a batch must still be processed (no abort).
+            applied2, skips2, msgs2 = self._apply(sdk, [
+                {"superseded": "Old Co", "supersedes_by": "Widget",
+                 "evidence": "test"},
+                {"superseded": "Missing Thing", "supersedes_by": "Widget",
+                 "evidence": "test"}])
+            assert applied2 + len(skips2) >= 1, (applied2, skips2, msgs2)
+        finally:
+            sdk.close()
+
+    def test_a_gone_survivor_does_not_hide_its_live_carrier(self, sdk_factory):
+        """`delete_entity(survivor)` leaves the carrier live and addressable."""
+        from tortoise.entity_resolver import apply_entity_merge
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            survivor = sdk.create_object("Widget", "document")["id"]
+            carrier = "r9-carrier-gone"
+            g.query(
+                "CREATE (o:Object {id:'r9-carrier-gone', name:'The Widget', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'widget'})")
+            apply_entity_merge(sdk, candidate_id=carrier, survivor_id=survivor,
+                               method="fuzzy", similarity=0.9)
+            assert sdk.delete_entity(survivor)
+            target = sdk.create_object("Old Co", "document")["id"]
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Co", "supersedes_by": "The Widget",
+                 "evidence": "test"}])
+            assert applied == 1, (
+                "a live carrier was hidden by its deleted survivor: "
+                f"{(applied, skips, msgs)!r}")
+            row = g.query("MATCH (o:Object {id:$id}) RETURN o.status",
+                          params={"id": target}).result_set
+            assert row and row[0][0] == "superseded", row
+        finally:
+            sdk.close()
+
+    def test_a_recorded_spelling_resolves_when_a_merged_carrier_exists(
+            self, sdk_factory):
+        """Two carriers under one folded key still record a NAME, not the raw input."""
+        from tortoise.entity_resolver import apply_entity_merge
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            survivor = sdk.create_object("Widget", "document")["id"]
+            g.query(
+                "CREATE (o:Object {id:'r9-merged-carrier', name:'The Widget', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'widget'})")
+            apply_entity_merge(sdk, candidate_id="r9-merged-carrier",
+                               survivor_id=survivor, method="fuzzy",
+                               similarity=0.9)
+            target = sdk.create_object("Old Co", "document")["id"]
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Co", "supersedes_by": "WIDGET",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            rows = g.query("MATCH (o:Object {id:$id}) RETURN o.supersededBy",
+                           params={"id": target}).result_set
+            stored = rows[0][0] if rows else None
+            raw = g.query("MATCH (o:Object) WHERE o.name = $n RETURN o.id",
+                          params={"n": stored}).result_set
+            assert raw, (
+                f"supersededBy {stored!r} names NO node — every raw reader of "
+                f"the fold (audit 4b/4c, assembly, the renderer) reports the "
+                f"successor as missing (applied={applied}, skips={skips})")
+            from tortoise.audit import audit_graph
+            issues = audit_graph(sdk._get_proj()).issues
+            assert [i for i in issues
+                    if i.issue_type == "superseded_by_unresolvable"] == [], (
+                "the recorded spelling must not read as unresolvable")
+        finally:
+            sdk.close()
+
+
 class TestThe12120ReviewRound3:
     """The three defects review round 3 found in the round-2 fix itself.
 
