@@ -1454,6 +1454,14 @@ def _segment_bounds(line: str, pos: int) -> tuple[int, int]:
 
     seg_start, seg_end = 0, len(line)
     for sep in _SEGMENT_SPLIT_RE.finditer(line):
+        # ⛔ A BACKSLASH-ESCAPED SEPARATOR IS NOT A SEPARATOR (#12173 review round 30,
+        # measured FAIL-OPEN). `find … -exec cp {} "$b/16/bin/" \;` was cut at the `;`
+        # of `\;` BEFORE the quote test ran, so the segment ended with a bare `\`
+        # which then became "the last operand" — and the full directory replacement
+        # was GREEN. This is the shell rule (`\;` is one escaped argument), not a
+        # special case for `find`, and it is what makes `\;` reachable as ONE token.
+        if sep.start() and line[sep.start() - 1] == "\\":
+            continue
         if _inside_quotes(line, sep.start()):
             continue
         if sep.start() <= pos:
@@ -1544,41 +1552,42 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
     segment = _REDIRECT_RE.sub(lambda m: " " * len(m.group(0)), segment)
 
     last: tuple[int, int] | None = None
+    # ⛔ ONE OPERAND SCAN THAT CONSUMES OPTION VALUES (#12173 review round 30,
+    # measured FAIL-OPEN). A first cut kept the last `/`-bearing token and then
+    # treated ANY later non-option token as "something comes after it", which
+    # reopened the hole this PR exists to close — an option's SEPARATE VALUE is
+    # not an operand:
+    #
+    #     sudo rsync -a "$b/17/bin/" "$b/16/bin/" -e ssh          -- GREEN (bypass)
+    #     sudo rsync -a "$b/17/bin/" "$b/16/bin/" --exclude foo   -- GREEN (bypass)
+    #
+    # So the scan walks the tokens ONCE: an option (`-e`, `--exclude`) makes the
+    # NEXT token its value and consumes it; `--opt=value` carries its own and
+    # consumes nothing; every other token is an OPERAND, and the LAST operand is
+    # what decides direction. `-t`/`--target-directory` never reaches here — the
+    # branch above returns first for the verbs where that flag MEANS a destination.
+    expect_value = False
     for token in _PATH_TOKEN_RE.finditer(segment):
         text = token.group(0)
         # ⛔ AN OPTION IS NOT AN OPERAND (#12069 review round 22, measured):
         # `--exclude-from=/etc/rsync-exclude` and `--log-file="$SCRATCH/x.log"`
         # carry a path in an option VALUE and were taken as the destination.
         if text.startswith("-"):
+            # `--opt=value` carries its own value; `-e`/`--exclude` take the next word.
+            expect_value = "=" not in text
             continue
-        if "/" in text:
-            last = (token.start() + seg_start, token.end() + seg_start)
+        if expect_value:
+            expect_value = False
+            continue
+        # Not operands: a `find … \\;`/`xargs` terminator (`+`), the escaped `\\;`
+        # itself, and the leading fragment the `2>&1` split leaves at `&`.
+        if text in {"+", "\\;", ";"}:
+            continue
+        if re.match(r"^\d*[<>]", text):
+            continue
+        last = (token.start() + seg_start, token.end() + seg_start)
     if last is None:
         return True
-    # ⛔ AN OPERAND AFTER THE LAST PATH TOKEN MAKES IT A SOURCE, NOT THE TARGET
-    # (#12173 review round 29, measured FALSE RED — this arm shipped it). `last` is
-    # only ever a token containing a `/`, so a destination spelled WITHOUT one is
-    # invisible to the loop above and the reading falls back to the pinned dir —
-    # the SOURCE:
-    #
-    #     sudo rsync -a "$b/16/bin/" "$RUNNER_TEMP"     -- refused
-    #     sudo cp -a "$b/16/bin" snapshot               -- refused
-    #
-    # Both are plain READS (`origin/main` answers False for each), refused with the
-    # untrue message `REPLACES a client binary` — the same false-RED class the
-    # `_segment_bounds` note above records. A non-option operand FOLLOWING the last
-    # path token means something comes after it, so it cannot be the last operand.
-    # A `find … \;`/`xargs` terminator and the leading fragment the `2>&1` split
-    # leaves at `&` are not operands.
-    trailing = [
-        token
-        for token in _PATH_TOKEN_RE.finditer(segment, last[1] - seg_start)
-        if not token.group(0).startswith("-")
-        and token.group(0) not in {"+", "\\;", ";"}
-        and not re.match(r"^\d*[<>]", token.group(0))
-    ]
-    if trailing:
-        return False
     return start >= last[0] and end <= last[1]
 
 
@@ -5455,6 +5464,27 @@ BINARY_MUTATION_POLARITY = [
         'sudo cp -a "$b/16/bin" backup',
         False,
         "#12173 round-29: a relative destination — copying OUT of the pinned dir",
+    ),
+    # ⛔ THE OTHER HALF OF ROUND 30: the round-29 repair must not spare the WRITE.
+    # An option's SEPARATE VALUE (`-e ssh`, `--exclude foo`) is not an operand, and
+    # `\;` is ONE escaped token — the segment split cut it and left a bare `\` that
+    # became "the last operand", so the complete directory replacement was GREEN.
+    # Each was measured GREEN at 5ccf4d746c and RED again here; removing the
+    # option-value consumption or the escaped-separator skip reddens exactly these.
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" -e ssh',
+        True,
+        "#12173 round-30: an option's SEPARATE VALUE is not a trailing operand",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" --exclude foo',
+        True,
+        "#12173 round-30: a long option's separate value is not a trailing operand",
+    ),
+    (
+        'find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \\;',
+        True,
+        "#12173 round-30: `\\;` is one escaped token, not a segment boundary",
     ),
 ]
 
