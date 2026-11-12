@@ -1750,9 +1750,15 @@ class EventAPI:
         # NOTHING checked the type, and this append is the commit point:
         #
         #     _emit("PointAdded", id="p", content="c", projection_version="x")
-        #       -> JOURNALLED with a `str` version; the fold then raises on every
-        #          replay: TypeError: '>=' not supported between instances of
-        #          'str' and 'int'  (FalkorProjection.apply + five rebuild passes)
+        #       -> JOURNALLED with a `str` version, and the flat record is then
+        #          folded AWAY: `fold([ev])` returns `{}` with NO exception, because
+        #          a flat record carries no `point` and `_apply_one` returns at its
+        #          non-dict-point guard — so the write survives and the fold loses
+        #          the point (live/replay divergence). The LOUD shape is the
+        #          record-positional one — `_emit("PointAdded", {"id": …, "content":
+        #          …}, projection_version="x")` — which raises on every replay:
+        #          TypeError: '>=' not supported between instances of 'str' and 'int'
+        #          (both measured; `projection/__init__.py`'s fold).
         #
         # A record every replay refuses is worse than a refused write: it is the
         # durable-corruption shape this whole fix exists to prevent, and the three
@@ -1766,7 +1772,8 @@ class EventAPI:
                     f"journal append is the commit point, so a non-numeric value "
                     f"is a record every replay refuses (#11996)")
             # ⛔ Stated, not implied: the VALUE is the producers' (`2` from
-            # `add_point`, `_SERVER_PROJECTION_VERSION` elsewhere), so an `int` a
+            # `add_point` and `add_operator`, `tortoise/sdk.py`'s
+            # `"projection_version": 2` elsewhere), so an `int` a
             # caller supplies still lands on this channel — a `1` suppresses the
             # `#49` v2 context strip. That is the SAME trade-off the
             # `_RECORD_ENVELOPE_EXTRA` note records, kept so the producers' own

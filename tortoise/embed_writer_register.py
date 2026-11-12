@@ -953,7 +953,9 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "recording later measured cases — because `_EMBED_WRITE` reads raw SOURCE, as it does "
             "for `tortoise.projection::_prewipe_synthetic_write_scope`",
             "#11835",
-            stores=NO_LIVE_VECTOR,  # matches are its DOCSTRING + 2 body comments, all prose
+            stores=NO_LIVE_VECTOR,  # DOCSTRING + body comments are prose, PLUS one journal-payload
+            # write (`payload["embedding"] = seam_values`, `api.py:843`) — the matches
+            # are NOT all prose, which is what this line said before #11996 round 18.
         ),
     ),
     (

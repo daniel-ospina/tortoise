@@ -1522,9 +1522,14 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     # commit point:
     #
     #     api._emit("PointAdded", id="p", content="c", projection_version="x")
-    #       -> JOURNALLED with a `str` version, and every replay then raises
+    #       -> JOURNALLED with a `str` version, and the flat record is then folded
+    #          AWAY: `fold([ev])` returns `{}` with NO exception (no `point` in a
+    #          flat record, so `_apply_one` returns at its non-dict-point guard),
+    #          i.e. the write survives and the fold silently loses the point. The
+    #          LOUD shape is record-positional — `_emit("PointAdded", {"id": …,
+    #          "content": …}, projection_version="x")` — which raises
     #          TypeError: '>=' not supported between instances of 'str' and 'int'
-    #          (FalkorProjection.apply + the five rebuild passes)
+    #          on every replay (both measured at this head).
     #
     # A record every replay refuses is the durable-corruption shape this whole fix
     # exists to prevent. Falsifier: delete the `type(_pv) is not int` arm and the
