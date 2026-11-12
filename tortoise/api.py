@@ -29,7 +29,7 @@ from .money import refuse_malformed_money_in_payload
 from .percent import refuse_malformed_percent_in_payload
 
 # #7951 §17.1: the live-write scope the journal-first doors open around the fold.
-from .projection import _live_write_scope, fold
+from .projection import EVIDENCE_FOLD_KEY, _live_write_scope, fold
 
 # #5140: the `documents` METER KEY's defender for THIS producer. `quota` is a
 # leaf module (stdlib-only at import time), so this adds no cycle.
@@ -82,29 +82,77 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
     "embedding_text_hash",
 })
 
-#: The marker family's two STORAGE-FORM keys — the ones no seam call ever
-#: MINTS, only reads. `stamp_journal_embedding` writes `embedding_width`
-#: (`_stamp_journal_vector_width`) and, on a creating record only, the identity
-#: triple; `is_verbatim`/`embeddings.py:539` READ these two, and a payload can
-#: only acquire them from a caller. A caller-set `embedding_preserved` makes the
-#: seam SKIP the model/text-hash attestation R1 exists to keep, and a
-#: caller-set `embedding_verbatim` flips the replay's storage form — both are
-#: forged journal FACTS with no node to correct them on.
+#: The record facts a CALLER must not set on `_emit`, on EITHER channel: no seam
+#: call in this module ever MINTS them, so a value can only be a caller's, and
+#: each one corrupts a DIFFERENT thing downstream — which is why they are listed
+#: by harm rather than as one "marker family":
 #:
-#: So they are REFUSED on `_emit`'s POSITIONAL record, while the width is
-#: VERIFIED and the identity triple is left alone (a creating `_point`
-#: legitimately stamps it). `#11948`-review finding at `ceae1cfcf4`: the
-#: comment there said "the marker family is verified", which was true of ONE
-#: key out of six — measured, `_emit("PointAdded", {..., "embedding_preserved":
-#: True, "embedding_model": "not-a-real-model"})` journalled the lie.
+#:   • `embedding_preserved` — payload-only metadata; the entry at
+#:     ``projection/entities.py:2392`` says "Never a node property" in as many
+#:     words. It makes ``stamp_journal_embedding`` SKIP the
+#:     model/revision/text-hash attestation that R1 exists to keep, so the
+#:     record claims a vector of unattested origin. The harm lives in the
+#:     JOURNAL the replay reads.
+#:   • `embedding_verbatim` — ⛔ NOT payload-only, and saying it was is the
+#:     same over-claim this guard was added to fix. Its entry is
+#:     ``projection/entities.py:2386``, under the comment at ``:2378``: a
+#:     DECLARED node property with its own SET clause, because a later re-emit
+#:     (``promote_point`` &c.) reads the point back and must carry the storage
+#:     form. A forged one therefore writes ``n.embedding_verbatim = true`` AND
+#:     flips the journal's storage form — the node and the record both.
+#:   • `evidence_fold` — the replay's recreate anchor. ``_emit``'s KEYWORD
+#:     channel is the dangerous one: a flat record carrying this key is read as a
+#:     fold (``projection.record_is_evidence_fold``), which makes the decay plan
+#:     and the terminalizer stamp diverge from the live tree. ``sdk.py:6837``
+#:     calls it a HARD-REJECT key for that reason.
+#:   • `embeddingText` — the enriched text the vector is computed from; a
+#:     caller-set one forges the text↔vector identity the ``#8488`` hash attests.
+#:   • `extractedFromAll`, `sourceVersion`, `sourceVersions` — the source-ref
+#:     set and its anchors. Their harm is the one `add_point`'s own note records
+#:     (``_forged_keys``): a caller-supplied value puts the payload's edges AHEAD
+#:     of the ``:Source`` resolution this seam performs, so the record asserts
+#:     provenance the graph does not have. ``extractedFromAll`` is
+#:     ``_POINT_HANDLED`` (``entities.py:2419``) and is what
+#:     ``_point_all_source_refs`` reads.
 #:
-#: ⛔ NOT refused on the `point=` channel: `sdk.py`'s evidence-fold snapshot
-#: sets `embedding_preserved` there by design (`_emit_event("PointAdded", {...},
-#: point=snapshot)`), so the two channels need different answers — which is why
-#: this is a separate set rather than `_SERVER_MANAGED_EMBEDDING_KEYS`.
-_POSITIONAL_UNMINTED_MARKERS = frozenset({
+#: ⛔ `sourceVersionTransit` is deliberately NOT in the set although it looks
+#: like a sibling: `add_point` MINTS it (``api.py:1198``, from
+#: ``_source_version_transit``, ``projection/edges.py:852``), so it is a seam fact
+#: on the channel that carries it rather than a caller's claim. (``_point`` does
+#: not mention the key at all — an earlier draft of this comment cited a ``pairs``
+#: arm there that does not exist.)
+#:
+#: `#11948`-review finding at `ceae1cfcf4`: the comment here said "the marker
+#: family is verified", which was true of ONE key out of six — measured,
+#: ``_emit("PointAdded", {..., "embedding_preserved": True, "embedding_model":
+#: "not-a-real-model"})`` journalled the lie.
+#:
+#: ⛔ Scoped to ``_emit``'s OWN two channels, and NOT because these are harmless
+#: elsewhere: the SDK's writers legitimately set `embedding_preserved` (the
+#: evidence-fold snapshot), `embedding_verbatim` (`create_point(embedding=...)`
+#: and every `get_point`-backed re-emit — `promote_point`, `DedupeRecorded`,
+#: `DedupeRejected`, the mitigation `PointAdded`), `evidence_fold` (the fold
+#: writer) and `embeddingText` (the capture snapshot). Those all go through
+#: ``sdk._emit_event(point=...)``, which appends to its own log and NEVER calls
+#: ``EventAPI._emit`` — a different DOOR, not a different channel of this one.
+#: Which is why this is a separate set rather than
+#: `_SERVER_MANAGED_EMBEDDING_KEYS`: two of that set's members
+#: (`embedding_verbatim`, `embedding_preserved`) are refused on both channels
+#: already, but the rest are VERIFIED (`embedding_width`) or deliberately left to
+#: `add_point` (the identity triple), so folding them together would assert a
+#: treatment three of its members do not get.
+#: ``EVIDENCE_FOLD_KEY`` is the READER's spelling (``projection/__init__.py``),
+#: imported here rather than retyped: the literal used to be its own copy, so a
+#: rename at the consumer would have left this guard refusing a name nobody reads
+#: and letting the new one through — a fail-open drift, not a style point.
+_UNCALLERABLE_RECORD_KEYS = frozenset({
     "embedding_verbatim",
     "embedding_preserved",
+    EVIDENCE_FOLD_KEY,
+    "embeddingText",
+    "extractedFromAll",
+    "sourceVersion",
+    "sourceVersions",
 })
 
 #: The envelope's RECORD-SHAPED payload keys — the shape a record door BUILDS
@@ -208,32 +256,37 @@ _ENVELOPE_KEYS_AT_PASSTHROUGH = _ENVELOPE_KEYS | {
 }
 
 
-def _refuse_unminted_positional_markers(record: dict, type_: str) -> None:
-    """Refuse a STORAGE-FORM marker a caller put on `_emit`'s positional record.
+def _refuse_uncallerable_record_keys(fields: dict, type_: str, channel: str) -> None:
+    """Refuse the record facts a caller cannot supply to `_emit`, on either channel.
 
-    The width is verified rather than refused (the seam mints it — see
-    `_verify_record_vector_width`); these two it never mints, only reads
-    (`embeddings.is_verbatim`, the `creating` arm of `stamp_journal_embedding`).
-    A value here can therefore only be a caller's, and either one is a forged
-    journal fact: `embedding_verbatim` flips the replay's storage form, and
-    `embedding_preserved` makes the seam SKIP the `embedding_model`/revision/
-    text-hash attestation that R1 exists to keep — so the record would report a
-    vector of unknown origin as attested, and no node exists to correct it on
-    (`_POINT_HANDLED`: these never become properties).
+    The width is VERIFIED rather than refused (the seam mints it — see
+    `_verify_record_vector_width`). The keys in `_UNCALLERABLE_RECORD_KEYS` are
+    refused on BOTH channels — the positional record AND the keyword payload —
+    and each for its OWN reason rather than under one "marker family" banner:
+    stating them as one family is what made the previous comment false. See that
+    set's comment for the harm of each, and the citation for each.
+
+    ⛔ BOTH CHANNELS, because the keyword one is not the safer one: a flat record
+    that carries ``evidence_fold`` is read as a fold by
+    ``projection.record_is_evidence_fold`` — measured, one caller-settable key
+    flipped the decay plan AND the terminalizer stamp, i.e. ``derived =
+    replay(journal)`` diverged from the live tree.
 
     Deliberately silent on the identity triple (`embedding_model`,
     `embedding_revision`, `embedding_text_hash`): a creating `_point` stamps
-    those, so this channel cannot distinguish the seam's value from a caller's.
-    That residual is `add_point`'s to refuse (its `_forged_keys` already does),
-    and it is stated here rather than hidden behind a blanket claim.
+    those, so the positional channel cannot distinguish the seam's value from a
+    caller's. That residual is `add_point`'s to refuse (its `_forged_keys`
+    already does), and it is stated here rather than hidden behind a blanket
+    claim.
     """
-    forged = sorted(k for k in record if k in _POSITIONAL_UNMINTED_MARKERS)
+    forged = sorted(k for k in fields if k in _UNCALLERABLE_RECORD_KEYS)
     if forged:
         raise ValueError(
-            f"the `{type_}` record door does not take "
-            f"{' or '.join(f'`{k}`' for k in forged)} from a caller: it is a "
-            "server-minted storage-form marker (a caller-set one would forge "
-            "the record's own account of where its vector came from)")
+            f"the `{type_}` {channel} does not take "
+            f"{' or '.join(f'`{k}`' for k in forged)} from a caller: "
+            "server-minted record facts are not a caller's to set (a "
+            "caller-set one forges what the record claims about its vector, its "
+            "provenance, or its replay)")
 
 
 def _verify_record_vector_width(record: dict, type_: str) -> None:
@@ -375,14 +428,24 @@ def _refuse_caller_named_markers(keys, door: str) -> None:
 def _refuse_caller_named_funnel_keys(keys, door: str) -> None:
     """Refuse EVERY name the journal funnel owns, at one passthrough door.
 
-    The three families and their reasons live above; this is the ONE call a
+    The four families and their reasons live above; this is the ONE call a
     door makes, so a fourth family (or a fourth door) cannot be half-wired —
     the failure mode #11835 review round 4 and #11948 both measured: a rule
     stated at two doors and silently absent at the third.
+
+    ⛔ The UNCALLERABLE family is in here rather than only in `_emit`, because a
+    door calls this BEFORE its best-effort arm: refusing deeper (inside `_emit`)
+    let `emit_belief` DROP the record with a log line while `add_event` and
+    `add_object` raised on the identical payload — measured at the third review
+    of this fix, for `evidence_fold`/`embeddingText`/`extractedFromAll`/
+    `sourceVersion`/`sourceVersions`, one family over from the money/percent/kind
+    recurrences this door has already been fixed for.
     """
     _refuse_caller_named_record_keys(keys, door)
     _refuse_caller_named_envelope_keys(keys, door)
     _refuse_caller_named_markers(keys, door)
+    _refuse_uncallerable_record_keys(keys, door.split("`")[1] if "`" in door else door,
+                                     "payload")
 
 
 def provenance(source_id, span, quote, *, speaker=None, extracted_by="mock@0"):
@@ -574,9 +637,10 @@ class EventAPI:
         # nothing to replay: `point` and the envelope names are REFUSED, and a
         # declared vector width is VERIFIED.
         #
-        # ⛔ THE MARKER FAMILY IS THREE GROUPS ON THIS CHANNEL, NOT ONE, and the
-        # comment that said "verified, not refused" described ONE key out of six
-        # (the review finding at `ceae1cfcf4`, measured). Precisely:
+        # ⛔ THE VECTOR/RECORD FACTS ARE THREE GROUPS ON THIS CHANNEL, NOT ONE, and
+        # the comment that said "the marker family is verified, not refused"
+        # described ONE key out of six (the review finding at `ceae1cfcf4`,
+        # measured). Precisely:
         #   • the WIDTH is VERIFIED — `_point`'s own `stamp_journal_embedding`
         #     writes it into this very record, so refusing it would red every
         #     vector-bearing `PointAdded`/`OperatorAdded`; the harm is a marker
@@ -584,15 +648,20 @@ class EventAPI:
         #     `_verify_record_vector_width` asks the seam's own question: a
         #     truthful declaration lands, a lie is refused, undecidable input
         #     keeps the pre-guard posture (a WRITE never fails on an import);
-        #   • the two STORAGE-FORM keys are REFUSED —
-        #     `_POSITIONAL_UNMINTED_MARKERS`, because no seam call mints them, so
-        #     a value there can only be a caller's (and `embedding_preserved`
-        #     silently suppresses the R1 attestation);
+        #   • the UNCALLERABLE facts are REFUSED on BOTH channels —
+        #     `_UNCALLERABLE_RECORD_KEYS`: no seam call here mints them, so a
+        #     value can only be a caller's. They are not one family and each
+        #     corrupts something different: `embedding_preserved` suppresses the
+        #     R1 attestation, `embedding_verbatim` ALSO writes the node's
+        #     declared property, `evidence_fold` forges the replay's recreate
+        #     anchor, `embeddingText` forges the text↔vector identity, and the
+        #     three source-ref keys assert provenance ahead of the `:Source`
+        #     resolution. See that set's comment for each harm and citation;
         #   • the IDENTITY triple is NEITHER — a creating `_point` legitimately
         #     stamps it, so this channel cannot tell the seam's value from a
         #     caller's. Stated as the residual it is rather than folded into a
-        #     blanket claim: on this channel an identity is undecidable, and the
-        #     door that refuses a caller's version of it is `add_point`.
+        #     blanket claim: here an identity is undecidable, and the door that
+        #     refuses a caller's version of it is `add_point`.
         _refuse_caller_named_record_keys(payload, f"the `{type_}` envelope")
         if record:
             if len(record) > 1:
@@ -606,11 +675,12 @@ class EventAPI:
             # `event_id=` here re-types or re-attributes the replayed record.
             _refuse_caller_named_envelope_keys(
                 record[0], f"the `{type_}` record door")
-            # ⛔ The storage-form half of the marker family is REFUSED (no seam
-            # call mints it), THEN the width is VERIFIED (the seam does mint
-            # that one), and the identity triple is left to the doors that can
-            # judge it — see the three-group note above the commit point.
-            _refuse_unminted_positional_markers(record[0], type_)
+            # ⛔ The uncallerable facts are REFUSED (no seam call here mints
+            # them), THEN the width is VERIFIED (the seam does mint that one),
+            # and the identity triple is left to the doors that can judge it —
+            # see the three-group note above the commit point.
+            _refuse_uncallerable_record_keys(
+                record[0], type_, "record door")
             _verify_record_vector_width(record[0], type_)
             payload["point"] = record[0]
         # #7951 — THE JOURNAL ORDERING CONTRACT: **journal first, then
@@ -669,6 +739,11 @@ class EventAPI:
                 f"{_forged_markers} are server-managed journal fields (embedding "
                 f"width / storage form / origin) and cannot be set via "
                 f"{type_}'s payload")
+        # ⛔ The same set on the OTHER channel. `_forged_markers` above covers the
+        # vector family; these are the record facts no seam call here mints, and
+        # the keyword channel is the more dangerous of the two on a flat record
+        # (`evidence_fold` is read as a fold by `record_is_evidence_fold`).
+        _refuse_uncallerable_record_keys(dict(payload), type_, "payload")
         # ⛔ THE STAMP covers the vector THIS door carries — top-level
         # `embedding` only. The record-shaped doors nest their payload
         # (`add_point` / `add_operator` pass their record positionally, rendered

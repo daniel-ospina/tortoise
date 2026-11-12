@@ -1343,16 +1343,59 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
         api.emit_belief("ConfidenceChanged", id="node-1", basisPoints=20000)
     with pytest.raises(PercentValueError, match="percent value refused"):
         api.add_object("an object", "skill", id="obj-pct", basisPoints=20000)
-    # …and the two STORAGE-FORM markers a caller can put on the positional
-    # record, which the seam never mints and only READS: `embedding_preserved`
-    # suppresses the model/text-hash attestation, `embedding_verbatim` flips the
-    # replay's storage form. Measured before the guard: the record below landed
-    # with a bogus `embedding_model` beside it, i.e. a forged account of origin.
-    for marker in ("embedding_preserved", "embedding_verbatim"):
-        with pytest.raises(ValueError, match="server-minted storage-form marker"):
+    # …and the record facts a caller must not set on EITHER channel of the
+    # funnel: no seam call here mints them, and each corrupts something
+    # different — `embedding_preserved` suppresses the model/text-hash
+    # attestation, `embedding_verbatim` ALSO writes the node's declared property
+    # (so the lie survives on both sides), `evidence_fold` makes a flat record
+    # read as a fold (`projection.record_is_evidence_fold`), `embeddingText`
+    # forges the text↔vector identity, and the three source-ref keys put the
+    # payload's edges AHEAD of the `:Source` resolution the seam performs.
+    # Measured before the guard: `_emit("PointAdded", {"...": "..",
+    # "embedding_preserved": True, "embedding_model": "not-a-real-model"})`
+    # journalled the lie, and `_emit("PointAdded", evidence_fold=True)` — the
+    # KEYWORD channel — journalled a record `record_is_evidence_fold` reads as
+    # a fold.
+    for marker in ("embedding_preserved", "embedding_verbatim",
+                   "evidence_fold", "embeddingText",
+                   "extractedFromAll", "sourceVersion", "sourceVersions"):
+        with pytest.raises(ValueError, match="server-minted record facts"):
             api._emit("PointAdded", {
                 "id": f"forged-{marker}", "content": "c",
                 "embedding": [0.1], marker: True})
+        if marker in ("embedding_preserved", "embedding_verbatim"):
+            # …already refused on this channel by the vector family's own guard,
+            # with its own message — the two must not be merged into one claim.
+            with pytest.raises(ValueError, match="server-managed"):
+                api._emit("PointAdded", **{marker: True})
+        else:
+            # …and the same key on the keyword payload, which is the more
+            # dangerous channel on a flat record (`evidence_fold` there IS a fold:
+            # `projection.record_is_evidence_fold` reads it and the replay's
+            # recreate anchor is skipped).
+            with pytest.raises(ValueError, match="server-minted record facts"):
+                api._emit("PointAdded", **{marker: True})
+    # The sibling that looks identical but is NOT refused: `add_point` mints it,
+    # so it is a seam fact rather than a caller's claim. Asserted as set
+    # membership rather than by journalling a record — this test's last
+    # assertion is that the refusals above left the journal EMPTY.
+    from tortoise.api import _UNCALLERABLE_RECORD_KEYS
+    from tortoise.projection import EVIDENCE_FOLD_KEY
+
+    assert "sourceVersionTransit" not in _UNCALLERABLE_RECORD_KEYS
+    assert {"extractedFromAll", "sourceVersion", "sourceVersions"} <= (
+        _UNCALLERABLE_RECORD_KEYS)
+    # The fold key is the READER's constant, not a second spelling of it: pin the
+    # identity, so a rename at the consumer cannot leave this guard refusing a
+    # name nobody reads (fail-open drift).
+    assert EVIDENCE_FOLD_KEY in _UNCALLERABLE_RECORD_KEYS
+    # …and `emit_belief` must RAISE these rather than drop them: its refusal is
+    # armed before the best-effort arm, which is the whole point of #11948 F2.
+    for marker in ("evidence_fold", "embeddingText", "extractedFromAll",
+                   "sourceVersion", "sourceVersions"):
+        with pytest.raises(ValueError, match="server-minted record facts"):
+            api.emit_belief("ConfidenceChanged", id="n-belief-forged",
+                            **{marker: True})
     assert not journal.exists() or not journal.read_text().strip(), (
         "the refusal must not leave a half-record behind")
 
