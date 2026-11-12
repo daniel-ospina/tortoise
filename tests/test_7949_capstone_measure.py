@@ -5023,6 +5023,12 @@ _EPIC_CITE_DOCS = {
 _EPIC_CITE_SOURCES = {
     "sdk": _REPO / "tortoise/sdk.py",
     "search_engine": _REPO / "tortoise/search_engine.py",
+    # `03-test-design.md` cites the manifest's OWN `carve_out:` entry by number.
+    # ⛔ Registered because #11837 moved it TWICE without a reader: restoring the
+    # `core:` line a merge dropped (+6 above it) shifted the entry 9548 -> 9554
+    # while the document went on naming 9548, which is the row above — a cite a
+    # change moves is exactly the cite no hand-recheck keeps.
+    "ci_surfaces": _REPO / "config/ci-surfaces.yml",
 }
 
 
@@ -5096,8 +5102,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("00-plan.md", "point-creation path at", (
             ("17621", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
+        # The manifest's own `carve_out:` entry, cited from the artifact table.
+        ("03-test-design.md", "`carve_out:` holds **one**", (
+            ("9554", "- test_pack_logic_writeprobe_11083.py"),
+        ), "ci_surfaces"),
     )
-    assert len(rows) >= 8, (
+    assert len(rows) >= 9, (
         f"only {len(rows)} rows — an emptied table would pass vacuously, and these "
         "are the cites the review found wrong on the pre-fix documents plus the "
         "consume pair that sat beside them")
