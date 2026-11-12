@@ -5049,10 +5049,10 @@ _EPIC_CITE_DOCS = {
     # `docs/evidence/11083/README.md` cites the SAME `relation_write.py` call the
     # RECONCILE row below pins, and was read by nothing at all until #12112. The
     # cite was CORRECT on main (`:631` WAS the call at `aebf91352bfd`, the parent of
-    # the squash) and went stale because #12112 moved the call twice — `:695`, then
-    # `:700` — while the record followed only as far as `:695`, where `:695` is
-    # `continue`. That is the whole lesson: the number was right when it was written,
-    # and a change moved the symbol out from under it.
+    # the squash) and went stale because #12112 moved the call three times inside that
+    # PR — `:687`, then `:695`, then `:700` — while the record followed only as far as
+    # `:695`, where `:695` is `continue`. That is the whole lesson: the number was
+    # right when it was written, and a change moved the symbol out from under it.
     "11083/README.md":
         _REPO / "docs/evidence/11083/README.md",
 }
@@ -5067,9 +5067,12 @@ _EPIC_CITE_SOURCES = {
     "ci_surfaces": _REPO / "config/ci-surfaces.yml",
     # ⛔ `relation_write.py`'s `plan_hierarchy_edges` call is cited by two documents
     # (and by an artifact row that talks about the same seam) and by NOTHING else in
-    # this file. Measured across #12112: the call sat at `:631` on `origin/main`, then
-    # `:695` after the branch's own first fix, then `:700` after round 15's — three
-    # numbers in three commits, with the documents trailing one behind at each step.
+    # this file. Measured commit-by-commit across #12112's own 36 commits (2 of them
+    # predate the call's existence): the call sat at `:631` on `origin/main` (8
+    # commits), then `:687` (22), then `:695` (3), then
+    # `:700` at the squash (1) — **four** numbers, not three, with the documents
+    # trailing one behind at each step. (`:687` is the move an earlier draft of this
+    # comment dropped, and dropping it is the same error the comment is about.)
     # ⛔ ONE TREE, ONE NUMBER: `:631` is the call at `aebf91352bfd` and is
     # `declared=None,` at the branch's forward merge `5b17de24de42` (that merge is what
     # made the number wrong). Quoting either tree's reading as if it described both is
@@ -5182,8 +5185,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
         # The `plan_hierarchy_edges` CALL, in the two documents that name it, keyed
-        # by the sentence rather than by the number: #12112 moved this line three
-        # times (`631` on main, `695`, `700`) and each move left a document behind.
+        # by the sentence rather than by the number: #12112 moved this line four
+        # times (`631` on main, `687`, `695`, `700`) and each move left a document
+        # behind.
         # ⛔ Three rows, not one, because a row scopes to ONE document + ONE source
         # and the 11083 record is a different file that no sweep reads at all.
         ("RECONCILE-A1-A2-A5.md", "one of them the **call**", (
