@@ -698,11 +698,22 @@ class QueueHealth:
             # and may never be rendered as a completed read.
             feed = ("truncated" if (self.truncated or self.pending_truncated)
                     else "read")
+            # ⛔ AND THE THIRD CAUSE NEEDS ITS OWN TOKEN, OR THE LINE CONTRADICTS ITSELF
+            # (#12037 review round 6). The other two causes each have a field that names
+            # the unwitnessed dimension — `feed=truncated` for a cut leg,
+            # `oldest=unmeasured` for an unreadable stamp — and cause (c) has NEITHER:
+            # the wait is measured and the feed was read, so the line reported every
+            # field as witnessed while the verdict said a dimension was not. Plain
+            # `feed=read, oldest=1000s` is byte-identical to a fully-measured reading
+            # and to cause (b) at the same counts, leaving the distinguishing fact only
+            # in the payload. `census=unmeasured` is emitted ONLY when the degradation
+            # actually fired, so it never appears on a reading that measured its census.
+            census = ", census=unmeasured" if self.pr_running_census_unwitnessed else ""
             return (
                 f"CI: PR-UNWITNESSED(queued={self.queued_total}, "
                 f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
                 f"pr_pending={self.pr_pending}, "
-                f"oldest={waited}, feed={feed})"
+                f"oldest={waited}, feed={feed}{census})"
             )
         if self.verdict == PR_STARVED:
             oldest = self.oldest_pr_queued_age_seconds
@@ -1888,6 +1899,19 @@ def read_health(
         follows the same rule instead of inventing a second one. GitHub's `date-time` is
         always `Z`, so this needs drift to trigger — which is what makes it worth pinning
         rather than trusting.
+
+        ⛔ AND THE SENTINEL'S DIRECTION IS A SAFETY RULE, NOT A TIEBREAK (#12037 review round
+        6). An unparseable stamp sorts LAST (`datetime.max`), i.e. it is probed only after
+        every readable stamp, because the budget is spent OLDEST-FIRST and a stamp that will
+        not parse has no age — it cannot claim to be the oldest. Reversing it to
+        `datetime.max → datetime.min` ranks a drifted run AHEAD of the frozen runs the probe
+        exists to reach, and MEASURED on `read_health` (one drifted-stamp run whose jobs read
+        executing, two frozen runs, one queued PR run waiting 1000 s, budget 1), it returns
+        the pre-#12037 reading this change removes: `pr_running=3`, `OK`,
+        `congests_pr is False` — and the round-3/4 degradation cannot see it, because one
+        counted run WAS measured so `pr_running != pr_running_unmeasured`. Under the shipped
+        direction the same reading is `pr_running=2`, `PR-UNWITNESSED`, `congests_pr None`.
+        Pinned by `test_an_unparseable_stamp_is_probed_LAST_even_under_budget_pressure`.
         """
         stamp = _parse_time(run.created_at)
         if stamp is None:

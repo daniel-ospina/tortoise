@@ -438,9 +438,16 @@ same step with the same tail is the investigation.
   executing is no longer `OK` (#10237 — it printed `CI: OK(queued=54, pr_running=2, pr_queued=32)`
   with the oldest queued PR run at 527 minutes). The budget's default is derived from this
   document's own §1 measurement (max first-job wait 81.9 min → 90 min), so it fires past the
-  measured-normal population rather than on it. Where that wait cannot be MEASURED at all — the
-  queued PR runs carry no readable `created_at` — the tool reports `PR-UNWITNESSED` rather than
-  `OK`: an unmeasured wait is not a measured-healthy one.
+  measured-normal population rather than on it. `PR-UNWITNESSED` is reported rather than `OK`
+  whenever the PR work is neither witnessed nor disproved, and it has THREE causes on different
+  dimensions, each with its own lever: the queued feed was cut at its page cap (raise
+  `--max-pages`); the queued PR runs carry no readable `created_at` (the wait cannot be measured
+  at all); or the RUNNING CENSUS is unwitnessed — every run counted in `pr_running` was
+  unmeasured, because the jobs probe could not read it or the probe budget did not reach it
+  (#12037 — frozen `in_progress` runs GitHub has stopped driving, whose jobs are all `completed`),
+  which shows on the state line as `census=unmeasured` and is
+  cleared by repairing those runs or raising `--max-job-probes`, NOT by `--max-pages`. In every
+  case an unmeasured dimension is not a measured-healthy one.
 - **It does not reduce jobs per run.** A `python-ci` run is 22 jobs (max 30) by construction; with
   ~17 concurrent PR heads that is the arithmetic behind the p95 77-minute first-job wait, and it
   is a sharding/capacity question (#5215, #9539), not a timeout question. It does now bound how

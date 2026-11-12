@@ -3030,3 +3030,89 @@ def test_backlogged_does_not_assert_execution_it_never_measured():
     assert "PR CI IS executing (1 run(s))" in next(
         r for r in measured.reasons if r.startswith("PR-BACKLOGGED")
     )
+
+
+def test_the_state_line_names_the_unwitnessed_CENSUS():
+    """⭐ ROUND-6 P2: the line the fleet samples could not express the third cause.
+
+    `PR-UNWITNESSED` has three causes and the other two each have a token on the line
+    (`feed=truncated`, `oldest=unmeasured`). Cause (c) — an unwitnessed RUNNING CENSUS — has
+    neither, so the line rendered every field as witnessed while the verdict said otherwise,
+    and it was byte-identical to a FULLY MEASURED reading at the same counts. Round 5 spent a
+    cycle removing exactly this from the annotation; the string the annotation embeds was left
+    unable to say it.
+    """
+    degraded = classify(
+        [run(1, "python-ci", event="pull_request", age_seconds=1000)],
+        in_progress=[run(2, "Python CI", event="pull_request", age_seconds=30)],
+        probe_attempted=True,
+    )
+    assert degraded.verdict == Q.PR_UNWITNESSED
+    line = degraded.state_line
+    assert line.startswith("CI: PR-UNWITNESSED(")
+    assert "census=unmeasured" in line, line
+    # ... and the OTHER causes must not borrow it: a measured census stays token-free.
+    measured_census = classify(
+        [run(1, "python-ci", event="pull_request", age_seconds=1000)],
+        in_progress=[Q.QueuedRun(id=9, name="Python CI", event="pull_request",
+                                 created_at=(NOW - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                 has_live_job=True)],
+        probe_attempted=True,
+    )
+    assert measured_census.verdict == Q.OK
+    assert "census=unmeasured" not in measured_census.state_line
+    # a truncated feed is cause (a): `feed=truncated`, and NOT the census token
+    truncated = classify(
+        [run(1, "python-ci", event="pull_request", age_seconds=30)],
+        in_progress=[],
+        truncated=True,
+        probe_attempted=True,
+    )
+    assert truncated.verdict == Q.PR_UNWITNESSED
+    assert "feed=truncated" in truncated.state_line
+    assert "census=unmeasured" not in truncated.state_line
+
+
+def test_an_unparseable_stamp_is_probed_LAST_even_under_budget_pressure(monkeypatch):
+    """⭐ ROUND-6 P2-2: the probe-order sentinel's DIRECTION is a safety rule.
+
+    Reversing `datetime.max` to `datetime.min` in `_probe_order_key` survived 128/128, and
+    the consequence is this PR's own fail-open: a drifted-stamp run then ranks AHEAD of the
+    frozen runs the budget exists to reach, so those stay unmeasured, and with ONE run
+    measured the degradation cannot fire. Reproduced below — the shipped order probes the
+    frozen run, the mutant probes the drifted one and returns `OK` + `congests_pr is False`.
+    """
+    seen: list[int] = []
+    rows = [
+        # a drifted stamp on a run whose jobs read EXECUTING
+        {"id": 1, "name": "python-ci", "event": "pull_request",
+         "created_at": "not-a-timestamp"},
+        # two frozen runs, the population the budget exists to prove idle
+        {"id": 2, "name": "ai-review-gate", "event": "pull_request_target",
+         "created_at": "2026-11-05T00:00:00Z"},
+        {"id": 3, "name": "ai-review-gate", "event": "pull_request_target",
+         "created_at": "2026-11-05T00:00:01Z"},
+    ]
+    queued_rows = [{"id": 4, "name": "python-ci", "event": "pull_request",
+                    "created_at": (NOW - timedelta(seconds=1000)).strftime("%Y-%m-%dT%H:%M:%SZ")}]
+
+    def fake_read_runs(repo, status, max_pages=5):
+        return (queued_rows if status == "queued" else rows), False
+
+    def fake_probe(repo, rid, attempt=None):
+        seen.append(rid)
+        return False if rid == 2 else None
+
+    monkeypatch.setattr(Q, "read_runs", fake_read_runs)
+    monkeypatch.setattr(Q, "read_run_live_job", fake_probe)
+
+    health = Q.read_health("o/r", NOW, max_job_probes=1)
+
+    assert seen == [2], (
+        "the OLDEST READABLE stamp must be probed first; a stamp that will not parse has no "
+        f"age and must sort LAST (probed: {seen})"
+    )
+    assert health.pr_running_excluded == (2,)
+    assert health.pr_running == 2 and health.pr_running_unmeasured == 2
+    assert health.verdict == Q.PR_UNWITNESSED, "one proved-idle run left two unmeasured"
+    assert health.congests_pr is None
