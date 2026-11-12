@@ -1001,6 +1001,12 @@ def test_the_PRODUCTION_tagged_note_is_the_not_a_target_annotation(monkeypatch):
         "WHERE n.pointKind = 'statement' RETURN count(DISTINCT n)": [[0]],
         "coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false)": [[0]],
         "coalesce(n.pointKind, 'NULL')": [],
+        # #10988: A4 is now the PER-LAYER row, so a completed census also answers the thing and
+        # event histograms and the per-writer query. Left unanswered they raise inside `row()`,
+        # which is fail-closed but would mis-report a fixture bug as a broken A4 row.
+        "RETURN coalesce(n.objectKind, 'NULL') AS k": [],
+        "RETURN coalesce(n.eventKind, 'NULL') AS k": [],
+        "RETURN n.content, n.pointKind": [],
         "MATCH (n:Subject) RETURN count(n)": [[0]],
         "MATCH (n:Point) RETURN count(n)": [[0]],
         "RETURN type(r) AS t, count(DISTINCT r) AS n": [],
@@ -1054,6 +1060,10 @@ _EMPTY_ROWS: dict = {
     "WHERE n.pointKind = 'statement' RETURN count(DISTINCT n)": [[0]],
     "coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false)": [[0]],
     "coalesce(n.pointKind, 'NULL')": [],
+    # #10988: the thing/event histograms and the per-writer query — see the inline fixture above.
+    "RETURN coalesce(n.objectKind, 'NULL') AS k": [],
+    "RETURN coalesce(n.eventKind, 'NULL') AS k": [],
+    "RETURN n.content, n.pointKind": [],
     "MATCH (n:Subject) RETURN count(n)": [[0]],
     "MATCH (n:Point) RETURN count(n)": [[0]],
     "RETURN type(r) AS t, count(DISTINCT r) AS n": [],
