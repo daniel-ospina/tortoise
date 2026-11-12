@@ -1255,7 +1255,14 @@ class EventAPI:
         # #331: explicit validation — a bare assert vanishes under python -O,
         # and non-string inputs crashed the label join below.
         if not isinstance(op_type, str) or op_type not in ("NAND", "IMPL"):
-            raise ValueError(f"unknown gate {op_type!r}")
+            # #12067: `coherence` is a valid MECHANISM, so the old "unknown gate"
+            # text named the wrong cause — it read as a typo rather than as this
+            # door's own limit (the third mechanism is reachable through the SDK
+            # only; this writer is outside the two gated doors).
+            raise ValueError(
+                f"add_operator: op_type must be 'NAND' or 'IMPL' (this door "
+                f"predates the closed mechanism set; 'coherence' is SDK-only, "
+                f"#12067), got {op_type!r}")
         if inputs is None:
             raise TypeError("add_operator: inputs must be a list of point ids")
         if isinstance(inputs, str):

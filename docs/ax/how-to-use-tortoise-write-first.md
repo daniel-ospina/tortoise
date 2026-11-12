@@ -500,10 +500,32 @@ structure, not the return value.
   is the most valuable check, because it is the one thing a
   structurally-correct-looking graph can still get wrong.
 - **Run both integrity surfaces, and read what each covers.** They are not
-  interchangeable. The **hygiene audit** reports nine classes, among them a
+  interchangeable. The **hygiene audit** reports eleven classes, among them a
   superseded claim with no replacement edge (`superseded_no_edge`, high),
   evidence with no provenance (`missing_sourceKind`), a superseded claim that
-  still has live `IMPL`/`NAND` edges into it (`superseded_active_edges`), and a
+  still has live `IMPL`/`NAND` edges into it (`superseded_active_edges`), a
+  superseded **Object** that still has a live `IMPL`/`NAND` edge on it
+  (`superseded_object_active_edges`, high — the `:Point` lane transfers its
+  edges on supersede, the `:Object` lane moves none, so on an Object the
+  survivor is lost belief rather than leftover wiring **where the row is an
+  operator input, or a direct edge whose own direction flows** — a direct edge's
+  direction lives on the RELATIONSHIP, and a neutral (`-`) one carries no
+  confidence in either direction. The check separates the row mechanisms and its
+  emitted `detail` names which one this row is: a neutral edge, and a shaped
+  endpoint EP admits in neither arm (its operator arm needs the `:Point` label
+  **and** `is_operator = true` or an `op_type`; its direct-edge arm refuses any
+  `op_type` and any `is_operator` that is not the boolean `false`) are leftover
+  wiring; the operator
+  input and the direct edge whose direction flows are lost belief — they carried
+  it while the endpoint was live. The `fix` differs for each for that reason.
+  Severity is `high` on every row until #12154 (this module's aggregates carry one
+  severity per check); the check is `:Object`-anchored, so a superseded
+  `:Subject` input is still not covered, and neither is an OUTGOING direct
+  `IMPL`/`NAND` edge from a superseded Object), a
+  superseded Object
+  whose `supersededBy` name resolves to no OTHER node
+  (`superseded_by_unresolvable` — a rename, a deletion, a name never created, or
+  a pointer naming the Object itself), and a
   keyword heuristic over `IMPL` edges that may have belonged to `NAND`
   (`impl_instead_of_nand`). The **chain-integrity check** validates the
   product-strategy chain rules only — dangling journey→use-case, workflow→JTBD
