@@ -32052,7 +32052,22 @@ class TortoiseSDK:
         # deliberately retains the dirty root. Excuse the reasons the guard
         # calls legitimate instead of false-paging on them.
         no_op_reason = self._dream_metrics.get("last_pass_no_op_reason")
-        coverage = self._metrics_coverage()
+        # #12116 review A-P2 (the WHOLE-read half): the live/stamped pair is read
+        # ONCE per health call and its ratio is computed from that one value.
+        # Before this, `coverage_pct` and the `propagation` block each called the
+        # pair read of their own (twice + once = the same aggregate computed
+        # THREE times, measured 5 graph queries per `dream_health_check`), and a
+        # helper-level pin could not see it — R7 bounded only the new helper, so
+        # the endpoint grew while the test stayed green. Both consumers below
+        # take the pair (or its failure) from THIS read.
+        # Failure posture is preserved per surface: `coverage_pct` keeps its
+        # pre-existing 0.0 (it feeds the alarm), while the `propagation` block
+        # reports `unavailable` with the reason (BOUNDED-OPERATION-CONTRACT §1a)
+        # — so a failed read is still `0` on one surface and `unavailable` on the
+        # other, never collapsed into a single meaning.
+        stamp_pair, stamp_error = self._read_stamp_pair()
+        coverage = (self._coverage_ratio(stamp_pair)
+                    if stamp_pair is not None else 0.0)
         _LEGITIMATE_NO_OP = {
             "stale_run_guard", "budget_zero", "no_dirty_roots",
             "no_ep_factors",
@@ -32094,7 +32109,9 @@ class TortoiseSDK:
             # caller must be able to see. The silent case raised
             # DreamNoOpError; this reports the proven-empty case.
             "no_op_reason": self._dream_metrics.get("last_pass_no_op_reason"),
-            "coverage_pct": self._metrics_coverage(),
+            # …the SAME number the alarm above was computed from — one read, not
+            # a second one that could disagree with the alarm's input (#12116 A-P2).
+            "coverage_pct": coverage,
             "failure_rate": (
                 self._dream_metrics["failure_count"]
                 / max(self._dream_metrics["pass_count"], 1)),
@@ -32112,10 +32129,12 @@ class TortoiseSDK:
             # it is on this surface for the same reason #3139 put
             # `last_belief_write_count` here: the pass result's key-set IS
             # pinned (I1, #6211), so belief observability lives on health.
-            "propagation": self._propagation_health(),
+            "propagation": self._propagation_health(stamp_pair, stamp_error),
         }
 
-    def _propagation_health(self) -> dict:
+    def _propagation_health(self,
+                            stamp_pair: tuple[int, int] | None = None,
+                            stamp_error: Exception | None = None) -> dict:
         """#11823 — the `propagation` block of `dream_health_check()`.
 
         ``last_pass`` is `None` with a named reason when no pass reached THIS
@@ -32143,7 +32162,14 @@ class TortoiseSDK:
             "last_pass_reason": None,
         }
         try:
-            out.update(self._propagation_counts())
+            # `stamp_pair` is the one read `dream_health_check` already made; the
+            # block does not read that aggregate a second time (#12116 A-P2). A
+            # read that already failed is REPLAYED rather than retried: `unavailable`
+            # must carry why the read failed, not a second exception from a retry
+            # (and the endpoint must not pay the failing read twice per poll).
+            if stamp_pair is None and stamp_error is not None:
+                raise stamp_error
+            out.update(self._propagation_counts(stamp_pair))
         except Exception as exc:  # noqa: BLE001, RUF100
             # "0 claims" and "could not read it" must never collapse
             # (`BOUNDED-OPERATION-CONTRACT.md` §1a) — a failed read reports WHY
@@ -32191,15 +32217,39 @@ class TortoiseSDK:
         that of :meth:`_stamp_counts`, so the stamp ratio on this surface and
         the ``stamped`` / ``graph_live_claims`` pair in the ``propagation``
         block cannot disagree — one spelling, one query.
+
+        ⛔ This is the STANDALONE read (one query). `dream_health_check` must not
+        call it: it reads the pair ONCE via :meth:`_read_stamp_pair` and hands
+        the value to both the alarm's ratio and :meth:`_propagation_health`, so
+        the polled endpoint computes the aggregate once per request (#12116
+        review A-P2, whole-read half — pinned by
+        ``test_the_health_read_computes_the_stamp_pair_once``).
+        """
+        stamp_pair, _err = self._read_stamp_pair()
+        return (self._coverage_ratio(stamp_pair)
+                if stamp_pair is not None else 0.0)
+
+    def _read_stamp_pair(self) -> tuple[tuple[int, int] | None, Exception | None]:
+        """The live/stamped pair, or the failure, in ONE read (#12116 A-P2).
+
+        Returns ``(pair, None)`` on success and ``(None, exc)`` on a failed read
+        instead of raising, because its two consumers have deliberately
+        DIFFERENT postures for the same failure: ``coverage_pct`` collapses it
+        to ``0.0`` (pre-existing, it feeds the alarm) while the ``propagation``
+        block reports ``unavailable`` with the reason. Capturing the error here
+        keeps one read and both postures; re-reading per consumer is what made
+        the polled endpoint compute the same aggregate three times.
         """
         try:
-            n_total, n_stamped = self._stamp_counts()
-            return (n_stamped / n_total) if n_total else 0.0
-        except Exception:
-            # Pre-existing posture, deliberately unchanged here: the stamp ratio
-            # collapses a read failure into 0.0 (the ``propagation`` block, added
-            # #11823, is the surface that reports ``unavailable`` instead).
-            return 0.0
+            return self._stamp_counts(), None
+        except Exception as exc:  # noqa: BLE001, RUF100
+            return None, exc
+
+    @staticmethod
+    def _coverage_ratio(stamp_pair: tuple[int, int]) -> float:
+        """Stamped fraction of a ``(live, stamped)`` pair; ``0.0`` when empty."""
+        n_total, n_stamped = stamp_pair
+        return (n_stamped / n_total) if n_total else 0.0
 
     def _stamp_counts(self) -> tuple[int, int]:
         """Live non-operator ``:Point`` population and how many carry a
@@ -32222,8 +32272,15 @@ class TortoiseSDK:
         # `sum(...)` returns a FLOAT on this engine (measured 3.0) — cast.
         return int(rows[0][0] or 0), int(rows[0][1] or 0)
 
-    def _propagation_counts(self) -> dict:
+    def _propagation_counts(self,
+                            stamp_pair: tuple[int, int] | None = None) -> dict:
         """#11823 — the graph-scoped population a propagation pass does NOT choose.
+
+        ``stamp_pair`` is the ``(live, stamped)`` value the caller already read
+        (:meth:`_read_stamp_pair`); absent, this method reads it itself so a
+        direct caller still gets a complete answer. Passing it in is what keeps
+        a polled health read to ONE read of that aggregate per request (#12116
+        review A-P2).
 
         `dream()`'s own `coverage` divides by the pass's radius
         (``affected / len(_window_closure(window, max_hops))``, ``_dream_local``
@@ -32303,7 +32360,12 @@ class TortoiseSDK:
         belief_present = int(reach_rows[0][1] or 0) if reach_rows else 0
         # Second query: the :Point population the stamp ratio uses — the SAME
         # helper `_metrics_coverage` calls, so the two cannot drift (#12116 A-P2).
-        graph_live, stamped = self._stamp_counts()
+        # When the health read already made it, reuse that value: reading it
+        # again here is the third copy of one aggregate (#12116 A-P2 whole-read).
+        if stamp_pair is not None:
+            graph_live, stamped = stamp_pair
+        else:
+            graph_live, stamped = self._stamp_counts()
         # Third query: the operator-less population, as its OWN count. A
         # `NOT (n)-[:IMPL|NAND]-()` inside a `sum(CASE ...)` is rejected by the
         # engine ("expected Boolean or Null but was List", measured) — so it

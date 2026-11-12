@@ -226,7 +226,7 @@ def test_unreadable_propagation_is_reported_not_zeroed(sdk, monkeypatch):
     (BOUNDED-OPERATION-CONTRACT §1a)."""
     _chain(sdk, 2)
 
-    def boom():
+    def boom(*_a, **_kw):
         raise RuntimeError("graph went away")
 
     monkeypatch.setattr(sdk, "_propagation_counts", boom)
@@ -391,6 +391,28 @@ def test_stale_first_computes_the_closure_once(sdk, monkeypatch):
     assert calls["closure"] == 1
 
 
+def test_the_full_pass_computes_the_closure_once(sdk, monkeypatch):
+    """The same call-count control on the full arm.
+
+    #12116 review A-P1 named ``local`` and ``full``; full reaches its
+    denominator through ``_reachable_claim_count`` -> ``_window_closure``, so a
+    second closure for the reach record would double the most expensive read on
+    the whole-graph write path — exactly what the ``local`` and ``stale-first``
+    controls beside this one forbid on their arms.
+    """
+    _chain(sdk, 3)
+    calls = {"closure": 0}
+    real_closure = sdk._window_closure
+
+    def counting_closure(window, max_hops):
+        calls["closure"] += 1
+        return real_closure(window, max_hops)
+
+    monkeypatch.setattr(sdk, "_window_closure", counting_closure)
+    sdk.dream(mode="full", require_calibration=False)
+    assert calls["closure"] == 1
+
+
 def test_the_stamp_ratio_and_the_block_share_one_query(sdk, monkeypatch):
     """#12116 A-P2: `coverage_pct` and the block's `stamped`/`graph_live_claims`
     come from ONE query (`_stamp_counts`), so they cannot drift apart."""
@@ -420,6 +442,76 @@ def test_the_stamp_ratio_and_the_block_share_one_query(sdk, monkeypatch):
     sdk._metrics_coverage()
     assert len(queries) == 1        # was TWO hand-copied queries before
     assert "sum(" in queries[0]
+
+
+def test_the_health_read_computes_the_stamp_pair_once(sdk, monkeypatch):
+    """#12116 review A-P2 (WHOLE-read half): ONE health call reads the
+    live/stamped aggregate ONCE.
+
+    The helper-level test above cannot see this class: `dream_health_check`
+    called `_metrics_coverage` TWICE and the `propagation` block a THIRD time,
+    so the polled `GET /v1/dream/health` computed one aggregate three times
+    (measured 5 graph queries per call) while every helper test stayed green.
+    R7's bound covered only the new helper, so the endpoint grew unnoticed.
+
+    This counts the WHOLE read: exactly one stamp-pair `sum(...)` among the
+    three aggregate reads (reach pair, stamp pair, operator-less).
+    """
+    _chain(sdk, 3)
+    _islands(sdk, 2)
+    inner = sdk._get_proj()
+    queries: list[str] = []
+
+    class _G:
+        def __init__(self, g):
+            self._g = g
+
+        def query(self, q, **kw):
+            queries.append(q)
+            return self._g.query(q, **kw)
+
+    class _P:
+        def __init__(self, p):
+            self._p = p
+            self.g = _G(p.g)
+
+    monkeypatch.setattr(sdk, "_get_proj", lambda: _P(inner))
+    h = sdk.dream_health_check()
+    # The stamp-pair aggregate is the one whose SUM keys on `lastDreamedAt` (the
+    # reach query also carries a `sum(CASE … has_belief …)`, so `sum(` alone
+    # would match both and could not discriminate).
+    stamp_reads = [q for q in queries if "lastdreamedat" in q.lower()]
+    assert len(stamp_reads) == 1, stamp_reads      # NOT 3
+    assert len(queries) == 3        # reach pair + stamp pair + operator-less
+    # the single read is what BOTH surfaces report, so they cannot disagree
+    prop = h["propagation"]
+    assert h["coverage_pct"] == pytest.approx(
+        prop["stamped"] / prop["graph_live_claims"])
+
+
+def test_a_failed_stamp_read_is_replayed_not_retried(sdk, monkeypatch):
+    """One failing read, both postures, no second attempt.
+
+    `coverage_pct` keeps its pre-existing 0.0 (it feeds the alarm) while the
+    `propagation` block reports `unavailable` with the reason
+    (BOUNDED-OPERATION-CONTRACT §1a). Hoisting the read must not collapse those
+    two meanings into one — nor pay the failing read twice per poll.
+    """
+    _chain(sdk, 2)
+    calls = {"n": 0}
+
+    def boom():
+        calls["n"] += 1
+        raise RuntimeError("graph went away")
+
+    monkeypatch.setattr(sdk, "_stamp_counts", boom)
+    h = sdk.dream_health_check()
+    assert calls["n"] == 1          # one attempt, reported twice
+    assert h["coverage_pct"] == 0.0
+    p = h["propagation"]
+    assert p["unavailable"] and "graph went away" in p["unavailable"]
+    assert p["graph_live_claims"] is None
+    assert p["no_belief"] is None
 
 
 def test_an_edged_but_unreachable_claim_is_not_invisible(sdk):
