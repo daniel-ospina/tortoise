@@ -642,11 +642,19 @@ class AlertStore:
         swallowed: the incident is already LOUD without it, and letting it
         propagate would turn a failed COMMENT into a failed POLL.
 
-        BOUNDED to one record per incident per UTC day
-        (:data:`_OCCURRENCE_DAY_FIELD`), because this runs inside the sweep loop
-        for every open incident. The bound is the store's own write, in the only
-        place it may trust one; the record itself carries no running number — see
-        :data:`OCCURRENCE_MARKER` for why.
+        BOUNDED to one ATTEMPT per incident per UTC day
+        (:data:`_OCCURRENCE_DAY_FIELD`), claimed BEFORE the post: this runs inside
+        the sweep loop for every open incident, so a channel that fails
+        persistently must not re-POST every poll. The bound is the store's own
+        write, in the only place it may trust one; the record itself carries no
+        running number — see :data:`OCCURRENCE_MARKER` for why.
+
+        BEST-EFFORT, and precisely so: the day is a field on a sentinel object
+        shared with the bash driver, which rewrites it with an unconditional
+        GET->PUT (no ETag guard), so a lost update re-records once — never
+        silences. Two live writer processes can each post once in a day. The
+        over-report is bounded and cosmetic; the false SILENCE this method
+        exists to remove is not.
         """
         if self._comment is None:
             return
@@ -655,15 +663,31 @@ class AlertStore:
             return
         # ONE reading of the clock for both the bound and the stamp it records: a
         # second reading could straddle UTC midnight and stamp tomorrow's time
-        # under today's day, which is a wasted record rather than a bound.
+        # under today's day.
         now = self._clock()
         day = now.date().isoformat()
         if state.get(_OCCURRENCE_DAY_FIELD) == day:
             return
-        subject = org_id or "_"
+        # ⛔ The day is claimed BEFORE the post, not after: the bound must cap
+        # ATTEMPTS. `open_incident_state` runs once per incident per POLL, so a
+        # channel that fails PERSISTENTLY — a locked issue (403), a
+        # deleted/transferred one (404), a token without `issues: write`, a
+        # secondary rate limit — never clears, and stamping only on success would
+        # re-POST on every poll forever, on the same credential the incident
+        # FILING needs (a starved search makes the store refuse to file, #3029).
+        # That is the write-burst hazard #5143 already bounded on the close path
+        # (`_close_cooldown_min`), so it is bounded here the same way. The cost is
+        # one lost record when a post fails transiently; the alternative is an
+        # unbounded storm.
+        self._set_occurrence_day(key, state, day)
+        # #3293: the issue comment is a PUBLIC publication sink, so the
+        # caller-supplied half is scrubbed AT THIS BOUNDARY exactly as `_title`
+        # and `_body` scrub it — a future caller cannot publish unredacted text
+        # through this sink.
+        label = redact_for_publication(f"[DR] {kind} — {org_id or '_'}")
         body = (
-            f"🔁 **Observed again** — `[DR] {kind} — {subject}` was still "
-            f"unhealthy at `{now.isoformat()}`. This incident is "
+            f"🔁 **Observed again** — `{label}` was still unhealthy at "
+            f"`{now.isoformat()}`. This incident is "
             "already tracked by this issue, so no duplicate was filed.\n\n"
             f"{OCCURRENCE_MARKER}"
         )
@@ -672,11 +696,11 @@ class AlertStore:
         except Exception as e:
             logger.warning(
                 "dedup: recurrence record on issue #%s FAILED (%s) — the incident "
-                "is still on record and still LOUD; the next observation "
-                "re-records", number, e,
+                "is still on record and still LOUD; this UTC day's record is not "
+                "retried (the bound caps ATTEMPTS, so a persistently failing "
+                "channel costs one post a day, never one a poll)", number, e,
             )
             return
-        self._set_occurrence_day(key, state, day)
 
     def _set_occurrence_day(self, key: str, state: dict[str, Any], day: str) -> None:
         """Compare-and-set the recurrence-record day on a sentinel (#12243).
@@ -688,9 +712,9 @@ class AlertStore:
         object still matches the snapshot, and not at all when it disappeared
         (resolved under us).
 
-        Never raises: the caller has ALREADY posted its record, so a failed bound
-        write costs at most a second record later the same day — far cheaper than
-        aborting a poll over bookkeeping.
+        Never raises: the caller posts regardless, so a failed bound write costs at
+        most a duplicate record — far cheaper than aborting a poll over
+        bookkeeping.
         """
         try:
             current = _read_json(self._storage, key)

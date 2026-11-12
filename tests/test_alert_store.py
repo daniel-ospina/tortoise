@@ -1919,7 +1919,7 @@ def test_a_failed_recurrence_comment_never_changes_the_incident_lifecycle():
     """Additive only: a comment failure is logged, never a failed poll.
 
     And it must NOT swallow the incident: the #3146 recovery-window reset still
-    lands, and the day is not consumed, so the next observation re-records.
+    lands even though the record's attempt consumed the day.
     """
     from tortoise.alert_store import OpenOutcome
 
@@ -1941,12 +1941,61 @@ def test_a_failed_recurrence_comment_never_changes_the_incident_lifecycle():
     assert ch.recurrence == [], "the failed post is not a record"
     assert _streak_state(storage, "DATA_LOSS_CANDIDATE", "team_x")[
         "healthy_streak"] == 0, "the #3146 reset must survive a failed record"
-    assert "last_occurrence_record" not in json.loads(storage.download(key)), (
-        "a record that never landed must not consume the day")
 
-    ch.fail_comment = False
+
+def test_a_persistently_failing_channel_is_attempted_once_per_day():
+    """The bound caps ATTEMPTS, not just successes (#12243 review P1).
+
+    `open_incident_state` runs once per incident per POLL, so a channel that can
+    never succeed — a locked issue (403), a 404, a token without `issues: write`,
+    a secondary rate limit — would otherwise re-POST on every poll forever, on
+    the same credential the incident FILING needs. One attempt a day bounds it.
+    """
+    from datetime import datetime, timedelta
+
+    ch = _RecordChannels()
+    storage = MemoryStorage()
+    _sentinel(storage, "DATA_LOSS_CANDIDATE", 8804, key="team_x")
+    clock = [datetime(2026, 11, 12, 9, 0, tzinfo=UTC)]
+    ch.fail_comment = True
+    store = _recording_store(ch, storage, now=lambda: clock[0])
+    calls = 0
+    original = ch.comment_issue
+
+    def counting(number, body):
+        nonlocal calls
+        calls += 1
+        original(number, body)
+
+    store._comment = counting
+
+    for _ in range(5):  # five polls inside one UTC day
+        store.open_incident_state("DATA_LOSS_CANDIDATE", "team_x")
+    assert calls == 1, "a failing channel must be attempted once, not once per poll"
+
+    clock[0] = clock[0] + timedelta(days=1)
     store.open_incident_state("DATA_LOSS_CANDIDATE", "team_x")
-    assert len(ch.recurrence) == 1, "the next observation re-records"
+    assert calls == 2, "the next UTC day attempts again"
+
+
+def test_the_record_body_is_scrubbed_at_the_publication_boundary():
+    """#3293: a PUBLIC issue comment is a publication sink — #12243 review P1.
+
+    `_title`, `_body` and `_telegram_text` all scrub at this boundary so no
+    caller has to remember it; the record must not be the one sink that does not.
+    """
+    ch = _RecordChannels()
+    storage = MemoryStorage()
+    _sentinel(storage, "STALE", 4711, key="/team/data/x")
+    store = _recording_store(ch, storage)
+    # A subject carrying a filesystem path is the shape redact_for_publication
+    # rewrites; a real org_id is a slug, so the assertion is about the BOUNDARY,
+    # not about today's values.
+    store.open_incident_state("STALE", "/team/data/x")
+
+    body = ch.recurrence[0][1]
+    assert "/team/data/x" not in body, "the caller-supplied subject must be scrubbed"
+    assert "[DR] STALE" in body
 
 
 def test_a_store_without_a_record_channel_posts_nothing():
