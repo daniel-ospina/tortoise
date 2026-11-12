@@ -258,7 +258,18 @@ def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
         "so the leg would run on the runner image's own client"
     )
 
-#: A (release -> PostgreSQL client major) fact table, PROVEN and not assumed.
+#: A (runner label -> PostgreSQL client major) fact table, PROVEN and not assumed.
+#: ⚠️ WHAT THIS TABLE DECIDES, AFTER THE PGDG CHANGE: it records that a NAMED
+#: release is a sound place to run this job — measured by `<codename>-pgdg`
+#: carrying the client major, and by the release's own archive carrying it too.
+#: It does NOT decide where the client comes from: since #12051 round 3 the step
+#: INSTALLS `postgresql-client-<major>` from `apt.postgresql.org`, and the live
+#: invariant is the in-step `pg_dump`/`pg_restore` assertion (major == the two
+#: `pgvector/pgvector:pg16` servers'), which no image can quietly change.
+#: ⛔ Do not read this table as "the archive supplies the client, so the PGDG
+#: block is redundant": it is not, and deleting it leaves this file GREEN on
+#: `ubuntu-24.04` (whose archive happens to carry 16) while reverting the fix —
+#: `test_the_client_comes_from_pgdg_not_the_distro_archive` exists to red that.
 #: Which client a release's archive carries IS #12051 round 2: `ubuntu-latest`
 #: moved to `ubuntu-26.04`, whose archive ships `postgresql-client-18` and NO 16,
 #: so the pin died `E: Unable to locate package` before a single test ran. A new
@@ -267,6 +278,8 @@ def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
 KNOWN_GOOD_IMAGE_MAJOR = {
     # `docker run --rm ubuntu:24.04 apt-cache policy postgresql-client-16`
     #   -> Candidate: 16.15-0ubuntu0.24.04.1
+    # and the PGDG suite the step actually installs from:
+    # `noble-pgdg` -> 16.15-1.pgdg24.04+2
     "ubuntu-24.04": 16,
 }
 
@@ -434,19 +447,23 @@ def _runs_on_labels(job: dict) -> list[str]:
 
 
 def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict) -> None:
-    """The image is part of the artifact: it decides which client the archive has.
+    """The image is NAMED, and its release has been measured for this major.
 
-    Round 2 of #12051. The pin assumes the image's archive CARRIES
-    `postgresql-client-<major>`, and that assumption is not free: MEASURED
-    2026-11-12 (job `131022562781`, head `58b5a417ba`), `ubuntu-latest` had
-    migrated to `Image: ubuntu-26.04`, whose archive ships `postgresql-client-18`
-    and no 16 — so the install died `E: Unable to locate package` (exit 100)
-    BEFORE the version assertion, and every leg below skipped.
+    Round 2 of #12051. MEASURED 2026-11-12 (job `131022562781`, head
+    `58b5a417ba`), `ubuntu-latest` had migrated to `Image: ubuntu-26.04`, whose
+    archive ships `postgresql-client-18` and no 16 — so the install died
+    `E: Unable to locate package` (exit 100) BEFORE the version assertion, and
+    every leg below skipped. A floating label lets the runner image change under
+    a drill whose artifact depends on the client's major, with no diff to blame.
 
-    A floating label lets the runner image change the drill's client major with
-    no diff, which is the class this PR closes. The (release -> major) pair is
-    asserted rather than the label's SHAPE, because `ubuntu-26.04` is just as
-    version-pinned as `ubuntu-24.04` and is the release that broke.
+    ⚠️ WHAT THIS TEST STILL OWNS, now that the install comes from PGDG: the image
+    must be a NAMED release, and that release must be one somebody measured. It
+    does NOT own "the archive supplies the client" any more — that claim is what
+    made the distro-archive pin fragile in the first place, and the live
+    invariant is the in-step `pg_dump`/`pg_restore` major assertion. The
+    (release -> major) pair is asserted rather than the label's SHAPE, because
+    `ubuntu-26.04` is just as version-pinned as `ubuntu-24.04` and is the release
+    that broke.
     """
     server_major = _postgres_image_majors(job)[0]
     labels = _runs_on_labels(job)
@@ -457,25 +474,25 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
         "reds before a single test runs (#12051). Name the release."
     )
     assert len(labels) == 1 and labels[0].startswith("ubuntu-"), (
-        f"`{JOB}` asks for {labels!r}. This pin needs ONE named hosted image: the "
-        "drill's PostgreSQL client major comes from that image's archive, so any "
-        "second label (e.g. `self-hosted`) makes the client an inherited fact of "
-        "whichever box answers — the exact inheritance #12051 removed. The "
-        "in-step precondition fails closed on such a box; this assertion is the "
-        "contract."
+        f"`{JOB}` asks for {labels!r}. This job needs ONE named hosted image: any "
+        "second label (e.g. `self-hosted`) makes the box's release an inherited "
+        "fact of whichever machine answers — the exact inheritance #12051 "
+        "removed, and the #10289 routing drift that the in-step checks exist to "
+        "name. This assertion is the contract."
     )
     label = labels[0]
     assert label in KNOWN_GOOD_IMAGE_MAJOR, (
-        f"`{JOB}` runs on {label!r}, whose PostgreSQL client major has not been "
-        "measured. PROVE it — `apt-cache policy "
-        f"postgresql-client-{server_major}` on that image — and add the pair to "
-        "KNOWN_GOOD_IMAGE_MAJOR. The image supplies the drill's client, so "
-        "adopting one unmeasured is how #12051 round 2 shipped."
+        f"`{JOB}` runs on {label!r}, which nobody has measured for this drill. "
+        "PROVE it — `apt-cache policy "
+        f"postgresql-client-{server_major}` on that image, and that its "
+        "`-pgdg` suite carries the same major — then add the pair to "
+        "KNOWN_GOOD_IMAGE_MAJOR. Adopting an unmeasured release is how #12051 "
+        "round 2 shipped."
     )
     assert KNOWN_GOOD_IMAGE_MAJOR[label] == server_major, (
-        f"`{JOB}`'s two servers are pg{server_major}, but {label} carries a "
-        f"pg{KNOWN_GOOD_IMAGE_MAJOR[label]} client: the archive would be dumped "
-        "by a client whose major differs from the restore target (#12051)."
+        f"`{JOB}`'s two servers are pg{server_major}, but {label} is measured for "
+        f"a pg{KNOWN_GOOD_IMAGE_MAJOR[label]} client: the artifact would be "
+        "dumped by a client whose major differs from the restore target (#12051)."
     )
 
     _, pin = _pin_step(_steps(job))
@@ -521,6 +538,77 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
     )
 
 
+def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
+    """⛔ DELETING THE PGDG BLOCK USED TO LEAVE THIS ENTIRE FILE GREEN.
+
+    #12051 round 3 exists because Ubuntu's own archive carries only the major its
+    RELEASE ships: `ubuntu-latest` rolled to 26.04 (client 18, no 16) and the pin
+    died `E: Unable to locate package`, exit 100, before a single test ran. The
+    remedy is to install from `apt.postgresql.org`, which publishes every
+    supported major for every supported release.
+
+    A guard is needed because the OLD mechanism still works on the label that is
+    pinned today: `ubuntu-24.04`'s archive carries `postgresql-client-16` too, so
+    deleting the five PGDG lines — or moving `apt-get update` above them — would
+    revert this fix while leaving every other assertion in this file green
+    (MEASURED 2026-11-12, fresh review of `f55bf421ec`: both mutations →
+    `6 passed`). The regression would then surface only when a label moves again,
+    which is the class #12051 removes.
+
+    Read from `_code_only` (comments stripped, `${…}` INTACT — the suite name is
+    an expansion, so `_normalised_code` would erase the fact under test).
+    """
+    _, pin = _pin_step(_steps(job))
+    code = _code_only(_run_text(pin))
+
+    assert "https://www.postgresql.org/media/keys/ACCC4CF8.asc" in code, (
+        "the step no longer imports the PGDG signing key (ACCC4CF8.asc). Without "
+        "it the `signed-by` on the sources line points at nothing and every "
+        "install from that repo fails closed — or, worse, the archive is used "
+        "instead and the client major is inherited from the image again (#12051)."
+    )
+
+    sources = [
+        line for line in code.splitlines()
+        if "apt.postgresql.org/pub/repos/apt" in line
+    ]
+    assert len(sources) == 1, (
+        "expected exactly ONE PGDG sources line, found "
+        f"{len(sources)}: {sources!r}. #12051 round 3's whole mechanism is that "
+        "one line."
+    )
+    sources_line = sources[0]
+    assert "signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc" in sources_line, (
+        "the PGDG sources line does not bind the keyring it just installed, so "
+        "apt would have to accept the repo unsigned (or refuse it): "
+        f"{sources_line!r}"
+    )
+    assert "${VERSION_CODENAME}-pgdg" in sources_line, (
+        "the PGDG suite is not derived from the box's own codename, so the step "
+        "would pin one release's suite and die on every other one — the exact "
+        "moving-target class this change removes: "
+        f"{sources_line!r}"
+    )
+    assert ". /etc/os-release" in code, (
+        "the step reads `${VERSION_CODENAME}` but never sources `/etc/os-release`, "
+        "so under `set -u` it aborts on an unset variable instead of naming the "
+        "cause"
+    )
+
+    # ⛔ ORDER IS THE MECHANISM. Sources added, THEN the indexes refreshed, THEN the
+    # install. Any other order installs from the distro archive (or from an index
+    # that does not know the PGDG package yet) and the pin silently reverts.
+    assert code.index("apt.postgresql.org/pub/repos/apt") < code.index("apt-get update"), (
+        "the PGDG source is added AFTER `apt-get update`, so the package index "
+        "never learns about `postgresql-client-16` and the install falls back to "
+        "the distro archive — #12051 round 3 reverted with every check green"
+    )
+    assert code.index("apt-get update") < code.index("apt-get install"), (
+        "`apt-get install` runs BEFORE `apt-get update`, so it installs against a "
+        "stale index that predates the PGDG source"
+    )
+
+
 def test_the_precondition_actually_fires_when_the_package_is_absent(
     job: dict, tmp_path: Path
 ) -> None:
@@ -557,9 +645,22 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     when it was armed. On a box running the suite as root it would instead have
     written the HOST's apt sources and fetched from the network — which is why
     the stubs below are part of the contract this test claims, not decoration.
-    The failing-stub run must STOP with a named `::error::`; the succeeding-stub
-    run must NOT stop, or the job would red on every image that carries the
-    client.
+
+    ⛔ AND THE HOST's `/etc/os-release` IS THE SAME CLASS ONE STEP FURTHER. The
+    prefix contains `. /etc/os-release` (the PGDG suite is derived from the box's
+    codename), so running it verbatim reads a HOST file — the one thing a suite
+    that claims hermeticity must not need. MEASURED 2026-11-12: on a box without
+    that file both arms die at the source line, and the ABSENT arm then fails on
+    `assert "::error::" in combined` — i.e. it reports an ARMED guard as silent,
+    about a missing host file. The single `. /etc/os-release` is therefore
+    REPLACED with a fixture this test writes (`VERSION_CODENAME=noble`), and the
+    substitution asserts it matched exactly once, so a future rename reds here
+    instead of silently restoring the host dependency.
+
+    Three arms, because the step now has TWO named-failure branches: an
+    `apt-get update` that cannot resolve the repo, and a probe that cannot find
+    the package in a repo that DID resolve. A branch nothing executes is the
+    unguarded-claim class this file exists to refuse.
     """
     _, pin = _pin_step(_steps(job))
     lines = _run_text(pin).splitlines()
@@ -575,7 +676,20 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "should already have caught this)"
     )
 
-    def run_with(stub: str) -> subprocess.CompletedProcess[str]:
+    os_release = tmp_path / "os-release"
+    os_release.write_text('ID=ubuntu\nVERSION_CODENAME=noble\n', encoding="utf-8")
+    substituted = prefix.count(". /etc/os-release")
+    assert substituted == 1, (
+        "the prefix is expected to source `/etc/os-release` exactly once so this "
+        "test can point it at a fixture; found "
+        f"{substituted}. Re-derive the substitution rather than letting the arm "
+        "fall back to reading the HOST's file"
+    )
+    prefix = prefix.replace(". /etc/os-release", f". {os_release}")
+
+    def run_with(
+        stub: str, apt_get: str = "apt-get() { return 0; }"
+    ) -> subprocess.CompletedProcess[str]:
         script = tmp_path / "precondition.sh"
         # ⛔ `sudo`, `apt-*` AND THE REPO-SETUP COMMANDS are stubbed. Without the
         # first two the prefix runs the HOST's real `sudo apt-cache` / `sudo apt-get
@@ -587,7 +701,7 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         # they either abort the prefix before the guard runs or write the host.
         script.write_text(
             'sudo() { "$@"; }\n'
-            "apt-get() { return 0; }\n"
+            f"{apt_get}\n"
             "install() { return 0; }\n"
             "curl() { return 0; }\n"
             "tee() { cat >/dev/null; }\n"
@@ -626,4 +740,29 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     assert "REACHED_PAST_PRECONDITION" in present.stdout, (
         "the script never reached the line after the precondition even when the "
         "package resolved — the block is unconditional"
+    )
+
+    # ⛔ THE OTHER NAMED BRANCH — `apt-get update` failing (repo, key or egress).
+    # Without this arm that branch is an UNGUARDED CLAIM: it could be deleted and
+    # nothing here would notice, and the failure it exists to name (apt's own
+    # `E: … does not have a Release file`, exit 100) would come back opaque. The
+    # probe is left SUCCEEDING so only the update branch can stop the script.
+    update_failed = run_with(
+        "apt-cache() { return 0; }",
+        apt_get="apt-get() { return 100; }",
+    )
+    update_combined = update_failed.stdout + update_failed.stderr
+    assert update_failed.returncode != 0, (
+        "with `apt-get update` FAILING the step carried on — on a runner whose "
+        "PGDG source or signing key does not resolve, that means the job "
+        f"continues into an install that cannot succeed: {update_combined!r}"
+    )
+    assert "REACHED_PAST_PRECONDITION" not in update_failed.stdout, (
+        "a failed `apt-get update` did not stop the script, so the repo-setup "
+        f"failure is not named and not fatal: {update_combined!r}"
+    )
+    assert "::error::" in update_combined, (
+        "`apt-get update` stopped the step but nothing NAMED it — the whole point "
+        "of the update guard is that a PGDG key/suite/egress failure reads as "
+        f"THIS defect rather than as apt's opaque exit 100: {update_combined!r}"
     )

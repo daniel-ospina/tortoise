@@ -4740,25 +4740,28 @@ jobs:
           sudo install -m 0644 /tmp/pgdg.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
           . /etc/os-release
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-          sudo apt-get update -qq
-          # ⛔ FAIL CLOSED WITH A NAME. Without this, `set -e` surfaces apt's own
-          # message — `E: Unable to locate package …` (exit 100) — which reads as a
-          # typo in THIS step rather than as the client's SOURCE failing under a
-          # drill whose artifact depends on the client's major. That is exactly what
-          # happened on 2026-11-12 when the label moved to 26.04 and the distro
-          # archive carried no 16 (#12051 round 2); the install now comes from PGDG,
-          # so this branch fires when PGDG itself did not resolve.
+          # Identity must survive BOTH runner classes: `ImageOS`/`ImageVersion` are set ONLY
+          # on GitHub-hosted runners, so naming them alone reports `unknown` on a self-hosted
+          # box — and a self-hosted box is exactly the #10289 path these messages exist for.
+          # `RUNNER_*` is set by the agent on both, and `RUNNER_ENVIRONMENT` says which remedy
+          # applies. A remedy that is already the state ("pin the job") is not a remedy there.
+          identity="${RUNNER_ENVIRONMENT:-unknown} ${RUNNER_NAME:-unknown} ${RUNNER_OS:-unknown}"
+          if [ -n "${ImageOS:-}" ]; then
+            identity="$identity hosted-image=${ImageOS}/${ImageVersion:-unknown}"
+          fi
+          # ⛔ FAIL CLOSED WITH A NAME — BOTH ways this step can fail to get a pg16 client.
+          # The two failure classes below are DIFFERENT and are named separately, because
+          # `set -e` would otherwise surface apt's own text for one of them: a repo or
+          # signing key that does not resolve aborts at `apt-get update` (exit 100), and a
+          # resolved archive without the package aborts at the install. Both read as a typo
+          # in THIS step rather than as the client's SOURCE failing under a drill whose
+          # artifact depends on the client's major.
+          if ! sudo apt-get update -qq; then
+            echo "::error::apt-get update FAILED after the PGDG source was added (suite ${VERSION_CODENAME:-unknown}-pgdg) [$identity] — the repository or its signing key did not resolve, so the pg16 client this drill needs cannot be installed, and BOTH provisioned servers are pg16 (#12051). Check the key at /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc, the suite name derived from /etc/os-release, and network egress."
+            exit 1
+          fi
           if ! apt-cache show postgresql-client-16 >/dev/null 2>&1; then
-            # Identity must survive BOTH runner classes: `ImageOS`/`ImageVersion` are set ONLY
-            # on GitHub-hosted runners, so naming them alone reports `unknown` on a self-hosted
-            # box — and a self-hosted box is exactly the #10289 path this message exists for.
-            # `RUNNER_*` is set by the agent on both, and `RUNNER_ENVIRONMENT` says which remedy
-            # applies. A remedy that is already the state ("pin the job") is not a remedy there.
-            identity="${RUNNER_ENVIRONMENT:-unknown} ${RUNNER_NAME:-unknown} ${RUNNER_OS:-unknown}"
-            if [ -n "${ImageOS:-}" ]; then
-              identity="$identity hosted-image=${ImageOS}/${ImageVersion:-unknown}"
-            fi
-            echo "::error::postgresql-client-16 does not resolve from PGDG on this runner [$identity] — BOTH provisioned servers are pg16 and the drill's client major is part of the artifact's contract (#12051), so it cannot run here. The pin installs from apt.postgresql.org via `/etc/os-release`'s ${VERSION_CODENAME:-unknown}-pgdg suite, so the usual cause is that repo not resolving: check the key at /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc, the suite name, and network egress. SELF-HOSTED runner: this box may not be the release that claims the label, i.e. the routing drift #10289 — on it run CI_RUNNER_OS_LABEL=off tools/install-ci-runner-x64.sh --repair-labels --count <N> (an on/auto install KEEPS the pin, so a BARE --repair-labels changes nothing)."
+            echo "::error::postgresql-client-16 is not resolvable from ANY configured archive on this runner [$identity] — BOTH provisioned servers are pg16 and the drill's client major is part of the artifact's contract (#12051), so it cannot run here. apt-get update SUCCEEDED, so the PGDG repo resolved; this branch means the package is absent from it. SELF-HOSTED runner: this box may not be the release that claims the label, i.e. the routing drift #10289 — on it run CI_RUNNER_OS_LABEL=off tools/install-ci-runner-x64.sh --repair-labels --count <N> (an on/auto install KEEPS the pin, so a BARE --repair-labels changes nothing)."
             exit 1
           fi
           sudo apt-get install -y --no-install-recommends postgresql-client-16
