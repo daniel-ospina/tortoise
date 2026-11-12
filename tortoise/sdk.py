@@ -17066,7 +17066,10 @@ class TortoiseSDK:
                                 # that lost its own write time.
                                 + (", no per-occurrence evidence of its own "
                                    "to carry beyond its write history — the "
-                                   "row's `createdAt`/`updatedAt` went with it"
+                                   "row's `createdAt`/`updatedAt` went with it, "
+                                   "and edge attributes beyond `confidence` are "
+                                   "a declared bound this fold does not read "
+                                   "(#12146)"
                                    if (not carried and not copied and not residual
                                        and not undeclared)
                                    else ""))

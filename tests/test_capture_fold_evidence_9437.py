@@ -187,6 +187,11 @@ def test_a_plain_duplicate_with_no_evidence_still_folds(sdk, monkeypatch):
     # Unqualified, it asserted an absence over a node whose `createdAt` died.
     assert "beyond its write history" in said[0], said[0]
     assert "createdAt" in said[0], said[0]
+    # …and the OTHER class the delete takes without carrying it: the duplicate's
+    # outbound `extractedFrom` edge may die (the canonical's equivalent survives)
+    # and can carry an attribute this fold does not read. The clause names the
+    # declared bound instead of asserting an absence over it.
+    assert "#12146" in said[0], said[0]
 
 
 def test_a_pre_existing_link_is_reported_present_but_not_written(sdk, monkeypatch):
@@ -1966,3 +1971,86 @@ def test_the_label_allowlist_backstop_still_fails_closed():
                                  "obj_1") == (0, None)
     assert capture_fold._carried(proj, "pt_canon", "aboutObject", "Object",
                                  "obj_1") == (1, 0.9)
+
+
+# ── 23) round 20: the presence tests, and the guard that only an OCCUPIED
+#         date plus a free OTHER slot can reach ──
+
+
+def test_the_dual_date_verdict_cannot_be_OVERWRITTEN_by_a_later_landing():
+    """`_complete_slot_conflict`'s `"travelled" not in item` is the only thing
+    stopping the LANDED verdict from appending a travel to an OCCUPIED slot's
+    "neither spelling travelled" — and the existing occupied-slot pins never reach
+    `_finish_date_conflict`, because they have nothing else to write. Here the
+    canonical holds the date AND the duplicate has a free `search_keys` slot, so
+    the write lands and the landed verdict is attempted on top."""
+    graph = _FakeGraph(
+        dup_row=("session:s", [], "q", 10, 40, "turn-1", "a b",
+                 "2026-08-01", "2026-08-02", None, None, None),
+        canon_row=("session:s", [], "q", None, None, "turn-0", None,
+                   "2026-09-09", None, None, None, None))
+    sdk = _FakeSDK(on_update=graph.apply_slot)
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is True, out
+    assert out["copied"] == ["search_keys"], out       # the write DID land
+    item = next(r for r in out["residual"]
+                if r.startswith("the duplicate's second validFrom"))
+    assert "neither spelling travelled" in item, item
+    assert "travelled; " not in item, item
+
+
+def test_a_FALSY_support_value_is_reported_like_the_pinned_slot_rule():
+    """`support`'s presence test is `v is not None`, and its only pin used a
+    truthy value: `v is not None` → `bool(v)` left every test green, and with it a
+    duplicate whose `confidence` was 0.0 and whose `eventId` was "" lost BOTH
+    silently — and the receipt then said "no per-occurrence evidence of its own to
+    carry" over them."""
+    graph = _FakeGraph(
+        dup_row=("session:s", [], "q", 10, 40, "turn-1", None,
+                 None, None, "", 0.0, None))
+    sdk = _FakeSDK(on_update=graph.apply_slot)   # so the free slots DO land
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is True, out
+    assert any("confidence (duplicate 0.0" in r for r in out["residual"]), out
+    # `eventId` is reported by name; the exact parenthetical depends on the
+    # fixture's canonical value, so assert the FIELD is named, not the form.
+    assert any(r.startswith("eventId") for r in out["residual"]), out
+
+
+def test_a_CANONICAL_EMPTY_STRING_part_of_the_address_is_OCCUPIED():
+    """`address_held` tests `is not None`, and the projection really stores `''`.
+    Mutating it to truthiness left every test green — and the fold then
+    OVERWRITES the canonical's present (empty) text, so "the canonical's own text
+    is untouched" breaks with no residual at all."""
+    graph = _FakeGraph(
+        dup_row=("session:s", [], "q dup", 10, 40, "turn-2", None,
+                 None, None, None, None, None),
+        # ONLY the empty `quote`: a canonical that also held a truthy part
+        # (`source_turn_id`) would mask the mutation this pins.
+        canon_row=("session:s", [], "", None, None, None, None,
+                   None, None, None, None, None))
+    sdk = _FakeSDK(on_update=graph.apply_slot)
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is True, out
+    assert "quote" not in out["copied"], out
+    assert sdk.calls == [], sdk.calls
+    assert any("quote — the canonical's value differs" in r
+               for r in out["residual"]), out
+
+
+def test_a_CANONICAL_EMPTY_STRING_single_slot_is_OCCUPIED():
+    """The same rule for the single slots: `held is not None`, not `held`."""
+    graph = _FakeGraph(
+        dup_row=("session:s", [], None, None, None, None, "a b",
+                 None, None, None, None, None),
+        canon_row=("session:s", [], None, None, None, None, "",
+                   None, None, None, None, None))
+    sdk = _FakeSDK(on_update=graph.apply_slot)
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is True, out
+    assert "search_keys" not in out["copied"], out
+    assert sdk.calls == [], sdk.calls
