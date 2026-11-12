@@ -5741,7 +5741,8 @@ _CLAUSE_BREAK = re.compile(
 #:   • FALSE BLOCK — a TRUE sentence is reported whenever the word and the
 #:     number share the WINDOW, and the window is NOT a clause: it stops at
 #:     `.` `;` `,` `—` `–`, at a relative pronoun (`which`/`that`/`whose`/
-#:     `where`/`who`) and at `but`/`rather`. It CROSSES
+#:     `where`/`who`) in EITHER segment, and at `but`/`rather` in either. It
+#:     CROSSES
 #:       - a COLON,
 #:       - a parenthetical `( … )`,
 #:       - a coordinating `and`,
@@ -5751,8 +5752,11 @@ _CLAUSE_BREAK = re.compile(
 #:     alone reads 0.75"; the same with ( … ), with "and", and "the credibility
 #:     word reads 0.75, which is not true". All four are pinned in the control
 #:     test as KNOWN FALSE BLOCKS so a later tightening is measured, not
-#:     guessed. (The `—`/`–`/`but` forms WERE false blocks and are closed; the
-#:     colon cannot be closed, because the pinned must-fire
+#:     guessed. (The `—`/`–`/`but` forms WERE false blocks and are closed, and
+#:     so are the post-verb relative pronouns — `which`/`that` stop the window
+#:     after the verb too, which they did NOT until review cycle 5 measured
+#:     "the credibility word reads a default which is 0.75" firing. The colon
+#:     cannot be closed, because the pinned must-fire
 #:     "the credibility word is not just an added body: it reads 0.75" is a
 #:     false claim that depends on the window crossing a colon.)
 #:     This is the direction that costs — the failure text hands the next fixer
@@ -5774,7 +5778,8 @@ _CRED_WORD_YIELDS_075 = re.compile(
     r"credibility(?:(?!\b(?:which|that|whose|where|who|but|rather)\b)"
     r"[^.;,–—]){0,60}?"
     r"\b(?:is|reads|lands\s+at|equals)\b"
-    r"(?:(?!\b(?:but|rather)\b)[^.;,–—]){0,25}?"
+    r"(?:(?!\b(?:which|that|whose|where|who|but|rather)\b)"
+    r"[^.;,–—]){0,25}?"
     r"(?:0?\.750*|75\s*%)(?!\d)",
     re.IGNORECASE)
 
@@ -5796,7 +5801,13 @@ _CRED_WORD_YIELDS_075 = re.compile(
 #: The demoters are a WORD LIST and therefore incomplete by construction:
 #: `ignored` / `discarded` / `overwritten` / `superseded` were added after they
 #: were MEASURED as false blocks; a synonym nobody has written yet is a
-#: false-block residual, not a claim of coverage.
+#: false-block residual, not a claim of coverage. ⚠️ Their pins must use a
+#: spelling the WINDOW actually reaches — review cycle 5 found that the two
+#: demoter strings a previous revision cited were quiet for WINDOW reasons
+#: (a comma, and a pre-verb `that`), so deleting this whole list left the suite
+#: green. "the credibility word is dropped when a pair reads 0.75" is the pin
+#: that holds: it matches the regex, is quiet only because `dropped` is
+#: exempted, and fires the moment that alternative is removed.
 #:
 #: ⚠️ NAMED RESIDUALS, both directions, stated rather than hidden. It does NOT
 #: catch: (i) a false claim whose OWN final clause carries a negator that
@@ -5893,9 +5904,14 @@ def _cred_word_yields_075(text: str) -> list[str]:
     that boundary, and they pull in opposite directions, which is why it is
     spelled out:
 
-    • Clause-START matters: "it is NOT the credibility word that reads 0.75"
-      keeps its negator BEFORE the `credibility` token, so the span must reach
-      back to the clause start or the true sentence is reported.
+    • Clause-START matters, and the reach-back is pinned on a sentence the
+      regex ACTUALLY matches: "it is not the case that the credibility word
+      reads 0.75" is quiet with the reach-back and fires the instant it is
+      removed. ⚠️ The sentence a previous revision cited here — "it is NOT the
+      credibility word that reads 0.75" — never matched the regex at all (`that`
+      stops the pre-verb window), so it pinned nothing: removing the reach-back
+      left the suite green (review cycle 5, P1). A pin must be re-measured
+      whenever the window changes.
     • Clause-START alone is not enough: with the whole span read, a negator of
       a DIFFERENT predicate exempted a real false claim — "the credibility
       word is not just an added body: it reads 0.75" passed silently.
@@ -6063,6 +6079,19 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # with (`_NEGATED`'s determiner rule): before this alternative
             # existed, this correct sentence was a false block (cycle 2, P2).
             "``credibility=`` is no 0.75 — it is 0.5238 alone",
+            # …the reach-back: the negator precedes the `credibility` token, so
+            # this is quiet ONLY because the span starts at the clause
+            # beginning. It is the pin for that boundary — the sentence a
+            # previous revision cited here never matched the regex at all
+            # (cycle 5, P1), so it pinned nothing.
+            "it is not the case that the credibility word reads 0.75",
+            # …a DEMOTER whose window really is reached, so deleting the demoter
+            # list reds here (cycle 5, P2): the two strings a previous revision
+            # relied on were quiet for window reasons instead.
+            "the credibility word is dropped when a pair reads 0.75",
+            # …a POST-VERB relative pronoun, which crossed the window until
+            # cycle 5 measured it (true prose, reported).
+            "the credibility word reads a default which is 0.75",
             # …the RELATIVE-CLAUSE family, where the verb the number attaches to
             # belongs to the default or the pair, not to the word. All six
             # fired before the window stopped at a comma and at a relative
