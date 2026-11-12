@@ -357,11 +357,13 @@ VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-#: ⛔ IT IS AN EQUALITY, NOT A FLOOR THAT CAN SLIDE DOWN: 41 as of the figure arms
+#: ⛔ IT IS AN EQUALITY, NOT A FLOOR THAT CAN SLIDE DOWN: 44 as of the figure arms
 #: (`a falsified §3 count beside a list-free decoy`, `a falsified overtaken figure
-#: beside a compliant decoy`), which closed the paragraph-scoped presence test. Bump
+#: beside a compliant decoy`), which closed the paragraph-scoped presence test, plus
+#: the three #11902-review arms (`a §6 state row naming the same issue twice`, `a §3
+#: row whose claim cell is blank`, `a §3 row whose correction cell is blank`). Bump
 #: it with any arm added or removed — the population is what the pin compares.
-MIN_SELF_TEST_MUTATIONS = 41
+MIN_SELF_TEST_MUTATIONS = 44
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -417,7 +419,13 @@ def read_doc(root: Path = REPO) -> str:
     path = root / DOC
     try:
         return path.read_text(encoding="utf-8")
-    except OSError as exc:  # unreadable is not clean
+    # ⛔ `UnicodeDecodeError` is a `ValueError`, NOT an `OSError` (#11902 review P1):
+    # catching `OSError` alone let undecodable bytes escape this arm entirely, so the
+    # traceback reached `main()`'s top-level handler and the tool exited **1** — the code
+    # it documents as "drift, a named claim is false" — over a document nobody faulted and
+    # with no claim named. §8 promises exit 2 UNVERIFIED here, never a verdict, and
+    # `MEMORY.md`'s `[unicode-decode-is-not-oserror]` row records this exact shape.
+    except (OSError, UnicodeDecodeError) as exc:  # unreadable is not clean
         raise Unverifiable(f"cannot read {DOC}: {exc}") from exc
 
 
@@ -586,7 +594,7 @@ def _has_evidence(cell: str, sections: set[int]) -> bool:
 
 
 def check_evidence_cells(text: str) -> list[str]:
-    """§3: every row's evidence cell names something that can be opened.
+    """§3: every row must carry a claim, a correction, and openable evidence.
 
     Without this arm the whole evidence column can be EMPTIED into greenness: the
     verdict vocabulary still passes (it reads a different cell) and a citation
@@ -596,6 +604,13 @@ def check_evidence_cells(text: str) -> list[str]:
     evidence; it is a memory", and the bypass is the one that matters here: a real
     drift reds the REQUIRED `docs` job, and deleting the citation turns the red
     green.
+
+    ⛔ The floor covers the PROSE columns too, not only the citation (#11902 review
+    P2). With it on the evidence cell alone a row could still be reduced to
+    `| **e** |  |  | **ADOPTED** | <citation> |` — a verdict with neither the claim
+    that was retracted nor the correction that replaced it, which is the same
+    "a verdict with nothing behind it" hole the evidence floor exists to close, one
+    and two columns to the left (measured: blanking either cell left the page CLEAN).
     """
     problems: list[str] = []
     section = _region(text, "## 3. The corrections log", "## 4. The artefact index")
@@ -605,6 +620,20 @@ def check_evidence_cells(text: str) -> list[str]:
         if match is None:
             continue  # check_verdicts owns the shape refusal
         cells = _split_row_cells(line)
+        # Cells: 0 = the empty cell before the leading `|`, 1 = label, 2 = the
+        # retracted claim, 3 = the correction, 4 = verdict, 5 = evidence.
+        for index, column, absence in (
+            (2, "claim", "names no retracted claim"),
+            (3, "correction", "states no correction"),
+        ):
+            value = cells[index] if len(cells) > index else ""
+            if value.strip():
+                continue
+            problems.append(
+                f"row ({match.group(1)}) at §3 line {offset}: its {column} cell is "
+                f"blank — {absence}, so the row asserts a verdict with nothing "
+                "beside it to have changed"
+            )
         cell = cells[5] if len(cells) > 5 else ""
         if _has_evidence(cell, sections):
             continue
@@ -1724,7 +1753,9 @@ def check_registration(root: Path = REPO) -> list[str]:
     """`docs/00_index.md` must carry a row naming this document."""
     try:
         index = (root / INDEX).read_text(encoding="utf-8")
-    except OSError as exc:
+    # The same `UnicodeDecodeError`-is-not-`OSError` arm as `read_doc` (#11902 review
+    # P1, measured: an undecodable `docs/00_index.md` exited **1** with a traceback).
+    except (OSError, UnicodeDecodeError) as exc:
         raise Unverifiable(f"cannot read {INDEX}: {exc}") from exc
     if DOC.split("/")[-1] not in index:
         return [
@@ -1756,7 +1787,23 @@ def check_state_arithmetic(text: str) -> list[str]:
             problems.append(f"§6: state row {label!r} appears twice — ambiguates the arithmetic")
             continue
         found[label] = count
-        listed = len(re.findall(r"`#\d+`", which))
+        refs = re.findall(r"`#\d+`", which)
+        listed = len(refs)
+        # ⛔ COUNT THE DISTINCT REFS, not the occurrences (#11902 review P1). Counting
+        # occurrences let a SUBSTITUTION stay green: replacing one issue with a duplicate
+        # of another keeps the total, so a census silently loses an issue while "the
+        # row's count reconciles with its own list" still holds — measured, the §6
+        # `CLOSED COMPLETED` row with `#2725` swapped for a second `#2714` read
+        # `count=32 listed=32` over 31 distinct issues and the guard returned `[]`. This
+        # is the shape `MEMORY.md`'s `[pin-defensive-claim]` names — pin the list by
+        # SHAPE, not by size, because a size or equality pin is replaced by substitution.
+        duplicates = sorted({ref for ref in refs if refs.count(ref) > 1})
+        if duplicates:
+            problems.append(
+                f"§6 row {label!r}: its own list names {', '.join(duplicates)} more than "
+                "once — a duplicated ref stands in for a dropped issue while the row's "
+                "count still reconciles, so the census can lose an issue in silence"
+            )
         if listed != count:
             problems.append(
                 f"§6 row {label!r}: declares {count} but its own list names {listed} "
@@ -2145,6 +2192,28 @@ def _empty_evidence_cells(text: str) -> str:
             cells[5] = " "
             lines[i] = "|".join(cells) + "\n"
     return "".join(lines)
+
+
+def _blank_cell_of_first_correction_row(text: str, cell: int) -> str:
+    """Blank ONE prose cell of the first §3 row, keeping the row's SHAPE.
+
+    Used by the two #11902-review arms that close the claim/correction floor. The
+    shape is deliberately preserved (`"|".join(cells)` round-trips the row exactly),
+    because a reshaped row would be caught by the row-shape arm instead — and an arm
+    that reds a NEIGHBOUR's assert rides a red it did not earn, which is how a rule
+    with no killing mutant reads as coverage (`MEMORY.md`'s `[pin-defensive-claim]`).
+    """
+    lines = text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        row = line.rstrip("\n")
+        if not CORRECTION_ROW_RE.match(row) or "\\|" in row:
+            continue
+        cells = _split_row_cells(row)
+        if len(cells) > cell:
+            cells[cell] = " "
+            lines[i] = "|".join(cells) + "\n"
+            return "".join(lines)
+    return text  # pragma: no cover - the §3 population pin refuses an empty region
 
 
 MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
@@ -2558,6 +2627,32 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             1,
         ),
         "sentences saying 'still read as written'",
+    ),
+    (
+        # #11902 review P1: §6 counted OCCURRENCES in each row's own list, so a
+        # SUBSTITUTION stayed green — swapping one issue for a duplicate of another
+        # keeps the total, and a census silently lost an issue while "the row's count
+        # reconciles" still held (measured: `#2725` -> a second `#2714` read
+        # `count=32 listed=32` over 31 distinct issues, `check_state_arithmetic` `[]`).
+        # This arm fails if the count goes back to occurrences instead of distinct refs.
+        "a §6 state row naming the same issue twice",
+        lambda t: t.replace("incl. `#2714`, `#2725`", "incl. `#2714`, `#2714`", 1),
+        "more than once",
+    ),
+    (
+        # #11902 review P2: the §3 floor held only the EVIDENCE cell, so a row could be
+        # reduced to `| **e** |  |  | **ADOPTED** | <citation> |` — a verdict with neither
+        # the claim that was retracted nor the correction that replaced it — and the page
+        # stayed CLEAN (measured). One arm per prose column, so each rule has its own
+        # killing mutant rather than riding its neighbour's red.
+        "a §3 row whose claim cell is blank",
+        lambda t: _blank_cell_of_first_correction_row(t, 2),
+        "names no retracted claim",
+    ),
+    (
+        "a §3 row whose correction cell is blank",
+        lambda t: _blank_cell_of_first_correction_row(t, 3),
+        "states no correction",
     ),
 )
 

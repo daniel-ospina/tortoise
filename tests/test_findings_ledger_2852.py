@@ -242,7 +242,7 @@ def test_mutation_population_is_pinned():
     invented claim class left `check_document()` at `[]` where the parent returned a
     problem — so the exemption is the shape `| Verdict | … |`, and a reworded header is a
     deliberate two-place edit rather than a silent one.
-    39 is the population at this head.
+    44 is the population at this head.
     """
     # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
     # at this head two merges of two 25-arm populations produced 26 arms while the
@@ -253,8 +253,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 41, (
-        "this line RECORDS the population (41 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 44, (
+        "this line RECORDS the population (44 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -463,6 +463,34 @@ def test_emptying_the_whole_evidence_column_is_rejected(tmp_path, monkeypatch):
     problems = _doc_problems()
     offenders = [p for p in problems if "names no `path:line`, issue, command or §N" in p]
     assert len(offenders) == 12, problems
+
+
+@pytest.mark.parametrize(
+    ("cell", "column", "absence"),
+    [(2, "claim", "names no retracted claim"), (3, "correction", "states no correction")],
+)
+def test_a_blank_prose_cell_is_rejected(tmp_path, monkeypatch, cell, column, absence):
+    """FAILS if §3's claim or correction cell can be blanked into greenness.
+
+    The evidence floor alone left a row reducible to
+    `| **e** |  |  | **ADOPTED** | <citation> |` — a verdict with neither the claim
+    that was retracted nor the correction that replaced it — and the page stayed
+    CLEAN (measured on the pre-fix tool: blanking either cell, `check_document()`
+    `[]`). The citation was still openable, which is exactly why the evidence floor
+    could not see it: the row kept its evidence and lost its SUBJECT.
+
+    The shape is preserved on purpose (`|`.join over the split cells round-trips the
+    line), so a reshaped row would be caught by the row-shape arm instead and this
+    assert would be satisfied by a neighbour's red.
+    """
+    original = flc.read_doc(REPO)
+    assert flc.check_evidence_cells(original) == []
+    blanked = flc._blank_cell_of_first_correction_row(original, cell)
+    assert blanked != original, "the §3 row shape moved — re-derive this mutation"
+    problems = flc.check_evidence_cells(blanked)
+    assert any(absence in p and column in p for p in problems), problems
+    # Evidence is untouched, so the evidence-floor assert cannot be what reds here:
+    assert not any("names no `path:line`" in p for p in problems), problems
 
 
 # ── no citation shape is exempt ────────────────────────────────────────────
@@ -1786,6 +1814,29 @@ def test_state_rows_not_summing_to_population_is_rejected(tmp_path, monkeypatch)
     assert any("sum to 41" in p and "pinned indexed population is 42" in p for p in problems), problems
 
 
+def test_a_duplicated_ref_cannot_stand_in_for_a_dropped_issue(tmp_path, monkeypatch):
+    """FAILS if §6 counts OCCURRENCES in a row's list instead of DISTINCT refs.
+
+    Reachable by a substitution, and a substitution is the shape a size/equality
+    pin cannot see: swapping one issue for a duplicate of another keeps the row's
+    total, so `count` still reconciles with its own list while the census has
+    silently lost an issue. Measured on the pre-fix tool: the shipped
+    `CLOSED COMPLETED` row with `#2725` replaced by a second `#2714` read
+    `count=32 listed=32` over **31 distinct** issues and `check_state_arithmetic`
+    returned `[]` — a fail-open, and the exact defect `MEMORY.md`'s
+    `[pin-defensive-claim]` names ("PIN THE LIST BY SHAPE, NOT BY SIZE").
+    """
+    text = flc.read_doc(REPO)
+    assert flc.check_state_arithmetic(text) == []
+    duplicated = text.replace("incl. `#2714`, `#2725`", "incl. `#2714`, `#2714`", 1)
+    assert duplicated != text, "the §6 anchor moved — re-derive this mutation"
+    problems = flc.check_state_arithmetic(duplicated)
+    assert any("more than once" in p and "#2714" in p for p in problems), problems
+    # The count still reconciles, so the duplicate arm is the ONLY thing that can red:
+    # an arm that also tripped the `listed != count` check would prove nothing new.
+    assert not any("is not derived from the list" in p for p in problems), problems
+
+
 def test_arithmetic_is_derived_from_the_table_not_trusted():
     """FAILS if the three state columns stop reconciling in the shipped document.
 
@@ -2029,6 +2080,51 @@ def test_unreadable_document_is_unverifiable(monkeypatch):
     monkeypatch.setattr(flc, "DOC", "/nonexistent/ledger.md")
     with pytest.raises(flc.Unverifiable):
         _doc_problems()
+
+
+def test_undecodable_document_is_unverifiable_not_drift(tmp_path, monkeypatch):
+    """FAILS (exits 1, "drift") when the document holds bytes that are not UTF-8.
+
+    Reachable: any commit that lands a stray non-UTF-8 byte in the page. This is
+    NOT the same class as the ENOENT arm above and the arm above does not cover it —
+    `read_text(encoding="utf-8")` raises `UnicodeDecodeError`, a `ValueError` and
+    **not** an `OSError`, so an `except OSError` misses it entirely and the traceback
+    reaches `main()`'s top-level handler, which exits **1** — the code §8 reserves for
+    "a named claim is false". Measured on the pre-fix tool: exit 1, a traceback, and no
+    claim named, over a page nobody faulted. `MEMORY.md`'s
+    `[unicode-decode-is-not-oserror]` row records exactly this shape and the remedy.
+
+    The fixture writes RAW BYTES on purpose: a `"{not json"`-style fixture is valid
+    UTF-8 and stays green over the whole class (the same reason that row records).
+    """
+    target = tmp_path / "ledger.md"
+    target.write_bytes(
+        DOC.read_text(encoding="utf-8").encode("utf-8") + b"\xff\xfe"
+    )
+    monkeypatch.setattr(flc, "DOC", str(target))
+    with pytest.raises(flc.Unverifiable) as excinfo:
+        _doc_problems()
+    # The reason must be the READ failure, not some later arm: a bare `raises` over a
+    # page that also lost its citations would pass for the wrong reason.
+    assert "cannot read" in str(excinfo.value), excinfo.value
+    assert "decode" in str(excinfo.value).lower(), excinfo.value
+    # And end to end: the CLI must refuse with 2, never the drift code 1.
+    assert flc.main(["--check", "--root", str(REPO)]) == 2
+
+
+def test_undecodable_index_is_unverifiable_not_drift(tmp_path, monkeypatch):
+    """FAILS (exits 1) when `docs/00_index.md` holds non-UTF-8 bytes.
+
+    The same `UnicodeDecodeError`-is-not-`OSError` hole as the document arm, one
+    `read_text` site over in `check_registration()`: measured on the pre-fix tool,
+    an undecodable index exited **1** with a traceback instead of 2 UNVERIFIED.
+    """
+    target = tmp_path / "00_index.md"
+    target.write_bytes(INDEX.read_text(encoding="utf-8").encode("utf-8") + b"\xff\xfe")
+    monkeypatch.setattr(flc, "INDEX", str(target))
+    with pytest.raises(flc.Unverifiable) as excinfo:
+        flc.check_registration(REPO)
+    assert "cannot read" in str(excinfo.value), excinfo.value
 
 
 def test_missing_section_is_unverifiable(tmp_path, monkeypatch):
