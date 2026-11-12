@@ -246,7 +246,18 @@ def test_mutation_population_is_pinned():
     complement naming a STILL-TRUE row behind an adverb; a marked cross-reference
     certifying a missing complement member), because the arms that review changed had no
     killing mutant and `--self-test` stayed green over both fail-opens.
-    49 is the population at this head.
+    49 was the population before the second pass; 62 is the population at this head.
+    The second pass of the same review added eight arms for the render-blank, placeholder
+    and copy families (an entity, markup, a comment, an empty-label link, `n/a` as the
+    JOINED form, a placeholder whose twin WAS listed, and a copy in either case), taking
+    the population to 57 — the review of that pass then found the `all(...)` placeholder
+    half unpinned, so multi-word placeholders got their own arm, and the verdict and
+    evidence columns turned out to read the RAW cell (a commented-out verdict and a
+    commented-out citation both passed), which added the last two: 49 + 8 = 57, + 3 = 60,
+    and the CYCLE-3 review added one more for the tally reader (a verdict hidden behind a
+    commented-out one), taking it to 61 — and the CYCLE-10 review added the raw-text arm
+    (`<SCRIPT>lorem ipsum</SCRIPT>`: a body a browser never renders, in a mixed CASE, which
+    pins both the raw-text switch and its case-insensitive matching), taking it to 62.
     """
     # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
     # at this head two merges of two 25-arm populations produced 26 arms while the
@@ -257,8 +268,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 49, (
-        "this line RECORDS the population (49 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 62, (
+        "this line RECORDS the population (62 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -495,6 +506,334 @@ def test_a_blank_prose_cell_is_rejected(tmp_path, monkeypatch, cell, column, abs
     assert any(absence in p and column in p for p in problems), problems
     # Evidence is untouched, so the evidence-floor assert cannot be what reds here:
     assert not any("names no `path:line`" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "&nbsp;",
+        "<br>",
+        "<span>&nbsp;</span>",
+        "<!-- removed -->",
+        "[](https://x)",
+        "![](https://x/y.png)",
+        "<!DOCTYPE html>",  # a DECLARATION renders as nothing
+        "<![CDATA[x]]>",  # …and so does a CDATA section
+        '<span title="`n/a`">',  # a QUOTED attribute may hold a backtick
+        '<div title="a > b"></div>',  # …or a `>`, which a loose pattern never matches
+        "<!-->",  # HTML5's abrupt-closing EMPTY comment is complete, not unterminated
+        "<!--->",
+        "<!----x-->",  # a TERMINATED comment whose text begins with `--`
+        "<script>lorem ipsum</script>",  # a RAW-TEXT element's body is not rendered at all
+        "<style>lorem ipsum</style>",
+        "<template>lorem ipsum</template>",
+        "<noscript>lorem ipsum</noscript>",
+        "<title>lorem ipsum</title>",
+        "<iframe>lorem ipsum</iframe>",
+        '<script>x</script foo=">**STILL-TRUE**">',  # an ATTRIBUTED close tag is not one
+        "<script>x</script/>AFTER",  # …nor is a self-closed one
+        "<script>a `</script>` b</script>",  # a close tag inside a CODE SPAN is escaped
+        "<SCRIPT>lorem ipsum</SCRIPT>",  # the element name is CASE-INSENSITIVE
+        "[<br>](https://x)",  # a LINK LABEL renders; the destination does not
+        "[<span></span>](https://x)",
+        "[![](x)](https://x)",  # an image inside a label
+        "[](<https://x>)",  # an autolink destination
+    ],
+)
+@pytest.mark.parametrize("column", [2, 3])
+def test_a_blank_rendering_cell_is_rejected(tmp_path, monkeypatch, column, cell):
+    """FAILS if a §3 prose cell that RENDERS blank can still pass the floor.
+
+    The whitespace floor behind `check_evidence_cells` asked `value.strip()`, which is a
+    different question from "does this cell show a reader anything". Measured at
+    `c5990249c0`: `&nbsp;`, `<br>`, `<!-- x -->` and `[](https://x)` in a prose cell each
+    left `--check` at rc 0 while the row sat beside them asserting a verdict — the same
+    "a verdict with nothing behind it" hole one dialect out from the blank cell the floor
+    already refused.
+    """
+    original = flc.read_doc(REPO)
+    assert flc.check_evidence_cells(original) == []
+    mutated = flc._rewrite_first_correction_cell(original, column, f" {cell} ")
+    assert mutated != original, "the §3 row shape moved — re-derive this mutation"
+    problems = flc.check_evidence_cells(mutated)
+    assert any("carries nothing a reader can read" in p for p in problems), problems
+    # Evidence is untouched, so the evidence floor cannot be what reds here.
+    assert not any("names no `path:line`" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "cell", ["n/a", "N/A", "tbd", "TBC", "none", "to do", "x nil", "nil nil", "tbd none"]
+)
+def test_a_placeholder_cell_is_rejected(tmp_path, monkeypatch, cell):
+    """FAILS if a §3 prose cell recording a placeholder counts as content.
+
+    A placeholder is what a lane reaches for when the guard reds a blank cell: it is not
+    blank, so `.strip()` passes it, and it records nothing. `n/a` tokenises to `['n', 'a']`
+    because `/` separates in the word class, so the JOINED form has to be tested too —
+    the most likely placeholder spelling of all is otherwise the one the set cannot see.
+    `TBC` is here because `tba` was in the set while its twin was not (measured: `TBC` in
+    every §3 correction cell left `--check` at rc 0).
+    """
+    original = flc.read_doc(REPO)
+    assert flc.check_evidence_cells(original) == []
+    mutated = flc._rewrite_first_correction_cell(original, 3, f" {cell} ")
+    assert mutated != original, "the §3 row shape moved — re-derive this mutation"
+    problems = flc.check_evidence_cells(mutated)
+    assert any("is a placeholder" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("claim", "correction"),
+    [
+        ("`CommitEvent` has 8 fields; `Point` has 15", "`CommitEvent` has 10 fields; `Point` has 18"),
+        ("The register holds 50 open decisions", "The register holds 41 open decisions"),
+        ("`tortoise/projection/entities.py:2679`", "`tortoise/projection/entities.py:3162`"),
+    ],
+)
+def test_the_copy_test_reads_digits(claim, correction):
+    """FAILS if the copy test compares two cells with their NUMBERS DELETED.
+
+    `CONTENT_WORD_RE` is letters-only, so using it for the copy comparison made a correction
+    that only fixes a count, a line or a section number reduce to its claim's own word list
+    and get refused as "a COPY of its claim" (measured by the review of this change) — the
+    dominant correction shape on this page, where rows (b), (k) and (l) all correct a number.
+    The copy test therefore reads digits (`_copy_tokens`); the placeholder test, which is
+    about the ABSENCE of content, keeps the letters-only reader.
+    """
+    original = flc.read_doc(REPO)
+    mutated = flc._rewrite_first_correction_cell(original, 2, f" {claim} ")
+    mutated = flc._rewrite_first_correction_cell(mutated, 3, f" {correction} ")
+    assert flc._copy_tokens(claim) != flc._copy_tokens(correction)
+    assert flc.check_evidence_cells(mutated) == []
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        r"\`<br>\`",
+        r"\`&nbsp;\`",
+        r"\`[](https://x)\`",
+        r"\`<!-- removed -->\`",
+        r"\`<span>&nbsp;</span>\`",
+    ],
+)
+def test_an_escaped_marker_does_not_hide_markup(cell):
+    r"""FAILS if the row splitter DELETES the backslash it uses to suppress a split.
+
+    `_split_row_cells`'s job is not to split on `\|`. Dropping the backslash as well
+    rewrote the cell's markdown before every reader saw it, so `\``<br>`` ` reached the guard
+    as a clean two-backtick span — accepted, CLEAN — while the renderer showed an escaped
+    backtick and a real `<br>` element: ONE character defeated all four render-blank families
+    (measured by the fifth review of this change, end-to-end through `check_document()`). The
+    splitter keeps the backslash now and `_rendered_cell_text` collapses the escape the way
+    the renderer does, which is also why the literal spelling `\<br>` is accepted.
+    """
+    original = flc.read_doc(REPO)
+    mutated = flc._rewrite_first_correction_cell(original, 3, f" {cell} ")
+    assert mutated != original, "the §3 row shape moved — re-derive this mutation"
+    problems = flc.check_evidence_cells(mutated)
+    assert any("carries nothing a reader can read" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("cell", ["`<br>", "`<span>", "`&nbsp;", "``<br>`"])
+def test_an_unmatched_backtick_run_does_not_hide_markup(cell):
+    """FAILS if an UNMATCHED backtick run is treated as a code span.
+
+    CommonMark does not open a span without a closing run, so `` ` <br> `` — a plausible typo
+    of the accepted `` `<br>` `` — renders the tag, and the tag renders nothing. A reader that
+    splits on single backticks classified everything after the run as "inside code", stripped
+    nothing, and let the cell pass as content (measured by the fourth review of this change).
+    A run of N closes only on a run of exactly N, which is why `` ``<br>` `` is refused too.
+    """
+    original = flc.read_doc(REPO)
+    mutated = flc._rewrite_first_correction_cell(original, 3, f" {cell} ")
+    assert mutated != original, "the §3 row shape moved — re-derive this mutation"
+    problems = flc.check_evidence_cells(mutated)
+    assert any("carries nothing a reader can read" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("column", "cell"),
+    [
+        (2, "[<br>](https://x)"),
+        (3, "[<!-- see section 4 -->](https://x)"),
+        (5, "[<br>](`tortoise/sdk.py:1`)"),
+    ],
+)
+def test_a_link_is_reduced_to_its_label_as_a_unit(column, cell):
+    """FAILS if a link is reduced only inside a scanned chunk.
+
+    A `[` starts no construct of its own, so once tags were moved out of the chunks a link
+    whose label carried one was fed to `LINK_RE` as a fragment that ended at the `<`: the link
+    was never reduced to its label and the DESTINATION's letters counted as content — 109 of
+    156 measured fail-opens (seventh review of this change), inside the family
+    `[](https://x)` had already closed. Links are now scanned as units, with bracket- and
+    paren-depth matching, and the LABEL is rendered recursively.
+    """
+    original = flc.read_doc(REPO)
+    mutated = flc._rewrite_first_correction_cell(original, column, f" {cell} ")
+    assert mutated != original, "the §3 row shape moved — re-derive this mutation"
+    assert flc.check_document(mutated, REPO), "a blank-rendering link label passed as content"
+
+
+@pytest.mark.parametrize(
+    ("column", "cell"),
+    [
+        (2, '<span title="`n/a`">'),
+        (3, '<span title="`x`">'),
+        (4, '<span title="**STILL-TRUE** `x`">'),
+        (5, '<span title="`tortoise/sdk.py:17109`">'),
+    ],
+)
+def test_a_tag_is_stripped_whole_even_across_a_backtick(column, cell):
+    """FAILS if a tag is stripped per SEGMENT rather than scanned as a unit.
+
+    A quoted attribute may contain a backtick, a backslash or `>`, so a tag is a single
+    construct the renderer consumes whole. Stripping tags inside each scanned segment instead
+    meant a construct boundary inside the tag ended the segment before its `>`, so the tag was
+    never matched and its own text was counted as CONTENT while the cell rendered blank —
+    measured by the sixth review of this change as 41 of 84 tag shapes, and the verdict column
+    is the sharpest: a blank verdict cell carried a phantom `**STILL-TRUE**` that satisfied
+    `check_verdicts` and agreed with the tally.
+    """
+    original = flc.read_doc(REPO)
+    mutated = flc._rewrite_first_correction_cell(original, column, f" {cell} ")
+    assert mutated != original, "the §3 row shape moved — re-derive this mutation"
+    assert flc.check_document(mutated, REPO), "a blank-rendering tag passed as content"
+
+
+def test_a_comparison_keeps_its_operand_words():
+    """FAILS if `TAG_RE` widens back to "any angle-bracket span".
+
+    A comparison in a §3 cell is prose, not markup: `x < y > z` must read as three words, not
+    two. Nothing else pins the narrowing — the wide pattern refuses no cell the narrow one
+    accepts, because a comparison carries letters or digits either way — so without this the
+    word-list fidelity the placeholder and copy tests depend on is unguarded.
+    """
+    assert flc._content_cell_words("x < y > z") == ["x", "y", "z"]
+    # …and a REAL tag is still stripped, else the pin would buy fidelity by losing the floor.
+    assert flc._content_cell_words("<span>x</span>") == ["x"]
+
+
+def test_an_unlisted_placeholder_is_the_declared_limit():
+    """FAILS silently if someone believes the denylist is a closed class.
+
+    §8 declares the denylist a LIST, so an unlisted placeholder passes. That is the arm's
+    honest limit, and pinning the acceptance is what keeps the declaration and the code
+    from drifting apart in the safe-looking direction (a guard nobody documents as partial
+    is read as total). This is also why the self-test arm named for `TBC` is about the LIST
+    as it stands, not about "unlisted" behaviour — the review of this change measured that
+    `tbc` was in the set, so an arm claiming to prove unlistedness proved listing.
+    """
+    original = flc.read_doc(REPO)
+    mutated = flc._rewrite_first_correction_cell(original, 3, " not applicable ")
+    assert flc.check_evidence_cells(mutated) == []
+
+
+@pytest.mark.parametrize(
+    ("column", "cell", "expect"),
+    [
+        (4, "<!-- **STILL-TRUE** -->", "no bolded verdict"),
+        (5, "<!-- `tortoise/sdk.py:17109` -->", "names no `path:line`, issue, command or §N"),
+    ],
+)
+def test_a_commented_out_column_is_rejected(column, cell, expect):
+    """FAILS if the verdict or evidence column can be hidden inside a comment.
+
+    The prose floor taught the READER to strip tags and comments; the two columns beside it
+    still read the RAW cell, so `<!-- **STILL-TRUE** -->` in the verdict cell and
+    `<!-- `tortoise/sdk.py:17109` -->` in the evidence cell each left `check_document()` at
+    `[]` (measured by the review of this change): a row that loses its verdict AND its
+    openable citation while §1 and §8 promise both. Each column reads
+    `_rendered_cell_text` now, one function shared with the prose floor.
+    """
+    original = flc.read_doc(REPO)
+    mutated = flc._rewrite_first_correction_cell(original, column, f" {cell} ")
+    assert mutated != original, "the §3 row shape moved — re-derive this mutation"
+    problems = flc.check_document(mutated, REPO)
+    assert any(expect in p for p in problems), problems
+
+
+@pytest.mark.parametrize("shout", [False, True])
+def test_a_correction_copying_its_claim_is_rejected(shout):
+    """FAILS if a row can restate its claim where its correction belongs.
+
+    A corrections log whose correction is the claim it exists to correct records no
+    correction at all — and every referential arm still passes, because the words are
+    real. Raw equality would pass the case-changed copy, so the comparison is on the
+    casefolded words (measured: `exists` vs `EXISTS` left `check_document()` at `[]`).
+    """
+    original = flc.read_doc(REPO)
+    assert flc.check_evidence_cells(original) == []
+    claim = flc._first_correction_cell(original, 2)
+    assert claim.strip(), "the first §3 row has no claim — re-derive this mutation"
+    mutated = flc._rewrite_first_correction_cell(
+        original, 3, f" {claim.strip().upper() if shout else claim.strip()} "
+    )
+    problems = flc.check_evidence_cells(mutated)
+    assert any("is a COPY of its claim" in p for p in problems), problems
+
+
+def test_a_correction_that_quotes_its_claim_and_adds_is_accepted():
+    """FAILS if the copy test over-refuses — the direction a lane routes around.
+
+    A correction that quotes the claim and then corrects it (`**False.** <claim>`) is NOT
+    a copy: it carries more words than the claim, so equality passes it. Containment
+    would refuse it, and a guard that reds correct prose is a guard a lane learns to
+    bypass — which is how a real drift later merges green.
+    """
+    original = flc.read_doc(REPO)
+    claim = flc._first_correction_cell(original, 2)
+    mutated = flc._rewrite_first_correction_cell(
+        original, 3, f" **False.** {claim.strip()} — it is superseded by the fold "
+    )
+    assert flc.check_evidence_cells(mutated) == []
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "`closed`",  # one content word names exactly what closed
+        "#2748, #1695, #1418 closed",  # refs plus one word
+        "[the props doc](https://x)",  # a link whose label is the content
+        "`&lt;br&gt;`",  # an ESCAPED tag: the reader sees literal text
+        "**Ложно** — проверено отсутствует",  # a non-Latin correction is content
+        "the R&amp;D lane is checked",  # an entity beside real words
+        "2026-09-10",  # a bare date: no LETTER, but a reader reads it
+        "#2748, #1695, #1418",  # an issue list records which issues closed
+        "`10 < 20 > 5`",  # a comparison is prose, not markup
+        "`has 10 fields` where the claim says 8",  # a derived NUMBER is content
+        "x = 2",  # a placeholder beside a digit records the digit
+        "`<br>`",  # a code span renders LITERALLY: the tag is the text a reader sees
+        "`&nbsp;`",  # …and so is the entity
+        "``<br>``",  # a run of TWO backticks closes only on a run of two
+        r"\<br>",  # an ESCAPED tag renders the literal text `<br>`
+        "<!-- unterminated comment",  # an unclosed comment is literal text, not a comment
+        "<!-- `<br>`",  # …and the construct AFTER it still has its own rules
+        "&nbsp",  # a character reference needs its semicolon; this renders five characters
+        "<!-->the lane is checked-->",  # an ABRUPT close ends the comment; the rest is text
+        "<!--a--->",  # a comment's text cannot end with `-`, so this is literal text
+        "</a b>",  # a CLOSE tag carries no attributes, so this is literal text
+        "<textarea>lorem ipsum</textarea>",  # a browser SHOWS this body: only RAW-TEXT hides
+        "<xmp>lorem ipsum</xmp>",
+        "<plaintext>lorem ipsum",  # the tokenizer switch shows everything after it as TEXT
+        "<script>x</SCRIPT>AFTER",  # the close tag is found CASE-INSENSITIVELY, so `AFTER` reads
+        '<script><span title="</script>">VISIBLE',  # a close tag inside a TAG's attribute is real
+    ],
+)
+def test_brief_rendering_and_non_latin_cells_are_accepted(cell):
+    """FAILS if the content floor over-refuses correct prose.
+
+    The rule is emptiness / declared placeholder / copy — deliberately NOT length. A
+    three-word floor was written first and measured false: the page's own shortest cells
+    ARE three words, so it sat at the page minimum and refused a legitimate compression
+    (`#2748, #1695, #1418 **closed**`). An ASCII-only word class counted a non-Latin
+    correction as zero for the same reason. Each case here is one a reader can read.
+    """
+    original = flc.read_doc(REPO)
+    mutated = flc._rewrite_first_correction_cell(original, 3, f" {cell} ")
+    assert mutated != original, "the §3 row shape moved — re-derive this mutation"
+    assert flc.check_evidence_cells(mutated) == []
 
 
 # ── no citation shape is exempt ────────────────────────────────────────────

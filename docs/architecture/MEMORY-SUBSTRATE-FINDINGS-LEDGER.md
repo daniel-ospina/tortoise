@@ -541,6 +541,83 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   what it pointed at, which is the one move this page exists to make impossible. The number is read
   **whole**: a single-digit read parsed `§10` as `§1`, so every two-digit reference to a section the
   page does not have was accepted as evidence (measured, rc 0);
+- the **two §3 content columns** — the retracted claim and its correction — must each carry a letter
+  or a digit a READER can read, and the correction must not be a copy of its claim. Without a floor on them a row
+  could be reduced to `| **e** |  |  | **ADOPTED** | <citation> |`: a verdict with neither the claim
+  that was retracted nor the correction that replaced it, while the citation beside it still opened
+  and every other arm stayed green (measured, rc 0 — the citation was never the hole, which is why
+  the evidence floor could not see it). ⛔ **The test is not `.strip()`**: a cell that is not blank
+  can still RENDER blank, so the cell is read with tags and comments stripped, markdown links
+  reduced to their label, and HTML entities decoded — and `&nbsp;`, `<br>`, `<!-- removed -->` and
+  `[](https://x)` are all refused for carrying no word (each measured at `c5990249c0` leaving
+  `--check` at rc 0 once the whitespace floor alone was in place). ⛔ **A code span is LITERAL**:
+  `` `<br>` `` renders the text `<br>`, so nothing inside backticks is treated as a tag, a comment
+  or an entity — and the cell is scanned LEFT TO RIGHT, so a comment wrapping a span still renders
+  as nothing, while a span wrapping an entity shows that entity's SOURCE text literally (`` `&nbsp;` ``
+  is the six characters `&nbsp;`, which is exactly why it counts). A run of N backticks closes
+  only on a run of exactly N, and an **unmatched** run is literal text (CommonMark opens no span
+  without a closer), so a stray backtick in front of `<br>` still carries a tag: treating it as
+  code let a plain typo of the accepted spelling hide markup and pass as content (measured). A
+  **backslash escape** renders
+  its character, so `\<br>` is the literal text `<br>` (accepted) while a backslash in the SOURCE
+  must not be swallowed by the row splitter — swallowing it rewrote the cell before every reader
+  saw it, and one escaped backtick in front of a blank-rendering payload defeated all four families
+  below (measured, end to end). The tag family includes **declarations and processing
+  instructions** (`<!DOCTYPE html>`, `<![CDATA[x]]>`, `<?php ?>`), which also render as nothing.
+  ⛔ **A tag is consumed WHOLE**, with the renderer's own grammar: a quoted attribute may contain
+  `>`, a backtick or a backslash, so an element whose quoted title carries a backticked word
+  is still ONE construct that renders as
+  nothing. Stripping tags per scanned SEGMENT instead meant a boundary inside the tag ended the
+  segment before its `>`, the tag never matched, and its own text was read as content while the
+  cell rendered blank — 41 of 84 tag shapes, in all four columns (measured), including a blank
+  VERDICT cell carrying a phantom bold token that satisfied both verdict arms. A **link is a unit
+  too**, and its LABEL is what renders: reducing links only inside a scanned chunk left a link
+  whose label carried a tag unreduced, so the DESTINATION's letters counted as content in 109 of
+  156 measured fail-opens. The comment matcher is the renderer's as well: an empty comment may be
+  closed ABRUPTLY (an opener followed immediately by a single `>` or by `->`), which the renderer
+  treats as COMPLETE rather than unterminated; and a comment's text may not end with `-`, so
+  `<!--a--->` is literal text and readable. So
+  `<div title="a > b"></div>` is now refused rather than declared, because it really does render
+  as nothing. A close tag carries no attributes, so `</a b>` is literal text. The **character
+  reference** is the renderer's too: it needs its **semicolon** — `&nbsp` renders five visible
+  characters and is accepted, while `&nbsp;` renders nothing. A **raw-text element's body** is not
+  rendered at all, so `<script>**STILL-TRUE**</script>` renders blank and is refused — in every
+  CASE (`<SCRIPT>`), and up to the close tag a browser ACTUALLY honours: `</name` then whitespace
+  then `>`, so `</script foo=">**STILL-TRUE**">` closes nothing and its attribute text stays
+  hidden, while a `` `</script>` `` inside a code span is escaped and closes nothing either
+  (measured against a real browser; reading the attribute text as content was a fail-open in all
+  four columns). A browser SHOWS the text of `<textarea>`, `<xmp>` and `<plaintext>`, so those
+  count — refusing `<plaintext>` was this guard's own false accusation until the tenth review
+  measured a real render and found the words on screen.
+  A cell whose every word is a **declared placeholder** (`n/a`, `to do`, `tbc`) is
+  refused too — unless it also carries a digit (`to do 5`, `x = 2`), because a digit is content
+  everywhere else here. A correction whose casefolded token sequence — letters AND digits —
+  equals its claim's is refused as a **copy**: the row would restate the claim it exists to
+  correct. ⛔ So the direction matters and is measured both ways: restating the claim with
+  different MARKUP or CASE is refused (the words are equal), while DERIVING from it by changing a
+  count, a line or a section number is not (the digits differ) — which is the shape rows (b), (k)
+  and (l) take, and refusing it was a false accusation until the copy test read numbers.
+  ⛔ **The rule is emptiness, not length.** A three-word floor was written first and measured false:
+  the page's own shortest claim and shortest correction are BOTH three words, so it sat at the
+  minimum and refused a legitimate compression (`#2748, #1695, #1418 **closed**`, one content word
+  that names exactly what closed), and an ASCII-only word class counted a non-Latin correction as
+  zero. A brief cell passes; a cell that records nothing does not. ⛔ **A DIGIT counts**, and that is
+  measured too: a letters-only class refused a bare date (`2026-09-10`) and a bare issue list
+  (`#2748, #1695, #1418`) while the message claimed the cell was empty — the false-accusation
+  direction the neighbouring arms exist to avoid.
+  ⚠️ **THREE DECLARED limits, not closed classes:** the placeholder denylist is a list (a placeholder
+  outside it is not refused, pinned by `test_an_unlisted_placeholder_is_the_declared_limit`); the
+  render-blank list is the five families above (a shape outside them — an element the browser
+  hides with CSS, `<span hidden>x</span>` say — renders blank and is not refused, while a
+  REFERENCE-style link `[][ref]` is accepted because with no reference definition it renders its
+  literal text); and the copy test is
+  **equality**, so a NEAR-copy — the claim with one word added, dropped or swapped, including the
+  word that inverts it — is not refused. Neither length nor truth is checked: a short true statement
+  and a long false one both pass, because this arm asks whether a row records something, not whether
+  it records the right thing. The VERDICT and EVIDENCE columns are read the same way — through the
+  same rendered text — because until they were, a verdict and a `path:line` citation each wrapped in
+  an HTML comment left `--check` at rc 0 (measured): a row that loses its verdict and its openable
+  citation while §1 and §8 promise both;
 - the **§3 population is pinned** to twelve rows, and the **§6 arithmetic** (open + closed + merged =
   the indexed population) is re-derived from the table rather than trusted — deleting a row and every
   mention of it otherwise passes every referential check. Because a pin selects rows *by shape*, an
@@ -576,10 +653,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   stored* defect, inside the correction that exists to stop it — and the reason two reviewers could
   each "prove" the other side was the stale one.
 
-The self-test that proves the arms its 49 mutations exercise still fire has its own **population
+The self-test that proves the arms its 62 mutations exercise still fire has its own **population
 floor** (`MIN_SELF_TEST_MUTATIONS`). An emptied arm set used to print `PASS (0 failing arm(s))` and
 exit 0 — a gate reporting OK when it cannot run — so a shrunk population now reds instead. ⛔ **The
-population is 49 mutations of the PAGE, not a proof of the guard**, and every one of them edits the
+population is 62 mutations of the PAGE, not a proof of the guard**, and every one of them edits the
 page's text (a falsified tally, a deleted correction row, a second survivor sentence), so anything an
 arm reads that is not the page's CONTENT is outside it. Of the arms `check_document()` calls, exactly
 two are blind this way — `check_section_presence`, the FIRST one called, and `check_registration`,
