@@ -92,6 +92,14 @@ def _run_code(step: dict) -> str:
     block each left all four tests GREEN while the leg went back to resolving
     the runner image's client — i.e. the guard could not distinguish the fix
     from its tombstone. Assertions therefore read this, never the raw body.
+
+    STATED LIMIT: only COMMENT LINES are stripped (a line whose first
+    non-space character is `#`). A TRAILING comment on a live line is left in
+    place, so `echo "/usr/bin" >> "$GITHUB_PATH"  # was: …/postgresql/16/bin`
+    still satisfies `GITHUB_PATH_PREPEND_RE` (measured, round 3). That is the
+    direction a careless hand-written edit takes rarely, and stripping trailing
+    comments would break on `#` inside quoted strings / `$GITHUB_PATH` URLs;
+    the in-job assertion remains the backstop.
     """
 
     return "\n".join(
@@ -245,14 +253,23 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
 
 
 def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
-    """`$GITHUB_PATH` affects SUBSEQUENT steps only — position is part of the fix."""
+    """`$GITHUB_PATH` affects SUBSEQUENT steps only — position is part of the fix.
+
+    The leg is located in the step's CODE, for the same reason every other
+    assertion here reads `_run_code` (#12051 review round 3): with the raw body
+    a commented-out `tests/test_9567_record_capstone.py` entry still counted as
+    the leg (a false PASS — the pin's position would be graded against a
+    line that never runs), and a stray COMMENT inside the pin step naming the
+    capstone made the pin itself look like the leg (`assert 4 < 4`, a false RED
+    on a correct workflow).
+    """
     steps = _steps(job)
     pin_index, _ = _pin_step(steps)
 
     leg_indexes = [
         index
         for index, step in enumerate(steps)
-        if "test_9567_record_capstone.py" in _run_text(step)
+        if "test_9567_record_capstone.py" in _run_code(step)
     ]
     assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
     assert pin_index < min(leg_indexes), (
