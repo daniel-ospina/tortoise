@@ -32,6 +32,11 @@
 #  15. the body file is written under RUNNER_TEMP and is the issue's body
 #  16. a NON-Actions author is refused by the shared substrate on this path too
 #      (the PAT trap: it would file a duplicate on every failing run)
+#  17b. the excerpt squeeze's EXIT STATUS is neither the alert's nor evidence of what it
+#      did: an iconv that reports the mid-character cut in its status must not abort the
+#      ledger leg, one that emits nothing must paste the raw tail and SAY so (never claiming
+#      a squeeze), and the drop must be disclosed from a BYTE MEASURE — so it is disclosed on
+#      a glibc that drops the sequence silently (2.39, rc=0) too
 #  19-21. `--resolve` (#8841) retires EXACTLY the keys whose steps reported
 #      `success` in this run (plus the job-level key only when `job.status` is
 #      `success`) — `skipped` and outcome-less steps are never read as a pass, and
@@ -193,6 +198,15 @@ reset_case() {
   : > "$STUB_TMP/calls.log"
   rm -f "$STUB_TMP/created.txt" "$STUB_TMP/comment.txt" "$STUB_TMP/closed.txt" \
         "$STUB_TMP/searched.txt"
+  # ⛔ #12077: the BODY file is a reused artifact and must not survive a case. A case
+  # that aborts BEFORE `build_body` opens the file (case 8's missing token is one)
+  # leaves the PREVIOUS case's body on disk, and any later assertion that reads it
+  # then asserts about the wrong case. (Corrected measurement, review round 2: the
+  # mid-character case's own green was NOT this — `build_body` truncates the file in
+  # place, so that assertion passed on a TRUNCATED ASCII partial body, which is valid
+  # UTF-8 while carrying no report. Both are fixed by the two changes below and the
+  # assertion that the body carries the report.)
+  rm -f "$RUNNER_TEMP/deploy-api-alert-body.md"
   unset STUB_SEARCH_JSON STUB_SEARCH_JSON_P2 STUB_SEARCH_FAIL STUB_CREATE_FAIL \
         STUB_COMMENT_FAIL STUB_COMMENTS_FAIL STUB_COMMENTS_JSON \
         STUB_CREATE_LOGIN STUB_COMMENT_LOGIN STUB_TG_FAIL STUB_CLOSE_FAIL \
@@ -446,11 +460,108 @@ fi
 reset_case
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
 assert_eq "$RC" "0" "the alert succeeds on a report cut mid-character"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "and the body it wrote carries the report, not just a valid-but-partial file"
 if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then
   ok "the body is valid UTF-8 even though the cut landed inside a multibyte character"
 else
   bad "the body is NOT valid UTF-8 — a split multibyte character reached the issue"
 fi
+# The RESET invariant, pinned directly. A body left behind by an earlier case is
+# indistinguishable from this case's when an abort happens before `build_body` opens
+# the file, so `reset_case` must remove it — otherwise a later assertion can read a
+# stale artifact.
+reset_case
+if [ -e "$RUNNER_TEMP/deploy-api-alert-body.md" ]; then
+  bad "reset_case leaves the previous case's body file in place — an assertion could read it as its own"
+else
+  ok "reset_case clears the reused body file, so no case can assert on a stale body"
+fi
+
+# ── case 17b: the SQUEEZE's exit status is not the alert's (#12077) ──────────
+# `iconv -c` reports the mid-character cut in its EXIT STATUS on glibc 2.43
+# (`ubuntu-26.04`, the runner image: the convertible bytes are emitted and rc is
+# still 1) while glibc 2.39 exits 0 — so on an ordinary box the defect is
+# INVISIBLE and the old code passes. Both arms are simulated here so the harness
+# discriminates on any host: (a) status 1 with the bytes emitted must still file
+# the alert, and (b) an iconv that emits NOTHING must not paste an empty block
+# under a heading that promises the report verbatim — it must say it went raw.
+PATH_BEFORE_ICONV_SHIM="$PATH"
+REAL_ICONV="$(command -v iconv)"
+# The arm below simulates glibc 2.43's `iconv -c` by wrapping the REAL one. With no
+# real iconv on the host the wrapper degrades to `"" "$@"` — which emits nothing
+# and exits 1, i.e. it silently becomes arm (b), and arm (a) would pass while
+# squeezing nothing. Fail loudly instead of asserting coverage we do not have.
+if [ -n "$REAL_ICONV" ]; then
+  ok "case 17b: a real iconv exists, so the status shim can wrap it"
+else
+  bad "case 17b: no iconv on PATH — arm (a) would degenerate into the raw-fallback arm and prove nothing"
+fi
+ICONV_STATUS_DIR="$FIX/bin-iconv-status"
+mkdir -p "$ICONV_STATUS_DIR"
+cat > "$ICONV_STATUS_DIR/iconv" <<ICONV_STATUS_EOF
+#!/usr/bin/env bash
+"$REAL_ICONV" "\$@"
+exit 1
+ICONV_STATUS_EOF
+chmod +x "$ICONV_STATUS_DIR/iconv"
+export PATH="$ICONV_STATUS_DIR:$PATH"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+assert_eq "$RC" "0" "an iconv that reports the cut in its STATUS does not fail the alert"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "and the squeezed excerpt is still carried"
+# ⚠️ The two assertions above are ALSO satisfied by the raw-tail fallback (its tail
+# carries the same `BLOCKING` line), so on their own they cannot tell the squeeze
+# from the fallback — a "fix" that discards iconv's bytes whenever it exits
+# non-zero would pass them while pasting the invalid-UTF-8 raw tail, re-creating
+# the artifact case 17 forbids. These make the arm name the SQUEEZE path.
+assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "could not be byte-squeezed" "and it is the SQUEEZED excerpt, not the raw fallback"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "NOT byte-identical" "and the characters the squeeze dropped are disclosed beside the excerpt"
+if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then
+  ok "and the body stayed valid UTF-8 on the squeeze path (the raw tail's is not)"
+else
+  bad "the squeezed body is NOT valid UTF-8 — the raw fallback's bytes reached the issue"
+fi
+
+ICONV_BROKEN_DIR="$FIX/bin-iconv-broken"
+mkdir -p "$ICONV_BROKEN_DIR"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$ICONV_BROKEN_DIR/iconv"
+chmod +x "$ICONV_BROKEN_DIR/iconv"
+export PATH="$ICONV_BROKEN_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+assert_eq "$RC" "0" "an iconv that emits nothing still files the alert"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "could not be byte-squeezed" "and says the excerpt is RAW, never a verbatim report it does not carry"
+assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "NOT byte-identical" "and it does NOT claim a squeeze it did not perform"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "and the raw tail is still carried"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+
+# ── case 17b (arm c): the disclosure is a BYTE MEASURE, not the status ─────────────────
+# glibc 2.39 drops the split sequence and exits 0, so a status-based disclosure says
+# nothing on every ordinary dev box while the excerpt IS short. This arm runs the REAL
+# iconv — whichever generation this host has — and requires the drop to be disclosed
+# anyway. Without it the disclosure is pinned only on the one host generation that
+# happens to report the drop in its exit status.
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+assert_eq "$RC" "0" "a real iconv files the alert on either glibc generation"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "NOT byte-identical" "and the characters it dropped SILENTLY are still disclosed (the measure, not the status)"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "and the squeezed excerpt is carried"
+
+# ── case 17c: a report with no excerpt-able text says only what is TRUE ─────────
+# A report of 6000 line endings (or NUL bytes) captures as EMPTY, so there is no
+# excerpt to paste. The earlier shape of this branch claimed BOTH "could not be
+# byte-squeezed" AND "the report could not be re-read at all" in that state, and pasted
+# an empty fenced block under a heading that promises the report — three statements
+# that were all false for a file that was read perfectly well (measured, review
+# round 3). It must say only what is true, and paste no fence.
+python3 -c 'import sys,pathlib; pathlib.Path(sys.argv[1]).write_bytes(b"\n" * 6000)' "$FIX/drift-report-blank.txt"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-blank.txt"
+assert_eq "$RC" "0" "a report holding no excerpt-able text still files the alert"
+BLANK_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$BLANK_BODY" "held no excerpt-able text" "and says the report held no excerpt-able text"
+assert_not_contains "$BLANK_BODY" "could not be byte-squeezed" "and does NOT claim a squeeze it never attempted"
+assert_not_contains "$BLANK_BODY" '```' "and pastes NO fenced block when there is nothing to paste"
 
 # A job with no declared note still alerts, with an honest generic sentence
 # rather than a wrong one (the workflow's site set is pinned by pytest).

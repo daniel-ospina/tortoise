@@ -31,6 +31,9 @@
 #   11. alert search fails                    → exit 1, NO create (not a false page)
 #   12. missing GH_TOKEN                      → exit 1 before any gh call
 #   13. missing jq                            → exit 1
+#   13b. the mirror that hides jq must not hide ANYTHING ELSE: a PATH entry holding a
+#        DIRECTORY named like a tool, or a RELATIVE PATH entry, must not shadow a real
+#        tool out of the mirror (both measured to, before the pins existed)
 #   14. bound garbage / overflow              → normalized to the default
 #   15. a valid explicit bound is honoured    → not force-defaulted
 #   16. cannot resolve main (bad ref)         → exit 1 (cannot verify = never a pass)
@@ -291,13 +294,79 @@ run_checker_with() { # <sha> [bound] [ref] [deploy-workflow] [max-age-hours]
   set -e
 }
 
-# Same, but PATH stripped so jq is provably absent (the script's own `command -v
-# jq` must refuse, not find a system jq). bash is resolved here first.
+# Same, but with a PATH that hides `jq` ALONE so the script's own `command -v jq`
+# must refuse — while every other tool the checker may legitimately use stays
+# resolvable.
+#
+# ⛔ #12077: this case used to run with `PATH="$BIN"`, which also removed
+# `dirname` — so the checker's line 107
+# (`SCRIPT_DIR="$(cd "$(dirname …)" && pwd)"`) collapses to `cd ""` BEFORE its
+# `command -v jq` guard can speak, and the case then reports the MESSAGE as
+# missing. Measured in CI and reproduced in `ubuntu:26.04`: `❌ case 13: names
+# jq (missing 'jq is required' in: … line 107: dirname: command not found)`
+# while `case 13: missing jq → exit 1` PASSED.
+#
+# ⚠️ The red needs BOTH halves, and the second one is why it is runner-only: the
+# stripped PATH (no `dirname`) AND bash ≥ 5.3 (the runner image), where `cd ""`
+# is an ERROR and `set -e` kills the checker. bash ≤ 5.2 tolerates `cd ""`
+# (measured: 5.2.21 → `rc=0`, `pwd` = the cwd; 5.3.9 → `cd: null directory`,
+# `rc=1`), so on such a box SCRIPT_DIR becomes the cwd, the jq guard IS reached
+# and this case is GREEN — which is exactly why the defect was invisible off the
+# runner. Do not read a green case 13 on an older box as "the CI red was wrong".
+#
+# Either way a PATH stripped to one stub makes the assertion depend on which
+# helper the script happens to call first — an ordering artefact, not a property
+# of the checker.
+#
+# So the no-jq PATH is a MIRROR of the real one (symlinks to every executable,
+# jq excluded) rather than a whitelist: a whitelist rots the moment the checker
+# gains a helper, and it rots into this same false RED. The pins at case 13 keep
+# the mirror honest — it must hide jq AND keep dirname.
+#
+# ⚠️ The mirror must not INTRODUCE the same class (#12077 review round 1): it
+# symlinks only REGULAR files (`-f`, not `-x` — a DIRECTORY is executable, and a
+# PATH entry holding a directory named `dirname` then occupies that name in the
+# mirror, shadowing the real tool out of reach of every later entry), and it
+# resolves each PATH entry to an ABSOLUTE path first (`cd … && pwd -P`), because
+# `ln -s` of a relative target against the mirror dir produces a DANGLING link
+# that `-e` dedupe then makes permanent. Both were measured to hide a real
+# `dirname` that the real PATH resolves — a false RED of exactly this class.
+NO_JQ_PATH="$FIX/no-jq-path"
+build_no_jq_path() { # [<dest>] — defaults to $NO_JQ_PATH
+  local dest="${1:-$NO_JQ_PATH}"
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  local dir name
+  local -a dirs
+  IFS=: read -r -a dirs <<<"$PATH"
+  # bash < 4.4 errors on `"${dirs[@]}"` for an EMPTY array under `set -u`, which would
+  # kill the suite with no summary line — the failure the `|| true` on `ln` exists to
+  # prevent. No caller supplies an empty PATH today; this keeps the next one safe.
+  [ "${#dirs[@]}" -gt 0 ] || return 0
+  for dir in "${dirs[@]}"; do
+    [ -d "$dir" ] || continue
+    dir="$(cd "$dir" && pwd -P)" || continue
+    [ "$dir" = "$dest" ] && continue
+    for name in "$dir"/*; do
+      [ -f "$name" ] || continue # a DIRECTORY is `-x`; it must not occupy a tool's name
+      [ "${name##*/}" = jq ] && continue
+      if [ -x "$name" ] && [ ! -e "$dest/${name##*/}" ]; then
+        # `|| true`: a single failed link must not abort the whole harness under the
+        # `set -e` that `run_checker` leaves on (measured: a dangling-name collision
+        # made `ln` fail and the suite exited with NO summary line at all). What the
+        # mirror must guarantee is pinned immediately after this call, not here.
+        ln -s "$name" "$dest/${name##*/}" 2>/dev/null || true
+      fi
+    done
+  done
+}
+
 run_checker_no_jq() {
   reset_case
   export DEPLOY_STALENESS_COMMIT_SHA="$C3"
+  build_no_jq_path
   set +e
-  PATH="$BIN" "$BASH_BIN" "$CHECKER" </dev/null 2>"$STUB_TMP/stderr.log"
+  PATH="$NO_JQ_PATH" "$BASH_BIN" "$CHECKER" </dev/null 2>"$STUB_TMP/stderr.log"
   RC=$?
   OUT="$(cat "$STUB_TMP/stderr.log" 2>/dev/null || true)"
   set -e
@@ -423,6 +492,56 @@ grep -q 'GH ' "$STUB_TMP/calls.log" 2>/dev/null && bad "case 12: gh was called w
 run_checker_no_jq
 assert_eq "$RC" 1 "case 13: missing jq → exit 1"
 assert_contains "$OUT" "jq is required" "case 13: names jq"
+# Non-vacuity, both directions: the case means "jq is hidden", not "PATH is
+# empty". Without these pins the case passes on a PATH that hides every
+# binary, which is the #12077 false RED — `dirname` gone, the checker dead at
+# line 107, and its own message never reached.
+# The AMBIENT jq must exist first, or "the mirror hides jq" proves nothing: on a
+# host with no jq anywhere the mirror pin is green for the wrong reason.
+if command -v jq >/dev/null 2>&1; then
+  ok "case 13: jq exists on the ambient PATH, so the mirror pin means something"
+else
+  bad "case 13: no jq on the ambient PATH — the mirror pin cannot distinguish 'hidden' from 'absent'"
+fi
+if PATH="$NO_JQ_PATH" command -v jq >/dev/null 2>&1; then
+  bad "case 13: the no-jq PATH still resolves jq (the case would test nothing)"
+else
+  ok "case 13: the no-jq PATH really does hide jq"
+fi
+if PATH="$NO_JQ_PATH" command -v dirname >/dev/null 2>&1; then
+  ok "case 13: and it KEEPS dirname — a hidden coreutil, not a hidden jq, was the false RED"
+else
+  bad "case 13: the no-jq PATH also hides dirname, so the checker dies before its own guard"
+fi
+
+# ── 13b. the mirror must not HIDE a real tool (#12077 review round 1) ───────
+# Two measured ways the FIRST cut of the mirror did, both re-creating the false
+# RED this fix removes:
+#   (a) a PATH entry holding a DIRECTORY named after a tool — `[ -x ]` is true for
+#       a directory, and the `[ ! -e ]` dedupe then made it permanent, so the real
+#       executable in a LATER entry could never be linked;
+#   (b) a RELATIVE PATH entry — `ln -s` of a relative target resolves against the
+#       MIRROR dir, producing a dangling link that `-e` cannot see, so the real
+#       one is never linked either and `ln` also complains on the job log.
+# Both cases assert the property (a tool the REAL PATH resolves still resolves
+# through the mirror), not the example.
+MIRROR_PROBE="$FIX/mirror-probe"
+mkdir -p "$MIRROR_PROBE/early/dirname" "$MIRROR_PROBE/late" "$MIRROR_PROBE/reldir"
+printf '#!/bin/sh\nexit 0\n' > "$MIRROR_PROBE/late/dirname"
+printf '#!/bin/sh\nexit 0\n' > "$MIRROR_PROBE/reldir/dirname"
+chmod +x "$MIRROR_PROBE/late/dirname" "$MIRROR_PROBE/reldir/dirname"
+( PATH="$MIRROR_PROBE/early:$MIRROR_PROBE/late:/usr/bin:/bin"; build_no_jq_path "$MIRROR_PROBE/mirror-abs" )
+if PATH="$MIRROR_PROBE/mirror-abs" command -v dirname >/dev/null 2>&1; then
+  ok "case 13b: a DIRECTORY named like a tool does not shadow the real one out of the mirror"
+else
+  bad "case 13b: the mirror lost dirname behind a same-named DIRECTORY in an earlier PATH entry"
+fi
+( cd "$MIRROR_PROBE" && PATH="reldir:/usr/bin:/bin" build_no_jq_path "$MIRROR_PROBE/mirror-rel" )
+if PATH="$MIRROR_PROBE/mirror-rel" command -v dirname >/dev/null 2>&1; then
+  ok "case 13b: a RELATIVE PATH entry does not leave a dangling mirror link that hides the real tool"
+else
+  bad "case 13b: a relative PATH entry produced a dangling mirror link and hid dirname"
+fi
 
 # ── 14. bound garbage / overflow → default ───────────────────────────────────
 run_checker "$C1" "2h"

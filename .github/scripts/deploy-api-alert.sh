@@ -230,6 +230,7 @@ USAGE
 
 build_body() { # <out-file> <job> <step-id> <failed-step-raw>
   local out="$1" job="$2" sid="$3" raw="$4" label excerpt
+  local raw_tail squeeze_incomplete
   local failed_names="" pair id outcome pretty
   if [ -n "$raw" ]; then
     for pair in $raw; do
@@ -286,25 +287,83 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # alert exists to carry; the run link above is the escape hatch for
         # anything cut (the measured 2026-09-04 report was 509 bytes, so the cap
         # is not normally reached).
-        excerpt="$(tail -c 6000 "$DRIFT_REPORT_FILE" | iconv -f UTF-8 -t UTF-8 -c)"
-        # `tail -c` cuts at a BYTE, so it can land inside a multibyte character;
-        # `iconv -c` above drops the split sequence rather than putting invalid
-        # UTF-8 in the issue body. The fence is then made longer than any backtick
-        # run in the excerpt: the report carries repo-controlled text (migration
-        # filenames, version names), and a report containing ``` would close the
-        # block early and render the rest as live markdown. (Round-5 review, P3-2.)
-        fence='```'
-        while grep -qF -- "$fence" <<<"$excerpt"; do
-          printf -v fence '%s`' "$fence"
-        done
-        echo "$fence"
-        printf '%s' "$excerpt"
-        # `tail -c` can start mid-line; a fenced block is still closed below.
-        echo
-        echo "$fence"
-        if [ "$(wc -c < "$DRIFT_REPORT_FILE")" -gt 6000 ]; then
+        # `tail -c` cuts at a BYTE, so it can land inside a multibyte character.
+        # TWO paths follow and the body's promise differs between them: the SQUEEZE
+        # below drops the split sequence, so the pasted excerpt is valid UTF-8; the
+        # RAW FALLBACK (further down) pastes the tail unsqueezed and SAYS SO, so a
+        # split character can reach the body only on a path that discloses it. The
+        # fence is then made longer than any backtick run in the excerpt: the report
+        # carries repo-controlled text (migration filenames, version names), and a
+        # report containing ``` would close the block early and render the rest as
+        # live markdown. (Round-5 review, P3-2.)
+        #
+        # ⛔ #12077 — the SQUEEZE'S EXIT STATUS IS NOT THE ALERT'S, and it is not
+        # EVIDENCE either: on glibc 2.43 (`ubuntu-26.04`, the runner image) `iconv -c`
+        # emits the convertible bytes and STILL exits 1 for the sequence it dropped
+        # (measured: 5999 bytes, rc=1), where glibc 2.39 exits 0 for the same input.
+        # Under `set -euo pipefail` that status aborted the whole alert, so
+        # `ops-harnesses` went red — it is not a required branch-protection context
+        # and is not in `.mergify.yml`'s queue/merge conditions, so its red does not
+        # block the rail directly; what it does is redden the PR's check list and
+        # stall a lane that waits for green — over a DECORATIVE excerpt, while the
+        # ledger entry this script exists to file was never written. The excerpt is
+        # best-effort by construction, so its status is caught here and the record
+        # still lands — the same ordering rule as cases 11/12: the record comes
+        # first, the nudge second, and neither may be lost to decoration.
+        #
+        # Whether a character WAS dropped is measured, never inferred from the status:
+        # the raw tail is captured once and the squeezed bytes are compared against it,
+        # so the disclosure below fires on BOTH glibc generations (2.39 drops the split
+        # sequence silently, rc=0).
+        #
+        # ⚠️ NOT checked, stated rather than implied: a NUL byte is valid UTF-8 and is
+        # stripped by the command substitution before the comparison, so a report
+        # carrying NULs is pasted with them removed and this measure cannot see it.
+        # `tail` is guarded: a report that cannot be RE-READ lands in the "no
+        # excerpt-able text" branch below instead of aborting the alert under `set -e`.
+        raw_tail="$(tail -c 6000 "$DRIFT_REPORT_FILE" 2>/dev/null)" || raw_tail=""
+        excerpt=""
+        squeeze_incomplete=0
+        if ! excerpt="$(printf '%s' "$raw_tail" | iconv -f UTF-8 -t UTF-8 -c)"; then
+          : # status only — the bytes `iconv` could convert have already been emitted
+        fi
+        if [ -z "$raw_tail" ]; then
+          # A report that is nothing but line endings or NUL bytes captures as EMPTY.
+          # Claiming "could not be byte-squeezed" there (or pasting an empty block under
+          # a heading that promises the report) would be two false statements; say only
+          # what is true.
+          echo "⚠️ **The report file held no excerpt-able text** (nothing but line endings or NUL bytes, or it could not be re-read); the gate's own output is in the run link above."
           echo
-          echo "_(report truncated to its LAST 6000 bytes — the gate prints the actionable block last; the full text is in the run link above)_"
+        elif [ -z "$excerpt" ]; then
+          # An iconv that is absent, or that refuses without emitting anything,
+          # would otherwise paste an EMPTY block under a heading that promises the
+          # report verbatim. Paste the raw tail instead and SAY so, so the body
+          # never overstates what it carries (a silent empty block reads as "the
+          # gate reported nothing").
+          excerpt="$raw_tail"
+          echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit); it is pasted raw, so the 6000-byte cut may land inside a multibyte character."
+          echo
+        elif [ "$(printf '%s' "$excerpt" | wc -c)" -lt "$(printf '%s' "$raw_tail" | wc -c)" ]; then
+          squeeze_incomplete=1
+        fi
+        if [ -n "$excerpt" ]; then
+          fence='```'
+          while grep -qF -- "$fence" <<<"$excerpt"; do
+            printf -v fence '%s`' "$fence"
+          done
+          echo "$fence"
+          printf '%s' "$excerpt"
+          # `tail -c` can start mid-line; a fenced block is still closed below.
+          echo
+          echo "$fence"
+          if [ "$(wc -c < "$DRIFT_REPORT_FILE")" -gt 6000 ]; then
+            echo
+            echo "_(report truncated to its LAST 6000 bytes — the gate prints the actionable block last; the full text is in the run link above)_"
+          fi
+          if [ "$squeeze_incomplete" = "1" ]; then
+            echo
+            echo "_(the excerpt is NOT byte-identical to the report: characters that are not valid UTF-8 were dropped — the 6000-byte cut can split one, and the report itself may hold others — so it can be shorter than the report)_"
+          fi
         fi
       else
         echo "⚠️ **The gate's report file was not readable** (\`${DRIFT_REPORT_FILE:-<unset>}\`)."
