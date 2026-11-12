@@ -1915,3 +1915,60 @@ def test_the_SVBP_decline_warning_survives_a_NULL_op_type(monkeypatch):
     proj.__dict__["g"] = type("G", (), {"query": staticmethod(_query)})()
     factors, _meta = FalkorProjection.extract_svbp_factors(proj)
     assert factors == [], factors
+
+
+def test_the_RUN_level_refusal_names_a_NULL_mechanism_without_raising(monkeypatch):
+    """⛔ THE SAME FIX ONE LAYER DOWN HAD NO PIN AT ALL (#12215).
+
+    `tortoise/svbp.py`'s own refusal path makes the identical comparison one
+    function over: `sorted(refused.items(), key=lambda kv: str(kv[0]))`. That
+    `key=` is a real fix — a caller that reaches the public `run()` with a NULL
+    `op_type` beside a named mechanism passed `[IMPL, coherence, None]` in review
+    and raised `TypeError: '<' not supported between instances of 'NoneType' and
+    'str'` on the pre-fix tree, while the fix logs `2 factor(s) REFUSED — None×1,
+    coherence×1`.
+
+    Nothing reddened when that `key=` was reverted to `sorted(refused.items())`:
+    the only caller in the suite that hands `run()` a refused mechanism is
+    `test_SVBP_declines_a_mechanism_it_cannot_price`, and it refuses exactly ONE
+    (`{"coherence": 1}`) — a one-key dict never compares. So the pin below is the
+    discriminand: TWO refused keys, one of them `None`, which is the shape the
+    comparison is on and the shape no test produced.
+
+    It is deliberately ALL-refused (no IMPL/NAND factor): passing one would route
+    the call into `_update_factor`, and that path dies `SIGFPE` inside
+    `jax`/`pjit` on this box on BOTH the pre- and post-fix tree (environmental,
+    reproduces on the pre-delta commit). With nothing priced, `run()` exercises
+    the sort/format/logger line and returns without touching the jax path — so
+    the gate reddens on the defect it is about, not on the environment.
+    """
+    from tortoise import svbp as svbp_module
+
+    seen: dict = {}
+
+    def _warn(fmt, *args):
+        seen["fmt"], seen["args"] = fmt, args
+
+    monkeypatch.setattr(svbp_module.logger, "warning", _warn)
+
+    eng = svbp_module.TortoiseSVBP()
+    iters, converged = eng.run([
+        ("op-null", None, ["c1"], 0.5),
+        ("op-coh", "coherence", ["c2"], 0.5),
+    ])
+
+    assert seen, (
+        "the refusal never warned — either the factors were not refused or the "
+        "warning path was lost entirely"
+    )
+    # The count and the ORDER are both pinned: the order is what the `key=`
+    # provides, and it is what a bare `sorted(refused.items())` cannot produce.
+    assert seen["args"] == (2, "None×1, coherence×1"), (
+        "the refused-mechanism list must sort by str(op_type), so a NULL and a "
+        "named mechanism can share one warning: " + repr(seen["args"])
+    )
+    assert converged is True and iters == 1, (
+        "with every factor refused there is nothing to iterate, so the reduced "
+        "problem converges immediately: " + repr((iters, converged))
+    )
+    assert eng.messages == {}, "a refused factor must not reach message passing"
