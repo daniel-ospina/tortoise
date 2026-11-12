@@ -643,9 +643,10 @@ ALIAS_FORMS_STILL_BLIND: dict[str, tuple[str, dict[str, str], str, str]] = {
         '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n',
         {"tortoise.m::w": "gated", "tortoise.m::_dead": "gated"},
         "`w` never CALLS `_dead`, so that body never executes — `w` reaches no gate and "
-        "`unresolved_write` is what the rule wants. The walk decides SCOPE; this is a CALL-GRAPH "
-        "question, so the over-credit is a NAMED residual rather than a guessed call graph",
-        "never-run nested scope",
+        "`unresolved_write` is what the rule wants. The walk decides SCOPE, so REACH is a separate "
+        "question: this row is also decidable without a call graph (nothing in `w` references "
+        "`_dead`), and it is named as a residual rather than pre-empted by one",
+        "never-run call",
     ),
     "never_run_nested_LAMBDA": (
         "from tortoise.embeddings import encode_for_row as _enc\n"
@@ -657,7 +658,7 @@ ALIAS_FORMS_STILL_BLIND: dict[str, tuple[str, dict[str, str], str, str]] = {
         {"tortoise.m::w": "gated"},
         "the same reach-blindness through a LAMBDA the writer binds and never invokes: `_NEW_SCOPE_NODES` "
         "already treats a lambda as a scope, so the credited body is unreachable for the same reason",
-        "never-run nested scope",
+        "never-run call",
     ),
     "never_run_container_CLASS_METHOD": (
         "from tortoise.embeddings import encode_for_row as _enc\n"
@@ -671,7 +672,26 @@ ALIAS_FORMS_STILL_BLIND: dict[str, tuple[str, dict[str, str], str, str]] = {
         {"tortoise.m::w": "gated", "tortoise.m::m": "gated"},
         "the same reach-blindness through a class the writer defines and never instantiates: a class "
         "BODY executes, a method body does not until called, so the credited seam call never runs",
-        "never-run nested scope",
+        "never-run call",
+    ),
+    # ⛔ The SAME axis in the writer's OWN scope — an unreachable statement, not a nested scope.
+    # Pinned because the naming entry states REACH as its axis (not scope), and a claim with no
+    # row is the stale-prose failure this table exists to prevent.
+    "never_run_own_scope_statement": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    if False:\n"
+        "        _enc(text)\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n',
+        {"tortoise.m::w": "gated"},
+        "the seam call is in the writer's OWN scope but behind `if False`, so it never runs — "
+        "`w` reaches no gate and `unresolved_write` is what the rule wants. Measured identically "
+        "for `while False:` and for a statement after `return`; this row is the spelling that keeps "
+        "the entry's axis honest, because a nested-scope-only residual reads as \"own-scope reach "
+        "is trustworthy\" and it is not",
+        "never-run call",
     ),
     # ⛔ The SPELLING axis (`#12020`): the gate credit is NAME-BASED on the literal path, so neither
     # the shadow model nor `_ALIAS_HOMES` is consulted. Each pair below is the SAME code shape twice,
@@ -775,6 +795,33 @@ def test_the_alias_forms_discovery_still_cannot_see_are_named(tmp_path):
         "the register's own docstring must scope its claim to what discovery can decide — a "
         "measured limitation nobody reading the register can see is the claim being wider than "
         "the mechanism"
+    )
+
+
+def test_the_never_run_call_entry_NAMES_every_spelling_it_was_measured_on():
+    """`#12020` review round 8 (P2): the entry's TITLE carries the enumeration, and the marker pin
+    above is a SUBSTRING of it — so trimming a spelling out of the key kept every assertion green.
+
+    Measured, not asserted: with the key rewritten to `never-run call (`def`)` the marker
+    `never-run call` still matches, `len(hits) == 1` still holds, and neither the behaviour rows
+    nor the note below reds — the entry would silently stop naming a shape it was measured on while
+    the suite reported coverage. That is the same inert-pin class this test's sibling replaced a
+    token-split check to avoid, so the tokens are pinned HERE, one assertion per spelling.
+    """
+    hits = [key for key in probe.UNDECIDABLE_WRITE_SHAPES if "never-run call" in key]
+    assert len(hits) == 1, f"expected exactly one never-run call entry, got {hits}"
+    key = hits[0]
+    for token in ("`def`", "`lambda`", "class-body method", "unreachable own-scope statement"):
+        assert token in key, (
+            f"the never-run call entry no longer names {token} — each of these was MEASURED (see "
+            f"ALIAS_FORMS_STILL_BLIND, one shape per process) and the title is the only place the "
+            f"enumeration lives, so trimming one narrows what the register claims while every "
+            f"row stays green: {key!r}")
+    # The residual must also reach the REGISTER's own prose — a blind spot named only in the
+    # instrument is invisible to whoever reads the declaration contract.
+    assert "never-run call" in (register.__doc__ or ""), (
+        "the register docstring must name the never-run-call residual: a caller reading the "
+        "declaration contract has to learn that a credited call may never execute"
     )
 
 

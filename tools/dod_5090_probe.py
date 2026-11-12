@@ -430,20 +430,28 @@ UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
     # spelling and data-flow residuals between them, so naming this one "the" other axis would
     # mis-taxonomise the rest). Found by re-measuring the round-7 fix at `b9a92e901a` rather than by
     # reading it: the scope threading is correct and the shape below is what it does not cover.
-    "never-run nested scope (`def`, `lambda`, or a class-body method)": (
-        "a seam call inside a nested scope the writer never RUNS: the body never executes, so "
-        "`w` reaches no gate and `unresolved_write` is what the rule wants — measured `gated`, "
-        "i.e. outside `NEEDS_A_DECLARATION`, the DANGEROUS direction (the writer owes nothing "
-        "while it reaches nothing). All THREE spellings measured the same way, one shape per "
-        "process: a never-called nested `def` (`w` `gated`), a never-called `lambda` body (`w` "
-        "`gated`), and a method of a class the writer defines and never instantiates (`w` "
-        "`gated`) — which is why the entry names the CLASS of shape rather than one spelling. "
+    "never-run call (`def`, `lambda`, class-body method, or an unreachable own-scope statement)": (
+        "a seam call the writer never RUNS — in a nested scope that is never entered, or behind an "
+        "`if False` / `while False` / a statement after `return` in the writer's OWN scope: the "
+        "call never executes, so `w` reaches no gate and `unresolved_write` is what the rule wants — "
+        "measured `gated`, i.e. outside `NEEDS_A_DECLARATION`, the DANGEROUS direction (the writer "
+        "owes nothing while it reaches nothing). ⛔ THE AXIS IS REACH, NOT SCOPE, and this must not "
+        "be read as \"own-scope reach is trustworthy\": an UNREACHABLE statement in the writer's "
+        "own scope over-credits identically (measured, one shape per process: `if False:` → `w` "
+        "`gated`, `while False:` → `w` `gated`, after `return` → `w` `gated`). All spellings "
+        "measured the same way, one shape per process: a never-called nested `def` (`w` `gated`), "
+        "a never-called `lambda` body (`w` `gated`), and a method of a class the writer defines "
+        "and never instantiates (`w` `gated`) — which is why the entry names the CLASS of shape "
+        "rather than one spelling. "
         "Distinct from `closure-scoped alias` above, which is about where the ALIAS binds; here "
         "the alias resolves correctly and only the REACH is wrong. Recorded rather than repaired "
-        "because deciding reach is a CALL-GRAPH question — \"is this nested name ever invoked "
-        "here\" has `getattr`, a by-reference pass and a transitively-nested caller, none of "
-        "which an AST scope walk resolves, and guessing one is how the sibling #11337 arm broke "
-        "its own closure over name-resolved calls only. The two bounding controls hold and are "
+        "for the AMBIGUOUS subset only: the three nested rows are decidable WITHOUT a call graph "
+        "(their nested binding is never referenced in the writer's own scope, so a conservative "
+        "\"do not descend into an unreferenced nested scope\" filter would close them), while "
+        "the returned / passed-by-reference / called-only-from-another-nested-body subset needs "
+        "one — `getattr` among the ways in — and guessing that is how the sibling #11337 arm "
+        "broke its own closure over name-resolved calls only. The conservative filter is "
+        "therefore the recorded repair path, not a claim. The two bounding controls hold and are "
         "pinned in `ALIASED_IMPORT_SHAPES` (`honest_closure_still_credits_the_gate`, "
         "`plain_control`): a writer with NO seam reach is `unresolved_write`, and the honest "
         "CLOSURE the writer does call keeps its `gated`."
@@ -743,12 +751,12 @@ def _named_callees(node) -> set[str]:
     asymmetry is not visible from reading this function alone. Named in
     `UNDECIDABLE_WRITE_SHAPES` ("literal seam spelling …"), not resolved here.
 
-    ⚠️ This walk answers SCOPE, and one neighbour of this bug is a CALL-GRAPH question it does not
-    answer: a seam call inside a nested scope the writer never RUNS — a never-called nested `def`,
-    a never-called `lambda` body, or a method of a class the writer never instantiates — is still
-    credited to the writer, so it reads `gated` while it reaches nothing. That is NAMED rather than
-    fixed — see `UNDECIDABLE_WRITE_SHAPES` ("never-run nested scope"), which the suite pins in both
-    directions.
+    ⚠️ This walk answers SCOPE, and one neighbour of this bug is a REACH question it does not
+    answer: a seam call the writer never RUNS — a never-called nested `def`, a never-called
+    `lambda` body, a method of a class the writer never instantiates, or a call behind an
+    `if False` / after `return` in the writer's OWN scope — is still credited to the writer, so
+    it reads `gated` while it reaches nothing. That is NAMED rather than fixed — see
+    `UNDECIDABLE_WRITE_SHAPES` ("never-run call"), which the suite pins in both directions.
     """
     import ast
 
