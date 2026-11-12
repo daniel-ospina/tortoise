@@ -182,8 +182,17 @@ def test_email_link_base_follows_an_explicit_override(monkeypatch):
 RETIRED_HOST_ALLOWLIST = {
     "tortoise/hosted_api.py": (
         1,
-        "CORS/Host allowlist KEEP — removal trigger recorded inline (#11767 §2). "
-        "The host still serves website/404.html forever (#11762)."),
+        "CORS/Host allowlist KEEP — removal trigger recorded inline in "
+        "`_ALLOWED_ORIGINS` (#11767 §2). The DURABLE reason is that this host "
+        "serves only THIS repository's own static pages, so the entry grants "
+        "nothing to a third party; it exists so a legacy tab's preflight is not "
+        "refused (#11762 keeps the hostname attached to the Pages project). "
+        "⛔ Do NOT restate 'the host still serves website/404.html forever' here: "
+        "that premise is FALSE — `/contact` is a 200 carrying a `<script>`, and "
+        "`/404.html` is a 308 to `/404` — and hosted_api.py's own comment retracts "
+        "it in terms. A sweep reading the false version could satisfy its own "
+        "removal condition (c) from a premise that was never true, so keeping the "
+        "false reason here would re-plant the trap the code had to dig out."),
     "supabase/functions/waitlist-subscribe/handle.ts": (
         1,
         "public CORS allowlist on a Deno edge function; both hosts intentional"),
@@ -282,10 +291,18 @@ RETIRED_HOST_ALLOWLIST = {
         "the docs target is the one #11764 settles."),
     "website/apps/dashboard/src/harnesses.js": (
         1,
-        "DOCS_ORIGIN constant (301 -> premiselabs.co/tortoise/docs). Same "
-        "deferral (#11764). ⚠️ This file ALSO carries a BARE-host mention at :277 "
-        "that this counter does not see, because the guard counts the full "
-        "origin — a bare-host sweep is a different guard."),
+        "DOCS_ORIGIN constant (301 -> premiselabs.co/tortoise/docs). Deferred to "
+        "#11764 with the rest of the dashboard copy. ⚠️ This file ALSO carries a "
+        "BARE-host mention of the same docs page in the ChatGPT step's copy "
+        "(`:277`) that this counter does not see, because the guard counts the "
+        "full origin — a bare-host sweep is a different guard. ⛔ That copy is "
+        "DEFERRED, not overlooked, and the reason is the same one that separates "
+        "the two: this line is rendered IN the dashboard a user acts on, so the "
+        "301 carries them; the copy re-aimed in this PR (`onboarding/SKILL.md` \u00a72) "
+        "is pasted into an agent's own config, which no redirect can reach. "
+        "Re-aiming `:277` here would be #11764's change, and it would leave this "
+        "file's DOCS_ORIGIN constant and its prose disagreeing — a partial move "
+        "is worse than one recorded deferral."),
     "website/apps/dashboard/src/overviewEmptyAction.js": (
         2,
         "SDK_DOCS_HREF and ONBOARDING_FUNNEL_HREF (both 301). Same deferral "
@@ -429,6 +446,19 @@ def test_every_allowlisted_occurrence_has_a_reason():
     for rel, (count, why) in RETIRED_HOST_ALLOWLIST.items():
         assert count, f"{rel}: a zero-count entry belongs out of the allowlist"
         assert why.strip(), f"{rel}: allowlisted with no stated reason"
+    # ⛔ AND every allowlisted key must be a file the guard actually OPENS, or the
+    # entry blesses a file nothing counts: `test_retired_origin_literals_match_the
+    # _recorded_allowlist` walks `RUNTIME_FILES` and looks the allowlist UP, so the
+    # reverse direction was unasserted — appending a row here (the natural way to
+    # record a deferral) would silently create an unenforced, invisible entry, and
+    # the module docstring promises the opposite ("this guard cannot report GREEN
+    # over a file it never opened"). Both sets are equal today, so this pins the
+    # invariant rather than repairing a live gap.
+    orphans = sorted(set(RETIRED_HOST_ALLOWLIST) - set(RUNTIME_FILES))
+    assert not orphans, (
+        "these files carry an allowlist entry but are NOT in RUNTIME_FILES, so no "
+        f"test counts them: {orphans} — add the path to RUNTIME_FILES or drop the "
+        "entry; an allowlist row for a file the guard never opens is invisible")
 
 
 def test_canonical_origin_set_is_what_the_runtime_may_emit():

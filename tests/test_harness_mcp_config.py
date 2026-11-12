@@ -1624,9 +1624,30 @@ class TestDocsPageAndSkillConfig:
         docs = self.DOCS.read_text(encoding="utf-8")
         assert f'id="{carrier.rpartition("#")[2]}"' in docs, (
             "the note's carrier fragment must exist on the docs page")
+        # ⛔ The carrier's PATH is `/docs`, and `website/_redirects` has NO `/docs`
+        # rule (only `/docs/` and `/docs.html`), so pinning that file alone proved
+        # a SIBLING alias: dropping `/docs` from the middleware's `PRODUCT_PAGES`
+        # would have kept this green while the note pointed at nothing. `/docs` is
+        # served by `_middleware.ts`'s PRODUCT_PAGES block, which rewrites a
+        # product path onto the `/tortoise` prefix (measured 2026-11-12:
+        # `premiselabs.co/docs` -> 301 -> `/tortoise/docs`). Pin THAT set, and keep
+        # the `_redirects` assertion as what it actually is — the `.html` alias.
+        middleware = (REPO_ROOT / "website" / "functions" / "_middleware.ts").read_text(
+            encoding="utf-8")
+        product_pages = re.search(
+            r"const PRODUCT_PAGES = new Set\(\[(.*?)\]\)", middleware, re.S)
+        assert product_pages, (
+            "_middleware.ts must keep its PRODUCT_PAGES set — that is what serves "
+            "the carrier's path on the company origin")
+        path = "/" + carrier.split("://", 1)[1].split("/", 1)[1].partition("#")[0]
+        assert f'"{path}"' in product_pages.group(1), (
+            f"the carrier URL's path {path!r} must stay in PRODUCT_PAGES — that "
+            "is what serves premiselabs.co/docs; there is no `/docs` rule in "
+            "_redirects, so this is the set that decides whether the note's URL "
+            "resolves at all")
         redirects = (REPO_ROOT / "website" / "_redirects").read_text(encoding="utf-8")
         assert re.search(r"^/docs\.html\s+/docs(\s+\d+)?\s*$", redirects, re.M), (
-            "the carrier URL's path must keep resolving to docs.html")
+            "the `.html` ALIAS of the carrier path must keep resolving to it")
         assert "chatgpt.com/plugins" in note, (
             "§2's note must keep naming the ChatGPT connector surface")
         assert "ChatGPT tab" not in note, (

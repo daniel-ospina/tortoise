@@ -439,13 +439,28 @@ class TestDashboardPlanPricesAreThePriceOfRecord:
         offenders: list[str] = []
         for spec in sorted((REPO_ROOT / "tests" / "e2e").rglob("*.py")):
             text = spec.read_text(encoding="utf-8")
+            # ⛔ COMMENTS ARE DOCUMENTATION, NOT RESTATEMENTS. Scan only non-comment
+            # lines: this PR's own e2e comment quotes `Solo · $19/mo` to record the
+            # #11981 regression it fixed, and a bare scan reds it the moment `solo`
+            # moves — forcing the next author to FALSIFY a historical measurement
+            # (or reword it to dodge this regex) on a line that asserts nothing.
+            # Same split the runtime-URL guard states one file over: "bare-host
+            # prose in a comment that explains the history is documentation, and
+            # counting it would make this test red on its own rationale (measured:
+            # it did, before this split)". Blanking keeps one entry per line, so
+            # offsets (and therefore the reported line) do not shift.
+            scannable = "\n".join(
+                "" if line.lstrip().startswith("#") else line
+                for line in text.splitlines())
             for label, tier in labels.items():
                 for m in re.finditer(
-                        rf"{re.escape(label)}\s*·\s*\$(\d+)/mo", text):
+                        rf"{re.escape(label)}\s*·\s*\$(\d+)/mo", scannable):
                     got = int(m.group(1))
                     if got != prices[tier]:
+                        line_no = scannable[:m.start()].count("\n") + 1
                         offenders.append(
-                            f"{spec.relative_to(REPO_ROOT)}: {label} · ${got}/mo "
+                            f"{spec.relative_to(REPO_ROOT)}:{line_no}: "
+                            f"{label} · ${got}/mo "
                             f"!= pricing.json tier {tier!r} ${prices[tier]}/mo")
         assert not offenders, (
             "a spec restates a plan price that disagrees with the price of "
