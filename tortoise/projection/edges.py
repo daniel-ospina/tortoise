@@ -219,7 +219,7 @@ def id_addressed_target(labels, target: dict):
     return None
 
 
-def _mint_subject_stub(g, name: str) -> None:
+def _mint_subject_stub(g, name: str) -> tuple[int, str] | None:
     """MERGE the Subject stub the about-edge Name-CASCADE falls back to.
 
     ⚠️ **#3590 retired this construction and the retirement was WITHDRAWN —
@@ -265,12 +265,37 @@ def _mint_subject_stub(g, name: str) -> None:
 
     #7369: `name` IS the MERGE key, so an unwritable one aborts the replay
     after the wipe. Skip rather than raise.
+
+    ⛔ **#12120 finding 1 (P1): RESOLVE-**OR**-MINT, over the WRITER'S key space.**
+    The mint used to be unconditional on the RAW spelling, so a mention of an
+    already-registered Subject under a VARIANT spelling ("the owner" beside
+    "The Owner") opened a SECOND live carrier carrying the same folded key — and
+    from then on ``entity_identity.resolve_or_mint`` refused EVERY spelling of
+    that name with a non-exempt ``ambiguous-name``: one mention create-poisoned
+    the entity, while ``main`` still succeeded. Every writer resolves on the
+    folded union (``name`` · ``canonical_name`` · ``aliases``, raw and folded), so
+    this read asks the same question —
+    :func:`entity_identity._live_holders_same_entity`, the one definition of
+    "which entity does this name land on" — and mints only when NOTHING live
+    holds the folded name.
+
+    Returns ``(internal_id, logical_id)`` of the node this call ADDRESSES — the
+    existing live holder when there is one, the freshly minted stub when there is
+    none — because a fold-only holder does not carry the MENTION'S spelling: a
+    caller that re-matched ``{name: $name}`` after the mint would find nothing and
+    drop a link live had already wired. ``None`` means nothing was written and
+    nothing is addressable: an unwritable name, a folded name held by two or more
+    live carriers (minting there would open a THIRD — the refusal is the point),
+    or a single id-less legacy holder (stamping an id here would not replay).
     """
-    from tortoise.entity_identity import entity_create_lock
+    from tortoise.entity_identity import (
+        _live_holders_same_entity,
+        entity_create_lock,
+    )
     from tortoise.projection import _log_identity_skip, _writable_id
     if not _writable_id(name):
         _log_identity_skip("Subject stub", name, "name (MERGE key)")
-        return
+        return None
     # ⛔ THE SAME ``(label, name)`` LOCK THE CREATE DOOR TAKES (#9876 review).
     # This is the last name-keyed WRITE left in the tree, and the create door is
     # id-keyed (`entity_identity.resolve_or_mint` mints an opaque id and MERGEs
@@ -288,11 +313,72 @@ def _mint_subject_stub(g, name: str) -> None:
     # Reentrant, and the replay callers (`replay_about_links`, create_event's
     # fold) take it harmlessly.
     with entity_create_lock("Subject", name):
+        # #12120 finding 1 (P1): the HOLDER probe sits ABOVE the mint, over the
+        # folded union (`name` · `canonical_name` · `aliases`, raw and folded) and
+        # COLLAPSED onto merged-away survivors — the same question the create door
+        # asks. One live holder means this name IS that entity: address it and
+        # write nothing.
+        holders, _name_props = _live_holders_same_entity(g, "Subject", name)
+        if len(holders) > 1:
+            # route-then-refuse: neither this stub nor a create may pick a
+            # carrier, and minting would open a third under the same folded key.
+            logger.warning(
+                "projection: the about-edge Subject stub for %r was NOT minted — "
+                "the folded name already has %d live carriers %s. Minting here is "
+                "what create-poisons a name (#12120 finding 1); resolve that "
+                "duplicate through the review queue instead.",
+                name, len(holders), display_holder_ids(holders))
+            return None
+        if holders:
+            ident = holders[0]
+            if not ident:
+                # A live legacy row carrying no id: this helper cannot address it
+                # without stamping an id, and an id minted here is not
+                # replay-deterministic (D9). Minting BESIDE it is the twin this
+                # branch forbids, so neither.
+                logger.warning(
+                    "projection: the about-edge Subject stub for %r resolved to a "
+                    "live id-less holder — NOT minting a twin and not stamping an "
+                    "id here (D9: a fold-time mint is not replay-deterministic).",
+                    name)
+                return None
+            rows = g.query(
+                "MATCH (s:Subject {id:$id}) RETURN ID(s), s.id LIMIT 2",
+                params={"id": str(ident)}).result_set
+            if len(rows) != 1:
+                logger.warning(
+                    "projection: the about-edge Subject stub for %r resolved to "
+                    "carrier %r, which %s — not addressing it.", name, ident,
+                    "is ambiguous" if rows else "is no longer in the graph")
+                return None
+            return (rows[0][0], str(rows[0][1]))
+        # Nothing live holds the folded name: mint the name-keyed stub. #12047: the
+        # stub carries the SAME folded key every other writer stores. This is the
+        # last name-keyed write in the tree, and without `canonical_name` the
+        # create-side resolver could not see the stub by its fold:
+        # `create_subject("the owner")` beside a stub named "The Owner" missed the
+        # raw-name arm (names differ) AND the folded arm (no key), minting the twin
+        # this stub's own docstring says the shared lock must prevent. Computed
+        # from the JOURNALED `name` and written in the same ON CREATE, so live and
+        # replay stay byte-identical.
+        from tortoise.entity_resolver import normalize_entity_name
         g.query(
             "MERGE (s:Subject {name:$name}) "
-            "ON CREATE SET s.id=$name, s.subjectKind='other'",
-            params={"name": name},
+            "ON CREATE SET s.id=$name, s.subjectKind='other', "
+            "              s.canonical_name=$folded",
+            params={"name": name, "folded": normalize_entity_name(name)},
         )
+        rows = g.query(
+            "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 2",
+            params={"name": name}).result_set
+        if len(rows) != 1:
+            # Two rows on an EXACT raw-name MERGE means that spelling was already
+            # held twice; picking a row is the guess route-then-refuse forbids.
+            logger.warning(
+                "projection: the Subject stub for %r matched %d carriers by its own "
+                "MERGE key — not addressing one.", name, len(rows))
+            return None
+        return (rows[0][0], str(rows[0][1]) if rows[0][1] else name)
 
 
 def _mint_source_stub(
@@ -395,8 +481,9 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
     really has, and a Source's identity IS its ``url`` (ONTOLOGY §3.2 — nothing
     is derived from a name). Every other arm resolves only:
 
-    * **``aboutSubject`` (Subject) mints its NAME-KEYED stub** when the bare
-      name has no holder — ``_mint_subject_stub``'s ``ON CREATE SET s.id=$name``
+    * **``aboutSubject`` (Subject) mints its NAME-KEYED stub** when no LIVE holder
+      of the FOLDED key exists (``_mint_subject_stub`` asks the create door's own
+      question, ``entity_identity._live_holders_same_entity``) — ``_mint_subject_stub``'s ``ON CREATE SET s.id=$name``
       construction, which is name-DETERMINISTIC (so replay reproduces the same
       node) and is what ``#8398``'s replay contract and the shipped pins are
       written against. ⚠️ #3590 briefly made this arm resolve-only; that was
@@ -499,8 +586,17 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
             return None
         return {"internal": rows[0][0], "logical": rows[0][1]}
     if label == "Subject":
+        # #12120 finding 1 (P1): the mint is RESOLVE-OR-MINT over the WRITER's key
+        # space and it returns the node it ADDRESSED (see `_mint_subject_stub`), so
+        # this arm no longer re-derives the target from the MENTION'S spelling — a
+        # fold-only holder does not carry it, and the raw re-read below would have
+        # answered "no such node" for a link live had already wired. The raw read
+        # stays as the resolve-only arm (`mint=False`) and as the refusal arm for a
+        # name that spelling already holds twice.
         if mint:
-            _mint_subject_stub(g, key)
+            target = _mint_subject_stub(g, key)
+            if target is not None:
+                return {"internal": target[0], "logical": target[1]}
         rows = g.query(
             "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 2",
             params={"name": key}).result_set
@@ -1893,6 +1989,27 @@ class _EdgeHandlers:
                 entity_name, label, rel)
             if link is not None:
                 return link, internals
+        # ⛔ #12120 finding 1 (P1): RAW cascade MISSED — retry the SUBJECT arm over
+        # the writer's folded key space BEFORE falling to the stub mint. The arms
+        # above probe `{name: $name}`, i.e. the raw spelling only, while every
+        # writer merges on `name` · `canonical_name` · `aliases` (raw and folded).
+        # A mention of a registered Subject under a variant spelling therefore
+        # missed the Subject arm and fell to the Subject-STUB fallback below. (The
+        # stub no longer MINTS a twin — `_mint_subject_stub` resolves-or-mints —
+        # but a stub-fallback link journals the mention's SPELLING as its target,
+        # which replay cannot resolve: measured `targets: ["the owner"]`,
+        # `mint_if_absent: true` for a mention of the registered "The Owner", i.e.
+        # a live/replay divergence waiting for the node to be absent.)
+        #
+        # It sits AFTER the raw cascade on purpose: the raw arms keep their
+        # precedence for every shape that resolves today (no cross-label
+        # re-routing), and this runs only when NOTHING matched by raw spelling.
+        # Live and replay move together (#9836): the record carries the RESOLVED
+        # endpoint's id (`how:"id"`, `mint_if_absent: false`), so replay wires the
+        # same node instead of re-deriving a stub from a spelling it does not hold.
+        link, internals = self._resolve_subject_fold_target(entity_name)
+        if link is not None:
+            return link, internals
         # Nothing matched — live defaults to a Subject stub (label-agnostic
         # source). #2489 routed that mint through the SHARED helper
         # (_mint_subject_stub) so live wiring and rebuild replay produced
@@ -1923,6 +2040,81 @@ class _EdgeHandlers:
             "resolve_key": entity_name,
             "mint_if_absent": True,
         }, None)
+
+    def _resolve_subject_fold_target(self, target_name: str
+                                     ) -> tuple[dict | None, list[int] | None]:
+        """The FOLDED-union retry for the Subject arm: raw first, then the writer's key.
+
+        #12120 finding 1 (P1). See the call site in :meth:`resolve_about_link` for
+        why this exists and why it runs only after the raw cascade.
+
+        ⛔ It asks the WRITER'S question through the WRITER'S function —
+        :func:`entity_identity._live_holders_same_entity`, the same call the create
+        door makes — not a hand-written MATCH over the same spellings. Review at
+        this head measured why the spelling set alone is a NARROWER question in two
+        directions, both reachable through normal journaled verbs:
+
+        * **terminal** — ``apply_subject_supersession`` stamps
+          ``status='superseded'``. Without the writer's live filter this arm
+          attributed a variant mention to the BURIED incarnation, while the same
+          record's ``subject`` fold records that name as having no live holder
+          (``resolve_fold_name``) and ``resolve_or_mint`` would mint a new one. One
+          record, two different answers about whether the entity exists.
+        * **merged-away** — ``apply_entity_merge`` writes the candidate's folded
+          name into the SURVIVOR's ``aliases`` and leaves the candidate live with
+          its own ``canonical_name``, so BOTH match the spelling union. Live then
+          wired and journaled a second about edge onto the carrier that
+          ``_collapse_resolved_holders`` exists to say is "not the entity any
+          more".
+
+        Both are fixed by delegation: the collapsed, live-only holders ARE the
+        answer to "which entity does this name land on".
+
+        An ID-LESS legacy row is left out (no ``id`` to journal, and stamping one
+        is the fold-time mint D9 forbids) — journaling its NAME as a target would
+        write a record replay cannot follow, because replay resolves ``how:"id"``
+        targets by ``id``/``eventId``, never by name (review P2 at this head).
+
+        Every collapsed live holder is journaled in ``targets`` and written — the
+        same rule the raw arm above applies to its own carriers, so live writes
+        exactly what the record says and replay repeats it by id.
+
+        Returns ``(journal_link, internal_ids)`` like every cascade arm, or
+        ``(None, None)`` when no LIVE :Subject holds the folded name (the stub
+        fallback below is then the honest arm, exactly as before this change).
+        """
+        from tortoise.entity_identity import _live_holders_same_entity
+        holders, _name_props = _live_holders_same_entity(
+            self.g, "Subject", target_name)
+        ids = [str(h) for h in holders if h]
+        if not ids:
+            return None, None
+        rows = self.g.query(
+            "MATCH (e:Subject) WHERE e.id IN $ids "
+            "RETURN ID(e), e.id, e.name ORDER BY ID(e)",
+            params={"ids": ids},
+        ).result_set
+        if not rows:
+            return None, None
+        targets = [str(row[1]) for row in rows]
+        internals = [row[0] for row in rows]
+        # ``resolve_key`` is the resolved node's OWN stored name — the only value
+        # the legacy repair (``resolve_structural_target``, a raw-NAME read) can
+        # use to land on the same node again. The mention's spelling cannot: by
+        # construction it is not on the node this folded match found, so a repair
+        # keyed on it could only miss or land on an unrelated same-spelling node.
+        resolve_key = str(rows[0][2]) if rows[0][2] else target_name
+        # ``mint_if_absent`` is FALSE: live resolved an EXISTING node, so a replay
+        # that cannot find it must report a failed link, never fabricate a stub
+        # (the fabrication direction `_resolve_about_edge_target` already pins).
+        return ({
+            "rel": "aboutSubject",
+            "how": "id",
+            "targets": targets,
+            "target_label": "Subject",
+            "resolve_key": resolve_key,
+            "mint_if_absent": False,
+        }, internals)
 
     def _resolve_about_edge_target(self, target_name: str, label: str,
                                    rel: str
@@ -2099,13 +2291,10 @@ class _EdgeHandlers:
                 f"wire_about_link: {rel!r} is not an about* rel "
                 f"({sorted(_ABOUT_REPLAY_RELS)})")
         if target_internal is None:
-            _mint_subject_stub(self.g, link["resolve_key"])
-            rows = self.g.query(
-                "MATCH (s:Subject {name:$name}) RETURN ID(s) LIMIT 1",
-                params={"name": link["resolve_key"]}).result_set
-            if not rows:
+            target = _mint_subject_stub(self.g, link["resolve_key"])
+            if target is None:
                 return False
-            internals: list[int] = [rows[0][0]]
+            internals: list[int] = [target[0]]
         elif isinstance(target_internal, int):
             internals = [target_internal]
         else:

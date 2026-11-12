@@ -20975,7 +20975,7 @@ def _refuse_ambiguous_commit_entities(sdk, reconcile) -> None:
       different node set;
     * the PREDICATE is not re-implemented: ``refuse_ambiguous_create`` is the
       READ-ONLY twin of the door's own ``refuse_if_ambiguous``, over the same
-      ``live_name_holder_ids`` primitive — LIVE rows, id-less included, because
+      ``_live_holders_same_entity`` primitive — LIVE rows, id-less included, because
       a filter on truthy ids is exactly what let a 2+ LIVE carrier miss pass a
       guard (#8018);
     * it RECORDS the non-folded entry before raising (R8), which the door would
@@ -48340,7 +48340,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 185 tracked files (456 distinct
+# ABSOLUTE line number from 180 tracked files (442 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

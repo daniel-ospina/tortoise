@@ -41,8 +41,28 @@ class _FakeSDK:
         self.edges: list[tuple] = []
 
     def query(self, cypher, **params):
-        name = params.get("name")
-        rows = [[dict(self.subjects[name])]] if name in self.subjects else []
+        # #12120: `find_subject_by_name` asks the FOLDED UNION, so the spelling
+        # arrives as `n0`/`n1`… (and alias arms as `an0`…) beside any `name`.
+        # Answer over the same key space the real writer merges on — raw name,
+        # `canonical_name`, `aliases`, and the folded spelling — or the fake
+        # would report "free" where the graph is held.
+        import re
+
+        from tortoise.entity_resolver import normalize_entity_name
+
+        merged = dict(params.get("params") or {})
+        merged.update({k: v for k, v in params.items() if k != "params"})
+        wanted = [v for k, v in merged.items()
+                  if k == "name" or re.fullmatch(r"a?n\d+", k)]
+        rows = []
+        for stored in self.subjects.values():
+            names = {stored.get("name"), stored.get("canonical_name")}
+            names.update(stored.get("aliases") or [])
+            names.discard(None)
+            folded = {normalize_entity_name(n) for n in names}
+            if any(w in names or normalize_entity_name(w) in folded
+                   for w in wanted):
+                rows.append([dict(stored)])
         return _FakeResult(rows)
 
     def _id_for(self, label, name):

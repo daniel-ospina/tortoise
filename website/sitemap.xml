@@ -1,40 +1,37 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- THE CONVENTIONAL ENTRY POINT: /sitemap.xml (#11615).
-     Nothing served this path until now, so every crawler, SEO tool and Search
+<!-- THE CONVENTIONAL ENTRY POINT: /sitemap.xml (#11615), and ONE SAME-HOST INDEX (#11766).
+     Nothing served this path until #11615, so every crawler, SEO tool and Search
      Console "add sitemap" box that reaches for the conventional URL got a 404 —
      while robots.txt advertised four real sitemaps under names nobody probes.
 
-     ONE DOCUMENT ON BOTH HOSTS, DELIBERATELY, AND IT IS A RECORDED DEVIATION.
-     The Sitemaps protocol (sitemaps.org, "Using Sitemap index files") says an
-     index "can only specify Sitemaps that are found on the same site as the
-     Sitemap index file … not on http://www.example.com or
-     http://yourhost.yoursite.com" — a SUBDOMAIN is the spec's own counterexample,
-     and this index is served from two of them while naming all four sitemaps.
+     ⛔ EVERY <loc> BELOW IS ON THE INDEX'S OWN HOST, `premiselabs.co`. That is the
+     Sitemaps protocol's own rule for index files (sitemaps.org, "Using Sitemap index
+     files": an index "can only specify Sitemaps that are found on the same site as the
+     Sitemap index file … not on … http://yourhost.yoursite.com" — a SUBDOMAIN is the
+     spec's own counterexample). It was violated on purpose while the product and blog
+     lived on `tortoise.premiselabs.co`; epic #11762 moved every one of those pages onto
+     this host, so the deviation is GONE and its `OVERRIDES:` line is deleted rather
+     than reworded (#11623 was the cross-host child that made the violation real).
 
-     OVERRIDES: the Sitemaps protocol's same-site rule for index files — this
-     project publishes ONE host-agnostic index from both premise-labs hosts
-     instead of a per-host one, because the sitemaps are already cross-submitted
-     from robots.txt on both hosts (the discovery path used since 2026-08-17) and
-     a per-host index cannot be expressed by one static file. Google waives the
-     same-site rule for cross-submitted sitemaps; a crawler that enforces it
-     strictly still finds all four through robots.txt. Deviation recorded in
-     `website/website_architecture.md` §6.5; a per-host index is #11624.
+     `app.premiselabs.co/sitemap.xml` is deliberately NOT a child. It was never a
+     marketing sitemap: it belongs to the SEPARATE `tortoise-dashboard` Pages project,
+     sits behind auth and has its own Search Console property. It is advertised by that
+     project's own `apps/dashboard/public/robots.txt`, so dropping it here removes the
+     cross-host entry without claiming anything about the app's own property.
 
-     The <loc> set below must equal the `Sitemap:` lines in robots.txt in BOTH
-     directions — `test_the_sitemap_index_and_robots_advertise_the_same_set`
-     holds the two files to each other, so neither can drift. blog/sitemap.xml
-     is dynamic (published posts only); the other three are files in some tree. -->
+     The three children must stay REACHABLE from robots.txt — that file advertises this
+     index, and `test_the_sitemap_index_and_robots_advertise_the_same_set` walks the
+     relation (robots → index → children) so a child cannot become undiscoverable by
+     being dropped here. blog/sitemap.xml is dynamic (published posts only); the other
+     two are files in this tree. -->
 <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <sitemap>
     <loc>https://premiselabs.co/sitemap-company.xml</loc>
   </sitemap>
   <sitemap>
-    <loc>https://tortoise.premiselabs.co/sitemap-product.xml</loc>
+    <loc>https://premiselabs.co/sitemap-product.xml</loc>
   </sitemap>
   <sitemap>
-    <loc>https://app.premiselabs.co/sitemap.xml</loc>
-  </sitemap>
-  <sitemap>
-    <loc>https://tortoise.premiselabs.co/blog/sitemap.xml</loc>
+    <loc>https://premiselabs.co/blog/sitemap.xml</loc>
   </sitemap>
 </sitemapindex>
