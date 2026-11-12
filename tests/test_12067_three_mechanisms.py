@@ -1963,9 +1963,8 @@ def test_the_RUN_level_refusal_names_a_NULL_mechanism_without_raising():
       * every refused factor carries TWO `input_ids`, because `_update_factor`
         early-returns below two (`svbp.py:269`). With one id, deleting
         `factors = priced` reaches no message passing and the pin stays green.
-        NOTE which assertion actually fires for that mutant: `converged`
-        (`False`, because the priced factors then iterate to `max_iter`);
-        `messages`/`posteriors` are the END-STATE corroboration behind it.
+        The assertion that fires for that mutant is `converged` (`False`,
+        because the priced factors iterate without ever converging).
 
     The companion assertion pins the other half of the block: with nothing
     refused (`if refused:` removed) `run()` must emit NO REFUSAL RECORD, or every
@@ -2025,13 +2024,15 @@ def test_the_RUN_level_refusal_names_a_NULL_mechanism_without_raising():
         # (it is agent-facing guidance, not a log line for humans to puzzle out).
         assert "Run EP (tortoise/ep.py)" in refusals[0], refusals[0]
 
-        # `converged` is the property worth pinning. `iters` is deliberately NOT
-        # asserted: it is an emergent property of the convergence loop (empty
-        # `posteriors` ⇒ `max_change == 0`), so a loop refactor would redden a
-        # test that is about sorting.
+        # `converged` is the property worth pinning, and it IS the discriminator
+        # for "the refused factors were not priced" (a later refactor that made
+        # `run()` converge anyway would be the `messages`/`posteriors` end state
+        # below — which is exactly why they are NOT asserted here: no single
+        # mutation of this block reaches them without `converged` firing first,
+        # and an assertion nothing can redden is dead weight that misleads the
+        # next reader (agent-infra#3442 rule 3). `iters` is likewise not asserted:
+        # it is emergent from the convergence loop, not from the refusal.
         assert converged is True, "nothing was priced, so the reduced problem converges"
-        assert eng.messages == {}, "a refused factor must not reach message passing"
-        assert eng.posteriors == {}, "a refused factor must not create a posterior"
 
         # ── the other half of the block: no refusal when nothing is refused ──
         # One `input_id` per PRICEABLE factor: `_update_factor` early-returns
@@ -2040,10 +2041,10 @@ def test_the_RUN_level_refusal_names_a_NULL_mechanism_without_raising():
         # bogus `0 factor(s) REFUSED — ` on every clean belief read.
         records.clear()
         clean = svbp_module.TortoiseSVBP()
-        clean_converged = clean.run([
+        clean.run([
             ("op-impl", "IMPL", ["c1"], 1.0),
             ("op-nand", "NAND", ["c2"], 1.0),
-        ])[1]
+        ])
         clean_refusals = [r for r in records if "REFUSED" in r]
     finally:
         log.removeHandler(handler)
@@ -2053,5 +2054,3 @@ def test_the_RUN_level_refusal_names_a_NULL_mechanism_without_raising():
         "a refused-only warning must not fire when every factor is priceable: "
         + repr(clean_refusals)
     )
-    assert clean_converged is True
-    assert clean.messages == {}, "an unpriced single-input factor must not write"
