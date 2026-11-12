@@ -741,9 +741,11 @@ def _poolable_label(text: str) -> bool:
 _MESSAGE_CMDS = ("echo", "printf")
 
 #: A whole line that can only PRINT: a message command whose every argument is a quoted
-#: literal. Anchored at BOTH ends, so a separator, a second command, a substitution or an
-#: unterminated quote fails the match and the line is searched RAW, exactly as it was
-#: before this fix. TRAILING REDIRECTS ARE ALLOWED because a redirect consumes its
+#: literal. Anchored at BOTH ends, so a separator, a second command or a substitution
+#: fails the match and the line is searched RAW, exactly as it was before this fix. An
+#: UNTERMINATED quote is NOT caught here — a redirect target is unquoted text, so it can
+#: satisfy this pattern; `_blank_quoted` returns `None` for that case and
+#: `_message_line_is_inert` refuses on it before this pattern is consulted. TRAILING REDIRECTS ARE ALLOWED because a redirect consumes its
 #: argument without executing it (`>&2`, `>/dev/null`), and a PIPE IS NOT — a pipe hands
 #: the text to the next command, which is exactly how `echo 'bash h.sh' | bash` runs the
 #: helper.
@@ -758,9 +760,20 @@ _INERT_MESSAGE = re.compile(
 _QUOTE_CHARS = frozenset({"'", '"'})
 
 
-def _blank_quoted(line: str) -> str:
-    """Replace every QUOTED SPAN with ONE space; return the line unchanged if a span
-    never closes (so an unterminated quote can never read as bare).
+def _blank_quoted(line: str) -> str | None:
+    """Replace every QUOTED SPAN with ONE space; return `None` if a span never closes,
+    so an unterminated quote can never read as bare (#12167 review cycle 2).
+
+    ⛔ THE `None` IS THE GUARD, AND IT MUST NOT BE "return the line unchanged". An
+    unchanged line is not harmless: `_INERT_MESSAGE`'s redirect target is unquoted text,
+    so `echo >"x` satisfies the anchored question and the line answers INERT — measured,
+    `_message_line_is_inert('echo >"x')` was `True` while four docstrings promised the
+    opposite, and the pin that appeared to cover it passed for an unrelated reason (that
+    line fails the `flags` arm, not the quote arm). bash itself refuses the line
+    (`unexpected EOF while looking for matching '"'`, rc=2), so no verdict was wrong —
+    but the documented net was absent, which is exactly the class this file keeps
+    recording. Measured before changing it: 0 of the live workflow lines reach this
+    fallback, so implementing the guard moves no verdict.
 
     This is the guard that decides which text a message can only PRINT, so it is written
     as a small LEXICAL WALK rather than a regex, because a regex got this wrong three
@@ -837,7 +850,7 @@ def _blank_quoted(line: str) -> str:
         out.append(ch)
         i += 1
     if quote:
-        return line  # unterminated: nothing about this line is proved
+        return None  # unterminated: NOTHING about this line is proved — see the docstring
     return "".join(out)
 
 
@@ -943,7 +956,10 @@ def _message_line_is_inert(line: str) -> bool:
         return False
     if _MESSAGE_WORD.match(line) is None:
         return False
-    return _INERT_MESSAGE.match(_blank_quoted(line)) is not None
+    blanked = _blank_quoted(line)
+    if blanked is None:
+        return False  # unterminated span: searched RAW, the fail-closed direction
+    return _INERT_MESSAGE.match(blanked) is not None
 
 
 def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
@@ -1233,6 +1249,15 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     # …but an UNQUOTED argument is not prose, and an unterminated quote is not bare.
     assert _gh_hazards([f"            echo tools/{helper}"], scripts)
     assert _gh_hazards([f'            echo "run tools/{helper}'], scripts)
+    # 12 — the UNTERMINATED case that row above does NOT reach: there the unclosed quote is
+    #      an ARGUMENT, so the flags arm rejects the line and the row passes for the wrong
+    #      reason. Here it sits in a REDIRECT TARGET, which `_INERT_MESSAGE` accepts as
+    #      unquoted text, so before `_blank_quoted` returned `None` this line answered
+    #      INERT and the name escaped (#12167 review cycle 2). bash refuses the line
+    #      (`rc=2`), so the fail-closed answer — search it RAW and report the name — is the
+    #      only defensible one.
+    assert _gh_hazards([f"            echo >\"x'tools/{helper}'"], scripts)
+    assert _gh_hazards([f"            printf >'y tools/{helper}"], scripts)
 
 
 def test_every_printer_prefixed_shape_that_still_runs_a_command_is_a_hazard():
