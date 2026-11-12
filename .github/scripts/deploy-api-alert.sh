@@ -278,7 +278,7 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
       echo "must never run DDL or \`migration repair\` against production; a blanket repair hides"
       echo "real drift, #1001)."
       echo
-      if [ -n "$DRIFT_REPORT_FILE" ] && [ -s "$DRIFT_REPORT_FILE" ]; then
+      if [ -n "$DRIFT_REPORT_FILE" ] && [ -e "$DRIFT_REPORT_FILE" ]; then
         # Bounded: an issue body is not a log dump. ⛔ TAKE THE **TAIL**, not the
         # head: the gate prints its context — remote-ahead, non-conforming files,
         # the warn-class preamble — BEFORE the actionable block, and ends with
@@ -319,8 +319,11 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # ⚠️ NOT checked, stated rather than implied: a NUL byte is valid UTF-8 and is
         # stripped by the command substitution before the comparison, so a report
         # carrying NULs is pasted with them removed and this measure cannot see it.
-        # `tail` is guarded: a report that cannot be RE-READ lands in the "no
-        # excerpt-able text" branch below instead of aborting the alert under `set -e`.
+        # `tail` is guarded: a report that cannot be RE-READ (a directory, or a file that
+        # vanished between the guard and the read) lands in the "no excerpt-able text"
+        # branch below instead of aborting the alert under `set -e` — the #12077 class at
+        # this line too. Pinned by case 17d, which passes a DIRECTORY (an `-e`-true,
+        # unreadable path).
         raw_tail="$(tail -c 6000 "$DRIFT_REPORT_FILE" 2>/dev/null)" || raw_tail=""
         excerpt=""
         squeeze_incomplete=0

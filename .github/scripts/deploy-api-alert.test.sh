@@ -563,6 +563,19 @@ assert_contains "$BLANK_BODY" "held no excerpt-able text" "and says the report h
 assert_not_contains "$BLANK_BODY" "could not be byte-squeezed" "and does NOT claim a squeeze it never attempted"
 assert_not_contains "$BLANK_BODY" '```' "and pastes NO fenced block when there is nothing to paste"
 
+# ── case 17d: an EXISTING but UNREADABLE report must not abort the alert ────
+# `-e` admits a path that exists and cannot be read (a directory), where `-s` used to
+# skip the whole section and report "not readable". The read is guarded, so the body
+# says the report yielded no excerpt AND the ledger issue is still filed — without the
+# guard, `tail` fails under `set -e` and the alert exits 1 having filed NOTHING (the
+# exact #12077 class, at the line round 2 moved the read back onto).
+mkdir -p "$FIX/report-dir"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/report-dir"
+assert_eq "$RC" "0" "case 17d: an existing but UNREADABLE report does not abort the alert"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "held no excerpt-able text" "case 17d: and the body says the report yielded no excerpt"
+assert_eq "$(count_creates)" "1" "case 17d: and the ledger issue was still filed"
+
 # A job with no declared note still alerts, with an honest generic sentence
 # rather than a wrong one (the workflow's site set is pinned by pytest).
 reset_case
