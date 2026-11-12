@@ -3225,6 +3225,19 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
         "the wait cause must not be handed the census lever"
     )
 
+    # 3b. ⛔ AND THE ARM RENDERS EXACTLY ONE ANNOTATION PER CAUSE (#12037 review round 10).
+    # The executed slice below starts at the selector, so an EXTRA `echo "::warning::"` placed
+    # anywhere else in the arm — e.g. an unconditional wait-lever warning above the selector —
+    # was outside it and survived: the reading then printed "raise --max-pages" AND
+    # "NOT --max-pages" together. Count the arm's annotation emits (comments excluded) here,
+    # and the rendered count in the executed section.
+    emits = [ln for ln in arm.splitlines()
+             if not ln.lstrip().startswith("#") and 'echo "::warning::' in ln]
+    assert len(emits) == 2, (
+        "exactly two annotation echoes: one per cause, each inside its own branch — "
+        f"got {len(emits)}: {emits}"
+    )
+
     # 4. ⛔ AND THE CONSTRUCTION IS EXECUTED, NOT SPELL-CHECKED (#12037 review round 9).
     # Every string assertion above is satisfied by a file whose SELECTOR IS INVERTED —
     # flipping `-eq 1` to `-eq 0`, or the `|| echo 0` fallback to `1`, inverts the
@@ -3265,6 +3278,12 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
         census_out = rendered('{"pr_running_census_unwitnessed": true}')
         assert "--max-job-probes" in census_out, census_out
         assert "NOT --max-pages" in census_out, census_out
+        # ⛔ AND IT MUST BE THE ONLY ANNOTATION RENDERED (#12037 review round 10). Every
+        # assertion above is a substring check, so an extra unconditional wait-lever `echo`
+        # above the selector — which prints "raise --max-pages" AND "NOT --max-pages" for the
+        # same reading — survived the suite. One cause, one annotation.
+        assert census_out.count("::warning::") == 1, census_out
+        assert "raise --max-pages" not in census_out, census_out
 
         # every other cause — flag false, key absent, payload absent, payload unparseable —
         # selects the WAIT lever and must never mention the census one
@@ -3274,7 +3293,8 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
                         "not json",
                         None):
             out = rendered(payload)
-            assert "--max-pages" in out, (payload, out)
+            assert out.count("::warning::") == 1, (payload, out)
+            assert "raise --max-pages" in out, (payload, out)
             assert "--max-job-probes" not in out, (payload, out)
 
 
@@ -3370,3 +3390,30 @@ def test_every_reason_line_that_says_executing_is_as_strong_as_its_evidence():
     assert "PR CI IS executing (1 run(s))" in next(
         r for r in strong.reasons if r.startswith("not a flood")
     )
+
+
+def test_the_probe_budget_flag_reaches_read_health_from_the_CLI(monkeypatch):
+    """⭐ ROUND-10 P2: the lever two surfaces tell operators to pull was inert at the CLI hop.
+
+    The workflow annotation and `docs/ops/ci-wall-clock.md` both say the census cause is cleared
+    by "repairing the frozen runs or raising `--max-job-probes`". Every other step of that chain
+    was proven — the budget as a function, its selection order, its arithmetic — and deleting the
+    one wiring line below it (`"max_job_probes": args.max_job_probes`) plus changing the parser's
+    default both SURVIVED the whole suite. So `--max-job-probes 1` would have run with 8 and said
+    nothing, which is the "proven as a FUNCTION, unproven as a WIRING" class twice already filed
+    here (rounds 3 and 5). The sibling `--max-pr-wait-seconds` is exercised through `main()`;
+    this one was not.
+    """
+    seen: dict[str, object] = {}
+
+    def fake_read_health(repo, **kwargs):
+        seen.update(kwargs)
+        return Q.classify_queue([], in_progress=[])
+
+    monkeypatch.setattr(Q, "read_health", fake_read_health)
+    assert Q.main(["--repo", "o/r", "--max-job-probes", "1", "--json"]) == Q.EXIT_OK
+    assert seen["max_job_probes"] == 1, "the flag must reach read_health, not be dropped"
+
+    # ... and the parser's DEFAULT is the constant, so the documented arithmetic and the
+    # shipped behaviour cannot drift apart.
+    assert Q.build_parser().parse_args([]).max_job_probes == Q.DEFAULT_MAX_JOB_PROBES

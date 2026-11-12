@@ -778,10 +778,15 @@ class QueueHealth:
         PR-UNWITNESSED) leaves starvation unmeasured or disproved and is False.
 
         PR-BACKLOGGED is False on purpose: this predicate asserts an ABSENCE ("no
-        PR-event run is executing"), and a backlogged queue is the case where PR CI
-        IS executing — just too slowly to answer. Folding it in would make the
-        per-PR report claim "CI is not running" about a repo where it demonstrably
+        PR-event run is executing"), and a backlogged queue is the case where PR CI is
+        COUNTED as executing — just too slowly to answer. Folding it in would make the
+        per-PR report claim "CI is not running" about a repo where the census says it
         is, which is a false statement in the instrument that exists to refuse them.
+        ("COUNTED" rather than "demonstrably": `PR-BACKLOGGED` requires
+        `pr_running > 0`, and that count may be runs whose jobs could not be read — the
+        state is reachable on an unmeasured census, which is why `_executing_claim`
+        reports that case separately instead of asserting the stronger fact. #12037
+        review rounds 5, 9 and 10.)
 
         For "is PR work waiting behind the QUEUE?" use `delays_pr`, which is the
         superset and says so — the two questions are different and one flag cannot
@@ -794,7 +799,8 @@ class QueueHealth:
         """True when PR work is waiting behind the QUEUE rather than behind itself.
 
         The superset of `starves_pr`: it adds `PR-BACKLOGGED`, the state where PR CI
-        IS executing but the oldest queued PR run has waited past its budget
+        is counted as executing (see `_executing_claim` — the count may include runs
+        whose jobs were never read) but the oldest queued PR run has waited past its budget
         (`DEFAULT_MAX_PR_WAIT_SECONDS`, derived from the measured max first-job wait
         in `docs/ops/ci-wall-clock.md` §1). Both readings describe the same thing for
         a caller deciding whether a per-PR action would help: the wait is the queue's,
