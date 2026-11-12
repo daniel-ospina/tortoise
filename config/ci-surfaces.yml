@@ -2262,9 +2262,9 @@ surfaces:
   # `--changed tortoise/cost_dimensions.py` -> ['core'] (that one is imported
   # DIRECTLY by the suite, not only through `pricing.storage_dimensions`). The
   # FOURTH (`tortoise/metering.py`) DOES select `api`, where #11837 already
-  # registered it — which is why this PR adds THIS row only (NOT the six-surface
-  # census `test_cost_dimensions.py` carries: this file pins two dimensions, not
-  # a sweep over every tracked `.py`).
+  # registered it — which is why the `core` arm keeps THIS row only (NOT the
+  # six-surface census `test_cost_dimensions.py` carries: this file pins two
+  # dimensions, not a sweep over every tracked `.py`).
   # Hermetic: 31 cases, no DB, no graph, no network, no model call, no `gh`.
   # ⚠️ COVERAGE GAP — NOT created here, NOT closed here (#12006): this suite also
   # reads `product/pricing.json`, and a diff touching ONLY that artifact selects
