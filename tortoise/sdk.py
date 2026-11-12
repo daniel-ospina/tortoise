@@ -5746,6 +5746,7 @@ def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
     refusal the caller never asked for.
     """
     from tortoise.kind_guards import (
+        SKIP_ROLE_HOLDER_NOT_LEGAL_ON_SUBJECT,
         SKIP_STATUS_NOT_LEGAL_ON_SUBJECT,
         SKIP_TARGET_LABEL_AMBIGUOUS,
         abstain,
@@ -5788,6 +5789,21 @@ def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
         if not (isinstance(_status, str) and _status in _SUBJECT_STATUS_VALUES):
             return t, abstain(decision,
                               SKIP_STATUS_NOT_LEGAL_ON_SUBJECT, layer=t)
+        # ⛔ THE SAME RULE, FOR THE OTHER PROP THAT DOOR VALIDATES. `roleHolder`
+        # (and its snake alias) is legal only on a `subjectKind='role'`; the
+        # OBJECT door stores it happily. So an object→subject redirect carrying
+        # `roleHolder` raised `ValueError: roleHolder is only valid on a Subject
+        # of subjectKind='role'` on a write that lands unguarded — measured, one
+        # prop away from the status arm this same block already covers, and the
+        # same forbidden class: a refusal the guard invented (#1934). The arm is
+        # enumerated rather than generalised because these are the two
+        # prop/kind validations the entity doors perform; a third would need its
+        # own abstention, which is why the check lives HERE beside them.
+        if (props.get("roleHolder") is not None
+                or props.get("role_holder") is not None) \
+                and named_kind(decision.kind) != "role":
+            return t, abstain(decision,
+                              SKIP_ROLE_HOLDER_NOT_LEGAL_ON_SUBJECT, layer=t)
 
     # ⛔ THE OTHER WAY A REDIRECT CAN REFUSE A LEGAL WRITE: IDENTITY.
     # The guard moves the write to the OTHER entity label, and entity identity

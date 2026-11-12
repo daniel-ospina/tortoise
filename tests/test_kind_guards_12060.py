@@ -333,7 +333,7 @@ class TestAcceptance2Abstention:
         # The abstention was reported, not swallowed...
         assert resolve("the owner", "subject", None,
                        pack_confusions=()).skipped["reason"].startswith(
-                           "link-predicate-unimplemented")
+                           "link-predicate-unavailable")
         # ...and the outcomes were counted.
         assert {r["outcome"] for r in kind_guard_counts()} == {"accepted", "skipped"}
 
@@ -378,15 +378,22 @@ class TestNeverRefuses:
         d = resolve("acme-1", "subject", None, pack_confusions=compiled)
         assert d.outcome == GuardOutcome.ACCEPT
 
-    def test_the_role_guard_abstains_until_holdsRole_is_implemented(self):
+    def test_the_role_guard_abstains_until_a_redirect_can_name_a_holder(self):
         """The owner's #12060 comment: five ORPHAN roles are worse than one
-        person with five aliases, so a redirect TO a kind whose linking
-        predicate is unbuilt abstains."""
-        assert LINK_PREDICATES["holdsRole"] is False  # #12047, not a code edit
+        person with five aliases, so a redirect TO a kind that needs a linking
+        predicate abstains.
+
+        ⚠️ The reason is NOT "unimplemented" any more. `#12047` LANDED
+        (`entity_resolver.wire_holds_role`) and the edge is produced whenever a
+        caller names a `roleHolder`; what a NAME-MATCHED redirect cannot do is
+        name a holder. Asserting the old token here would pin a false statement
+        about the tree into the disclosure a client branches on.
+        """
+        assert LINK_PREDICATES["holdsRole"] is False  # a redirect has no holder
         d = resolve("the owner", "subject", None, pack_confusions=())
         assert d.outcome == GuardOutcome.SKIPPED
         assert d.kind is None
-        assert d.skipped["reason"] == "link-predicate-unimplemented:holdsRole"
+        assert d.skipped["reason"] == "link-predicate-unavailable:holdsRole"
         assert d.skipped["target"] == "core:role"
 
 
@@ -1243,12 +1250,31 @@ depends_on: []
 class TestSafetyProperties:
     def test_the_layer_is_derived_from_kind_layers_not_redeclared(self):
         """ONE authority for kind↔layer (#9964/#9675) — the guard table must not
-        become a second answer to it."""
+        become a second answer to it.
+
+        ⛔ `layer` is the single layer when there IS one, and `None` when the
+        authority declines to answer (2+ layers). It is NOT
+        `next(iter(sorted(...)))`, which claimed the alphabetically-first of
+        two; and it is NOT `kind_layers.entity_route`, which answers a narrower
+        question and would report `None` for every Point/Event kind
+        (`statement` → None) — losing a layer this table can answer truthfully.
+        Measured at this head: 0 multi-layer kinds, so the difference is latent.
+        """
         from tortoise.kind_layers import routing_layers
 
+        multi = []
         for kind, entry in guard_table(include_packs=False).items():
-            assert entry["allowedLayers"] == sorted(routing_layers(kind)), kind
-            assert entry["layer"] == next(iter(sorted(routing_layers(kind))), None)
+            layers = sorted(routing_layers(kind))
+            assert entry["allowedLayers"] == layers, kind
+            expected = layers[0] if len(layers) == 1 else None
+            assert entry["layer"] == expected, kind
+            if len(layers) > 1:
+                multi.append(kind)
+        # A kind declared on two layers must claim NEITHER … and the population
+        # is measured, not assumed, so this assertion cannot go vacuous by the
+        # table shrinking.
+        for kind in multi:
+            assert guard_table(include_packs=False)[kind]["layer"] is None, kind
 
     def test_every_core_kind_has_a_guard_table_entry(self):
         from tortoise.kind_layers import core_sections
@@ -1475,3 +1501,123 @@ depends_on: []
         assert r.returncode == 1, out
         assert "declares no layer" in out, out
         assert "actionKind" in out, out
+
+
+# ══ 5. review round 4 — the four ways a guard could still lie ═════════════
+
+class TestReviewRound4Closed:
+    """Findings from the #12060 landing review, each with the measurement."""
+
+    def test_the_guard_probe_uses_the_DOOR_s_holder_reads(self, sdk):
+        """⛔ The refusal-avoidance probe must ask the DOOR's question.
+
+        `ambiguous_holder_ids` shipped reading `live_name_holder_ids` (`name`
+        only, no folded arm) while the door refuses on
+        `_live_holders_same_entity` (`name` AND `canonical_name`, plus the
+        FOLDED spelling). A carrier that only the wider read sees therefore read
+        as unambiguous, the redirect was applied, and the door then raised
+        `AmbiguousEntityName` — the redirect inventing exactly the refusal it
+        probes to avoid. MEASURED before the fix with two legacy carriers in
+        which the second holds the name as `canonical_name`.
+        """
+        from tortoise.entity_identity import (
+            ambiguous_holder_ids,
+            live_name_holder_ids,
+        )
+
+        g = sdk._get_proj().g
+        g.query("MATCH (n:Object) DETACH DELETE n")
+        g.query("CREATE (:Object {id:'o-12060-a', name:$n, objectKind:'core:WorkItem'})",
+                params={"n": "repo/door-probe"})
+        g.query("CREATE (:Object {id:'o-12060-b', canonical_name:$n, objectKind:'core:WorkItem'})",
+                params={"n": "repo/door-probe"})
+        # The narrow read says ONE holder; the door says TWO.
+        assert len(live_name_holder_ids(g, "Object", "repo/door-probe")) == 1
+        assert ambiguous_holder_ids(g, "Object", "repo/door-probe")
+
+    def test_a_relative_fromKinds_scope_matches_the_canonical_write(self):
+        """A manifest names its own kinds BARE; a write declares them canonical.
+
+        Unqualified, `fromKinds: [concept]` compiled to a form no write can
+        declare, so the guard was dead in EVERY mode (a non-empty `from_kinds`
+        also leaves the NIL mode) — while `pack validate` reported it clean.
+        """
+        compiled = kg.pack_guards("acme", [{
+            "kind": "concept",
+            "layer": "object",
+            "onConfusion": [{
+                "rule": "acme:concept-scope",
+                "pattern": r"^concept-[0-9]+$",
+                "redirect": "core:WorkItem",
+                "fallback": "core:WorkItem",
+                "reason": "a concept handle is not an entity",
+                "fromKinds": ["concept"],
+            }],
+        }])
+        assert compiled[0].from_kinds == ("acme:concept",)
+        # …and BOTH spellings a caller may use are matched.
+        for declared in ("acme:concept", "concept"):
+            d = resolve("concept-7", "object", declared,
+                        pack_confusions=compiled, installed=frozenset({"acme"}))
+            assert d.outcome == GuardOutcome.REDIRECT, declared
+            assert d.kind == "core:WorkItem"
+
+    def test_a_degraded_redirect_is_counted_as_skipped_as_well(self):
+        """`accepted` alone cannot answer "did the declared target resolve?".
+
+        Ladder step 1 re-files to the fallback BECAUSE the declared target is
+        unusable, and the reply carries both facts. Before this, the tally kept
+        only `accepted` (rule, from → fallback) and no `skipped` row at all, so
+        a healthy redirect and an uninstalled-target redirect were the same
+        number — the one instrument the feature ships could not see its own
+        commonest failure.
+        """
+        guard = Confusion(
+            rule="acme:degrades",
+            when="nameMatches",
+            pattern=r"^ticket-[0-9]+$",
+            redirect="other:issue",
+            fallback="core:WorkItem",
+            reason="a ticket is a work item",
+        )
+        d = resolve("ticket-9", "subject", None,
+                    pack_confusions=(guard,),
+                    installed=frozenset({"acme"}))  # `other` is NOT installed
+        assert d.outcome == GuardOutcome.REDIRECT
+        assert d.redirect["degraded"] is True
+        assert d.redirect["to"]["kind"] == "core:WorkItem"
+        assert d.skipped["target"] == "other:issue"
+        outcomes = {(r["rule"], r["outcome"]): r for r in kind_guard_counts()}
+        assert ("acme:degrades", "accepted") in outcomes
+        skipped = outcomes.get(("acme:degrades", "skipped"))
+        assert skipped, "the unusable declared target was not tallied"
+        assert skipped["to"] == "other:issue"
+
+    def test_an_object_to_subject_redirect_with_roleHolder_abstains(
+            self, sdk, monkeypatch):
+        """The status arm's twin: `roleHolder` is legal on ONE Subject kind.
+
+        The object door stores `roleHolder`; the subject door raises unless the
+        kind is `role`. So an object→subject redirect carrying it raised on a
+        write that lands unguarded — a refusal the guard invented.
+        """
+        monkeypatch.setattr(
+            kg, "_catalog_pack_guards",
+            lambda: (Confusion(
+                rule="acme:to-subject",
+                when="nameMatches",
+                pattern=r"^org-[0-9]+$",
+                redirect="core:organization",
+                fallback="core:organization",
+                reason="an org handle names an organization",
+            ),))
+        r = sdk.create_object("org-4242", roleHolder="daniel")
+        # The write LANDED, as an :Object, unchanged — no ValueError.
+        assert r.get("id")
+        assert _labels_kinds(sdk, r["id"])[0] == ["Object"]
+        assert r["kind_redirect_skipped"]["reason"] == \
+            "role-holder-not-legal-on-subject"
+        # The negative control: without `roleHolder` the same write redirects.
+        r2 = sdk.create_object("org-4243")
+        assert _labels_kinds(sdk, r2["id"])[0] == ["Subject"]
+        assert r2["kind_redirect"]["to"]["kind"] == "core:organization"

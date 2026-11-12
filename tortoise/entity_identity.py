@@ -1003,13 +1003,20 @@ def display_holder_ids(candidate_ids) -> list:
 def is_ambiguous(holders) -> bool:
     """Would a create on this holder set REFUSE? — THE ONE predicate (#9876).
 
-    ``holders`` is the raw :func:`live_name_holder_ids` row list, id-less LIVE
-    rows INCLUDED (a name held by one id-carrying and one id-less entity is
-    still TWO holders). Extracted so the refusal sites and the non-fatal
-    PROBES that must predict them cannot answer differently — the threshold
-    ``len(holders) > 1`` used to be spelled inline in
-    :func:`refuse_if_ambiguous` only, and a second site re-deriving it is
-    exactly the drift #9876 closed.
+    ``holders`` is the row list the READER produced, id-less LIVE rows INCLUDED
+    (a name held by one id-carrying and one id-less entity is still TWO
+    holders). Extracted so the refusal sites and the non-fatal PROBES that must
+    predict them cannot answer differently — the threshold ``len(holders) > 1``
+    used to be spelled inline in :func:`refuse_if_ambiguous` only, and a second
+    site re-deriving it is exactly the drift #9876 closed.
+
+    ⛔ ONE predicate is not ONE reader: the threshold is shared here, but the
+    QUESTION also includes *which holders were read*. Every refusal and every
+    probe of one must therefore go through ``_live_holders_same_entity`` (the
+    raw + folded arm over ``name`` and ``canonical_name``) — a caller that pairs
+    this threshold with a narrower read (``live_name_holder_ids``) answers a
+    different question and lands in the drift this function exists to close
+    (see :func:`ambiguous_holder_ids`).
     """
     return len(holders) > 1
 
@@ -1025,8 +1032,20 @@ def ambiguous_holder_ids(g, label: str, name: str) -> list[str]:
     refusal the feature exists to prevent. It reads, decides nothing, and
     records nothing (there was no refusal to record), and it asks
     :func:`is_ambiguous` for the threshold.
+
+    ⛔ THE SAME TWO READS THE DOOR MAKES — ``_live_holders_same_entity``, the
+    raw arm then the FOLDED one, over ``name`` AND ``canonical_name``. This
+    function shipped reading only :func:`live_name_holder_ids` (``name`` alone,
+    no folded arm), which is NARROWER than both the door and this function's own
+    twin: two legacy carriers — one under the folded spelling, or one holding
+    the name as ``canonical_name`` — read as unambiguous here and then raise
+    ``AmbiguousEntityName`` at the door, i.e. the redirect invented exactly the
+    refusal it probes to avoid (measured: ``intent="as_declared"`` lands while
+    the same write with the guard ON raises). The probe is only a twin if it
+    asks the door's question, so it asks it through the door's helper; the
+    threshold stays :func:`is_ambiguous`.
     """
-    holders = live_name_holder_ids(g, label, name)
+    holders, _props = _live_holders_same_entity(g, label, name)
     return display_holder_ids(holders) if is_ambiguous(holders) else []
 
 

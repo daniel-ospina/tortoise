@@ -3123,6 +3123,43 @@ class PackRegistry:
                 for fk in c.get("fromKinds", []) or []:
                     if not isinstance(fk, str) or not fk.strip():
                         errors.append(f"{cw}.fromKinds: entries must be kinds")
+                        continue
+                    # ⛔ THE R1 CLOSURE, applied to the SCOPE and not only to the
+                    # target. A bare entry means this pack's own kind (the
+                    # manifest convention, and the spelling the `kind:` field of
+                    # this same entry uses) — so qualify it exactly as
+                    # `kind_guards._qualify` will, then hold it to the same
+                    # closure `redirect` is held to. Unqualified, `fromKinds:
+                    # [invoice]` compiled to a form no write can declare and the
+                    # guard was DEAD in every mode while this gate printed
+                    # `✓ Clean` — a false PASS on the gate whose own docstring
+                    # says an installable guard that can never act is a
+                    # declaration that lies (`kind_guards` round-3 review).
+                    _fkq, _fkns = _resolve_ref(fk.strip())
+                    if _fkns is not None and _fkns not in allowed_ns:
+                        errors.append(
+                            f"{cw}.fromKinds: '{fk}' names namespace "
+                            f"'{_fkns}', which this pack neither owns nor "
+                            f"declares in depends_on (R1)")
+                    elif (_fkns is not None and _fkns == (ns or None)
+                          and _fkq.split(":", 1)[-1] not in all_pack_kinds
+                          and _fkq.split(":", 1)[-1] not in own_layer):
+                        errors.append(
+                            f"{cw}.fromKinds: '{fk}' is this pack's own "
+                            f"namespace but no kind it declares — a scope no "
+                            f"write to this pack can ever match")
+                # ⛔ A `linkPredicate` the runtime does not know is a guard that
+                # abstains for ever, and one that names no key of
+                # `LINK_PREDICATES` at all is a typo the install gate used to
+                # accept (`holdRole` vs `holdsRole`) with a `✓ Clean` verdict.
+                _lp = c.get("linkPredicate")
+                if _lp is not None:
+                    from tortoise.kind_guards import LINK_PREDICATES
+                    if not isinstance(_lp, str) or _lp not in LINK_PREDICATES:
+                        errors.append(
+                            f"{cw}.linkPredicate: {_lp!r} is not a predicate the "
+                            f"write path knows ({', '.join(sorted(LINK_PREDICATES))}) "
+                            f"— an unknown one abstains for ever")
                 for fl in c.get("fromLayers", []) or []:
                     if fl not in ("subject", "object"):
                         errors.append(

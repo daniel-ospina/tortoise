@@ -75,12 +75,26 @@ One shape everywhere, and one stable JSON field so a client never parses prose::
       "rule":     "issue-identifier-is-work-item",     # WHY, as a stable id
       "reason":   "issue:<repo>#<n> names a tracked work item, not an entity",
       "override": 'intent="as_declared"',              # the EXACT override
-      "undo":     "none — the node was created at the redirected layer",
+      "undo":     "none — the node was written with the kind the guard chose; to keep your own, re-issue the write with intent=\"as_declared\"",
       "degraded": False,                               # True ⇒ to == fallback
       "message":  "<the human AX block: what changed, why, override, undo>",
     }
     kind_redirect_skipped = {"rule": ..., "target": ..., "reason": ...}
     kind_guard_overridden = {"rule": ..., "target": ..., "declaredKind": ...}
+
+⛔ **EVERY non-accept is ECHOED, never silent — `docs/ax/ax-principles.md` Rule 1.**
+That rule splits two classes with opposite reporting: a formatter that merely
+RE-SPELLS the caller's value is silent, while one that SUPPLIES A MEANING is
+echoed. A kind redirect supplies a meaning (it asserts what this thing IS), so
+it is always echoed — in the reply field, in the human block, AND on the node.
+Do not "simplify" any of the three into a silent re-spell: that is the exact
+regression the owner named on `#12060`, and the reporting class is a recorded
+ruling, not a style choice.
+
+⚠️ The `undo` above is the SAME-LAYER branch verbatim. A cross-layer redirect
+returns a different string (`_undo_text`), because re-filing onto the other
+label can leave the name on BOTH labels — identity is label-scoped (#2489) —
+and an `undo` that promised a clean move would be false.
 
 `from` carries the caller's declaration, so an override / replay / an audit can
 restore it (R5); the redirect path ALSO records `declaredKind`/`declaredLayer`/
@@ -202,12 +216,15 @@ deterministic, cheap and idempotent, so it is safe to run AGAIN after `#12047`
 merges (which is how NER's provisional type survives in those pipelines).
 
 And the case the owner named as the meeting point is why the role guard
-**abstains** rather than redirecting: `#12047` records that person→role linking
-(`holdsRole`) does not exist, so redirecting `the owner` to `core:role` today
-would file five ORPHAN roles — less information than a person with five aliases,
-and harder to reconcile. A redirect TO a kind whose linking predicate is
-unimplemented abstains (R4's shape) until `#12047` produces `holdsRole`; see
-`LINK_PREDICATES` for the one place that is declared, and its flip condition.
+**abstains** rather than redirecting: redirecting `the owner` to `core:role`
+files an ORPHAN role — less information than a person with five aliases, and
+harder to reconcile. ⚠️ **The blocker is no longer "`holdsRole` is unbuilt".**
+`#12047` LANDED (`entity_resolver.wire_holds_role`, reached from
+`create_entity(roleHolder=…)`), so the edge IS produced when a caller NAMES a
+holder. A name-matched redirect has no holder to name, so it still cannot
+produce the edge it would need — the abstention is right and its REASON changed.
+See `LINK_PREDICATES` for the one place that is declared, what the flag now
+means, and its flip condition.
 """
 from __future__ import annotations
 
@@ -247,7 +264,14 @@ def _pattern_needs_compile(when: str) -> bool:
 
 #: Skip reasons — a CLOSED vocabulary, so a client can branch on the value.
 SKIP_NAMESPACE_NOT_INSTALLED = "namespace-not-installed"
-SKIP_LINK_PREDICATE_UNIMPLEMENTED = "link-predicate-unimplemented"
+#: ⛔ NOT "unimplemented". `holdsRole` IS implemented (`#12047` landed
+#: `entity_resolver.wire_holds_role`), but it needs a HOLDER, and a name-matched
+#: redirect has none — so the reason is "this redirect cannot supply the
+#: predicate's input", which stays true however the predicate is implemented.
+#: The old token asserted a capability the tree has, and a client branches on
+#: this value: a false statement in a closed vocabulary is worse than a vague
+#: true one.
+SKIP_LINK_PREDICATE_UNAVAILABLE = "link-predicate-unavailable"
 SKIP_DECLARING_PACK_NOT_INSTALLED = "declaring-pack-not-installed"
 SKIP_INSTALLED_SET_UNREADABLE = "installed-set-unreadable"
 SKIP_TARGET_LABEL_AMBIGUOUS = "target-label-ambiguous"
@@ -257,19 +281,32 @@ SKIP_NO_USABLE_HOME = "no-usable-home"
 #: abstains instead: a legal Object write with an Object-only `status` must not
 #: become a `ValueError` because a name looked person-shaped.
 SKIP_STATUS_NOT_LEGAL_ON_SUBJECT = "status-not-legal-on-subject"
+#: The OTHER prop a `:Subject` door validates and an `:Object` door does not
+#: (`roleHolder` needs `subjectKind='role'`). Same rule as the status arm: a
+#: redirect that crosses into the Subject door must not turn a write that lands
+#: today into a `ValueError`.
+SKIP_ROLE_HOLDER_NOT_LEGAL_ON_SUBJECT = "role-holder-not-legal-on-subject"
 
-#: The linking predicate a redirect may depend on. A redirect TO a kind whose
-#: linking predicate is UNIMPLEMENTED abstains (#12060 owner comment): filing
-#: five orphan roles is worse than a person with five aliases.
+#: The linking predicate a redirect may depend on. A redirect TO a kind that
+#: needs one abstains (#12060 owner comment): filing an orphan role is worse than
+#: a person with five aliases.
 #:
-#: ⛔ THE FLIP CONDITION IS `#12047` (entity resolution), NOT A CODE EDIT HERE.
-#: `holdsRole` is a sanctioned person→role predicate (`docs/ONTOLOGY.md:206`,
-#: `:423`, deliberately distinct from `memberOf`), and nothing produces it:
-#: MEASURED 2026-11-11, `live-v4` and `default` hold ZERO `holdsRole` edges, and
-#: #12047's indicator 3 ("person→role links are produced") is unbuilt. When that
-#: lands, flip this entry to True in the same change that produces the edge —
-#: the abstention is then no longer needed, and the role guard starts redirecting
-#: with no other edit.
+#: ⛔ `False` HERE MEANS "A REDIRECT CANNOT SATISFY IT", NOT "THE PREDICATE IS
+#: UNBUILT". `holdsRole` is a sanctioned person→role predicate
+#: (`docs/ONTOLOGY.md:206`, `:423`, deliberately distinct from `memberOf`) and it
+#: IS produced: `#12047` LANDED — `entity_resolver.wire_holds_role` is called
+#: from `create_entity(..., roleHolder=…)`. What a NAME-MATCHED redirect cannot
+#: do is name a holder, so it cannot produce the edge that keeps the role from
+#: floating. The measurement this comment used to carry ("`live-v4` and
+#: `default` hold ZERO `holdsRole` edges", 2026-11-11) described the graphs at
+#: that date; it is not a statement about the code at this head, and the flip
+#: below is not "when #12047 lands" — it already did.
+#:
+#: ⛔ THE FLIP CONDITION IS NOW: a guard that can RESOLVE A HOLDER for the name it
+#: matched (e.g. a redirect rule that carries the holder, or a resolution step
+#: that names one). Then set this True in the same change that supplies the
+#: holder — the abstention is no longer needed and the role guard starts
+#: redirecting with no other edit.
 LINK_PREDICATES: dict[str, bool] = {"holdsRole": False}
 
 
@@ -559,6 +596,33 @@ def _declared_forms(declared: Any) -> frozenset[str]:
     return kind_forms(declared)
 
 
+def _from_kind_forms(confusion: Confusion) -> frozenset[str]:
+    """Every spelling a write may use for one of a guard's ``fromKinds``.
+
+    A manifest author names a kind BARE (`fromKinds: [invoice]` — the manifest
+    convention, and `pack_guards` now qualifies it to `acme:invoice`), while a
+    write may declare EITHER spelling: the doors accept the bare form of a pack
+    kind as readily as the qualified one. Matching only `kind_forms()` — which
+    adds the bare alias for `core:` keys alone, deliberately, so a guard cannot
+    silently widen across namespaces — would leave the qualified entry deaf to
+    the bare write it was written for.
+
+    So the bare form is added here, for a PACK kind only, and only as a MATCH
+    CANDIDATE: the entry is already installed-gated (R1 target closure in
+    `pack_registry._validate_guards`), and a bare spelling that two packs both
+    declare is the same ambiguity the door's own `named_kind` already
+    normalises. `core:` keys keep `kind_forms`' rule (a core key is its own
+    bare form and nothing else).
+    """
+    forms: set[str] = set()
+    for kind in confusion.from_kinds:
+        forms |= kind_forms(kind)
+        _ns = kind_namespace(kind)
+        if _ns is not None:
+            forms.add(kind.split(":", 1)[1])
+    return frozenset(forms)
+
+
 def _usable_fallback(confusion: Confusion, layer_of: Callable[[str], str | None]
                      ) -> str | None:
     """The guard's core fallback, when it is a LEGAL one — else ``None``.
@@ -700,8 +764,7 @@ def resolve(name: Any, layer: str, declared_kind: Any = None, *,
         if _layer not in confusion.from_layers:
             continue
         if confusion.from_kinds:
-            if not (declared_forms & {f for k in confusion.from_kinds
-                                      for f in kind_forms(k)}):
+            if not (declared_forms & _from_kind_forms(confusion)):
                 continue
         else:
             # The unnamed mode: an EXPLICIT declaration is the caller's answer
@@ -743,7 +806,7 @@ def resolve(name: Any, layer: str, declared_kind: Any = None, *,
                 confusion.link_predicate, False):
             first_skip = first_skip or _skip(
                 accept, confusion, target,
-                f"{SKIP_LINK_PREDICATE_UNIMPLEMENTED}:"
+                f"{SKIP_LINK_PREDICATE_UNAVAILABLE}:"
                 f"{confusion.link_predicate}", layer=_layer)
             continue
 
@@ -849,7 +912,18 @@ def _redirect(confusion: Confusion, *, declared: str | None,
         "message": _ax_message(declared, declared_layer, target, target_layer,
                                confusion.rule, confusion.reason, undo),
     }
+    # ⛔ A DEGRADED redirect is TWO facts and the tally must not collapse them
+    # into one. Ladder step 1 re-files the write to the fallback because the
+    # guard's DECLARED target was not resolvable here — the reply says both, and
+    # the counter must too, or the one instrument this feature ships cannot
+    # answer the question it exists for: "how often does a guard's declared
+    # target fail to resolve?". Measured before this: `accepted` for
+    # (rule, from → fallback), no `skipped` row anywhere, and no way to tell a
+    # healthy fallback redirect from a guard whose target has been uninstalled.
     _record(confusion.rule, declared, target, GuardOutcome.REDIRECT)
+    if degraded and skipped:
+        _record(confusion.rule, declared,
+                str(skipped.get("target") or target), GuardOutcome.SKIPPED)
     return GuardDecision(
         outcome=GuardOutcome.REDIRECT, layer=target_layer, kind=target,
         prop=KIND_PROP[target_layer],
@@ -993,8 +1067,21 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                 fallback=(_qualify(str(c.get("fallback")).strip(), namespace)
                           if c.get("fallback") else ""),
                 reason=str(c.get("reason") or c.get("message") or rule),
-                from_kinds=tuple(str(k) for k in from_kinds
-                                 if isinstance(k, str)),
+                # ⛔ QUALIFIED, exactly like `redirect`/`fallback` — the SAME
+                # defect, on the third field. A manifest spells its OWN kinds
+                # bare (`fromKinds: [invoice]`, the convention `_qualify`'s own
+                # docstring states and the `kind:` field of this same entry
+                # follows), while every write's declared kind is canonicalised
+                # (`objectKind="acme:invoice"`). Unqualified, the entry compiled
+                # to `from_kinds=('invoice',)`, NEVER matched a real write, and —
+                # because a non-empty `from_kinds` also leaves the unnamed/NIL
+                # mode — did not fire for an absent/`other` kind either: the
+                # guard was dead in EVERY mode while `pack validate` printed
+                # `✓ Clean` and exited 0. `_from_kind_forms` then accepts both
+                # spellings of the qualified kind, because the door does.
+                from_kinds=tuple(_qualify(str(k).strip(), namespace)
+                                 for k in from_kinds
+                                 if isinstance(k, str) and str(k).strip()),
                 from_layers=tuple(str(layer).lower() for layer in from_layers
                                   if isinstance(layer, str)),
                 link_predicate=(str(c["linkPredicate"])
@@ -1233,10 +1320,28 @@ def guard_table(*, include_packs: bool = True) -> dict[str, dict]:
         if kind in table:
             continue
         layers = routing_layers(kind)
+        # The ONE authority for the target's layer. `entity_route` — never
+        # `routing_layers`' first element: the table reports ONE layer, and a
+        # kind declared on two may not claim either, which is `entity_route`'s
+        # whole documented rule. Using `sorted(routing_layers(...))[0]` here
+        # made this view disagree with the authority in exactly the case the
+        # authority refuses to answer (latent at this head: 0 multi-layer kinds
+        # measured across 29 core + 73 pack kinds, so nothing shipped was wrong
+        # — the pin `test_the_layer_is_derived_from_kind_layers_not_redeclared`
+        # asserted the expression, so it could not catch it).
+        #
+        # ⚠️ NOT `entity_route(kind)` either, and the difference is real: that
+        # function answers "which ENTITY door may this kind decide" and returns
+        # None for every Point/Event kind (`statement` → None). Reporting None
+        # there would lose a layer the table CAN answer truthfully. The rule is
+        # therefore "one layer ⇒ report it; two ⇒ claim neither", which is what
+        # `entity_route` does INSIDE the entity partition and what this view
+        # needs across all of them.
+        _layers = sorted(layers)
         table[kind] = {
             "kind": kind,
-            "layer": next(iter(sorted(layers)), None),
-            "allowedLayers": sorted(layers),
+            "layer": _layers[0] if len(_layers) == 1 else None,
+            "allowedLayers": _layers,
             "fallback": (by_kind.get(kind) or [{}])[0].get("fallback") or kind,
             "reason": (by_kind.get(kind) or [{}])[0].get("reason"),
             "commonConfusions": by_kind.get(kind, []),
