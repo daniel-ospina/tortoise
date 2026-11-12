@@ -1338,10 +1338,17 @@ def test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row():
     # asserted, so the two arms cannot drift apart silently the way they did before.
     # ⚠️ The bare string has to sit where NO enclosing statement also carries it: a string inside the
     # loop body is invisible to the statement arm because the `for` itself then carries the text
-    # (measured — that is why the first version of this arm could not isolate prose at all).
-    signature = (
-        "    def _update_entity(self, id_val: str, *, _reserved_supplied: tuple = (), "
-        "**props) -> dict:\n")
+    # (measured — that is why the first version of this arm could not isolate prose at all). A bare
+    # string in a NESTED scope is invisible for the same reason (#12020 review round 2, Finding 2).
+    # ⛔ The def line is DERIVED, never hand-copied, and the insert is ASSERTED to have applied:
+    # `_update_entity`'s signature has been edited before (#11836 renamed a binding in this very
+    # function), and a silent `.replace()` no-op would leave the needle ABSENT from the body rather
+    # than prose-carried — measured to pass all four assertions below, because the needle also
+    # occurs in the sibling `_delete_entity`, so `_carrying_statements(...) == []` cannot tell
+    # "prose" from "gone". That is the same vacuous attribution this arm was fixed for, one level
+    # down, so the mutation proves it applied.
+    signature = next(line + "\n" for line in source.splitlines()
+                     if line.startswith(f"    def {symbol}("))
     prose = source.replace(
         loop,
         "            for label, _prop in (\n"
@@ -1351,6 +1358,12 @@ def test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row():
     assert prose != source
     fn_prose = _function_of(prose, symbol)
     assert fn_prose.end_lineno is not None
+    # The prose mutation really applied: the needle is IN the symbol's body …
+    assert needle in _slice(prose.splitlines(), fn_prose), (
+        "the prose insert did not apply, so this arm would be measuring an ABSENT needle rather "
+        f"than prose: {symbol}'s def line drifted — re-derive `signature`")
+    # … but no real statement carries it (the assertion two lines down is the half that would pass
+    # vacuously if the insert had silently missed).
     # The loop half of the claim is deliberately UNTOUCHED by this mutant …
     assert _iterated_store_problem(fn_prose, iterated, prose.splitlines()) is None, (
         "the prose mutant moved the loop too — then its red is the iterated arm's, not the statement "
@@ -1866,8 +1879,8 @@ _STORE_CARRIER = re.compile(
 
 
 #: Scope-defining node types: `ast.stmt` subclasses that establish a RANGE rather than execute a
-#: statement. Excluded as carriers by `_carrying_statements` — a symbol's own body is never the
-#: statement that carries its claim (#12020 review, Finding 2).
+#: statement. Never carriers in `_carrying_statements` — a scope's body is not the statement that
+#: carries its claim, at the cited symbol's level or nested (#12020 review, Finding 2).
 _SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 
@@ -1919,20 +1932,25 @@ def _carrying_statements(universe: list[ast.AST], lines: list[str],
     The residual that remains is a TRAILING comment, which this cannot strip without cutting a `#`
     inside a Cypher string.
     """
-    # The cited symbol (and any other scope-defining ROOT) is the range the claim is bounded TO,
-    # never the statement that carries it: `ast.FunctionDef`/`AsyncFunctionDef`/`ClassDef` are
-    # `ast.stmt` subclasses, so without this a docstring-only needle answers "the function carries
-    # it" — the substring test this whole row replaced, one level up. Module CONSTANTS in
-    # `universe` are deliberately NOT excluded: a writer may hold its clause in one
-    # (`_TURN_WRITE_CYPHER`), and that statement is a real carrier.
-    roots = {id(root) for root in universe if isinstance(root, _SCOPE_NODES)}
+    # The cited symbol is the RANGE the claim is bounded TO, never the statement that carries it:
+    # `ast.FunctionDef`/`AsyncFunctionDef`/`ClassDef` are `ast.stmt` subclasses, so without this a
+    # docstring-only needle answers "the function carries it" — the substring test this whole row
+    # replaced, one level up.
+    # ⛔ Every scope node is skipped, not just the `universe` ROOTS: a NESTED `def`/`class` inside the
+    # cited symbol is its own body, so a needle left in a nested scope's docstring satisfied the arm
+    # the same way (measured — the nested `FunctionDef`'s slice contains the nested body's stores).
+    # Skipping the scope NODE never hides the statements inside it: they are still walked, so a
+    # needle carried by a real nested statement is still found — only "the body of a nested scope"
+    # stops being a carrier.
+    # Module CONSTANTS in `universe` are deliberately NOT excluded: a writer may hold its clause in
+    # one (`_TURN_WRITE_CYPHER`), and that statement is a real carrier.
     hits: list[tuple[ast.stmt, str]] = []
     for root in universe:
         for node in ast.walk(root):
             if not isinstance(node, ast.stmt):
                 continue
-            if id(node) in roots:
-                continue  # the cited symbol is not a statement that carries the needle
+            if isinstance(node, _SCOPE_NODES):
+                continue  # a scope's body is not a statement that carries the needle
             if (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
                     and isinstance(node.value.value, str)):
                 continue  # a docstring is prose, not a statement that stores
@@ -2195,6 +2213,38 @@ def test_a_bare_string_statement_is_not_a_carrier() -> None:
         [_function_of(real, "_f")], real.splitlines(), _PROSE_NEEDLE)
     assert len(found) == 1 and isinstance(found[0][0], ast.For), (
         f"a real statement no longer carries the needle, so the pin above proves nothing: {found}")
+
+    # ⛔ `#12020` review round 2, Finding 2: a NESTED scope's body is not a carrier either. Skipping
+    # only the `universe` ROOTS left this hole open one level down — measured: the same prose inside
+    # a nested `def` satisfied the statement arm, because the nested `FunctionDef`'s slice contains
+    # the nested body's stores. The real nested statement is still found (asserted below), so the
+    # exclusion removes a body from being a "carrier", never the statements inside it.
+    nested_prose = (
+        "def _f() -> None:\n"
+        "    def _inner() -> None:\n"
+        f'        "{_PROSE_NEEDLE}"\n'
+        '        g.query("SET n += $p")\n'
+        "    _inner()\n"
+    )
+    hits_nested = _carrying_statements(
+        [_function_of(nested_prose, "_f")], nested_prose.splitlines(), _PROSE_NEEDLE)
+    assert hits_nested == [], (
+        "a NESTED scope's docstring counts as a carrier — the statement arm can be satisfied by "
+        f"prose one level down: {[(type(n).__name__, t) for n, t in hits_nested]}")
+    # …while a real statement INSIDE that nested scope is still a carrier (the exclusion is about
+    # the scope's body, not about reach into it).
+    nested_real = (
+        "def _f() -> None:\n"
+        "    def _inner() -> None:\n"
+        "        for label, _prop in _CANONICAL_ENTITY_ID_PROPS:\n"
+        "            pass\n"
+        "    _inner()\n"
+    )
+    hits_nested_real = _carrying_statements(
+        [_function_of(nested_real, "_f")], nested_real.splitlines(), _PROSE_NEEDLE)
+    assert len(hits_nested_real) == 1 and isinstance(hits_nested_real[0][0], ast.For), (
+        "a real statement inside a nested scope stopped being a carrier — the exclusion went too "
+        f"far: {hits_nested_real}")
 
 
 
