@@ -1273,8 +1273,11 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
     # ⛔ The EDGE spelling comes from `cache_projection.relationship_target`, its ONE owner
     # (`#12015` review): a format composed independently here and in the projection is how one
     # of them moves and leaves the other's consumer classifying an edge as a record label.
-    # Imported locally — this module is imported by the projection's own entry points, and a
-    # module-level import of the projection from here would close that cycle.
+    # Imported at the POINT OF USE, which is this module's own convention for reaching out
+    # (`alert_channel`, `record_backup`, `backup_sweep`, `hosted_api` all import from here the
+    # same way) — a DR verb should not pull another subsystem's import graph in at module
+    # scope. There is no cycle here (`cache_projection` never imports `hosted_backup`), so
+    # module scope would also work; this is the lighter of two valid choices, not a constraint.
     from tortoise.cache_projection import relationship_target
 
     dropped_vector_labels = sorted({
