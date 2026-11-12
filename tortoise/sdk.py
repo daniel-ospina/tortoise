@@ -17037,11 +17037,13 @@ class TortoiseSDK:
                                 # duplicate's value went with the node. "did not
                                 # carry" is true of both cases and the
                                 # parenthetical says which.
-                                said += (
-                                    "; did not carry "
-                                    f"{', '.join(residual)} "
-                                    "(one value per slot — the canonical's "
-                                    "differs or is absent)")
+                                # Each residual item states its OWN reason (a
+                                # differing slot, a dual-spelling conflict on the
+                                # duplicate, an #1370 short-circuit) — a blanket
+                                # parenthetical here asserted "the canonical's
+                                # differs or is absent" over two of those three.
+                                said += ("; did not carry "
+                                         f"{'; '.join(residual)}")
                             if undeclared:
                                 # The fold cannot carry a prop it does not
                                 # declare, and the duplicate is gone — so the

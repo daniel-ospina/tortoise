@@ -203,10 +203,13 @@ _FOLD_ATTACHMENT_RELS = ("aboutObject", "aboutSubject", "aboutEvent",
 #:
 #: ⚠️ Permitted is not the same as POSSIBLE for one of them: a `:Source` is
 #: `url`-keyed and carries NO `id` (`projection._mint_source_stub`), while the
-#: writer addresses its target by `{id:$id}` — so an `aboutSource` link is
-#: refused as `unaddressable` in a real graph rather than carried. It is
-#: fail-closed (nothing is lost) and it is reported, not silently dropped, but
-#: the module must not claim it as carried. `aboutDocument` (Point→Source) and
+#: writer matches its target by `{id:$tid}` — so an `aboutSource` link reaches the
+#: writer, finds nothing, and the fold refuses as `link_not_carried` ("did not
+#: land"), NOT as `unaddressable` (an earlier version of this comment said the
+#: latter; the outbound read coalesces `t.url` into the address column, so a real
+#: Source is addressable and simply not addressable the way `link_entity` asks).
+#: Either way it is fail-closed — nothing is lost — and it is reported, never
+#: silently dropped; the module must not claim it as carried. `aboutDocument` (Point→Source) and
 #: `aboutPoint` (whose only permitted direction is Event→Point) are NOT among
 #: them: there is no legal writer for the duplicate's copy of those, so the fold
 #: REFUSES rather than dropping it.
@@ -319,8 +322,20 @@ _REPORTED_FIELDS = ("confidence", "pointKind", "eventId", "status",
 #: noise on the receipt (loud, harmless) rather than as a silent omission, and
 #: `test_a_clean_capture_point_reports_no_undeclared_props` is what reds when
 #: this list has drifted behind the projection's own writes.
+#: ⚠️ `sourceVersionTransit` is the projection's own bookkeeping (`projection`
+#: stamps it beside `provenanceSource` on a captured Point) — it is NOT evidence,
+#: and it stays structural. `provenanceSource` is the OTHER half: it is a
+#: PROVENANCE POINTER (`graph_census.PROVENANCE_POINTER_PROPS` names exactly
+#: `("provenanceSource", "extractedFrom")`), so it is read as a REF — a
+#: differing one refuses the fold like any other source reference, and an equal
+#: one is silent.
 _STRUCTURAL_PROPS = ("id", "content", "content_hash", "createdAt",
-                     "updatedAt")
+                     "updatedAt", "sourceVersionTransit",
+                     # EP's own recompute bookkeeping, written by the projection on
+                     # a Point the epistemic engine has touched (`ep_dirty`,
+                     # `ep_dirty_at`). Not evidence: the flag says "recompute me",
+                     # and its value is derived from the graph, not asserted.
+                     "ep_dirty", "ep_dirty_at")
 
 #: Everything the duplicate read DECLARES it knows: the occurrence address, the
 #: single slots in BOTH spellings (a producer stores `when` or `validFrom`, and
@@ -334,7 +349,16 @@ _DECLARED_PROPS = frozenset(
     | {write_key for _, write_key in _SINGLE_SLOTS}
     | set(_REPORTED_FIELDS)
     | set(_STRUCTURAL_PROPS)
-    | {"extractedFrom", "extractedFromAll"}
+    #: `provenanceSource` is the OTHER provenance pointer
+    #: (`graph_census.PROVENANCE_POINTER_PROPS` names exactly
+    #: `("provenanceSource", "extractedFrom")`): it is DECLARED here because it is
+    #: READ — as a ref, through `_refs_from` — not reported as an unknown.
+    #: ⚠️ Omitting it from this union put it straight into `undeclared`, so every
+    #: Point the m2 capture path mints (the projection stamps it) got a receipt
+    #: saying the fold "could not carry: provenanceSource" over a value it had
+    #: compared and allowed. The VGATE caught it; the stub-based drift test could
+    #: not, because that producer never writes the prop.
+    | {"extractedFrom", "extractedFromAll", "provenanceSource"}
 )
 
 #: The edge ATTRIBUTES the fold carries. `confidence` is the only one a capture
@@ -352,6 +376,25 @@ _DECLARED_PROPS = frozenset(
 #: only through a producer that does, and a lane reading this must not assume the
 #: attribute class is closed.
 _CARRIED_EDGE_ATTRS = ("confidence",)
+
+#: The duplicate's outbound walk. ⚠️ UNFILTERED: the caller's `DETACH DELETE`
+#: takes every edge, so a rel-type filter here would answer for the subset this
+#: module knows and say nothing about the rest — the shape the typed-pattern
+#: census was blind to. `type(r) IN [...]` was that filter; the partition is in
+#: PYTHON and anything outside `_FOLD_ATTACHMENT_RELS` becomes an
+#: `unexpected_edge` refusal instead of an orphaning delete.
+#:
+#: It is a CONSTANT because `_CARRIED_EDGE_ATTRS` is asserted against it by
+#: `assert_evidence_vocabulary` — the attribute bound was declared and read by
+#: NOTHING (the "second constant nothing reads" shape this module calls out
+#: elsewhere), so adding a read without declaring it could not drift-flag.
+#: `url` as well as `id`: a provenance edge targets a `:Source`, which is
+#: `url`-keyed and carries NO id (`projection._mint_source_stub`), so
+#: `coalesce(t.id,'')` would hand the provenance check an empty string and
+#: refuse every capture Point's own `extractedFrom` edge.
+_OUTBOUND_EDGES_QUERY = (
+    "MATCH (d:Point {id:$dup})-[r]->(t) "
+    "RETURN type(r), head(labels(t)), coalesce(t.id, t.url, ''), r.confidence")
 
 
 @dataclass(frozen=True)
@@ -395,6 +438,11 @@ class FoldEvidence:
     #: two spellings — `when`/`validFrom`). Reported as residuals by the carry:
     #: the fold cannot carry both and must not cross the difference in silence.
     slot_conflicts: tuple[str, ...] = ()
+    #: The target identities of the duplicate's OUTBOUND `_PROVENANCE_RELS` edges
+    #: (`id`, or `url` for a `:Source`). Whether one may die with the node is the
+    #: CANONICAL's question — it is exempt only when the canonical carries the
+    #: same edge — so the read collects them and the carry decides.
+    provenance_edges: tuple[str, ...] = ()
     #: `(rel, direction)` for every edge the duplicate carries OUTSIDE
     #: `_FOLD_ATTACHMENT_RELS` (`direction` is `"out"` or `"in"`). The delete
     #: takes EVERY edge, so an unfiltered read is the only way to know nothing
@@ -411,7 +459,8 @@ class FoldEvidence:
     ambiguous: bool = False
 
 
-def _refs_from(scalar_ref: Any, all_refs: Any) -> set[str] | None:
+def _refs_from(scalar_ref: Any, all_refs: Any,
+               prov_source: Any = None) -> set[str] | None:
     """The provenance refs a row holds, from ONE normaliser.
 
     ⚠️ A string is a SEQUENCE, so `*(all_refs or ())` iterated a malformed
@@ -430,7 +479,7 @@ def _refs_from(scalar_ref: Any, all_refs: Any) -> set[str] | None:
     elif all_refs is not None and not isinstance(all_refs, (list, tuple)):
         return None
     refs: set[str] = set()
-    for ref in (scalar_ref, *(all_refs or ())):
+    for ref in (scalar_ref, prov_source, *(all_refs or ())):
         if isinstance(ref, str) and ref.strip():
             refs.add(ref.strip())
     return refs
@@ -444,7 +493,33 @@ _EVIDENCE_SELECT = (
     "RETURN {alias}.extractedFrom, {alias}.extractedFromAll, {alias}.quote, "
     "       {alias}.span_start, {alias}.span_end, {alias}.source_turn_id, "
     "       {alias}.search_keys, {alias}.when, {alias}.validFrom, "
-    "       {alias}.eventId, {alias}.status, {alias}.is_operator")
+    "       {alias}.eventId, {alias}.status, {alias}.is_operator, "
+    "       {alias}.provenanceSource")
+
+
+def _assert_carried_edge_attrs(query: str) -> None:
+    """The edge-attribute bound must be READ by something, or it cannot drift-flag.
+
+    `_CARRIED_EDGE_ATTRS` was declared and read by NOTHING — the "second
+    constant nothing reads" shape this module calls out elsewhere — so a new
+    attribute read added to the query, or a carried attribute dropped from it,
+    would leave the declaration drifting in silence.
+
+    ⚠️ The query arrives as an ARGUMENT, never by naming `_OUTBOUND_EDGES_QUERY`
+    here: the census derives an every-relationship-type SITE for any symbol whose
+    statement references that constant, and this function only inspects the TEXT
+    (no query is ever issued) — a shape the register has no honest slot for. The
+    call site is `read_fold_evidence`, which owns §13 row 42 for that walk.
+    """
+    read = {name for name in _CARRIED_EDGE_ATTRS if f"r.{name}" in query}
+    if read != set(_CARRIED_EDGE_ATTRS):
+        raise AssertionError(
+            "#9437: `_CARRIED_EDGE_ATTRS` declares attributes the outbound read "
+            f"does not select: {sorted(set(_CARRIED_EDGE_ATTRS) - read)}")
+    if "r.confidence" not in query:                   # non-vacuity
+        raise AssertionError(
+            "#9437: the outbound read selects no edge attribute at all, so the "
+            "declaration above is unmeasurable")
 
 
 def assert_evidence_vocabulary() -> None:
@@ -486,6 +561,7 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
     only the first may authorise a delete. The caller REFUSES the fold on
     ``None`` rather than treating an unreadable node as an empty one.
     """
+    _assert_carried_edge_attrs(_OUTBOUND_EDGES_QUERY)
     try:
         rows = proj.g.query(
             _EVIDENCE_SELECT.format(alias="d")
@@ -501,8 +577,8 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         return FoldEvidence(ambiguous=True)
     (scalar_ref, all_refs, quote, span_start, span_end, source_turn_id,
      search_keys, when, validfrom, _event_id, _status, _is_operator,
-     _confidence, _point_kind, _props) = rows[0]
-    refs = _refs_from(scalar_ref, all_refs)
+     prov_source, _confidence, _point_kind, _props) = rows[0]
+    refs = _refs_from(scalar_ref, all_refs, prov_source)
     if refs is None:
         return None
     # The open set: what the node carries that this module does not read. Read
@@ -550,37 +626,24 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         malformed_address = str(exc)
 
     try:
-        # ⚠️ UNFILTERED: the caller's `DETACH DELETE` takes every edge, so a
-        # rel-type filter here would answer for the subset this module knows and
-        # say nothing about the rest — the same shape the typed-pattern census
-        # was blind to. `type(r) IN [...]` was that filter; the partition is now
-        # in PYTHON and anything outside `_FOLD_ATTACHMENT_RELS` becomes an
-        # `unexpected_edge` refusal instead of an orphaning delete.
-        edges = proj.g.query(
-            "MATCH (d:Point {id:$dup})-[r]->(t) "
-            # `url` as well as `id`: a provenance edge targets a `:Source`, which
-            # is `url`-keyed and carries NO id (`projection._mint_source_stub`),
-            # so `coalesce(t.id,'')` would hand the provenance check an empty
-            # string and refuse every capture Point's own `extractedFrom` edge.
-            "RETURN type(r), head(labels(t)), coalesce(t.id, t.url, ''), "
-            "r.confidence",
-            params={"dup": dup_id}).result_set
+        edges = proj.g.query(_OUTBOUND_EDGES_QUERY,
+                             params={"dup": dup_id}).result_set
     except Exception:
         return None
     attachments: list[tuple[str, str, str, float | None]] = []
     unaddressable: list[tuple[str, str]] = []
     unexpected: list[tuple[str, str]] = []
+    provenance_targets: list[str] = []
     for rel, label, target_id, confidence in edges:
         if not isinstance(rel, str) or not isinstance(label, str):
             return None
-        if rel in _PROVENANCE_RELS and target_id.strip() in refs:
-            # The ONE case the field check covers: this edge IS the projection of
-            # a ref the row also holds, and `uncarried_source_ref` has already
-            # established the canonical carries it. An exemption applied to every
-            # `extractedFrom` edge instead (the earlier shape) skipped the edge
-            # BEFORE the ref check could see it, so an edge pointing at a source
-            # the row's own field does not name was destroyed on an `ok=True`
-            # fold with the receipt claiming no evidence at all.
+        if rel in _PROVENANCE_RELS:
+            # COLLECTED, not exempted: whether this edge may die depends on the
+            # CANONICAL (does it have the same edge?), which this read cannot
+            # answer. An exemption granted here on the FIELD alone was false twice
+            # over — it skipped the edge before the ref check could see it, and
+            # the field's presence does not imply the canonical's edge exists.
+            provenance_targets.append(target_id.strip())
             continue
         if rel not in _FOLD_ATTACHMENT_RELS:
             unexpected.append((rel, "out"))
@@ -636,6 +699,7 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         inbound=tuple(inbound),
         support={k: v for k, v in support.items() if v is not None},
         slot_conflicts=tuple(slot_conflicts),
+        provenance_edges=tuple(provenance_targets),
         undeclared=undeclared_props,
         unexpected_edges=tuple(unexpected),
     )
@@ -663,10 +727,21 @@ def _canonical_view(proj: Any, canonical_id: str) -> dict | None:
         return None
     (scalar_ref, all_refs, quote, span_start, span_end, source_turn_id,
      search_keys, when, validfrom, _event_id, _status, _is_operator,
-     _confidence, _point_kind) = rows[0]
-    refs = _refs_from(scalar_ref, all_refs)
+     _prov_source, _confidence, _point_kind) = rows[0]
+    refs = _refs_from(scalar_ref, all_refs, _prov_source)
     if refs is None:
         return None
+    try:
+        # The canonical's OWN provenance edges. A provenance edge on the
+        # duplicate may only die if the canonical holds the same one — the field
+        # says which source the row names, not that an edge to it exists.
+        prov_rows = proj.g.query(
+            "MATCH (:Point {id:$id})-[:extractedFrom]->(s) "
+            "RETURN coalesce(s.id, s.url, '')",
+            params={"id": canonical_id}).result_set
+    except Exception:
+        return None
+    prov_targets = {str(r[0]).strip() for r in prov_rows if r and r[0]}
     return {
         "refs": refs,
         "quote": quote, "span_start": span_start, "span_end": span_end,
@@ -675,6 +750,7 @@ def _canonical_view(proj: Any, canonical_id: str) -> dict | None:
         "confidence": _confidence, "pointKind": _point_kind,
         "eventId": _event_id,
         "status": _status, "is_operator": _is_operator,
+        "prov_targets": prov_targets,
     }
 
 
@@ -709,8 +785,8 @@ def _already_written(out: dict) -> str:
         # may hold NOTHING (`confidence` absent), and then nothing was kept — the
         # duplicate's value went with the node. "not carried" is true in both
         # cases; the parenthetical says why (a conflicting value, or an absence).
-        said += ("; did not carry " + ", ".join(out["residual"])
-                 + " (one value per slot — the canonical's differs or is absent)")
+        # Each residual item carries its own reason — see the caller's note.
+        said += "; did not carry " + "; ".join(out["residual"])
     return said
 
 
@@ -916,6 +992,20 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                           "inbound link(s))")
         return out
 
+    # 2b) A provenance EDGE whose target the canonical has no edge to. The ref
+    #     check above establishes a FIELD; this establishes the EDGE, which is
+    #     what the delete actually removes. Exempting the edge on the field alone
+    #     (the earlier shape) claimed "the canonical carries it" from a fact that
+    #     does not imply it.
+    orphaned = sorted({t for t in evidence.provenance_edges
+                       if t and t not in canonical["prov_targets"]})
+    if orphaned:
+        out["reason"] = "unexpected_edge"
+        out["blocked"] = ("it carries a provenance edge to "
+                          f"{orphaned[0]!r} that the canonical has no edge to, "
+                          "and the delete would orphan it")
+        return out
+
     # 5) Evidence of SUPPORT the fold must not write but must not cross in
     #    silence: the canonical's own value stands (first-writer; `confidence`
     #    is EP's field, not a capture writer's) and the difference is reported.
@@ -940,7 +1030,8 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             continue
         if address_held:
             if canonical.get(key) != evidence.scalar[key]:
-                out["residual"].append(key)
+                out["residual"].append(
+                    f"{key} — the canonical's value differs")
         else:
             to_write[key] = evidence.scalar[key]
     # 6b) single-slot facts. `when`/`validFrom` are ONE slot: the occupancy
@@ -960,7 +1051,8 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                 # value lives on `validFrom` sends the reader to a field the
                 # node does not hold.
                 out["residual"].append(
-                    key if key == write_key else f"{key} (as {write_key})")
+                    (key if key == write_key else f"{key} (as {write_key})")
+                    + " — the canonical's value differs")
             continue
         to_write[write_key] = value
 
@@ -1020,6 +1112,13 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             created = link_entity(proj, "Point", canonical_id, target_id,
                                   edge_type=rel, target_label=label, sdk=sdk,
                                   confidence=confidence)
+            # ⚠️ COUNTED HERE, before the read-back: `created` is what the WRITER
+            # reported, and the read-back below can RAISE. Counting after it left
+            # `created: 0` on a refusal that had already added the link, so the
+            # disclosure said "nothing changed" over a canonical that gained one
+            # (measured on a real graph with `_carried` patched to raise).
+            if created:
+                out["created"] += 1
             present, grading = _carried(proj, canonical_id, rel, label,
                                         target_id)
         except Exception as e:
@@ -1030,11 +1129,13 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             failures.append(f"{rel}→{target_id} ({type(e).__name__}: {e})")
             continue
         if not present:
+            # The writer said it created the edge and the read-back does not see
+            # it: it did NOT land, so it must not be counted as created either.
+            if created:
+                out["created"] -= 1
             failures.append(f"{rel}→{target_id} (did not land)")
             continue
         out["carried"] += 1
-        if created:
-            out["created"] += 1
         # ⚠️ The LINK is carried; its GRADING may not be. `link_entity`
         # short-circuits a pre-existing edge without re-grading it (#1370),
         # so when the canonical already held this link the duplicate's

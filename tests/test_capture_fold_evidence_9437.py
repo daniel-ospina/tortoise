@@ -423,6 +423,9 @@ class _FakeGraph:
         #: gained when they stopped being silently structural.
         self.dup_status = dup_status
         self.dup_is_operator = dup_is_operator
+        #: The canonical's own `extractedFrom` targets — a provenance edge on the
+        #: duplicate may only die when the canonical holds the same one.
+        self.canon_prov_targets = []
         self.raise_on = set(raise_on)
         #: The DUPLICATE's whole property map — the `properties(d)` column the
         #: open-set report reads. Kept OUT of the shared row tuples so every
@@ -444,7 +447,9 @@ class _FakeGraph:
         """
         base = tuple(row)
         assert len(base) == 12, f"fixture row is {len(base)} wide, expected 12"
-        return (*base[:10], status, is_operator, *base[10:])
+        # query order: evidence×10, status, is_operator, provenanceSource,
+        # confidence, pointKind
+        return (*base[:10], status, is_operator, None, *base[10:])
 
     def apply_slot(self, props: dict) -> None:
         """Simulate `update_point` landing: the read-back must SEE it."""
@@ -493,6 +498,9 @@ class _FakeGraph:
             return SimpleNamespace(
                 result_set=[] if self.canon_row is None else [
                     self._to_query_row(self.canon_row, None, None)])
+        if "-[:extractedFrom]->(s)" in q:
+            return SimpleNamespace(
+                result_set=[[t] for t in self.canon_prov_targets])
         if "head(collect(r.confidence))" in q:
             target = (kw.get("params") or {}).get("target")
             if isinstance(self.carried, dict):
@@ -984,6 +992,29 @@ def test_the_undeclared_report_does_not_depend_on_the_fold_succeeding():
     assert out["undeclared"] == ["author"], out
 
 
+def test_a_point_the_real_write_door_mints_reports_no_undeclared_props(sdk):
+    """The drift guard on a REAL producer, not a stub.
+
+    ⚠️ The earlier arm ran a stub whose payload shape differs from the SDK's own
+    write door, so it could not see the props the projection actually writes —
+    and `create_point` writes THREE this module did not declare
+    (`provenanceSource`, `sourceVersionTransit`, `ep_dirty`/`ep_dirty_at`).
+    `provenanceSource` is a provenance POINTER (`graph_census
+    .PROVENANCE_POINTER_PROPS` names `provenanceSource`/`extractedFrom`), so it is
+    read as a REF; the rest are bookkeeping. This is the arm that reds when
+    either fact drifts.
+    """
+    sdk.create_point("statement", "a claim", dedup=False)
+    props = sdk._get_proj().g.query(
+        "MATCH (p:Point) WHERE p.is_operator <> true RETURN properties(p)"
+    ).result_set[0][0]
+    assert not (set(props) - capture_fold._DECLARED_PROPS), (
+        "a real write door mints props this fold does not declare (so every fold "
+        f"of such a Point reports them as dropped): "
+        f"{sorted(set(props) - capture_fold._DECLARED_PROPS)}"
+    )
+
+
 def test_a_clean_capture_point_reports_no_undeclared_props(sdk, monkeypatch):
     """NOISE CONTROL, and the drift guard for `_STRUCTURAL_PROPS`.
 
@@ -1200,13 +1231,14 @@ def test_a_provenance_edge_that_is_not_one_of_the_rows_refs_refuses():
     out = capture_fold.carry_fold_evidence(
         _FakeProj(graph), "pt_dup", "pt_canon")
     assert out["ok"] is False and out["reason"] == "unexpected_edge", out
-    assert "extractedFrom (outbound)" in out["blocked"], out
+    assert "provenance edge to 'session:STALE'" in out["blocked"], out
 
 
 def test_a_provenance_edge_on_the_canonicals_own_ref_is_exempt():
     """…and the exemption still holds for the case it exists for: the edge IS the
     projection of a ref the canonical already carries."""
     graph = _FakeGraph(edges=[("extractedFrom", "Source", "session:s", None)])
+    graph.canon_prov_targets = ["session:s"]      # the canonical holds that edge
     out = capture_fold.carry_fold_evidence(
         _FakeProj(graph), "pt_dup", "pt_canon")
     assert out["ok"] is True, out
@@ -1288,3 +1320,97 @@ def test_a_refused_fold_still_names_the_open_set_on_the_captures_receipt(
     assert any("kept distinct" in w for w in meta["warnings"]), meta["warnings"]
     assert any("cannot carry: author" in w for w in meta["warnings"]), \
         meta["warnings"]
+
+
+# ── 13) round 10: what the writer counted, and what the bound is read by ──
+
+
+def test_a_link_counted_before_the_read_back_still_counts_when_it_raises(
+        monkeypatch):
+    """`created` is what the WRITER reported, counted BEFORE the read-back that
+    can raise.
+
+    RED before round 10 — measured on a real graph with `_carried` patched to
+    raise: the canonical gained the link, while the refusal reported
+    `created: 0` and printed no "ALREADY added" clause, so "kept distinct" read
+    as "nothing changed" over a node that had gained one.
+    """
+    from tortoise import session_link
+    monkeypatch.setattr(session_link, "link_entity", lambda *a, **kw: True)
+
+    def boom(*a, **kw):
+        raise RuntimeError("read-back failed")
+
+    monkeypatch.setattr(capture_fold, "_carried", boom)
+    graph = _FakeGraph(edges=[("aboutObject", "Object", "obj_1", None)])
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "link_not_carried", out
+    assert out["created"] == 1, out
+    assert "ALREADY added 1 attachment link(s)" in out["blocked"], out["blocked"]
+
+
+def test_a_provenance_edge_the_canonical_lacks_refuses_even_when_the_ref_matches():
+    """The field is not the edge: a duplicate's provenance edge may only die when
+    the CANONICAL holds the same edge. The earlier exemption granted it on the
+    field alone and claimed "the canonical carries it" from a fact that does not
+    imply it.
+    """
+    graph = _FakeGraph(edges=[("extractedFrom", "Source", "session:s", None)])
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")     # no canonical edges
+    assert out["ok"] is False and out["reason"] == "unexpected_edge", out
+    assert "provenance edge to 'session:s'" in out["blocked"], out
+
+
+def test_the_carried_edge_attr_bound_is_read_by_the_module_guard(monkeypatch):
+    """`_CARRIED_EDGE_ATTRS` was declared and read by NOTHING — a "second
+    constant nothing reads" — so a new attribute read, or a dropped one, left the
+    declaration drifting in silence. `assert_evidence_vocabulary` now asserts it
+    against the query that reads it.
+    """
+    capture_fold._assert_carried_edge_attrs(capture_fold._OUTBOUND_EDGES_QUERY)
+    monkeypatch.setattr(capture_fold, "_CARRIED_EDGE_ATTRS",
+                        ("confidence", "weight"))
+    with pytest.raises(AssertionError, match="does not select"):
+        capture_fold._assert_carried_edge_attrs(
+            capture_fold._OUTBOUND_EDGES_QUERY)
+
+
+def test_a_real_source_link_refuses_as_link_not_carried(sdk):
+    """A `:Source` is `url`-keyed, so its address is the url; the writer matches
+    `{id:$tid}`, finds nothing, and the fold refuses as `link_not_carried` — NOT
+    `unaddressable`, which an earlier comment and test claimed.
+    """
+    proj = sdk._get_proj()
+    for pid, content in (("pt_src_dup", "the duplicate claim with a source"),
+                         ("pt_src_canon", "the canonical claim")):
+        sdk.create_point("statement", content, id=pid, dedup=False)
+    proj.g.query(
+        "MATCH (p:Point {id:'pt_src_dup'}) "
+        "CREATE (p)-[:aboutSource]->(:Source {url:'doc:policy-9437'})")
+    out = capture_fold.carry_fold_evidence(proj, "pt_src_dup", "pt_src_canon",
+                                          sdk=sdk)
+    assert out["ok"] is False, out
+    assert out["reason"] == "link_not_carried", out
+    assert "did not land" in out["blocked"], out["blocked"]
+
+
+def test_a_provenance_source_on_the_duplicate_is_declared_not_undeclared():
+    """`provenanceSource` is a provenance POINTER, read as a ref — so it is
+    DECLARED, and an equal value is silent.
+
+    RED before round 11: it was read by `_refs_from` but missing from
+    `_DECLARED_PROPS`, so it fell into the open set — every capture Point the m2
+    path mints carried a receipt clause claiming the fold "could not carry:
+    provenanceSource" over a value it had compared and allowed. Neither drift
+    test saw it: `create_point` does not write the prop and the stub producer
+    does not either.
+    """
+    graph = _FakeGraph(dup_props={"provenanceSource": "session:s",
+                                  "sourceVersionTransit": "v1"})
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["undeclared"] == [], out
+    assert "provenanceSource" not in out["undeclared"], out
+    assert "sourceVersionTransit" not in out["undeclared"], out
