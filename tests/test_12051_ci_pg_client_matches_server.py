@@ -6033,7 +6033,24 @@ def test_an_arithmetic_or_parameter_redirect_is_not_a_comment_boundary() -> None
     # the direction that has no cover otherwise: `#` must stay DATA inside
     # `(( … ))` / `$(( … ))` / `${…}`, which the FRAMES enforce — not the class.
     replacement = 'sudo rsync -a "$b/17/bin/" "$b/16/bin/"'
-    for opener in ("a=1; (( a >#0 ))", "a=1; (( a <#0 ))", "echo ${x:->#y}", "echo ${x:-<#y}"):
+    for opener in (
+        "a=1; (( a >#0 ))",
+        "a=1; (( a <#0 ))",
+        "echo ${x:->#y}",
+        "echo ${x:-<#y}",
+        # ⛔ AND THESE THREE CARRY A REAL BOUNDARY CHARACTER, WHICH IS WHY THEY PIN
+        # THE FRAME ITSELF (#12279 REVIEW 6, P3). The rows above have `#` after a
+        # character that is NOT in `COMMENT_START_CHARS`, so a frame-less stripper
+        # leaves them green as well and this test could not see `M8` on its own — it
+        # only redded when the redirect mutation AND the frame mutation were applied
+        # together, which made the sentence below true about the pair and false about
+        # this test. After `|`, `;` or `&` the flat class WOULD strip, so only the
+        # `arith` frame keeps the `#` as DATA in these three: reverting the frames
+        # reds THIS test, which is what the claim below asserts.
+        "a=1; (( a|#0 )) || true",
+        "a=1; (( a;#0 )) || true",
+        "a=1; (( a&#0 )) || true",
+    ):
         step = {"run": f"b=/usr/lib/postgresql; {opener}; {replacement}"}
         survived = _run_commands(step)
         assert replacement in survived, (
@@ -6098,6 +6115,21 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         # bash prints ` # y` (or `a # b`) and runs the replacement.
         "unset x; echo ${x:- # y}",
         "unset x; echo ${x:-a # b}",
+        # ⛔ A FRAME'S INTERIOR IS READ BY THE *FRAME*, NOT BY THE FLAT CLASS (#12279
+        # REVIEW 6, P1 — one mechanism, three measured RED→GREEN faces). (a) An
+        # extglob word is ONE word inside too: `shopt -s extglob; echo @(a|#b)`
+        # PRINTS `@(a|#b)`, yet the `|`/space/`(` there used to set a boundary and cut
+        # the line at the `#`. (b) A `]]` GLUED to a word is regex DATA, not the
+        # conditional's closer — `[[ $v =~ a]]|#b ]]` is a live line, and `[[ -n x]]`
+        # is a syntax error, so an unspaced `]]` never terminates. (c) A `(` inside
+        # `[[ … ]]` is a regex group, not a shell one, so its `)` must not set a
+        # boundary either. All three erased the replacement while bash ran it.
+        "echo @(a|#b)",
+        "echo @(a #b)",
+        "echo @(a|(#b))",
+        'v=x; [[ $v =~ a]]|#b ]] || true',
+        'v=x; [[ $v =~ a|]]b ]] || true',
+        'v=x; [[ $v =~ (a|b)]]|#b ]] || true',
         # ⛔ A `#` AFTER AN OPENER THAT BEGINS NO WORD IS DATA TOO (#12279 REVIEW 4,
         # P0, measured RED→GREEN twice). The opener itself used to set the boundary,
         # so the line was truncated AT THE `(` and every rule arm went blind.
@@ -6152,6 +6184,18 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         "a comment after a plain `(` survived, so the whole line still ran: "
         f"{_run_commands(step)!r}"
     )
+
+    # CONTROL: a REAL trailing comment after a CLOSED frame still strips (#12279
+    # REVIEW 6, P1's other direction — making the interior data must not protect the
+    # text after the closer). Both are comments to bash.
+    for line in (
+        'v=x; [[ -n $v ]] || true # was: ' + replacement,
+        "echo @(a|b) # was: " + replacement,
+    ):
+        step = {"run": line}
+        assert replacement not in _run_commands(step), (
+            f"a REAL trailing comment after a closed frame survived: {_run_commands(step)!r}"
+        )
 
 
 def test_without_comment_is_the_same_rule_as_the_stripper() -> None:
@@ -7089,7 +7133,7 @@ def _strip_trailing_comment(line: str) -> str:
             boundary = False
             index += 1
             continue
-        if char == "#" and (braces or conditional or arith):
+        if char == "#" and (braces or conditional or arith or "extglob" in stack):
             boundary = False
             index += 1
             continue
@@ -7124,7 +7168,7 @@ def _strip_trailing_comment(line: str) -> str:
             boundary = False
             index += 2
             continue
-        if char == "]" and index + 1 < len(line) and line[index + 1] == "]" and conditional:
+        if char == "]" and index + 1 < len(line) and line[index + 1] == "]" and conditional and boundary:
             conditional -= 1
             boundary = False
             index += 2
@@ -7134,7 +7178,7 @@ def _strip_trailing_comment(line: str) -> str:
             boundary = False
             index += 2
             continue
-        if char == ")" and index + 1 < len(line) and line[index + 1] == ")" and arith:
+        if char == ")" and index + 1 < len(line) and line[index + 1] == ")" and arith and boundary:
             arith -= 1
             boundary = False
             index += 2
@@ -7158,8 +7202,26 @@ def _strip_trailing_comment(line: str) -> str:
             # line at the `(` and blinded every rule arm while bash ran the
             # replacement. A `(` inside `${…}`, the `(` of an extglob pattern, and
             # the second `(` of `((` are word parts: no word begins there.
-            if braces or (index and previous in "?*+@!"):
+            if braces or conditional or arith:
+                # ⛔ INSIDE `[[ … ]]` / `(( … ))` A `(` IS A REGEX/ARITHMETIC GROUP, NOT
+                # A SHELL ONE (#12279 REVIEW 5, P1, measured RED→GREEN). It pushed a
+                # GROUP frame, whose `)` set `boundary = True`, after which a GLUED
+                # `]]` closed the conditional early and the following `|#` — DATA to
+                # bash — was stripped and the line ERASED:
+                # `v=x; [[ $v =~ (a|b)]]|#b ]] || true` really replaces.
                 stack.append("word")
+                boundary = False
+            elif index and previous in "?*+@!":
+                # ⛔ AN EXTGLOB `@( … )` IS ONE WORD **INSIDE** AS WELL AS AT ITS
+                # CLOSER (#12279 REVIEW 5, P1, measured RED→GREEN). The closer was
+                # fixed two rounds ago, but the interior was still read by the flat
+                # class, so `|`, `(`, `;`, `&` and space set `boundary = True` inside
+                # ONE word: `echo @(a|#b)` is a single word to bash (it PRINTS
+                # `@(a|#b)`), yet the guard cut at the `|` and ERASED the rest of the
+                # line — the replacement included. The frame is therefore its own
+                # kind, and while it is on the stack no character opens a word and a
+                # `#` is DATA.
+                stack.append("extglob")
                 boundary = False
             elif previous == "(":
                 stack.append("arith")
@@ -7184,14 +7246,18 @@ def _strip_trailing_comment(line: str) -> str:
             # erased the live line. `$(`/`=()` frames are therefore left on the
             # stack: an unconfirmable `)` is not a boundary (fail closed — the tail
             # stays live and the arms still see it).
-            if stack and stack[-1] == "group":
-                stack.pop()
-                boundary = True
+            if stack and stack[-1] in {"group", "extglob"}:
+                kind = stack.pop()
+                boundary = kind == "group"
             else:
                 boundary = False
             index += 1
             continue
-        boundary = char in COMMENT_START_CHARS
+        # ⛔ INSIDE AN EXTGLOB WORD NOTHING IS AN OPERATOR (#12279 REVIEW 5, P1): the
+        # frame's interior is one shell WORD, so a `|`/`(`/space there must not set a
+        # boundary either — the same "derive it from the FRAME, not the character"
+        # rule R11 applied to the `(` opener.
+        boundary = char in COMMENT_START_CHARS and "extglob" not in stack
         index += 1
     return line
 
