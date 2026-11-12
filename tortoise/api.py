@@ -288,11 +288,11 @@ def _refuse_uncallerable_record_keys(fields: dict, type_: str, channel: str) -> 
     see `_verify_record_vector_width`): a declaration outside the seam's own two
     widths (`f32`, `f64`) is refused, a declared `f32` is then checked against
     the values, and a declared `f64` is always truthful. The keys in
-    `_UNCALLERABLE_RECORD_KEYS` are
-    refused on BOTH channels — the positional record AND the keyword payload —
-    and each for its OWN reason rather than under one "marker family" banner:
-    stating them as one family is what made the previous comment false. See that
-    set's comment for the harm of each, and the citation for each.
+    `_UNCALLERABLE_RECORD_KEYS` are refused on BOTH channels — the positional
+    record AND the keyword payload — and each for its OWN reason rather than
+    under one "marker family" banner: stating them as one family is what made
+    the previous comment false. See that set's comment for the harm of each, and
+    the citation for each.
 
     ⛔ BOTH CHANNELS, because neither is the safer one: a flat record carrying
     ``evidence_fold`` at the top level is read as a fold by
