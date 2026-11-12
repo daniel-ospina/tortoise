@@ -3879,6 +3879,9 @@ def test_a_governed_group_in_its_own_sentence_is_validated(tmp_path, monkeypatch
         # ⛔ AND THE PAGE'S OWN LABEL MAY OPEN THE FRAGMENT (`Only **(a)** … still read as
         # written` is the documented list label): without it this spelling read CLEAN.
         "are **DRIFTED**. Only **(i)** and **(j)** do not. Only",
+        # The idiomatic trailing adverbs and continuations, which the tail check must accept.
+        "are **DRIFTED**. — **(i)** and **(j)** do not read as written any more. Only",
+        "are **DRIFTED**. — **(i)** and **(j)** do not, unlike the rest. Only",
     )
     for spelled in contradicting:
         src = tail if spelled.startswith("are ") else complement
@@ -3904,6 +3907,11 @@ def test_a_governed_group_in_its_own_sentence_is_validated(tmp_path, monkeypatch
         # `Only` is this page's own list label, so it may open the governed span — and a
         # real word after it still means prose.
         "are **DRIFTED**. Only **(i)** and **(j)** do not apply here. Only",
+        # ⚠️ A STATED RESIDUAL, pinned so it cannot drift silently: only the verbs this page
+        # pairs with the tally are read. `no longer hold.` negates a row too, but it is
+        # shape-identical to the TRUE `did not move.`, so reading arbitrary verbs
+        # re-creates the false accusation. CLEAN here is the declared trade, not a pass.
+        "are **DRIFTED**. — **(i)** and **(j)** no longer hold. Only",
     ):
         with monkeypatch.context() as patch:
             _mutated(tmp_path, patch, lambda t, b=spelled: t.replace(tail, b, 1))

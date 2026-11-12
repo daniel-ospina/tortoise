@@ -1672,8 +1672,13 @@ def check_verdict_tally(text: str) -> list[str]:
     # `… — **(a)**, **(f)**, **(h)**, **(i)** and **(j)** do not need re-reading.` RED with
     # "names ['a','f','h','i','j'] as NOT still reading as written" — the page saying exactly
     # what its table says. So the text AFTER the verb must be the ellipsis (`do not.`), or a
-    # form of `read` (`do not read`, `no longer read as written`), or `do` again
-    # (`no longer do.`). Anything else negates something that is not this claim.
+    # form of `read` — `do not read`, `no longer read as written`, `read as written any more` —
+    # or `do` again (`no longer do.`), optionally followed by punctuation and more prose
+    # (`do not, unlike the rest.`). ⚠️ A NEGATION OF ANY OTHER VERB IS NOT READ, and that is a
+    # stated residual, not an oversight: `no longer hold.` and `do not overlap the fix.` name
+    # rows too, but `did not move.` and `do not need re-reading.` are TRUE sentences with the
+    # same shape, so accepting arbitrary verbs re-creates the false accusation above. Only the
+    # verbs this page actually pairs with the tally are read.
     # ⛔ AND `Only` IS THIS PAGE'S OWN LIST LABEL (`Only **(a)** … still read as written`), so
     # it may open the governed span: without that, the natural counterpart spelling
     # `Only **(i)** and **(j)** do not.` still read CLEAN (measured).
@@ -1683,7 +1688,10 @@ def check_verdict_tally(text: str) -> list[str]:
             continue
         tail = candidate[verb.end() :].strip()
         if not re.fullmatch(
-            r"(?:(?:do|read|reads)(?:\s+as\s+written)?)?[\W_]*", tail, re.IGNORECASE
+            r"(?:(?:do|read|reads)(?:\s+as\s+written)?"
+            r"(?:\s+any\s+(?:more|longer))?)?(?:\W.*)?",
+            tail,
+            re.IGNORECASE | re.DOTALL,
         ):
             continue
         head = re.sub(
