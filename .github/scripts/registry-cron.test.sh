@@ -3426,6 +3426,23 @@ assert_not_contains "$OUT" "closed open incidents for a healthy run" \
   "118. … and never claims closes it deferred"
 assert_contains "$OUT" "incidents left UNCHANGED" \
   "118. … saying instead that self-heal changed nothing"
+assert_contains "$OUT" "backed up normally" \
+  "118. … and qualifies the sweep arm by what it measured"
+# Review C5: the same terminal line used to carry a CATEGORICAL "backups are NOT
+# the part that failed". This arm exits before the NO_COVERAGE one, so a run
+# whose sweep really did fail ended on a line denying the fault its own output
+# had just measured — and its SWEEP_NO_COVERAGE arm never ran. Re-run the
+# aws-missing case with a FAILED sweep and require the contradiction gone.
+export STUB_SWEEP_BODY='{"status":"error","graph_totals":{"attempted":1,"backed_up":0}}'
+set +e
+FOUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+FRC=$?
+set -e
+assert_eq "$FRC" 1 "118. a failed sweep is still RED with the CLI missing"
+assert_not_contains "$FOUT" "backups are not the part that failed" \
+  "118. … and the terminal line does NOT deny the sweep fault the run just measured"
+assert_contains "$FOUT" "SECOND fault" \
+  "118. … it names the coverage fault the missing CLI left unfiled"
 assert_contains "$OUT" "RED: the aws CLI is missing" \
   "118. the terminal line names the cause, not just 'a broken pipeline'"
 

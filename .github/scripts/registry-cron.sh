@@ -2223,7 +2223,21 @@ fi
 # broken pipeline was detected". The other terminal arms below still run in their
 # own right when this is not the cause.
 if [ "$AWS_CLI_MISSING" = "1" ]; then
-  fail "RED: the aws CLI is missing on this runner, so this run could not measure R2, dedup, file or resolve any incident (#12135). The sweep leg still ran (see the outcome line above) — backups are NOT the part that failed. Fix: install the CLI (the workflow's 'Ensure the AWS CLI' step does it idempotently), then re-run."
+  # Review C5: "backups are NOT the part that failed" was a CATEGORICAL claim, and
+  # this arm is reached before the NO_COVERAGE one below — so a run whose sweep
+  # really did fail ended on a line denying the fault its own output had just
+  # measured (and the `sweep backed up nothing` arm never ran, because this exit
+  # came first). State what was measured; a coverage fault is then a SECOND fault
+  # whose incident could not be filed while the CLI is missing.
+  case "$RUN_STATUS" in
+    backed_up)
+      cli_scope="the sweep leg ran too, and backed up normally — backups are not the part that failed" ;;
+    degraded)
+      cli_scope="the sweep leg ran but reported status=$RUN_STATUS_SAFE (per-graph errors) — a SECOND fault, and its SWEEP_NO_COVERAGE incident could not be filed while the CLI is missing" ;;
+    *)
+      cli_scope="the sweep leg ran but reported status=$RUN_STATUS_SAFE — a SECOND fault, and its SWEEP_NO_COVERAGE incident could not be filed while the CLI is missing" ;;
+  esac
+  fail "RED: the aws CLI is missing on this runner, so this run could not measure R2, dedup, file or resolve any incident (#12135). $cli_scope. Fix: install the CLI (the workflow's 'Ensure the AWS CLI' step does it idempotently), then re-run."
   exit 1
 fi
 if [ "$PURGE_FAILED" = "1" ]; then
