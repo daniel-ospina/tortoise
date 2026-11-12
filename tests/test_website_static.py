@@ -6763,8 +6763,22 @@ class TestProductSetIsServedUnderTheOneHost:
     # these out of the scan is what let `contact.html` keep `href="/self-hosted"` while
     # every sibling it sits beside was rewritten (caught by the VGATE review, #11764).
     ROOT_SERVED = ("index.html", "contact.html")
-    OLD_PRODUCT_PATHS = ("/product", "/docs", "/faq", "/self-hosted", "/security",
-                         "/license", "/investors", "/design-partners-intro")
+    # The RETIRED path -> the path that serves it now. BOTH spellings are keys: the
+    # middleware's `PRODUCT_PAGES` carries `/docs` AND `/docs.html`, so the `.html` form
+    # is routed in one hop rather than 404ing — and a guard that only knew the
+    # extensionless spelling would stay green on a link that still costs the visitor a
+    # redirect, which is the property these guards advertise.
+    OLD_PRODUCT_PATHS: ClassVar[dict[str, str]] = {
+        "/product": "/tortoise", "/product.html": "/tortoise",
+        "/docs": "/tortoise/docs", "/docs.html": "/tortoise/docs",
+        "/faq": "/tortoise/faq", "/faq.html": "/tortoise/faq",
+        "/self-hosted": "/tortoise/self-hosted", "/self-hosted.html": "/tortoise/self-hosted",
+        "/security": "/tortoise/security", "/security.html": "/tortoise/security",
+        "/license": "/tortoise/license", "/license.html": "/tortoise/license",
+        "/investors": "/tortoise/investors", "/investors.html": "/tortoise/investors",
+        "/design-partners-intro": "/tortoise/design-partners-intro",
+        "/design-partners-intro.html": "/tortoise/design-partners-intro",
+    }
 
     def _canonical(self, name: str) -> str | None:
         head = self.CONTRACT._head((self.WEB / name).read_text())
@@ -6817,11 +6831,7 @@ class TestProductSetIsServedUnderTheOneHost:
         `premiselabs.co/docs` (a 301), and `href="/"` resolves to the COMPANY homepage —
         a different document. Nothing about the file changed when the URL did.
         """
-        old_paths = {"/": "/tortoise", "/product": "/tortoise", "/docs": "/tortoise/docs",
-                     "/faq": "/tortoise/faq", "/self-hosted": "/tortoise/self-hosted",
-                     "/security": "/tortoise/security", "/license": "/tortoise/license",
-                     "/investors": "/tortoise/investors",
-                     "/design-partners-intro": "/tortoise/design-partners-intro"}
+        old_paths = {"/": "/tortoise", **self.OLD_PRODUCT_PATHS}
         offenders = []
         for name in self.MOVED:
             text = (self.WEB / name).read_text()
@@ -6851,7 +6861,7 @@ class TestProductSetIsServedUnderTheOneHost:
                 path = href.split("#", 1)[0].split("?", 1)[0]
                 if path in self.OLD_PRODUCT_PATHS:
                     offenders.append(f"{name}: href={href!r} → should be "
-                                     f"'/tortoise{path}'")
+                                     f"{self.OLD_PRODUCT_PATHS[path]!r}")
                 elif path == "/" and name != "index.html":
                     # `/` is the COMPANY page on this host. On `index.html` that is the
                     # document itself; on any other root-served page a `/` link labelled
@@ -6877,7 +6887,7 @@ class TestProductSetIsServedUnderTheOneHost:
         the dashboard (200), so a logo pointing at `/` is correct on this origin.
         """
         marketing = {"/docs", "/faq", "/self-hosted", "/security", "/license",
-                     "/privacy", "/tos", "/dpa", "/blog", "/product",
+                     "/privacy", "/tos", "/dpa", "/blog", "/product", "/contact",
                      "/investors", "/design-partners-intro"}
         app_pages = sorted(self.CONTRACT.DASHBOARD_ROOT.glob("*.html"))
         assert app_pages, "no app-origin pages found — the guard would pass vacuously"
@@ -6885,7 +6895,11 @@ class TestProductSetIsServedUnderTheOneHost:
         for page in app_pages:
             for href in re.findall(r'href="([^"]+)"', page.read_text()):
                 path = href.split("#", 1)[0].split("?", 1)[0]
-                if path in marketing:
+                # The prefix IS a marketing URL on this origin, and so is the `.html`
+                # spelling of any marketing path: `app.premiselabs.co/tortoise/docs`
+                # answered 404 when measured, exactly like `/docs` did.
+                under_prefix = path == "/tortoise" or path.startswith("/tortoise/")
+                if path in marketing or under_prefix or path.removesuffix(".html") in marketing:
                     offenders.append(f"{page.name}: href={href!r}")
         assert not offenders, (
             "these root-relative links on an APP-ORIGIN page resolve inside the dashboard "
