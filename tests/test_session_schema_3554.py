@@ -1332,12 +1332,12 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
 
     The file's CRITICAL RULE names a PERSON, so the entry has to name where that
     person's answer lives. The sibling entries do it by comment id —
-    ``#11827 (comment 6805834755)``, ``#11083 (comment 6667121779)`` — and the
-    v3.34 entry did not: it asserted an owner approval whose only home was a
-    decision lane's pane, so it named no surface the next lane could read
-    (``DECISION RELAY``: recorded nowhere the next lane reads is a default, not a
-    decision). The relay comment that finally recorded it (``6815950417``) is
-    what this entry must cite.
+    ``#11827 (comment 6805834755)``, ``#11083 (comment 6667121779)`` — and v3.34
+    does it with the relay comment ``6815950417``. ⛔ WHY THIS PIN EXISTS: an
+    approval can live ONLY in a decision lane's pane, which names no surface the
+    next lane can read (``DECISION RELAY``: recorded nowhere the next lane reads
+    is a default, not a decision) — so the ENTRY has to be the surface that
+    carries it, and ``6815950417`` is that answer for this release.
 
     Pinned as a SHAPE, not as that id: a later entry cites its own relay, and a
     shape is what stays true.
