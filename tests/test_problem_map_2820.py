@@ -186,9 +186,13 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     not as a status finding. Those premises are therefore not the REASON such a
     swap is caught: `#2813` is a WS-A row while all four `OPEN` rows sit in
     WS-B/C/D, so a tally-holding swap touching it has to promote one of the four
-    the pin names — which reds this arm. Move WS-A's "5 of 5" cell with it and
-    the count arms stay green; leave the cell stale and they red instead —
-    breakage, not confirmation. What the premises add is the case this arm cannot
+    the pin names — which reds this arm. Correct BOTH affected workstream cells
+    (WS-A's down, the promoted row's up) and the tally arms stay green — they
+    cannot see a swap that leaves them consistent. Leave either cell stale and
+    they red on a COUNT rather than on the swap ("summary says 7 of 8 WS-B
+    row(s) fixed; the table has 8 VERIFIED-FIXED"); and a cell whose literal a
+    fixture quotes, moved, breaks that fixture — breakage, not confirmation.
+    What the premises add is the case this arm cannot
     see: a UNILATERAL move on a row the pin does NOT name, whose counts are all
     corrected, where `problem_map_check --check` reads CLEAN and the reds are
     breakage — these premises, and the arms whose fixtures encode the shipped
