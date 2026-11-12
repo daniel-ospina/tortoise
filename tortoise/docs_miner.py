@@ -84,6 +84,8 @@ from tortoise.entity_identity import (  # #3633 route-then-refuse
     all_name_holder_ids,
     resolve_entity_id,
 )
+# #12047: ONE fold for `canonical_name` across every writer — see the use site.
+from tortoise.entity_resolver import normalize_entity_name
 
 logger = logging.getLogger(__name__)
 
@@ -505,8 +507,18 @@ def _ensure_entities(api, proj, entities: list[dict]) -> list[str]:
                 f"the projection's MERGE would stamp onto every holder "
                 f"(#3633)")
         oid = ent["id"]
+        # ⛔ The FOLD, not the surface form (review P0). `canonical_name` is the
+        # folded matching key every other writer stores (`sdk._with_folded_
+        # entity_name`, `EventAPI.add_object`, `mining._matching_key`,
+        # `apply_entity_merge`) — and `EventAPI.add_object` only `setdefault`s, so
+        # a caller-supplied value is kept verbatim. Writing the RAW name here put
+        # a second key space in one property: a docs-mined Object named
+        # "The Owner" carried `canonical_name="The Owner"`, the resolver's folded
+        # probe missed it, and the very next write of "owner" minted the twin
+        # #12047 exists to prevent. `id` is still `ent["id"]` — the opaque id is
+        # not derived from the name (#3590).
         api.add_object(name, ent["object_kind"], id=oid,
-                       canonical_name=name, title=name,
+                       canonical_name=normalize_entity_name(name), title=name,
                        externalId=ent["externalId"])
         ids.append(oid)
     return ids

@@ -393,23 +393,29 @@ def resolve_or_mint(g, label: str, name: str, *,
     if explicit_id:
         return str(explicit_id), True
     with _holder_lock(label, name):
-        holders = live_name_holder_ids(g, label, name)
-        _props: tuple = ("name",)
-        if not holders:
-            # #12047: the FOLDED name is the second addressable spelling
-            # (`_NAME_PROPERTIES` already declares `canonical_name` as one, and
-            # `mining` writes it). Without this lookup a near-duplicate mints a
-            # twin: "the fresh-context code reviewer" and "fresh-context code
-            # reviewer" are one entity, and the leading article carries no
-            # identity. This is the DETERMINISTIC rung only — a similarity score
-            # never resolves here (#2730 §6.7: auto-link only on an asserted or
-            # unambiguous deterministic transform; the review queue owns the rest).
-            # ⛔ NOT guarded on ``folded != name``: creating "owner" after
-            # "the owner" was written must find the holder whose FOLDED key is
-            # "owner" and whose name is "the owner" — the exact pair #12047
-            # measured on the hosted graphs. That guard made this branch inert
-            # for every already-folded spelling, which is the common case.
-            holders, _props = _live_holders_same_entity(g, label, name)
+        # #12047: ONE probe, both addressable spellings. `_live_holders_same_entity`
+        # runs the RAW-name query and only falls through to the FOLDED key when it
+        # finds nothing — so calling `live_name_holder_ids` here first would repeat
+        # that first query on every create (the 44k re-file this issue unblocks is
+        # a write loop, so a duplicated probe per row is real cost), and two copies
+        # of one question are a drift site besides.
+        #
+        # The FOLDED name is the second addressable spelling
+        # (`_NAME_PROPERTIES` already declares `canonical_name` as one, and
+        # `mining` writes it). Without this lookup a near-duplicate mints a
+        # twin: "the fresh-context code reviewer" and "fresh-context code
+        # reviewer" are one entity, and the leading article carries no
+        # identity. This is the DETERMINISTIC rung only — a similarity score
+        # never resolves here (#2730 §6.7: auto-link only on an asserted or
+        # unambiguous deterministic transform; the review queue owns the rest).
+        # ⛔ NOT guarded on ``folded != name``: creating "owner" after
+        # "the owner" was written must find the holder whose FOLDED key is
+        # "owner" and whose name is "the owner" — the exact pair #12047
+        # measured on the hosted graphs. That guard made this branch inert
+        # for every already-folded spelling, which is the common case.
+        # The returned props name the spelling that FOUND the holders, so
+        # `_adopt_idless_holder` below matches exactly what resolved (F4).
+        holders, _props = _live_holders_same_entity(g, label, name)
         # COUNT holders, REPORT holders (#9876 review, this head): the
         # earlier ``[h for h in holders if h]`` performed exactly the
         # filter `live_name_holder_ids` forbids, so a name held by one

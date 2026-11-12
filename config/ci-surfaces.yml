@@ -3605,6 +3605,17 @@ surfaces:
   # on precisely the PRs that can break it. `core` is the docs/default surface.
   - test_bridge_table.py
   - test_entity_identity.py
+  # #12047: the entity-resolution mechanism — the deterministic/fuzzy/semantic
+  # ladder, the entity review queue that replaced `return []` (#783's stub), the
+  # non-destructive merge (`aliases` + `resolved_from`, nothing deleted) and
+  # `holdsRole` production. `core` for the same reason as
+  # `test_entity_identity.py` beside it, which it drives: it builds its own
+  # embedded `TortoiseSDK` per test (`sdk_factory`, `tmp_path`) with no server and
+  # no network, and its subject under test — `tortoise/entity_identity.py` —
+  # selects `core` ALONE, so an unregistered row means the one diff that can
+  # break the create-side resolution runs NONE of these tests (measured:
+  # `❌ manifest drift: ['test_12047_entity_resolution.py']`).
+  - test_12047_entity_resolution.py
   - test_ci_verdict.py
   # #10962/#10968: the owner-facing merge-readiness gate — six conditions over the tree, the
   # required checks, the review record, coverage, the declared exclusions and open blocking

@@ -274,9 +274,9 @@ def _semantic_matrix(entities: list[dict], encode_fn) -> dict:
     is ``embeddings.DEFAULT_THRESHOLD`` — reused, never re-invented (#2730 §5: a
     second similarity constant was REFUSED).
 
-    Returns ``{(id_a, id_b): cosine}`` for every ordered pair; empty on any
-    degrade (numpy/model failure) — and says so in the log, because a silently
-    skipped rung reads as "nothing found".
+    Returns ``{(id_a, id_b): cosine}`` for every pair ``i < j``; empty on any
+    degrade (numpy/model/math failure) — and says so in the log, because a
+    silently skipped rung reads as "nothing found".
     """
     if len(entities) < 2:
         return {}
@@ -299,16 +299,29 @@ def _semantic_matrix(entities: list[dict], encode_fn) -> dict:
             "entity semantic rung skipped — encoder returned %s rows for %s names",
             None if vectors is None else len(vectors), len(texts))
         return {}
-    mat = np.asarray(vectors, dtype=float)
-    norms = np.linalg.norm(mat, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    unit = mat / norms
-    sims = unit @ unit.T
+    try:
+        mat = np.asarray(vectors, dtype=float)
+        norms = np.linalg.norm(mat, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        unit = mat / norms
+        sims = unit @ unit.T
+    except Exception as exc:
+        # ⛔ The MATH is a degrade path too, not just the encoder call. A
+        # length-matching but non-2-D encoder result (e.g. `[1.0, 1.0]`) passed
+        # the row check above and then raised `numpy.AxisError` from
+        # `np.linalg.norm` OUTSIDE this guard — and because `AxisError` subclasses
+        # `ValueError`, `entity_candidates`' caller-error clause re-raised it
+        # verbatim, so the whole queue refused with a bare numpy error where this
+        # docstring promised a logged degrade.
+        _logger.warning(
+            "entity semantic rung skipped — similarity math failed %s: %s",
+            type(exc).__name__, exc)
+        return {}
     return {(ids[i], ids[j]): float(sims[i][j])
             for i in range(len(ids)) for j in range(i + 1, len(ids))}
 
 
-def entity_candidates(graph, *, limit: int = 50,
+def entity_candidates(graph, *, limit: int | None = 50,
                       review_threshold: float = REVIEW_THRESHOLD,
                       include_semantic: bool = True,
                       encode_fn=None,
@@ -328,8 +341,12 @@ def entity_candidates(graph, *, limit: int = 50,
     Rows whose two kinds are both declared and DIFFER are kept (a wrong kind is
     part of the measured damage) but are never ``auto_mergeable``: mismatched
     kinds are evidence against identity, so they always take a human decision.
+
+    ``limit=None`` means NO truncation. The review surface passes a limit (it is a
+    paged read); :func:`entity_pair_for` passes ``None`` because it must be able
+    to find the row the surface displayed for ANY limit the caller used.
     """
-    if limit < 1:
+    if limit is not None and limit < 1:
         raise ValueError(f"limit must be >= 1, got {limit}")
     try:
         entities = scan_entities(graph, labels=labels)
@@ -371,11 +388,6 @@ def entity_candidates(graph, *, limit: int = 50,
                         continue
                     fuzzy_sim = (1.0 if left["folded"] == right["folded"]
                                  else similarity(left["folded"], right["folded"]))
-                    if fuzzy_sim >= 1.0:
-                        # A 1.0 match is the best this candidate can score, and
-                        # the queue keeps only its best row — so stop spending
-                        # comparisons on it.
-                        settled.add(right["id"])
                     sem_sim = sem.get((left["id"], right["id"]))
                     if sem_sim is None:
                         sem_sim = sem.get((right["id"], left["id"]))
@@ -394,6 +406,19 @@ def entity_candidates(graph, *, limit: int = 50,
                     survivor, candidate = left, right
                     if _pair_reviewed(survivor, candidate):
                         continue
+                    if fuzzy_sim >= 1.0:
+                        # Only an EMITTED 1.0 row settles its candidate. Doing
+                        # this before the reviewed-pair filter (as this did) hid
+                        # two things: after a REJECTED exact pair the candidate
+                        # matched no other survivor for the rest of the scan (a
+                        # genuine duplicate silently vanished from the queue,
+                        # contradicting `_pair_reviewed`'s "only the reviewed
+                        # combination is suppressed"), and a candidate that is an
+                        # exact twin of TWO survivors lost the tie, so the queue
+                        # elected the older one instead of showing `ambiguous`
+                        # and `entity_pair_for` would merge a pair the reviewer
+                        # was never told was a tie.
+                        settled.add(right["id"])
                     kind_mismatch = bool(
                         survivor["kind"] and candidate["kind"]
                         and survivor["kind"] != candidate["kind"])
@@ -447,7 +472,7 @@ def entity_candidates(graph, *, limit: int = 50,
             best[cid] = top
         rows = sorted(best.values(),
                       key=lambda p: (-p["similarity"], p["candidate_id"]))
-        return rows[:limit]
+        return rows if limit is None else rows[:limit]
     except (EntityScanUnavailable, ValueError):
         # A caller error (an empty label set) is not a scan failure and must not
         # be relabelled as one — nor swallowed into an empty queue.
@@ -478,14 +503,26 @@ def follow_resolved_from(graph, label: str, node_id: str) -> str:
     """
     current = str(node_id)
     seen = {current}
+    if label not in ENTITY_LABELS:
+        raise ValueError(
+            f"entity resolution covers {ENTITY_LABELS}, got {label!r}")
     while True:
         try:
             row = graph.query(
                 f"MATCH (n:{label} {{id:$id}}) RETURN n.resolved_from",
                 params={"id": current},
             ).result_set
-        except Exception:
-            return current
+        except Exception as exc:
+            # ⛔ NOT swallowed (review): returning the PRE-hop id on a failed read
+            # is the one outcome this hop exists to prevent — a write resolved
+            # onto a carrier the merge already retired — and it looked like a
+            # successful resolve. Sibling reads here (`_read_entities`,
+            # `find_live_holder`) raise for the same reason: the module's contract
+            # is "cannot answer" ≠ "no answer".
+            raise EntityScanUnavailable(
+                f"could not follow resolved_from for {node_id!r} — refusing to "
+                f"resolve onto a possibly-retired carrier "
+                f"({type(exc).__name__}: {exc})") from exc
         target = row[0][0] if row else None
         if not target or str(target) in seen:
             return current
@@ -508,6 +545,15 @@ def find_live_holder(graph, label: str, folded: str) -> list[tuple[str, str]]:
     ``ambiguous`` would make "these are one entity" turn the read surface into
     "there are two", inviting a review of a settled merge.
     """
+    if label not in ENTITY_LABELS:
+        # The label reaches a Cypher label position, so it is validated here
+        # exactly as `scan_entities` validates it: `entity_identity`'s
+        # `_require_identity_label` is the repo's allowlist guard for this, and
+        # the projection states the rule (a label is never interpolated from an
+        # unvalidated source). `resolve_entity_name` is a public entry point that
+        # passes its label straight here.
+        raise ValueError(
+            f"entity resolution covers {ENTITY_LABELS}, got {label!r}")
     try:
         rows = graph.query(
             f"MATCH (n:{label}) "
@@ -547,9 +593,10 @@ def resolve_entity_name(graph, label: str, name: str, *,
     ``exact``/``alias`` are deterministic and safe to write onto
     (``requires_review=False``). ``fuzzy``/``semantic`` are PROPOSALS:
     ``requires_review=True`` always, because similarity alone is not evidence
-    enough to merge (#2730 §6.7 gate). ``ambiguous`` (>1 live holder of the folded
-    key) is returned as ``resolution='ambiguous'`` with the holder ids, never
-    collapsed to one — route-then-refuse (#3590 R8).
+    enough to merge (#2730 §6.7 gate). ``ambiguous`` — more than one live entity
+    whose name FOLDS to this key, whether found by its stored key or by the fold
+    — is returned with every holder id and ``entity_id=None``, never collapsed to
+    one: route-then-refuse (#3590 R8).
     """
     folded = normalize_entity_name(name)
     holders = find_live_holder(graph, label, folded)
@@ -565,12 +612,40 @@ def resolve_entity_name(graph, label: str, name: str, *,
                 "candidates": [h[0] for h in holders]}
 
     entities = scan_entities(graph, labels=(label,))
+    # ⛔ DETERMINISTIC EQUALITY COMES FIRST, and it is a GROUP, not a winner.
+    # `find_live_holder` above answers from the STORED keys (`canonical_name`,
+    # `aliases`). An entity written before #12047 carries neither — the exact
+    # shape of the damage #12047 measured on the hosted graphs — so the folded
+    # rung below would have called a fold-EQUAL match "fuzzy, requires_review"
+    # (a deterministic identity mis-reported as a proposal, while the queue
+    # reports the same pair as `exact`). Worse, when TWO such legacy rows fold
+    # to one key, picking the best-scored one returned a SINGLE id for a pair of
+    # live twins: a resolver answering "this is the entity" where the truth is
+    # "ambiguous", which is the fail-open shape route-then-refuse (#3590 R8)
+    # exists to prevent. Group first, then decide.
+    ties = [ent for ent in entities if ent["folded"] == folded]
+    if len(ties) == 1:
+        return {"name": name, "folded": folded, "label": label,
+                "resolution": "exact", "entity_id": ties[0]["id"],
+                "similarity": 1.0, "requires_review": False, "candidates": []}
+    if len(ties) > 1:
+        return {"name": name, "folded": folded, "label": label,
+                "resolution": "ambiguous", "entity_id": None,
+                "similarity": 1.0, "requires_review": True,
+                "candidates": [ent["id"] for ent in ties]}
     scored = []
     for ent in entities:
-        if ent["dedup_reviewed"]:
+        # ⛔ Only a MERGE verdict removes an entity from the ladder. It was a
+        # blanket `if ent["dedup_reviewed"]: continue`, which also skipped a
+        # REJECT — and `_pair_reviewed` is explicit that a rejection suppresses
+        # only the reviewed COMBINATION, so a candidate rejected against one
+        # survivor must still be visible against the next name queried. Skipping
+        # it reported `resolution="new"`, `similarity=0.0` beside a live
+        # 0.8-similar node: the caller was told "nothing similar exists" about an
+        # entity the scan had just read, and with `requires_review=False`.
+        if (ent.get("dedup_reviewed") or "") == "merge":
             continue
-        sim = (1.0 if ent["folded"] == folded
-               else similarity(folded, ent["folded"]))
+        sim = similarity(folded, ent["folded"])
         scored.append((sim, ent))
     scored.sort(key=lambda s: (-s[0], s[1]["id"]))
     if scored and scored[0][0] >= REVIEW_THRESHOLD:
@@ -628,6 +703,14 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     if not rows:
         raise ValueError(f"No entity {survivor_id!r}")
     survivor_name, aliases, survivor_canonical = rows[0]
+    # `aliases` is an undeclared-but-writable property, so a caller may have
+    # stored a bare string (`update_entity(id, aliases="foo")` is reachable).
+    # Iterating it would then manufacture one "alias" PER CHARACTER — silently
+    # dropping the real one and writing junk keys onto the survivor.
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    elif not isinstance(aliases, (list, tuple)):
+        aliases = []
     rows = graph.query(
         "MATCH (c) WHERE c.id = $cid RETURN c.name, c.canonical_name",
         params={"cid": candidate_id},
@@ -645,20 +728,29 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
         sdk.update_entity(survivor_id,
                           canonical_name=normalize_entity_name(survivor_name))
     sdk.update_entity(survivor_id, aliases=alias_list)
-    sdk.update_entity(
-        candidate_id,
-        resolved_from=survivor_id,
-        dedup_reviewed="merge",
-        reviewed=True,
-        canonical_name=folded,
-    )
+    # ⛔ The candidate's `canonical_name` is only FILLED, never rewritten — the
+    # same rule as the survivor arm above. A caller-supplied value is a real
+    # addressable spelling (`_with_folded_entity_name` setdefaults, and
+    # `find_live_holder` states that "the candidate keeps its own
+    # canonical_name (its surface form is evidence)"); overwriting it with the
+    # fold deletes a key `resolve_entity_id(name_props=...)` answered for, which
+    # is exactly what a NON-destructive merge must not do.
+    _candidate_props = {
+        "resolved_from": survivor_id,
+        "dedup_reviewed": "merge",
+        "reviewed": True,
+    }
+    if not candidate_canonical:
+        _candidate_props["canonical_name"] = folded
+    sdk.update_entity(candidate_id, **_candidate_props)
     return {"survivor_id": survivor_id, "candidate_id": candidate_id,
             "aliases": alias_list, "method": method,
             "similarity": round(float(similarity), 4)}
 
 
 def entity_pair_for(graph, candidate_id: str, *,
-                    review_threshold: float = REVIEW_THRESHOLD) -> dict | None:
+                    review_threshold: float = REVIEW_THRESHOLD,
+                    encode_fn=None) -> dict | None:
     """The pair ``approve_merge`` applies — **the same row the queue showed**.
 
     ``list_dedup_candidates`` is a READ surface (``risk="read"``), so it cannot
@@ -674,8 +766,22 @@ def entity_pair_for(graph, candidate_id: str, *,
     ``None`` when the candidate has no pair on the current graph. An AMBIGUOUS
     pair (two equally-good survivors) RAISES: a merge must never pick one for
     the reviewer (route-then-refuse, #3590 R8).
+
+    ⛔ **The rung set is the QUEUE's, not a cheaper one** (review P0). This used
+    to pass ``include_semantic=False`` while ``list_dedup_candidates`` used the
+    default ``True``, so on a graph where the vectors rank a different survivor
+    than the string rungs, the reviewer approved (C into B) and the verdict folded
+    C into A — the exact "a verdict applies to a pair the reviewer never saw"
+    failure this function's parity requirement exists to prevent. The queue is a
+    read surface and degrades WITH the encoder (no model ⇒ no semantic row
+    shown), so recomputing with the same ladder keeps the two answers equal on
+    the same box, which is the property that matters.
+
+    ``limit=None`` — no truncation. The queue truncates ITS page; a verdict must
+    not fail because the row sat past a bound this call chose.
     """
-    rows = entity_candidates(graph, limit=1000, include_semantic=False,
+    rows = entity_candidates(graph, limit=None, include_semantic=True,
+                             encode_fn=encode_fn,
                              review_threshold=review_threshold)
     mine = [r for r in rows if r["candidate_id"] == candidate_id]
     if not mine:
@@ -701,8 +807,11 @@ def resolve_role_holder(sdk, holder: str, *, required: bool = True) -> str | Non
     """Resolve a DECLARED role holder to exactly one live ``:Subject`` id.
 
     ``holder`` is an id or a name, tried in that order. Exactly one match is
-    required: an unresolvable or ambiguous holder RAISES (when ``required``)
-    rather than wiring an edge to a guess (#1370 — *"no subject > wrong subject"*).
+    required: an ABSENT holder resolves to ``None`` when ``required`` is False and
+    RAISES when it is True; an AMBIGUOUS holder ALWAYS raises, whatever
+    ``required`` says, because wiring the edge to a guess is the failure #1370
+    (*"no subject > wrong subject"*) refuses — ``resolve_entity_id`` performs that
+    refusal itself, so it is not this function's to downgrade.
 
     ⛔ This is a CONSUMER of :func:`entity_identity.resolve_entity_id` — the one
     route-then-refuse authority (#3633), which is what the source-level sweep in

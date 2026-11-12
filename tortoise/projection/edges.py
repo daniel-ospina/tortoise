@@ -288,10 +288,20 @@ def _mint_subject_stub(g, name: str) -> None:
     # Reentrant, and the replay callers (`replay_about_links`, create_event's
     # fold) take it harmlessly.
     with entity_create_lock("Subject", name):
+        # #12047: the stub carries the SAME folded key every other writer stores.
+        # This is the last name-keyed write in the tree, and without
+        # `canonical_name` the create-side resolver could not see the stub by its
+        # fold: `create_subject("the owner")` beside a stub named "The Owner"
+        # missed the raw-name arm (names differ) AND the folded arm (no key),
+        # minting the twin this stub's own docstring says the shared lock must
+        # prevent. Computed from the JOURNALED `name` and written in the same
+        # ON CREATE, so live and replay stay byte-identical.
+        from tortoise.entity_resolver import normalize_entity_name
         g.query(
             "MERGE (s:Subject {name:$name}) "
-            "ON CREATE SET s.id=$name, s.subjectKind='other'",
-            params={"name": name},
+            "ON CREATE SET s.id=$name, s.subjectKind='other', "
+            "              s.canonical_name=$folded",
+            params={"name": name, "folded": normalize_entity_name(name)},
         )
 
 

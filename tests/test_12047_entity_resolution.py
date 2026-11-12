@@ -42,6 +42,8 @@ from tortoise.entity_resolver import (
     apply_entity_merge,
     entity_candidates,
     entity_pair_for,
+    find_live_holder,
+    follow_resolved_from,
     normalize_entity_name,
     resolve_entity_name,
     similarity,
@@ -60,17 +62,19 @@ def _count(sdk, label: str, **where) -> int:
 
 
 def _create_raw(sdk, label: str, node_id: str, name: str, kind_prop: str,
-                kind: str) -> None:
+                kind: str, *, ts: str = "2026-01-01", **extra) -> None:
     """A raw create — the only way to reach a *pre-existing* duplicate.
 
     Since #3590 the SDK door resolves a name before minting, so no public writer
     produces a twin by accident. The hosted graphs' damage (the issue's measured
     Subjects) is exactly this shape: nodes written before any resolution existed.
     """
+    props = {"id": node_id, "name": name, kind_prop: kind,
+             "status": "live", "createdAt": ts, **extra}
+    assigns = ", ".join(f"{k}: ${k}" for k in props)
     sdk._get_proj().g.query(
-        f"CREATE (n:{label} {{id:$id, name:$name, {kind_prop}:$kind, "
-        "status:'live', createdAt:$ts})",
-        params={"id": node_id, "name": name, "kind": kind, "ts": "2026-01-01"},
+        f"CREATE (n:{label} {{{assigns}}})",
+        params=props,
     )
 
 
@@ -227,6 +231,44 @@ class TestDeterministicResolutionReusesTheEntity:
 
         new = resolve_entity_name(g, "Subject", "a wholly unrelated entity")
         assert new["resolution"] == "new" and new["entity_id"] is None
+
+    def test_a_legacy_row_with_no_stored_key_is_EXACT_not_a_fuzzy_proposal(self, sdk_factory):
+        """FAILS on the pre-fix code: it returned ``fuzzy`` + requires_review.
+
+        A pre-#12047 row carries ``name`` only — no ``canonical_name``. The
+        deterministic rung is *fold equality*, not *stored-key equality*, so a
+        fold-equal match on such a row is an EXACT resolution; reporting it as
+        ``fuzzy`` told the caller a deterministic identity needed review, while
+        the queue reported the same relationship as ``exact``.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-legacy", "The Owner",
+                    "subjectKind", "naturalPerson")
+        got = resolve_entity_name(sdk._get_proj().g, "Subject", "owner")
+        assert got["resolution"] == "exact", got
+        assert got["entity_id"] == "sub-legacy"
+        assert got["requires_review"] is False
+
+    def test_two_legacy_rows_that_fold_alike_are_AMBIGUOUS_not_a_pick(self, sdk_factory):
+        """FAILS on the pre-fix code: it returned ONE id (the best-scored tie).
+
+        This is the measured damage class — twins written before any resolution
+        existed, with no ``canonical_name`` to look up — so ``find_live_holder``
+        sees nothing and the fuzzy branch used to pick a winner. Answering "this
+        is the entity" for a pair of live twins is the fail-open shape
+        route-then-refuse (#3590 R8) forbids.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "The Owner",
+                    "subjectKind", "naturalPerson")
+        _create_raw(sdk, "Subject", "sub-b", "owner",
+                    "subjectKind", "naturalPerson")
+        got = resolve_entity_name(sdk._get_proj().g, "Subject", "the OWNER")
+        assert got["resolution"] == "ambiguous", got
+        assert got["entity_id"] is None, (
+            "an ambiguous fold must not hand back a single entity")
+        assert sorted(got["candidates"]) == ["sub-a", "sub-b"]
+        assert got["requires_review"] is True
 
 
 # ── the semantic rung ─────────────────────────────────────────────────────
@@ -570,3 +612,217 @@ class TestHoldsRoleProduction:
             "MATCH (s:Subject {id:$id}) RETURN properties(s)",
             params={"id": role["id"]}).result_set[0][0]
         assert "roleHolder" not in props and "role_holder" not in props
+
+
+# ── the second review round (fresh-context reviewer, measured defects) ────
+
+
+class TestSecondReviewRound:
+    """Pins for the defects the SECOND review round measured.
+
+    Every test here fails on the head that preceded it. They are grouped (rather
+    than folded into the classes above) so the round that produced them stays
+    legible in the history: a fix that is later reverted has to argue with the
+    measurement, not with a prose claim.
+    """
+
+    def test_the_merge_recomputes_with_the_QUEUE_s_rungs(self, sdk_factory):
+        """P0: the queue ranks by the semantic rung, the merge recomputed without it.
+
+        `entity_pair_for` passed `include_semantic=False` while
+        `list_dedup_candidates` used the default `True`. On a graph where the
+        vectors rank a DIFFERENT survivor than the string rungs, the reviewer
+        approved (C into B) and the verdict folded C into A — a merge applied to a
+        pair the reviewer never saw, which is the failure the parity pin above
+        (`test_the_queue_row_and_the_merge_apply_the_SAME_survivor`) exists to
+        prevent and could not see, because it injects no encoder.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "qqq alpha", "subjectKind", "other",
+                    ts="2026-01-01")
+        _create_raw(sdk, "Subject", "sub-b", "qqq zzzzzzzz", "subjectKind", "other",
+                    ts="2026-01-02")
+        _create_raw(sdk, "Subject", "sub-c", "qqq alpho", "subjectKind", "other",
+                    ts="2026-01-03")
+
+        # Only the vectors put sub-b next to sub-c; the strings put sub-a there.
+        vectors = {"qqq alpha": [0.0, 1.0], "qqq alpho": [0.2, 0.98],
+                   "qqq zzzzzzzz": [0.2, 0.98]}
+
+        def _enc(texts):
+            return ([vectors[t] for t in texts], True)
+
+        g = sdk._get_proj().g
+        queue = {r["candidate_id"]: r for r in
+                 entity_candidates(g, encode_fn=_enc)}
+        assert queue["sub-c"]["method"] == "semantic", queue["sub-c"]
+        assert queue["sub-c"]["existing_id"] == "sub-b"
+        pair = entity_pair_for(g, "sub-c", encode_fn=_enc)
+        assert pair is not None
+        assert pair["survivor_id"] == queue["sub-c"]["existing_id"], (
+            "the merge recomputed a DIFFERENT survivor than the queue showed")
+
+    def test_a_rejected_exact_pair_does_not_hide_the_next_candidate(self, sdk_factory):
+        """P1: `settled` was populated before the reviewed-pair filter.
+
+        A candidate rejected against one exact twin matched NO other survivor for
+        the rest of the scan, so a genuine duplicate silently vanished from the
+        queue — contradicting `_pair_reviewed`'s \"only the reviewed combination is
+        suppressed\" and under-reporting exactly what this module exists to report.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "aaa one", "subjectKind", "other",
+                    ts="2026-01-01")
+        _create_raw(sdk, "Subject", "sub-b", "aaa wun", "subjectKind", "other",
+                    ts="2026-01-02")
+        _create_raw(sdk, "Subject", "sub-c", "aaa one", "subjectKind", "other",
+                    ts="2026-01-03", dedup_reviewed="reject",
+                    dedup_target_id="sub-a")
+        rows = sdk.list_dedup_candidates(candidate_type="entity")
+        got = {(r["candidate_id"], r["existing_id"]) for r in rows}
+        assert ("sub-c", "sub-b") in got, (
+            f"the real sub-b/sub-c duplicate is missing from the queue: {got}")
+        assert ("sub-c", "sub-a") not in got, (
+            "the reviewed combination must stay suppressed")
+
+    def test_a_merge_does_not_rewrite_the_candidate_s_caller_key(self, sdk_factory):
+        """P2: the survivor's `canonical_name` was fill-only; the candidate's was not.
+
+        A caller-supplied spelling is an addressable key
+        (`resolve_entity_id(name_props=("name","canonical_name"))` answers for it),
+        so overwriting it with the fold deletes a key — and falsifies
+        `find_live_holder`'s stated premise that the candidate keeps its own key.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Object", "obj-a", "Big Boss Inc", "objectKind", "organization",
+                    ts="2026-01-01")
+        _create_raw(sdk, "Object", "obj-c", "Big Boss Inc.", "objectKind", "organization",
+                    ts="2026-01-02", canonical_name="Big Boss Inc")
+        row = next(r for r in sdk.list_dedup_candidates(candidate_type="entity")
+                   if r["candidate_id"] == "obj-c")
+        assert row["existing_id"] == "obj-a"
+        sdk.approve_merge("obj-c", action="merge")
+        kept = sdk._get_proj().g.query(
+            "MATCH (o:Object {id:'obj-c'}) RETURN o.canonical_name, o.resolved_from"
+        ).result_set[0]
+        assert kept[0] == "Big Boss Inc", (
+            "the merge rewrote the caller's canonical_name with the fold")
+        assert kept[1] == "obj-a"
+
+    def test_a_string_aliases_property_is_not_split_into_characters(self, sdk_factory):
+        """P2: `aliases` is writable as a bare string; iterating it lost the alias."""
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "alpha gamma", "subjectKind", "other",
+                    ts="2026-01-01", aliases="legacy alias")
+        _create_raw(sdk, "Subject", "sub-b", "alpha gammas", "subjectKind", "other",
+                    ts="2026-01-02")
+        sdk.approve_merge("sub-b", action="merge")
+        aliases = sdk._get_proj().g.query(
+            "MATCH (s:Subject {id:'sub-a'}) RETURN s.aliases").result_set[0][0]
+        assert "legacy alias" in aliases, (
+            f"the stored alias was destroyed by per-character iteration: {aliases}")
+        assert "alpha gammas" in aliases
+        assert not any(len(a) == 1 for a in aliases if a != " ")
+
+    def test_the_semantic_math_degrades_instead_of_escaping(self, sdk_factory):
+        """P2: the matrix math sat OUTSIDE the degrade guard.
+
+        A length-matching but non-2-D encoder result passed the row check and then
+        raised `numpy.AxisError` — a `ValueError` subclass, so `entity_candidates`
+        re-raised it verbatim and the whole queue refused where the docstring
+        promises a logged degrade to the string rungs.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "fresh-context code reviewer",
+                    "subjectKind", "role")
+        _create_raw(sdk, "Subject", "sub-b", "the fresh-context reviewer role",
+                    "subjectKind", "role")
+
+        def _flat(_texts):
+            return ([1.0, 1.0], True)  # right LENGTH, wrong rank
+
+        rows = entity_candidates(sdk._get_proj().g, encode_fn=_flat)
+        assert rows and rows[0]["method"] == "fuzzy", (
+            "a broken similarity matrix must degrade to the string rungs")
+
+    def test_an_unknown_label_refuses_before_reaching_cypher(self):
+        """P2: the label reaches the Cypher label position unvalidated."""
+        class _Untouched:
+            def query(self, *_a, **_kw):
+                raise AssertionError("the label must be validated before the query")
+
+        for call in (lambda: find_live_holder(_Untouched(), "Injected", "x"),
+                     lambda: follow_resolved_from(_Untouched(), "Injected", "x")):
+            with pytest.raises(ValueError, match="covers"):
+                call()
+
+    def test_a_rename_refreshes_the_folded_key(self, sdk_factory):
+        """P1: a rename left the stale fold behind, so the OLD spelling resolved
+        onto the RENAMED entity — a wrong-entity write, with the pre-flight probe
+        agreeing because it reads the same key."""
+        sdk = sdk_factory()
+        obj = sdk.create_object("owner", "concept")
+        sdk.update_entity(obj["id"], name="Alice")
+        g = sdk._get_proj().g
+        folded = g.query("MATCH (o:Object {id:$id}) RETURN o.canonical_name",
+                         params={"id": obj["id"]}).result_set[0][0]
+        assert folded == normalize_entity_name("Alice"), (
+            "the rename left the stale folded key on the node")
+        # Creating the OLD spelling must mint a NEW entity, not write onto Alice.
+        again = sdk.create_object("owner", "concept")
+        assert again["id"] != obj["id"], (
+            "a write of the pre-rename spelling resolved onto the renamed entity")
+
+    def test_a_padded_role_kind_is_accepted_exactly_as_the_door_accepts_it(
+            self, sdk_factory):
+        """P2: the `roleHolder` gate compared the RAW kind while the door normalised it.
+
+        The padded kind must arrive as a PROP, not through `create_subject`'s
+        positional argument — the alias normalises that one itself
+        (`subjectKind = named_kind(subjectKind)`), so only the prop path reaches
+        the gate raw.
+        """
+        sdk = sdk_factory()
+        sdk.create_subject("Daniel", "naturalPerson")
+        role = sdk.create_subject("owner", roleHolder="Daniel",
+                                  subjectKind=" role ")
+        assert role["id"]
+        assert sdk._get_proj().g.query(
+            "MATCH (:Subject)-[r:holdsRole]->(:Subject) RETURN count(r)"
+        ).result_set[0][0] == 1
+
+    def test_both_role_holder_spellings_are_popped_off_the_node(self, sdk_factory):
+        """P2: supplying both spellings left `role_holder` on the node."""
+        sdk = sdk_factory()
+        sdk.create_subject("Daniel", "naturalPerson")
+        role = sdk.create_subject("owner", "role", roleHolder="Daniel",
+                                  role_holder="Daniel")
+        props = sdk._get_proj().g.query(
+            "MATCH (s:Subject {id:$id}) RETURN properties(s)",
+            params={"id": role["id"]}).result_set[0][0]
+        assert "roleHolder" not in props and "role_holder" not in props, props
+
+    def test_every_entity_writer_stores_the_FOLDED_canonical_name(self, sdk_factory):
+        """P0/P1: a raw name in `canonical_name` is a second key space in one property.
+
+        `EventAPI.add_object` only `setdefault`s a caller's value, so every writer
+        is responsible for folding. Two did not (the docs miner, literally; the
+        issue-Object and Subject-stub doors, by not writing the key at all).
+        """
+        from tortoise.docs_miner import normalize_entity_name as _fold_used_by_docs
+        assert _fold_used_by_docs is normalize_entity_name, (
+            "the docs miner must fold through the ONE resolver fold")
+
+        sdk = sdk_factory()
+        sdk._get_proj().g.query(
+            "MERGE (s:Subject {name:$n}) "
+            "ON CREATE SET s.id=$n, s.subjectKind='other', s.canonical_name=$f",
+            params={"n": "The Owner", "f": normalize_entity_name("The Owner")})
+        # The funnel fills the fold for a door that passes none.
+        sdk._create_entity("Object", "obj-funnel",
+                           {"name": "The Operator", "objectKind": "role",
+                            "createdAt": "2026-01-01"}, "ObjectRegistered")
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object {id:'obj-funnel'}) RETURN o.canonical_name"
+        ).result_set[0]
+        assert rows[0] == normalize_entity_name("The Operator")

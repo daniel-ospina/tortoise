@@ -5162,9 +5162,19 @@ def _with_folded_entity_name(name: str, props: dict) -> dict:
     """Add the FOLDED name key (``canonical_name``) to an entity create's props.
 
     #12047: entity resolution's deterministic rung compares folded names. The
-    folded form is written at CREATE so the lookup is an indexed equality rather
-    than an O(n) Python scan per write — the 44k re-file the issue exists to
-    unblock would otherwise be quadratic. ``canonical_name`` is the slot
+    folded form is written at CREATE so the lookup only has to fold the INCOMING
+    name and compare it to a STORED key — without it there is no key to compare
+    at all, and the rung could only find a near-duplicate by reading every
+    entity and folding it in Python, once per write (the 44k re-file the issue
+    exists to unblock would then be quadratic). ⚠️ It is a stored-key equality,
+    not an indexed one: ``canonical_name`` is NOT (yet) in
+    ``projection._RANGE_INDEX_LABEL_PROPS`` — ``Subject``/``Object`` carry
+    ``id``/``name`` only — and this docstring used to claim "an indexed equality",
+    which the declaration did not support (review). Adding the index is a
+    separate, measurable change (both `_RANGE_INDEX_LABEL_PROPS` and
+    `_REQUIRED_RANGE_INDEXES`, per `tests/test_5407_index_label_parity.py`) and is
+    recorded as a follow-up rather than smuggled into this repair.
+    ``canonical_name`` is the slot
     ``entity_identity._NAME_PROPERTIES`` already treats as an addressable name
     spelling (“the SECOND spelling an Object may be addressed by (``mining``'s
     reification writes it)”), and the #783 plan §4.1 defines it as exactly
@@ -23849,7 +23859,12 @@ class TortoiseSDK:
             if ent_rows:
                 break
         if ent_rows:
-            return self._approve_entity_merge(candidate_id, action, ent_rows[0])
+            _entity_verdict = self._approve_entity_merge(candidate_id, action, ent_rows[0])
+            # `None` = "this id is an entity, but there is no entity verdict and it
+            # is ALSO a Point" — fall through to the content branch below rather
+            # than making a legitimate content verdict unreachable (review).
+            if _entity_verdict is not None:
+                return _entity_verdict
         rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN properties(n)",
             params={"id": candidate_id},
@@ -23928,12 +23943,17 @@ class TortoiseSDK:
                 "target_id": target_id}
 
     def _approve_entity_merge(self, candidate_id: str, action: str,
-                              row) -> dict:
+                              row) -> dict | None:
         """The entity half of :meth:`approve_merge` (#12047).
 
         Split out so the content/temporal Point branch above keeps its exact
         shape (three pinned suites read it) and this branch owns the entity
         semantics: recompute the pair, refuse an ambiguous one, never delete.
+
+        ``None`` is a SENTINEL, not an answer: it means "this id is an entity and
+        ALSO a Point, and there is no entity pair to merge", so the caller falls
+        through to the content branch. Returning a dict instead would make a
+        legitimate content verdict unreachable for an id that both labels carry.
         """
         from .entity_resolver import apply_entity_merge, entity_pair_for
 
@@ -23973,6 +23993,18 @@ class TortoiseSDK:
                     "deferred_to_promotion": False, "target_id": None}
         pair = entity_pair_for(proj.g, candidate_id)
         if pair is None:
+            # An id can be carried by BOTH a Point and an Object/Subject (the
+            # explicit-id doors make that reachable). The entity probes above run
+            # first, so without this the content verdict was diverted into the
+            # entity branch and raised "no ambiguity pair" for a candidate whose
+            # Point half is a perfectly valid content duplicate — a regression
+            # introduced by this PR's routing, not a pre-existing refusal.
+            _point = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.id",
+                params={"id": candidate_id},
+            ).result_set
+            if _point:
+                return None
             raise ValueError(
                 f"Entity {candidate_id!r} has no ambiguity pair on the current "
                 f"graph — nothing to merge (re-list the queue to see the "
@@ -43791,6 +43823,22 @@ class TortoiseSDK:
         # a caller-forged `type` when its drop is removed (measured) — only that
         # door's drop keeps it honest. Assigned rather than reordered so the
         # dict's key order is unchanged.
+        #
+        # #12047: the FOLDED name key is filled HERE, at the funnel every entity
+        # door meets, and not only at `create_entity`'s subject/object branches
+        # (review P1). Two in-tree writers reach the node through this method
+        # WITHOUT passing the door helper — `_connect_issue_objects` (issue
+        # Objects) and any caller-relayed props — so they wrote no folded key at
+        # all, and the deterministic rung could not see their nodes: creating
+        # "the owner" beside a stub `(s:Subject {name:"The Owner"})` misses both
+        # arms (raw name differs, no `canonical_name`) and mints a second live
+        # carrier. `setdefault` because a caller-supplied fold wins, and the value
+        # is computed from the JOURNALED `name`, so live and replay agree.
+        if label in ("Object", "Subject") and "canonical_name" not in props:
+            _ent_name = props.get("name")
+            if isinstance(_ent_name, str) and _ent_name:
+                from .entity_resolver import normalize_entity_name
+                props["canonical_name"] = normalize_entity_name(_ent_name)
         event = {"type": event_type, "id": id_val, **props}
         event["type"] = event_type
         # Normalize field names for projection compatibility
@@ -45069,6 +45117,27 @@ class TortoiseSDK:
         if isinstance(props.get("name"), str) and props["name"].strip():
             _rename_locks = (("Object", props["name"]),
                              ("Subject", props["name"]))
+            # ⛔ A RENAME MUST REFRESH THE FOLDED KEY (review P1).
+            # `_with_folded_entity_name` states the contract — "the fold is a
+            # lookup key, so a rename changes it without changing who the entity
+            # is" — but it only ran on the two CREATE doors, so a rename left the
+            # old fold behind in `canonical_name`. Two measured consequences, both
+            # silent: creating the NEW spelling missed both arms of
+            # `resolve_or_mint` (name is case-sensitive, the fold was stale) and
+            # minted a twin beside the renamed node; and creating the OLD spelling
+            # still matched the stale fold, so the write resolved onto the renamed
+            # entity — a wrong-entity write, with `refuse_ambiguous_create`
+            # agreeing because it reuses the same helper.
+            #
+            # It rides the ordinary `SET n += $p`, whose applied map is the
+            # journaled `EntityMutated.state`, so a rebuild restores it too (no
+            # #7951 live-only key). A caller-supplied `canonical_name` in the same
+            # call still wins — this fills, never overwrites. A non-entity label
+            # renamed through here (a Point carrying `name`) just gains an inert
+            # property nothing reads.
+            if "canonical_name" not in props:
+                from .entity_resolver import normalize_entity_name
+                props["canonical_name"] = normalize_entity_name(props["name"])
         with contextlib.ExitStack() as _rename_lock_stack:
             for _lock_key in _rename_locks:
                 _rename_lock_stack.enter_context(
@@ -45461,8 +45530,14 @@ class TortoiseSDK:
             # both hosted graphs — the predicate was declared and read but never
             # produced, so a role floated free of its holder.
             _role_holder = props.pop("roleHolder", None)
+            # ⛔ BOTH pops run, unconditionally. The snake alias used to be popped
+            # only when the camel key was absent, so a caller supplying both left
+            # `role_holder` in `props` — and `_entity_door_props` copies the
+            # remainder onto the node, which is exactly what this block exists to
+            # prevent ("the edge is the record").
+            _role_holder_alias = props.pop("role_holder", None)
             if _role_holder is None:
-                _role_holder = props.pop("role_holder", None)
+                _role_holder = _role_holder_alias
             # #1423 (review P1): `status` arrives through `**props` below, so this
             # surface is a SECOND door onto an undeclared Subject status.
             # Validate against ONTOLOGY §4.2's declared lifecycle and fail closed,
@@ -45481,7 +45556,13 @@ class TortoiseSDK:
                 )
             if _role_holder is not None:
                 # #12047 review F5: pre-flight, so a refusal writes nothing.
-                _kind = props.get("subjectKind")
+                # ⛔ The kind is compared through `named_kind` — the SAME
+                # normaliser the door applies a few lines below. Comparing the
+                # raw prop refused `subjectKind=" role "` here while the identical
+                # call WITHOUT `roleHolder` succeeded and stored `subjectKind="role"`:
+                # two spellings of one rule, which is the divergence `named_kind`
+                # exists to prevent.
+                _kind = named_kind(props.get("subjectKind"))
                 if _kind != "role":
                     raise ValueError(
                         "roleHolder is only valid on a Subject of "
