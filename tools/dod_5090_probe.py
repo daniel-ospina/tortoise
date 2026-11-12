@@ -2260,7 +2260,11 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
             "their own, so read from that file ALONE the gate is off — this reading is "
             "PER FILE and does not model a compose file that BUILDS from an armed "
             "image build file (it INHERITS that image's `ENV`), so it is not a claim "
-            "about such a deployment."
+            "about such a deployment"
+            # ⛔ No trailing period: `shipped_default_note` joins this clause with a
+            # literal `"; files read: "`, so a period here published
+            # "… about such a deployment.; files read: 64" (fresh review of PR
+            # #12016, P3). The other three branches already end punctuation-free.
         )
     return (
         f"gate enabled by default: {reported} (ambient "
