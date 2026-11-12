@@ -5518,7 +5518,11 @@ def _flag_comes_from_a_positive_probe(code: str, path: str, flag: str) -> bool:
         assignment = re.search(rf"(?<![\w.]){f}=1\b", arm)
         if assignment is None:
             continue
-        if "||" in arm[: assignment.start()]:
+        # ⛔ A CONDITIONED ASSIGNMENT IS NOT THE FLAG. `false && F=1` (or `|| F=1`)
+        # inside the then-arm leaves the flag 0 when the path EXISTS, so the trap still
+        # deletes the operator's file — MEASURED GREEN before this guard (review cycle 18),
+        # and REFUSED by the pre-diff substring check it replaced.
+        if "||" in arm[: assignment.start()] or "&&" in arm[: assignment.start()]:
             continue
         return True
     return False
@@ -5532,11 +5536,15 @@ def _guard_owns_path(trap: str, flag: str, path: str) -> bool:
     an operator's sources file present, the sources `rm` gated on `had_keyring` deletes
     a path it does not own — the exact harm this row names — and the suite stayed GREEN
     (MEASURED, review cycle 17). The association is the assertion.
+    Returns: the clause bound stops at `fi`/`else`/`elif`, and the removal must name
+    the SAME path — so neither an `else`-arm removal nor a swapped guard passes.
     """
     f, p = re.escape(flag), re.escape(path)
     for opener in re.finditer(r"\bif\b", trap):
         clause = trap[opener.end():]
-        stop = re.search(r";\s*fi\b|\n\s*fi\b|\bfi\b", clause)
+        stop = re.search(
+            r";\s*fi\b|\n\s*fi\b|\bfi\b|;\s*else\b|\n\s*else\b|\belif\b", clause
+        )
         if stop is None:
             continue
         clause = clause[: stop.start()]
@@ -5547,7 +5555,10 @@ def _guard_owns_path(trap: str, flag: str, path: str) -> bool:
         )
         if test is None:
             continue
-        if re.search(rf"rm\s+-f\s+\S*{p}", clause[test.end():]) is not None:
+        # ⛔ THE WHOLE `rm` SPELLING, NOT ONE FLAG CLUSTER. `-rf`, `-f --` and a
+        # `sudo` prefix are the same removal; pinning `-f ` alone refused them with a
+        # message false about what the file said (MEASURED, review cycle 18).
+        if re.search(rf"rm\s+(?:-[a-zA-Z]+\s+)*(?:--\s+)?\S*{p}", clause[test.end():]) is not None:
             return True
     return False
 
