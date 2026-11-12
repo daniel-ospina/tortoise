@@ -2406,7 +2406,7 @@ def test_a_de_bolded_second_tally_sentence_is_still_refused(tmp_path, monkeypatc
     decoys = (
         "Six of the twelve rows no longer read as written: b, c, d, e, g and k.",
         "Six of the twelve rows no longer read as written (b), (c), (d), (e), (g) and (k).",
-        "Six of the twelve rows no longer read as written: b and c.",
+        "Six of the twelve rows no longer read as written: b, c, d and g.",
     )
     for decoy in decoys:
         with monkeypatch.context() as patch:
