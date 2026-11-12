@@ -432,6 +432,174 @@ def test_every_embedded_label_has_a_query_path():
         assert row.verdict in ("PARTIAL", "NOT MET"), row.verdict
 
 
+#: ── `#11747`: the write path the DISCOVERY cannot see ─────────────────────────────────
+#: `cache_projection.node_statement` stores its vector through an INTERPOLATED property name
+#: (`f", n.{prop} = {form}"`), which is one of the shapes `_EMBED_WRITE` and the AST pass cannot
+#: decide — so the writer was ABSENT from `embedding_writers()` and a `:Session` vector reached the
+#: graph while this row printed `MET` / `stored-without-a-query-path: none`. The tests below are that
+#: hole's closure: the first pins that the row MEASURES the projection at all (and that the
+#: measurement is non-vacuous); the second that emptying the guard turns the row RED; the third that
+#: the probe's THIRD (directly-built `RecordNode`) door is measured; the fourth that the PLANTED
+#: property set is derived rather than the literal `embedding`; and the fifth that an unbuildable
+#: label HOLDS the row instead of crashing it.
+
+
+def test_row_two_MEASURES_the_cache_projection_by_running_it():
+    """`#11747` — measured by EXECUTING the writer, because reading it is the blind spot.
+
+    ⚠️ Non-vacuity is the load-bearing half. A derivation that simply returned nothing (or that
+    the import broke) would satisfy `labels <= served` on the live tree while seeing no store at
+    all — the fail-open shape every row in this file refuses. So the assertion is that the
+    projection DOES store vectors, that every label it stores on is served, and that `Session`
+    is not among them.
+    """
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert measured["unmeasured"] == {}, measured["unmeasured"]
+    assert measured["labels"], (
+        "the projection reports NO vector store at all — the probe is measuring nothing, so a "
+        "`labels <= served` assertion below would pass vacuously")
+    assert measured["labels"] <= probe.served_labels(), (
+        sorted(measured["labels"] - probe.served_labels()))
+    assert "Session" not in measured["labels"]
+    assert probe.score_path_bullet().verdict == "MET"
+
+
+def test_re_introducing_the_session_vector_flips_row_two_to_NOT_MET(monkeypatch):
+    """The falsifier: delete the guard and this row must go RED by itself.
+
+    ⛔ Mutating the GATE (not the probe's inputs) is the point: it exercises the real derivation
+    path end to end — `node_from_row` → `node_statement` → `stmt.params` → served-set comparison
+    — so the test reds on the failure a future lane would actually introduce, rather than on a
+    mock the probe was told to believe.
+    """
+    import tortoise.cache_projection as cp
+
+    monkeypatch.setattr(cp, "UNSERVED_VECTOR_LABELS", frozenset())
+    assert "Session" in probe.cache_projection_store_labels()["labels"]
+    row = probe.score_path_bullet()
+    assert row.verdict == "NOT MET", row.observed
+    assert "stored-without-a-query-path: ['Session']" in row.observed
+
+
+def test_the_PROBES_direct_writer_door_is_what_this_pin_measures(monkeypatch):
+    """The falsifier for the probe's THIRD door (`#11747` review, finding 5).
+
+    ⛔ WHAT THIS PIN MEASURES, stated plainly (`#11747` round-3 review, finding 4b): the probe's
+    DIRECTLY-BUILT `RecordNode` door, and nothing else. `record_plan` is public, so a caller may
+    hand the writer a node that never passed `node_from_row` — a row that cannot see that door
+    claims more than it measures.
+
+    ⚠️ It is NOT a falsifier for `node_statement`'s own check, which its old name and docstring
+    claimed. The `monkeypatch` below empties `UNSERVED_VECTOR_LABELS`, which disables BOTH gates at
+    once, and the wrapper re-applies the row→property drop by hand — so deleting
+    `node_statement`'s check from the source leaves this test GREEN. That check is pinned where it
+    is actually attributable:
+    `test_cache_projection.py::test_the_writer_refuses_a_directly_built_unserved_node`.
+    """
+    import tortoise.cache_projection as cp
+
+    real_unserved = cp.UNSERVED_VECTOR_LABELS
+    real_from_row = cp.node_from_row
+    assert "Session" in real_unserved, sorted(real_unserved)
+
+    def _from_row_with_its_drop_intact(label, row):
+        """`node_from_row` with the gate PINNED, so only the writer's is removed."""
+        node = real_from_row(label, row)
+        if label not in real_unserved:
+            return node
+        props = dict(node.props)
+        dropped = dict(node.dropped_vectors)
+        for prop in sorted(cp.stored_vector_props()):
+            if props.pop(prop, None) is not None:
+                dropped[prop] = "pinned by this test"
+        return cp.RecordNode(label=label, key=node.key, props=props,
+                             dropped_vectors=dropped)
+
+    monkeypatch.setattr(cp, "node_from_row", _from_row_with_its_drop_intact)
+    monkeypatch.setattr(cp, "UNSERVED_VECTOR_LABELS", frozenset())
+
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert "Session" in measured["labels"], (
+        "the DIRECT writer door is unmeasured: with `node_statement`'s check deleted and the "
+        "row→property drop intact, a `:Session` vector can only be seen through a node the "
+        f"caller built itself. Measured: {sorted(measured['labels'])}")
+    row = probe.score_path_bullet()
+    assert row.verdict == "NOT MET", row.observed
+    assert "stored-without-a-query-path: ['Session']" in row.observed
+
+
+def test_the_PLANTED_property_set_is_DERIVED_not_the_literal_embedding(monkeypatch):
+    """`#11747` round-3 review, finding 4a — the falsifier the derived planting was missing.
+
+    `planted = {prop: vector for prop in vector_props}` reads `cp.stored_vector_props()`, but that
+    set had exactly ONE member (`embedding`), so reverting the derivation to the old literal
+    `{"embedding": vector}` red NO row in the tree: the derivation was unfalsifiable and the
+    round-2 defect could have come back silently the day a second vector property joined the set.
+
+    So this pin MOVES the stored set to a property the literal would never plant, and keeps the
+    label served (otherwise the writer's own gate hides the store the probe must see). Nothing is
+    mocked into belief: the probe, `node_from_row` and `node_statement` all read the same patched
+    set, so the row's answer comes from the real derivation path.
+
+    ⛔ What reds: the assertion that `Session` is MEASURED. With the literal planting the row would
+    carry `embedding`, which is no longer a stored property — it lands in the `props` map, never in
+    `stmt.params` as a store clause — so the probe would see nothing and row 2 would keep printing
+    `stored-without-a-query-path: none`. The control at the end proves that half explicitly.
+    """
+    import tortoise.cache_projection as cp
+    import tortoise.record_projection as rp
+
+    monkeypatch.setattr(cp, "STORED_VECTOR_PROPS", frozenset({"embedding_v2"}))
+    monkeypatch.setattr(cp, "UNSERVED_VECTOR_LABELS", frozenset())
+
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert "Session" in measured["labels"], (
+        "the probe planted only the literal `embedding`: the projection's stored property is "
+        f"{sorted(cp.stored_vector_props())} and the store it emits was not inspected. "
+        f"Measured: {sorted(measured['labels'])}")
+    row = probe.score_path_bullet()
+    assert row.verdict == "NOT MET", row.observed
+    assert "stored-without-a-query-path: ['Session']" in row.observed, row.observed
+
+    # The control: the LITERAL planting is invisible to this row — it never reaches
+    # `stmt.params` as a store clause, which is what makes the assertion above a falsifier.
+    key_column = rp.snake(cp.KEY_PROPERTY["Session"])
+    literal = cp.node_statement(cp.RecordNode(
+        label="Session", key="dod-literal",
+        props={key_column: "dod-literal", "embedding": [0.5, 0.25]}))
+    assert "embedding_v2" not in literal.params
+    assert "embedding" not in literal.params
+    assert literal.params["props"]["embedding"] == [0.5, 0.25]
+
+
+def test_a_record_label_without_a_key_HOLDS_the_row_instead_of_crashing(monkeypatch):
+    """`#11747` review, finding 4 — the per-label derivation is inside the envelope.
+
+    ⛔ MEASURED pre-fix: only the imports and the two door-builds were wrapped, so a label in
+    `cp.NODE_TABLES` that `cp.KEY_PROPERTY` does not know made the WHOLE DoD report raise
+    `KeyError` — instead of holding row 2 at `PARTIAL`, which is what this function's own
+    contract says an unbuildable shape does ("a label where NEITHER shape could be built is
+    reported as unmeasured"). Before `#11747` row 2 could not be taken down by a projection-side
+    `KeyError` at all.
+    """
+    import tortoise.cache_projection as cp
+
+    monkeypatch.setitem(cp.NODE_TABLES, "NoSuchRecordLabel", "no_such_record_label")
+
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert "NoSuchRecordLabel" in measured["unmeasured"], measured
+    assert "KeyError" in measured["unmeasured"]["NoSuchRecordLabel"], measured["unmeasured"]
+    # …and the ROW holds rather than reporting a verdict it could not measure.
+    assert probe.score_path_bullet().verdict == "PARTIAL"
+    # The other labels are still measured: a hold on one must not blind the rest.
+    assert "Session" not in measured["labels"]
+    assert measured["labels"], "nothing measured at all — the pin above would be vacuous"
+
+
 #: ── `#11492`: row 2 resolves labels from the SAME product register row 1 reads ──────────────
 #: The issue required the reading to be DECIDED, not assumed: the register classified writers but
 #: carried NO label (Case B), and the label is not derivable per writer either (15 of the 20
@@ -7153,11 +7321,11 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `165 passed, 1 skipped`
+    defect. Measured at this tree: the docker lane reads `170 passed, 1 skipped`
     (the skip is the `<3.12` re-derive) and the carve-out lane reads
-    `164 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
+    `169 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
     fixture, which only a lane with a `TORTOISE_DB_URI` satisfies). Both splits add
-    to the `166` re-derived below, which is why the doc states its split as
+    to the `171` re-derived below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
     root = Path(probe.__file__).resolve().parent.parent

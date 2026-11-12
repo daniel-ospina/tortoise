@@ -72,7 +72,12 @@ ADMIN_NOTIFY_MODULE = WEBSITE / "functions" / "blog" / "api" / "notify-publish.t
 PATCH_HANDLER = WEBSITE / "functions" / "blog" / "api" / "posts" / "[[path]].ts"
 DEPLOY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-pages.yml"
 
-SITE = "https://tortoise.premiselabs.co"
+# The blog's canonical origin (#11765: flipped from the product host, which is now a
+# permanent 301 — see epic #11762). The handlers derive every absolute URL from
+# `SITE_URL` in `website/functions/blog/_lib.ts`, NOT from the request origin, so this
+# literal is the only place the origin appears in this file; the host assertions below
+# DERIVE from it (`SITE.removeprefix("https://")`) rather than repeating it.
+SITE = "https://premiselabs.co"
 AGENT = "blog-indexnow-test"
 ENDPOINT = "https://api.indexnow.org/indexnow"
 
@@ -769,7 +774,7 @@ def test_v2_the_publish_transition_submits_the_canonical_url_exactly_once(result
     assert body["urlList"] == [canonical], (
         f"the payload must carry exactly the canonical URL {canonical!r} — got {body['urlList']!r}"
     )
-    assert body["host"] == "tortoise.premiselabs.co", body["host"]
+    assert body["host"] == SITE.removeprefix("https://"), body["host"]
     assert body["key"] == res["key"], body["key"]
     assert body["keyLocation"] == f"{SITE}/{res['key']}.txt", (
         f"keyLocation must name the file V1 asserts is served — got {body['keyLocation']!r}"
@@ -935,7 +940,7 @@ def test_v4_a_failed_submission_does_not_fail_the_publish(results, case: str, ne
     assert len(res["submissions"]) == 1, f"{case}: the attempt itself must happen: {res}"
     matching = _logs_matching(res, needle)
     assert matching, f"{case}: no log line carries {needle!r}: {res['logs']}"
-    assert any("tortoise.premiselabs.co/blog/indexnow-slug" in line for line in matching), (
+    assert any(f"{SITE}/blog/indexnow-slug" in line for line in matching), (
         f"{case}: the failure log must name the URL — got {matching}"
     )
 
