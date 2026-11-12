@@ -1252,11 +1252,12 @@ def test_signup_acceptance_dom_structure(page: Page) -> None:
     # ⛔ THE DESTINATION IS PINNED, NOT THE SPELLING (#12058). This page belongs
     # to the APP origin (`_app_url`), which is its own Pages project, so a
     # root-relative `/tos` here answers 404 — measured, and the reason the markup
-    # carries the company host ABSOLUTELY. The ORIGINAL pin was a substring of the
-    # raw attribute (`"/tos" in hrefs`), which reddened a tree that had just been
-    # corrected to `https://premiselabs.co/tos`; the pin this change REPLACES went
-    # the other way and compared the PATH only, so a root-relative `/tos` still
-    # passed it and the 404 the guard exists for stayed green. `a.href` is the
+    # carries the company host ABSOLUTELY. The ORIGINAL pin required the raw
+    # attribute to be EXACTLY `/tos` (`"/tos" in hrefs` is LIST MEMBERSHIP, not a
+    # substring test), so it reddened a tree that had just been corrected to
+    # `https://premiselabs.co/tos` while passing a root-relative `/tos`; the pin this
+    # change REPLACES then compared the PATH only, so the relative form still passed
+    # and the 404 the guard exists for stayed green. `a.href` is the
     # browser-resolved URL and the origin is compared whole, so the pin is the
     # destination — while a root-relative `/tos` on this origin still FAILS,
     # because it resolves to the app host, which serves no legal page.
