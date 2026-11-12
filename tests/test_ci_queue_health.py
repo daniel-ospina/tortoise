@@ -1702,9 +1702,10 @@ def test_a_counters_met_queue_with_an_executing_PR_run_reaches_OK_with_no_PRWITN
     THIS test pins the route's OUTPUT, not the clauses' reachability: the route
     (`pr_running != 0` → `healthy()` → the constructor's derivation) leaves `OK` /
     `pr_wait_measured=False` / `congests_pr is None`. It is the behavioural anchor for
-    `healthy()`'s sentence — it reds when that route's RETURN changes — but it is NOT a
-    witness that its clauses are REACHED, which is why the two mutations below and the two
-    retractions that follow are kept apart.
+    `healthy()`'s sentence — it reds when any of THOSE THREE values changes, and a change
+    elsewhere in that route's return can leave it green — but it is NOT a witness that its
+    clauses are REACHED, which is why the two mutations below and the two retractions that
+    follow are kept apart.
 
     ⛔ WHAT THIS TEST DOES **NOT** PIN (round 24, measured — an earlier draft of this
     docstring claimed both and both were GREEN): conjoining `and not truncated` into the
