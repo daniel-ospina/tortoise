@@ -10837,6 +10837,16 @@ def _property_filter_clause(key: str) -> str:
     return f"n.`{key}` = ${key}"
 
 
+# #11823 — the propagation census rides a POLLED endpoint
+# (`GET /v1/dream/health`) and costs O(live points + IMPL|NAND edges), so it is
+# BOUNDED: above this many live non-operator `:Point`s the census refuses with
+# a named reason instead of holding the dream executor. Measured ~65 ms per
+# 1,000 live claims (embedded), so 25_000 is ~1.6 s worst case per poll.
+# Raise it if you accept that cost.
+PROPAGATION_CENSUS_MAX_POINTS_ENV = "TORTOISE_PROPAGATION_CENSUS_MAX_POINTS"
+DEFAULT_PROPAGATION_CENSUS_MAX_POINTS = 25_000
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -32106,12 +32116,18 @@ class TortoiseSDK:
             "warm_skipped_updates": state["warm_skipped_updates"],
             # #11823 — the propagation cap, made visible. `coverage_pct` above
             # is STAMP coverage over a population EP cannot reach; this block
-            # is the graph-scoped answer to "how many claims have no belief"
-            # plus the reach of the last pass in THIS process. It is an
+            # is the graph-scoped answer to "how many claims have no belief",
+            # plus the reach of the last pass THIS SDK instance served (not
+            # "in this process" — the hosted door runs the pass on another
+            # per-request SDK, see `_propagation_health`). It is an
             # additive field on a plain dict (no key-set is pinned here), and
             # it is on this surface for the same reason #3139 put
             # `last_belief_write_count` here: the pass result's key-set IS
             # pinned (I1, #6211), so belief observability lives on health.
+            # "6 of 20, 14 uncovered": the graph-scoped half gives the counts;
+            # this records the pass that ran. The pass half is per-instance, so
+            # the per-pass keys are absent when this instance served no pass —
+            # see `last_pass_reason`.
             "propagation": self._propagation_health(),
         }
 
@@ -32222,6 +32238,17 @@ class TortoiseSDK:
         # `sum(...)` returns a FLOAT on this engine (measured 3.0) — cast.
         return int(rows[0][0] or 0), int(rows[0][1] or 0)
 
+    def _propagation_census_cap(self) -> int:
+        """The live-`:Point` bound above which :meth:`_propagation_counts`
+        refuses (#12116 P2). Env-overridable; a malformed or non-positive value
+        falls back to the default rather than disabling the bound."""
+        raw = os.environ.get(PROPAGATION_CENSUS_MAX_POINTS_ENV)
+        try:
+            value = int(raw) if raw not in (None, "") else 0
+        except (TypeError, ValueError):
+            value = 0
+        return value if value > 0 else DEFAULT_PROPAGATION_CENSUS_MAX_POINTS
+
     def _propagation_counts(self) -> dict:
         """#11823 — the graph-scoped population a propagation pass does NOT choose.
 
@@ -32251,16 +32278,22 @@ class TortoiseSDK:
           `ep_has_belief_cypher`, the SHARED predicate — never a private sum").
         - ``graph_live_claims`` / ``stamped`` — the ``:Point`` population the
           existing stamp-coverage ratio uses.
-        - ``operator_less_claims`` — its OWN ``NOT (n)-[:IMPL|NAND]-()`` count:
-          the `_trivial_stamp`/``scanned_count`` population EP can never cover.
-          NOT ``graph_live_claims - ep_reachable_claims``: the two are defined
-          by different rules — a live Point whose only ``IMPL|NAND`` edge
-          reaches a DRAFT or non-epistemic endpoint has an edge and is still
-          unreachable (#12116 review C-P2, measured with
-          ``create_direct_edge``). One query owns each number, and
-          ``unclassified_claims`` is the explicit remainder (below).
-        - ``unclassified_claims`` — ``graph_live - ep_reachable -
-          operator_less``: live non-operator ``:Point``s that DO have an
+        - ``operator_less_claims = graph_live_claims - points_edged``, where
+          ``points_edged`` is the count of live non-operator ``:Point``s with
+          ANY ``IMPL|NAND`` edge: the `_trivial_stamp`/``scanned_count``
+          population EP can never cover. ⛔ **Derived from the POSITIVE
+          traversal, not from a negated pattern** (#12116 review P2: the
+          ``NOT (n)-[:IMPL|NAND]-()`` spelling measured 76.6 ms per 1 000
+          claims — 57% of the whole census — against 7.9 ms for the positive
+          count). It is NOT ``graph_live_claims - ep_reachable_claims``: the
+          two are defined by different rules, and a live Point whose only
+          ``IMPL|NAND`` edge reaches a DRAFT or non-epistemic endpoint has an
+          edge and is still unreachable (#12116 review C-P2, measured with
+          ``create_direct_edge``). That population is ``unclassified_claims``
+          (below).
+        - ``unclassified_claims`` — ``points_edged - ep_reachable`` (the same
+          value as ``graph_live - ep_reachable - operator_less``): live
+          non-operator ``:Point``s that DO have an
           ``IMPL|NAND`` edge but whose far endpoint is draft or non-epistemic,
           so EP excludes the factor and no pass can recompute them. Without
           this field the block UNDER-reports — a graph whose only live claim
@@ -32281,17 +32314,45 @@ class TortoiseSDK:
         anchors ``n:Point``, so such a component can never match it and can
         never enter the denominator.
 
-        Raises on a read failure: the caller reports ``unavailable`` rather
-        than letting 0 mean both "no claims" and "could not read"
-        (`docs/architecture/BOUNDED-OPERATION-CONTRACT.md` §1a).
+        Raises ``PropagationCensusRefused`` when the live ``:Point`` population
+        exceeds ``TORTOISE_PROPAGATION_CENSUS_MAX_POINTS`` — checked after the
+        cheap O(points) stamp count and BEFORE the two O(points + edges)
+        traversals (#12116 review P2: this census rides a polled endpoint) —
+        and re-raises any read failure. The caller reports either as
+        ``unavailable`` rather than letting 0 mean both "no claims" and "could
+        not read" (`docs/architecture/BOUNDED-OPERATION-CONTRACT.md` §1a).
         """
-        from .dream import TRIVIAL_STAMP_PREDICATE  # #11823 one spelling
         from .search_engine import ep_has_belief_cypher  # #11702 shared gate
         proj = self._get_proj()
         live = "(n.status IS NULL OR n.status <> 'draft')"
         live_m = "(m.status IS NULL OR m.status <> 'draft')"
         non_op = "(n.is_operator IS NULL OR n.is_operator = false)"
-        # One query: the denominator AND the belief count over that SAME set.
+        # #12116 review P2 — the census is BOUNDED before the expensive reads.
+        # The census is O(points + edges) and rides a POLLED endpoint; measured
+        # 135 ms per 1,000 live claims for the first version and ~68 ms for this
+        # one. The stamp count below is O(points) only, so it is the cheap
+        # population probe; the two traversals after it are what the bound is
+        # there to prevent.
+        graph_live, stamped = self._stamp_counts()
+        cap = self._propagation_census_cap()
+        if graph_live > cap:
+            from .exceptions import PropagationCensusRefused
+            raise PropagationCensusRefused(
+                graph_live, cap, PROPAGATION_CENSUS_MAX_POINTS_ENV)
+        # Query 1: how many live non-operator :Points carry ANY IMPL|NAND edge.
+        # This is the CHEAP spelling of the operator-less answer (#12116 P2:
+        # a negated pattern — `NOT (n)-[:IMPL|NAND]-()` — measured 76.6 ms per
+        # 1,000 claims, 57% of the whole census; the positive traversal is
+        # 7.9 ms for the same answer, derived as `graph_live - points_edged`).
+        edged_rows = proj.g.query(
+            "MATCH (n:Point)-[:IMPL|NAND]-() "
+            f"WHERE {non_op} AND {live} "
+            "WITH DISTINCT n RETURN count(n)"
+        ).result_set
+        points_edged = int(edged_rows[0][0] or 0) if edged_rows else 0
+        # Query 2: of those, the ones EP can actually reach (a LIVE, epistemic
+        # far endpoint) and how many store a belief — one pass, both numbers,
+        # so the numerator and denominator cannot come from different sets.
         reach_rows = proj.g.query(
             "MATCH (n:Point)-[r:IMPL|NAND]-(m) "
             f"WHERE {non_op} AND {live} AND {live_m} "
@@ -32301,19 +32362,11 @@ class TortoiseSDK:
         ).result_set
         reachable = int(reach_rows[0][0] or 0) if reach_rows else 0
         belief_present = int(reach_rows[0][1] or 0) if reach_rows else 0
-        # Second query: the :Point population the stamp ratio uses — the SAME
-        # helper `_metrics_coverage` calls, so the two cannot drift (#12116 A-P2).
-        graph_live, stamped = self._stamp_counts()
-        # Third query: the operator-less population, as its OWN count. A
-        # `NOT (n)-[:IMPL|NAND]-()` inside a `sum(CASE ...)` is rejected by the
-        # engine ("expected Boolean or Null but was List", measured) — so it
-        # cannot ride the aggregate above.
-        less_rows = proj.g.query(
-            "MATCH (n:Point) "
-            f"WHERE {TRIVIAL_STAMP_PREDICATE} "
-            "RETURN count(n)"
-        ).result_set
-        operator_less = int(less_rows[0][0] or 0) if less_rows else 0
+        # The partition, each term the difference of two counts over the SAME
+        # `:Point` population — `operator_less` is the `_trivial_stamp`
+        # population (no IMPL|NAND edge at all) and `unclassified` is edged but
+        # unreachable (#12116 C-P2). Equalities, not clamps.
+        operator_less = graph_live - points_edged
         # No clamp: the numbers are reported as measured. A future mixed
         # population must show up as `no_belief < 0` / a `belief_coverage_pct`
         # outside [0, 1] — a VISIBLE defect — rather than being silently
@@ -32321,11 +32374,7 @@ class TortoiseSDK:
         # clamp is the opposite of the asserted invariant the comment claimed).
         # `tests/test_11823_*` asserts the ranges instead.
         no_belief = reachable - belief_present
-        # The remainder of the partition (#12116 C-P2): edged, live, EP cannot
-        # reach it. NOT clamped — a negative value would mean the three counts
-        # came from different populations, and that must be VISIBLE (#12116
-        # C-P3: a silent clamp is a silent lie).
-        unclassified = graph_live - reachable - operator_less
+        unclassified = points_edged - reachable
         return {
             "graph_live_claims": graph_live,
             "ep_reachable_claims": reachable,

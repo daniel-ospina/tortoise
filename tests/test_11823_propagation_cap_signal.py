@@ -172,15 +172,22 @@ def test_the_denominator_is_the_graph_not_the_last_pass(sdk):
     assert before == after == 3
 
 
-def test_reachable_claim_count_is_unchanged(sdk):
+def test_reachable_claim_count_is_unchanged(sdk, monkeypatch):
     """`_edged_claim_ids()` was extracted out of `_reachable_claim_count`;
-    the closure intersection must stay AT THE CALL SITE (dropping it inflates
-    full-mode `coverage`'s denominator silently)."""
+    the closure intersection must stay AT THE CALL SITE.
+
+    #12116 review P3: the earlier version compared two numbers that are equal
+    on any real fixture (the function anchors at EVERY non-operator Point), so
+    a version returning `len(self._edged_claim_ids())` — closure term dropped —
+    still passed. The discriminator is a monkeypatched edged set containing one
+    id that cannot be in any closure.
+    """
     _chain(sdk, 3)
-    _islands(sdk, 2)
-    closure = sdk._window_closure(_chain_ids(sdk), 2)
-    edged = sdk._edged_claim_ids()
-    assert sdk._reachable_claim_count(2) == len(closure & edged)
+    real = sdk._edged_claim_ids()
+    assert real
+    monkeypatch.setattr(
+        sdk, "_edged_claim_ids", lambda: set(real) | {"no-such-point-id"})
+    assert sdk._reachable_claim_count(2) == len(real)
 
 
 def _chain_ids(sdk):
@@ -195,7 +202,13 @@ def _chain_ids(sdk):
 
 def test_the_propagation_read_is_three_aggregate_counts(sdk, monkeypatch):
     """The polled `GET /v1/dream/health` must not grow a per-vertex
-    materialisation: three aggregate COUNT/SUM reads, nothing else."""
+    materialisation: three aggregate reads, nothing else.
+
+    ⚠️ #12116 review P2: this COUNT control cannot detect cost — the first
+    version passed it while the census measured 135 ms per 1,000 live claims.
+    The budget now also has the BOUND (`test_the_census_refuses_above_its_bound`)
+    and a recorded measurement (plan R7); this test only guards the SHAPE.
+    """
     _chain(sdk, 2)
     inner = sdk._get_proj()
     queries: list[str] = []
@@ -284,20 +297,56 @@ def test_last_pass_never_subtracts_across_populations(sdk):
 
 
 def test_an_operator_less_pass_does_not_report_full_coverage(sdk):
-    """#12116 review B-P2, as a reproduction: a pass that consumes ONLY
-    operator-less claims leaves every EP-reachable claim uncovered, and the
-    block must not read as covered."""
+    """#12116 review P3 — the earlier version of this test could not fail.
+
+    Its discriminating assertion was an `or` whose second disjunct was the
+    healthy value, and its fixture passed the CHAIN ids as the dirty roots, so
+    no operator-less claim was ever in `affected`. This one puts ONLY
+    operator-less claims in the window: the pass consumes them (their stamps
+    land), and every EP-reachable claim stays belief-less — so the block must
+    show a non-zero `no_belief`, and `last_pass` must carry no derived
+    "uncovered" that could mask it.
+    """
     ids = _chain(sdk, 3)                      # 3 EP-reachable claims
-    for i in range(20):                       # 20 operator-less claims
-        _claim(sdk, f"island {i}")
-    sdk._dirty_roots = {i for i in ids}
+    islands = [_claim(sdk, f"island {i}") for i in range(5)]
+    sdk._dirty_roots = set(islands)            # ONLY operator-less claims
     sdk.dream(mode="local", max_hops=1, require_calibration=False)
     p = _prop(sdk)
+    last = p["last_pass"]
+    assert last["affected"] >= 1               # the pass really ran over them
     assert p["ep_reachable_claims"] == 3
-    assert p["operator_less_claims"] == 20
-    assert p["no_belief"] > 0 or p["belief_present"] == 3
-    # whatever the pass reached, the block never publishes a *derived* zero
-    assert "uncovered" not in p["last_pass"]
+    assert p["operator_less_claims"] == 5
+    assert p["unclassified_claims"] == 0
+    # the reachable claims are still belief-less (except the chain head, which
+    # carries the declared baseline), and the block says so
+    assert p["belief_present"] == 1
+    assert p["no_belief"] == 2
+    assert "uncovered" not in last
+    assert ids
+
+
+def test_the_census_refuses_above_its_bound(sdk, monkeypatch):
+    """#12116 review P2 — the census is O(points + edges) on a POLLED endpoint
+    (measured ~65 ms per 1,000 live claims), so it is bounded and refuses with
+    a NAMED reason instead of holding the dream executor.
+    """
+    _chain(sdk, 3)
+    monkeypatch.setenv("TORTOISE_PROPAGATION_CENSUS_MAX_POINTS", "2")
+    p = _prop(sdk)
+    assert p["unavailable"] and "PropagationCensusRefused" in p["unavailable"]
+    assert "TORTOISE_PROPAGATION_CENSUS_MAX_POINTS" in p["unavailable"]
+    assert p["no_belief"] is None      # refused, NOT zero
+    monkeypatch.setenv("TORTOISE_PROPAGATION_CENSUS_MAX_POINTS", "1000")
+    assert _prop(sdk)["no_belief"] == 2      # the census runs again
+
+
+def test_the_census_bound_cannot_be_disabled_by_a_junk_value(sdk, monkeypatch):
+    """A malformed or non-positive override falls back to the default bound
+    rather than removing it."""
+    _chain(sdk, 2)
+    for junk in ("not-a-number", "0", "-5", ""):
+        monkeypatch.setenv("TORTOISE_PROPAGATION_CENSUS_MAX_POINTS", junk)
+        assert _prop(sdk)["unavailable"] is None
 
 
 def test_a_budget_zero_pass_is_recorded_not_absent(sdk):
@@ -443,7 +492,13 @@ def test_an_edged_but_unreachable_claim_is_not_invisible(sdk):
 
 
 def test_the_three_counts_partition_the_live_points(sdk):
-    """The partition is exact on a mixed graph — and no term is clamped."""
+    """The partition is exact on a mixed graph — and no term is clamped.
+
+    ⚠️ #12116 review P3: `operator_less = graph_live - points_edged` and
+    `unclassified = points_edged - reachable`, so the identity alone is a
+    TAUTOLOGY. The numbers must therefore be checked against queries written
+    independently here, plus the non-negativity the derivation relies on.
+    """
     _chain(sdk, 3)
     _islands(sdk, 2)
     live = _claim(sdk, "edged only to a draft")
@@ -451,14 +506,28 @@ def test_the_three_counts_partition_the_live_points(sdk):
                              status="draft")["id"]
     sdk.create_direct_edge("IMPL", live, draft)
     p = _prop(sdk)
+    g = sdk._get_proj().g
+    edged = int(g.query(
+        "MATCH (n:Point)-[:IMPL|NAND]-() "
+        "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+        "AND (n.status IS NULL OR n.status <> 'draft') "
+        "WITH DISTINCT n RETURN count(n)").result_set[0][0])
+    assert p["operator_less_claims"] == p["graph_live_claims"] - edged
+    assert p["unclassified_claims"] == edged - p["ep_reachable_claims"]
+    assert p["operator_less_claims"] >= 0
     assert p["unclassified_claims"] >= 0
     assert (p["ep_reachable_claims"] + p["operator_less_claims"]
             + p["unclassified_claims"] == p["graph_live_claims"])
 
 
 def test_untested_operator_less_population_matches_trivial_stamp(sdk):
-    """#12116 A-P3: the block's operator-less count and `_trivial_stamp`'s own
-    population are ONE spelling (`TRIVIAL_STAMP_PREDICATE`), so the two agree.
+    """#12116 A-P3: the block's operator-less count IS `_trivial_stamp`'s
+    population — a VALUE agreement, checked against an independent query.
+
+    ⛔ The first version made this a shared SPELLING (`TRIVIAL_STAMP_PREDICATE`)
+    and was reverted in review P2: that constant's negated pattern was the most
+    expensive read in the census. The guarantee is now the value, not the text —
+    so this test must keep measuring the value.
     """
     _chain(sdk, 3)
     _islands(sdk, 2)
@@ -472,8 +541,10 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
         "(n.is_operator IS NULL OR n.is_operator = false) "
         "AND (n.status IS NULL OR n.status <> 'draft') "
         "AND NOT (n)-[:IMPL|NAND]-() RETURN count(n)").result_set
-    # The block's number IS `_trivial_stamp`'s population (one shared constant),
-    # so a change to either spelling cannot make them disagree.
+    # The block's number carries the SAME VALUE as `_trivial_stamp`'s own
+    # population (checked against the query below, which is written
+    # independently). #12116 review P2 reverted the shared-constant version:
+    # that constant's negated pattern was the most expensive read in the census.
     assert prop["operator_less_claims"] == int(rows[0][0]) == 2
     # A draft-edged claim is still edged, so it is NOT in this population — the
     # count is not "claims with no edges at all" by accident.

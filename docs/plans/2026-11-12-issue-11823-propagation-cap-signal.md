@@ -130,7 +130,8 @@ not a fix (D2-5).
 | `_record_dream_metrics` | pass record writer | unchanged signature; reads a new metrics key | ✅ |
 | `dream_health_check` | read surface (embedded, hosted, MCP all read THIS dict) | this change | ✅ |
 | `_metrics_coverage` | existing stamp-coverage helper, must keep its value | unchanged behaviour; now delegates to `_stamp_counts()` so `coverage_pct` and the block's `stamped`/`graph_live_claims` cannot drift (#12116 A-P2) | ✅ |
-| `tortoise/dream.py::TRIVIAL_STAMP_PREDICATE` | the operator-less population predicate, one spelling | `_trivial_stamp` (two queries) + `_propagation_counts` (#12116 A-P3) | ✅ |
+| `tortoise/dream.py::TRIVIAL_STAMP_PREDICATE` | the operator-less population predicate, one spelling | `_trivial_stamp` (two queries); the health block derives the same population from `graph_live - points_edged` for cost reasons (#12116 P2/A-P3) | ✅ |
+| `tortoise/exceptions.py::PropagationCensusRefused` | the bounded-refusal signal for the polled census | `_propagation_health` reports it as `unavailable` (#12116 P2) | ✅ |
 | `compute_confidence` no-arg path | calls `self.dream(...)`; reads `dreamer._last_selection_stats` only | no interaction (no result keys touched) | ✅ |
 | `tests/test_dream.py` exact local key-set | contract pin | must stay green | ✅ |
 | `tests/test_epic903_observability.py`, `tests/test_dream_noop_3139.py` | alarm + metrics regressions | must stay green | ✅ |
@@ -146,7 +147,8 @@ not a fix (D2-5).
    have inflated full-mode `coverage`'s denominator silently).
 2. **Denominator semantics (corrected in cycle 3 — the two populations must be the SAME population).**
    `ep_reachable_claims` is its **own `:Point`-scoped `count(DISTINCT n)`**: live non-operator
-   `:Point`s participating in ≥1 `IMPL|NAND` edge to a live point. It is **NOT** `len(_edged_claim_ids())`
+   `:Point`s participating in ≥1 `IMPL|NAND` edge to a live EPISTEMIC point (the far
+   endpoint passes `epistemic_disjunction`, i.e. `Point|Subject|Object|Event`). It is **NOT** `len(_edged_claim_ids())`
    — that query is label-blind (`MATCH (n)-[r:IMPL|NAND]-(m)` + `epistemic_disjunction('n')` admits
    `Point|Subject|Object|Event`, `live.py:509`), so reusing it here would mix a `:Point` numerator with
    a wider denominator and produce `belief_coverage_pct > 1` and a NEGATIVE `no_belief` (measured on
@@ -154,15 +156,20 @@ not a fix (D2-5).
    fixture). A second query spelling is legitimate here precisely because it asks a different
    question; the extraction in step 1 exists only so `_reachable_claim_count` keeps ONE copy of ITS
    predicate.
-   - `operator_less_claims` is likewise **its own count**: `MATCH (n:Point) WHERE <live> AND NOT
-     (n)-[:IMPL|NAND]-() RETURN count(n)` — the `_trivial_stamp` population (`tortoise/dream.py::_trivial_stamp`). It is
+   - `operator_less_claims = graph_live_claims - points_edged`, where `points_edged` is the live
+     non-operator `:Point` count with ANY `IMPL|NAND` edge — the `_trivial_stamp` population
+     (`tortoise/dream.py::_trivial_stamp`) derived from the POSITIVE traversal (#12116 review P2: the
+     negated-pattern spelling measured 76.6 ms per 1 000 claims, 57% of the whole census, against
+     7.9 ms). It is NOT a shared spelling — `test_untested_operator_less_population_matches_trivial_stamp`
+     asserts the two populations AGREE by VALUE on a fixture. It is also
      **not** `graph_live_claims - ep_reachable_claims`: the subtraction is wrong two measured ways
      (label-blind denominator, far-endpoint draft filter). ⚠️ **Corrected during BUILD:** a third
      reason carried from an earlier cycle — "Points edged only to a draft that `_trivial_stamp` does
      not stamp" — does **not** hold as stated: a draft-edged claim is still edged, and `create_operator`
      routes the edge through an operator node, so the claim is reached. The draft gap exists only for a
      DIRECT `IMPL|NAND` edge to a draft endpoint; the honest statement is that the two populations are
-     defined by different rules, which is why each has its own query.
+     defined by different rules — `ep_reachable_claims` is one rule, `operator_less_claims` another, and
+     the claims that satisfy neither are `unclassified_claims`.
    - Invariants (asserted, not merely documented): `0 ≤ no_belief ≤ ep_reachable_claims` and
      `0 ≤ belief_coverage_pct ≤ 1`.
    - ⚠️ `ep_reachable_claims` INCLUDES anchor-less epistemic components (`:Subject-[:IMPL]->:Object`,
@@ -257,7 +264,7 @@ unreadable test goes red; drop the closure term from `_reachable_claim_count` wh
   window) + `test_no_belief_stays_inside_its_invariants` (`0 ≤ no_belief ≤ ep_reachable_claims`,
   `0 ≤ belief_coverage_pct ≤ 1` — RANGES, not the tautological identity) +
   `test_a_zero_pair_is_not_a_belief` (shared predicate, not `IS NOT NULL`) +
-  `test_operator_less_claims_are_not_in_the_denominator` (its own `NOT (n)-[:IMPL|NAND]-()` count,
+  `test_operator_less_claims_are_not_in_the_denominator` (derived by difference over one population,
   disjoint from the denominator) + `test_reachable_claim_count_is_unchanged` (the extraction preserves
   `closure & edged`).
   ⚠️ The zero-claim is scoped, not general: on a fixture whose **whole** edged population sits in the
@@ -284,14 +291,27 @@ unreadable test goes red; drop the closure term from `_reachable_claim_count` wh
   of being visible → the clamp is gone; the ranges are asserted in the tests
   (`test_no_belief_stays_inside_its_invariants`), so a negative `no_belief` reddens CI.
 - R7 the new reads make a polled endpoint expensive (`GET /v1/dream/health` is per-request; the
-  denominator query is an edge traversal) → `test_the_propagation_read_is_three_aggregate_counts`
-  (query counter: exactly **three** aggregate reads — `count(DISTINCT n)`+belief `sum` over the
-  reachable set, `count`+stamp `sum` over live `:Point`s, and a `NOT (n)-[:IMPL|NAND]-()` `count` —
-  all aggregates, never a per-vertex id materialisation on the polled path).
-  ⚠️ **Corrected during BUILD (measured, not predicted):** the operator-less count cannot ride the
-  same `RETURN` as the other two — `sum(CASE WHEN NOT (n)-[:IMPL|NAND]-() …)` is refused by the
-  engine (`ResponseError: Type mismatch: expected Boolean or Null but was List`), so it is its own
-  `count` query. Three reads, not two.
+  census traverses every live `:Point` and its `IMPL|NAND` edges) → **two** controls, because the
+  first one alone was inadequate:
+  - `test_the_propagation_read_is_three_aggregate_counts` — SHAPE: three aggregate reads, no
+    per-vertex id materialisation.
+  - `test_the_census_refuses_above_its_bound` + `test_the_census_bound_cannot_be_disabled_by_a_junk_value`
+    — COST: above `TORTOISE_PROPAGATION_CENSUS_MAX_POINTS` (default 25 000) the census raises
+    `PropagationCensusRefused`, reported as `propagation.unavailable` with the count, the bound and the
+    env var — a bounded operation with a named refusal, never a silent stall.
+  ⚠️ **Corrected after code review (#12116 P2), with measurements.** The count-based control passed
+  while the census measured **135 ms per 1 000 live claims** (vs 1.9 ms for the pre-existing stamp
+  read), i.e. ~15× the rest of `dream_health_check()` and linear in graph size — a 40 k-claim graph
+  would hold the dream executor for ~2.6 s per poll. Two changes: the operator-less answer is now
+  **derived from the positive traversal** (`points_edged`) instead of the negated
+  `NOT (n)-[:IMPL|NAND]-()` pattern (76.6 ms → 7.9 ms per 1 000 claims on its own), taking the census
+  to **68 ms @ 1 000** and **148 ms @ 4 000** (measured after the change); and the bound above caps
+  what is left. The residual — the census is still O(points + edges) — is recorded on the PR; the
+  O(1) fix is a maintained counter on the write path, a much larger change than this instrument.
+  ⚠️ Also corrected during BUILD: `sum(CASE WHEN NOT (n)-[:IMPL|NAND]-() …)` is refused by the engine
+  (`ResponseError: Type mismatch: expected Boolean or Null but was List`), which is what pushed the
+  first version to a third query — and that third query is the one the positive-traversal derivation
+  above replaced.
 
 **Threat classes:** (not adversarial) — this is a read-only observability field; no gate, no
 enforcement path, nothing that can fail open into a wrong verdict.
