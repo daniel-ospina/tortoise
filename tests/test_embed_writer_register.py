@@ -2645,21 +2645,63 @@ def _carrier_issues_a_call(statement: ast.stmt) -> bool:
     is: a store is ISSUED by a call (`proj.g.query(…)`, `clear_embedding(…)`), so an `ast.Expr`
     whose value is not a call holds text and issues nothing.
 
-    Applies to the "does this store" arms only (`store`, `merge`) — the same scope `_executes_a_call`
-    claims. `bound`/`bound_store`/`assembly` ask about a LABEL statement, which legitimately issues
-    no write of its own.
+    Applies to every arm whose question is "does this store" — the `store` and `merge` branches
+    directly, `bound_store` through `_symbol_stores_in_own_scope`, and `assembly`'s store scan. Only
+    `bound` is exempt, and for a real reason rather than a categorical one: its needle is a LABEL
+    binding whose completeness rests on `LABEL_CONSTANTS`, and its store genuinely lives in the
+    caller. ⛔ Round 11 measured the cost of the first version of this sentence, which grouped
+    `bound`/`bound_store`/`assembly` together as "asks about a LABEL statement" — false for
+    `bound_store` (its definition is the label PLUS a store), so the one kind that DOES owe an
+    executed store was left on the gate that cannot see the discard shape.
 
     ⚠️ Residual, stated (`#12020` round 10): this does not reach a store clause built into an
-    ASSIGNMENT that is never issued — `_unused = "…" + set_embedding_clause("e")`. An `ast.Assign`
-    is not a bare expression, and proving the built string never reaches a `query(…)` is DATA FLOW,
-    the same limit `UNDECIDABLE_WRITE_SHAPES` names for the map merge. Measured on the reviewed
-    head: that mutation also stayed GREEN. It is pinned as a named residual by
-    `test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual`, so the blind spot can
-    narrow in neither direction silently.
+    ASSIGNMENT that is never issued — `_unused = "…" + set_embedding_clause("e")` — nor a
+    `return`/`with`/`yield` that carries it. Those bind or scope a value and proving the built string
+    never reaches a `query(…)` is DATA FLOW, the same limit `UNDECIDABLE_WRITE_SHAPES` names for the
+    map merge. Measured on the reviewed head: the assignment mutation stayed GREEN. It is pinned as a
+    named residual by `test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual`, so the
+    blind spot can narrow in neither direction silently.
     """
     if isinstance(statement, ast.Expr):
         return isinstance(statement.value, ast.Call)
+    if isinstance(statement, ast.Assert):
+        # ⛔ An `assert` BINDS NOTHING and discards its value, so it is DECIDABLE by the same rule as
+        # a bare expression — not data flow, and therefore not covered by the residual above
+        # (`#12020` review round 11, P2). Measured: `assert f"… {set_embedding_clause('e')}"` put in
+        # place of `_event_plain_merge`'s issued query left the row GREEN.
+        return isinstance(statement.test, ast.Call)
     return True
+
+
+def _statements_that_store(root: ast.AST, lines: list[str]) -> list[ast.stmt]:
+    """The statements in `root`'s OWN scope that both CARRY a store marker and ISSUE it.
+
+    One definition, because three arms now ask this question (`store` via
+    `_carrying_statements` + `_carrier_issues_a_call`, `bound_store` via
+    `_symbol_stores_in_own_scope`, and `assembly`'s ancestor scan) and two of the three had drifted
+    apart from the third (`#12020` review round 11, P1).
+
+    ⛔ COMPOUND containers are skipped deliberately. An `ast.For`/`If`/`With`/`Try` is an `ast.stmt`
+    whose slice SPANS its body, so counting it answers "something in here stores" for a body whose
+    only store statement has been replaced by a discarded string — the same vacuity
+    `_symbol_stores_in_own_scope` documents for the cited symbol itself, one level down. The body's
+    own statements are yielded by `_walk_own_scope` anyway, so nothing is lost by skipping the
+    container.
+    """
+    return [
+        sub for sub in _walk_own_scope(root)
+        if isinstance(sub, ast.stmt)
+        and not isinstance(sub, _SCOPE_NODES)
+        and not hasattr(sub, "body")
+        and _STORE_CARRIER.search(_slice_own_scope(lines, sub))
+        # ⛔ BOTH gates, and they are complementary rather than redundant — dropping either reopens a
+        # measured hole. `_executes_a_call` catches the PROSE ASSIGNMENT (a constant string with no
+        # call: `_NOTE = "… set_embedding_clause(" + "n, r.v)"`, measured GREEN again the moment it
+        # was dropped). `_carrier_issues_a_call` catches the DISCARDED clause (a call inside a value
+        # nobody issues: `f"… {set_embedding_clause('e')}"`, `_executes_a_call` answers True to it).
+        and _executes_a_call(sub)
+        and _carrier_issues_a_call(sub)
+    ]
 
 
 def _symbol_stores_in_own_scope(node: ast.AST, lines: list[str]) -> bool:
@@ -2679,12 +2721,7 @@ def _symbol_stores_in_own_scope(node: ast.AST, lines: list[str]) -> bool:
     # including one quoted in prose. Measured: with the executed write deleted, adding a single
     # `_NOTE = "… set_embedding_clause( … "` statement kept `bound_store` GREEN, but so did the
     # function node alone. Same rule `_carrying_statements` has applied to its roots since round 1.
-    return any(
-        _STORE_CARRIER.search(_slice_own_scope(lines, sub))
-        for sub in _walk_own_scope(node)
-        if isinstance(sub, ast.stmt) and not isinstance(sub, _SCOPE_NODES)
-        and _executes_a_call(sub)
-    )
+    return bool(_statements_that_store(node, lines))
 
 
 def _parent_map(root: ast.AST) -> dict[int, ast.AST]:
@@ -2797,8 +2834,12 @@ def _evidence_violation(source: str, symbol: str, needle: str,
                 # claim this row makes is "the label statement and a store are the same BLOCK's".
                 # Walked up from the carrier to the cited symbol, never out of it — a store in
                 # another function cannot satisfy it.
+                # ⛔ `#12020` review round 11 (P1): this used to match the ancestor's TEXT, so an
+                # ancestor whose clause had been replaced by a discarded f-string still satisfied
+                # the row — measured GREEN with the vector never written. The ancestor is scanned for
+                # a statement that CARRIES a store and ISSUES it, mirroring `_iterated_store_problem`.
                 for ancestor in _enclosing_statements(statement, parents, node):
-                    if _STORE_CARRIER.search(_slice_own_scope(lines, ancestor)):
+                    if _statements_that_store(ancestor, lines):
                         carried.append(text)
                         break
         if not carried:
@@ -3262,6 +3303,71 @@ def test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual() -> Non
     assert "never issued" in (_carrier_issues_a_call.__doc__ or ""), (
         "the residual is measured-OPEN here, so `_carrier_issues_a_call` must NAME it — an "
         "undisclosed fail-open is the claim being wider than the mechanism")
+
+
+def test_a_DISCARDED_clause_stores_nothing_on_EVERY_claim_kind() -> None:
+    """`#12020` review round 11 (P1 + P2): round 10 fixed the discard shape in the `store` arm ONLY.
+
+    `bound_store` reached `_symbol_stores_in_own_scope`, whose only execution gate was
+    `_executes_a_call` — the gate round 10 measured CANNOT see a discarded clause — and `assembly`
+    had no execution gate at all (a bare `_STORE_CARRIER` search over an ancestor's TEXT). Both were
+    measured GREEN with the vector never written, on the real `restore_graph` and
+    `_rebuild_all_replay`. And `assert` fell through `_carrier_issues_a_call`'s `return True` even
+    though it binds nothing and discards its value, so it is decidable by the same rule, not data
+    flow.
+
+    Synthetic sources, one per claim kind, because each arm's rule is what is under test — a real-file
+    mutation would confound the rule with three `replace()` calls that could silently no-op, the
+    defect rounds 2 and 3 each had to fix. The real rows are covered by the row pin above.
+    """
+    def violation(source: str, needle: str, claim: str) -> str | None:
+        return _evidence_violation(source, "w", needle, claim=claim)
+
+    # ── `store`: an `assert` holds the clause and issues nothing (P2) ──────────────────────────────
+    store_control = ('def w(g):\n'
+                     '    g.query("MERGE (e:Event) " + set_embedding_clause("e"))\n')
+    assert violation(store_control, "MERGE (e:Event)", "store") is None
+    assert violation('def w(g):\n'
+                     '    assert f"MERGE (e:Event) {set_embedding_clause(\'e\')}"\n',
+                     "MERGE (e:Event)", "store") is not None, (
+        "an `assert` holding the clause satisfied the store half — an assert binds nothing and "
+        "discards its value, so it is the bare-expression shape, not data flow")
+
+    # ── `bound_store`: the store is owed, and a discarded clause is not one (P1) ────────────────
+    bound_store_control = (
+        'def w(g):\n'
+        '    g.query("MERGE (n:Point) SET " + set_embedding_clause("n", "r.v"))\n')
+    assert violation(bound_store_control, "MERGE (n:Point)", "bound_store") is None
+    assert violation(
+        'def w(g):\n'
+        '    f"MERGE (n:Point) SET {set_embedding_clause(\'n\', \'r.v\')}"\n',
+        "MERGE (n:Point)", "bound_store") is not None, (
+        "`bound_store` credited a DISCARDED clause — that kind's whole definition is the label PLUS "
+        "a store, so it must take the strict gate, not `_executes_a_call`")
+
+    # ── `assembly`: the store is a SIBLING statement in the same block (P1) ─────────────────────
+    assembly_control = (
+        'def w(g):\n'
+        '    for label in ("Point",):\n'
+        '        clauses = [set_embedding_clause("n", "r.v")]\n'
+        '        g.query("MATCH (n:Point) SET " + clauses[0])\n')
+    assert violation(assembly_control, "MATCH (n:Point)", "assembly") is None
+    assembly_discarded = (
+        'def w(g):\n'
+        '    for label in ("Point",):\n'
+        '        f"SET {set_embedding_clause(\'n\', \'r.v\')}"\n'
+        '        g.query("MATCH (n:Point)")\n')
+    assert violation(assembly_discarded, "MATCH (n:Point)", "assembly") is not None, (
+        "`assembly` matched the enclosing block's TEXT, so a block whose only store statement had "
+        "been replaced by a discarded string satisfied the row — the #11954 class, at BLOCK "
+        "granularity instead of statement granularity")
+
+    # ⛔ The container must not satisfy itself: an `ast.For` spans its body, so counting it would
+    # re-create the vacuity `_symbol_stores_in_own_scope` documents — asserted directly, because a
+    # block-granularity match is the shape that fails silently.
+    assert _statements_that_store(ast.parse(assembly_discarded).body[0],
+                                  assembly_discarded.splitlines()) == [], (
+        "a discarded clause is being counted as a store by a CONTAINER's slice")
 
 
 def test_a_deleted_vector_write_reds_the_BOUND_STORE_row() -> None:
