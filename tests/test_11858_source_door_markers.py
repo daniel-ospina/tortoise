@@ -15,11 +15,18 @@ supplied in any of them — i.e. every marker describing NOTHING:
     `embedding_revision` / `embedding_text_hash` / `embeddingText` land identically.
 
 The same measurement over the other public props doors found this one alone:
-`create_point` and `create_entity` refuse the name at intake, `update_point` refuses
-it, `create_document` does not accept it. That is why the census below drives the
-WHOLE population instead of pinning this door's row alone — the class this file
-exists for (a rule stated at one door and silently absent at the next) has been
-measured twice in this repo (#11948, #11835 review round 4/5).
+`create_point`, `create_entity`, `update_point` and `create_document` (which forwards
+to `_create_entity`'s props path) all refuse the name at intake. That is why the
+census below drives the WHOLE population instead of pinning this door's row alone —
+the class this file exists for (a rule stated at one door and silently absent at the
+next) has been measured twice in this repo (#11948, #11835 review round 4/5).
+
+⚠️ THE SANCTIONED ROUTE IS `embedding=`, NOT SILENCE. A `:Source` MAY carry a vector
+— `embedding` is a declared, caller-writable prop — and this door journals it, with
+the width minted truthfully by the same stamp (`f32` for our embedder's output).
+So the refusal is not "a source has no vector"; it is "the MARKER is not yours to
+write, because only the writer can derive it from the values".
+`test_a_caller_vector_still_gets_a_truthfully_minted_marker` pins that route.
 
 ⛔ WHY THE GUARD IS AT THE DOOR AND NOT IN `_emit_event`: the refusal must precede
 the write. `_emit_event` is called AFTER `_create_entity` has already MERGEd the
@@ -169,6 +176,37 @@ def test_the_family_is_not_blanket_refused_at_the_funnel(tmp_path):
         "vector it describes")
 
 
+def test_a_caller_vector_still_gets_a_truthfully_minted_marker(tmp_path):
+    """The sanctioned route: hand over the VECTOR, let the writer declare it.
+
+    ⛔ This row exists because the refusal's first draft claimed "a `:Source`
+    carries no vector" — false: `embedding` is a declared, caller-writable prop
+    and this door journals it. Measured at this head: a 4-float caller vector
+    lands on the node AND on the `SourceCreated` record, with `embedding_width`
+    minted `f32` by the stamp. So the rule is about WHO derives the marker, not
+    about the door having no vector — and this row keeps the message honest: if
+    the door ever stops minting for a caller vector, the message's remedy breaks
+    and this reds.
+    """
+    sdk, journal = _journal(tmp_path)
+    try:
+        sdk.create_source("https://example.invalid/11858-vector", "web",
+                         embedding=[0.5] * 4)
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+    created = [r for r in _records(journal) if r.get("type") == "SourceCreated"]
+    assert created, "the caller's vector was not journalled — nothing to assert"
+    record = created[-1]
+    assert "embedding" in record, (
+        "`embedding=` is documented as the sanctioned route, so the record must "
+        "carry the vector the message tells the caller to pass instead")
+    assert record.get("embedding_width") in ("f32", "f64"), (
+        "the writer must declare the width it derived; a vector with no marker is "
+        "the population #11821 P0 closed")
+
+
 @pytest.mark.parametrize("door", ["create_point", "create_entity",
                                   "update_point", "create_document"])
 def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
@@ -180,17 +218,24 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
     sdk, journal = _journal(tmp_path)
     try:
         with pytest.raises((ValueError, TypeError)):
+            # ⛔ The positionals matter: `create_entity(type, name)` and
+            # `create_document(title, documentKind)` are NOT interchangeable with
+            # this row's intent. An earlier draft passed them in the wrong order,
+            # so each row raised for a reason that had nothing to do with the
+            # marker (`unknown type 'e-census'` / `multiple values for 'title'`)
+            # and stayed GREEN under the mutant that removes the key from the
+            # constant — a false PASS in the file written to stop exactly that.
             if door == "create_point":
                 sdk.create_point("statement", "a claim",
                                  source_id="s", span="1-2", quote="q",
                                  embedding_width="f16")
             elif door == "create_entity":
-                sdk.create_entity("e-census", "thing", embedding_width="f16")
+                sdk.create_entity("object", "e-census", embedding_width="f16")
             elif door == "update_point":
                 sdk.update_point("p-census", embedding_width="f16")
             else:
-                sdk.create_document("https://example.invalid/11858-census",
-                                    title="t", embedding_width="f16")
+                sdk.create_document("a census title", "document",
+                                    embedding_width="f16")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()

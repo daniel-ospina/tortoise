@@ -48575,9 +48575,15 @@ class TortoiseSDK:
         # store unguarded, so `create_source(url, "web", sourceDate=2**70)` was
         # still silently clamped — the exact defect #4647 exists to fix, still
         # live on a public tenant write surface (and reachable through `ingest`,
-        # which splats `**item` into this method). Running it here, after every
-        # `ev` assignment, makes the cover structural: a field added to `ev`
-        # later cannot bypass a guard that runs after all of them.
+        # which splats `**item` into this method). Running it here, after the
+        # CALLER-facing assignments, covers every field a caller can reach: a
+        # caller field added to `ev` above this point cannot bypass the guard.
+        # (Two assignments do follow it — `updatedAt` and `validFrom`, minted
+        # from this door's one clock — so the cover is over caller ingress, not
+        # over literally every later line. Stated because the earlier wording
+        # "after every `ev` assignment … cannot bypass a guard that runs after
+        # all of them" was false as written, and #11858's guard below says why
+        # that distinction matters.)
         for _key, _value in ev.items():
             _reject_unrepresentable_number(_key, _value)
         # #11858: the embedding MARKER family is not caller-writable on this
@@ -48586,9 +48592,11 @@ class TortoiseSDK:
         # (`_skip_sanitize=True`), it is the ONE door measured to accept them,
         # and it writes the node BEFORE it emits, so a refusal at `_emit_event`
         # would land too late and leave a live-only `:Source` (the #2296
-        # divergence). Over the ASSEMBLED `ev`, so every assignment above and
-        # any field added later is covered structurally rather than by a
-        # caller-argument list.
+        # divergence). Over the ASSEMBLED `ev`, so the guard follows every
+        # CALLER ingress of this door (the `**props` splat and the explicit
+        # keyword arguments) rather than a caller-argument list. It is NOT a
+        # claim that no `ev` assignment follows — two server-minted ones do, and
+        # the note below the guard names them.
         #
         # Measured at `7e6baffc5d`, one `create_source` call per key, none of
         # them carrying any vector — i.e. every marker describing NOTHING:
@@ -48601,19 +48609,31 @@ class TortoiseSDK:
         #          land identically.
         #
         # The other public props doors were driven the same way in the same
-        # measurement: `create_point` and `create_entity` refuse it at intake
-        # (ValueError), `update_point` refuses it (ValueError), and
-        # `create_document` does not accept the name at all (TypeError). This
-        # door was the only leak, which is why the guard is here and why the
-        # test drives the whole population rather than this row alone.
+        # measurement. `create_point`, `create_entity` (with its OWN positional
+        # order — `(type, name)`), `update_point` and `create_document` (which
+        # forwards to `_create_entity`'s props path) all refuse the name at
+        # intake with `ValueError`. This door was the only leak, which is why the
+        # guard is here and why the test drives the whole population rather than
+        # this row alone.
+        #
+        # ⚠️ Scope of "covered": this guard sits above every CALLER ingress
+        # (`**props` is splatted into `ev` at the top of this method), so a
+        # caller key cannot arrive below it. It is NOT a claim that no `ev`
+        # assignment follows — two server-minted ones do (`updatedAt` /
+        # `validFrom` from the one clock), and they are this door's own values,
+        # not caller input. That distinction is pinned by the control test rather
+        # than by this comment (a marker injected after the guard is caught
+        # there; the guard itself never sees it).
         _caller_markers = sorted(set(ev) & _SERVER_MANAGED_EMBEDDING_MARKERS)
         if _caller_markers:
             raise ValueError(
                 f"{_caller_markers} are server-managed embedding journal "
-                "fields and cannot be set on a :Source. The writer mints them "
-                "from the vector they describe (`stamp_journal_embedding`), "
-                "and a :Source carries no vector, so a caller value could only "
-                "declare a width/identity over no values at all (#11858)."
+                "fields and cannot be set by hand. They are minted from the "
+                "vector they describe (`stamp_journal_embedding`), so a "
+                "hand-set value can only duplicate that derivation or LIE about "
+                "it — including declaring a width over no values at all. Pass "
+                "`embedding=` instead and let the writer declare the truth "
+                "(#11858)."
             )
         # #2782 (review Finding 3): the same reason, one field family over — and
         # the same placement discipline, over the ASSEMBLED ``ev`` so a later
