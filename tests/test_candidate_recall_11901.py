@@ -612,10 +612,23 @@ def test_the_briefs_restatements_all_recompute(report, control):
     # ── §7-2b: the fold's reach over IN-WINDOW separator variants (a different
     # denominator from the arm above) and §7-2d's article-class share.
     sep3_share = _sum_cls(report, ("hyphen-to-space", "space-to-hyphen"), "3")
-    assert (f"{_pct_cell(0)} % → "
+    # BOTH legs from the artifact: a literal `_pct_cell(0)` let `90 % → 100 %`
+    # pass, because a substring check cannot tell 0 from 90 (round 8, F1).
+    # ⛔ The leading space is the boundary: "0 % → 100 %" is a SUBSTRING of
+    # "90 % → 100 %", so without it the from-leg is still unguarded.
+    assert (f" {_pct_cell(100 * sep3_share['attached'] / sep3_share['in_window'])} % → "
             f"{_pct_cell(100 * sep3_share['attached_folded'] / sep3_share['in_window'])} % "
             f"of in-window separator variants") in text, (
         "§7-2b does not state the recomputed in-window separator recovery")
+    # "~40 vs 15" is restated three times (§1, §6, §7-1) and every one must be
+    # the artifact's rounded mean: a single substring check over the FIRST
+    # occurrence left the other two free to drift (round 8, F2).
+    arm3 = report["arms"]["pooled"]["3"]
+    rounded = f"~{arm3['set_sum'] / arm3['captures']:.0f}"
+    assert text.count(rounded) >= 3, (
+        f"the brief no longer restates {rounded!r} in all three places "
+        f"(found {text.count(rounded)}); one has drifted from the artifact's "
+        f"{arm3['set_sum'] / arm3['captures']:.1f}")
     article = report["arms"]["variant_by_class"]["article-drop"]["3"]["pairs"]
     assert f"({article}/{pairs})" in text, (
         f"§7-2d does not state the article class's share of the {pairs} pairs")
