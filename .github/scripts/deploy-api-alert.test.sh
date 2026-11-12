@@ -738,6 +738,22 @@ BODY_17I_LC="$(printf '%s' "$BODY_17I_FLAT" | tr '[:upper:]' '[:lower:]')"
 assert_no_match "$BODY_17I_LC" '(it|they|this|the excerpt|the report|the degraded report) (is|are|was|were|has been|have been) +(pasted|reproduced|quoted|included|shown|carried|printed)' "case 17i: no phrasing of a PASTE/PRESENCE claim survives (#12200), across line breaks and case"
 assert_not_contains "$BODY_17I_FLAT" "with its non-ASCII bytes dropped" "case 17i: and no LOSS CLAUSE survives either — verb-agnostic, so a synonym for 'pasted' cannot carry it in"
 assert_no_match "$BODY_17I" 'follows verbatim' "case 17i: and the section intro claims no verbatim report either — the louder sibling of the same class"
+# ⛔ THE INTRO'S CONDITION IS THE FIX, SO THE CONDITION IS WHAT GETS PINNED (review round 3, P2).
+# The rows above pin the PHRASE that had to go; nothing pinned the clause that makes the
+# replacement true. Measured: delete `when it can be carried` and this file stays green,
+# 186/186 — while the body then reads "… is reproduced below;" in a state whose next
+# paragraph says "NOTHING is pasted below", i.e. the exact claim #12200 exists to remove,
+# restored by a four-word edit. The net below is the shape that catches that deletion and
+# NOT the correct wording: it needs the presence verb to be followed by END-OF-CLAIM
+# punctuation, so "reproduced below when it can be carried;" (the shipped sentence, and
+# any rewording that keeps a condition) does not match, while "reproduced below;" does.
+# ⚠️ Why it is NOT the SHAPE net reused from :739: that row requires SUBJECT-VERB ADJACENCY,
+# and the intro separates them with an appositive ("the one that names … — is reproduced
+# below"), so the intro's own sentence shape walks past it. `pasted` is deliberately NOT in
+# this verb list: the CORRECT empty-state sentence ends "NOTHING is pasted below;", which
+# this net would otherwise false-red.
+BODY_17I_PRESENCE='(reproduced|quoted|shown|included|printed|carried) below([[:space:]]*[;.,:]|$)'
+assert_no_match "$BODY_17I_LC" "$BODY_17I_PRESENCE" "case 17i: and the intro's presence claim is CONDITIONED — an unconditional '<verb> below;' would claim a report this state does not carry (#12200)"
 assert_not_contains "$BODY_17I" '```' "case 17i: and it pastes NO fenced block, in any form"
 if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then
   ok "case 17i: and the body is still valid UTF-8"
@@ -801,6 +817,11 @@ assert_not_contains "$BLANK_BODY" '```' "and pastes NO fenced block when there i
 # fallback-empty bodies alike (#12200). Pinned in this state as well as 17i so the claim
 # cannot survive in one arm while being fixed in another.
 assert_no_match "$BLANK_BODY" 'follows verbatim' "and the intro claims no VERBATIM report either (#12200)"
+# …and the intro's CONDITION is pinned in this state too, not only in 17i (review round 3,
+# P2): the same four-word deletion must not be able to survive in one report-less arm while
+# reddening in the other. Same net, flattened+lowercased for the same reasons as 17i's.
+BLANK_BODY_LC="$(printf '%s' "$BLANK_BODY" | tr '\n' ' ' | tr '[:upper:]' '[:lower:]')"
+assert_no_match "$BLANK_BODY_LC" "$BODY_17I_PRESENCE" "and the intro's presence claim is CONDITIONED here too — 'reproduced below;' would claim a report a blank state does not carry (#12200)"
 
 # ── case 17d: the READ GUARD — an existing but unreadable report must not abort ─────
 # NOTE THE MECHANISM (corrected, pass-5 review): a DIRECTORY is `-s`-TRUE on this fs, so
@@ -869,10 +890,17 @@ fi
 # not depend on the host's iconv build.
 cat > "$BIN/iconv" <<'ICONV_EOF'
 #!/usr/bin/env bash
-# STUB_ICONV_MODE=status → pass the bytes through, then report GNU libiconv's
-# "some sequence was dropped" status.  =silent → report it and emit nothing.
+# STUB_ICONV_MODE=status → what `iconv -c` REALLY does: emit the CONVERTIBLE bytes
+# (valid UTF-8), then report "a sequence was dropped" in the STATUS.  =silent →
+# report it and emit nothing.
 [ "${STUB_ICONV_MODE:-status}" = "silent" ] && exit 1
-cat
+# ⛔ `cat` here modelled the WRONG converter (review round 3, P2): it passed the
+# ORPHANED continuation byte through, so the pasted excerpt was invalid UTF-8 —
+# the artifact case 17 forbids and 17b arm (a) forbids explicitly — while the
+# row went green, because nothing in this case measured the body's validity. The
+# comment above claimed "status 1 WITH valid output" about a stub that emits
+# invalid output. Decoding with errors ignored IS `-c`'s contract.
+python3 -c 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read().decode("utf-8","ignore").encode())'
 exit 1
 ICONV_EOF
 chmod +x "$BIN/iconv"
@@ -881,6 +909,15 @@ export STUB_ICONV_MODE=status
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
 assert_eq "$RC" "0" "an iconv status of 1 with valid output does not abort the alert (the notifier is the safety net)"
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "gh workflow run supabase-deploy.yml --ref main" "and the excerpt still reaches the body"
+# …and the two properties 17b arm (a) pins ONLY where a real `iconv` exists are pinned here,
+# converter-independently — which is this case's whole reason to exist (review round 3, P2:
+# before these rows the label said "with valid output" and nothing measured it).
+assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "could not be byte-squeezed" "case 17g: and it is the SQUEEZED excerpt, not the raw fallback"
+if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then
+  ok "case 17g: and the status-1 body is VALID UTF-8 — the split character was dropped, never pasted"
+else
+  bad "case 17g: the status-1 body is NOT valid UTF-8 — the raw tail's orphaned byte reached the issue"
+fi
 reset_case
 export STUB_ICONV_MODE=silent
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"

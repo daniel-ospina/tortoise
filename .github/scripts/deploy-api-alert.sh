@@ -280,7 +280,10 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
       # louder sibling of the arm sentence fixed further down: same class, same cause — a
       # sentence authored at the BRANCH site describing an ARTIFACT decided later. Write the
       # claim about the artifact, never about the code path that produced it. Pinned by
-      # case 17i, which requires this phrase to be ABSENT from an empty-state body.
+      # case 17i/17c: the phrase is ABSENT from every report-less body, AND the presence
+      # claim must stay CONDITIONED (a `<verb> below;` with no condition reds) — pinning
+      # only the deleted phrase left the four-word deletion of `when it can be carried`
+      # green, measured at review round 3.
       echo "The gate's own report (\`check-migration-drift\`) — the one that names the blocking"
       echo "versions and the ordered remediation — is reproduced below when it can be carried; any of"
       echo "the 6000-byte cut, a character dropped by the squeeze, or the bytes dropped by the ASCII"
@@ -346,9 +349,15 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         squeeze_incomplete=0
         # `2>/dev/null`: a converter that is absent prints its own "command not found" or
         # refusal on stderr, which lands in the job log beside an alert that went out
-        # perfectly well. Main already suppressed it here (#12077); the merge that brought
-        # this branch up to main dropped the suppression, leaving one spurious diagnostic
-        # per alert on a runner without `iconv` (recorded on #12200, restored here).
+        # perfectly well. ⛔ THE HISTORY, CHECKED RATHER THAN ASSUMED (#12200): the
+        # pre-#12110 form of this statement DID suppress it
+        # (`… | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null || true`, `49cf519354`), and
+        # #12110's rewrite of the squeeze (`6e5ff01625`) did not carry the suppression
+        # over — no merge dropped it, and no commit has touched this file on main since.
+        # So this line ADDS it relative to main: one spurious diagnostic per alert on a
+        # runner without `iconv` (recorded on #12200). An earlier draft of this comment
+        # said "main already suppressed it; a merge dropped it", which is the same class
+        # this change removes — a sentence stating something the artifact does not show.
         if ! excerpt="$(printf '%s' "$raw_tail" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null)"; then
           : # status only — the bytes `iconv` could convert have already been emitted
         fi
