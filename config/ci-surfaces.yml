@@ -2376,6 +2376,9 @@ surfaces:
   # registered it — which is why THIS row covers the `core` half only (NOT the
   # six-surface census `test_cost_dimensions.py` carries: this file pins two
   # dimensions, not a sweep over every tracked `.py`).
+  # registered it — which is why this PR keeps THIS one row (NOT the six-surface
+  # census `test_cost_dimensions.py` carries: this file pins two dimensions, not
+  # a sweep over every tracked `.py`).
   # Hermetic: 31 cases, no DB, no graph, no network, no model call, no `gh`.
   # ⚠️ COVERAGE GAP — NOT created here, NOT closed here (#12006): this suite also
   # reads `product/pricing.json`, and a diff touching ONLY that artifact selects
@@ -2386,6 +2389,8 @@ surfaces:
   # and its `tier1:` row — the printed count is |`tier1`| minus any
   # `slow_files`/`uri_requiring`/`on_demand` overlap, so re-derive it in one
   # `select()` call) because `product/` is a
+  # the tier-1 smoke set, this suite absent) because `product/` is a
+  # surfaces [], the tier-1 pool, this suite absent) because `product/` is a
   # `NON_PYTHON_PREFIXES` entry. Those four modules are what THIS row buys;
   # the artifact leg needs the #12006 decision, so do not read this row as
   # covering the rates.
