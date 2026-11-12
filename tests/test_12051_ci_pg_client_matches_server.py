@@ -241,3 +241,50 @@ def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
         f"{min(leg_indexes)} — a `$GITHUB_PATH` prepend after the leg is inert, "
         "so the leg would run on the runner image's own client"
     )
+
+
+#: A version-pinned Ubuntu image label — `ubuntu-24.04`, `ubuntu-26.04`, …
+#: Deliberately NOT `ubuntu-latest`: a floating label is what moved the client.
+VERSION_PINNED_IMAGE_RE = re.compile(r"^ubuntu-\d{2}\.\d{2}$")
+
+
+def test_the_pin_runs_on_a_named_image_not_a_floating_label(job: dict) -> None:
+    """The image is part of the artifact: it decides which client the archive has.
+
+    Round 2 of #12051. The pin above assumes the image's archive CARRIES
+    `postgresql-client-<major>`, and that assumption is not free: MEASURED
+    2026-11-12 (job `131022562781`, head `58b5a417ba`), `ubuntu-latest` had
+    migrated to `Image: ubuntu-26.04`, whose archive ships
+    `postgresql-client-18` and NO 16 — so the install died
+    `E: Unable to locate package postgresql-client-16` (exit 100) BEFORE the
+    version assertion, and every leg below skipped.
+
+    A floating label means the runner image can change the drill's client major
+    without a diff, which is the exact class this PR closes. Naming the release
+    makes that a deliberate, reviewable choice; the in-job `apt-cache show`
+    precondition turns the next move into a NAMED `::error::` instead of an
+    opaque apt failure.
+    """
+    runs_on = job.get("runs-on")
+    assert isinstance(runs_on, str), (
+        f"`{JOB}` must name ONE literal image; found runs-on={runs_on!r}. An "
+        "expression makes the client major depend on what the expression "
+        "happened to resolve to, which no assertion in this file can see."
+    )
+    assert runs_on != "ubuntu-latest", (
+        "`ubuntu-latest` is a MOVING label and it moved: on 2026-11-12 it became "
+        "ubuntu-26.04, whose archive has no `postgresql-client-16`, so this job "
+        "reds before a single test runs (#12051). Name the release."
+    )
+    assert VERSION_PINNED_IMAGE_RE.match(runs_on), (
+        f"`{JOB}` runs on {runs_on!r}, which is not a version-pinned Ubuntu "
+        "image. The record drill's client major comes from the image's archive, "
+        "so the image IS part of the artifact's contract."
+    )
+    _, pin = _pin_step(_steps(job))
+    assert "apt-cache show postgresql-client-16" in _run_text(pin), (
+        "the pin does not precondition on the package being resolvable, so an "
+        "image whose archive lacks the major reds as `E: Unable to locate "
+        "package` (exit 100) — an opaque failure that reads as a typo in this "
+        "step, which is how the image move hid behind a #12051-shaped red"
+    )
