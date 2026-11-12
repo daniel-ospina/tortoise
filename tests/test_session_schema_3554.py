@@ -1013,6 +1013,12 @@ ONTOLOGY = REPO_ROOT / "docs/ONTOLOGY.md"
 # one, and pinning the header's home to `ONTOLOGY.md` would fail on a document
 # that is correct.
 ONTOLOGY_CHANGELOG = REPO_ROOT / "docs/ONTOLOGY-CHANGELOG.md"
+
+# What the §4.3 approval-citation pin accepts as a comment id. The token must be
+# ADJACENT to the digits: an earlier cut allowed up to 12 non-digits in between,
+# which read the ISSUE number in the rejected shape below as a comment citation.
+_CITATION_RE = re.compile(r"#issuecomment-(\d{6,})|comment(?:-id)?\s*[:`]?\s*(\d{6,})")
+_REJECTED_CITATION_SHAPE = "See the discussion comments 118245"
 PLAN = REPO_ROOT / "docs/plans/2026-08-25-1714-memory-capture-onboarding.md"
 
 
@@ -1046,7 +1052,7 @@ def _model_version(text: str) -> tuple[int, ...]:
     return tuple(int(part) for part in text.split("."))
 
 
-_BLOCK_VERSION_RE = re.compile(r">\s*\*\*Changelog v(\d+\.\d+)")
+_BLOCK_VERSION_RE = re.compile(r"^>\s*\*\*Changelog v(\d+\.\d+)", re.M)
 
 
 def _newest_changelog_version(changelog: str) -> str:
@@ -1198,6 +1204,212 @@ def test_a_model_version_bump_with_no_changelog_block_fails() -> None:
                 + f"> **Changelog v{bumped_version} (2199-01-01 — issue #0 — synthetic):**\n>\n"
                 + changelog[newest_at:])
     _assert_declared_version_is_recorded(bumped, recorded)
+
+
+# ── the newest block's §4.3 quote must BE the landed §4.3 sentence ──────
+
+OBJECT_CLAUSE_START = "**Core Object types accept"
+OBJECT_CLAUSE_END = (
+    "Pack-declared kinds validate against their own declared words.**")
+
+
+def _landed_object_lifecycle_clause(ontology: str) -> str:
+    """The §4.3 `status` row's bold lifecycle clause, as the model states it."""
+    for line in ontology.splitlines():
+        if line.startswith("| `status` |") and OBJECT_CLAUSE_START in line:
+            start = line.index(OBJECT_CLAUSE_START)
+            end = line.index(OBJECT_CLAUSE_END, start) + len(OBJECT_CLAUSE_END)
+            return line[start:end]
+    raise AssertionError(
+        "docs/ONTOLOGY.md §4.3's `status` row carries no lifecycle clause — the "
+        "sentence this file's vocabulary is built from is missing")
+
+
+def _newest_block_body(changelog: str) -> str:
+    """The newest block's text: from its header to the next block's header."""
+    start = changelog.index("> **Changelog v3.")
+    match = _BLOCK_VERSION_RE.match(changelog[start:changelog.index("\n", start)])
+    assert match, "the changelog's newest block header must be readable"
+    rest = changelog[changelog.index("\n", start):]
+    following = _BLOCK_VERSION_RE.search(rest)
+    return rest[:following.start()] if following else rest
+
+
+def _quoted_clause(block: str) -> str | None:
+    """The block's `> > ` quote of the §4.3 lifecycle clause, normalised.
+
+    Markdown line wrapping is not part of the quoted text, so the quote's lines
+    are joined with single spaces — the comparison is of the SENTENCE.
+    """
+    lines = block.splitlines()
+    starts = [i for i, line in enumerate(lines)
+              if line.startswith("> > ") and OBJECT_CLAUSE_START in line]
+    if not starts:
+        return None
+    quote: list[str] = []
+    i = starts[0]
+    while i < len(lines) and lines[i].startswith("> > "):
+        quote.append(lines[i][4:])
+        i += 1
+    return " ".join(quote)
+
+
+def _block_bodies(changelog: str) -> list[str]:
+    """Every RELEASE block's text, newest first (the file's own order).
+
+    ``^`` is load-bearing: a block's prose can QUOTE an older header
+    (``> > **Changelog v3.7 …`` inside the v3.2 entry), and an unanchored
+    pattern counts that quote as a release — measured at this head: 40 pieces
+    for 39 blocks, one of them a fragment starting at the quoted header.
+    """
+    starts = [m.start() for m in _BLOCK_VERSION_RE.finditer(changelog)]
+    return [changelog[a:b] for a, b in zip(starts, starts[1:] + [len(changelog)])]
+
+
+def test_a_4_3_change_must_be_quoted_verbatim_by_some_changelog_block() -> None:
+    """A changelog that quotes a sentence the model does not carry is a false record.
+
+    ``docs/ONTOLOGY.md:39`` and ``ONTOLOGY-CHANGELOG.md:32`` both require
+    *explicit approval of the exact changes*, and the approval is of **exact
+    text** — so any block that quotes the §4.3 lifecycle sentence must quote the
+    sentence the model carries, and a release that CHANGES that sentence must
+    quote it at all.
+
+    Measured at head ``6057b6d4``: the v3.34 block still quoted the
+    PRE-restatement wording ("At the write door `superseded` requires the
+    successor …") while §4.3 carried the definition form. It was verbatim before
+    that commit and the commit updated only one of the two copies, which is how
+    an approved artifact came to disagree with itself. Nothing else in the tree
+    compares them.
+
+    ⛔ SCOPE OF THE CLAIM — read this before trusting the name. What is enforced
+    is *"§4.3 may not change without SOME block quoting the new text"*, not
+    "the release that changed it quotes it": the comparison target is the newest
+    block that quotes the clause AT ALL, so a lane could change §4.3 and paste
+    the new sentence into an OLDER block's quote and this pin would pass
+    (measured: new text into v3.34's quote plus a quoteless v3.35 → both pins
+    green). Tying the quote to the version that actually made the change needs
+    the previous release's clause, which the file does not carry; the residual
+    is stated rather than papered over, and the cheap half — "the model and its
+    record disagree" — is fully covered.
+
+    ⛔ THE RULE IS "MAY NOT CHANGE WITHOUT A BLOCK RECORDING IT", NOT "EVERY
+    BLOCK MUST QUOTE". An earlier cut of this pin demanded a §4.3 quote in the
+    NEWEST block unconditionally, which reds the next release that touches §4.5
+    or §4.6 and teaches the lane to paste a §4.3 quote into an entry that did
+    not change §4.3 — a changelog recording a change it did not make. The landed
+    clause is instead compared against the clause of the most recent block that
+    DOES quote it: equal means §4.3 did not move this release (nothing to pin),
+    different means it moved and this release must be the one recording the new
+    text. Absence is therefore never a silent pass — a change with no quote
+    fails, and there is no state in which both sides go uncompared.
+    """
+    ontology = ONTOLOGY.read_text(encoding="utf-8")
+    blocks = _block_bodies(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
+    landed = _landed_object_lifecycle_clause(ontology)
+    quoted_pairs = [(b, q) for b in blocks if (q := _quoted_clause(b)) is not None]
+    assert quoted_pairs, (
+        "no ONTOLOGY-CHANGELOG.md block quotes the §4.3 lifecycle clause, so "
+        "nothing in the record says which sentence any release landed")
+    newest_block, newest_quote = quoted_pairs[0]
+    if newest_block == blocks[0]:
+        assert newest_quote == landed, (
+            "the newest changelog block quotes a §4.3 sentence the model does "
+            f"not carry\n  quoted: {newest_quote}\n  landed: {landed}\n"
+            "the approval in the entry is of EXACT text, so the two must be "
+            "identical")
+        return
+    assert newest_quote == landed, (
+        "§4.3's lifecycle clause differs from the last one a changelog block "
+        "quoted, so a release changed it without quoting the new sentence\n"
+        f"  last quoted: {newest_quote}\n  landed:      {landed}\n"
+        "quote the landed sentence verbatim in the block for the release that "
+        "changed it — the approval is of exact text")
+
+
+def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
+    """A §4.3-recording release must cite a comment id, in one of the enumerated forms.
+
+    The file's CRITICAL RULE names a PERSON, so the entry has to name where that
+    person's answer lives. The sibling entries do it by comment id —
+    ``#11827 (comment 6805834755)``, ``#11083 (comment 6667121779)`` — and the
+    v3.34 entry did not: it asserted *"the owner answered `ok` to a three-item
+    amendment proposal"* while three independent passes measured **zero**
+    standalone ``ok`` and zero ``three-item`` occurrences on the issue it named.
+    The answer existed in a decision lane's pane, not on any surface the next
+    lane could read (``DECISION RELAY``: recorded nowhere the next lane reads is
+    a default, not a decision). The relay comment that finally recorded it
+    (``6815950417``) is what this entry must cite.
+
+    Pinned as a SHAPE, not as that id: a later entry cites its own relay, and a
+    shape is what stays true.
+
+    ⛔ WHAT THIS PIN ENFORCES IS NARROWER THAN "the approval is discharged", which
+    is why the name says "cites a comment id" and not "discharges its approval".
+    It requires a comment reference in one of the **enumerated** forms below —
+    not every form the fleet writes; the plural ``comments <id>`` is refused on
+    purpose, because accepting it re-opens the issue-number arm (*"the discussion
+    comments 118245"*). It does **not** verify that the referenced comment is an
+    approval. Measured at this head: a block reading *"No approval is recorded
+    anywhere; the only comment 999999 is unrelated"* passes, and so does one that
+    cites the id only to disclaim it. (An issue number, a "comments <n>" form and
+    a bare parenthesised number do not — that arm is closed above.) Closing the
+    rest needs the comment's own text, an API read this pin cannot make, so the
+    residual is tracked in #12068 rather than grown here.
+
+    ⛔ SCOPED TO A RELEASE THAT RECORDS §4.3, because the unconditional form was
+    measured to false-block. Demanding a comment id in EVERY newest block reds
+    the next release that touches §4.5 (verified with a synthetic `v3.35`), and
+    the file's practice does not support the demand: **3 of 39** blocks cite a
+    comment id, and v3.33 — the block that landed `D2 — A` for this very
+    question — cites none. What the approval rule actually needs is that no
+    release RECORDS owner-approved §4.3 text without naming where that approval
+    lives. The requirement is scoped to §4.3, like the sibling pin, but it is NOT
+    the sibling pin's gate: it is armed only when the newest block quotes the
+    clause, which makes it strictly narrower — the sibling pin also speaks when
+    an OLDER block quotes it, and reds in the state where an older block still
+    carries pre-change text while the newest quotes nothing.
+    """
+    block = _newest_block_body(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
+    if _quoted_clause(block) is None:
+        # This release does not record the §4.3 clause, so it owes no §4.3-style
+        # approval citation. ⛔ A release that CHANGES §4.3 is NOT reliably caught
+        # by the sibling pin here, and an earlier version of this comment said it
+        # was: pasting the new sentence into an OLDER block's quote leaves the
+        # newest block quoteless, the sibling pin green, and this arm disabled.
+        # Measured; see the SCOPE paragraph above and #12068.
+        return
+    # Accept these ENUMERATED forms, each measured against this detector:
+    # ``comment 1234567890``, ``comment `1234567890` ``, ``comment-id: 1234567890``,
+    # and the permalink ``#issuecomment-1234567890``.
+    # ⛔ THE PLURAL ``comments 1234567890`` IS REFUSED even though the file itself
+    # uses that style (v3.32, ``docs/ONTOLOGY-CHANGELOG.md:213``): accepting it
+    # re-opens the issue-number arm below. A reader who hits a red on that form is
+    # looking at a deliberate refusal, not a broken pin — rewrite it in the
+    # singular or as a permalink.
+    # A BARE ``(1234567890)`` is deliberately NOT
+    # accepted — the pin cannot tell it from a version or an issue number, and a
+    # citation a reader cannot resolve is the state this pin exists to refuse.
+    # ⛔ THE TOKEN MUST BE ADJACENT TO THE DIGITS. An earlier cut allowed up to 12
+    # non-digits between them, which accepted *"the discussion comments 118245"*
+    # — an ISSUE number read as a comment citation, i.e. fail-open on exactly the
+    # "approval with no readable home" shape this pin refuses.
+    # ⛔ AND THE DETECTOR IS PINNED SEPARATELY, because the real changelog cannot
+    # pin it: the newest block yields the same single id under the old pattern and
+    # the new one, so reverting this fix would leave the file green (measured — a
+    # review round found exactly that). The rejected shape is asserted directly,
+    # and so is the reason: a comment id must be adjacent to its token.
+    assert _CITATION_RE.findall(_REJECTED_CITATION_SHAPE) == [], (
+        "the citation detector reads an ISSUE number as a comment id — the token "
+        "must be adjacent to the digits, not merely near them")
+    cited = [permalink or inline
+             for permalink, inline in _CITATION_RE.findall(block)]
+    assert cited, (
+        "the newest changelog block records the §4.3 clause but carries no comment "
+        "id in an accepted form, so its owner approval has no home a reader can "
+        "verify — cite the comment that records it (``comment <id>`` or the "
+        "permalink). NOTE: the plural ``comments <id>`` is refused on purpose; if "
+        "you cited two ids that way, rewrite them in the singular.")
 
 
 def _assert_no_block_records_a_version_above_the_declared_one(

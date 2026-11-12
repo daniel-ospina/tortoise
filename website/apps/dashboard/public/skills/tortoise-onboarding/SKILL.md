@@ -142,7 +142,7 @@ mode → teach-human fallback).
 > It also has its own surface in the dashboard's connect step (the ChatGPT
 > family): the same connector recipe, then the three Tortoise `.skill` installs
 > (one upload, one-time), then a paste-able first job. The public setup docs
-> page at <https://tortoise.premiselabs.co/docs#chatgpt> carries the reference
+> page at <https://premiselabs.co/docs#chatgpt> carries the reference
 > copy of those steps. It has no row
 > here — these six rows are the harnesses this document covers (4
 > config-writing, 2 teach-human).

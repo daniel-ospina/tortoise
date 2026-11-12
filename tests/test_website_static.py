@@ -386,6 +386,91 @@ class TestDisplayLabelParity:
             PRICING_JSON.read_text(encoding="utf-8"))["tiers"]
 
 
+class TestDashboardPlanPricesAreThePriceOfRecord:
+    """#11981 raised `solo` from $9 to $19 in `product/pricing.json` and left the
+    dashboard e2e's plan-button pin at the old literal, so the required
+    `dashboard-e2e` job went red on `main` for every PR from that landing onward
+    (measured: run 43142101648 — `Solo · $9/mo` not found, the failure snapshot
+    renders `Solo · $19/mo`).
+
+    The dashboard does not carry a second price table: `pricing.js` imports
+    `product/pricing.json` at build time and the dialog renders those numbers. A
+    spec (or any other surface) that RESTATES a price therefore holds a copy that
+    can disagree with the shipped artifact, and when it does the disagreement
+    reds a browser job on `main` instead of failing a two-second static check.
+    These two rows pin the construction AND the restatements.
+    """
+
+    _MAIN_JSX = (REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "main.jsx")
+
+    def _prices(self) -> dict:
+        data = json.loads(PRICING_JSON.read_text(encoding="utf-8"))
+        return {tier: t["price_usd_monthly"] for tier, t in data["tiers"].items()}
+
+    def _label_to_tier(self) -> dict:
+        """Display label -> tier key, from the dashboard's own TIER_LABELS.
+
+        Derived, not restated: `TestDisplayLabelParity` already pins that map
+        against product.html's, so this row cannot introduce a third copy.
+        """
+        js = DASHBOARD_PRICING_JS.read_text(encoding="utf-8")
+        m = re.search(r"export const TIER_LABELS = \{([^}]*)\}", js, re.S)
+        assert m, "pricing.js must export TIER_LABELS"
+        pairs = dict(re.findall(r"([A-Za-z_$][\w$]*)\s*:\s*'([^']*)'", m.group(1)))
+        return {label: tier for tier, label in pairs.items() if tier in PUBLIC_TIERS}
+
+    def test_the_dialog_renders_the_price_of_record_by_construction(self):
+        """The chain the e2e keys on: pricing.json -> planOptions() -> button."""
+        js = DASHBOARD_PRICING_JS.read_text(encoding="utf-8")
+        assert "from '../../../../product/pricing.json'" in js, (
+            "pricing.js must import the price of record, never a local copy")
+        assert re.search(r"price:\s*t\.price_usd_monthly", js), (
+            "planOptions() must read `price_usd_monthly` out of pricing.json")
+        jsx = self._MAIN_JSX.read_text(encoding="utf-8")
+        assert re.search(r"\{p\.label\}\s*·\s*\$\{p\.price\}/mo", jsx), (
+            "the paid-new-org dialog must render `<label> · $<price>/mo` from a "
+            "`planOptions()` entry (the accessible name the e2e asserts)")
+
+    def test_no_spec_restates_a_plan_price_that_disagrees_with_the_record(self):
+        """A spec may pin a plan price only at the price of record. Fails on the
+        tree BETWEEN #11981 and this PR: #11981 raised `solo` 9 -> 19 while the e2e
+        spec still asserted `Solo · $9/mo`, so they agreed BEFORE #11981 (verified:
+        `git show a3d20763ab09^:product/pricing.json` -> solo 9) and disagreed after
+        it — which is why the fix is to read the record, not to bump the literal."""
+        prices = self._prices()
+        labels = self._label_to_tier()
+        offenders: list[str] = []
+        for spec in sorted((REPO_ROOT / "tests" / "e2e").rglob("*.py")):
+            text = spec.read_text(encoding="utf-8")
+            # ⛔ COMMENTS ARE DOCUMENTATION, NOT RESTATEMENTS. Scan only non-comment
+            # lines: this PR's own e2e comment quotes `Solo · $19/mo` to record the
+            # #11981 regression it fixed, and a bare scan reds it the moment `solo`
+            # moves — forcing the next author to FALSIFY a historical measurement
+            # (or reword it to dodge this regex) on a line that asserts nothing.
+            # Same split the runtime-URL guard states one file over: "bare-host
+            # prose in a comment that explains the history is documentation, and
+            # counting it would make this test red on its own rationale (measured:
+            # it did, before this split)". Blanking keeps one entry per line, so
+            # offsets (and therefore the reported line) do not shift.
+            scannable = "\n".join(
+                "" if line.lstrip().startswith("#") else line
+                for line in text.splitlines())
+            for label, tier in labels.items():
+                for m in re.finditer(
+                        rf"{re.escape(label)}\s*·\s*\$(\d+)/mo", scannable):
+                    got = int(m.group(1))
+                    if got != prices[tier]:
+                        line_no = scannable[:m.start()].count("\n") + 1
+                        offenders.append(
+                            f"{spec.relative_to(REPO_ROOT)}:{line_no}: "
+                            f"{label} · ${got}/mo "
+                            f"!= pricing.json tier {tier!r} ${prices[tier]}/mo")
+        assert not offenders, (
+            "a spec restates a plan price that disagrees with the price of "
+            "record (product/pricing.json) — read the price instead of "
+            "restating it, or correct the literal: " + "; ".join(offenders))
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. fmtPrice() math
 # ═══════════════════════════════════════════════════════════════════════════════
