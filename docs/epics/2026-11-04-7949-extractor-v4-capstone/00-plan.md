@@ -155,7 +155,7 @@ above (they declare `mechanism: IMPL`, so the `operator` path binds; the predica
 set). The **`mechanism`** leg *is* read at the write door by `declared_mechanisms`
 (`pack_registry.py:1006-1118`, the `CORE_PREDICATES` membership test at `:1107`), consumed by `create_operator`. Unread: (i) the
 **`semantics`** leg — surfaced at `:3736`, and nothing derives an op_type or direction from it; and (ii)
-**`hierarchies`** — validated only (`pack_registry.py:2373-2387`). ⚠️ The operator writers (`commit_ops.py:426-429`,
+**`hierarchies`** — validated only (`pack_registry.py:2388-2402`). ⚠️ The operator writers (`commit_ops.py:426-429`,
 `sdk.create_operator`) are the **Point-layer** mechanism; they are not evidence about Object→Object.
 
 **R5 · The declared-mechanism registry is a contract, not a list.** `config/v4-mechanisms.yml` — 13 rows,
