@@ -2321,7 +2321,9 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     been still"). Extending a needle to its terminal clause SHRINKS that surface; it cannot
     close it. What closes it is CONTEXT, not wording, and that is what `hits()` does: a hit
     counts only when the sentence carrying it does not itself state the stillness half — which
-    is exactly the clause every correct rewrite adds, and the clause no retracted sentence had.
+    is exactly the clause every CORRECT rewrite adds. ⛔ NOT "and no retracted sentence had":
+    a shipped count sentence DOES name stillness and is therefore disarmed by design — which
+    is why the count claims below are checked WITHOUT this discriminator.
     Two lists below keep that honest, and BOTH are asserted: `correct` (the same-sentence
     restatements must pass, so no needle may red the right answer) and `pre_fix` (every
     sentence that actually shipped must still be caught, so no needle may be narrowed past
@@ -2534,16 +2536,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # counts the budget-unreached runs too (the split is emitted separately). Anchored
         # to the CLAIM, not to the bare count: "three causes, one bucket" alone is a true
         # statement about `PR-UNWITNESSED` and reds on legitimate prose.
-        "disproved — three causes, one bucket",
-        # the count forms that shipped, BOTH of them (review P2). "disproved — FOUR causes, one
-        # bucket: the probe BUDGET never reached the run; …" shipped at c0c53f8c and 7b9636cd;
-        # "disproved. FOUR causes, ONE bucket — and the causes span three layers" replaced it at
-        # 7c535d2f and survived through 77cae6056. The numeral-only needle catches the earlier
-        # form, whose FULL sentence is disarmed by design (it goes on to name the stillness
-        # half, so the discriminator reads it as corrected — the same treatment the `three
-        # causes` entry gets).
-        "disproved — FOUR causes, one bucket",
-        "disproved. FOUR causes, ONE bucket — and the causes span three layers",
+
     ]
     flats = {name: flat(text) for name, text in scanned.items()}
     # The guard's own docstring quotes several of these to describe them, so the test file
@@ -2617,8 +2610,8 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # each token in turn.
         "False is a PROOF (every job of the run is completed, so it is executing nothing) "
         "because its stamp is motionless",
-        "now READ: every job is completed, so none of them is executing anything, and the "
-        "queue has been quiet for 300 s",
+        "now READ: every job is completed, so none of them is executing anything, and the run "
+        "has been quiet for 300 s",
         "the runs read out because EVERY job of them was completed (a proof of "
         "non-execution), and how many, now that we are inside the settle window",
         "all-jobs-completed is the PROOF that EXCLUDES a run from pr_running (see the "
@@ -2703,14 +2696,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # is the shortest TRUE instance of the claim, which is what pins that the needle can
         # still fire — a count re-added without a stillness clause is exactly the revert the
         # needle exists for.
-        "disproved — three causes, one bucket: the jobs could NOT be read.",
-        # the same claim with the numerals the branch carried. ⛔ Provenance is the BRANCH, not
-        # `origin/main`: main never carried a numeral, but the branch carried this one from
-        # c0c53f8c (as "the probe BUDGET never reached the run; the jobs could NOT be read") and
-        # then from 7c535d2f to 77cae6056 in the form below — so it is a shipped retracted
-        # claim, and the dead-needle check is right to demand it here.
-        "disproved — FOUR causes, one bucket: the probe BUDGET",
-        "disproved. FOUR causes, ONE bucket — and the causes span three layers,",
+
         # ⛔ A RE-TYPED REVERT, not a shipped quote: `flat()` turns the shipped
         # "all-jobs" / newline / "-completed" into "all-jobs -completed", so a revert that
         # re-types it without the break would otherwise be caught by no needle at all
@@ -2728,6 +2714,44 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         "these needles catch NO shipped sentence, so nothing would notice their removal — "
         f"add the shipped phrasing to `pre_fix` or delete the needle: {unexercised!r}"
     )
+    # ⛔ THE COUNT CLAIMS ARE CHECKED WITHOUT THE DISCRIMINATOR (review P2). The retraction
+    # here is that NO count is given at all, so unlike the one-half claims a count sentence is
+    # wrong whatever stillness it also names — and EVERY shipped form goes on to name
+    # `JOB_SETTLE_SECONDS`, which `hits()` would read as a correction. Measured: with only the
+    # discriminator, a revert to c0c53f8c's sentence (and to 6c05aeb9's) was GREEN.
+    unconditional = [
+        "disproved — three causes, one bucket",
+        "disproved — FOUR causes, one bucket",
+        "disproved. FOUR causes, ONE bucket",
+    ]
+    for phrase in unconditional:
+        needle = flat(phrase)
+        for name, hay in flats.items():
+            assert needle not in hay, (
+                f"a RETRACTED COUNT is back in the {name}: {phrase!r} — no count is given "
+                f"anywhere any more, so this check does not use the stillness discriminator"
+            )
+
+    # ⛔ AND THE DELETION CLASS NEEDS A POSITIVE LEG (review P2). A blocklist cannot see a site
+    # that went SILENT, and `pre_fix` only covers sentences that shipped: the ops doc's
+    # DEFINITION of a frozen run and the module's two `False` statements can each lose their
+    # stillness clause while every needle stays green (measured — three sites). These assert
+    # the clause is PRESENT.
+    must_state = [
+        # the ops doc's definition of a frozen run
+        "in_progress` with every job `completed` and its own `updated_at` motionless for",
+        # QueuedRun.has_live_job's `False` bullet
+        "the list is PROVABLY COMPLETE, AND the run's own `updated_at` has",
+        # read_run_live_job's summary sentence
+        "COMPLETE**, and whose own `updated_at` has been STILL",
+    ]
+    for phrase in must_state:
+        needle = flat(phrase)
+        assert any(needle in hay for hay in flats.values()), (
+            f"a site went SILENT about the stillness half — this clause must be PRESENT "
+            f"somewhere in the scanned files, and it is not: {phrase!r}"
+        )
+
     for phrase in pre_fix:
         want = flat(phrase)
         caught = [p for p in retracted if hits(want, flat(p))]
