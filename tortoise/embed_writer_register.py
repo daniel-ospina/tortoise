@@ -253,6 +253,10 @@ claim and a slogan:
   `probe._import_aliases` resolves the alias back to the primitive it names, so the writer lands in
   `unresolved_write` and owes a declaration here; an aliased `encode_for_row` classes `gated`
   instead, because it really does reach the gate and therefore owes nobody a declaration. ⛔ The
+  SCOPE of that sentence is the MODULE and the WRITER'S OWN scope: an alias imported in an
+  ENCLOSING function and called in a nested one is neither resolved nor named as a writer, while the
+  enclosing function is credited `gated` in its place — a named residual, not a resolved case
+  (`UNDECIDABLE_WRITE_SHAPES`, "closure-scoped alias"). ⛔ The
   RESOLUTION IS OF CALLS, not of imports: an alias imported and never called is credited nothing —
   crediting the import would fill the population with writers that store nothing, the cry-wolf
   direction. Pinned, DRIVEN (a temp module per shape, through the real discovery filter), by

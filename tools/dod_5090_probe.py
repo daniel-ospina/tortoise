@@ -392,6 +392,20 @@ UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
         "direction, because `gated` is outside the guard's population, so the writer owes no "
         "declaration while never reaching the gate."
     ),
+    # ⛔ `#12020` round 6 review (P3) — the ENCLOSING-scope axis, fifth blind spelling. Not a
+    # regression (`main` missed the nested writer too), but the register's alias bullet reads
+    # unqualified, so the residual is NAMED here rather than left to be inferred from it.
+    "closure-scoped alias (`def factory(): from … import encode_for_row as _enc; def w(): …`)": (
+        "the alias is imported in the ENCLOSING function and called in a NESTED one: "
+        "`_import_aliases` reads the MODULE and the WRITER's own scope only, so the nested writer "
+        "is never resolved and never discovered — measured `{}` for it — while the call walk "
+        "descends into the nested body and classes the ENCLOSING function `gated` (measured "
+        "`{'tortoise.m::factory': 'gated'}`). A writer that stores nothing therefore stands in the "
+        "population in place of the one that does. Naming the form is the honest statement: "
+        "closing it means threading the ENCLOSING chain through both the alias map and the "
+        "discovery walk — a widening of the model, not a spelling. Pinned by "
+        "`tests/test_embed_writer_register.py::test_the_alias_forms_discovery_still_cannot_see_are_named`."
+    ),
 }
 
 
@@ -443,6 +457,106 @@ def _walk_own_scope(root: ast.AST):
             stack.append(child)
 
 
+def _imports_that_REBIND(root_children) -> set[str]:
+    """Local names an `import` statement binds to something that is NOT the seam it names.
+
+    ⛔ `ast.alias` is excluded from the shadow set because the import is what CREATES the alias
+    (`#12020` round 3) — right for the import that RESOLVES to the seam, wrong for one that
+    REBINDS the same local name to another object (`#12020` round 6 review, P2, measured):
+
+        from tortoise.embeddings import encode_for_row as _enc   # the seam alias
+        def w(proj, text):
+            import json as _enc          # rebinds `_enc` to the MODULE
+            proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": "x"})
+            return _enc(text)
+
+    Here `_enc(text)` reaches `json`, not the gate, but the module alias survived and the writer
+    classed `gated` — OUTSIDE `NEEDS_A_DECLARATION`, so it stopped owing a declaration while never
+    reaching the gate. `main` (no alias resolution at all) had it `unresolved_write`, so this is a
+    REGRESSION the alias resolver introduced, and the safe direction is the one that owes.
+
+    Only a binding that does not resolve is counted, so the honest `function_level_alias` shape —
+    the import in the writer's own scope whose whole point is that it binds the call — is left
+    alone. `import … as Y` always binds a MODULE (never the seam function), so every its alias
+    counts.
+    """
+    rebound: set[str] = set()
+    for sub in root_children:
+        if isinstance(sub, ast.Import):
+            for alias in sub.names:
+                if alias.name != "*":
+                    rebound.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(sub, ast.ImportFrom):
+            module = sub.module or ""
+            for alias in sub.names:
+                if alias.name == "*":
+                    continue
+                resolves = (alias.name in _ALIASABLE_CALL_NAMES
+                            and module in _ALIAS_HOMES.get(alias.name, frozenset()))
+                if not resolves:
+                    rebound.add(alias.asname or alias.name)
+    return rebound
+
+
+def _comprehension_walrus_targets(comp: ast.AST) -> set[str]:
+    """`Name`s a WALRUS binds inside a comprehension — in the ENCLOSING FUNCTION (PEP 572).
+
+    ⛔ The comprehension's own `for` TARGET is the other direction entirely, and the distinction is
+    the round-6 lesson this file already carries: `[_set for _set in rows]` binds `_set` for the
+    element only, so enrolling it as a writer-scope binding DELETED a real writer. A walrus inside
+    the same comprehension is the opposite fact — PEP 572 puts its target in the containing scope —
+    and the own-scope walk skips the comprehension BODY, so `[_enc := r for r in rows]` rebound the
+    alias invisibly (measured `gated` where `main` had `unresolved_write`).
+
+    A nested `def`/`class`/`lambda` inside the comprehension opens its own scope, so its walrus
+    binds there and is not collected here; a NESTED COMPREHENSION is still the same containing
+    scope, so it is descended into.
+    """
+    found: set[str] = set()
+    stack: list[ast.AST] = [comp]
+    while stack:
+        node = stack.pop()
+        if (node is not comp and isinstance(node, _NEW_SCOPE_NODES)
+                and not isinstance(node, _COMPREHENSION_NODES)):
+            continue
+        if isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+            found.add(node.target.id)
+        stack.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _own_scope_bindings(root: ast.AST) -> set[str]:
+    """Every name `root`'s OWN scope binds — ONE implementation for both shadow walks.
+
+    The module pass (`_scope_bound_names`) and the writer pass (`_locally_bound`) ask the same
+    question at two heights, and they were two copies of the same twelve lines. That is exactly how
+    the round-4/round-5 leak survived in one copy while the other was fixed, so they share this
+    body: a case added here is added to BOTH, and a case that should differ cannot silently differ.
+    """
+    bound: set[str] = set()
+    for sub in _walk_own_scope(root):
+        if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+            bound.add(sub.id)
+        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(sub.name)  # the NAME binds here; the body/arguments are another scope
+        elif isinstance(sub, ast.arg):
+            bound.add(sub.arg)
+        elif isinstance(sub, ast.ExceptHandler) and sub.name:
+            bound.add(sub.name)
+        # ⛔ `#12020` round 6 review (P2): the three binding forms the walk did not know about, each
+        # measured `gated` at that head where `main` had `unresolved_write`.
+        elif isinstance(sub, (ast.MatchAs, ast.MatchStar)) and sub.name:
+            # `case {"k": _enc}:` / `case [*_enc]:` — a capture binds HERE, in the function scope.
+            bound.add(sub.name)
+        elif isinstance(sub, ast.MatchMapping) and sub.rest:
+            bound.add(sub.rest)  # `case {**_enc}:`
+        elif isinstance(sub, _COMPREHENSION_NODES):
+            bound |= _comprehension_walrus_targets(sub)
+        elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+            bound |= _imports_that_REBIND([sub])
+    return bound
+
+
 def _scope_bound_names(root: ast.AST) -> set[str]:
     """Names bound in `root`'s OWN scope (nested scopes excluded) — what shadows an import alias.
 
@@ -451,19 +565,12 @@ def _scope_bound_names(root: ast.AST) -> set[str]:
     imported object. ⚠️ The `def` form was NOT seen at round 4 — `_walk_own_scope` skipped nested
     scope NODES entirely, so a module-level `def` rebound a seam alias invisibly and the writer
     stayed `gated` (`#12020` round 5).
+
+    ⛔ `ast.alias` is not counted as a shadow BY DEFAULT — the import is what CREATES the alias —
+    but an import that binds the local name to something OTHER than the seam it names IS a shadow
+    (`_imports_that_REBIND`, `#12020` round 6 review P2).
     """
-    bound: set[str] = set()
-    for sub in _walk_own_scope(root):
-        if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
-            bound.add(sub.id)
-        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bound.add(sub.name)  # a def/class NAME binds here, even a nested one's
-        elif isinstance(sub, ast.arg):
-            bound.add(sub.arg)
-        elif isinstance(sub, ast.ExceptHandler) and sub.name:
-            bound.add(sub.name)
-    # ⛔ `ast.alias` is deliberately NOT counted — the import is what CREATES the alias.
-    return bound
+    return _own_scope_bindings(root)
 
 
 def _import_aliases(*roots: ast.AST, own_scope_only: bool) -> dict[str, str]:
@@ -531,23 +638,15 @@ def _locally_bound(node) -> set[str]:
             → discovered NOTHING before this fix; `unresolved_write` without the nested def.
 
     Pinned by `ALIASED_IMPORT_SHAPES`' `nested_scope_parameter_does_not_shadow` arm.
-    """
-    import ast
 
-    bound: set[str] = set()
-    for sub in _walk_own_scope(node):
-        if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
-            bound.add(sub.id)
-        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bound.add(sub.name)  # the NAME binds here; the body/arguments are another scope
-        elif isinstance(sub, ast.arg):
-            bound.add(sub.arg)
-        elif isinstance(sub, ast.ExceptHandler) and sub.name:
-            bound.add(sub.name)
-    # ⛔ `ast.alias` is deliberately NOT counted: the import is what CREATES the alias, so counting
-    # it would drop every function-level alias — including the honest `function_level_alias` shape
-    # whose whole point is that the writer's own subtree binds it.
-    return bound
+    ⛔ `ast.alias` is NOT counted as a shadow by itself: the import is what CREATES the alias, and
+    counting every one would drop the honest `function_level_alias` shape, whose whole point is that
+    the writer's own scope binds it. An import that binds the name to something ELSE is a different
+    fact and IS counted (`_imports_that_REBIND`, `#12020` round 6 review P2). `MatchAs` /
+    `MatchStar` / `MatchMapping.rest` and a WALRUS inside a comprehension bind in THIS scope too,
+    and each of them was measured `gated` (owed nothing) before `_own_scope_bindings` knew them.
+    """
+    return _own_scope_bindings(node)
 
 
 def _named_callees(node) -> set[str]:
@@ -3833,12 +3932,28 @@ def _sdk_methods_on_vector_leg(
         `self.__class__.<name>` is the same receiver written the long way; `super()` and `type(self)`
         are the same family and were already accepted. Every one of them was a real reach DROPPED
         with no entry — the silent-short-list direction this channel exists to narrow.
+
+        ⛔ …and every one of them is a claim about the BASE, not about the spelling (#12020 round 6
+        review, P3): `type(<anything>)` was accepted as a receiver while its twin
+        `other.__class__._helper` is refused two lines below, so the file stated a receiver rule it
+        enforced on one spelling and not the other. `type(self)` is an in-module receiver;
+        `type(other)` is a FOREIGN class's helper.
         """
         if isinstance(expr, ast.Name):
             return expr.id in receivers
-        if (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name)
-                and expr.func.id in ("super", "type")):
-            return True
+        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name):
+            if expr.func.id == "super":
+                return True
+            # ⛔ `type(self)` is the receiver spelled through the type — but ONLY when its ARGUMENT
+            # is one (#12020 round 6 review, P3). Accepting ANY `type(…)` call made
+            # `type(other)._helper` an in-module reach, which is the FOREIGN object's class — the
+            # exact shape the `__class__` arm two lines below refuses for the same reason. The
+            # asymmetry published a spurious `declared bound` entry on a complete caller table, on
+            # the channel whose over-reports the comment above calls out as making a real
+            # declaration ignorable.
+            if expr.func.id == "type" and len(expr.args) == 1 and not expr.keywords:
+                return _in_module_receiver(expr.args[0], receivers)
+            return False
         # `self.__class__` — the same receiver, spelled through the type. ⛔ The BASE must itself be
         # an in-module receiver (`#11397` review): `other.__class__._pool` is a FOREIGN object's
         # class, and accepting any `*. __class__` published a spurious `declared bound` entry on a
