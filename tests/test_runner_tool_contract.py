@@ -661,33 +661,41 @@ def _code_only(line: str) -> str:
 #: FAILS CLOSED on a no-egress runner, and a `KNOWN_UNCOVERED` entry would declare a
 #: `gh` user that does not exist.
 #:
-#: ⛔ THREE CONDITIONS, so this cannot become a filter — the command word is
+#: ⛔ FOUR CONDITIONS, so this cannot become a filter — the command word is
 #: `echo`/`printf` (also after a YAML `run:` prefix or a `then`/`else`), the line has NO
-#: shell operator once its quoted spans are gone, and the script name is exempted only
-#: inside such a line. A bare `.*echo` would exempt `python3 tools/x.py && echo done` —
-#: a real invocation hidden behind its own log line, the FALSE NEGATIVE the script arm
-#: exists to catch.
+#: shell operator once its quoted spans are gone, the line carries NO command
+#: substitution or backtick (a substitution EXECUTES: `echo "$(tools/x.sh)"` runs the
+#: script and only prints its output), and the script name is exempted only inside such
+#: a line. A bare `.*echo` would exempt `python3 tools/x.py && echo done` — a real
+#: invocation hidden behind its own log line, the FALSE NEGATIVE the script arm exists
+#: to catch.
 #:
 #: RESIDUAL, stated rather than discovered later: a message printed by another command
-#: (`cat <<'EOF'` heredocs, `python3 -c 'print(…)'`) is still read as code, and a
-#: message that carries a shell operator is read as code too. Both fail in the SAFE
-#: direction — they ask for a declaration the job may not need, never a silent skip.
+#: (`cat <<'EOF'` heredocs, `python3 -c 'print(…)'`) is still read as code, and so is a
+#: printed line that carries a substitution (`echo "$(date) — run tools/x.sh"`). Both
+#: fail in the SAFE direction — they ask for a declaration the job may not need, never a
+#: silent skip.
 _MESSAGE_CMD = re.compile(r"^(?:-(?:\s+)?)?(?:run:\s*)?(?:(?:then|else)\s+)?(?:echo|printf)\b")
 _SHELL_OPERATOR = re.compile(r"[;&|]")
+_SUBSTITUTION = re.compile(r"\$[({]|`")
 
 
 def _message_only(line: str) -> bool:
     """Is this line a PRINTED message rather than a shell call site? (#12133)
 
-    The predicate is deliberately CONSERVATIVE in both directions: it exempts a script
-    name only when the line provably does nothing but print (see `_MESSAGE_CMD`), and
-    it reads the RAW line for the name, so a quoted invocation written inside a
-    command substitution — `OUT="$(python3 graph-scripts/e2e_live_reconcile.py --json)"`
-    (e2e-live-reconcile.yml:77) or
+    It exempts a script name only when the line does nothing but print: command word
+    `echo`/`printf`, no shell operator, and **no command substitution or backtick**.
+    That last condition is not decoration — `echo "$(tools/x.sh)"` PRINTS, and it also
+    EXECUTES the script, so exempting it would be a silent skip. The direction chosen
+    is the safe one: such a line asks for a declaration it may not need.
+
+    The script name is matched on the RAW line, so a quoted invocation stays a hazard —
+    `OUT="$(python3 graph-scripts/e2e_live_reconcile.py --json)"`
+    (e2e-live-reconcile.yml:77) and
     `head_digest="$(python3 tools/mergify_config_guard.py --print-digest)"`
-    (mergify-guard-recut.yml:105) — stays a hazard. A whitespace-based strip cannot do
-    that: it hid both of those, one leading space defeated it, and a message that
-    merely CONTAINS a substitution was read as a call site (#12092 review).
+    (mergify-guard-recut.yml:105) are both seen. A whitespace-based strip cannot do
+    this: it hid both, one leading space defeated it, and a printed message that
+    contained a substitution was read as a call site (#12092 review).
 
     MEASURED over the 41 `*.yml` workflows: against the pre-#12133 raw scan, exactly
     **4** line verdicts change and **all four are printed `echo` messages** — zero real
@@ -695,7 +703,11 @@ def _message_only(line: str) -> bool:
     predicate can be held to; a count that mixes two baselines is not a measurement.
     """
     code = _code_only(line).strip()
-    return bool(_MESSAGE_CMD.match(code)) and not _SHELL_OPERATOR.search(code)
+    return (
+        bool(_MESSAGE_CMD.match(code))
+        and not _SHELL_OPERATOR.search(code)
+        and not _SUBSTITUTION.search(line)
+    )
 
 
 def _looks_poolable(value: str) -> bool:
@@ -926,6 +938,13 @@ def test_a_remediation_message_is_not_read_as_a_gh_call_site():
     ⛔ THE EXEMPTION IS `_message_only`, NOT "quoted spans with whitespace": a quoted
     span is how a real invocation is commonly written, and the substitution forms below
     are the ones a whitespace test lost (two are in this repo today).
+
+    ⛔ CONVERGENCE WITH #12102, which repairs the same #12133 red with the same predicate:
+    that PR carries its OWN copy of this test. **This copy is the superset** — the derived
+    `_gh_executing_scripts()` set plus the leading-space, mid-span and quoted-argv pins —
+    so the SECOND lander keeps this one and drops the other. A duplicate same-named
+    `def` is SILENT (python binds the later definition), not a merge error, so this is
+    stated rather than left to be discovered.
     """
     scripts = _gh_executing_scripts()
 
@@ -938,10 +957,24 @@ def test_a_remediation_message_is_not_read_as_a_gh_call_site():
         ],
         scripts,
     ) == [], "an operator-facing MESSAGE that names a `gh`-executing script was read as an invocation"
-    assert _gh_hazards(
-        ['        run: echo "$(date) — on failure run tools/install-ci-runner-x64.sh --repair-labels"'],
-        scripts,
-    ) == [], "a printed message that merely CONTAINS a substitution is still only printing"
+    # …but a line that PRINTS a substitution is not "only printing": `echo "$(x)"`
+    # EXECUTES x and prints its output, so exempting it would be a silent skip. The
+    # exemption therefore requires the absence of ANY substitution or backtick, and a
+    # message that carries one is read as code — the SAFE direction (it asks for a
+    # declaration the job may not need) rather than the silent one.
+    for line, why in [
+        ('        run: echo "$(date) — on failure run tools/install-ci-runner-x64.sh --repair-labels"',
+         "a printed line carrying a substitution is read as code (safe direction)"),
+        ('        run: echo "$(tools/install-ci-runner-x64.sh --repair-labels)"',
+         "echoing a substitution RUNS it — exempting that is a silent skip"),
+        ("        run: printf '%s' \"$(tools/install-ci-runner-x64.sh)\"",
+         "the same shape via printf"),
+        ('        run: echo "`tools/install-ci-runner-x64.sh`"',
+         "the backtick form runs it too"),
+        ("        run: echo done && tools/install-ci-runner-x64.sh --repair-labels",
+         "an invocation AFTER an operator is a call site, not a message"),
+    ]:
+        assert _gh_hazards([line], scripts), why
 
     # 2. Real invocations, including every shape a whitespace strip hid: the two in
     #    this repo, a leading space inside the quotes, and a mid-span substitution.
@@ -960,6 +993,12 @@ def test_a_remediation_message_is_not_read_as_a_gh_call_site():
          "an unquoted invocation is an invocation"),
         ("        run: python3 tools/mergify_config_guard.py --emit && echo done",
          "a log line AFTER a real invocation must not exempt it"),
+        ("        run: echo done; tools/install-ci-runner-x64.sh --repair-labels",
+         "a message FIRST does not exempt the invocation that follows a `;`"),
+        ('        run: echo "a" && tools/install-ci-runner-x64.sh --repair-labels',
+         "a message FIRST does not exempt the invocation that follows an `&&`"),
+        ("        run: echo x | bash tools/install-ci-runner-x64.sh --repair-labels",
+         "a message piped INTO an invocation is an invocation"),
     ]:
         assert _gh_hazards([line], scripts), why
 
