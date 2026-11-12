@@ -98,28 +98,24 @@ _SEPARATE_HOSTS = APP not in (COMPANY, TORTISE)
 # URL cannot be both 200 and a 301, so that leg self-skips.
 _BLOG_HOSTS_DIFFER = COMPANY != TORTISE
 
-# ⛔ THE PRODUCTION ORIGINS THIS SUITE MAY GRADE A HOST AGAINST (#11976 review, rounds
-# 5-6). A run pointed at one of these grades the HOST that robots.txt names; ANY other
-# target — a local wrangler server, a preview deployment, a staging host — grades its
-# own PATH. robots.txt names an ABSOLUTE production URL, so fetching it as written from
-# a target that does not serve that URL reads and asserts on the DEPLOYED document
-# instead of the server under test: a false green, plus an unintended production read.
-# Keying on `ALLOW_PROD` was wrong twice over (it says "https targets are permitted", so
-# a local http run slipped through; and every https preview is forced to set it), and
-# keying on the scheme was wrong once more (a preview is https too). Only "is this
-# target a production origin" is the property the two arms actually need.
-# `tortoise.premiselabs.co` is in the set on purpose even though it no longer SERVES the
-# blog — it 301s /blog* to the company origin (`_middleware.ts:513-521`,
-# `_lib.ts:63-68`) — because it is the host robots.txt names TODAY, and grading it is
-# the whole point of the as-written arm. Keep this list in step with #11766's repoint.
-# ⛔ EXACTLY the origins that SERVE the blog, and no `www.` member (#11976 review, round
-# 7): `www.premiselabs.co` was listed and does not exist — NXDOMAIN, absent from
-# `_middleware.ts`'s own `COMPANY_HOSTS` (`{"premiselabs.co"}`, line 265) and absent
-# from the rest of the repo — so a lane that read the list as "these are production
-# origins", pointed `BASE_URL` at it, and got a DNS failure would read that as a broken
-# blog rather than a bogus target. A host nothing deploys does not belong in a
-# production-origin allowlist.
+# ⛔ THE TWO ORIGINS THIS SUITE GRADES robots.txt's SITEMAP HOST AGAINST (#11976 review).
+# A run pointed at one of these fetches the sitemap URL robots.txt names AS WRITTEN.
+# Any other target — a local wrangler server, a Pages preview, a staging host — grades
+# its own PATH instead: robots.txt names an ABSOLUTE production URL, so fetching it as
+# written from a target that does not serve it reads and asserts on the DEPLOYED
+# document, which is a false green plus an unintended production read.
+#
+#    premiselabs.co            serves the blog
+#    tortoise.premiselabs.co   what robots.txt names TODAY; 301s /blog* to the company
+#                              origin (`_middleware.ts:513-521`, `_lib.ts:63-68`),
+#                              and grading that hop is the point of the as-written arm
+#
+# Nothing else belongs here: `app.premiselabs.co` is also in robots.txt but only for
+# its own sitemap, which the `/blog/sitemap.xml` filter drops. Keying the mode on
+# `ALLOW_PROD` or on the scheme was wrong three times over — that flag says "https
+# targets are permitted", not "this target is production", and a preview is https too.
 # Membership is tested against `.hostname` (lower-case, port-stripped), not `.netloc`.
+# Keep in step with #11766's repoint.
 _PRODUCTION_ORIGIN_HOSTS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
 if os.environ.get("ALLOW_PROD") != "1" and any(
     h.startswith("https://") for h in (COMPANY, TORTISE, APP)
