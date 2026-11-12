@@ -6814,18 +6814,22 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
     assert "NEGATED clause" in _mirror_refusal_reason(
         "Its confidence_mean IS the PRIOR mean — the mirror isn't supplying "
         "the value.")
-    # …and the CONTRACTION spelling of the broken-adjacency diagnosis: the
-    # filler class must span an apostrophe, or every contraction form is
-    # reported as "no source shape" and the remedy it names cannot clear the
-    # red (review, measured).
+    # …and the CONTRACTION spelling, which pins `_MIRROR_NEGATED`'s `n['’]t`
+    # arm rather than a filler class: BOTH apostrophes, because a docstring
+    # pasted from rendered prose writes the curly one, and an arm accepting only
+    # `'` would leave it invisible. Each row asserts BOTH causes — the sentence
+    # has no source construct AND a denied mention — so it REDS if the `-n't`
+    # arm is dropped (the denial would then go unreported) instead of passing on
+    # a substring the missing-shape message also contains (review, measured).
     for contraction in (
             "Its confidence_mean IS the PRIOR mean — the mirror doesn't "
             "supply the value.",
             "Its confidence_mean IS the PRIOR mean — the mirror won’t supply "
             "the value."):
-        assert "NEGATED clause" in _mirror_refusal_reason(contraction), (
-            f"a negated auxiliary in a contraction is a DENIAL, not a missing "
-            f"shape: {contraction!r}")
+        _r = _mirror_refusal_reason(contraction)
+        assert "NEGATED clause" in _r and "NOT as the value's source" in _r, (
+            "a negated auxiliary written as a contraction is BOTH a denial and "
+            f"a missing source shape, so both causes must be named: {contraction!r}")
     assert "NEGATED clause" in _mirror_refusal_reason(
         "Its confidence_mean IS the PRIOR mean — not the mirror's value.")
     # …and a clause that legitimately negates something else must NOT be told to
@@ -6850,11 +6854,10 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             f"the missing-shape leg must be named too: {both_causes!r}")
     # …while a sentence with NO negator at all is missing the shape and nothing
     # else — the denial leg must stay silent, or every missing-shape red tells
-    # the fixer to hunt a denial that is not there. The BROKEN-ADJACENCY probe
-    # is what could over-fire here: this row has `supply` within the window but
-    # no negator, so the probe's own `_MIRROR_NEGATED` leg keeps the verdict at
-    # "missing shape". Without that leg pinned, the mutant `if broken:` reports
-    # a denial the sentence does not contain (review, measured).
+    # the fixer to hunt a denial that is not there. This row also pins the TIGHT
+    # verb alternation: it is `can supply`, not `supplies`, so it must not match
+    # `_MIRROR_SOURCE`; admitting bare `supply` there would match it and this row
+    # would report a denial the sentence does not contain (review, measured).
     assert "NEGATED clause" not in _mirror_refusal_reason(
         "its confidence_mean IS the declared PRIOR mean — the mirror can "
         "supply the value."), \
