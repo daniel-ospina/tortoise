@@ -1689,11 +1689,20 @@ def cache_forbidden_columns(table: str) -> frozenset[str]:
 
 @dataclass(frozen=True)
 class RecordNode:
-    """One record row, as the cache must materialize it."""
+    """One record row, as the cache must materialize it.
+
+    ``dropped_vectors`` is the DROP LOG (`#11747`): the vector properties the
+    RECORD IMAGE refused for this node's label, mapped to the reason. It lives
+    on the view rather than only on the statement because the view is what
+    `record_serve.read_node` answers from — a record read that returned a vector
+    the cache refuses would be the exact "live ≠ rebuild" divergence that read
+    exists to avoid.
+    """
 
     label: str
     key: str
     props: Mapping[str, Any] = field(default_factory=dict)
+    dropped_vectors: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -2546,7 +2555,26 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     for prop, sources, value in DERIVED_FROM_RECORD.get(label, ()):
         if props.get(prop) is None and any(props.get(src) for src in sources):
             props[prop] = value
-    return RecordNode(label=label, key=raw, props=props)
+    # ⛔ `#11747`: a vector for a label no query leg serves is dropped HERE, in the
+    # row→property map BOTH directions read (`record_serve.read_node` answers from
+    # this same function, by contract). Dropping it only at the writer would leave
+    # the record read returning a vector the cache refuses — the divergence that
+    # read exists to prevent — and would make the plan's written set narrower than
+    # the view it was built from. `node_statement` keeps its OWN check for a
+    # directly-constructed `RecordNode` (nothing else may put a vector on an
+    # unserved label); the DECLARATION is single (:data:`UNSERVED_VECTOR_LABELS`),
+    # so the two cannot disagree about which labels are refused.
+    dropped: dict[str, str] = {}
+    if label in UNSERVED_VECTOR_LABELS:
+        for prop in sorted(STORED_VECTOR_PROPS):
+            if props.pop(prop, None) is None:
+                continue
+            dropped[prop] = (
+                f"{label} is not a label run_vector_query serves "
+                f"(served: {sorted(served_vector_labels())}) — a vector stored "
+                f"there has no query path"
+            )
+    return RecordNode(label=label, key=raw, props=props, dropped_vectors=dropped)
 
 
 def relation_from_row(row: Mapping[str, Any]) -> RecordRelation:
@@ -3198,7 +3226,8 @@ def apply_event_stream_folds(
             continue
         props = dict(node.props)
         props["status"] = status
-        out.append(RecordNode(label=node.label, key=node.key, props=props))
+        out.append(RecordNode(label=node.label, key=node.key, props=props,
+                              dropped_vectors=node.dropped_vectors))
     return tuple(out)
 
 
@@ -3346,6 +3375,12 @@ def node_statement(node: RecordNode) -> Statement:
     :mod:`tortoise.stored_form` — the one spelling this writer shares with the
     record↔cache check (#8615), so a widened or narrowed writer cannot leave
     the check comparing a form nobody writes.
+
+    ⛔ `#11747`: a vector is stored ONLY on a label the query leg serves
+    (:data:`UNSERVED_VECTOR_LABELS`). Writing one anywhere else stores bytes no
+    reader can reach — `run_vector_query` refuses an unserved `entity_type`
+    before it builds a query — so the vector is dropped and the drop is recorded
+    on :attr:`Statement.dropped_vectors`, never performed silently.
     """
     key_prop = KEY_PROPERTY[node.label]
     props = dict(node.props)
@@ -3353,7 +3388,7 @@ def node_statement(node: RecordNode) -> Statement:
     props.pop(VERBATIM_MARKER, None)
     cypher = f"MERGE (n:{node.label} {{{key_prop}:$key}}) SET n += $props"
     params: dict[str, Any] = {"key": node.key, "props": props}
-    dropped: dict[str, str] = {}
+    dropped: dict[str, str] = dict(node.dropped_vectors)
     for prop in sorted(STORED_VECTOR_PROPS):
         vector = props.pop(prop, None)
         if vector is None:

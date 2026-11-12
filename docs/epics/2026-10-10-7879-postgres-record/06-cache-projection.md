@@ -139,6 +139,28 @@ completeness, the `#4240`/`#5089` root). Shipping a `rebuild_all`-shape snapshot
 on this path would import a **cache read** into the one path the ruling requires
 to have none.
 
+### 0.5b A vector is not carried onto a label no query path serves (`#11747`)
+
+The vector clause is the one place this projection writes a property with a
+STORAGE FORM rather than a value (`n.embedding = vecf32($embedding)`), and it was
+guarded by nothing: whatever label the record row carried got its vector. But
+the cache is loaded to be READ, and `run_vector_query` can only read the labels
+`tortoise.security.VALID_ENTITY_TYPES` translates to — so a vector on any other
+record label is paid for and unreadable, which is `#5090` DoD row 2's whole
+subject.
+
+`:Session` was the one such label, and the door was the RECORD's:
+`public.session` is the only record table whose `chk_*_props_no_derived` refuses
+NOTHING (`NOT (props ?| ARRAY[]::text[])`, an empty array) and it has no
+`embedding` column, so a vector could arrive through the row's open-set `props`
+tail. It is now refused at the writer (`cache_projection.UNSERVED_VECTOR_LABELS`,
+derived as `NODE_TABLES` minus the served set — never a list) and the refusal is
+**reported on the statement** (`Statement.dropped_vectors`), because this
+projection does not drop a name it cannot name. ⛔ Not an index decision: which
+labels get a VECTOR INDEX is §14.3 **V3** (`#11901`), and nothing here creates
+one. ⛔ Nor a narrowing of the 2026-11-10 ruling: `:Object` and `:Subject` are
+served, keep their embeddings, and are untouched.
+
 ### 0.6 Verification
 
 * `tests/test_cache_projection.py` — hermetic, no DB:

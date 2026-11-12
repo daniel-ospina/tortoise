@@ -938,23 +938,55 @@ def test_an_unserved_record_label_cannot_be_given_a_vector():
     ⛔ The door is real, and it is the RECORD's: `public.session` is the ONE table
     whose `chk_*_props_no_derived` refuses NOTHING (`NOT (props ?| ARRAY[]::text[])`,
     an empty array), and it has no `embedding` column — so a vector can reach this
-    writer through the row's open-set `props` tail and nowhere else. Before this
-    fix it landed on the node while `run_vector_query` refuses
+    projection through the row's open-set `props` tail and nowhere else. Before
+    this fix it landed on the node while `run_vector_query` refuses
     `entity_type='session'` before it builds a query: a vector paid for and
     unreadable, which is exactly what `#5090` DoD row 2 forbids.
+
+    ⛔ Dropped in the row→property map, not only at the writer: `record_serve.read_node`
+    answers from `node_from_row` by contract, so a view that kept the vector would make
+    the record read advertise one the cache refuses.
     """
     node = _node("Session", {"props": {"embedding": [0.5, 0.25]}})
-    assert "embedding" in node.props, (
-        "the tail door no longer carries the name, so this test no longer measures "
-        "the store it exists to refuse")
+    assert "embedding" not in node.props
+    # NOT SILENT: this module refuses to drop a name it cannot name.
+    assert "embedding" in node.dropped_vectors
+    assert "Session" in node.dropped_vectors["embedding"]
     stmt = cp.node_statement(node)
     assert "embedding" not in stmt.params
     assert "embedding" not in stmt.params["props"]
     assert "n.embedding" not in stmt.cypher
-    # ⛔ NOT SILENT: this module refuses to drop a name it cannot name, so the drop
-    # carries its own reason on the statement.
+    assert dict(stmt.dropped_vectors) == dict(node.dropped_vectors), (
+        "the statement must CARRY the view's drop log, not re-derive a second one")
+
+
+def test_the_gate_is_what_removes_the_tail_vector_not_the_tail():
+    """Non-vacuity: the SAME `props`-tail shape on a SERVED label keeps its vector.
+
+    Without this, `test_an_unserved_record_label_cannot_be_given_a_vector` would still
+    pass if the tail had simply stopped carrying the name — it would be measuring
+    nothing. A record label the query leg DOES serve must keep the vector the tail
+    delivered.
+    """
+    node = _node("Point", {"props": {"embedding": [0.5, 0.25]}})
+    assert "embedding" in node.props
+    assert node.dropped_vectors == {}
+    assert "embedding" in cp.node_statement(node).params
+
+
+def test_the_writer_refuses_a_directly_built_unserved_node():
+    """The writer's own check, for a `RecordNode` that never went through `node_from_row`.
+
+    `record_plan` is a public door: a caller may build the node itself, and the writer
+    is the last place that can refuse. One declaration decides both
+    (`UNSERVED_VECTOR_LABELS`), so they cannot disagree about which labels are refused.
+    """
+    node = cp.RecordNode(label="Session", key="s-1",
+                         props={"id": "s-1", "embedding": [0.5, 0.25]})
+    stmt = cp.node_statement(node)
+    assert "embedding" not in stmt.params
+    assert "n.embedding" not in stmt.cypher
     assert "embedding" in stmt.dropped_vectors
-    assert "Session" in stmt.dropped_vectors["embedding"]
 
 
 def test_the_unserved_vector_label_class_is_derived_from_the_query_vocabulary():
