@@ -5644,8 +5644,18 @@ _BELIEF_PROSE = (
 #: corpus writes (`e.g.` / `i.e.` / `cf.`): splitting on those tears a correct
 #: sentence in two and reports its claim fragment as a defect — a false positive
 #: that steers the next fixer to "correct" correct prose.
-_SENTENCE_END = re.compile(
-    r"(?<!\be\.g\.)(?<!\bi\.e\.)(?<!\bcf\.)(?<=[.!?])\s+")
+#: The abbreviations to exempt. Defined ONCE and composed into both splitters
+#: below: a fourth abbreviation added here reaches both, whereas a copy-pasted
+#: second list would let an addition re-open the aperture closed by
+#: `_MIRROR_CLAUSE_BREAK` with no control row to red for it (review, measured).
+#: `e.g.` / `i.e.` are what the five `_BELIEF_PROSE` modules actually write
+#: (measured: 137 `e.g.`, 101 `i.e.` lines); `cf.` occurs ZERO times there and
+#: is carried DEFENSIVELY (it lives elsewhere in the tree, e.g.
+#: `tortoise/projection/edges.py`) — its control row is what pins the
+#: shared-list property, not a corpus measurement.
+_ABBREV_LOOKBEHIND = r"(?<!\be\.g\.)(?<!\bi\.e\.)(?<!\bcf\.)"
+
+_SENTENCE_END = re.compile(_ABBREV_LOOKBEHIND + r"(?<=[.!?])\s+")
 
 #: Sentences that ASSERT the value of a prior-only claim's mean. The verb is
 #: what distinguishes a CLAIM from a factual mention of a number ("Beta(3,1),
@@ -5866,6 +5876,119 @@ _CRED_WORD_EXEMPT = re.compile(
     r"|\bloses\b|\blost\b|\bignored\b|\bdiscarded\b|\boverwritten\b"
     r"|\bsuperseded\b",
     re.IGNORECASE)
+#: The constructs that make the mirror the SOURCE of the served value — an
+#: ALLOW-LIST, and that is the point (#11993). The guard shipped with bare
+#: presence (`"mirror" in sentence.lower()`), so an INVERTED sentence —
+#: "…IS the declared PRIOR mean; the mirror never leads it." — was CERTIFIED as
+#: pinned: a mention used to DENY the rule reads as the qualifier while
+#: asserting its opposite.
+#:
+#: A BLACKLIST of inversion verbs cannot close that class — the closed #11922
+#: branch's negation-keyed shape refused `never leads` and still CERTIFIED "the
+#: mirror loses to the pair" and "the pair outranks the mirror", because every
+#: rewording invents a verb. Neither can an allow-list of BARE verbs: measured
+#: by review, "the mirror is only a fallback when the pair is absent, so the
+#: pair wins" certified under one, because `wins` was listed while the mirror
+#: was not its subject. So what is required is the RELATION — the mirror NAMED
+#: AS THE VALUE'S SOURCE — in one of the two shapes that can be bound
+#: UNAMBIGUOUSLY, with the mirror adjacent to its verb:
+#:
+#:   * `the … mirror's value` / `… mirror's mean` (the possessive source —
+#:     BOTH apostrophes: a docstring pasted from rendered prose writes `’`,
+#:     and accepting only `'` refused the correct sentence while telling its
+#:     author it used no possessive construct at all). The apostrophe is
+#:     REQUIRED: an optional one also accepted the bare attributive `mirror
+#:     value`, which is not the possessive the docstring claims and which let a
+#:     sentence dodge the relative-clause refusal by inserting one ordinary
+#:     noun (review, measured: `the mirror value, which leads the mean`
+#:     CERTIFIED while `the mirror, which leads the mean` was refused).
+#:   * `the mirror supplies / supplying (one)` (the mirror as the verb's own
+#:     subject — no filler allowed between noun and verb). The BARE `supply`
+#:     is deliberately NOT in this alternation: with `the mirror` as subject it
+#:     is ungrammatical, so no correct sentence writes it, and an unpinnable
+#:     alternative is one whose removal ships green. It IS in the
+#:     auxiliary-gap probe (`_MIRROR_SOURCE_BROKEN_BY_DENIAL`), where an
+#:     auxiliary takes the base form (`does not supply`).
+#:
+#: MEASURED over the five `_BELIEF_PROSE` modules at `e4703a286a`: exactly 5
+#: sentences make one of these claims AND name the mirror (4 class-1, 1
+#: class-2), and ALL 5 use the POSSESSIVE shape (`the readable n.confidence
+#: mirror's value`). The `supplies` shape is carried for SIBLING prose that
+#: states the same relation outside a claim sentence — `why.py` writes `no
+#: readable mirror supplies one`, and `sdk.py` / `ranking.py` / `volunteer.py`
+#: write `… mirror supplying one` — not because a claim sentence needs it.
+#:
+#: ⛔ A THIRD SHAPE IS DELIBERATELY ABSENT: `the mirror …, which/that leads`.
+#: It cannot be bound without a parser. Measured by review: with a 60-char
+#: filler window, "…the mirror is only for absent nodes, and the prior mean is
+#: the one that leads" certified, because `which/that leads` binds to whatever
+#: noun precedes it — re-introducing, for that shape, exactly the defect this
+#: change exists to remove (a verb listed while the mirror is not its subject).
+#: No corpus claim sentence needs it, so it is refused; see the
+#: `refused_by_design` control rows.
+#:
+#: The list being an allow-list is deliberate: an unknown phrasing is REFUSED (a
+#: human reads it and, if the sentence is correct, adds its shape here), so
+#: novel wording costs a RED TEST — a false block, cheap and visible — instead
+#: of buying a false PASS, which is the defect class. `_mirror_refusal_reason`
+#: is what makes that trade pay: the red test names which of the three causes
+#: fired, because the remedy differs.
+_MIRROR_SOURCE = re.compile(
+    r"\bmirror['’]s\s+(?:value|mean|number|reading)\b"
+    r"|\bmirror\b\s+(?:suppl(?:ies|ying))\b",
+    re.IGNORECASE,
+)
+
+
+#: The clause breaks for the MIRROR scan. A LOCAL copy of `_CLAUSE_BREAK`
+#: plus the same abbreviation lookbehinds `_SENTENCE_END` carries, and for the
+#: same reason: `_CLAUSE_BREAK`'s `(?<=[.!?])\s` fires on `i.e. ` / `e.g. ` /
+#: `cf. `, which the corpus writes on 150+ lines. Measured (review): with the
+#: bare `_CLAUSE_BREAK`, `…the readable mirror's value i.e. not the value the
+#: field serves` CERTIFIED — the denial sits in the same clause, across an
+#: abbreviation, and fell outside the scanned span on both legs. The landed
+#: #11933 gloss guard reads `_CLAUSE_BREAK` itself, so that object is NOT
+#: widened here; that guard's measured semantics stay exactly as they were.
+_MIRROR_CLAUSE_BREAK = re.compile(
+    r"—|–|:|;|" + _ABBREV_LOOKBEHIND + r"(?<=[.!?])\s|\bbut\b|\brather\b",
+    re.IGNORECASE,
+)
+
+
+#: Negators for the MIRROR relation, deliberately SEPARATE from `_NEGATED`
+#: above: that one scopes the EP-pass gloss, a landed guard with its own
+#: measured semantics (`#11933`), and widening it here would silently change
+#: what THAT guard exempts. The delta from `_NEGATED` is: `cannot`; `neither` /
+#: `nor` / `no longer`; and ANY `-n't`
+#: contraction in either apostrophe — `doesn't`, `can't`, `won't`, `don't`,
+#: `didn't`, `wouldn't`, `couldn't`, `shouldn't`, `hasn't`, `haven't`, `hadn't`,
+#: `aren't`, `wasn't`, `weren't`, `mustn't`, plus the curly `isn’t` (straight
+#: `isn't` is already in `_NEGATED`). Those forms are EXAMPLES — the arm is the
+#: whole morphology, not a list. Measured CERTIFIED before it: "the mirror's
+#: value doesn't lead it", "…is neither the served one nor the pair's".
+#:
+#: ⛔ BARE `no` IS DELIBERATELY EXCLUDED, and the exclusion is PINNED rather
+#: than argued: `no readable mirror supplying one` is the CORRECT qualifier
+#: shape the sibling prose writes (`why.py`, `sdk.py`, `ranking.py`,
+#: `volunteer.py`), and admitting `\bno\b` here refuses it — measured, the
+#: sibling control row reds. The cost is a disclosed residual: `no reading of
+#: the field comes from the mirror's value` is not refused.
+_MIRROR_NEGATED = re.compile(
+    r"\b(?:not|never|cannot|neither|nor)\b|\bno\s+longer\b|n['’]t\b",
+    re.IGNORECASE,
+)
+
+#: The `supplies` shape with a negated AUXILIARY in the gap the adjacency
+#: requires (`the mirror does not supply`) — the one case where the denial
+#: HIDES the construct instead of sitting beside it, so `_mirror_refusal_reason`
+#: must not report it as "no source shape" and send the fixer to add a clause
+#: the guard already refuses. Deliberately narrow: it matches nothing unless a
+#: `suppl*` verb is within three words of the mirror mention. The filler class is
+#: apostrophe-AWARE (`[\w'’]`) because a contraction is ONE word to the reader
+#: and two to `\w`: with the plain `\w` version every contraction form of the
+#: negated auxiliary was misdiagnosed (review, measured).
+_MIRROR_SOURCE_BROKEN_BY_DENIAL = re.compile(
+    r"\bmirror\b(?:\s+[\w'’]+){0,3}\s+suppl(?:y|ies|ying)\b", re.IGNORECASE)
 
 
 def _belief_prose(rel: str) -> str:
@@ -5883,94 +6006,162 @@ def _sentences(rel: str) -> list[str]:
     return [s for s in _SENTENCE_END.split(_belief_prose(rel)) if s.strip()]
 
 
-def _mirror_is_named_affirmatively(sentence: str) -> bool:
-    """True when the sentence names the mirror in a clause that does not DENY
-    it (#11993).
+def _mirror_refusal_reason(sentence: str) -> str:
+    """WHY a sentence did not qualify — the diagnosis its corpus assertion prints.
 
-    The original predicate cleared the claim on the bare substring ``mirror``,
-    so a sentence that INVERTED the relation it must state certified itself:
-
-        "a prior-only claim's confidence_mean IS the declared PRIOR mean;
-         the readable ``n.confidence`` mirror never leads it."
-
-    `_PRIOR_MEAN_CLAIM_PATTERNS` matched it and the mirror substring suppressed
-    the problem, so the guard reported "pinned" while certifying exactly the
-    defect it exists to catch — a false PASS. A claim is therefore qualified
-    only by an AFFIRMATIVE mention.
-
-    The scoping is the file's OWN, not a new one: the same `_NEGATED` +
-    `_CLAUSE_BREAK` machinery `_negates_its_verb` uses for the `has_ep` gloss,
-    for the same measured reason — a negator in a DIFFERENT clause belongs to a
-    different predicate and must not deny the mention:
-
-        "confidence_mean IS the declared PRIOR mean — or the readable mirror's
-         value, which LEADS it — never a measured one."
-
-    is AFFIRMATIVE: the mirror's clause carries no negator, and the `never`
-    attaches to "a measured one" in its own clause. A sentence whose own
-    mirror-carrying clause IS denied is not qualified ("…; the mirror never
-    leads it"). A comma does NOT break a clause, so "the mirror leads it, never
-    the pair" is treated as DENIED (fail-closed: the safer direction for a prose
-    guard, and the shape never occurs in the corpus). A mirror mention is
-    affirmative when ANY clause carrying it has no negator, so a mixed sentence
-    that states the relation correctly in one clause and denies it in another is
-    not reported: the guard's unit is the CLAIM, and the claim is qualified in
-    the clause that states it.
-
-    Deliberately NOT a verb-keyed negation (the shape the closed #11922 branch
-    carried as `_MIRROR_LEAD_NEGATED`, which locates a negator BEFORE the verb
-    `lead`). Measured against that branch's own regex, the verb-keyed arm DOES
-    catch `not` / `never` / `isn't` / `doesn't` in front of `lead` — it is
-    better than this predicate on `doesn't`, and #11999 carries that residual
-    because this one leaves it open. Its verbs are WIDER than the bare word:
-    the pattern ends `\blead` with NO trailing `\b`, so `leads` / `leader` /
-    `leading` are caught as well (measured: "the mirror isn't the leader" and
-    "the mirror is not leading the pair" both match). What it MISSES is every
-    inversion whose verb does not BEGIN with `lead` — `led` is missed, because
-    the pattern matches the letters `lead` ("the mirror loses to the pair", "the
-    pair outranks the mirror") — and every denial with no `lead` in reach ("the
-    mirror never is the value") — so it is the same class with a narrower KEY,
-    not a superset. Neither arm is a superset of the other.
-
-    RESIDUALS, disclosed and not closed here — tracked as #11999, measured
-    before it was filed, so none is a silent gap:
-      * a NEGATOR-FREE inversion ("the mirror loses to the pair", "the pair
-        outranks the mirror") carries no denial word and is still certified.
-        Closing it needs a positive-verb allow-list (#11993's options b/c),
-        which fail-closes on ordinary rewording and is the shape-list this
-        repo's R1/R2/R3 rule has seen falsified by "a shape beside the one it
-        named";
-      * `_NEGATED` lists `not` / `never` / `isn't` only, so CONTRACTION
-        negators ("doesn't", "cannot", "won't") and `no`-negation ("no
-        readable mirror is consulted here") still certify — `no` is excluded
-        from `_NEGATED` on purpose, for the `has_ep` guard's reason ("no mere
-        flag" is a determiner). That regex is shared with `_ep_pass_claims` and
-        is deliberately NOT widened here — widening it changes a second
-        guard's verdicts and belongs in its own reviewed change, not in the
-        tail of this one.
-      * a MIXED sentence — one affirmative mirror clause and one negated one —
-        is CLEARED, because the rule is "ANY mirror-carrying clause without a
-        negator". That is the deliberate fail-open edge of this predicate: the
-        clause that STATES the claim qualifies it, and the guard's unit is the
-        claim. Pinned by a control row, so the `all`-clause variant cannot be
-        substituted without a red.
-    A future lane should take either residual to #11999 rather than quietly
-    widening this predicate.
+    The allow-list trade-off (`_MIRROR_SOURCE`) pays off only if the red test
+    says which of the three causes fired, because the REMEDY differs: name the
+    mirror at all / use a source construct / delete a denial. A message reading
+    "does not name the mirror" for all three sends the fixer to add a mirror
+    clause the guard then refuses again.
     """
-    clauses = [c for c in _CLAUSE_BREAK.split(sentence)
-               if "mirror" in c.lower()]
-    return any(not _NEGATED.search(c) for c in clauses)
+    if "mirror" not in sentence.lower():
+        return "names no `n.confidence` mirror at all"
+    # Order matters, and each branch is reachable from `_unqualified_claims_on`:
+    # a construct that MATCHED but was refused means SOME mirror mention's
+    # clause carried the denial — usually the construct's own (`the mirror's
+    # value, never the prior's`), but also a bare mention's in another clause
+    # (`the mirror never leads it, but the mirror's value applies elsewhere`).
+    _denial = ("names the mirror in a NEGATED clause — a clause carrying a "
+               "mirror mention must not hold any negator from "
+               "`_MIRROR_NEGATED` (`not` / `never` / `neither` / `nor` / "
+               "`no longer` / `cannot` / any `-n't` contraction); if that "
+               "word negates something else, reword so it is not in the same "
+               "clause as a mirror mention")
+    if _MIRROR_SOURCE.search(sentence):
+        return _denial
+    # …and a construct that could not match because a negated AUXILIARY broke
+    # the adjacency (`the mirror does not supply`) is a denial too. Reported
+    # only for THAT shape: an unrelated negation in the mirror's clause (`the
+    # mirror, when it is not null, LEADS it`) with NO matched construct is a
+    # MISSING SOURCE SHAPE. The DENIAL wording therefore asks for the sourcing
+    # not to sit in a negated clause rather than telling the fixer to delete the
+    # word — such a clause can legitimately negate something else, and the
+    # remedy has to stay truthful when it does.
+    broken = _MIRROR_SOURCE_BROKEN_BY_DENIAL.search(sentence)
+    if broken and _MIRROR_NEGATED.search(broken.group(0)):
+        return _denial
+    return ("names a mirror but NOT as the value's source — it uses no "
+            "`mirror's value` or `mirror supplies` construct (see "
+            "`_MIRROR_SOURCE`)")
+
+
+def _mirror_sources_the_value(sentence: str) -> bool:
+    """True when the sentence names the mirror AS THE SOURCE of the served value.
+
+    Two-sided, and both sides are needed:
+
+    * POSITIVE — an allow-listed source construct must relate the mirror to the
+      value (`_MIRROR_SOURCE`).
+    * NEGATION — no `_MIRROR_NEGATED` word may sit in the clause around that
+      construct. (`_MIRROR_NEGATED`, the MIRROR list — not the gloss guard's
+      `_NEGATED`: widening that one would change what a landed guard exempts.)
+      The scan covers the WHOLE clause — prefix, the construct itself, and the
+      suffix — because a denial can precede it (`not the mirror's value`) or
+      follow it in the same clause (`the mirror's value, never the prior's`);
+      each of those was CERTIFIED by an earlier revision that scanned only one
+      side (review, measured), and each now has its own control row.
+
+      The scan is also not first-match-wins: ONE denied construct refuses the
+      sentence even when a later construct in it is clean. Measured by review,
+      `…the field never reads the mirror's value here; the mirror's value
+      applies to a different column` CERTIFIED under a first-match loop, which
+      is the #11993 class again — a denial inside a source construct, read as
+      a qualifier. No corpus sentence carries two constructs, so requiring all
+      of them to be clean cannot false-block today.
+
+      The construct's OWN text is in the span because the `supplies` shape
+      used to admit filler (`mirror never supplies` matched the construct with
+      the negator inside it, in neither window). With the tightened patterns
+      that case is closed by ADJACENCY — no negator fits between the noun and
+      its verb — so including the construct changes no current outcome
+      (measured: removing it leaves every control row green). It is kept as a
+      guard against a future widening that admits filler again, not because it
+      is load-bearing today.
+
+    ⛔ NAMED RESIDUALS — this is a tripwire on the WORDING the tree uses, not a
+    grammar proof. Three are known and deliberate:
+
+      1. FALSE BLOCK (accepted — the remedy is to reword, and the red test says
+         so). A correct sentence phrasing the relation outside the two source
+         shapes is REFUSED: `the mirror, when it is not null, LEADS it` (no
+         possessive, verb not adjacent), `the mirror …, which leads` (a
+         relative clause, which cannot be bound without a parser), and `the
+         mirror, which is not unreadable, leads the mean` (a negation of a
+         DIFFERENT word sitting in the mirror's clause). All are pinned as
+         control rows so the behaviour is intentional rather than a surprise.
+      2. FALSE PASS, unclosable by clause scope (pinned as a disclosure): a
+         denial in a `_MIRROR_CLAUSE_BREAK`-separated clause that carries NO
+         mirror mention, on EITHER side of the construct — `the mirror's value
+         is real but it is never the served one`, `the mirror's value — is not
+         the value the field reads`, and the realistic rewording of the shipped
+         `why.py` sentence, `… which is stale — never the value the field
+         reads`. Scanning past the break is NOT free: it would refuse the
+         shipped `why.py` row, whose trailing `— never a measured one` denies
+         `measured`, not the mirror.
+         (A denial in a clause that DOES carry a mirror mention is refused —
+         that is the `for mention` loop above, not this residual.)
+      3. FALSE PASS, denied WITHOUT a negator from the list — two sub-classes,
+         both pinned:
+         a. a PREDICATE adjective/verb: `the mirror's value is irrelevant`,
+            `the mirror's value, which is ignored, …`, `…loses to the pair`.
+            No negation LIST can close this — the words are open-ended, so
+            closing one only moves the hole.
+         b. a bare DETERMINER `no`: `no reading of the field comes from the
+            mirror's value`. `\bno\b` cannot be added to `_MIRROR_NEGATED`
+            without refusing `no readable mirror supplying one`, which is the
+            CORRECT qualifier the sibling prose writes — the sibling control
+            row reds when it is added (measured). The exclusion is a trade, not
+            an oversight.
+         The STANDARD negators are NOT in this residual: `not` / `never` /
+         `neither` / `nor` / `no longer` / `cannot` and every `-n't`
+         contraction are carried, measured against this corpus at zero
+         false-block cost.
+
+    A green run therefore means "every shipped claim names the mirror as the
+    value's source, un-denied IN THE CONSTRUCT'S OWN CLAUSE", never "no
+    inversion exists".
+    """
+    # EVERY mirror mention is checked, not only the ones that matched a source
+    # construct. A denial can sit on a BARE mention in an earlier clause
+    # (`the mirror never leads it, but the mirror's value applies elsewhere`),
+    # and a construct-scoped scan let it through: the denied mention carries no
+    # construct, so nothing scanned its clause (review, measured). Refusing on
+    # ANY denied mention is the fail-closed direction, and it also subsumes the
+    # construct's own text — the span after the noun runs to the next break, so
+    # it covers `'s value, never the prior's`.
+    for mention in re.finditer(r"\bmirror\b", sentence, re.IGNORECASE):
+        before = _MIRROR_CLAUSE_BREAK.split(sentence[:mention.start()])[-1]
+        after = _MIRROR_CLAUSE_BREAK.split(sentence[mention.end():])[0]
+        if _MIRROR_NEGATED.search(f"{before} {mention.group(0)} {after}"):
+            return False
+    return bool(_MIRROR_SOURCE.search(sentence))
 
 
 def _unqualified_claims_on(sentence: str, patterns) -> list[str]:
     """The mirror-guard's predicate on ONE sentence (the reusable core of
     `_unqualified_claims`, so the control test exercises the real logic rather
-    than a regex object in isolation.
+    than a regex object in isolation).
 
     BOTH callers share this core — `_PRIOR_MEAN_CLAIM_PATTERNS` and
-    `_ABSENT_CLAIM` — so the affirmative-mention rule (#11993) is a property of
-    the predicate, not of one guard."""
-    if _mirror_is_named_affirmatively(sentence):
+    `_ABSENT_CLAIM` — so the rule below is a property of the predicate, not of
+    one guard (a divergence between the two is asserted separately).
+
+    The mirror qualifies the sentence only when the sentence names it as the
+    VALUE'S SOURCE (`_mirror_sources_the_value`). Bare presence is what the
+    guard shipped with, and it is a false PASS for the inversion this class
+    exists to catch (`#11993`, measured):
+
+        "A prior-only claim's confidence_mean IS the declared PRIOR mean;
+         the mirror never leads it."                     CERTIFIED by presence
+
+    That is the *opposite* of `elif mirror is not None: value = round(mirror,
+    4)`, asserted in the one sentence the guard is supposed to make honest. No
+    such sentence was ever SHIPPED in this corpus (`rg -n 'never leads'` over
+    the five modules returns nothing) — #11993 quotes it as the shape the old
+    guard certified.
+    """
+    if _mirror_sources_the_value(sentence):
         return []
     return [sentence] if any(p.search(sentence) for p in patterns) else []
 
@@ -5981,13 +6172,30 @@ def _unqualified_claims(patterns) -> list[str]:
     Same-sentence, not window-based: a qualifier in the NEXT sentence does not
     save the claim (that is how the old `:345` passed every review), and a
     long legitimate aside inside the same sentence does not condemn it.
+
+    Each problem carries the `_mirror_refusal_reason` diagnosis, so the red
+    test tells the fixer which remedy applies instead of implying (falsely,
+    when the mirror IS named) that the sentence names no mirror.
     """
     problems = []
     for rel in _BELIEF_PROSE:
         for sentence in _sentences(rel):
-            problems += [f"{rel}: …{hit[:180]}…"
-                         for hit in _unqualified_claims_on(sentence, patterns)]
+            for hit in _unqualified_claims_on(sentence, patterns):
+                problems.append(_problem_line(rel, hit))
     return problems
+
+
+def _problem_line(rel: str, hit: str) -> str:
+    """One corpus-assertion line: module, sentence, and the DIAGNOSIS.
+
+    A function rather than an inline f-string so the wiring itself is pinnable.
+    Every other leg of this guard has a row that reds when it is removed; the
+    sentence→cause wiring had none, so it could be reverted (a merge conflict
+    resolved in `main`'s favour, say) leaving 125 green and a fixer with a bare
+    sentence and no cause — the exact state `_mirror_refusal_reason` exists to
+    prevent (review, measured).
+    """
+    return f"{rel}: …{hit[:180]}… — it {_mirror_refusal_reason(hit)}"
 
 
 def _negates_its_verb(link: str) -> bool:
@@ -6205,7 +6413,7 @@ def _cred_word_claims(rel: str) -> list[str]:
     return [s for s in _sentences(rel) if _cred_word_yields_075(s)]
 
 
-def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
+def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
     """A guard that matches nothing pins nothing (reviewer B, cycle 1).
 
     Each pattern is asserted against the sentence that actually shipped the
@@ -6273,22 +6481,346 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
         _PRIOR_MEAN_CLAIM_PATTERNS), \
         "the denial is SENTENCE-scoped: a `never` in a clause that does not " \
         "carry the mirror denied an affirmative mention"
-    # …and the rule is ANY mirror-carrying clause, not EVERY one: a MIXED
-    # sentence is cleared, because the clause that STATES the claim qualifies
-    # it. Pinned so the `all`-clause variant — which passes every row above —
-    # cannot be substituted for the documented rule without a red.
-    assert not _unqualified_claims_on(
+    # ⚠️ THIS ROW IS DELIBERATELY REVERSED from the pin #12001 landed.
+    # #12001 judged the mention clause-scoped ("ANY mirror-carrying clause
+    # without a negator" clears), so a MIXED sentence was CLEARED. This guard
+    # checks EVERY mirror mention, so a denial on a BARE mention in another
+    # clause REFUSES the sentence — fail-CLOSED, the safe direction for a prose
+    # guard, and the #11993 class again if it did not: a construct-scoped scan
+    # CERTIFIED "the mirror never leads it, but the mirror's value applies
+    # elsewhere" (measured). The `ANY`-clause variant passes every row above,
+    # so this row is what makes reinstating it a red rather than a silent
+    # fail-open edge. #11999 owns the residual either way.
+    assert _unqualified_claims_on(
         "confidence_mean IS the declared PRIOR mean — or the mirror's value, "
         "which LEADS it — but the mirror never leads R1 in practice.",
         _PRIOR_MEAN_CLAIM_PATTERNS), \
-        "the rule is now ALL-clauses: a mixed sentence whose affirmative " \
-        "mirror clause states the relation was reported"
+        "a denial on a mirror mention in ANY clause must refuse the sentence: " \
+        "the rule is not `ANY mirror-carrying clause` (#12001) — it is `every " \
+        "mirror mention un-denied in its own clause`"
     # The absent-claim guard shares the predicate, so it shares the fix; assert
     # it separately so a future divergence between the two guards is visible.
     assert _unqualified_claims_on(
         "prior mean (ep_alpha/beta), else ``None``; the readable mirror never "
         "leads.", (_ABSENT_CLAIM,)), \
         "the absent-claim guard certifies a NEGATED mirror mention (#11993)"
+    # …and naming the mirror must be naming it as the VALUE'S SOURCE, not a
+    # mere MENTION (#11993). Bare presence certified every inversion below —
+    # the one sentence class this guard exists to catch, read as though it were
+    # the qualifier.
+    for inverted in (
+            # the shape #11993 quotes: a negator between the noun and `lead`
+            "A prior-only claim's confidence_mean IS the declared PRIOR mean; "
+            "the mirror never leads it.",
+            # the negator BEFORE the noun
+            "Its confidence_mean IS the declared PRIOR mean, and never does "
+            "the mirror lead it.",
+            # different-verb inversions: the closed #11922 branch's
+            # negation-keyed blacklist CERTIFIED both of these (its named hole)
+            "Its confidence_mean IS the declared PRIOR mean; the mirror loses "
+            "to the pair.",
+            "Its confidence_mean IS the declared PRIOR mean — the pair "
+            "outranks the mirror.",
+            # DENIAL AFTER the source construct, in its own clause. A
+            # prefix-only negation scan certified this class (review, measured)
+            # and `why.py` really does write the mirror's precedence with a
+            # TRAILING `— never …` clause, so the inverted variant of a shipped
+            # sentence is exactly this shape.
+            "Its confidence_mean IS the declared PRIOR mean — or the mirror's "
+            "value, never the prior's.",
+            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+            "value is never used.",
+            # no denial word at all: an allow-listed VERB whose subject is not
+            # the mirror certified this (review, measured). The relation, not
+            # the vocabulary, is what has to match.
+            "Its confidence_mean IS the declared PRIOR mean — the mirror is "
+            "only a fallback when the pair is absent, so the pair wins.",
+            # TWO constructs, the FIRST one denied. A first-match-wins loop
+            # certified this (review, measured): one clean mention later in the
+            # sentence laundered the denied one, which is the #11993 class again.
+            "Its confidence_mean IS the declared PRIOR mean — at this site the "
+            "field never reads the mirror's value; the mirror's value is "
+            "documented elsewhere.",
+            # a denial carried by an AUXILIARY between the noun and the verb.
+            # These are refused by ADJACENCY — the negator breaks the source
+            # construct, so none of them matches it at all — not by the
+            # construct sitting inside the scanned span (including it is
+            # insurance only; see `_mirror_sources_the_value`).
+            "Its confidence_mean IS the declared PRIOR mean — the mirror "
+            "never supplies the value.",
+            "Its confidence_mean IS the declared PRIOR mean — the mirror "
+            "does not supply the value.",
+            "Its confidence_mean IS the declared PRIOR mean — the mirror "
+            "isn't supplying the value.",
+            # a CONTRACTION the gloss guard's `_NEGATED` does not carry: this is
+            # why `_MIRROR_NEGATED` exists as its own list (measured CERTIFIED
+            # before it). BOTH apostrophe spellings are pinned — the curly `’`
+            # is what a docstring says when it is pasted from rendered prose,
+            # and a row that only covers `'` leaves that arm dead.
+            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+            "value doesn't lead it.",
+            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+            "value can't lead it.",
+            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+            "value doesn’t lead it.",
+            # …and the LONGEST negation word in the list. Without this row,
+            # deleting `cannot` from `_MIRROR_NEGATED` leaves the whole file
+            # GREEN while this sentence starts certifying — the guard would
+            # regress fail-OPEN with no red (review, measured).
+            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+            "value cannot lead it.",
+            "Its confidence_mean IS the declared PRIOR mean — the mirror "
+            "cannot supply the value.",
+            # a denial in the SAME clause across an abbreviation the corpus
+            # writes on 150+ lines (`i.e.` / `e.g.` / `cf.`). The shared
+            # `_CLAUSE_BREAK` breaks there and certified both of these (review,
+            # measured); `_MIRROR_CLAUSE_BREAK` carries `_SENTENCE_END`'s
+            # abbreviation lookbehinds for exactly this.
+            "Its confidence_mean IS the declared PRIOR mean — the readable "
+            "mirror's value i.e. not the value the field serves.",
+            "Its confidence_mean IS the declared PRIOR mean — the field does "
+            "not read, i.e. the mirror's value.",
+            # …and one row per abbreviation in `_ABBREV_LOOKBEHIND`: a row set
+            # that only exercised `i.e.` leaves `e.g.` and `cf.` free to be
+            # dropped from the shared list with no red (review, measured).
+            "Its confidence_mean IS the declared PRIOR mean — the readable "
+            "mirror's value e.g. not the value the field serves.",
+            "Its confidence_mean IS the declared PRIOR mean — the readable "
+            "mirror's value cf. not the value the field serves.",
+            # the STANDARD negators that are not contractions: `neither`/`nor`
+            # and `no longer` certify without them, at zero corpus cost
+            # (review, measured) — so they are carried, not disclosed.
+            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+            "value is neither the served one nor the pair's.",
+            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+            "value is no longer the served one.",
+            # a denial on a BARE mention in an EARLIER clause, laundered by a
+            # break: the construct-scoped scan saw nothing wrong, because the
+            # denied mention carries no construct of its own (review, measured).
+            "Its confidence_mean IS the declared PRIOR mean — the mirror never "
+            "leads it, but the mirror's value applies to another column.",
+            "Its confidence_mean IS the declared PRIOR mean — the pair wins, "
+            "not the mirror — the mirror's value only applies when no pair "
+            "exists.",
+            # the denial BEFORE the construct, in its own clause: this row's
+            # ONLY defence is the prefix leg of the scan, so dropping that leg
+            # reds here instead of shipping silently.
+            "Its confidence_mean IS the declared PRIOR mean — not the "
+            "mirror's value.",
+            # a relative clause binding `which/that leads` to a NON-mirror
+            # antecedent. The `mirror …, which leads` shape is deliberately
+            # NOT in `_MIRROR_SOURCE` (it cannot be bound without a parser),
+            # and these are what an unbound version certified (review,
+            # measured).
+            "Its confidence_mean IS the declared PRIOR mean — the mirror is "
+            "only for absent nodes, and the prior mean is the one that leads.",
+            "Its confidence_mean IS the declared PRIOR mean — the mirror is "
+            "irrelevant here, and it is the pair mean that leads the value.",
+            "Its confidence_mean IS the declared PRIOR mean — the mirror is "
+            "cosmetic and the stored pair is the value that leads it."):
+        assert _unqualified_claims_on(inverted, _PRIOR_MEAN_CLAIM_PATTERNS), (
+            "a mirror mention that INVERTS the rule must not qualify the "
+            f"claim: {inverted!r}")
+    # …while the AFFIRMING shapes the tree actually writes must all still
+    # qualify. These 4 are the shapes of the corpus's class-1 claim sentences
+    # at `e4703a286a` — all possessive, which is why the possessive shape is the
+    # one the allow-list must never lose. The class-2 sentence's shape is
+    # asserted separately below.
+    for affirming in (
+            "its confidence_mean IS the declared PRIOR mean — or the readable "
+            "n.confidence mirror's value, which LEADS it.",
+            "its confidence_mean IS the declared PRIOR mean — or the mirror's "
+            "value when the claim also carries a readable n.confidence, "
+            "because R1 leads (stated above).",
+            "its confidence_mean IS the declared prior mean — or the readable "
+            "n.confidence mirror's value, which LEADS it (R1 in "
+            "search_engine).",
+            "its confidence_mean is the PRIOR mean — or the readable "
+            "n.confidence MIRROR's value when there is one (R1 leads) — never "
+            "a measured one."):
+        assert not _unqualified_claims_on(affirming, _PRIOR_MEAN_CLAIM_PATTERNS), (
+            f"an AFFIRMING mirror mention must qualify the claim: {affirming!r}")
+    # …and the `supplies` shape is pinned as VOCABULARY, not as a corpus claim
+    # sentence: no claim sentence uses it today (`why.py` writes `no readable
+    # mirror supplies one`, `sdk.py` / `ranking.py` / `volunteer.py` write
+    # `… mirror supplying one`, all OUTSIDE a claim sentence). If this row
+    # reds, `_MIRROR_SOURCE`'s second alternative was narrowed past the
+    # sibling prose it exists for.
+    assert not _unqualified_claims_on(
+        "it reads its PRIOR mean — or the readable n.confidence mirror "
+        "supplies the value.", _PRIOR_MEAN_CLAIM_PATTERNS), \
+        "the `mirror supplies` source shape must qualify the claim"
+    # …and the possessive's OTHER nouns and the relative-clause-less `mean`
+    # spelling are exercised too: a row set that only ever tests `value` leaves
+    # `mean|number|reading` dead code, whose deletion would ship green.
+    # …and the possessive's CURLY apostrophe: a docstring pasted from rendered
+    # prose writes `’`, and accepting only `'` refused a correct sentence while
+    # the diagnosis told its author it used no possessive construct — advice
+    # that cannot clear the red (review, measured).
+    assert not _unqualified_claims_on(
+        "its confidence_mean IS the PRIOR mean — or the readable n.confidence "
+        "mirror’s value, which LEADS it.", _PRIOR_MEAN_CLAIM_PATTERNS), \
+        "the possessive source shape must accept the CURLY apostrophe"
+    for other_noun in (
+            "its confidence_mean IS the PRIOR mean — or the mirror's mean, "
+            "when one is readable.",
+            "its confidence_mean IS the PRIOR mean — the mirror's number is "
+            "what the field serves.",
+            "its confidence_mean IS the PRIOR mean — or the mirror's reading "
+            "where the mirror exists."):
+        assert not _unqualified_claims_on(other_noun, _PRIOR_MEAN_CLAIM_PATTERNS), (
+            f"a possessive source noun must qualify the claim: {other_noun!r}")
+    # …and the OTHER direction of the allow-list trade-off is pinned as
+    # INTENTIONAL, not left to surprise the next fixer: a correct sentence that
+    # phrases the relation outside the TWO source shapes is REFUSED, because
+    # the guard errs toward a false block (a red test a human reads) rather than
+    # a false PASS. If one of these starts being accepted, that is fine — but it
+    # must be a deliberate widening of `_MIRROR_SOURCE`, so this row has to be
+    # changed with it.
+    for refused_by_design in (
+            "its confidence_mean IS the declared PRIOR mean — the mirror, when "
+            "it is not null, LEADS it.",
+            "its confidence_mean IS the declared PRIOR mean — the mirror, "
+            "which is not unreadable, leads the mean.",
+            # the shape the docstring names but nothing used to pin: the plain
+            # relative clause, with no possessive. A widening that admits it
+            # leaves every other row green (review, measured).
+            "its confidence_mean IS the declared PRIOR mean — the mirror, "
+            "which leads the mean.",
+            # the bare attributive `mirror value` is NOT a possessive source:
+            # an optional apostrophe also accepted it, which let a sentence
+            # dodge the row above by inserting one ordinary noun (review,
+            # measured).
+            "its confidence_mean IS the declared PRIOR mean — the mirror "
+            "value, which leads the mean."):
+        assert _unqualified_claims_on(
+            refused_by_design, _PRIOR_MEAN_CLAIM_PATTERNS), (
+            "a source phrase outside `_MIRROR_SOURCE` is expected to be "
+            f"REFUSED (fail-closed) — if this now passes, widen the allow-list "
+            f"deliberately and move this row: {refused_by_design!r}")
+    # The red test must say WHICH of the three causes fired, or the allow-list
+    # trade-off does not pay: "names no mirror" is false for a sentence that
+    # names one, and the fix it suggests is one the guard already refuses.
+    assert "names no" in _mirror_refusal_reason(
+        "Its confidence_mean IS the PRIOR mean.")
+    assert "NOT as the value's source" in _mirror_refusal_reason(
+        "Its confidence_mean IS the PRIOR mean; the mirror loses to the pair.")
+    assert "NEGATED clause" in _mirror_refusal_reason(
+        "Its confidence_mean IS the PRIOR mean — the mirror's value is never "
+        "used.")
+    assert "NEGATED clause" in _mirror_refusal_reason(
+        "Its confidence_mean IS the PRIOR mean — the mirror never supplies "
+        "the value.")
+    # …including the AUXILIARY form, which matches no source construct at all:
+    # reporting it as "no source construct" would send the fixer to add a
+    # clause the guard already refuses (review, measured).
+    assert "NEGATED clause" in _mirror_refusal_reason(
+        "Its confidence_mean IS the PRIOR mean — the mirror isn't supplying "
+        "the value.")
+    # …and the CONTRACTION spelling of the broken-adjacency diagnosis: the
+    # filler class must span an apostrophe, or every contraction form is
+    # reported as "no source shape" and the remedy it names cannot clear the
+    # red (review, measured).
+    for contraction in (
+            "Its confidence_mean IS the PRIOR mean — the mirror doesn't "
+            "supply the value.",
+            "Its confidence_mean IS the PRIOR mean — the mirror won’t supply "
+            "the value."):
+        assert "NEGATED clause" in _mirror_refusal_reason(contraction), (
+            f"a negated auxiliary in a contraction is a DENIAL, not a missing "
+            f"shape: {contraction!r}")
+    assert "NEGATED clause" in _mirror_refusal_reason(
+        "Its confidence_mean IS the PRIOR mean — not the mirror's value.")
+    # …and a MISSING SOURCE SHAPE is not a denial, even when the mirror's clause
+    # happens to carry a negation of some other word: both fail-closed rows
+    # below are refused for the shape, so telling the fixer to delete the `not`
+    # would be advice that does not clear the red (review, measured).
+    for missing_shape in (
+            "its confidence_mean IS the declared PRIOR mean — the mirror, when "
+            "it is not null, LEADS it.",
+            "its confidence_mean IS the declared PRIOR mean — the mirror, "
+            "which is not unreadable, leads the mean.",
+            # …and the BROKEN-ADJACENCY probe must not fire here either: this
+            # sentence has `supply` within the window but NO negator, so the
+            # probe's own `_MIRROR_NEGATED` leg is what keeps the verdict at
+            # "missing shape". Without that leg pinned, the mutant `if broken:`
+            # reports a denial the sentence does not contain (review, measured).
+            "its confidence_mean IS the declared PRIOR mean — the mirror can "
+            "supply the value."):
+        assert "NOT as the value's source" in _mirror_refusal_reason(
+            missing_shape), (
+            "a missing source SHAPE must not be diagnosed as a denial: "
+            f"{missing_shape!r}")
+    # The sentence→cause WIRING is a leg of its own: the allow-list trade-off
+    # is justified by the message, so the message must be pinned, not merely
+    # present (review: reverting the f-string left 125 green).
+    assert "— it names no" in _problem_line(
+        "tortoise/x.py", "Its confidence_mean IS the PRIOR mean.")
+    assert "— it names a mirror but NOT as the value's source" in _problem_line(
+        "tortoise/x.py",
+        "Its confidence_mean IS the PRIOR mean; the mirror loses to the pair.")
+    # …and the WIRING: `_unqualified_claims` must actually route through that
+    # helper. Asserting the helper alone leaves the call site free to be
+    # reverted to a bare f-string with 125 still green (review, measured), which
+    # is how the "the message makes the trade-off pay" justification could
+    # disappear silently. Drive it with one injected sentence.
+    monkeypatch.setattr(
+        sys.modules[__name__], "_sentences",
+        lambda rel: ["Its confidence_mean IS the PRIOR mean; the mirror loses "
+                     "to the pair."])
+    wired = _unqualified_claims(_PRIOR_MEAN_CLAIM_PATTERNS)
+    monkeypatch.undo()
+    assert wired and "— it names a mirror but NOT as the value's source" in wired[0], (
+        "`_unqualified_claims` must report the refusal CAUSE, not a bare "
+        f"sentence: {wired[:1]!r}")
+    # …and the message must not name a shape `_MIRROR_SOURCE` refuses, or the
+    # fixer writes exactly the construct that will be refused again.
+    for shape in ("mirror's value", "mirror supplies"):
+        assert shape in _mirror_refusal_reason(
+            "Its confidence_mean IS the PRIOR mean; the mirror loses to the "
+            "pair."), f"the diagnosis must name the `{shape}` source shape"
+    assert "which leads" not in _mirror_refusal_reason(
+        "Its confidence_mean IS the PRIOR mean; the mirror loses to the pair."), \
+        "the diagnosis names a relative-clause shape the guard REFUSES"
+    # ⛔ PINNED ONLY AS A DISCLOSURE — a KNOWN false PASS, residual 2 of
+    # `_mirror_sources_the_value`: a denial in a LATER clause of the same
+    # sentence is beyond the scanned span, because a `_CLAUSE_BREAK` ends it.
+    # Closable only at the cost of refusing the shipped `why.py` row, whose
+    # trailing `— never a measured one` denies `measured`, not the mirror.
+    # If this starts being REFUSED, delete this row AND the residual it names.
+    for known_false_pass in (
+            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+            "value is real but it is never the served one.",
+            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+            "value — is not the value the field reads.",
+            # residual 3's own two examples, pinned so the disclosure cannot go
+            # stale: adding `irrelevant|ignored` to `_MIRROR_NEGATED` would
+            # close them, and that must red here first (review, measured).
+            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+            "value is irrelevant.",
+            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+            "value, which is ignored, applies to a different column."):
+        assert not _unqualified_claims_on(
+            known_false_pass, _PRIOR_MEAN_CLAIM_PATTERNS), (
+            "if this is now REFUSED the residual-2 disclosure is stale — "
+            f"delete this row and the residual: {known_false_pass!r}")
+    # The SIBLING class-2 guard shares this predicate, so it inherited the
+    # STRUCTURAL hole: an inversion would have cleared it exactly as it cleared
+    # the class-1 guard. MEASURED at `e4703a286a`, `(_ABSENT_CLAIM,)` matches
+    # ONE corpus sentence (the `search_engine` 'Issue 2206 contract' block), and
+    # that sentence is certified by the possessive construct — so the change is
+    # a no-op for today's corpus and closes the inversion for the next sentence
+    # written there. The `supplying` rows are pinned as VOCABULARY the sibling
+    # prose uses (see `_MIRROR_SOURCE`), not as a corpus claim sentence.
+    assert not _unqualified_claims_on(
+        "the persisted prior mean (ep_alpha/beta), else ``None`` — and null "
+        "when nothing yields a mean and no readable n.confidence mirror "
+        "supplying one", (_ABSENT_CLAIM,)), \
+        "the absent-claim guard refuses the qualifier the sibling prose writes"
+    assert _unqualified_claims_on(
+        "the persisted prior mean (ep_alpha/beta), else ``None`` — the "
+        "readable mirror never supplies one", (_ABSENT_CLAIM,)), \
+        "the absent-claim guard certifies a NEGATED mirror mention"
     # The absent-claim guard must survive the REWORDINGS of the same false
     # prediction, not just the one that shipped it.
     for spelling in (
