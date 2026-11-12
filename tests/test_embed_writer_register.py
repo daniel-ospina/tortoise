@@ -484,7 +484,10 @@ def test_NEEDS_A_DECLARATION_is_the_scope_the_guard_is_scored_on(tmp_path):
     assert outside == {k for k, e in probe.embedding_writers().items()
                        if e["kind"] in NEEDS_A_DECLARATION}, sorted(outside)
     assert outside, "the outside-gate population is empty — re-measure the guard, do not pass it"
-    assert not {k for k in outside if register.is_declared(k) is False}, sorted(outside)
+    undeclared = sorted(k for k in outside if not register.is_declared(k))
+    assert not undeclared, (
+        f"the guard's own scope contains writers the register does not declare: {undeclared} — "
+        "the silent-bypass refusal is what this population exists for")
 
 
 def test_the_exported_ROUTE_seams_are_the_ones_the_class_claims_are_used():
