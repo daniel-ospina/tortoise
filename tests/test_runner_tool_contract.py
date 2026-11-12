@@ -953,7 +953,17 @@ def _jobs(path: Path) -> list[tuple[str, list[str]]]:
 #: not cosmetic here: `run: >2` was NOT matched by a chomp-only pattern, so the exact class
 #: this function exists to close — a folded `echo 'bash h.sh'` + `| bash` pair — stayed silent
 #: under one spelling, with no escape or contrivance needed (#12167 review).
-_FOLDED_RUN = re.compile(r"^(?P<indent>\s*)(?:-\s+)?run:\s*>(?:[1-9][-+]?|[-+][1-9]?)?\s*(?:#.*)?$")
+#:
+#: ⛔ NOR IS THE KEY SPELLING COSMETIC. `"run":`, `'run':`, `run :` and `run: &anch` are all the
+#: SAME key to YAML, so all of them fold the body into one executing command — and a pattern
+#: bound to the literal `run:` answered no hazard for every one of them, measured end-to-end
+#: through `_jobs` with `yaml.safe_load` as the oracle (#12167 review, acceptance pass).
+_FOLDED_RUN = re.compile(
+    r"^(?P<indent>\s*)(?:-\s+)?"
+    r"(?:run|\"run\"|'run')\s*:\s*"  # the key, quoted or bare, YAML allows space before `:`
+    r"(?:&\S+|!!\S+)?\s*"  # an ANCHOR or a TAG on the value
+    r">(?:[1-9][-+]?|[-+][1-9]?)?\s*(?:#.*)?$"
+)
 
 
 def _folded_scalars(lines: list[str]) -> list[str]:
@@ -1828,7 +1838,7 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     EXECUTE on a line that also emits a message is a way this gate could fail OPEN — a
     job that runs a `gh` helper with no contract step, and a green suite.
 
-    ⛔ TWELVE CLASSES ACROSS FOUR CUTS — each one was a FALSE NEGATIVE in a fix that
+    ⛔ THIRTEEN CLASSES ACROSS FOUR CUTS — each one was a FALSE NEGATIVE in a fix that
     modelled the shell. Where the class was already caught on `origin/main` it is stated
     as ARMOR rather than claimed as this change's finding (`#12167` review, and the same
     correction as the shape matrix above):
@@ -1840,7 +1850,7 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
       5. `echo 'bash h.sh' | bash`                     cut 3: the consumer EXECUTES the text
       6. `echo 'bash h.sh' > f; bash f`                cut 3: ditto, via a file
 
-    …and classes 7-12, every one found by REVIEW on a later head rather than by a red —
+    …and classes 7-13, every one found by REVIEW on a later head rather than by a red —
     they are the reason this docstring no longer calls any guard "covered": a guard is
     covered when deleting it reds a row, and nothing else. Each is a FAIL-OPEN in this
     gate's own subject (a real invocation the scan answered nothing for):
@@ -1943,12 +1953,12 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     #      the helper really runs (marker file created) while the scan reported nothing.
     #      Found by `#12167` review on the rebased head. `#12149`'s walker misses it too,
     #      so it is inherited rather than a regression.
-    #      ⛔ WHAT THIS ROW IS AND IS NOT: it is a HAZARD row, NOT a pin for the branch.
-    #      Measured, deleting the single-quote branch leaves the whole suite green, because
-    #      the mis-walk then ends INSIDE the span and the unterminated guard falls back to
-    #      the raw line, which still names the helper — fail-closed by a different route.
-    #      The branch's own discriminating row is the OVER-REPORT one below (class 11b), and
-    #      it is what reds when the branch goes.
+    #      ⛔ WHAT THIS ROW IS AND IS NOT: it is a HAZARD row, NOT a pin for the branch. The
+    #      row survives deleting the branch, because the mis-walk then ends INSIDE the span and
+    #      the unterminated guard falls back to the raw line, which still names the helper —
+    #      fail-closed by a different route. (Before class 11b existed, deleting the branch left
+    #      the whole suite green, and that is what the acceptance review caught.) The branch's
+    #      own discriminating row is 11b below, and it is what reds when the branch goes.
     #      The probe is BUILT BY CONCATENATION on purpose: as one literal it is a wall of
     #      backslashes where a reader cannot tell a bash escape from a Python one, which is
     #      the very confusion that produced the hole.
@@ -2337,6 +2347,26 @@ def test_a_folded_block_scalar_is_one_command_not_two(tmp_path):
         )
         spelled_body = dict(_jobs(spelling))["folded"]
         assert _gh_hazards(spelled_body, scripts), f"`run: {header}` was not folded: {spelled_body}"
+
+    # ⛔ AND EVERY KEY SPELLING. `"run":`, `'run':`, `run :` and `run: &anch`/`!!str` are the
+    # SAME key to YAML, so each folds the body into ONE executing command — and a pattern bound
+    # to the literal `run:` answered no hazard for all of them, measured end-to-end here with
+    # `yaml.safe_load` as the oracle (#12167 review, acceptance pass).
+    for key in ('"run":', "'run':", "run :", "run: &anch", "run: !!str"):
+        keyed = tmp_path / "keyed.yml"
+        keyed.write_text(
+            "jobs:\n"
+            "  folded:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    steps:\n"
+            f"      - {key} >\n"
+            f"          echo 'bash tools/{helper}'\n"
+            "          | bash\n"
+        )
+        keyed_body = dict(_jobs(keyed))["folded"]
+        assert _gh_hazards(keyed_body, scripts), (
+            f"`{key} >` was not folded, though YAML folds it into one command: {keyed_body}"
+        )
 
 
 def test_the_cross_line_redirect_residual_is_a_declared_miss():
