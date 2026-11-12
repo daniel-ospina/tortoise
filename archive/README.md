@@ -48,10 +48,14 @@ checkout, archived code **is importable**: `import archive` and `import archive.
 as PEP 420 namespace packages, and `importlib.import_module("archive.modules.<batch>.<path>")`
 resolves and EXECUTES any frozen module regardless of the batch slug (measured — a hyphen stops the
 `import …` *statement*'s grammar, not the import machinery). **Reading** a frozen file is the
-supported path; **importing** one is not supported, and `check` fails closed on the direction that
-matters: no module under `tortoise/` may import `archive` (parsed with `ast`, so a mention in prose
-is not an import). The product-facing property is the shipped package and the wheel — nothing under
-`tortoise/`, nothing in `packages.find`, no `__init__.py` anywhere under `archive/`.
+supported path; **importing** one is not supported, and `check` fails closed on the direction that matters: no
+module under `tortoise/` may **statically** import `archive`. Parsed with `ast`, so a mention in
+prose is not an import; a static `import archive…` / `from archive… import` AND a dynamic
+`importlib.import_module("archive…")` / `__import__("archive…")` are caught.
+⚠ **RESIDUAL, stated not implied:** a module name *assembled at runtime* cannot be seen by any
+static scan, so that form is not caught. The product-facing property is the shipped package and the
+wheel — nothing under `tortoise/`, nothing in `packages.find`, no `__init__.py` anywhere under
+`archive/`.
 
 `tools/archive_surface.py check` enforces every one of those, and
 `tests/test_archive.py` proves the detectors **fire** (a gate nobody has seen fire is

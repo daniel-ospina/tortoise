@@ -66,7 +66,12 @@ WHAT IS ENFORCED (both `check` and `tests/test_archive.py`)
       about the AMBIENT interpreter rather than `root` (see `package_violations`), and
       `live_surface(root)` already refuses when `import tortoise` is not inside `root`;
     · `archive/INDEX.md` is a regenerated view of `MANIFEST.json` — a stale index is a
-      violation.
+      violation;
+    · NO product module imports the archive, which is the archive's promise turned around
+      (removed BEHAVIOUR must not re-enter the product): a static `import archive…` /
+      `from archive… import` and a dynamic `import_module("archive…")` / `__import__("archive…")`
+      are both caught. ⚠ RESIDUAL: a module name built at runtime cannot be seen by any static
+      scan, so that form is not caught and is stated rather than implied.
 
     ⛔ WHAT IS — AND IS NOT — ENFORCED ABOUT IMPORTABILITY. The enforced property is
     "not importable from the PUBLIC PACKAGE": nothing under `tortoise/`, nothing in the
@@ -245,6 +250,20 @@ def live_surface(root: Path | None = None) -> dict:
     }
 
 
+def _literal_text(node: ast.AST) -> str:
+    """The text of a string literal, a concatenation of literals, or "" when not static."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _literal_text(node.left) + _literal_text(node.right)
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value for part in node.values
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+    return ""
+
+
 def _imports_of_archive(root: Path) -> list[tuple[str, str]]:
     """Every product module that imports `archive` (or a submodule of it).
 
@@ -269,6 +288,21 @@ def _imports_of_archive(root: Path) -> list[tuple[str, str]]:
                 module = node.module or ""
                 if module == "archive" or module.startswith("archive."):
                     out.append((rel, module))
+            elif isinstance(node, ast.Call):
+                # The DYNAMIC forms whose argument is READABLE: `importlib.import_module("x")`,
+                # `__import__("x")`, or a name assembled from literals. A name built at runtime
+                # cannot be seen by any static scan — that is the declared residual, stated in
+                # `archive/README.md` and in the WHAT IS ENFORCED list — but the one-line
+                # `import_module("archive.…")` bypass is not worth leaving open.
+                callee = node.func
+                name = (
+                    callee.attr if isinstance(callee, ast.Attribute)
+                    else callee.id if isinstance(callee, ast.Name) else ""
+                )
+                if name not in ("import_module", "__import__"):
+                    continue
+                if node.args and _literal_text(node.args[0]).startswith("archive"):
+                    out.append((rel, _literal_text(node.args[0])))
     return out
 
 

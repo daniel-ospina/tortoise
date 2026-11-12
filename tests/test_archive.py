@@ -1038,6 +1038,17 @@ def test_a_product_module_that_imports_the_archive_is_reported(tree: Path) -> No
         problems
     )
 
+    # …and the one-line DYNAMIC bypass is caught too.
+    (tree / "tortoise" / "live.py").write_text(
+        "import importlib\n"
+        "_m = importlib.import_module(\"archive.modules.b1.tortoise.memory_scope\")\n",
+        encoding="utf-8",
+    )
+    assert any(
+        "imports `archive.modules.b1.tortoise.memory_scope`" in problem
+        for problem in arch.package_violations(tree)
+    )
+
     # …and a MENTION in prose is not an import: the scan parses, it does not grep.
     (tree / "tortoise" / "live.py").write_text(
         'def f():\n    """Restored from archive.modules.b1.tortoise.memory_scope."""\n    return 1\n',
