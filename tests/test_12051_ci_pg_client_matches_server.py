@@ -191,14 +191,29 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
         "never be pinned, and every assertion below would still be green over a "
         "step that never ran"
     )
-    assert pin.get("continue-on-error") is not True, (
-        "the pin step sets `continue-on-error`, so its `exit 1` cannot red the "
-        "job — the mismatch would carry on into the record leg, which is the "
-        "silent unrestorable artifact #12051 is"
+    assert pin.get("continue-on-error") in (None, False), (
+        f"the pin step sets `continue-on-error: {pin.get('continue-on-error')!r}`, "
+        "so its `exit 1` cannot red the job — the mismatch would carry on into "
+        "the record leg, which is the silent unrestorable artifact #12051 is. "
+        "Read as a VALUE, not `is not True`: `${{ … }}` is a legal value for this "
+        "key, parses to a string, and `is not True` is true of every string "
+        "(MEASURED, review of `6a6367cd48`: `continue-on-error: 'true'` and "
+        "`${{ true }}` both stayed green)"
     )
-    assert job.get("continue-on-error") is not True, (
-        "the job sets `continue-on-error`, so no step in it can red the job — "
-        "the whole drill, including this pin, is advisory"
+    assert job.get("continue-on-error") in (None, False), (
+        f"the job sets `continue-on-error: {job.get('continue-on-error')!r}`, so "
+        "no step in it can red the job — the whole drill, including this pin, is "
+        "advisory. Same value-vs-identity reason as the step assertion above"
+    )
+    # A job that cannot run certifies nothing. `#5219`'s aggregate does red a
+    # skipped always-run leg, so this is not a silent merge — it is diagnosed one
+    # layer later, without the client-major reason. ⚠️ STATED LIMIT: an `if:`
+    # EXPRESSION that evaluates false is out of a text guard's reach; the constant
+    # spellings are caught here.
+    job_if = job.get("if")
+    assert job_if not in (False, "false", "${{ false }}"), (
+        f"`{JOB}` is switched OFF (`if: {job_if!r}`) — a skipped job pins nothing, "
+        "and the pin is never consulted"
     )
 
     pkg = CLIENT_INSTALL_RE.search(_code_only(text))
@@ -511,6 +526,16 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
     """
     server_major = _postgres_image_majors(job)[0]
     labels = _runs_on_labels(job)
+
+    # A `container:` replaces the image the steps run in, so the archive that
+    # supplies the client major is the CONTAINER's, not the one this test just
+    # checked — and `apt-cache show` below would then fail closed on a container
+    # whose archive lacks the major while every assertion here stayed green
+    # (MEASURED, review of `6a6367cd48`: `container: ubuntu:26.04` → 6 passed).
+    assert "container" not in job, (
+        f"`{JOB}` runs in a `container:`, which replaces the archive that supplies "
+        "the client major this pin is derived from (#12051 round 2)"
+    )
 
     assert "ubuntu-latest" not in labels, (
         "`ubuntu-latest` is a MOVING label and it moved: on 2026-11-12 it became "
