@@ -669,10 +669,9 @@ deployment simplicity. Reported (⚠️ **vendor self-report**; the managed plat
 optimizations not available in the open-source SDK"*): **LoCoMo 71.4 → 92.5**, **LongMemEval 67.8 → 94.4**,
 **~6.8–7.0 K tokens per retrieval call** — where `71.4`/`67.8` are **Mem0's own previous algorithm**, the
 baseline column of the *same* table (not OpenAI and not full-context; the 2025 paper's OpenAI comparison is
-a different measurement). ⚠️ **The two citations stay split, per §7.5 #7:** the *2026* report carries these
-deltas; `arXiv:2504.19413` (2025) **does not** — Mem0 states the algorithm post-dates it.
-(⚠️ **vendor self-report; the managed platform "includes proprietary optimizations not available in the
-open-source SDK"**).
+a different measurement). ⚠️ **The two citations stay split, per §7.5 #7:** the **README's `Old`/`New` table**
+carries these deltas (the *2026* report carries the new scores and ~6,900 tokens/query); `arXiv:2504.19413`
+(2025) **does not** — Mem0 states the algorithm post-dates it.
 → **Lesson for us:** the strongest evidence in the field that **entity-keyed boosting without traversable
 edges** buys most of the graph's retrieval value — which is an argument for B2-as-*candidate-generation* and
 against B2-as-*edge-overlap-score*.
