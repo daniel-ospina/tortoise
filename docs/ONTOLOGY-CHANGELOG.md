@@ -58,17 +58,23 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > is `archived`"* redirected **every** `deprecated` write to `archived`, because a deprecated Object is
 > terminal and by definition has no successor — erasing the difference between *something replaced this*
 > and *this was wrong*. The clause is now scoped to a **replacement**, and `deprecated` is stated as an
-> independent terminal state. (3) *"`superseded` requires the successor in the same write"* is true at the
-> **write door** and false of a **journal rebuild**, which legitimately restores a supersession recorded
-> before any successor was named: `_fold_object_superseded` folds `supersededBy` from
-> `ev.get("supersedes_by") or ""`, and `sdk.py` records the id-only legacy `ObjectSuperseded` as a
-> legitimate record row. A guard built from the unscoped sentence would have refused the rebuild and
-> broken §11's reconstruction guarantee.
+> independent terminal state. (3) *"`superseded` requires the successor in the same write"* holds on the
+> **supersession lane** (`apply_supersessions` / `ObjectSuperseded`, where `commit_schema` requires
+> `supersedes_by`) and on **neither** the generic `create` nor `update` door — both are MEASURED to accept
+> `status='superseded'` with `supersededBy` absent, and `sdk.py` records that mirror shape as **deliberately
+> out of the guard** ("Refusing it would be an over-block"). It is also false of a **journal rebuild**,
+> which legitimately restores a supersession recorded before any successor was named
+> (`_fold_object_superseded` folds `supersededBy` from `ev.get("supersedes_by") or ""`; `sdk.py` records
+> the id-only legacy `ObjectSuperseded` as a legitimate record row). ⚠️ **The §4.3 clause above still says
+> "at the write door", which is FALSE of those two doors**; it is owner-approved text, so the correction is
+> with the owner on #11824 rather than in this entry.
 >
 > **Still unbuilt, deliberately:** the guard that enforces this vocabulary, including the AX three-part
 > refusals (`status='outdated'` naming both `archived` and `superseded`; one refusal shape across
-> Point/Subject/Object, where `:Subject` currently raises a bare `KeyError`). Tracked on **#8166** (same
-> root as **#10371**), where the buildable contract is recorded.
+> Point/Subject/Object — measured: `:Subject` **already** raises the correct shape,
+> `ValueError: Invalid status 'outdated' for a :Subject. Must be one of: archived, deprecated, draft, live,
+> superseded`, for `None` and every undeclared word alike, so the Object arm should match it rather than
+> invent one). Tracked on **#8166** (same root as **#10371**), where the buildable contract is recorded.
 
 ---
 
