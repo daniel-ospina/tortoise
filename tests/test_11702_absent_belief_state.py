@@ -5944,8 +5944,10 @@ _MIRROR_SOURCE = re.compile(
 
 #: The clause breaks for the MIRROR scan. A LOCAL copy of `_CLAUSE_BREAK`
 #: plus the same abbreviation lookbehinds `_SENTENCE_END` carries, and for the
-#: same reason: `_CLAUSE_BREAK`'s `(?<=[.!?])\s` fires on `i.e. ` / `e.g. ` /
-#: `cf. `, which the corpus writes on 150+ lines. Measured (review): with the
+#: same reason: `_CLAUSE_BREAK`'s `(?<=[.!?])\s` fires on `i.e. ` and `e.g. `,
+#: which the corpus writes on 178 lines (77 `e.g.`, 101 `i.e.`, measured — `cf. `
+#: is carried DEFENSIVELY and occurs ZERO times in these five modules).
+#: Measured (review): with the
 #: bare `_CLAUSE_BREAK`, `…the readable mirror's value i.e. not the value the
 #: field serves` CERTIFIED — the denial sits in the same clause, across an
 #: abbreviation, and fell outside the scanned span on both legs. The landed
@@ -6946,6 +6948,21 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             # pinned, not narrowed away.
             "Its confidence_mean IS the declared PRIOR mean — the mirror's "
             "number of reads is zero.",
+            # residual 3a, in ITS OWN SENSE — the possesssive construct is
+            # PRESENT here and the relation is denied by a predicate verb, which
+            # is what 3a actually discloses. The `…; the mirror loses to the
+            # pair.` rows elsewhere assert REFUSED, but only because that form
+            # has no source construct — a different leg, pinning the OPPOSITE
+            # direction from the class 3a names (review, measured).
+            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+            "value loses to the pair.",
+            # residual 3b: a bare determiner `no`. The sibling row that reds
+            # when `\bno\b` is added to `_MIRROR_NEGATED` pins the TRADE (the
+            # correct `no readable mirror supplying one` would be refused);
+            # this row pins the residual the trade buys, so it cannot go stale
+            # silently if some other edit closes it (review, measured).
+            "Its confidence_mean IS the declared PRIOR mean — no reading of "
+            "the field comes from the mirror's value.",
             # residual 4: a CONTRASTIVE CONNECTIVE that inverts the relation
             # while SATISFYING the positive leg (the possessive is present and
             # un-denied), which is why it needs its own disclosure — checking
