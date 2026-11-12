@@ -194,7 +194,7 @@ def test_the_two_histograms_are_pinned_by_INVARIANT_not_by_key_presence():
 
 
 #: The five point kinds `tortoise.sdk` registers through `domain_loader.register_kind` at IMPORT time
-#: (`sdk.py:229-232`, `:239`). No `packs/*/manifest.yaml` declares them and none is in
+#: (`sdk.py:241-244`, `:251`). No `packs/*/manifest.yaml` declares them and none is in
 #: `CANONICAL_POINT_KINDS`, so the SDK import is the ONLY path that makes them declared.
 _SDK_REGISTERED_KINDS = ("diary", "checkpoint-item", "option", "evidence", "criterion")
 
@@ -298,7 +298,7 @@ def test_the_claim_layer_keeps_its_EXCLUSION_predicate_so_capture_rows_are_not_c
     """FAILS IF the per-layer rewrite drops the `is_episodic`/`is_operator` filter.
 
     Turn rows are written `pointKind='event'` (`sdk.py:2553` `_TURN_WRITE_CYPHER`, whose
-    `t.pointKind=turn.k` is fed by the payload's own `"k": "event"` at `sdk.py:3074`) and operator
+    `t.pointKind=turn.k` is fed by the payload's own `"k": "event"` at `sdk.py:3086`) and operator
     Points are operators, not claims. On the committed corpus 159 of 354 Points are turn rows, so
     counting them read ~45 % "typed" against the owner's 0.6 % reading (`#10982` review, finding 4).
     ⛔ Asserted on the QUERY TEXT: the fake answers the same rows with the clause deleted, so this

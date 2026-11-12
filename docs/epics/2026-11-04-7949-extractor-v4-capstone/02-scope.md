@@ -55,7 +55,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    (within-batch vs to-graph). That last clause is not decoration: it is the evidence the owner's `§13.8 Q1`
    answer is waiting on (`01-research-brief.md` Rec. 3). ⚠️ **The set is DERIVED, not persisted** (F4): the
    write path already carries `batch_id` in `RelationUpsert.attrs` (`tortoise/record_projection.py`: the dataclass at
-   `:953`, its `attrs` tuple at `:959-960` — keyed by symbol, since this row moved twice), and
+   `:962`, its `attrs` tuple at `:968-969` — keyed by symbol, since this row moved twice), and
    "this batch" vs "a previous batch" is exactly that distinction — so the tier is **reported from `batch_id`**
    and no new edge property is added. A persisted marker would have to update the five MAP-form writers and
    `sdk.py:18713`'s per-door `_honours` set in the same change, and a free-form `props` key is the branch this
