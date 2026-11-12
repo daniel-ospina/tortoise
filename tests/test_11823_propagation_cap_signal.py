@@ -728,8 +728,11 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     the point. Two of them, with different residuals:
 
     * dropping the `is_operator` clause cannot be observed HERE — this fixture
-      carries no operator for the clause to exclude. Such a node is one public
-      call away (`create_point(..., is_operator=True)` is accepted and yields an
+      carries no EDGE-LESS operator for the clause to exclude: every operator it
+      has (3, from `_chain` and `create_operator`) is IMPL-edged, so the
+      NEGATED-EDGE term already excludes them (measured: dropping the clause
+      leaves the population at 2). Such a node is one public call away
+      (`create_point(..., is_operator=True)` is accepted and yields an
       `is_operator` Point with no edges, while `create_operator` itself always
       wires one), and fixtures that DO carry the shape exist
       (`tests/test_graphcopy_boolean_index_3154.py::_seed_points`,
