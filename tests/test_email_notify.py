@@ -16,7 +16,7 @@ from tortoise import email_notify
 def _env(monkeypatch):
     monkeypatch.setenv("RESEND_API_KEY", "re_test_secret_key_123")
     monkeypatch.setenv("RESEND_FROM_EMAIL", "noreply@premiselabs.co")
-    monkeypatch.setenv("EMAIL_LINK_BASE_URL", "https://tortoise.premiselabs.co")
+    monkeypatch.setenv("EMAIL_LINK_BASE_URL", "https://app.premiselabs.co")
     # #1138: budget envs unset (free-tier defaults) + counters reset per test.
     monkeypatch.delenv("RESEND_SEND_BUDGET_DAILY", raising=False)
     monkeypatch.delenv("RESEND_SEND_BUDGET_MONTHLY", raising=False)
@@ -78,7 +78,7 @@ def test_invite_email_payload_and_link(monkeypatch):
     assert body["to"] == ["bob@example.com"]
     assert body["from"] == "noreply@premiselabs.co"
     assert "Acme &lt;Team&gt;" in body["html"]  # HTML-escaped team name
-    assert "tortoise.premiselabs.co/invite-accept.html?token=tok_123" in body["html"]
+    assert "app.premiselabs.co/invite-accept?token=tok_123" in body["html"]
     assert sent == ["msg_123"]  # on_sent only on provider accept
 
 

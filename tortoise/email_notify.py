@@ -71,10 +71,20 @@ def _from_address() -> str:
 def email_link_base() -> str:
     """Email-link host — single env-driven source (#1135).
 
-    Also the welcome.html host (hosted_api github_callback); shared so the
-    static-Pages host is configured once via EMAIL_LINK_BASE_URL.
+    Also the `/welcome` host (hosted_api github_callback); shared so the
+    origin is configured once via EMAIL_LINK_BASE_URL.
+
+    #11767: the default is the APP origin, 0 hops. #1135 defaulted it to
+    `tortoise.premiselabs.co` because it was "also the welcome.html host", and
+    that premise died with #4054: BOTH consumers are app pages today —
+    `/invite-accept` (`_build_invite_link`) and `/welcome`
+    (`hosted_api` github_callback) live only under
+    `website/apps/dashboard/public/`. The retired host has answered 301 for
+    both since #4054, and a hop on the one token-delivery path is a hop that
+    can drop the token. Measured 2026-11-11: `EMAIL_LINK_BASE_URL` is NOT set
+    on Fly, so this default IS production behaviour.
     """
-    return _env("EMAIL_LINK_BASE_URL") or "https://tortoise.premiselabs.co"
+    return _env("EMAIL_LINK_BASE_URL") or "https://app.premiselabs.co"
 
 
 def _skip_channel(channel: str, secret: str | None) -> bool:
@@ -285,7 +295,12 @@ async def _send_resend(to: str, subject: str, html_body: str, text_body: str,
 
 
 def _build_invite_link(token: str) -> str:
-    return f"{email_link_base()}/invite-accept.html?token={token}"
+    # #11767: extensionless — the terminal form ON the app origin. Measured
+    # 2026-11-11: `app.premiselabs.co/invite-accept.html` answers 308 to
+    # `/invite-accept`, so emitting the `.html` form would keep the one hop
+    # this flip exists to remove (query preserved, so it was lossless — just
+    # slower, and on the only token-delivery path).
+    return f"{email_link_base()}/invite-accept?token={token}"
 
 
 async def _send_invite_attempt(invitee_email: str, org_name: str, role: str,
