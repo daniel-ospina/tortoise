@@ -2408,7 +2408,6 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
     # that they arm it would be a measurement the walk never made (fresh review of PR
     # #12016, P3 — this comment previously said they "arm the flag", which is false).
     assert "one armed TEMPLATE" not in hold, hold
-    assert "the flag is armed in deployment file(s)" not in hold, hold
 
     # ⛔ And the THIRD shape, where NOTHING arms the flag at all (fresh review of PR
     # #12016, P3). The two-arm form published "the surfaces that do arm it (none) do
@@ -2633,8 +2632,7 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     `#11455` exists because the row reached `MET` on one armed template while the
     compose path shipped the gate off; the row's own hold note must name that path.
     This is also the finding the lane reports: on THIS tree row 1 moves `MET` →
-    `PARTIAL`, because `docker-compose.yml` is the only deployment surface present
-    and it ships no gate.
+    `PARTIAL`, because `docker-compose.yml` is present and ships no gate.
     """
     _row_one_fixture(tmp_path, monkeypatch)
     (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")

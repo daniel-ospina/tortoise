@@ -2833,11 +2833,19 @@ def score_rule_bullet() -> Row:
             # review of PR #12016, P3). The old noun also produced a tautology
             # ("deployment file(s) are themselves deployment files"), so it is gone
             # rather than reworded around.
+            # ⛔ NO consequence is asserted from the assignment (fresh review of PR
+            # #12016, P3): the walk's per-file verdict is "some line of this file
+            # ASSIGNS the flag a truthy value", which is not "a build using this file
+            # carries the flag". Both divergence shapes are reachable and the walk
+            # reads them ON: an `ARG TORTOISE_EMBED_GATE=1` is build-time only and never
+            # reaches the container's environment, and `ENV …=1` followed by `ENV …=0`
+            # is last-wins, so a build from that file carries 0. The claim is deleted
+            # rather than qualified — a second arm here would be another sentence to
+            # falsify, and the per-FILE caveat below already carries the meaning.
             armed_clause = (
                 f"the flag is armed in deployment file(s) "
-                f"({', '.join(armed_deployment_files)}), so a build that uses one of "
-                "them carries it — this reading is per FILE and does not model that "
-                "merge"
+                f"({', '.join(armed_deployment_files)}) — this reading is per FILE and "
+                "does not model that merge"
             )
         elif shipped["armed"]:
             # ⛔ NOT "a TEMPLATE": this arm is reached by ANY armed non-deployment
