@@ -17,7 +17,11 @@ Response contract (§3.2.2 / §6.2 / §6.3)::
 
     {pointers: [{id, label, synopsis}],
      why: [{point_id, support_chain, ep, conflicts?, supersession,
-            tradeoffs?, dig_deeper?}],           # canonical §3.1.4 why-block
+            assessment?, tradeoffs?, dig_deeper?}],  # canonical §3.1.4 why-block
+     # `assessment` is #11928's additive dimension (the derived judgement with
+     # the reading, the target and the comparison); absent when nothing judged
+     # the node, and the one dimension a non-`:Point` anchor can carry WITHOUT
+     # `supersession` (that read gate is #11824's).
      surfaced: [{label, band}],                  # one entry per pointer
      block: "<markdown ≤ 8 KB>",
      degraded_reason: null | "timeout" | "assembly_error" | "breaker_open"}

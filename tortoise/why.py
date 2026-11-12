@@ -262,11 +262,10 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
         }
         # Deterministic tie-break rank for this (target, supporter): the pair
         # (operator_id, mitigation_id). The "no operator" sentinel orders a
-        # DIRECT row after every operator row — within ONE call. The direct leg
-        # runs as a SEPARATE call (merge=True) and its union keeps the existing
-        # entry via ``setdefault``, so cross-leg precedence comes from that call
-        # order, not from this rank; the sentinel exists so a future single-call
-        # merge cannot silently invert it.
+        # DIRECT row after every operator row, and because the rank map is SHARED
+        # by both legs (#11928) that precedence holds ACROSS legs and independent
+        # of which leg ran first: an operator-mediated entry ranks below a direct
+        # one whatever the call order.
         key = (op_id or "\uffff", mit_id or "\uffff")
         existing = pending.get(pid, {}).get(sup_key)
         if existing is None:
@@ -284,11 +283,14 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
         # was written first). #9962: the mitigation leg is read live-only, so
         # "more than once" here is several CURRENT mitigations; a withdrawn one
         # is not a candidate and can no longer win the tie-break.
-        # The "no operator" sentinel is the WEAKEST rank, so a missing entry
-        # (a caller that shared ``seen`` without ``rank``) degrades to the
-        # original cross-leg ``setdefault`` semantics — first entry wins — rather
-        # than raising out of the whole support dimension.
-        if key < ranks.get((pid, sup_key), ("\uffff", "\uffff")):
+        # ⛔ ``seen`` and ``rank`` are ONE state and must be passed together: a
+        # missing rank would compare against a fallback, and the only fallback
+        # that does not REINTRODUCE row-order dependence is none — a sentinel
+        # makes every later row win (#11928 review 2, measured). So the lookup is
+        # unguarded; a caller that shares one without the other raises, which the
+        # dimension's own fail-open absorbs (logged) instead of silently picking
+        # the wrong operator and mitigation TEXT.
+        if key < ranks[(pid, sup_key)]:
             pending[pid][sup_key] = entry
             ranks[(pid, sup_key)] = key
     # Re-derive the chain from EVERYTHING seen so far, for every point in the
@@ -300,11 +302,16 @@ def _assemble_supports(rows: list, by_id: dict[str, dict], *,
         # with no persisted belief, and it sorts after EVERY weighted one so
         # the ≤3 cap cannot be filled by fabricated 0.5s (measured: two absent
         # supporters crowded a real 0.4 reading out of the chain).
-        chain = sorted(chain_map.values(),
-                       key=lambda s: (s["weight"] is None,
-                                      -(s["weight"] or 0.0),
-                                      s["point_id"]))
-        by_id[pid]["support_chain"] = chain[:W4_MAX_SUPPORT]
+        # ⛔ THE LAST TIE-BREAK IS THE FUSION KEY (the internal node id), not the
+        # display id: two distinct nodes can emit the same ``point_id`` (#11928
+        # review 2, measured — the chain then depended on Cypher row order). The
+        # key is unique, so the order is total and row-order independent.
+        chain = sorted(
+            chain_map.items(),
+            key=lambda kv: (kv[1]["weight"] is None,
+                            -(kv[1]["weight"] or 0.0),
+                            kv[1]["point_id"], kv[0]))
+        by_id[pid]["support_chain"] = [e for _, e in chain][:W4_MAX_SUPPORT]
 
 
 def _assemble_conflicts(rows: list, by_id: dict[str, dict]) -> None:
@@ -345,12 +352,13 @@ def _assemble_conflicts(rows: list, by_id: dict[str, dict]) -> None:
                 "severity": None if weight is None else _severity(weight),
             }
     for pid, nand_map in pending.items():
+        # The internal node id is the total tie-break (see _assemble_supports).
         nands = sorted(
-            nand_map.values(),
-            key=lambda n: (n["severity"] is None,
-                           0 if n["severity"] == "high" else 1,
-                           n["point_id"]))
-        by_id[pid]["nands"] = nands[:W4_MAX_CONFLICTS]
+            nand_map.items(),
+            key=lambda kv: (kv[1]["severity"] is None,
+                            0 if kv[1]["severity"] == "high" else 1,
+                            kv[1]["point_id"], kv[0]))
+        by_id[pid]["nands"] = [n for _, n in nands][:W4_MAX_CONFLICTS]
 
 
 def _assemble_tradeoffs(rows: list, by_id: dict[str, dict]) -> None:
@@ -409,14 +417,14 @@ def _assemble_tradeoffs(rows: list, by_id: dict[str, dict]) -> None:
         # Bounded: strongest W4_MAX_TRADEOFFS by EP weight (the other
         # dimensions are capped; a decision with N alternatives must not
         # make every enriched recall of it emit N entries).
-        block["tradeoffs"] = sorted(
-            [
-                {k: v for k, v in a.items() if k != "kind"}
-                for a in alt_list
-            ],
-            key=lambda t: (t["ep_weight"] is None,
-                           -(t["ep_weight"] or 0.0),
-                           t["point_id"]))[:W4_MAX_TRADEOFFS]
+        block["tradeoffs"] = [
+            {k: v for k, v in t.items() if k != "kind"}
+            for _, t in sorted(
+                alts.items(),
+                key=lambda kv: (kv[1]["ep_weight"] is None,
+                                -(kv[1]["ep_weight"] or 0.0),
+                                kv[1]["point_id"], kv[0]))
+        ][:W4_MAX_TRADEOFFS]
 
 
 def _assemble_supersession(by_id: dict[str, dict],
@@ -701,11 +709,25 @@ def _assemble_dig_deeper(by_id: dict[str, dict]) -> None:
 #     family-ONLY terminal word would be admitted as LIVE — wire the arms through
 #     ``_status_vocab_for`` then.
 #
-# WHAT IS STILL NOT WIDENED, recorded rather than implied: the SUPERSESSION read
-# (``search_engine.fetch_point_epistemic_state``) stays ``:Point``-only, because
-# the entity-supersession READ GATE is #11824's open work and not a why-layer
-# decision. A non-Point block therefore carries no ``supersession`` key —
-# absent-means-not-computed (§3.1.3), never a fabricated ``live``.
+# TWO RESIDUALS, recorded rather than implied — neither is an oversight:
+#
+#  1. THE SUPERSESSION READ stays ``:Point``-only
+#     (``search_engine.fetch_point_epistemic_state``), because the
+#     entity-supersession READ GATE is #11824's open work and not a why-layer
+#     decision. A non-Point block therefore carries no ``supersession`` key —
+#     absent-means-not-computed (§3.1.3), never a fabricated ``live``.
+#  2. THE ANCHOR IS ``id``-KEYED, so an ``:Event`` that carries ``eventId`` ONLY
+#     is NOT explainable: every anchor filters ``WHERE n.id IN $ids`` and returns
+#     ``n.id``, while the TRAVERSAL positions use ``epistemic_identity``. That is
+#     the split ``live.epistemic_identity``'s own docstring prescribes (a
+#     coalesced identity may be displayed, never used to address a node), and it
+#     is a real shape, not only a legacy one: ``projection/entities.py``'s
+#     ``MERGE (e:Event {eventId:$eid})`` writes no ``id``, and
+#     ``session_indexer`` writes ``eventId`` only. Measured (#11928 review 2):
+#     such an Event answers ``{}`` as an ANCHOR while it surfaces fine as a
+#     counter-claim. Widening the anchor to a coalesced key is a different
+#     change — it would have to face the non-uniqueness of that key (#8879) —
+#     so it is stated here rather than absorbed into this one.
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -1406,14 +1428,15 @@ def item_to_why_entry(item: dict) -> dict | None:
 
 # ── Analyze-surface helpers (point ids inside raw rows) ───────────────────
 
-# ULID point ids ("<timestamp-hex>-<uuid12>") and deterministic pt_<hash> ids
-# (commit endpoint). Conservative: a cell that doesn't match is ignored; a
-# match that isn't a real Point node produces no block.
+# ULID ids ("<timestamp-hex>-<uuid12>") and deterministic pt_<hash> ids (commit
+# endpoint). Conservative: a cell that doesn't match is ignored; a match that is
+# not an existing EPISTEMIC node produces no block (the anchor admits all four
+# labels since #11928 — but still keyed on `id`, see the block note's residual).
 _POINT_ID_RE = re.compile(r"^(?:[0-9a-f]{10,16}-[0-9a-f]{12}|pt_[0-9a-f]+)$")
 
 
 def point_ids_in_raw(raw_rows: list[list[str]]) -> list[str]:
-    """Extract candidate Point ids from analyze()'s raw rows (row cells).
+    """Extract candidate epistemic ids from analyze()'s raw rows (row cells).
 
     The analyze patterns return point ids as the first column (and the
     paired id at column 3 for pair patterns); scanning every cell is

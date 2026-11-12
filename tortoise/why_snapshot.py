@@ -423,9 +423,17 @@ def precompute(proj, point_ids: list[str], *, now: datetime | None = None,
     # snapshot the read half will never serve AND this function would then
     # delete again — on every pass, for every non-Point id the EP pass moved —
     # is churn with no reader at the end of it. So a non-Point id is dropped
-    # BEFORE the assembly rather than written and reaped. On a read ERROR
-    # ``_vanished`` returns ``[]`` ("nothing provably gone"), so this filter is
-    # a no-op and today's behaviour is preserved.
+    # BEFORE the assembly rather than written and reaped.
+    #
+    # ⚠️ THE READ-ERROR ARM IS NOT A NO-OP, and saying so is the point (#11928
+    # review 2): ``_vanished`` returns ``[]`` on a read error ("nothing provably
+    # gone"), which keeps the id set intact — so on THAT pass a non-Point id can
+    # be assembled and written, and the next successful pass reaps it. That is a
+    # bounded, transient write-then-reap window (the snapshot is never SERVED:
+    # ``read_blocks`` joins ``:Point``), not a wrong answer, and it is what the
+    # alternative would trade for — skipping the whole pass on a transient read
+    # error, i.e. serving no why-block to any subscriber for a graph whose
+    # existence read hiccuped.
     gone = _vanished(proj, ids)
     if gone:
         _gone_set = set(gone)

@@ -355,6 +355,38 @@ def test_a_derived_claim_that_is_not_a_judgement_is_not_an_assessment(sdk):
     assert block["support_chain"][0]["point_id"] == derived["id"]
 
 
+def test_an_eventId_only_event_is_not_explainable_and_that_is_recorded(sdk):
+    """RESIDUAL 2, pinned as a behaviour rather than left to prose.
+
+    Every anchor is ``id``-keyed (``WHERE n.id IN $ids``), so an ``:Event`` that
+    carries ``eventId`` ONLY gets no block — while the same node surfaces fine as
+    a NANDer, because the TRAVERSAL positions use ``epistemic_identity``. That is
+    ``live.epistemic_identity``'s own split (a coalesced identity may be
+    displayed, never used to address a node) and it is a real shape:
+    ``projection/entities.py``'s ``MERGE (e:Event {eventId:$eid})`` writes no
+    ``id``, and ``session_indexer`` writes ``eventId`` only.
+
+    Pinned so a future widening is a DECISION: if the anchor starts resolving a
+    coalesced key, this test reds and its docstring says what that costs
+    (``eventId`` is not unique — #8879).
+    """
+    claim = sdk.create_point("statement", "a claim with a keyless counter-claim")
+    sdk._get_proj().g.query(
+        "CREATE (e:Event {eventId:'KEYLESS1', name:'a keyless reading', "
+        "eventKind:'note', status:'live'})")
+    sdk._get_proj().g.query(
+        "MATCH (e:Event {eventId:'KEYLESS1'}), (t) WHERE t.id = $t "
+        "CREATE (e)-[:NAND]->(t)", params={"t": claim["id"]})
+
+    assert "KEYLESS1" not in assemble_why_blocks(sdk._get_proj(), ["KEYLESS1"]), (
+        "the anchor now resolves a coalesced (non-unique) key — that is a new "
+        "decision: widen this pin AND why.py's residual note together")
+    nands = (assemble_why_blocks(sdk._get_proj(), [claim["id"]])[claim["id"]]
+             .get("conflicts") or {}).get("nands") or []
+    assert [n["content_snippet"] for n in nands] == ["a keyless reading"], (
+        "the keyless Event must still surface as a TRAVERSAL position: " + repr(nands))
+
+
 # ── 5. bounded: budget + a fixed read count ───────────────────────────────
 
 def test_an_unchanged_state_keeps_one_live_judgement_per_target(sdk):

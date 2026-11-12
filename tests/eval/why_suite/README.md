@@ -10,8 +10,10 @@ The Tortoise-original why-layer eval: grade how well the **W4 why-block
 assembly** answers the four why-questions from the **surfaced context
 alone**.  This is the A11 pilot — the harness and the product surface are
 the SAME artifact: the canonical §3.1.4 why-block (`{point_id,
-support_chain, ep, conflicts, supersession, tradeoffs, dig_deeper}`)
-produced by `tortoise.why.assemble_why_blocks` is all the grader ever sees.
+support_chain, ep, conflicts, supersession, assessment?, tradeoffs,
+dig_deeper}` — `assessment` is #11928's additive dimension, absent when nothing
+judged the node) produced by `tortoise.why.assemble_why_blocks` is all the
+grader ever sees.
 
 | | |
 |---|---|

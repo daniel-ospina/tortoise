@@ -5121,8 +5121,11 @@ def tortoise_analyze(question: str,
     Returns {"answer": "...", "raw": [...], "pattern": "...", "query": "..."}
     — plus, with the W4 enrichment flag ON (epic #2080), an additive ``why``
     array of canonical why-blocks (support_chain/ep/conflicts/supersession/
-    tradeoffs/dig_deeper) for the Points surfaced in ``raw`` (zero-LLM,
-    bounded batch reads; absent with the flag OFF — byte-identical).
+    assessment/tradeoffs/dig_deeper) for the ids surfaced in ``raw`` (zero-LLM,
+    bounded batch reads; absent with the flag OFF — byte-identical). #11928:
+    the anchors are the four epistemic labels, not ``:Point`` only — a goal
+    (``:Object``) or a reading (``:Event``) gets a block, and ``assessment``
+    names the derived judgement that decided its belief.
     """
     from tortoise.analyze import analyze
     from tortoise.navigation import entityProfile
