@@ -741,13 +741,62 @@ def _poolable_label(text: str) -> bool:
 _SHELL_SEP = re.compile(r"&&|\|\||;|\|")
 
 #: The command word a segment starts with, after YAML's `- ` / `run:` decoration.
-_SEGMENT_CMD = re.compile(r"^(?:-\s+)?(?:run:\s*)?([A-Za-z_][\w.-]*)")
+_SEGMENT_PREFIX = re.compile(r"^(?:-\s+)?(?:run:\s*)?")
+_COMMAND_WORD = re.compile(r"[A-Za-z0-9_./-]+")
+
+
+def _segment_command(segment: str) -> str | None:
+    """The BASENAME of a segment's command word, or None when it cannot be read.
+
+    ⛔ PATH-QUALIFIED WORDS ARE NORMALISED (review cycle 1, P0). Matching only words
+    that START with `[A-Za-z_]` missed `/bin/bash` and `./bash`, so the interpreter arm
+    below stayed off and `echo "bash helper.sh" | /bin/bash` was read as prose. A
+    basename is the right identity: `/bin/bash`, `./bash` and `bash` are one program.
+
+    An UNREADABLE command word returns None, and every caller treats that as "not a
+    message, not an interpreter" — i.e. it falls back to the raw segment, which
+    over-detects rather than blanking anything. That is the safe direction for a gate
+    whose failure mode is passing a job that reaches a bare runner.
+    """
+    rest = _SEGMENT_PREFIX.sub("", segment, count=1)
+    match = _COMMAND_WORD.match(rest)
+    if match is None:
+        return None
+    word = match.group(0).rstrip("/")
+    return word.rsplit("/", 1)[-1] or None
+
 
 #: Commands that EMIT a message rather than EXECUTE their arguments.
 _MESSAGE_CMDS = frozenset({"echo", "printf"})
 
-#: A quoted span, with the shell's three quoting styles.
-_QUOTED_SPAN = re.compile(r"`[^`]*`|\"[^\"]*\"|'[^']*'")
+#: Commands that can turn a MESSAGE's text into CODE — `echo "bash x.sh" | bash`,
+#: `eval "$(printf …)"`, `printf -v c '…'; bash -c "$c"`. When one of these shares a
+#: line with a message, the message is not prose and must not be blanked.
+_INTERPRETER_CMDS = frozenset(
+    {
+        "bash",
+        "sh",
+        "dash",
+        "zsh",
+        "ksh",
+        "ash",
+        "eval",
+        "xargs",
+        "sudo",
+        "env",
+        "doas",
+        "perl",
+        "python",
+        "python3",
+        "ruby",
+        "node",
+    }
+)
+
+#: A quoted span, with the shell's three quoting styles. The DELIMITER is captured so
+#: the three can be judged differently: the shell substitutes inside `"…"` and `` `…` ``
+#: but NOT inside `'…'`.
+_QUOTED_SPAN = re.compile(r"(`[^`]*`)|(\"[^\"]*\")|('[^']*')")
 
 
 def _message_segment_text(segment: str) -> str:
@@ -759,11 +808,22 @@ def _message_segment_text(segment: str) -> str:
     kept when it carries a command substitution (`$( … )` / backticks) and blanked only
     when it is inert text. That is the whole difference between the operator message this
     fix exists for and a hazard that happens to be printed.
+
+    ⛔ THE DELIMITER MATTERS (review cycle 1, P0). Reading `span.startswith("`")` treated a
+    DOUBLE-quoted span carrying a BACKTICK substitution as inert, because the span starts
+    with `"` — so `echo "see `bash tools/x.sh`"` became invisible, a shape the raw-line
+    scan always caught. Conversely a SINGLE-quoted span is inert by construction: the
+    shell substitutes nothing inside it, so `echo 'see $(bash tools/x.sh)'` prints
+    literally and is prose.
     """
 
     def _blank_if_inert(match: re.Match[str]) -> str:
         span = match.group(0)
-        return span if "$(" in span or span.startswith("`") else "''"
+        # `'…'`: no substitution happens inside single quotes, so it is always prose.
+        if match.group(3) is not None:
+            return "''"
+        # `"…"` and `` `…` `` both substitute; keep them when they carry one.
+        return span if "$(" in span or "`" in span else "''"
 
     return _QUOTED_SPAN.sub(_blank_if_inert, segment)
 
@@ -793,15 +853,22 @@ def _segment_executes_a_helper(line: str, script_ref: re.Pattern[str]) -> bool:
     invisible — a real invocation, so that shape was a false negative in a gate whose
     whole job is not to fail open. Splitting on the shell's separators and judging each
     command keeps every invocation visible, wherever on the line it sits.
+
+    ⛔ THE MESSAGE ARM IS DISABLED WHEN AN INTERPRETER SHARES THE LINE (review cycle 1,
+    P0). Blanking a message is only sound while the message stays PROSE. `echo "bash
+    tools/x.sh" | bash` executes exactly the bytes the blanking removes — and the
+    executing segment (`bash`, `sh -s`, `sudo bash`, `xargs bash`) carries no name of its
+    own, so neither arm saw it. That is the `curl … | bash` idiom, not an exotic shape.
+    When any segment's command word can consume a message as code, every segment is
+    searched RAW — the pre-fix reading, so the exclusion cannot hide an invocation.
     """
-    for segment in _SHELL_SEP.split(line):
-        segment = segment.strip()
-        if not segment:
-            continue
-        cmd = _SEGMENT_CMD.match(segment)
+    segments = [s.strip() for s in _SHELL_SEP.split(line) if s.strip()]
+    commands = [_segment_command(segment) for segment in segments]
+    feeds_an_interpreter = any(command in _INTERPRETER_CMDS for command in commands)
+    for segment, command in zip(segments, commands, strict=True):
         haystack = (
             _message_segment_text(segment)
-            if cmd is not None and cmd.group(1) in _MESSAGE_CMDS
+            if (command in _MESSAGE_CMDS and not feeds_an_interpreter)
             else segment
         )
         if script_ref.search(haystack):
@@ -958,8 +1025,9 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     The exclusion exists so inert text stops reddening. Every way a command can still
     EXECUTE on a line that also emits a message is a way this gate could fail OPEN — a
     job that runs a `gh` helper with no contract step, and a green suite. Each is pinned
-    here; the first cut of this fix failed classes 1 and 2 (it excluded the whole line
-    when its FIRST word was `echo`).
+    here; the first cut of this fix failed ALL FIVE of classes 1–5 (it excluded the whole
+    line when its FIRST word was `echo`), and review cycle 1 found that the second cut
+    still failed classes 6 and 7.
 
       1. a later command on the same line        `echo x; bash helper.sh`
       2. a later command after `&&` / `||` / `|` `echo x && bash helper.sh`
@@ -967,6 +1035,10 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
       4. a bare command substitution            `echo $(python3 helper.py)`
       5. the helper as the ARGUMENT-EXECUTING   `printf x | bash helper.sh`
          end of a pipeline
+      6. a BACKTICK substitution inside a       `echo "see `bash helper.sh`"`
+         DOUBLE-quoted message
+      7. the message's TEXT fed to an           `echo "bash helper.sh" | bash`
+         interpreter on a later segment
 
     …while the INERT shapes stay inert, so the fix cannot be satisfied by reverting it.
     """
@@ -986,6 +1058,16 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     assert _gh_hazards([f'            echo "see $(python3 tools/{helper})"'], scripts)
     # 4 — a bare command substitution
     assert _gh_hazards([f"            echo $(python3 tools/{helper})"], scripts)
+    # 6 — a BACKTICK substitution inside a DOUBLE-quoted message (the span starts with
+    #     `"`, so judging it by its first character read it as inert — review P0)
+    assert _gh_hazards([f'            echo "see `bash tools/{helper}`"'], scripts)
+    assert _gh_hazards([f'            echo "pre `bash tools/{helper}` post"'], scripts)
+    # 7 — the message's TEXT executed by an interpreter on a later segment: the blanked
+    #     bytes ARE the code, and the executing segment names no helper (review P0)
+    for tail in ("bash", "sh -s", "sudo bash", "/bin/bash", "xargs bash"):
+        assert _gh_hazards([f'            echo "bash tools/{helper}" | {tail}'], scripts), tail
+    assert _gh_hazards([f"            printf -v c 'bash tools/{helper}'; bash -c \"$c\""], scripts)
+    assert _gh_hazards([f'            echo "bash tools/{helper}" > /tmp/s; bash /tmp/s'], scripts)
 
     # …and the inert shapes that motivated the fix stay inert.
     assert (
