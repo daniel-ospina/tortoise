@@ -1028,6 +1028,36 @@ def test_a_shaped_non_point_endpoint_is_in_neither_arm(sdk):
     assert "tortoise_update_entity(" in fix and "'is_operator': False" in fix, fix
 
 
+def test_a_shaped_endpoint_with_no_successor_gets_no_edge_rewrite(sdk):
+    """The successorless arm picked the DIRECT sentence for a shaped endpoint too.
+
+    That put two contradicting sentences in ONE finding: the detail said EP builds
+    NO factor in either arm, the fix said "this is a DIRECT edge … write the
+    equivalent edge onto that successor". The prescribed repair restores nothing and
+    the re-audit reads CLEAN over a claim whose support was never there.
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    sdk.update_entity(v1["id"], status="superseded")  # NO successor at all
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
+              {"i": v1["id"]}) == [[None]], "fixture drifted"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    detail, fix = issues[0].detail, issues[0].fix
+    assert "in EITHER arm" in detail, detail
+    assert "write the equivalent edge" not in fix, (
+        "the detail says no factor exists in either arm, so an edge rewrite cannot "
+        "help: " + fix)
+    assert "no edge rewrite repairs this" in fix, fix
+    assert "'is_operator': False" in fix, fix
+    # The archive sentence must not claim a strip that never happens either.
+    assert "EP strips a terminal input either way" not in fix, fix
+
+
 def test_a_flag_dead_successor_names_the_flag_not_none(sdk):
     """``outdated=true`` with no status is terminal and renders no status at all.
 

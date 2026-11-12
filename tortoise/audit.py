@@ -1122,11 +1122,29 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"'<the successor name>'}}) — then re-point the input onto it and "
                 f"delete the edge into {q}. If a Subject or Point carries that "
                 f"name, re-point onto THAT node instead and delete this edge. "
-                f"Archiving it instead — tortoise_update_entity({q}, {{'status': "
-                f"'archived'}}) — does NOT clear this: EP strips a terminal input "
-                f"either way, so the edge must still be deleted or re-pointed onto "
-                f"whatever now carries the claim")
-            if not s["is_operator"]:
+                + ("Archiving it instead does NOT clear this: EP builds no factor "
+                   "for that endpoint in EITHER arm, so archiving only drops it out "
+                   "of this anchor — the claim's support has to be wired through a "
+                   ":Point operator (or the shape cleared) regardless"
+                   if (s["shape"] and not s["is_operator"]) else
+                   f"Archiving it instead — tortoise_update_entity({q}, {{'status': "
+                   f"'archived'}}) — does NOT clear this: EP strips a terminal input "
+                   f"either way, so the edge must still be deleted or re-pointed onto "
+                   f"whatever now carries the claim"))
+            if s["shape"] and not s["is_operator"]:
+                # ⛔ The SAME neither-arm fact the resolvable path states, in the
+                # successorless one: a shaped non-``:Point`` endpoint is in neither
+                # EP arm, so "write the equivalent edge" (the direct-edge sentence)
+                # changes nothing and a re-audit reads CLEAN over a claim whose
+                # support was never there.
+                fix += ("; and no edge rewrite repairs this — EP builds NO factor "
+                        f"for {q} in EITHER arm (the operator arm needs the :Point "
+                        "label, the direct-edge arm refuses an operator-shaped "
+                        f"endpoint): clearing the shape — "
+                        f"tortoise_update_entity({q}, {{'is_operator': False}}) — or "
+                        "wiring this claim through a :Point operator is what "
+                        "restores the support")
+            elif not s["is_operator"]:
                 fix += ("; and this is a DIRECT edge, so there is no factor to "
                         "re-point — write the equivalent edge onto that successor "
                         "and delete this one")
