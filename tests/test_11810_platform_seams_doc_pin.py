@@ -245,10 +245,12 @@ _PY = sys.executable
 #: The SITE column names the record's own BOLD ITEM HEADING, never a section number.
 #: This legend used to carry `§3.2`/`§3.3`, and those resolve NOWHERE: the record has
 #: no such section (its only `§` literals point at OTHER documents), so the labels were
-#: guidance that could not be followed — and two of the seven named the WRONG item even
+#: guidance that could not be followed — and FOUR of the seven named the WRONG item even
 #: where the numbering read plausibly (the "pull only" consequence sits in the
 #: `Hosted cloud agents get NEITHER hook` item, while the three sentences beside it sit
-#: in the `"IDE-only" is NOT the right absolute` item). A heading-named site cannot be
+#: in the `"IDE-only" is NOT the right absolute` item). Four, not two: r21 said "two" and
+#: r22 measured four, which is why the count is stated once here and never as a standing
+#: figure anywhere else. A heading-named site cannot be
 #: renumbered by a later edit, and `_RESTATEMENT_SITES` (index-aligned with the tuple
 #: below) makes it checkable — see
 #: `test_every_restatement_site_label_names_the_item_that_states_it` (review r27 P3 #1).
@@ -578,8 +580,10 @@ _ITEM_START = re.compile(r"^(?:\*\*)?\(?\d+[.)](?:\*\*)?\s")
 #: `markdown_it` renders it OUTSIDE the item (r40 P2 #1).
 #:
 #: `markdown-it-py` is already a declared test dependency (`pyproject.toml`'s `test`
-#: extra, added so `tests/test_blog_authoring_doc.py` could import it), and it IS the
-#: CommonMark reference implementation the review rounds kept measuring against. So the
+#: extra, added so `tests/test_blog_authoring_doc.py` could import it), and it is a
+#: CommonMark-COMPLIANT implementation (a port of `markdown-it`; the reference
+#: implementation is `cmark`/`commonmark.js`) — the one the review rounds measured
+#: against. So the
 #: block is the `list_item_open` token's own `map`, and there is no boundary left for a
 #: future edit to disagree with. Measured identical to every boundary this file has
 #: produced on the current record: `764 / 1393 x3 / 2309 x3`.
@@ -771,6 +775,16 @@ def test_the_item_extent_is_the_parsers_map():
     lazy = "1. **A** first\ncol0 lazy line\n\n2. **B** second\n"
     assert _parser_item_end(lazy, 0) == 3       # a lazy continuation stays INSIDE
 
+    # ⛔ THE PARAGRAPH-BREAK FIXTURE — the one case that separates the PARSER's `map` from a
+    # hand-rolled "end at the first blank line" boundary, and the reason it is here (`review r45
+    # P3 #2`, measured): without it, swapping `token.map[1]` for the r40-shaped blank-line rule
+    # left this whole test GREEN, because none of the fixtures above puts a blank line INSIDE a
+    # single item — and neither does any item of the record, so the pin could not see the
+    # regression it exists to catch. A blank line followed by a paragraph indented to the item's
+    # content column is still THAT item in CommonMark; a blank-line rule ends the block at 2.
+    two_paragraphs = "1. **A** first\n\n   same item, second para\n\n2. **B** second\n"
+    assert _parser_item_end(two_paragraphs, 0) == 4   # a second paragraph is INSIDE the item
+
     assert _parser_item_end("not a list\n", 0) is None
 
 
@@ -779,10 +793,11 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
 
     The `_RESTATEMENTS` legend is the map a next rewriter follows to find the seven
     places this PR scoped. It carried `§3.2`/`§3.3` labels, and the record has no
-    such section at all — so the map could not be followed, and two rows named the
+    such section at all — so the map could not be followed, and FOUR rows named the
     WRONG item while reading perfectly plausible (review r27 P3 #1: the "pull only"
     consequence is stated in the `Hosted cloud agents get NEITHER hook` item, the
-    three sentences beside it in `"IDE-only" is NOT the right absolute`). Guidance
+    three sentences beside it in `"IDE-only" is NOT the right absolute` — four rows,
+    the count PR #11810's own table carries). Guidance
     that misdirects is how the NEXT round re-derives what this one already measured.
 
     So the labels are pinned twice over, and each half is a distinct failure:
