@@ -299,6 +299,33 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # documented drop-and-recreate operation, never a silent rewrite.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261109000001_record_embedding_vector.sql", None),
+    # #11827's retire of `public.point.as_of` (#12024). ⛔ NOT skippable as "a
+    # DROP needs no re-apply", which is what this list first said — and the
+    # branch was red on the required `test-record-postgres` leg because of it.
+    #
+    # The DROP is not here for the container's SAKE, it is here because the
+    # MONEY ENTRY ABOVE RESURRECTS THE COLUMN. `20261018000001` adds all five
+    # money columns with `ADD COLUMN IF NOT EXISTS`, so on a container that
+    # took the already-migrated branch the drop from the fresh apply has
+    # already happened and `IF NOT EXISTS` is TRUE — the entry above re-ADDS
+    # `as_of`. Measured on a throwaway pgvector container: after one
+    # `_ensure_record_schema()` (fresh apply) `point.as_of` is absent; after a
+    # second one (already-migrated branch) it is BACK. The readers parse the
+    # FILES and answer "no such column", the placement table classifies it
+    # nowhere, and the first record row read out of that container raises
+    # `cache_projection.UnknownRecordColumn: point.as_of` — which is how the
+    # capstone's restore legs (D4/D5/D6/D8) went ERROR and D10 wedged, on a
+    # required, zero-skip job. So the DROP must run AFTER every entry that can
+    # resurrect a column it retires: last in this list, not absent from it.
+    #
+    # ⚠️ The cost the exclusion was protecting against is real but it is the
+    # migration's own: on a pre-#11827 container this DELETES the rows' retired
+    # `as_of` values, which the append-only tree and production deploy do the
+    # same way, and which `PointAdded.point.asOf` keeps recoverable. `DROP
+    # COLUMN IF EXISTS` makes it idempotent, so re-applying on a container that
+    # never had it is a no-op.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261110000001_record_point_retire_as_of_11827.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in
@@ -356,20 +383,6 @@ RECORD_REAPPLY_EXCLUDED: dict[str, str] = {
     "20261025000002_record_source_canonical_index.sql":
         "index only — no column, refusal or policy; the readers parse files, and a "
         "container without it is slower, not wrong",
-    # #11827's retire of `public.point.as_of`. Classified by the axis the two
-    # entries above sit on, and one step further: this migration REMOVES a
-    # column, so re-applying it on a legacy container would DELETE the rows'
-    # historical `as_of` values — data that is recoverable from
-    # `PointAdded.point.asOf` but not for free. Nothing needs it re-applied:
-    # the drop is in the append-only tree, so the readers (`table_columns()`,
-    # `column_types()`, `replay_plan`) already answer "no such column" and the
-    # writer cannot emit it (`money.py`'s four reserved names). A legacy
-    # container therefore reads IDENTICALLY and writes the same rows, and the
-    # only difference is that it still HOLDS the retired values — which is the
-    # reason not to touch it, not a defect.
-    "20261110000001_record_point_retire_as_of_11827.sql":
-        "a DROP COLUMN — re-applying it destroys the retired values a legacy "
-        "container still holds; the readers parse files, so nothing needs it",
 }
 
 #: The minimum Supabase-shaped substrate the record migrations need: the three
@@ -3732,6 +3745,91 @@ def test_ensure_record_schema_reaches_the_forward_amendments_it_owes():
                     f"{not expected}: UPDATE/DELETE/TRUNCATE would let it "
                     "rewrite or erase the journal the append-only trigger "
                     "reserves to app.record_journal_purge")
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_the_reapply_branch_leaves_no_column_the_readers_dropped():
+    """A re-applied ADD must not RESURRECT what a later file retired (#12024).
+
+    The closure above asks *"does the container have the columns the readers
+    emit?"*. This asks the other direction, which nothing asked and which cost
+    the required `test-record-postgres` leg: `20261018000001` adds the money
+    columns with `ADD COLUMN IF NOT EXISTS`, so re-applying it on an
+    already-migrated container re-creates `public.point.as_of` — after
+    `20261110000001` had dropped it. The readers parse the FILES and answer "no
+    such column", `cache_projection`'s placement classifier (`_props_from_row`,
+    the raise at `cache_projection.py:2426`) knows the name nowhere, and the first
+    record row read out of that container raises
+    `cache_projection.UnknownRecordColumn: point.as_of`. Measured pre-fix on a
+    throwaway pgvector container, from the ARMED list this file drives: the
+    capstone's restore legs (D4/D5/D6/D8) went ERROR on the exception and D10
+    wedged behind it, taking the 20m job cap with them.
+
+    ⚠️ THE FIXTURE PLANTS THE COLUMN rather than relying on the money entry's
+    resurrection, so what is asserted is the branch's END STATE — "nothing a
+    container holds is unclassified" — not the narrower "the resurrection does
+    not survive". That is deliberately the stronger property: it is the one the
+    read path needs, and it also covers a legacy container that still carries
+    the column for its own reasons. The resurrection itself is measured on its
+    own above, where the entry that prevents it is named.
+
+    The assertion is the INVARIANT the record path assumes, not a list of the
+    columns we happen to have retired: whatever a container holds after the
+    branch runs must be a column the readers know about, or the next retirement
+    reproduces exactly this red. Same transaction-and-rollback discipline as its
+    two neighbours, so the shared database is left as it was.
+    """
+    from tortoise import record_projection as _rp
+
+    retired = "as_of"
+    conn = _record_db()
+    conn.autocommit = False
+    try:
+        _ensure_record_schema(conn)
+        with conn.cursor() as cur:
+            # The LEGACY shape: a container migrated before #11827 still carries
+            # the column. `text`, not `date`: that is what `20261018000001`
+            # declares, and the DROP is by name. `IF NOT EXISTS` so the fixture
+            # is honest on either shape the shared database happens to be in.
+            cur.execute(
+                f"ALTER TABLE public.point ADD COLUMN IF NOT EXISTS {retired} text")
+            cur.execute(
+                "SELECT count(*) FROM information_schema.columns WHERE "
+                "table_schema = 'public' AND table_name = 'point' "
+                "AND column_name = %s", (retired,))
+            assert cur.fetchone()[0] == 1, (
+                "the fixture did not reach the legacy shape: `public.point.as_of` "
+                "is not there to be retired")
+
+        # The already-migrated branch — the one every test file after the first
+        # takes in the armed job, and the one the money entry re-adds `as_of`
+        # from.
+        _ensure_record_schema(conn)
+
+        columns = _rp.table_columns()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM information_schema.columns WHERE "
+                "table_schema = 'public' AND table_name = 'point' "
+                "AND column_name = %s", (retired,))
+            assert cur.fetchone()[0] == 0, (
+                f"the already-migrated branch left `public.point.{retired}`, a "
+                "column the readers answer 'no such column' for: the money "
+                "entry above re-adds it and nothing drops it again, so every "
+                "restore of a point row raises UnknownRecordColumn (#12024)")
+            for table, expected in columns.items():
+                cur.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE "
+                    "table_schema = 'public' AND table_name = %s", (table,))
+                present = {row[0] for row in cur.fetchall()}
+                unknown = sorted(present - set(expected))
+                assert not unknown, (
+                    f"public.{table} holds {unknown} after the branch, and the "
+                    "readers' set (parsed from the files) does not classify "
+                    "them — the record's read path refuses such a row with "
+                    "UnknownRecordColumn instead of projecting it")
     finally:
         conn.rollback()
         conn.close()
