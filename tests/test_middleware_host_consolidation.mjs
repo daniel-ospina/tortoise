@@ -13,12 +13,15 @@
 // gate. The two are complementary: the E2E suite proves the deployed host is
 // correct, this proves the RULES are.
 //
-// The mock context is deliberately minimal — `request.url`, the `host` header,
+// The mock is deliberately minimal — `request.url`, the `host` header,
 // `env.ASSETS.fetch` and `next()`. That is exactly the surface `onRequest`
-// reads, and the faithfulness of the mock is itself pinned below: the PRE-MOVE
-// behaviour (company host 301s /docs and /blog TO the product host, 404s
-// /product) was measured against live production before the inversion, and the
-// same assertions run against the pre-inversion file (see MOCK_FIDELITY).
+// reads. ⛔ `env.ASSETS.fetch` RE-ENTERS the asset router, where the committed
+// `website/_redirects` DOES apply (measured — `MEMORY.md` `[deploy]`), so this
+// mock APPLIES the `.html` rules from the real file. That is not pedantry: an
+// earlier cut of the middleware fetched `<page>.html`, five product pages are
+// `_redirects` sources, and the rewrite answered 404 for every one of them —
+// i.e. five browser-persistent 301s pointing at a 404. A mock that skipped
+// `_redirects` was green through all of it. It cannot be now.
 //
 // ⛔ THE PROPERTY THIS FILE EXISTS FOR: one hop, never a chain.
 // A 301 is browser-persistent and cannot be reclaimed by a later deploy, so a
@@ -29,12 +32,19 @@
 // "the target is a 200" is a claim about files that exist, not about a string.
 
 import { onRequest } from "../website/functions/_middleware.ts";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WEBSITE = join(HERE, "..", "website");
+
+// The product set, as the map below drives it. Kept in one place so a page added
+// to the middleware without a row here is a visible omission rather than a silent gap.
+const PRODUCT_PAGES = [
+  "/docs", "/faq", "/security", "/self-hosted", "/license",
+  "/design-partners-intro", "/investors",
+];
 
 const COMPANY = "premiselabs.co";
 const PRODUCT = "tortoise.premiselabs.co";
@@ -71,19 +81,42 @@ const ROOT_HTML = new Set(
 //   • Pages Functions — `/blog` and `/blog/*` are served by
 //     `website/functions/blog/[[path]].ts`, so they are 200s, not files.
 //   • `worksite/_redirects` — the retired Spanish privacy alias answers 301 on
-//     ANY host. The middleware must let it through so that rule — not a
-//     cross-host hop — is what consolidates the retired route.
+//     ANY host, and the `.html` duplicate rules apply to an ASSET FETCH too. Both
+//     are read from the REAL committed file, so adding or removing a rule changes
+//     this harness rather than silently diverging from it.
 const isBlogFunction = (pathname) => pathname === "/blog" || pathname.startsWith("/blog/");
-const COMMITTED_REDIRECTS = new Map([
-  ["/aviso-privacidad", "/privacy"],
-  ["/aviso-privacidad/", "/privacy"],
-  ["/aviso-privacidad.html", "/privacy"],
-]);
 
+// Parse the committed `_redirects` for single-hop 301 rules (the only shape this
+// project uses). Anything this harness cannot model is a hard failure, not a skip.
+const COMMITTED_REDIRECTS = (() => {
+  const text = readFileSync(join(WEBSITE, "_redirects"), "utf8");
+  const rules = new Map();
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const parts = line.split(/\s+/);
+    if (parts.length !== 3 || parts[2] !== "301") {
+      throw new Error("_redirects rule this harness cannot model: " + raw);
+    }
+    rules.set(parts[0], parts[1]);
+  }
+  return rules;
+})();
+
+// The asset router: `_redirects` first (YES, even for an ASSETS.fetch), then
+// Pages' pretty-URL resolution of `/x` to `/x.html`, then the file itself.
 async function assetsFetch(assetUrl) {
   const { pathname } = new URL(assetUrl);
+  if (COMMITTED_REDIRECTS.has(pathname)) {
+    // A 3xx is NOT an asset — the caller must treat this as a miss, exactly as
+    // `website/apps/dashboard/functions/admin/[[path]].ts` does.
+    return new Response(null, { status: 301, headers: { Location: COMMITTED_REDIRECTS.get(pathname) } });
+  }
   if (ROOT_HTML.has(pathname)) {
     return new Response(`<html data-asset="${pathname}"></html>`, { status: 200 });
+  }
+  if (ROOT_HTML.has(`${pathname}.html`)) {
+    return new Response(`<html data-asset="${pathname}.html"></html>`, { status: 200 });
   }
   return new Response("Not Found", { status: 404 });
 }
@@ -261,6 +294,20 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
   // is a 404, never a redirect onto a 404.
   const missing = await onRequest(ctx(`https://${COMPANY}/tortoise/nope`));
   assertEq(missing.status, 404, "an unknown /tortoise/* path is a 404, not a 200 or a redirect");
+
+  // ⛔ THE PREFIX IS NOT A WILDCARD. Only the product set is servable under it —
+  // otherwise `/tortoise/index` answers the COMPANY homepage at a product URL and
+  // `/tortoise/product` is a second URL for the product page, both 200. That is
+  // the duplicate-canonical condition the whole change exists to remove, and the
+  // `/tortoise/nope` row above does NOT discriminate it (`nope` is not a file).
+  for (const from of ["/tortoise/index", "/tortoise/contact", "/tortoise/product", "/tortoise/privacy"]) {
+    const res = await onRequest(ctx(`https://${COMPANY}${from}`));
+    assertEq(
+      res.status,
+      404,
+      `${from} must NOT resolve — only the product set (${[...PRODUCT_PAGES].join(", ")}) is servable under the prefix`,
+    );
+  }
 }
 
 // ── The app origin's pinned decisions survive the host move ────────────────

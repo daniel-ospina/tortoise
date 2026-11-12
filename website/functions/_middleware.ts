@@ -546,7 +546,33 @@ export const onRequest: PagesFunction = async (context) => {
       .replace(/^\/+/, "")
       .replace(/\/+$/, "")
       .replace(/\.html$/, "");
-    const asset = rest === "" ? "/product.html" : `/${rest}.html`;
+    // ⛔ ONLY the product set is servable under the prefix. Without this gate the
+    // rewrite would serve ANY top-level page at a product URL — `/tortoise/index`
+    // would answer the COMPANY homepage and `/tortoise/product` would be a second
+    // URL for the product page, both 200. That is the duplicate-canonical
+    // condition this whole change exists to remove.
+    if (rest !== "" && !PRODUCT_PAGES.has(`/${rest}`)) {
+      // ⛔ 404, NOT `context.next()`. Falling through would let Pages' pretty-URL
+      // resolution answer `/tortoise/product` with product.html and
+      // `/tortoise/index` with the company homepage — two more 200 duplicates of
+      // pages that already have a canonical URL. Nothing lived under this prefix
+      // before #11762, so a strict contract here breaks no existing URL.
+      return new Response("Not Found", { status: 404, headers: HSTS });
+    }
+    // ⛔ FETCH THE EXTENSIONLESS PATH, never `<rest>.html`.
+    // `env.ASSETS.fetch` RE-ENTERS the asset router, where `_redirects` DOES
+    // apply (measured — `MEMORY.md` `[deploy]`; the admin gate treats a 3xx from
+    // `ASSETS.fetch` as "not an asset" for the same reason). `website/_redirects`
+    // 301s `/docs.html`, `/faq.html`, `/self-hosted.html`,
+    // `/design-partners-intro.html` and `/investors.html` to their extensionless
+    // form, so fetching the `.html` spelling answers a 3xx, `res.ok` is false, and
+    // five of the seven product rows would answer 404 — i.e. the 301 map would
+    // point five permanent redirects at a 404. The extensionless path is not a
+    // `_redirects` source and Pages resolves it to `<rest>.html` (that is how
+    // `/docs` is served today).
+    // `/product.html` is kept for the root row: it is the path the previous root
+    // rewrite fetched in production and `_redirects` has no rule for it.
+    const asset = rest === "" ? "/product.html" : `/${rest}`;
     const res = await context.env.ASSETS.fetch(url.origin + asset);
     if (res.ok) {
       return new Response(res.body, {
@@ -559,9 +585,10 @@ export const onRequest: PagesFunction = async (context) => {
         },
       });
     }
-    // No such product page: let Pages answer exactly as it does today (committed
-    // 404 / `_redirects`), never a redirect onto a 404.
-    return context.next();
+    // No such product page: a 404 for the same reason as the gate above — never a
+    // redirect onto a 404, and never a silent pass-through that could resolve to
+    // some other document.
+    return new Response("Not Found", { status: 404, headers: HSTS });
   }
 
   // Only rewrite the root path — everything else serves its own asset.
