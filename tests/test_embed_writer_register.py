@@ -836,28 +836,56 @@ def test_the_never_run_call_entry_NAMES_every_spelling_it_was_measured_on():
             f"the never-run call entry no longer names {token} — each of these was MEASURED (see "
             f"ALIAS_FORMS_STILL_BLIND, one shape per process), and trimming one narrows what the "
             f"table claims while every behaviour row stays green: {key!r}")
-    # ⛔ The SAME enumeration is shipped in TWO prose copies — the register's own docstring (what a
-    # caller reads) and the discovery walk's blindness note. `#12020` review round 9 (P2) measured
-    # that deleting the OWN-SCOPE half from the register copy left this whole test GREEN, which
-    # silently restored the "nested-scope-only residual" misreading the entry was renamed to remove.
-    # So both halves are pinned on all three carriers: nested, own scope, and the `if False`
-    # spelling that makes the own-scope half concrete. Lowercased, because the prose emphasises
-    # OWN SCOPE in caps.
-    carriers = {
-        "register docstring": register.__doc__ or "",
-        # The note sits on the WALK that answers scope (`_named_callees`), which is where the
-        # reader who could conclude "scope is handled, so reach is" actually is. Pinned by its
-        # real owner rather than by where one might expect it: measured, `_embedding_writers.
-        # __doc__` is empty.
-        "probe blindness note": probe._named_callees.__doc__ or "",
-    }
-    for where, text in carriers.items():
-        low = text.lower()
-        for half in ("never-run call", "nested", "own scope", "if false"):
-            assert half in low, (
-                f"the {where} no longer names {half!r} of the never-run-call residual — the entry "
-                f"is an AXIS (reach), and dropping the own-scope half from a copy restores the "
-                f"nested-scope-only reading it was renamed to remove: {text[:160]!r}…")
+    # ⛔ The SAME enumeration and the same WIDE harm ship in TWO prose copies — the register's own
+    # docstring (what a caller reads) and the discovery walk's blindness note (`_named_callees`,
+    # where the note actually lives: measured, `_embedding_writers.__doc__` is empty). Round 9
+    # measured that deleting the own-scope half from the register copy left this whole suite GREEN.
+    # Round 10 then measured the OPPOSITE failure in the first fix: matching four tokens over the
+    # whole 33k-char docstring let an unrelated sentence satisfy the pin, reddened a legitimate
+    # `while False` rewording of the very spelling the table lists as measured-identical, and still
+    # let the `lambda` / class-body spellings be deleted from BOTH copies without a red.
+    #
+    # So the pin reads the CLAUSE: from the enumeration's own opening ("... the writer never RUNS")
+    # through the sentence that names the entry, whitespace-normalized because both docstrings are
+    # wrapped (an un-normalized multi-word token splits across a line break and can never match).
+    # The own-scope half is an ALTERNATION over the measured spellings rather than one chosen
+    # literal, and every measured spelling must survive — the narrowing the pin exists for.
+    spelling_fragments = (
+        "never-called nested `def`",
+        "never-called `lambda` body",
+        "class the writer never instantiates",
+        "own scope",
+    )
+    own_scope_spellings = ("if false", "while false", "after `return`")
+    for where, raw in (
+        ("register docstring", register.__doc__ or ""),
+        ("probe blindness note", probe._named_callees.__doc__ or ""),
+    ):
+        low = raw.lower()
+        for anchor in ("never-run call", "never runs"):
+            assert anchor in low, (
+                f"the {where} no longer carries {anchor!r} — the clause this pin reads has moved or "
+                f"been removed, so the pin would otherwise cover less than it claims; re-anchor it "
+                f"deliberately in the same change")
+        named = low.index("never-run call")
+        start = low.rindex("never runs", 0, named)  # the enumeration's own opening
+        stop = raw.find("\n\n", named)
+        clause = re.sub(r"\s+", " ", raw[start:stop if stop != -1 else named + 900].lower())
+        for fragment in spelling_fragments:
+            assert fragment in clause, (
+                f"the {where} no longer names {fragment!r} in the never-run clause — every one of "
+                f"these was MEASURED (one shape per process, `ALIAS_FORMS_STILL_BLIND`), and "
+                f"dropping one from a copy restores the narrow reading the entry was renamed to "
+                f"remove: {clause[:200]!r}…")
+        assert any(s in clause for s in own_scope_spellings), (
+            f"the {where} names the own-scope half of the axis but no measured spelling of it "
+            f"({own_scope_spellings}): the half is what stops the entry reading as "
+            f"nested-scope-only: {clause[:200]!r}…")
+        assert "mask" in clause or "ungated" in clause, (
+            f"the {where} still describes the residual as only over-crediting a phantom — the "
+            f"`SEAM_CALL` branch pre-empts the write predicate, so a never-run seam call MASKS a "
+            f"live ungated reach and the wanted verdict there is `ungated`, not "
+            f"`unresolved_write`: {clause[:200]!r}…")
 
 
 def test_the_seam_CALL_population_is_the_one_the_register_names():

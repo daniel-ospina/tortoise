@@ -272,7 +272,10 @@ claim and a slogan:
   direction. ⛔ The MIRROR of that is NOT closed: a CALL the writer never RUNS — a never-called
   nested `def`, a never-called `lambda` body, a method of a class the writer never instantiates,
   or a call behind an `if False` / after `return` in the writer's own scope — IS credited, so the
-  writer classes `gated` while reaching nothing
+  writer classes `gated`. ⛔ AND `gated` NEED NOT MEAN IT REACHED NOTHING: because the seam branch
+  pre-empts the write predicate, a writer that ALSO reaches an ungated primitive is masked out of
+  `NEEDS_A_DECLARATION` — measured `ungated` → `gated` once a never-run seam call is added — so
+  for that composition the wanted verdict is `ungated`, NOT `unresolved_write`
   (measured; the dangerous direction). That is a named residual in `UNDECIDABLE_WRITE_SHAPES`
   ("never-run call") and pinned in the suite, not a resolved case, and this bullet must not
   be read as "every credited call executes". Pinned, DRIVEN (a temp module per shape, through the

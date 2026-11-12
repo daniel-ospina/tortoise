@@ -768,7 +768,10 @@ def _named_callees(node) -> set[str]:
     answer: a seam call the writer never RUNS — a never-called nested `def`, a never-called
     `lambda` body, a method of a class the writer never instantiates, or a call behind an
     `if False` / after `return` in the writer's OWN scope — is still credited to the writer, so
-    it reads `gated` while it reaches nothing. That is NAMED rather than fixed — see
+    it reads `gated`. ⛔ `gated` does NOT imply it reached nothing: the seam branch pre-empts the
+    write predicate, so a writer that ALSO reaches an ungated primitive is masked out of
+    `NEEDS_A_DECLARATION` (measured `ungated` → `gated`), and the wanted verdict there is
+    `ungated`, not `unresolved_write`. That is NAMED rather than fixed — see
     `UNDECIDABLE_WRITE_SHAPES` ("never-run call"), which the suite pins in both directions.
     """
     import ast
