@@ -2306,8 +2306,13 @@ def storage_overage_cost_usd(tier: str, dimension: str, used, *,
     The customer buys DATA STORED and DATA HELD HOT, **per account**, with no
     per-graph and no per-node component (#11758 comment 6807826749; the owner's
     correction in 6805077325). So ``used`` is an ACCOUNT TOTAL: a second graph
-    does not double the allowance and does not add a second line — the caller
-    sums its graphs into one figure before calling this.
+    does not double the allowance and does not add a second line.
+
+    ⛔ HOW the account total is obtained DIFFERS by dimension, and only one of
+    them can be summed today: ``graph_storage`` is metered per graph, so summing
+    an account's graphs IS the account total; ``postgres_storage`` has no
+    per-org figure at all (see the ``used`` note below). "Sum your graphs" is
+    therefore correct for exactly one of the two.
 
     Args:
         tier: the org's tier. Decides whether overage is PURCHASABLE at all
@@ -2317,6 +2322,21 @@ def storage_overage_cost_usd(tier: str, dimension: str, used, *,
             ONE declared registry, not a second spelling: an undeclared name
             raises ``KeyError``.
         used: the account total in the dimension's OWN unit.
+            ⛔ ``postgres_storage`` HAS NO PER-ORG BYTE METER, and this is a trap
+            for a caller, not a docstring nicety: ``cost_dimensions`` declares
+            its attribution as *"DATABASE grain — no per-org figure exists, and
+            none is invented. Per-org BYTES would be an ALLOCATION, not a
+            measurement"*, and the only shipped reader is
+            ``measure_postgres_storage()``, which returns the WHOLE database.
+            Passing that figure as ``used`` would bill every tenant for the
+            shared database's bytes — the over-charge the allowance gate
+            records as its own reason for blocking this dimension. So this
+            function can price ``postgres_storage`` only once a per-org
+            attribution exists; until then it is callable with a figure the
+            caller has some OTHER way to establish, never with the database
+            total. ``graph_storage`` has no such problem: the graph meter is
+            genuinely per-graph, and summing an account's graphs IS the account
+            total.
         included: the tier's allowance in the same unit. Defaults to
             ``pricing.storage_limits(tier)[allowance_key]``. ``None`` means
             UNCONFIGURED, which the allowance gate reads as unlimited — so no

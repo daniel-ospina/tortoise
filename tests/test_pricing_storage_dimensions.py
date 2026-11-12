@@ -86,6 +86,52 @@ class TestTheTwoDimensionsExist:
         with pytest.raises(KeyError):
             storage_overage_cost_usd("solo", "cold_capacity", 1)
 
+    def test_a_negative_or_nan_rate_is_refused(self, tmp_path, monkeypatch):
+        """The rate is INPUT from a hand-edited file, so it needs the same
+        fail-closed guard as `used`/`included`.
+
+        Measured before this: a rate of -85.0 produced **$-8.50** — a CREDIT
+        line nobody decided — and NaN produced a NaN cost, and both came back
+        looking like an ordinary result. 0 is deliberately ALLOWED ("overage is
+        free" is a legitimate promotion); only negative and non-finite are
+        refused.
+        """
+        from tortoise.metering import storage_overage_cost_usd
+
+        for bad in (-85.0, float("nan"), float("inf")):
+            data = json.loads(_CANONICAL.read_text(encoding="utf-8"))
+            data["billing"]["storage"]["dimensions"][
+                "graph_storage"]["overage_price_usd_per_gb_month"] = bad
+            mutated = tmp_path / f"bad-{abs(bad)}.json"
+            mutated.write_text(json.dumps(data), encoding="utf-8")
+            monkeypatch.setattr(pricing, "_PRICING_PATH", str(mutated))
+            pricing.reload()
+            with pytest.raises(ValueError, match="must be"):
+                pricing.storage_overage_rate("graph_storage")
+            with pytest.raises(ValueError):
+                storage_overage_cost_usd("solo", "graph_storage", 177)
+
+    def test_a_zero_rate_is_allowed(self, tmp_path, monkeypatch):
+        """A zero rate is a legitimate configuration (overage is free during a
+        promotion) — the guard must refuse a CREDIT, not a waiver.
+
+        Mutation this REDs: tightening the bound from `>= 0` to `> 0`, which
+        would refuse a valid artifact at import.
+        """
+        from tortoise.metering import storage_overage_cost_usd
+
+        data = json.loads(_CANONICAL.read_text(encoding="utf-8"))
+        data["billing"]["storage"]["dimensions"][
+            "graph_storage"]["overage_price_usd_per_gb_month"] = 0.0
+        mutated = tmp_path / "zero-rate.json"
+        mutated.write_text(json.dumps(data), encoding="utf-8")
+        monkeypatch.setattr(pricing, "_PRICING_PATH", str(mutated))
+        pricing.reload()
+        assert pricing.storage_overage_rate("graph_storage") == 0.0
+        result = storage_overage_cost_usd("solo", "graph_storage", 177)
+        assert result["overage_quantity"] == pytest.approx(100.0)
+        assert result["overage_cost_usd"] == 0.0
+
     def test_the_rate_is_read_from_the_artifact_not_hardcoded(self, tmp_path,
                                                              monkeypatch):
         """Point the loader at a copy whose rate was changed: the reader must
@@ -225,9 +271,13 @@ def test_allowance_keys_are_the_allowance_gate_keys():
     spellings. `allowance_gate.ALLOWANCE_KEYS` is the ONE declaration; the
     artifact's `allowance_key` must equal it for both storage dimensions.
 
-    A runtime import of `allowance_gate` in `pricing.py` is avoided on purpose
-    (it imports `quota`, which imports `pricing` — a cycle), so this pin lives
-    here where importing both is safe.
+    A runtime import of `allowance_gate` in `pricing.py` is avoided for IMPORT
+    WEIGHT, not because a cycle makes it impossible: `quota` imports `pricing`
+    only inside function bodies, so the import would in fact resolve. It is not
+    taken because `allowance_gate` pulls in `quota`, and `pricing` is imported by
+    tools, graph scripts and the `pricing-artifact` CI parity check, which must
+    stay dependency-light. This pin therefore lives here, where importing both is
+    safe and cheap.
     """
     from tortoise.allowance_gate import ALLOWANCE_KEYS
 

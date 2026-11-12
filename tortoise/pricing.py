@@ -191,8 +191,19 @@ def storage_overage_rate(dimension: str) -> float:
         raise KeyError(
             f"{dimension!r} is not a declared storage dimension "
             f"(declared: {sorted(dims)})")
-    return float(dims[dimension]["overage_price_usd_per_gb_month"])
-
+    value = float(dims[dimension]["overage_price_usd_per_gb_month"])
+    # ⛔ THE RATE IS INPUT FROM A HAND-EDITED FILE, so it needs the same
+    # fail-closed guard as ``used``/``included`` in the arithmetic. Measured
+    # before this: a rate of -85.0 produced $-8.50 (a CREDIT line nobody
+    # decided) and NaN produced a NaN cost, and both came back looking like an
+    # ordinary result. 0 IS allowed — "overage is free" is a legitimate
+    # promotion — so the bound is finite-and-non-negative, not positive.
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(
+            f"{dimension!r} overage_price_usd_per_gb_month={value!r} must be "
+            f"finite and >= 0 — a negative rate would bill a CREDIT and a NaN "
+            f"would carry an unusable figure into invoicing")
+    return value
 
 def tier_price(tier: str) -> int:
     data = _load()
