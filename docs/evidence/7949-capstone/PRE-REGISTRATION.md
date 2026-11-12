@@ -518,9 +518,9 @@ budget to spend. Floor 30 nodes, so a three-node run cannot certify itself.
 **Mentions are out of scope, by decision, not by convenience (§10.1, #9736).** `#5199`'s owner-approved
 option A (2026-09-25) put the version anchor on the **derivation** link, and the writer's own constant
 names those classes: `_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})`
-(`tortoise/projection/edges.py:747`) — `:Object` links are identity/mention links and are pinned
+(`tortoise/projection/edges.py:843`) — `:Object` links are identity/mention links and are pinned
 property-free by `tests/test_source_version_references_5199.py::test_identity_link_stays_property_free`
-(`tortoise/projection/edges.py:721-723`, `docs/architecture/STORAGE-ARCHITECTURE.md:763`). Counting `:Object` mentions in
+(`tortoise/projection/edges.py:817-819`, `docs/architecture/STORAGE-ARCHITECTURE.md:763`). Counting `:Object` mentions in
 E3's denominator therefore made `= 1.000` **unreachable as registered**: every mention link is
 unanchored by rule, so a run would have reported the decision as a defect. `:Point` carries the anchor
 on the node itself (`#5038`), which is why the derivation set is those two link labels **plus**
@@ -1276,7 +1276,7 @@ under either class set).
 version anchor sits on the **derivation link**, and `:Object` reaches its source through an
 identity/mention link that carries **no** `sourceVersion` **by design**. Pinned in the tree, not in
 prose: `_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})`
-(`tortoise/projection/edges.py:747`), `edges.py:721-723`'s statement of the rule, and
+(`tortoise/projection/edges.py:843`), `edges.py:817-819`'s statement of the rule, and
 `tests/test_source_version_references_5199.py::test_identity_link_stays_property_free`.
 
 **Why the old denominator was a defect and not a bar.** Counted over `Point` + `Object` + `Event`, E3's
@@ -2533,6 +2533,33 @@ to answer.
   are the ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for
   *any* edit to this file, and the probe's cite and this document's cite are re-pointed TOGETHER so
   they cannot disagree about this anchor.
-- **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
-  supersede marker (§10.26's records the `:14245` window; `29ec0f3471` then inserted a net `+3`
-  above the anchor, making the live window `:14248-14250`, which is what this entry measures).
+- ⛔ **Superseded for the merged tree by §10.28.** The numbers above are the head this entry
+  measured; later merges inserted `+7` more above the anchor, so the live window is
+  `:14255-14257`.
+
+### 10.28 — the §548 cite re-pointed again, and the rule that both sides move together (2026-11-12, `#12205`)
+
+- **What redded.** `tests/test_7949_capstone_measure.py` failed four legs on the merged tree over
+  cites whose numbers had drifted (35 sites in total). The `#548` anchor was one of them:
+  §10.27 measured `:14248-14250`, and at this head
+  `# Ensure pointKind is present (operators often lack it)` sits at `:14255` — `+7`, from merges
+  that inserted lines above it (`#12055`'s `sdk.py`/`projection` work among them).
+- **New value — measured at this head, by opening the lines:**
+  `tortoise/projection/__init__.py:14255-14257` — `14255` is
+  `# Ensure pointKind is present (operators often lack it)`, `14256` is
+  `if "pointKind" not in clean:` and `14257` is `clean["pointKind"] = ""`.
+- **The invariant this entry exists for, and the failure that made it necessary:** §10.27 states
+  *"the probe's cite and this document's cite are re-pointed TOGETHER so they cannot disagree about
+  this anchor"*. The first cut of the `#12205` repair re-pointed the PROBE
+  (`probes/capstone_measure.py`) and left this document on `:14248-14250`, so probe and
+  pre-registration named two different windows for one anchor — exactly the disagreement §10.25 was
+  written to stop. Caught by review, not by a test: no pin reads this document's copy of the
+  number, which is why the rule is prose rather than a gate.
+- **The same repair's other pre-registration cites, re-derived rather than assumed:**
+  `_DERIVATION_REFERENCES_LABELS` is `tortoise/projection/edges.py:843` (was `:747`), and the
+  `:Object`-absent rule statement it is paired with is `edges.py:817-819` (was `:721-723`). The
+  same two numbers are corrected in `preregistration.json`'s `class_set_basis`.
+- **What moved — no protocol value.** No metric, denominator, threshold, class set or corpus pin is
+  changed. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this
+  file, and `preregistration.json`'s `class_set_basis` cites move with it.
+- **This entry is LIVE for the merged tree** — it has no successor.
