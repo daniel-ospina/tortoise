@@ -1414,3 +1414,90 @@ def test_a_provenance_source_on_the_duplicate_is_declared_not_undeclared():
     assert out["undeclared"] == [], out
     assert "provenanceSource" not in out["undeclared"], out
     assert "sourceVersionTransit" not in out["undeclared"], out
+
+
+# ── 14) round 11: the residual on a refusal, the guard's WIRING, the sinks ──
+
+
+def test_a_refused_fold_discloses_the_duplicates_own_slot_conflict(
+        sdk, monkeypatch):
+    """The module sets `residual` before every pre-write refusal so a refusal can
+    disclose the duplicate's own one-slot-two-values conflict — and the seam
+    printed only `blocked`/`undeclared`, so it went quiet in exactly the case an
+    operator force-deciding the fold needs it.
+    """
+    extracted, meta = _extract(
+        sdk, monkeypatch,
+        evidence={"when": "2026-08-01", "validFrom": "2026-08-02"},
+        dup_source="session:other")            # …and this refuses the fold
+    assert [e["dedup"] for e in extracted] == ["new", "new"], extracted
+    assert any("kept distinct" in w for w in meta["warnings"]), meta["warnings"]
+    assert any("validFrom (as when)" in w for w in meta["warnings"]), \
+        meta["warnings"]
+
+
+def test_the_edge_attr_guard_is_WIRED_into_the_read(monkeypatch):
+    """The guard's BODY was pinned; its CALL was not.
+
+    Delete the call in `read_fold_evidence` and every test stayed green — the
+    "second constant nothing reads" shape, restored. This arm pins the call.
+    """
+    monkeypatch.setattr(capture_fold, "_CARRIED_EDGE_ATTRS",
+                        ("confidence", "weight"))
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph()), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "internal_error", out
+    assert "does not select" in out["blocked"], out
+
+
+def test_a_provenance_edge_with_no_address_refuses():
+    """`if t` skipped an address-less provenance target, so that edge died on an
+    `ok=True` fold: the ref check reads the FIELD, the edge check had nothing to
+    compare, and the delete took the edge with no clause naming it."""
+    graph = _FakeGraph(edges=[("extractedFrom", "Source", "", None)])
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "unexpected_edge", out
+
+
+def test_the_writerless_partition_is_derived_from_the_carriable_one():
+    """Two hand-listed tuples of one fact can drift in the direction that matters
+    (removing a rel from the writerless list changes nothing if the complement
+    check is what fires), and no test read the second one."""
+    assert set(capture_fold._WRITERLESS_ATTACHMENT_RELS) == (
+        set(capture_fold._FOLD_ATTACHMENT_RELS)
+        - set(capture_fold._CARRIABLE_ATTACHMENT_RELS)), (
+            capture_fold._WRITERLESS_ATTACHMENT_RELS,
+            capture_fold._CARRIABLE_ATTACHMENT_RELS)
+
+
+def test_the_link_refusal_states_the_total_not_only_the_first_three():
+    """Naming three of seven is a partial fact; the rest of this module counts
+    what it cannot name."""
+    edges = [("aboutObject", "Object", f"obj_{i}", None) for i in range(5)]
+    graph = _FakeGraph(edges=edges,
+                       carried={f"obj_{i}": (0, None) for i in range(5)})
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["reason"] == "link_not_carried", out
+    assert out["blocked"].startswith("its 5 attachment link(s)"), out["blocked"]
+    assert "(and 2 more)" in out["blocked"], out["blocked"]
+
+
+def test_an_address_part_the_canonical_does_not_hold_says_so():
+    """The address is all-or-nothing: a canonical holding only `quote` drops the
+    duplicate's `span_start`, whose canonical value does not exist. The receipt
+    said "the canonical's value differs" over an absent value — the wording this
+    same module fixed for the support fields."""
+    graph = _FakeGraph(
+        dup_row=("session:s", [], "q dup", 40, 72, "turn-2", None, None, None,
+                 None, None, None),
+        canon_row=("session:s", [], "q canon", None, None, "turn-1", None, None,
+                   None, None, None, None))
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is True, out
+    assert any("span_start — the canonical holds no part of the address" in r
+               for r in out["residual"]), out["residual"]
+    assert not any("span_start — the canonical's value differs" in r
+                   for r in out["residual"]), out["residual"]

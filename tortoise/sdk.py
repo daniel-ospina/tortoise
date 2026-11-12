@@ -16980,9 +16980,19 @@ class TortoiseSDK:
                             # operator deciding whether to force the fold).
                             kept = ""
                             if fold_report["undeclared"]:
-                                kept = ("; it also holds field(s) this fold "
-                                        "cannot carry: "
-                                        + ", ".join(fold_report["undeclared"]))
+                                kept += ("; it also holds field(s) this fold "
+                                         "cannot carry: "
+                                         + ", ".join(fold_report["undeclared"]))
+                            # ⚠️ `residual` too: every PRE-WRITE refusal leaves it
+                            # holding only the module's slot conflicts (a
+                            # duplicate that spells one slot twice), which is
+                            # exactly the fact an operator deciding to force the
+                            # fold needs — and this branch printed `blocked` and
+                            # `undeclared` only, so the module's "set here so a
+                            # refusal discloses them too" was half-delivered.
+                            if fold_report["residual"]:
+                                kept += ("; it also holds "
+                                         + "; ".join(fold_report["residual"]))
                             warnings.append(
                                 f"repeated claim '{content[:60]}' kept "
                                 f"distinct — {fold_report['blocked']}{kept}")

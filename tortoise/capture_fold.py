@@ -246,7 +246,13 @@ _PROVENANCE_RELS = ("extractedFrom",)
 #: Only a rel-ignoring writer can have made one (the capture cascade mints
 #: `aboutDocument` for a Point when the name resolves to a `:Source`), and a
 #: fold cannot re-create it — so its presence REFUSES the fold.
-_WRITERLESS_ATTACHMENT_RELS = ("aboutDocument", "aboutPoint")
+#: ⚠️ DERIVED, not hand-listed: a second tuple of the same fact could drift in
+#: the direction that matters (removing a rel here changes nothing if the
+#: complement check below is what fires), so the partition is computed from the
+#: one list that says which predicates a Point may write.
+_WRITERLESS_ATTACHMENT_RELS = tuple(
+    rel for rel in _FOLD_ATTACHMENT_RELS
+    if rel not in _CARRIABLE_ATTACHMENT_RELS)
 
 #: ONE OCCURRENCE'S ADDRESS — an all-or-nothing group.
 #:
@@ -385,9 +391,11 @@ _CARRIED_EDGE_ATTRS = ("confidence",)
 #: `unexpected_edge` refusal instead of an orphaning delete.
 #:
 #: It is a CONSTANT because `_CARRIED_EDGE_ATTRS` is asserted against it by
-#: `assert_evidence_vocabulary` — the attribute bound was declared and read by
-#: NOTHING (the "second constant nothing reads" shape this module calls out
-#: elsewhere), so adding a read without declaring it could not drift-flag.
+#: `_assert_carried_edge_attrs`, called from `read_fold_evidence` (NOT from
+#: `assert_evidence_vocabulary`, which covers a different vocabulary). The
+#: attribute bound was declared and read by NOTHING — the "second constant
+#: nothing reads" shape this module calls out elsewhere — so adding a read
+#: without declaring it could not drift-flag.
 #: `url` as well as `id`: a provenance edge targets a `:Source`, which is
 #: `url`-keyed and carries NO id (`projection._mint_source_stub`), so
 #: `coalesce(t.id,'')` would hand the provenance check an empty string and
@@ -965,13 +973,12 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
     #    cascade can mint `aboutDocument`/`aboutPoint` on a Point; neither is a
     #    permitted §3.2 triple for a Point source, so `link_entity` cannot
     #    re-create it.)
-    # ⚠️ Derived from the ONE list that says which predicates have no writer, so
-    # editing that list is not a silent no-op (an earlier revision had a second
-    # constant nothing read).
+    # ⚠️ `rel not in _CARRIABLE_ATTACHMENT_RELS` is the operative test;
+    # `_WRITERLESS_ATTACHMENT_RELS` is DERIVED from it (a hand-listed second copy
+    # could be edited with no effect, and no test reads it).
     writer_less = sorted({rel for rel, _label, _target, _conf
                           in evidence.attachments
-                          if rel in _WRITERLESS_ATTACHMENT_RELS
-                          or rel not in _CARRIABLE_ATTACHMENT_RELS})
+                          if rel not in _CARRIABLE_ATTACHMENT_RELS})
     if writer_less:
         out["reason"] = "uncarriable_attachment"
         out["blocked"] = (f"its {', '.join(writer_less)} link(s) are predicates "
@@ -997,8 +1004,14 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
     #     what the delete actually removes. Exempting the edge on the field alone
     #     (the earlier shape) claimed "the canonical carries it" from a fact that
     #     does not imply it.
+    # ⚠️ `if t` (an earlier shape) SKIPPED an address-less provenance target —
+    # `coalesce(t.id, t.url, '')` is empty when a `:Source` is keyed some third
+    # way — so that edge died on an `ok=True` fold with no clause naming it: the
+    # ref check reads the FIELD, the edge check had nothing to compare, and the
+    # delete took the edge. Unaddressable is a refusal here, exactly like an
+    # unknown rel.
     orphaned = sorted({t for t in evidence.provenance_edges
-                       if t and t not in canonical["prov_targets"]})
+                       if not t or t not in canonical["prov_targets"]})
     if orphaned:
         out["reason"] = "unexpected_edge"
         out["blocked"] = ("it carries a provenance edge to "
@@ -1029,9 +1042,16 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
         if key not in evidence.scalar:
             continue
         if address_held:
-            if canonical.get(key) != evidence.scalar[key]:
-                out["residual"].append(
-                    f"{key} — the canonical's value differs")
+            held_value = canonical.get(key)
+            if held_value != evidence.scalar[key]:
+                # ⚠️ "the canonical's value differs" was printed for a part the
+                # canonical does not hold AT ALL: the address is all-or-nothing,
+                # so a canonical holding only `quote` reports the duplicate's
+                # `span_start` as dropped while its own `span_start` does not
+                # exist. The occupancy is part of the fact.
+                reason = ("the canonical's value differs" if held_value is not None
+                          else "the canonical holds no part of the address")
+                out["residual"].append(f"{key} — {reason}")
         else:
             to_write[key] = evidence.scalar[key]
     # 6b) single-slot facts. `when`/`validFrom` are ONE slot: the occupancy
@@ -1145,8 +1165,13 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             out["residual"].append(f"confidence of {rel}→{label}")
     if failures:
         out["reason"] = "link_not_carried"
-        out["blocked"] = ("its attachment link(s) could not be carried onto "
-                          f"the canonical: {'; '.join(failures[:3])}"
+        # The COUNT first: naming three of seven is a partial fact, and the rest
+        # of this module counts what it cannot name (`unexpected_edges` names
+        # every one, `created`/`carried` are counted, never assumed).
+        shown = "; ".join(failures[:3])
+        more = "" if len(failures) <= 3 else f" (and {len(failures) - 3} more)"
+        out["blocked"] = (f"its {len(failures)} attachment link(s) could not be "
+                          f"carried onto the canonical: {shown}{more}"
                           + _already_written(out))
         return out
 
