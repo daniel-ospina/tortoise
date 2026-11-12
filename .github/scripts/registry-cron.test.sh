@@ -3653,16 +3653,24 @@ assert_not_contains "$BROUT" "filing R2_DOWN" \
   "120. … and no R2_DOWN is filed from a client that never answered"
 # The installer's step-1 probe needs the same second half, or a failing shim
 # satisfies the dependency and the host never installs the CLI again.
-set +e
-BEOUT="$(PATH="$FIX/awsbroken:$FIX/tamper:$FIX/noaws" GITHUB_PATH="" RUNNER_TOOL_CACHE="$FIX/toolcache-brokency" \
-  "$ENSURE" 2>&1)"
-BERC=$?
-set -e
-assert_eq "$BERC" 1 "120. the installer does not accept a failing aws as installed"
-assert_not_contains "$BEOUT" "already installed" \
-  "120. … it never claims a broken client satisfies the dependency"
-assert_contains "$BEOUT" "downloading" \
-  "120. … and installs the pinned build instead"
+# ⛔ Inside the same TARCH guard case 119 uses (review P2): on an arch with no
+# pinned AWS CLI build the installer exits at step 2, BEFORE any download, so
+# "downloading" can never print there and an unguarded assertion would false-red a
+# diff-independent host — the exact host-dependence case 119's guard exists to stop.
+if [ -z "$TARCH" ]; then
+  ok "120. installer leg skipped — host arch $(uname -m) has no pinned AWS CLI build"
+else
+  set +e
+  BEOUT="$(PATH="$FIX/awsbroken:$FIX/tamper:$FIX/noaws" GITHUB_PATH="" RUNNER_TOOL_CACHE="$FIX/toolcache-brokency" \
+    "$ENSURE" 2>&1)"
+  BERC=$?
+  set -e
+  assert_eq "$BERC" 1 "120. the installer does not accept a failing aws as installed"
+  assert_not_contains "$BEOUT" "already installed" \
+    "120. … it never claims a broken client satisfies the dependency"
+  assert_contains "$BEOUT" "downloading" \
+    "120. … and installs the pinned build instead"
+fi
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
