@@ -3418,6 +3418,14 @@ assert_not_match "$(cat "$LOG")" 'GH PATCH .*/issues/4242' \
   "118. no incident is CLOSED either — its R2 sentinel and recovery window are unmanageable"
 assert_contains "$OUT" "leaving APP_DOWN unchanged" \
   "118. … and the driver says it left it open, instead of claiming a resolve"
+# Review C4: the pre-existing "closed open incidents for a healthy run" line is
+# UNCONDITIONAL, and `resolve_global` is a no-op while the CLI is missing — so a
+# RED run listed seven "leaving … unchanged" lines and then claimed it closed
+# incidents for a healthy run. Nothing was closed; the operator must be told so.
+assert_not_contains "$OUT" "closed open incidents for a healthy run" \
+  "118. … and never claims closes it deferred"
+assert_contains "$OUT" "incidents left UNCHANGED" \
+  "118. … saying instead that self-heal changed nothing"
 assert_contains "$OUT" "RED: the aws CLI is missing" \
   "118. the terminal line names the cause, not just 'a broken pipeline'"
 
@@ -3465,6 +3473,26 @@ assert_file_match "$WF" 'run: bash \.github/scripts/ensure-aws-cli\.sh' \
 # fail BEFORE anything lands on PATH (review P2: a source grep cannot tell that
 # ordering, and one stray commented line satisfies it). Drive the real code path
 # with a `curl` that serves junk — no network, no 62 MB download.
+#
+# ⛔ The tree the installer discards is named from `uname -m`, so every seeded
+# path below must be derived the same way (review C4: hardcoding x86_64 made an
+# arm64 host report a false red on the discard assertion while its "installs
+# NOTHING" sibling passed vacuously — the host-dependence C1 removed from case
+# 118, reintroduced one case later). The version comes from the script too, so a
+# deliberate pin bump does not silently un-name these trees.
+TPIN="$(sed -n 's/^PIN_VERSION="\([^"]*\)".*/\1/p' "$ENSURE" | head -1)"
+case "$(uname -m)" in
+  x86_64|amd64)  TARCH=x86_64 ;;
+  aarch64|arm64) TARCH=aarch64 ;;
+  *)             TARCH="" ;;
+esac
+if [ -z "$TPIN" ]; then bad "119. could not read PIN_VERSION from the installer"; fi
+if [ -z "$TARCH" ]; then
+  # The installer refuses an unpinned arch outright, so there is no install path
+  # to exercise — say so instead of asserting against a tree nobody builds.
+  ok "119. install-path assertions skipped — host arch $(uname -m) has no pinned AWS CLI build"
+else
+TREE="aws-cli-${TPIN}-${TARCH}"
 mkdir -p "$FIX/tamper"
 cat > "$FIX/tamper/curl" <<'TAMPER_EOF'
 #!/usr/bin/env bash
@@ -3492,19 +3520,19 @@ TRC=$?
 set -e
 assert_eq "$TRC" 1 "119. a tampered archive exits non-zero (fail closed)"
 assert_contains "$TOUT" "sha256 MISMATCH" "119. … naming the digest failure"
-assert_eq "$([ -e "$FIX/toolcache/aws-cli-2.31.27-x86_64/bin/aws" ] && echo present || echo absent)" "absent" \
+assert_eq "$([ -e "$FIX/toolcache/${TREE}/bin/aws" ] && echo present || echo absent)" "absent" \
   "119. … and installs NOTHING (no aws on PATH from a rejected archive)"
 # A BROKEN cached tree must not be trusted either (review P1: a cancelled install
 # leaves $root/v2/<version> with no working bin/aws, and the installer then skips
 # the re-install, wedging the host forever). The probe must run the binary, not
 # just stat it — so a cache holding a broken `aws` must fall through to the
 # download (and here, to the digest failure).
-mkdir -p "$FIX/toolcache-broken/aws-cli-2.31.27-x86_64/bin"
-cat > "$FIX/toolcache-broken/aws-cli-2.31.27-x86_64/bin/aws" <<'BROKEN_EOF'
+mkdir -p "$FIX/toolcache-broken/${TREE}/bin"
+cat > "$FIX/toolcache-broken/${TREE}/bin/aws" <<'BROKEN_EOF'
 #!/usr/bin/env bash
 exit 1
 BROKEN_EOF
-chmod +x "$FIX/toolcache-broken/aws-cli-2.31.27-x86_64/bin/aws"
+chmod +x "$FIX/toolcache-broken/${TREE}/bin/aws"
 set +e
 BOUT="$(PATH="$FIX/tamper:$FIX/noaws" GITHUB_PATH="" RUNNER_TOOL_CACHE="$FIX/toolcache-broken" \
   "$ENSURE" 2>&1)"
@@ -3520,15 +3548,15 @@ assert_contains "$BOUT" "downloading" \
 # it must therefore be PINNED, not just present. A pre-seeded partial tree + a
 # tampered download is enough: the discard runs BEFORE the download, so the tree
 # must be GONE even though the run fails at the digest.
-mkdir -p "$FIX/toolcache-partial/aws-cli-2.31.27-x86_64/v2/2.31.27"
-printf 'partial install' > "$FIX/toolcache-partial/aws-cli-2.31.27-x86_64/v2/2.31.27/marker"
+mkdir -p "$FIX/toolcache-partial/${TREE}/v2/${TPIN}"
+printf 'partial install' > "$FIX/toolcache-partial/${TREE}/v2/${TPIN}/marker"
 set +e
 POUT="$(PATH="$FIX/tamper:$FIX/noaws" GITHUB_PATH="" RUNNER_TOOL_CACHE="$FIX/toolcache-partial" \
   "$ENSURE" 2>&1)"
 PRC=$?
 set -e
 assert_eq "$PRC" 1 "119. a partial install tree still aborts on a bad archive"
-assert_eq "$([ -e "$FIX/toolcache-partial/aws-cli-2.31.27-x86_64/v2/2.31.27/marker" ] && echo present || echo gone)" \
+assert_eq "$([ -e "$FIX/toolcache-partial/${TREE}/v2/${TPIN}/marker" ] && echo present || echo gone)" \
   "gone" "119. … and the unusable tree is DISCARDED first (without it the installer skips and wedges the host forever)"
 # A source-order pin as well: the discard must precede the installer invocation,
 # because moving it later re-creates the wedge while the assertion above (which
@@ -3540,6 +3568,7 @@ if [ -n "$DISCARD_LINE" ] && [ -n "$INSTALL_LINE" ] && [ "$DISCARD_LINE" -lt "$I
 else
   bad "119. the discard is missing or comes after the installer (discard=${DISCARD_LINE:-none}, install=${INSTALL_LINE:-none})"
 fi
+fi  # TARCH guard
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

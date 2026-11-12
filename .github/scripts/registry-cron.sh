@@ -2205,7 +2205,16 @@ elif [ "$WATCHER_MEASURED" != "1" ]; then
 fi
 if [ "$RUN_STATUS" = "backed_up" ] || [ "$RUN_STATUS" = "degraded" ]; then
   resolve_global SWEEP_NO_COVERAGE "Resolved — sweep succeeded ($RUN_STATUS_SAFE)."
-  log "self-heal: closed open incidents for a healthy run"
+  # ⛔ review C4: `resolve_global` is a no-op while the CLI is missing (it must not
+  # delete the R2 sentinel or persist a recovery window off unmeasured evidence),
+  # so the unconditional line below claimed closes that did not happen — in a RED
+  # run, seven "leaving … unchanged" lines were followed by "closed open
+  # incidents for a healthy run". Report what actually happened.
+  if [ "$AWS_CLI_MISSING" = "1" ]; then
+    log "self-heal: incidents left UNCHANGED — the aws CLI is missing, so nothing could be closed this run"
+  else
+    log "self-heal: closed open incidents for a healthy run"
+  fi
 fi
 
 # #12135: the undeclared-dependency arm reports FIRST among the terminal arms,
