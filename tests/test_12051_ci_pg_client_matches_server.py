@@ -1395,51 +1395,99 @@ _DESTINATION_VERBS = frozenset({"cp", "rsync", "mv", "ln", "install"})
 #: bare flag, which is what a person writes.
 _TARGET_OPTION_VERBS = frozenset({"cp", "mv", "ln", "install"})
 
-#: The options that take their value as a SEPARATE token, so the word after them is
-#: NOT an operand. ⛔ AN OPTION NOT LISTED HERE TAKES NO VALUE (#12173 review round
-#: 31, measured FAIL-OPEN): "any option without `=` consumes the next word" made a
-#: VALUE-LESS flag eat the destination —
+#: The options that take NO separate value. ⛔ THE LIST IS INVERTED ON PURPOSE
+#: (#12173 review round 32, measured FAIL-OPEN TWICE). Three consecutive repairs
+#: each traded one hole for another because the scan guessed which options TAKE a
+#: value:
 #:
-#:     sudo rsync -a "$b/17/bin/" -v "$b/16/bin/"      -- GREEN (bypass)
-#:     sudo cp -a "$b/17/bin/" -v "$b/16/bin/"         -- GREEN (bypass)
-#:     sudo rsync -a "$b/17/bin/" --verbose "$b/16/bin/" -- GREEN (bypass)
+#:   round 29  an option's separate VALUE (`-e ssh`) read as a trailing operand
+#:   round 31  "any option without `=` consumes the next word" made a VALUE-LESS
+#:             flag (`-v`, `-h`) eat the destination
+#:   round 32  "only a LISTED option consumes" made an UNLISTED value-taker
+#:             (`-S .bak`, `--max-size 100m`, `--port 2222`) leave its value as
+#:             the last operand — sparing the write again
 #:
-#: — because `last` fell back to the SOURCE, so the real destination read as a
-#: source. Listing the value-takers is the fail-CLOSED direction: an option this
-#: set omits costs at most a false RED, never a spared write. The residual is the
-#: mirror: a value-taking option OMITTED from this list lets its value be read as
-#: an operand, which can spare a write whose target precedes it — so a new rsync/
-#: cp option that takes a value must be added here, and `--opt=value` never does.
-_VALUE_TAKING_OPTIONS = frozenset(
+#: The list is therefore the VALUE-LESS set and every other option is treated as
+#: consuming the next word. That is the fail-CLOSED polarity: an option this set
+#: omits costs at most a false RED (a read refused), NEVER a spared write — which
+#: is the direction that matters, because the whole point of this guard is that a
+#: directory-level replacement must not pass. Adding a value-taking option to the
+#: old list closed exactly today's rows and reopened the class with the next
+#: option anyone used; inverting closes the class.
+#:
+#: `--opt=value` never consumes anything (it carries its own value), and `-t` on
+#: cp/mv/ln/install never reaches here (the target-option branch above returns
+#: first) while `-t` on rsync means `--times` and is listed.
+_VALUE_LESS_OPTIONS = frozenset(
     {
-        "-e",
-        "--rsh",
-        "--exclude",
-        "--include",
-        "-f",
-        "--filter",
-        "--exclude-from",
-        "--include-from",
-        "-T",
-        "--files-from",
-        "--rsync-path",
-        "--log-file",
-        "--password-file",
-        "--suffix",
-        "--chmod",
-        "--chown",
-        "--block-size",
-        "-B",
-        "--bwlimit",
-        "--timeout",
-        "--remote-option",
-        "-M",
-        "--temp-dir",
+        "--archive", "--recursive", "--links", "--perms", "--times", "--group",
+        "--owner", "--devices", "--specials", "--verbose", "--human-readable",
+        "--progress", "--quiet", "--compress", "--stats", "--dry-run",
+        "--itemize-changes", "--delete", "--delete-excluded", "--delete-after",
+        "--checksum", "--partial", "--append", "--append-verify", "--numeric-ids",
+        "--no-implied-dirs", "--inplace", "--dirs", "--executability", "--acls",
+        "--xattrs", "--hard-links", "--protect-args", "--force", "--ignore-errors",
+        "--relative", "--no-r", "--no-recursive", "--mkpath", "--parents",
+        "--version", "--help", "--list-only", "--whole-file", "--sparse",
+        "--copy-links", "--keep-dirlinks", "--safe-links", "--use-compress-program",
+        "--compress-level", "--update", "--existing", "--ignore-existing",
+        "--backup", "--fuzzy", "--prune-empty-dirs", "--remove-source-files",
     }
 )
 
+#: The SHORT letters that take no separate value, so a cluster like `-avh` consumes
+#: nothing. `-e`/`-f`/`-B`/`-M`/`-T` are deliberately ABSENT: they take a value.
+_VALUE_LESS_SHORT = frozenset("arlptvhqzPRDIEFO")
 
-#: A whitespace-delimited token that names a path (contains a `/`).
+
+def _option_takes_value(option: str) -> bool:
+    """Does this option consume the NEXT word as its value?
+
+    Fail-CLOSED by construction: only an option provably in the value-less set
+    consumes nothing; everything else is assumed to take a value, so its value is
+    not mistaken for an operand.
+    """
+
+    if option.startswith("--"):
+        return option.split("=", 1)[0] not in _VALUE_LESS_OPTIONS
+    letters = option[1:]
+    if not letters:
+        return True
+    return not all(letter in _VALUE_LESS_SHORT for letter in letters)
+
+
+def _shell_tokens(segment: str) -> list[tuple[int, int, str]]:
+    """Split `segment` into (start, end, text) shell words, respecting QUOTES.
+
+    ⛔ A QUOTED SPAN IS ONE TOKEN (#12173 review round 32, measured FAIL-OPEN).
+    `_PATH_TOKEN_RE` is `[^\\s]+`, so it split INSIDE quotes: `-e "ssh -p 22"`
+    became `"ssh` | `-p` | `22"`, the `-e` value consumed only `"ssh`, and `22"`
+    then became "the last operand" — sparing the whole directory replacement.
+    `rsync -e "ssh -p 2222 -i key"` is the ordinary way to write a remote shell.
+    """
+
+    tokens: list[tuple[int, int, str]] = []
+    index, length = 0, len(segment)
+    while index < length:
+        if segment[index].isspace():
+            index += 1
+            continue
+        start = index
+        quote = ""
+        while index < length:
+            char = segment[index]
+            if quote:
+                if char == quote:
+                    quote = ""
+            elif char in {"'", '"'}:
+                quote = char
+            elif char.isspace():
+                break
+            index += 1
+        tokens.append((start, index, segment[start:index]))
+    return tokens
+
+
 _PATH_TOKEN_RE = re.compile(r"[^\s]+")
 
 #: Shell list separators — a command SEGMENT ends at one of these.
@@ -1610,16 +1658,16 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
     # what decides direction. `-t`/`--target-directory` never reaches here — the
     # branch above returns first for the verbs where that flag MEANS a destination.
     expect_value = False
-    for token in _PATH_TOKEN_RE.finditer(segment):
-        text = token.group(0)
+    for token_start, token_end, text in _shell_tokens(segment):
         # ⛔ AN OPTION IS NOT AN OPERAND (#12069 review round 22, measured):
         # `--exclude-from=/etc/rsync-exclude` and `--log-file="$SCRATCH/x.log"`
         # carry a path in an option VALUE and were taken as the destination.
         if text.startswith("-"):
-            # `--opt=value` carries its own value; a listed `-e`/`--exclude` takes the
-            # next word; every OTHER option takes none, so the word after it is an
-            # operand — which is what keeps `rsync -a SRC -v DST` refusing.
-            expect_value = "=" not in text and text.split("=", 1)[0] in _VALUE_TAKING_OPTIONS
+            # `--opt=value` carries its own value. Otherwise `_option_takes_value`
+            # decides, and it FAILS CLOSED: only an option provably value-less
+            # consumes nothing, so `-v`/`-avh` keep the destination last while an
+            # unlisted value-taker (`-S .bak`, `--max-size 100m`) consumes its value.
+            expect_value = "=" not in text and _option_takes_value(text)
             continue
         if expect_value:
             expect_value = False
@@ -1630,7 +1678,7 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
             continue
         if re.match(r"^\d*[<>]", text):
             continue
-        last = (token.start() + seg_start, token.end() + seg_start)
+        last = (token_start + seg_start, token_end + seg_start)
     if last is None:
         return True
     return start >= last[0] and end <= last[1]
@@ -5544,6 +5592,24 @@ BINARY_MUTATION_POLARITY = [
         'sudo rsync -a "$b/16/bin/" -v "$RUNNER_TEMP/"',
         False,
         "#12173 round-31 CONTROL: the same flag on a read stays GREEN",
+    ),
+    # ⛔ ROUND 32 INVERTS THE POLARITY: "only a LISTED option consumes" made an
+    # UNLISTED value-taker leave its value as the last operand, and a quoted value
+    # with a space was SPLIT into three tokens — both spared the write again.
+    (
+        'sudo cp -a "$b/17/bin/" "$b/16/bin/" -S .bak',
+        True,
+        "#12173 round-32: an UNLISTED value-taker must still consume its value",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" --max-size 100m',
+        True,
+        "#12173 round-32: an unlisted long option's value is not an operand",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" -e "ssh -p 22"',
+        True,
+        "#12173 round-32: a QUOTED value with a space is ONE token",
     ),
 ]
 
