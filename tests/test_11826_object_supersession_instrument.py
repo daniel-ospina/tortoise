@@ -3217,3 +3217,97 @@ def test_a_direct_row_whose_SUPERSEDED_endpoint_is_shaped_claims_no_belief(sdk):
             f"the {shape} endpoint never carried belief, so the fix must not claim it "
             "did: " + fix)
         assert "carried belief into the superseded endpoint" not in fix, fix
+
+
+def test_the_direct_and_neither_arm_draft_rows_cite_no_ladder(sdk):
+    """EP builds NO factor on those lanes, so nothing is dropped or re-scored.
+
+    Measured: `direct/bid/draft` → `compute_confidence(anchors=[sup])` is `{}` and the
+    row is excluded before evaluation (the string's own `_chain_tail` says so), and the
+    neither-arm row emits "builds no factor either" nine words later. Citing "the arity
+    ladder stated above" there was false twice: the ladder is absent from the text and
+    the lane has no factor to drop an input from (#12210 review, P2).
+    """
+    # direct lane
+    p = sdk.create_point("statement", "the direct draft gateway")
+    v1 = _obj(sdk, "PolicyV1-direct-draftladder")
+    v2 = _obj(sdk, "PolicyV2-direct-draftladder")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _supersede_object(sdk, "PolicyV1-direct-draftladder", "PolicyV2-direct-draftladder")
+    sdk.update_entity(v2["id"], status="draft")
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    assert "ONCE PROMOTED" in issue.fix, issue.fix
+    assert "the arity ladder stated above" not in issue.fix, (
+        "the direct lane has no factor to drop an input from: " + issue.fix)
+    assert "nothing is dropped or re-scored" in issue.fix, issue.fix
+
+    # neither-arm lane
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    w1 = _obj(sdk, "PolicyW1")
+    w2 = _obj(sdk, "PolicyW2")
+    sdk.create_direct_edge("IMPL", actor["id"], w1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyW1", "PolicyW2")
+    sdk.update_entity(w2["id"], status="draft")
+    issue2 = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                  if i.node_id == w1["id"])
+    assert "ONCE PROMOTED" in issue2.fix, issue2.fix
+    assert "still shaped builds no factor either" in issue2.fix, issue2.fix
+    assert "the arity ladder stated above" not in issue2.fix, (
+        "the neither-arm row builds no factor, so no input is dropped: " + issue2.fix)
+
+
+def test_a_shaped_superseded_endpoint_is_told_what_the_repair_RESTORES(sdk):
+    """The trailing measurement must match the lane: nothing existed, so nothing is kept.
+
+    Measured: with an EP-refused superseded endpoint the prescribed repair (edge onto a
+    live claim successor) restores two confidences (`effective_n 2.5255`), so "the same
+    posteriors as before the supersession" was false and contradicted the same
+    sentence's "would establish one" (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1-supshaped")
+    v2 = _obj(sdk, "PolicyV2-supshaped")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.op_type = 'IMPL'", {"i": v1["id"]})
+    before = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
+    assert before["confidences"] == {}, before
+    _supersede_object(sdk, "PolicyV1-supshaped", "PolicyV2-supshaped")
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "no confidence was EVER carried" in fix, fix
+    assert "the same posteriors as before the supersession" not in fix, (
+        "no belief existed, so nothing can be 'the same': " + fix)
+    assert "restores two confidences" in fix, fix
+
+
+def test_a_neither_arm_re_point_moves_no_belief_only_WHILE_shaped(sdk):
+    """Clearing the shape makes the re-point carry, so the clause must be conditional.
+
+    Measured on a neither-arm row whose successor chain ends LIVE: clear the shape on the
+    subject and write the edge onto that head → `effective_n 2.5255`, re-audit 0 rows —
+    so the absolute "the re-point moves no belief either way" contradicted the repair the
+    same string ordered (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    v3 = _obj(sdk, "PolicyV3")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='live'", {"i": v3["id"]})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "target THAT" in fix, fix
+    assert "moves no belief until the shape is cleared" in fix, (
+        "the re-point DOES carry once the shape is cleared: " + fix)
+    assert "moves no belief either way" not in fix, fix
