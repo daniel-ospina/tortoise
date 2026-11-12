@@ -2527,6 +2527,6 @@ to answer.
   are the ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for
   *any* edit to this file, and the probe's cite and this document's cite are re-pointed TOGETHER so
   they cannot disagree about this anchor.
-- ⛔ **Superseded for the merged tree by §10.27.** The numbers above are the head this entry
-  measured; `29ec0f3471` inserted a net `+3` above the anchor and did not re-derive the cite,
-  so the live window is `:14248-14250`.
+- **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
+  supersede marker (§10.26's records the `:14245` window; `29ec0f3471` then inserted a net `+3`
+  above the anchor, making the live window `:14248-14250`, which is what this entry measures).
