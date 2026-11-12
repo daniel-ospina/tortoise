@@ -2313,14 +2313,27 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     are likewise avoided where the fragment is legitimate: "therefore NOT counted in" is
     correct prose in the corrected field doc, so the retracted PAIR is one needle.
 
-    ⛔ TWO OF THE NEEDLES BELOW ARE NOT RETRACTED PHRASINGS BUT DISCLOSURE DELETIONS (review
-    P3). A blocklist can only catch a claim that came BACK; it cannot see a site that went
-    SILENT — the sentence simply deleted, leaving the retracted statement unstated rather
-    than contradicted. Two corrected field docs were exactly that: dropping the stillness
-    clause from `has_live_job`'s `None` bullet, or restoring `pr_running_unmeasured_unprobed`'s
-    "the CANONICAL list lives in `read_run_live_job`'s Returns block", both left the suite
-    green (measured). Their needles match the pre-fix JOIN the deletion recreates, so the
-    silence and the revert are the same failure and are both caught.
+    ⛔ AND EVERY NEEDLE RUNS TO ITS SENTENCE'S TERMINAL CLAUSE (review P2). "Never a
+    fragment" has a sharper form, and the softer one was FALSE: a needle holding only the
+    pre-fix PREFIX is a substring of the CORRECT sentence an editor writes by appending the
+    second half, so the minimal RIGHT fix redded — measured on four needles before they
+    were extended ("a run counts out only when its jobs were read and every one had
+    completed **AND its own `updated_at` has been still for …**"). Each needle now carries
+    the clause its pre-fix sentence ENDED on ("…had completed. An unmeasured run keeps",
+    "…(a proof of non-execution), and how many", "…still counted as executing", "…and they
+    are subtracted"), so a correct sentence cannot contain one. A needle you are adding is
+    finished only when you can say which pre-fix clause ends it — and extending a needle
+    must not let an earlier revert escape, so each extension is re-measured against its own
+    revert.
+
+    ⛔ ONE NEEDLE BELOW IS NOT A RETRACTED PHRASING BUT A DISCLOSURE DELETION (review P3).
+    A blocklist catches a claim that came BACK; it cannot see a site that went SILENT — the
+    sentence deleted, leaving the wrong statement unstated rather than contradicted. That
+    is `has_live_job`'s `None` bullet: dropping the stillness clause from it left the suite
+    green (measured), and its needle matches the pre-fix JOIN the deletion recreates, so the
+    silence and the revert are the same failure. The CANONICAL-list needles beside it are a
+    DIFFERENT shape — a retracted claim, not a deletion — and they exist twice because the
+    claim shipped twice, in the module and in this file, with different wording.
 
     RESIDUAL, stated plainly: this catches the phrasings that have actually shipped, not a
     novel paraphrase — a NEW wrong wording, or a revert that keeps the wrong claim but
@@ -2358,9 +2371,12 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     retracted = [
         # the module sites that shipped uncorrected
         "whose EVERY job had completed, and which are therefore NOT counted in",
-        "EVERY job of them was `completed` (a proof of",
-        "whose jobs could NOT be read, and which are",
-        "only when its jobs were read and every one had completed",
+        # ⛔ EACH RUNS TO THE CLAUSE ITS PRE-FIX SENTENCE ENDED ON (review P2): a prefix-only
+        # needle is a substring of the CORRECT sentence that appends the second half, and all
+        # of these redded the minimal RIGHT fix before they were extended (measured).
+        "EVERY job of them was `completed` (a proof of non-execution), and how many",
+        "whose jobs could NOT be read, and which are still counted as executing",
+        "only when its jobs were read and every one had completed. An unmeasured run keeps",
         # the settled-ness INFERENCE the two test headers shipped: all-completed,
         # therefore executing nothing. True only of a fixture that is also still, so it
         # must be stated as the premise, never as the inference.
@@ -2385,15 +2401,22 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         "all-jobs-completed is the PROOF that EXCLUDES a run from `pr_running`",
         # the `classify_queue` RETURNED-DICT twin of the comment above (review P2). It was
         # corrected by this change and NO needle matched it: silencing its stillness clause
-        # left the suite green. Anchored on the join the silence recreates; "read as
-        # `completed`" alone is retained by the corrected sentence and would collide.
-        "read as `completed` — a run GitHub has stopped driving",
+        # left the suite green. ⛔ Anchored on the TERMINAL clause, not on "read as
+        # `completed` — a run GitHub has stopped driving": that prefix is a substring of a
+        # CORRECT sentence with the stillness clause interposed (review P2, measured RED on
+        # correct prose), and both shapes end on "and they are subtracted".
+        "read as `completed` — a run GitHub has stopped driving — and they are subtracted",
         # the has_live_job `None` bullet's stillness clause (review P3) — a DISCLOSURE
         # deletion: dropping the clause re-joins "not provably complete" to the budget arm.
         "that is not provably complete, or a run the probe BUDGET",
         # the CANONICAL-list claim this change RETRACTED (review P3): a single list cannot
         # own a set that spans the callee, the caller's settle gate, and the budget split.
         "The CANONICAL list lives in `read_run_live_job`'s Returns block",
+        # ... and its TWIN IN THIS FILE (review P3), which shipped with different wording
+        # and so was NOT caught by the needle above: the same claim, corrected twice and
+        # half-guarded — the "corrected one twin, left the other" shape this docstring names.
+        'The canonical list of what "did not prove it idle" covers lives in '
+        "`read_run_live_job`'s Returns block",
         # the merged claim that either state is a CLOSED avenue: for a settle-downgraded
         # run /cancel is ACCEPTED and destructive
         "accepts a run in either state",
@@ -2418,10 +2441,15 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     ]
     flats = {name: flat(text) for name, text in scanned.items()}
     # The guard's own docstring quotes several of these to describe them, so the test file
-    # is scanned with this function's body CUT OUT — otherwise the guard self-triggers.
-    head, _, tail = scanned["tests"].partition("def test_NO_site_states_the_retracted")
-    _, _, tail_after = tail.partition("def test_the_reason_line_names_the_runs")
-    flats["tests"] = flat(head + tail_after)
+    # is scanned with THIS FUNCTION's span CUT OUT — otherwise the guard self-triggers.
+    # ⛔ THE END BOUNDARY IS THE NEXT TOP-LEVEL `def`, NOT A NAME (review P3): partitioning
+    # on the following test's name found a mention of it INSIDE this body, so the "cut"
+    # stopped six lines early and left the tail of the guarded body in the hay (harmless
+    # only until a retracted phrasing is added there, and then it self-triggers).
+    own = scanned["tests"]
+    start = own.index("def test_NO_site_states_the_retracted")
+    end = own.index("\ndef ", start + 1)
+    flats["tests"] = flat(own[:start] + own[end:])
     for phrase in retracted:
         needle = flat(phrase)
         for name, hay in flats.items():
