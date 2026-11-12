@@ -1192,8 +1192,16 @@ export function headHtml(opts: {
   // (`website/assets/og-tortoise.jpg`), a static asset under `/assets/`.
   // ⛔ The stored cover is author-supplied and may name a retired host; normalise
   // at RENDER so `og:image` / `twitter:image` never advertise a redirecting URL
-  // (#11765). The check is BEFORE `isDefaultCard`, so a normalised image can never
-  // be mistaken for the authored card (or vice versa).
+  // (#11765). This is the belt, not the only guard: both callers today arrive with a
+  // value `normaliseStoredUrls` already canonicalised (the article route passes
+  // `post.cover_image_url` out of `fetchPostBySlug`, the index passes no image), so
+  // reverting THIS line changes no rendered page — which is exactly why it has its
+  // own assertion against the exported helper rather than a rendered-surface one
+  // (`tests/test_blog_seo_meta.mjs`, §"the blog's link preview and icon": a cover
+  // naming the retired host must emit the canonical host). Keep it and keep that
+  // assertion: it is the contract for any caller that hands over a raw value.
+  // The check is BEFORE `isDefaultCard`, so a normalised image can never be
+  // mistaken for the authored card (or vice versa).
   const normalised = image && validUrl(image) ? normaliseRetiredHostUrl(image) : null;
   const safeImage = normalised ? escapeHtml(normalised) : DEFAULT_OG_IMAGE;
   // Dimensions are declared ONLY for the card we authored. A post cover is

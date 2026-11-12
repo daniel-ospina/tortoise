@@ -3255,6 +3255,16 @@ _INDEXNOW_PROBE_QUOTERS = (
 
 _INDEXNOW_MODULE_REL = "website/functions/blog/_shared/indexnow.ts"
 _INDEXNOW_KEY = "0123456789abcdef0123456789abcdef"
+#: ⛔ THE HOST THE GATE MUST PROBE (#11976 review F3): the one the IndexNow ENDPOINT
+#: is handed, not merely one that also serves the file. `_shared/indexnow.ts` derives
+#: `host`/`keyLocation` from the submitted url (the COMPANY origin since #11765), and
+#: the endpoint resolves `keyLocation` against that declared host — so the proof of
+#: ownership has to sit on `premiselabs.co`. Every assertion below compares against
+#: this constant, and it is deliberately a LITERAL rather than something read back
+#: out of the workflow: reading the step's own value would make the pin agree with
+#: whatever the step says, which is the self-referential shape these tests exist to
+#: refuse.
+INDEXNOW_KEY_HOST = "https://premiselabs.co"
 
 #: The module fixture the step resolves the key from. The script runs with `cwd`
 #: set to this temp tree, so the step's own relative path reads THIS file — which
@@ -3607,9 +3617,14 @@ def test_the_indexnow_gate_passes_when_the_surface_is_correct(tmp_path) -> None:
     rc, out, calls = _run_indexnow_gate(tmp_path)
     assert rc == 0, out
     # Non-vacuity: it must have read BOTH key-file legs and the marketing hop.
-    origin = [c for c in calls if c.startswith(f"https://tortoise.premiselabs.co/{_INDEXNOW_KEY}.txt?cb=")]
+    origin = [c for c in calls if c.startswith(f"{INDEXNOW_KEY_HOST}/{_INDEXNOW_KEY}.txt?cb=")]
     assert origin, f"the cache-bypassing ORIGIN leg was never requested: {calls}"
-    assert f"https://tortoise.premiselabs.co/{_INDEXNOW_KEY}.txt" in calls, (
+    # ⛔ THE HOST IS PART OF THE CLAIM (#11976 review F3). Pointing the gate back at
+    # `tortoise.premiselabs.co` leaves both legs green while the apex — the host the
+    # endpoint is told to verify — could stop serving the file, and the publish
+    # handler fails OPEN, so nothing else would red. This assertion is what reds on
+    # that revert.
+    assert f"{INDEXNOW_KEY_HOST}/{_INDEXNOW_KEY}.txt" in calls, (
         f"the canonical URL the IndexNow endpoint is handed was never requested: {calls}"
     )
     assert any("tortoise.premiselabs.co" in c and c.endswith("notify-publish") for c in calls), calls
@@ -3833,7 +3848,7 @@ def test_the_shipped_extractor_reads_the_shipped_constant(tmp_path) -> None:
     served_key = served[0].stem
     rc, out, calls = _run_indexnow_gate(tmp_path, cwd=REPO)
     assert rc == 0, out
-    assert f"https://tortoise.premiselabs.co/{served_key}.txt" in calls, (
+    assert f"{INDEXNOW_KEY_HOST}/{served_key}.txt" in calls, (
         "the shipped extractor did not resolve the constant the deploy serves — "
         f"expected {served_key}.txt, requested {[c for c in calls if c.endswith('.txt')]}"
     )
@@ -3867,7 +3882,7 @@ def test_the_indexnow_gate_reads_the_constant_not_an_example_above_it(tmp_path) 
     rc, out, calls = _run_indexnow_gate(tmp_path, module_text=module)
     assert rc == 0, out
     requested = [c for c in calls if c.endswith(".txt")]
-    assert requested == [f"https://tortoise.premiselabs.co/{_INDEXNOW_KEY}.txt"], requested
+    assert requested == [f"{INDEXNOW_KEY_HOST}/{_INDEXNOW_KEY}.txt"], requested
 
 
 def test_the_indexnow_gate_diagnoses_a_dead_origin_instead_of_aborting_silently(tmp_path) -> None:

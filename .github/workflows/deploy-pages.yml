@@ -716,7 +716,18 @@ jobs:
             echo "::error::EXTRACTOR fault: INDEXNOW_KEY is ${#KEY} characters, not the 32 lowercase hex the issue pins. Nothing about the deployed site was checked."
             exit 1
           fi
-          url="https://tortoise.premiselabs.co/$KEY.txt"
+          # ⛔ THE HOST HERE IS THE ONE THE ENDPOINT IS HANDED, not "whichever host the
+          # site also answers on" (#11976 review F3). `_shared/indexnow.ts` builds the
+          # payload from the SUBMITTED url — `host: parsed.host`,
+          # `keyLocation: ${parsed.origin}/${key}.txt` — and the endpoint resolves
+          # `keyLocation` against that declared `host` (indexnow.org documentation: the
+          # key file must sit at the root of the declared host). Since #11765 every
+          # published post is on the COMPANY origin, so the URL that must serve the
+          # proof of ownership is `premiselabs.co`. Probing the retired product host
+          # would stay green while the apex stopped serving the file — and because the
+          # handler fails OPEN by design below, a 403 to every submission would be
+          # SILENT. Both legs (`origin_url` and `edge`) derive from `$url`.
+          url="https://premiselabs.co/$KEY.txt"
           # #4050/#9680: the ORIGIN leg needs a per-run nonce. This host is the shared
           # Pages project and its static assets are edge-cached (`s-maxage: 7d` — the
           # leak probe above measures it), so a plain GET can be answered by the

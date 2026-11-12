@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import xml.etree.ElementTree as ET
 from urllib.parse import parse_qs, urljoin, urlparse
 
@@ -127,7 +128,6 @@ def test_blog_article_ssr() -> None:
     r = SESSION.get(f"{TORTISE}/blog", timeout=20)
     if r.status_code != 200:
         pytest.skip("blog index unavailable")
-    import re
 
     slugs = re.findall(r'href="/blog/([a-z0-9]+(?:-[a-z0-9]+)*)"', r.text)
     slugs = [s for s in slugs if s not in ("feed.xml", "sitemap.xml")]
@@ -176,14 +176,47 @@ def test_host_isolation_blog() -> None:
             f"{src}{path} must 301 to {COMPANY}{target_suffix} in ONE hop — got {location!r}"
         )
 
-    # The canonical origin SERVES the path. A 301 here would mean the move has not
+    # The canonical origin SERVES the index. A 301 here would mean the move has not
     # happened; a 404 would mean it was pointed at a target that does not exist (the
     # 301→404 failure #11762 records).
-    for path in ("/blog", "/blog/", "/blog/any-slug"):
+    for path in ("/blog", "/blog/"):
         r = SESSION.get(f"{COMPANY}{path}", timeout=20, allow_redirects=False)
         assert r.status_code == 200, (
             f"{COMPANY}{path} → {r.status_code}; the blog's canonical origin serves it "
             "(#11762 decision), so this is not a redirect source"
+        )
+
+    # ⛔ A SLUG-SHAPED path is a DIFFERENT contract, and asserting 200 on it was FALSE
+    # on a correct system (#11976 review F1). `any-slug` is not a published post, so
+    # the SSR catch-all answers 404 BY CONSTRUCTION (`[[path]].ts` `SLUG_RE.test(slug)`
+    # → then `if (!post) return notFound()` → `_lib.ts` `status: 404`). Measured on the
+    # live product host: `/blog` → 200, `/blog/` → 200, `/blog/any-slug` → 404. The old
+    # triple only worked while ALL THREE were 301, because a redirect happens in the
+    # MIDDLEWARE, before any slug is read.
+    #
+    # So the honest claims are: the canonical origin ANSWERS this path instead of
+    # redirecting it (a 301 is the move undone), an unknown slug is a 404 rather than
+    # an empty 200, and a REAL post taken from the index is served at 200 — read from
+    # the index the way `test_blog_article_ssr` does, so the leg cannot be satisfied by
+    # a slug that only exists in this file, and it self-skips when nothing is published.
+    unknown = SESSION.get(f"{COMPANY}/blog/any-slug", timeout=20, allow_redirects=False)
+    assert unknown.status_code == 404, (
+        f"{COMPANY}/blog/any-slug → {unknown.status_code}; the canonical origin serves the "
+        "blog (a 301 is the move undone) and an unpublished slug is a 404, not an empty 200"
+    )
+    slugs = [
+        s
+        for s in re.findall(
+            r'href="/blog/([a-z0-9]+(?:-[a-z0-9]+)*)"',
+            SESSION.get(f"{COMPANY}/blog", timeout=20).text,
+        )
+        if s not in ("feed.xml", "sitemap.xml")
+    ]
+    if slugs:
+        real = SESSION.get(f"{COMPANY}/blog/{slugs[0]}", timeout=20, allow_redirects=False)
+        assert real.status_code == 200, (
+            f"{COMPANY}/blog/{slugs[0]} → {real.status_code}; a published post must be "
+            "SERVED on the canonical origin, not redirected off it"
         )
 
     # The retired host sends every /blog path to the canonical one. Trailing slashes

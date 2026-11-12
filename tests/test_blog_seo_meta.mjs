@@ -1882,6 +1882,39 @@ console.log("the blog's link preview and icon");
   const noCover = headHtml({ title: "No cover", description: "d", url: `${url}/b`, type: "article" });
   assertEq(ogImage(noCover), DEFAULT_OG_IMAGE, "a coverless post gets the fallback card, not nothing");
 
+  // ⛔ THE RENDER-TIME NORMALISATION IS PINNED HERE, because nothing else can pin
+  // it (#11976 review F4). `headHtml` normalises the image it is handed before
+  // emitting `og:image`/`twitter:image`, and today's two callers both arrive with a
+  // value `normaliseStoredUrls` already canonicalised (`[[path]].ts` passes
+  // `post.cover_image_url` out of `fetchPostBySlug`; the index passes no image at
+  // all). So the row seam masks it on every RENDERED surface, and reverting the line
+  // reddened no assertion while the comment claimed it was load-bearing.
+  //
+  // The claim it actually makes is about the EXPORTED helper's own contract — a value
+  // that still names the retired host must not reach a card, whichever caller hands it
+  // over — so it is asserted against `headHtml` directly, with a retired-host URL that
+  // no row seam has touched. Path preserved (the normaliser moves the host, never the
+  // path) and NO invented dimensions (it is still an author's cover, not our card).
+  const RETIRED_COVER = "https://tortoise.premiselabs.co/assets/author-cover.png";
+  const fromRetiredHost = headHtml({
+    title: "A post",
+    description: "d",
+    url: `${url}/retired`,
+    image: RETIRED_COVER,
+    imageAlt: "A post",
+    type: "article",
+  });
+  assertEq(ogImage(fromRetiredHost), `${SITE_URL}/assets/author-cover.png`,
+    "a cover naming the RETIRED host is normalised at render — og:image must never " +
+      "advertise a URL that 301s away from the page");
+  assertEq(attr(fromRetiredHost, "name", "twitter:image"), ogImage(fromRetiredHost),
+    "...and twitter:image carries the same normalised value, so one platform cannot " +
+      "advertise the retired host on the same card");
+  assert(!fromRetiredHost.includes(RETIRED_COVER),
+    "the raw retired-host value does not survive anywhere in the head, even as a second copy");
+  assertEq(attr(fromRetiredHost, "property", "og:image:width"), null,
+    "a normalised cover is still the AUTHOR's image, so it still declares no dimensions");
+
   // A hostile title must not break out of an attribute.
   const hostile = headHtml({
     title: 'A "quoted" & <script>alert(1)</script> title',

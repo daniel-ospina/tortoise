@@ -318,8 +318,12 @@ and a body byte-identical to the constant the submitter sends — a trailing new
 every submission, so the byte count is compared, not just the text. It reads the file through a
 per-run nonce and refuses a `cf-cache-status: HIT` answer, so a cached copy of the previous
 deployment cannot satisfy it (#4050), and then reads the canonical URL the endpoint is handed, which
-is where the file has to be intact as well. It also asserts that `/blog/api/notify-publish` at the
-marketing origin still refuses an anonymous caller with its admin gate. `deploy-dashboard`
+is where the file has to be intact as well — that URL is `https://premiselabs.co/<key>.txt`, because
+since #11765 the endpoint is told `host=premiselabs.co` and resolves `keyLocation` against it. It also
+asserts that `/blog/api/notify-publish` still refuses an anonymous caller with its admin gate — that
+probe is on the PRODUCT host (`tortoise.premiselabs.co`), not on the marketing origin: `/blog/api/*`
+is deliberately excluded from the `/blog*` 301, so it is the one blog surface the retired host still
+serves. `deploy-dashboard`
 (`Post-deploy — the app-origin IndexNow proxy answers its session gate (#9680)`) asserts the hop the
 console actually calls: that the app-origin proxy route exists and answers its own session gate. It is
 the route's presence that one proves, not the upstream handler — an anonymous call is refused at the
