@@ -37,10 +37,14 @@ from pathlib import Path
 
 import pytest
 
+from tests import _wiring_gate_marks
 from tools import session_retrofit_audit as audit
 from tortoise import session_schema
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# The synthetic-tree test below loads the REAL predicate module by path, because a
+# temp directory is not the repo root and `tests` is not importable from there.
+_WIRING_GATE_MARKS_SOURCE = Path(_wiring_gate_marks.__file__)
 
 
 @pytest.fixture(scope="module")
@@ -3533,3 +3537,301 @@ def test_seed_demo_graph_derives_its_session_id_from_the_declaration() -> None:
     body = ast.get_source_segment(src, fn) or ""
     assert "demo_session_id(org_id)" in body
     assert "session_demo_" not in body
+
+
+# ── The wiring gate cannot be silenced by a marker (#12223) ──────────────────
+# `tests/_wiring_gate_marks.py` holds the predicate and the measurements; these pin
+# its discriminating power in BOTH directions, because each direction is a defect
+# already recorded here: missing a marker that CAN stop the gate leaves it green over
+# a body nobody executed, and refusing one that CANNOT is a false block whose message
+# claims a suppression that is not there.
+
+
+def test_the_wiring_gate_refuses_every_marker_that_can_stop_it() -> None:
+    """The markers that stop the gate — and the shapes a name-only read cannot see."""
+    assert _wiring_gate_marks.refusal_reasons([pytest.mark.skip(reason="probe")])
+    assert _wiring_gate_marks.refusal_reasons([pytest.mark.skipif(True, reason="probe")])
+    assert _wiring_gate_marks.refusal_reasons([pytest.mark.xfail(reason="probe")])
+    # The CI legs run `-m 'not track_b and not live and not integration'`, so these
+    # deselect the gate in the invocation that decides whether main is green.
+    for selector in ("integration", "live", "track_b"):
+        assert _wiring_gate_marks.refusal_reasons([getattr(pytest.mark, selector)]), (
+            selector)
+    # ⛔ AN EMPTY PARAMETER SET IS A SKIP, not a failure, and the item's own marks
+    # then carry only `parametrize` — the shape a name-only read is blind to.
+    assert _wiring_gate_marks.refusal_reasons(
+        [pytest.mark.parametrize("monkeypatch", [])])
+    # ⛔ A CASE-LEVEL mark, and a `parametrize(..., marks=...)` that covers every case.
+    assert _wiring_gate_marks.refusal_reasons([pytest.mark.parametrize(
+        "monkeypatch",
+        [pytest.param(None, marks=pytest.mark.skip(reason="probe"))])])
+    assert _wiring_gate_marks.refusal_reasons([pytest.mark.parametrize(
+        "monkeypatch", [None], marks=pytest.mark.skip(reason="probe"))])
+
+
+def test_the_wiring_gate_allows_markers_that_cannot_stop_it() -> None:
+    """No false block: a marker that still RUNS the item is not a suppression."""
+    assert _wiring_gate_marks.refusal_reasons([]) == []
+    # This repo's own budget convention — the item still executes.
+    assert _wiring_gate_marks.refusal_reasons([pytest.mark.timeout(300)]) == []
+    # A non-empty parameter set with no case-level suppression.
+    assert _wiring_gate_marks.refusal_reasons(
+        [pytest.mark.parametrize("value", ["skipped", "neutral"])]) == []
+    # A word that only APPEARS in a case list cannot suppress anything, and neither
+    # can an unrelated marker name.
+    assert _wiring_gate_marks.refusal_reasons([pytest.mark.usefixtures("tmp_path")]) == []
+
+
+def test_the_wiring_gate_reader_names_a_gate_suppressed_at_COLLECTION(tmp_path) -> None:
+    """End-to-end: the REAL predicate, applied the way `conftest.py` applies it.
+
+    The unit assertions above cannot show that the reader is reached by pytest at
+    collection, or that a refusal is a RED run rather than a warning — so a
+    synthetic module is collected in a subprocess through the same hook body.
+    """
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (tmp_path / "conftest.py").write_text(
+        "import importlib.util\n"
+        "import pytest\n"
+        "\n"
+        f"_spec = importlib.util.spec_from_file_location(\n"
+        f"    '_wiring_gate_marks', {str(_WIRING_GATE_MARKS_SOURCE)!r})\n"
+        "_wiring_gate_marks = importlib.util.module_from_spec(_spec)\n"
+        "_spec.loader.exec_module(_wiring_gate_marks)\n"
+        "\n"
+        "@pytest.hookimpl(tryfirst=True)\n"
+        "def pytest_collection_modifyitems(items):\n"
+        "    _wiring_gate_marks.refuse_suppressed_gates(items)\n",
+        encoding="utf-8")
+    target = tmp_path / f"{_wiring_gate_marks.GUARDED_FILE}"
+    body = (
+        "import pytest\n"
+        "\n"
+        "{marker}\n"
+        "def {name}() -> None: ...\n"
+    )
+    for name in sorted(_wiring_gate_marks.GUARDED_ITEMS):
+        target.write_text(
+            body.format(marker="@pytest.mark.skip(reason='probe')", name=name),
+            encoding="utf-8")
+        refused = subprocess.run(
+            [sys.executable, "-m", "pytest", str(target), "-q",
+             "-c", str(tmp_path / "pytest.ini"),
+             "-p", "no:cacheprovider"],
+            cwd=tmp_path, capture_output=True, text=True)
+        assert refused.returncode != 0, (
+            f"a `@pytest.mark.skip` on {name} was not refused: "
+            + (refused.stdout + refused.stderr)[-1500:])
+        assert "WIRING GATE" in refused.stdout + refused.stderr, (
+            "the refusal did not name the wiring gate, so the next lane reads a "
+            "collection error with no fix in it: "
+            + (refused.stdout + refused.stderr)[-1500:])
+        # ...and the SAME module, unmarked, collects and runs clean — so the refusal
+        # above is the marker, not the synthetic file.
+        target.write_text(body.format(marker="", name=name), encoding="utf-8")
+        allowed = subprocess.run(
+            [sys.executable, "-m", "pytest", str(target), "-q",
+             "-c", str(tmp_path / "pytest.ini"),
+             "-p", "no:cacheprovider"],
+            cwd=tmp_path, capture_output=True, text=True)
+        assert allowed.returncode == 0, (
+            f"an UNMARKED {name} was refused or errored: "
+            + (allowed.stdout + allowed.stderr)[-1500:])
+    # ⛔ AND UNDER `-n`, the shape this repo's own CI shard legs use
+    # (`.github/workflows/python-ci.yml` runs `python -m pytest $FILES -n "$XDIST_WORKERS"
+    # --dist loadscope`). Measured: the refusal is still RED there, but it surfaces as
+    # an xdist INTERNALERROR exiting 3 whose text does NOT carry the message above — a
+    # traded DIAGNOSTIC, not an open gate. Pinned so it cannot drift to green.
+    pytest.importorskip("xdist")
+    target.write_text(
+        body.format(marker="@pytest.mark.skip(reason='probe')",
+                    name=sorted(_wiring_gate_marks.GUARDED_ITEMS)[0]),
+        encoding="utf-8")
+    distributed = subprocess.run(
+        [sys.executable, "-m", "pytest", str(target), "-q", "-n", "2",
+         "-c", str(tmp_path / "pytest.ini"),
+         "-p", "no:cacheprovider"],
+        cwd=tmp_path, capture_output=True, text=True)
+    # ⛔ THE VERDICT, NOT MERELY "non-zero" (review round 3): `!= 0` also passes when
+    # the synthetic run breaks for an unrelated reason (a bad import, a bad `-n`), so
+    # the shape is asserted — xdist turns a worker's collection refusal into an
+    # INTERNALERROR with exit 3.
+    combined = distributed.stdout + distributed.stderr
+    assert distributed.returncode == 3 and "INTERNALERROR" in combined, (
+        "a suppressed gate did not produce the measured xdist refusal (exit 3, "
+        "INTERNALERROR) under `-n 2`: " + combined[-1500:])
+    # ...and the CONTROL: the same unmarked module under `-n 2` is green, so the
+    # assertion above is about the suppression and not about xdist itself.
+    target.write_text(
+        body.format(marker="", name=sorted(_wiring_gate_marks.GUARDED_ITEMS)[0]),
+        encoding="utf-8")
+    distributed_clean = subprocess.run(
+        [sys.executable, "-m", "pytest", str(target), "-q", "-n", "2",
+         "-c", str(tmp_path / "pytest.ini"),
+         "-p", "no:cacheprovider"],
+        cwd=tmp_path, capture_output=True, text=True)
+    assert distributed_clean.returncode == 0, (
+        "an UNMARKED gate errored under `-n 2`, so the distributed pin above proves "
+        "nothing: " + (distributed_clean.stdout + distributed_clean.stderr)[-1500:])
+
+
+def test_the_wiring_gate_hook_is_wired_into_the_suite(monkeypatch) -> None:
+    """The guard is a gate too: deleting the conftest HOOK alone must red.
+
+    ⛔ MEASURED, AND THIS IS WHY THE TEST EXISTS (fresh-context review, this PR).
+    Removing only the `pytest_collection_modifyitems` hook from `tests/conftest.py`
+    — one hunk, one file, the predicate left untouched in the tree — left a skipped
+    gate at `61 passed, 1 skipped, exit 0`, and NOTHING in the suite redded. A sound
+    predicate that nothing calls is exactly the shape this file keeps recording, so
+    the hook has a witness rather than a claim: this calls the hook that is actually
+    registered, so a deleted hook is a missing attribute rather than a silent no-op.
+    """
+    mounted = [
+        module for module in list(sys.modules.values())
+        if str(getattr(module, "__file__", "")).endswith(
+            ("tests/conftest.py", "tests\\conftest.py"))
+        and hasattr(module, "pytest_collection_modifyitems")]
+    assert mounted, (
+        "no loaded module exposes `pytest_collection_modifyitems` from "
+        "tests/conftest.py — the citation WIRING GATE guard is UNWIRED, so a marker "
+        "on the gate silences it while the suite reports green")
+    reached: list[object] = []
+
+    def recorder(items) -> None:
+        # The REAL predicate is replaced so this witnesses the HOOK, not a copy of it.
+        reached.append(items)
+        raise pytest.UsageError("the wiring-gate guard was called")
+
+    monkeypatch.setattr(_wiring_gate_marks, "refuse_suppressed_gates", recorder)
+    marker = object()
+    with pytest.raises(pytest.UsageError, match="the wiring-gate guard was called"):
+        mounted[0].pytest_collection_modifyitems([marker])
+    assert reached == [[marker]], (
+        "the conftest hook is mounted but no longer calls "
+        "`refuse_suppressed_gates` — the guard exists and nothing applies it")
+
+
+def test_the_wiring_gate_guards_every_citation_gate() -> None:
+    """A gate that is not in `GUARDED_ITEMS` is not guarded, so the SET is pinned.
+
+    ⛔ MEASURED (review round 3): truncating `GUARDED_ITEMS` to one name — ONE line —
+    and skip-marking the other gate left `62 passed, 1 skipped, exit 0`. Every new
+    test iterated the constant, so none of them could see it go missing, and nothing
+    outside `tests/_wiring_gate_marks.py` names these two gates. The gates are
+    exactly this module's `test_the_citation_*` items, so the set is checked against
+    what the module actually defines: a truncated set reds here, and so does a gate
+    RENAMED out of the guarded set.
+    """
+    defined = {name for name in vars(sys.modules[__name__])
+               if name.startswith("test_the_citation_")}
+    assert defined == set(_wiring_gate_marks.GUARDED_ITEMS), (
+        "`GUARDED_ITEMS` no longer matches the citation gates this module defines — "
+        f"defined {sorted(defined)}, guarded "
+        f"{sorted(_wiring_gate_marks.GUARDED_ITEMS)}. A gate missing from the set is "
+        "a gate a marker can silence in one line")
+
+
+def test_the_wiring_gate_refuses_a_gate_that_never_PASSED(tmp_path) -> None:
+    """A skip in the BODY (or a fixture) carries no marker — the outcome half runs.
+
+    Measured on this tree (review round 3): `pytest.skip()` as the first statement of
+    the gate gave `62 passed, 1 skipped, exit 0`, and a module-level fixture that
+    skips gave `63 skipped, exit 0`. Neither carries a marker, so the collection-time
+    guard is blind to both by construction, and a gate that did not run certified
+    nothing while the suite reported green.
+    """
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (tmp_path / "conftest.py").write_text(
+        "import importlib.util\n"
+        "import pytest\n"
+        "\n"
+        f"_spec = importlib.util.spec_from_file_location(\n"
+        f"    '_wiring_gate_marks', {str(_WIRING_GATE_MARKS_SOURCE)!r})\n"
+        "_wiring_gate_marks = importlib.util.module_from_spec(_spec)\n"
+        "_spec.loader.exec_module(_wiring_gate_marks)\n"
+        "\n"
+        "def pytest_sessionstart(session):\n"
+        "    _wiring_gate_marks.reset()\n"
+        "\n"
+        "def pytest_collection_modifyitems(items):\n"
+        "    _wiring_gate_marks.refuse_suppressed_gates(items)\n"
+        "\n"
+        "def pytest_collection_finish(session):\n"
+        "    _wiring_gate_marks.note_required(session.items)\n"
+        "\n"
+        "def pytest_runtest_logreport(report):\n"
+        "    _wiring_gate_marks.note_report(report)\n"
+        "\n"
+        "def pytest_testnodedown(node, error):\n"
+        "    _wiring_gate_marks.merge_worker(\n"
+        "        (getattr(node, 'workeroutput', None) or {}).get(\n"
+        "            'wiring_gate_marks'))\n"
+        "\n"
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    session.exitstatus = _wiring_gate_marks.refuse_unpassed(\n"
+        "        session.config, exitstatus)\n",
+        encoding="utf-8")
+    name = sorted(_wiring_gate_marks.GUARDED_ITEMS)[0]
+    target = tmp_path / _wiring_gate_marks.GUARDED_FILE
+    run = [sys.executable, "-m", "pytest", str(target), "-q",
+           "-c", str(tmp_path / "pytest.ini"), "-p", "no:cacheprovider"]
+
+    target.write_text(
+        f"import pytest\n\n\ndef {name}() -> None:\n"
+        "    pytest.skip('probe: the gate certified nothing')\n",
+        encoding="utf-8")
+    skipped = subprocess.run(run, cwd=tmp_path, capture_output=True, text=True)
+    assert skipped.returncode != 0, (
+        "a gate that SKIPPED ITSELF was reported green: "
+        + (skipped.stdout + skipped.stderr)[-1500:])
+    assert "WIRING GATE did not PASS" in skipped.stderr + skipped.stdout, (
+        "the outcome refusal did not name the gate: "
+        + (skipped.stdout + skipped.stderr)[-1500:])
+
+    # ...and the SAME module with a gate that runs PASSES, so the refusal above is
+    # the skip and not the synthetic tree.
+    target.write_text(
+        f"def {name}() -> None:\n    assert True\n", encoding="utf-8")
+    passed = subprocess.run(run, cwd=tmp_path, capture_output=True, text=True)
+    assert passed.returncode == 0, (
+        "an UNMARKED, PASSING gate was refused: "
+        + (passed.stdout + passed.stderr)[-1500:])
+
+    # ⛔ AND A PARTIAL RUN IS NOT A FALSE BLOCK: with the gate deselected by `-k` it
+    # was never collected, so it is not `required` and the session stays green.
+    deselected = subprocess.run(
+        [*run, "-k", "not " + name], cwd=tmp_path, capture_output=True, text=True)
+    assert deselected.returncode in (0, 5), (
+        "`-k` deselection of the gate false-blocked the run: "
+        + (deselected.stdout + deselected.stderr)[-1500:])
+
+    # ⛔ NOR IS A COLLECT-ONLY RUN (review round 4, and this was a P0). `--collect-only`
+    # has no call phase, so nothing CAN pass; before the bail, this red an invocation
+    # that never claimed to run anything — and `tools/skip-guard.py --emit-manifest`
+    # runs exactly this to build CI's coverage manifest and fails closed on any rc
+    # other than 0/5, so it failed the manifest step of python-ci.yml,
+    # post-merge-validation.yml, ci.yml and ci-timing.yml. Measured then: `65 tests
+    # collected, EXIT=1` and `emit-manifest: collect-only did not COMPLETE`.
+    target.write_text(
+        f"import pytest\n\n\ndef {name}() -> None:\n"
+        "    pytest.skip('probe')\n", encoding="utf-8")
+    collected = subprocess.run(
+        [*run, "--collect-only"], cwd=tmp_path, capture_output=True, text=True)
+    assert collected.returncode == 0, (
+        "a `--collect-only` run was RED, which fails closed CI's coverage-manifest "
+        "generation: " + (collected.stdout + collected.stderr)[-1500:])
+
+    # ⛔ AND THE OUTCOME HALF SURVIVES `-n`, which is how CI runs the suite (review
+    # round 4: measured green at `63 passed, 2 skipped, exit 0` before the worker
+    # record was published to the controller — a worker runs a slice and the
+    # controller collects nothing, so neither side could answer alone).
+    pytest.importorskip("xdist")
+    distributed_skip = subprocess.run(
+        [*run, "-n", "2"], cwd=tmp_path, capture_output=True, text=True)
+    assert distributed_skip.returncode != 0, (
+        "a gate that skipped ITSELF was green under `-n 2`: "
+        + (distributed_skip.stdout + distributed_skip.stderr)[-1500:])
+    assert "WIRING GATE did not PASS" in (
+        distributed_skip.stdout + distributed_skip.stderr), (
+        "the distributed outcome refusal did not name the gate: "
+        + (distributed_skip.stdout + distributed_skip.stderr)[-1500:])

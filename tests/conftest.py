@@ -309,7 +309,64 @@ _projection_mod.install_thread_stamp()
 # frame-keyed carve-out exemption cannot see worker-thread stacks.
 
 
-from tests import _live_gate  # noqa: E402
+from tests import (  # noqa: E402  (late import: after TEST_MODE env wiring)
+    _live_gate,
+    _wiring_gate_marks,
+)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items):
+    """Refuse a suppression/deselection MARKER on the §4.3 citation wiring gate.
+
+    tryfirst, and item-level, because both are the fix rather than tidiness: the
+    gate cannot guard itself (a guard inside it is skipped with it), an import-time
+    assertion inside its module cannot see a `pytestmark` assigned below it, and in
+    the CI invocation whose `-m 'not track_b and not live and not integration'`
+    expression is about to deselect the gate, a trylast hook would never see it.
+    The predicate, and the measurements behind it, live in
+    `tests/_wiring_gate_marks.py`.
+    """
+    _wiring_gate_marks.refuse_suppressed_gates(items)
+
+
+def pytest_sessionstart(session):
+    """Reset the wiring-gate outcome record (a process may run several sessions)."""
+    _wiring_gate_marks.reset()
+
+
+def pytest_collection_finish(session):
+    """Record the guarded gates THIS session collected — after `-k`/`-m` filtering.
+
+    Reading `session.items` here rather than in `pytest_collection_modifyitems` is
+    what keeps a legitimate partial run (`-k`, `-m`, `--deselect`) free of a false
+    block: a gate the caller deliberately did not select is not ``required``, so the
+    outcome check below never asks it to have passed.
+    """
+    _wiring_gate_marks.note_required(session.items)
+
+
+def pytest_runtest_logreport(report):
+    """Record how a guarded gate actually reported (the OUTCOME half)."""
+    _wiring_gate_marks.note_report(report)
+
+
+def pytest_testnodedown(node, error):
+    """Fold a worker's wiring-gate record in (xdist collects and runs on workers)."""
+    workeroutput = getattr(node, "workeroutput", None)
+    if isinstance(workeroutput, dict):
+        _wiring_gate_marks.merge_worker(workeroutput.get("wiring_gate_marks"))
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Red a green run whose guarded gate did not PASS (a body or fixture skip).
+
+    The verdict is assigned to `session.exitstatus`: a hook's RETURN value is
+    ignored by pytest, so returning the status would print the refusal and still
+    exit 0 — measured, and the reason this is an assignment.
+    """
+    session.exitstatus = _wiring_gate_marks.refuse_unpassed(
+        session.config, exitstatus)
 
 
 @pytest.hookimpl(tryfirst=True)

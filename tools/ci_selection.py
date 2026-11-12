@@ -362,6 +362,17 @@ SHARED_MODULES = (
     # (#1349/#3332/#3910 under-selection class). The gate's own blast radius is
     # the whole suite: it can RED any test that skips on a live-storage reason.
     "tests/_live_gate.py",
+    # #12223: the wiring-gate marker guard (`tests/_wiring_gate_marks.py`) is
+    # imported at conftest MODULE level and applied from
+    # `pytest_collection_modifyitems`, so it is consulted before EVERY item on
+    # EVERY surface — not just the module whose gate it guards. Same class as
+    # `_live_gate.py` directly above, and enforced by the same AST ratchet
+    # (`tests/test_ci_selection.py::test_every_conftest_module_level_tests_import_is_shared`):
+    # it is not a `test_*.py` file, so the manifest never classifies it — without
+    # this entry a change to the guard would select `core` only. Its own blast
+    # radius is the whole suite: a defect in it can refuse collection for any
+    # invocation that collects `tests/test_session_schema_3554.py`.
+    "tests/_wiring_gate_marks.py",
     "pyproject.toml",
     "requirements.txt",
     ".github/workflows/python-ci.yml",
