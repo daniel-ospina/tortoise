@@ -54,6 +54,16 @@ from tortoise.live import (
 from tortoise.log import EventLog
 from tortoise.sdk import POINT_STATUS_VALUES, TortoiseSDK
 
+#: Either refusal answers "can this key smuggle a terminal status?".
+#:
+#: `EventAPI.add_event` grew main's #12106/#12133 KEY-TYPE guard, which fires
+#: BEFORE the `:Event` arm and is deliberately STRICTER (it refuses a key that is
+#: not an exact `str`, whatever it renders as). Both refusals are correct answers
+#: to the question these tests ask, and neither may be weakened: the assertion is
+#: the STATE (nothing stored, nothing journalled), so the pattern accepts either
+#: and the ordering is main's to decide.
+_EITHER_REFUSAL = r"(not writable on an :Event|not an exact `str`)"
+
 #: The terminal half, as a sorted tuple so a parametrized id list is stable.
 _TERMINAL = tuple(sorted(TERMINAL_EXCLUDED_STATUSES))
 
@@ -573,7 +583,7 @@ class TestTheEventApiDoor:
 
         api = self._api(sdk)
         _before = len(_journal_lines(sdk._test_log))
-        with pytest.raises(ValueError, match="not writable on an :Event"):
+        with pytest.raises(ValueError, match=_EITHER_REFUSAL):
             api.add_event("ev-kliar", "deployment", **{_KeyLiar("x"): "superseded"})
         assert len(_journal_lines(sdk._test_log)) == _before, (
             "a refused call must append nothing to the journal")
@@ -619,7 +629,7 @@ class TestTheEventApiDoor:
 
         api = self._api(sdk)
         before = len(_journal_lines(sdk._test_log))
-        with pytest.raises(ValueError, match="not writable on an :Event"):
+        with pytest.raises(ValueError, match=_EITHER_REFUSAL):
             api.add_event("ev-masked-flag", "deployment",
                           **{"outdated": True, _AliasOutdated("outdated"): False})
         assert len(_journal_lines(sdk._test_log)) == before
@@ -785,7 +795,7 @@ class TestTheEventApiDoor:
 
         for key in (_ConstHashKey("status"), _LyingEqKey("status")):
             api = self._api(sdk)
-            with pytest.raises(ValueError, match="not writable on an :Event"):
+            with pytest.raises(ValueError, match=_EITHER_REFUSAL):
                 api.add_event("ev-api-keyed", "deployment", **{key: "superseded"})
             assert _journal_lines(sdk._test_log) == []
 

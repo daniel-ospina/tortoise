@@ -136,7 +136,20 @@ def test_uri_shapes(monkeypatch):
     monkeypatch.setenv("TORTOISE_TEST_DOCKER_PORT", "32768")
     monkeypatch.setenv("TORTOISE_TEST_LEGACY_PORT", "32769")
     monkeypatch.delenv("TORTOISE_TEST_DOCKER_HOST", raising=False)
+    # ⛔ Set the password this assertion DEPENDS ON instead of inheriting it (#11521).
+    # `docker_uri` resolves its default through `docker_password()`, which reads this
+    # seam at CALL time ("falkordb" only when the variable is UNSET), so without this
+    # line the two `docker://:falkordb@...` expectations below are statements about the
+    # AMBIENT environment, not about the code under test. Measured: `tools/test_lane.py`
+    # exports `TORTOISE_TEST_DOCKER_PASSWORD=''` (its own container has no password) —
+    # by design, since that is the mandated cell invocation — so this test red as
+    # `docker://:@localhost:32768/g` on every lane that ran it, while CI stayed green
+    # because the shared lane's password happens to equal the literal. A test that is
+    # green only where the ambient default is green pins nothing.
+    monkeypatch.setenv("TORTOISE_TEST_DOCKER_PASSWORD", "falkordb")
     assert _live_utils.docker_uri("g") == "docker://:falkordb@localhost:32768/g"
+    # `legacy_uri`'s password default is its OWN default (`""`), not the ambient seam,
+    # so this expectation is already hermetic — it is the empty-userinfo shape either way.
     assert _live_utils.legacy_uri("g") == "docker://:@localhost:32769/g"
     # the legacy shape is the EMPTY-userinfo form the raw-client probes use
     assert ":@" in _live_utils.legacy_uri("g")

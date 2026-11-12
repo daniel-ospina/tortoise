@@ -1468,6 +1468,44 @@ assert (
 )
 
 
+def _fold_declared_bounds_note() -> str:
+    """The two classes this fold does NOT read, named on the receipt.
+
+    ⚠️ Emitted on EVERY arm that carried anything, not only on the "nothing was
+    carried" clause: `carried >= 1` suppressed that clause, so the ordinary fold
+    destroyed the duplicate's `createdAt`/`updatedAt` and any non-`confidence`
+    attribute on its own links with NO clause naming them. Both are DECLARED — the
+    structural props in `capture_fold._STRUCTURAL_PROPS`, the attribute bound in
+    `_CARRIED_EDGE_ATTRS` + #12146 — but "declared in a docstring" is not
+    "disclosed on the receipt an operator reads."
+    """
+    return ("the row's `createdAt`/`updatedAt` went with it, and edge "
+            "attributes beyond `confidence` are a declared bound this fold "
+            "does not read (#12146)")
+
+
+def _fold_residual_clause(fold_report: dict) -> str:
+    """The refusal's residual clause, minus anything `blocked` already said.
+
+    ⚠️ `capture_fold._already_written` prints the residual INTO `blocked` on the
+    post-write refusal arm, and this seam appends the residual too (a refusal can
+    be reached before any write, when that line is not printed at all) — so
+    echoing the whole list printed ONE fact twice under two lead-ins ("did not
+    carry X; it also holds X"), which reads as two facts on the arm whose whole
+    purpose is telling an operator what changed.
+
+    ⚠️ `str(blocked)` — NOT ``" ".join(str(blocked))``: joining a STRING iterates
+    it character-wise (``" ".join("abc") == "a b c"``), so every item got a space
+    between its letters and no item was ever found in `_said`. The de-duplication
+    was inert for exactly one commit, and the pin that was supposed to catch it
+    inspected `capture_fold`'s own `blocked` instead of this seam. It returns a
+    string so this line is testable on its own.
+    """
+    said = str(fold_report.get("blocked") or "")
+    fresh = [r for r in fold_report.get("residual") or () if r not in said]
+    return ("; it also holds " + "; ".join(fresh)) if fresh else ""
+
+
 def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     """Build the LLM-extraction transcript + pre-write estimate for a
     conversation (#822). One ``Speaker: text`` line per turn (the
@@ -17376,10 +17414,129 @@ class TortoiseSDK:
                             f"repeated claim '{content[:60]}' kept distinct — "
                             "operator-wired duplicate not deduped")
                     else:
-                        proj.g.query(
-                            "MATCH (n:Point {id:$id}) DETACH DELETE n",
-                            params={"id": pid})
-                        pid = resolved
+                        # #9437: the fold may not destroy the duplicate's OWN
+                        # evidence. `DETACH DELETE` takes the node's
+                        # `aboutObject`/`aboutSubject` edges with it, so the
+                        # SURVIVING claim would carry less support than the
+                        # two together held — the loss the sibling guard
+                        # (PR #9424) refuses at the against-store classifier.
+                        # The evidence is moved onto the canonical FIRST; where
+                        # it cannot be moved, the copy is not redundant and the
+                        # fold is refused (the `engaged` branch's shape,
+                        # extended from "operator-wired" to "carries evidence").
+                        from tortoise.capture_fold import carry_fold_evidence
+                        fold_report = carry_fold_evidence(
+                            proj, pid, resolved, sdk=self)
+                        if not fold_report["ok"]:
+                            dedup = DEDUP_NEW
+                            # ⚠️ The module sets `undeclared` on EVERY arm so a
+                            # refusal can disclose it — and this branch used to
+                            # print only `blocked`, so the open set went quiet in
+                            # exactly the case the module's own comment cites (an
+                            # operator deciding whether to force the fold).
+                            kept = ""
+                            if fold_report["undeclared"]:
+                                kept += ("; it also holds field(s) this fold "
+                                         "cannot carry: "
+                                         + ", ".join(fold_report["undeclared"]))
+                            # ⚠️ `residual` too: every PRE-WRITE refusal leaves it
+                            # holding only the module's slot conflicts (a
+                            # duplicate that spells one slot twice), which is
+                            # exactly the fact an operator deciding to force the
+                            # fold needs — and this branch printed `blocked` and
+                            # `undeclared` only, so the module's "set here so a
+                            # refusal discloses them too" was half-delivered.
+                            kept += _fold_residual_clause(fold_report)
+                            warnings.append(
+                                f"repeated claim '{content[:60]}' kept "
+                                f"distinct — {fold_report['blocked']}{kept}")
+                        else:
+                            proj.g.query(
+                                "MATCH (n:Point {id:$id}) DETACH DELETE n",
+                                params={"id": pid})
+                            pid = resolved
+                            # A fold is a non-accept outcome and a destructive
+                            # one: the receipt says what happened and what was
+                            # carried, never a silent delete.
+                            carried = fold_report["carried"]
+                            created = fold_report["created"]
+                            copied = fold_report["copied"]
+                            residual = fold_report["residual"]
+                            undeclared = fold_report["undeclared"]
+                            # ⚠️ "present" and "moved" are different facts:
+                            # `link_entity` short-circuits a link the canonical
+                            # already held, so `carried` counts links PRESENT
+                            # and only `created` were written by this fold.
+                            links = ""
+                            if carried:
+                                links = f"{carried} attachment link(s) present"
+                                if created != carried:
+                                    links += f" ({created} written by this fold)"
+                            said = (
+                                f"repeated claim '{content[:60]}' folded "
+                                f"into canonical {pid} — "
+                                + (links or "no attachments") 
+                                + (f", copied {', '.join(copied)}"
+                                   if copied else "")
+                                # ⚠️ `residual` matters: a duplicate whose
+                                # evidence DIFFERS from the canonical's has
+                                # per-occurrence evidence, so the
+                                # "nothing to carry" clause would contradict
+                                # the clause that immediately follows it.
+                                # `undeclared` matters for the same reason and
+                                # one more: the node carried something this
+                                # fold does not know, and the delete is about
+                                # to destroy it — so the clause that would
+                                # deny any evidence must not be printed over
+                                # it (#2795's open set).
+                                # ⚠️ QUALIFIED, not a bare "nothing to carry":
+                                # the clause is measured against this module's
+                                # private vocabulary, while the duplicate DOES
+                                # hold `createdAt`/`updatedAt` — the row's write
+                                # history, which the delete takes and which no
+                                # residual claims (a DECLARED exemption in
+                                # `capture_fold._STRUCTURAL_PROPS`). Unqualified,
+                                # the receipt asserted an absence over a node
+                                # that lost its own write time.
+                                + (", no per-occurrence evidence of its own "
+                                   "to carry beyond its write history"
+                                   if (not carried and not copied and not residual
+                                       and not undeclared)
+                                   else "")
+                                # ⚠️ UNCONDITIONAL. The bound is a property of
+                                # the DELETE, not of an empty fold: gating it on
+                                # `carried or copied` left the two states the
+                                # module itself calls normal — every slot
+                                # differs (residual-only), or a prop it cannot
+                                # carry (undeclared-only) — disclosing nothing
+                                # about `createdAt`/`updatedAt` or the attribute
+                                # bound, both of which the delete takes.
+                                + f"; {_fold_declared_bounds_note()}")
+                            if residual:
+                                # ⚠️ NOT "kept the canonical's own …": a support
+                                # field the canonical does not hold at all (an
+                                # absent `confidence`) was not "kept" — the
+                                # duplicate's value went with the node. "did not
+                                # carry" is true of both cases and the
+                                # parenthetical says which.
+                                # Each residual item states its OWN reason (a
+                                # differing slot, a dual-spelling conflict on the
+                                # duplicate, an #1370 short-circuit) — a blanket
+                                # parenthetical here asserted "the canonical's
+                                # differs or is absent" over two of those three.
+                                said += ("; did not carry "
+                                         f"{'; '.join(residual)}")
+                            if undeclared:
+                                # The fold cannot carry a prop it does not
+                                # declare, and the duplicate is gone — so the
+                                # receipt NAMES what went with it (a silent
+                                # drop of a producer's own field was the
+                                # measured shape this clause closes).
+                                said += (
+                                    "; dropped field(s) this fold does not "
+                                    f"declare, and so could not carry: "
+                                    f"{', '.join(undeclared)}")
+                            warnings.append(said)
                 if dedup == DEDUP_NEW:
                     canonical_by_hash[_content_hash(content)] = pid
                     canonical_contents.append((pid, content))
@@ -33802,8 +33959,16 @@ class TortoiseSDK:
         # arithmetic: the block's `no_belief` is read from the graph AFTER this
         # pass, so it IS the uncovered count — "6 of 20" is
         # `belief_present` of `ep_reachable_claims`, and 14 uncovered is
-        # `no_belief`. `graph_ep_reachable` is reported as the denominator this
-        # pass ran against, with no cross-population sum.
+        # `no_belief`. ⛔ `graph_ep_reachable` is NOT this pass's denominator
+        # (#12138 §1): it is the GRAPH-scoped `ep_reachable_claims` — the whole
+        # graph's EP-reachable population — copied in beside the pass record so
+        # a reader sees both scopes at once. The pass's own denominator is the
+        # `window_reachable` already in the same dict (`_record_pass_reach`),
+        # and `dream()`'s `coverage` is `affected / window_reachable`. Dividing
+        # `affected` by `graph_ep_reachable` is WRONG: on a pass with
+        # affected=3, window_reachable=4, graph_ep_reachable=8 the record
+        # carries `coverage=0.75` while that division reads 0.375 for a pass
+        # that consumed its whole window.
         reachable = out.get("ep_reachable_claims")
         if reachable is not None:
             last["graph_ep_reachable"] = int(reachable)
@@ -34013,12 +34178,18 @@ class TortoiseSDK:
         # population (no IMPL|NAND edge at all) and `unclassified` is edged but
         # unreachable (#12116 C-P2). Equalities, not clamps.
         operator_less = graph_live - points_edged
-        # No clamp: the numbers are reported as measured. A future mixed
-        # population must show up as `no_belief < 0` / a `belief_coverage_pct`
-        # outside [0, 1] — a VISIBLE defect — rather than being silently
-        # corrected into a plausible "fully covered" (#12116 review C-P3: a
-        # clamp is the opposite of the asserted invariant the comment claimed).
-        # `tests/test_11823_*` asserts the ranges instead.
+        # No clamp: the numbers are reported as measured, rather than being
+        # silently corrected into a plausible "fully covered" (#12116 review
+        # C-P3: a clamp is the opposite of the asserted invariant the comment
+        # claimed). ⛔ #12138 §2 — only ONE direction is visible that way: a
+        # NARROWER (or label-blind) denominator lets the numerator exceed it,
+        # so `no_belief` goes negative or `belief_coverage_pct` exceeds 1. A
+        # WIDER denominator keeps BOTH in range (`belief_present` fixed over a
+        # larger denominator ⇒ the ratio falls and `no_belief` rises; measured:
+        # denominator +4 ⇒ pct 0.2, no_belief +4), so the ranges cannot see it.
+        # What reddens on an inflated denominator is the counts pinned against
+        # independent queries in `tests/test_11823_propagation_cap_signal.py`
+        # (`test_counts_match_an_independent_query`).
         no_belief = reachable - belief_present
         unclassified = points_edged - reachable
         return {

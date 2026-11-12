@@ -23,15 +23,15 @@ The T's per-question leg is *"the value-bearing evidence is verbatim-present"*
   ``_value_verbatim_span``, called in the SHIPPED ORDER (resolve, then stamp
   against the resolved turn). **The two stamp-side inputs are the ones
   production hands it** — content cut to ``_MAX_CONTENT`` and the quote to
-  ``_MAX_QUOTE``, both at a TOKEN boundary (``extractor_v2.py:10402`` /
-  ``:10470``), while the resolver gets the raw point (``:10693``). See
+  ``_MAX_QUOTE``, both at a TOKEN boundary (``extractor_v2.py:10430`` /
+  ``:10498``), while the resolver gets the raw point (``:10721``). See
   ``_stamp_inputs``.
 
 ⛔ **The resolver is not optional in this census.** The receipt's
 ``source_turn_id`` is the model's ADVISORY index; the write path resolves the
 turn from the quote first and never lets a wrong model index win
-(``_resolve_source_turn`` docstring; call site ``extractor_v2.py:10693`` →
-``:10718``). Passing the receipt field straight through measures a population
+(``_resolve_source_turn`` docstring; call site ``extractor_v2.py:10721`` →
+``:10746``). Passing the receipt field straight through measures a population
 production never produces *and* never fires the resolver's own E3 anchor
 warning — it under-counts ``no_turn`` and over-counts ``band`` (measured: 3
 points, all ``wp06_quarry_rollout``/``narrative``, which the resolver reports
@@ -43,8 +43,8 @@ observation: it answers *"what would the shipped mechanism stamp on these
 committed points?"*. The structural reason is that the measuring harness
 persists the S2 *model* output (``tests/eval/write_path/raw_vs_narrative.py`` →
 ``ev2.run_s2(...)``), which is pre-``pt_entry``; the span is stamped later, when
-``pt_entry`` is built (``extractor_v2.py:10694-10701``, stamped at
-``:10718-10721``). It is NOT a question of
+``pt_entry`` is built (``extractor_v2.py:10722-10729``, stamped at
+``:10746-10749``). It is NOT a question of
 dates — the receipts (committed 2026-10-19, ``ecc7bc8ca8``) postdate #8659
 (``2312845b6``, 2026-10-14) — so no re-ingest through that harness can ever put
 a span key in a receipt.
@@ -207,7 +207,7 @@ def _edus(session: str) -> list[dict]:
     ``_resolve_source_turn`` — "position and value can diverge"). A hand-rolled
     copy keeps the empty turns, so its list is LONGER and the divergence lands
     on the resolver's in-range bound, ``0 <= model_idx < len(edus)``
-    (``extractor_v2.py:9273``): a model index that fell inside the hand-rolled
+    (``extractor_v2.py:9280``): a model index that fell inside the hand-rolled
     list can fall outside production's, so the resolved ``turn_idx`` differs for
     exactly those points. That flips them between ``no_turn`` (``turn_idx is
     None``) and ``band``/``valuefree_quote``, changes which warning variant an
@@ -231,9 +231,9 @@ def _stamp_inputs(point: dict) -> tuple[str, str]:
     write path clamps them.
 
     ⛔ Not the receipt's raw strings. ``extractor_v2`` trims the content to
-    ``_MAX_CONTENT`` (``:10402``) and the quote to ``_MAX_QUOTE`` (``:10470``)
-    BEFORE ``_value_verbatim_span(content, quote, ...)`` is called (``:10718``);
-    only ``_resolve_source_turn`` gets the raw point (``:10693``, deliberately).
+    ``_MAX_CONTENT`` (``:10430``) and the quote to ``_MAX_QUOTE`` (``:10498``)
+    BEFORE ``_value_verbatim_span(content, quote, ...)`` is called (``:10746``);
+    only ``_resolve_source_turn`` gets the raw point (``:10721``, deliberately).
     A census on the raw strings therefore answers a question production never
     asks: a >``_MAX_QUOTE``-char quote gets an address production cannot stamp.
     Measured over the sealed corpus: 3 of the 217 points carry a
@@ -280,7 +280,7 @@ def _stamp_quote(point: dict) -> str:
     The dedupe half reads quotes too, and ``retrieval._same_fact`` compares the
     COMMITTED hit (``retrieval.py:3443``: ``qa = str(a.get("quote") or "")``),
     i.e. after ``extractor_v2`` rewrote the field to the ``_MAX_QUOTE`` span at
-    the point's own commit (``:10470``). Reading the raw
+    the point's own commit (``:10498``). Reading the raw
     receipt string here would measure a population no package holds — the same
     defect §2.1 and §2.3 each corrected once already (advisory turn index, raw
     span inputs), one field over.
@@ -401,7 +401,7 @@ def test_the_census_stamps_on_the_inputs_production_hands_it():
 
     ``_stamp_inputs`` trims the content to ``_MAX_CONTENT`` and the quote to
     ``_MAX_QUOTE`` because that is what ``extractor_v2`` hands
-    ``_value_verbatim_span`` (``:10402`` / ``:10470`` -> ``:10718``). Measured at
+    ``_value_verbatim_span`` (``:10430`` / ``:10498`` -> ``:10746``). Measured at
     this head: 3 points in the population carry a >``_MAX_QUOTE``-char quote and
     exactly ONE of them is value-bearing AND spanned — ``wp04_aurora_perf``/``raw``
     — and it is the only place the two readings differ, ``(0, 201)`` raw vs
@@ -471,7 +471,7 @@ def test_the_census_resolves_the_turn_the_way_the_write_path_does():
     """The census must not measure a population production never produces.
 
     The write path resolves the source turn from the quote BEFORE stamping
-    (``extractor_v2.py:10693`` → ``:10718``), and the receipt's
+    (``extractor_v2.py:10721`` → ``:10746``), and the receipt's
     ``source_turn_id`` is only the model's ADVISORY index. Reading that field
     straight through puts three ``wp06_quarry_rollout``/``narrative`` points on
     turns the resolver refuses (quote-overlap < 0.6), which (a) hides the
@@ -776,7 +776,7 @@ def _resolved_turn_key(point: dict, edus: list[dict]) -> str:
 
     ⛔ Not the receipt's own ``source_turn_id``. That field is the S2 model's
     ADVISORY index; production overwrites it with ``_resolve_source_turn``'s
-    answer before the point is committed (``extractor_v2.py:10693`` → ``:10700``),
+    answer before the point is committed (``extractor_v2.py:10721`` → ``:10728``),
     and ``_same_fact`` groups on the committed field
     (``retrieval.py:3439-3441`` — the ``_pkg_turn_key`` pair and its equality
     test). Same defect class as §2.1's, one leg over —
@@ -985,7 +985,7 @@ def test_the_dedupe_leg_reads_the_COMMITTED_quote_not_the_raw_receipt(monkeypatc
     assert committed == {"consulted": 1, "value_flagged": 0,
                          "value_guard_decisive": 0, "collapsed": 1}, (
         f"the route did not read the COMMITTED quote: {committed} — production "
-        f"commits the _MAX_QUOTE span (extractor_v2.py:10470), so the pair is a "
+        f"commits the _MAX_QUOTE span (extractor_v2.py:10498), so the pair is a "
         "collapse, not a value conflict")
 
     # … and the SAME pair read the way this file used to read it, to show the
@@ -1130,19 +1130,19 @@ def _longest_quote_run(turn: str, quote: str):
 # lines reds until the numbers are re-derived, and a cite edited without
 # re-deriving reds too. That is the contract, not an inconvenience.
 _PUBLISHED_CITES = {
-    10402: ("content = _write_span(_raw_content, _MAX_CONTENT)",
+    10430: ("content = _write_span(_raw_content, _MAX_CONTENT)",
            "the content clamp"),
-    10470: ('quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)',
+    10498: ('quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)',
            "the quote clamp, at the point's own commit"),
-    9273: ("if type(model_idx) is int and 0 <= model_idx < len(edus):",
+    9280: ("if type(model_idx) is int and 0 <= model_idx < len(edus):",
            "the resolver's in-range bound"),
-    10693: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
+    10721: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
            "the resolver call"),
-    10694: ("pt_entry = {", "the point entry the span is stamped into"),
-    10700: ('"source_turn_id": turn_idx,',
+    10722: ("pt_entry = {", "the point entry the span is stamped into"),
+    10728: ('"source_turn_id": turn_idx,',
            "the resolved turn the point COMMITS"),
-    10701: ("}", "the end of the point entry"),
-    10718: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
+    10729: ("}", "the end of the point entry"),
+    10746: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
            "the stamp itself"),
 }
 
@@ -1153,7 +1153,7 @@ _PUBLISHED_CITES = {
 #: ⛔ No concrete line number is spelled in this comment: the two examples that
 #: used to sit here went stale in the very drift this PR repairs, and an example
 #: that rots is the defect restated in the guidance (#10848 review P2).
-_VALUE_FREE_GATE = (5582, "if not _carries_value(content, quote):")
+_VALUE_FREE_GATE = (5589, "if not _carries_value(content, quote):")
 
 #: The same contract, for the RUNBOOK — the doc half of the census (#10742).
 #: The runbook `publishes the same numbers` as this file, so when the file's
@@ -1162,32 +1162,32 @@ _VALUE_FREE_GATE = (5582, "if not _carries_value(content, quote):")
 #: asserted ONE number, and the other seven went stale unread. This mapping is
 #: keyed the same way so the two halves can never drift apart again.
 _RUNBOOK_CITES = {
-    10402: ("content = _write_span(_raw_content, _MAX_CONTENT)",
+    10430: ("content = _write_span(_raw_content, _MAX_CONTENT)",
            "the content clamp"),
-    10470: ('quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)',
+    10498: ('quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)',
            "the quote clamp, at the point's own commit"),
-    10693: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
+    10721: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
            "the resolver call"),
-    10694: ("pt_entry = {", "the point entry the span is stamped into"),
-    10701: ("}", "the end of the point entry"),
-    10718: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
+    10722: ("pt_entry = {", "the point entry the span is stamped into"),
+    10729: ("}", "the end of the point entry"),
+    10746: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
            "the stamp itself"),
-    4472: ("def _verbatim_span_in_turn(turn_text: str, quote: str) -> tuple[int, int] | None:",
+    4479: ("def _verbatim_span_in_turn(turn_text: str, quote: str) -> tuple[int, int] | None:",
            "`_verbatim_span_in_turn`'s definition"),
-    4500: ("def _carries_value(*texts: object) -> bool:",
+    4507: ("def _carries_value(*texts: object) -> bool:",
            "`_carries_value`'s definition"),
-    5542: ("def _value_verbatim_span(content: str, quote: str, turn_idx: int | None,",
+    5549: ("def _value_verbatim_span(content: str, quote: str, turn_idx: int | None,",
            "`_value_verbatim_span`'s definition"),
-    9255: ("if not edus:", "the resolver's empty-edus silent bound"),
-    9256: ("return None", "the resolver's silent early return"),
-    5582: ("if not _carries_value(content, quote):",
+    9262: ("if not edus:", "the resolver's empty-edus silent bound"),
+    9263: ("return None", "the resolver's silent early return"),
+    5589: ("if not _carries_value(content, quote):",
            "the value-free gate (`_VALUE_FREE_GATE`)"),
-    5583: ("return None", "the value-free gate's refusal"),
-    10698: ('"source_ref": "session.md", "quote": quote, "status": "draft",',
+    5590: ("return None", "the value-free gate's refusal"),
+    10726: ('"source_ref": "session.md", "quote": quote, "status": "draft",',
            "the committed quote inside `pt_entry`"),
-    10700: ('"source_turn_id": turn_idx,',
+    10728: ('"source_turn_id": turn_idx,',
            "the resolved turn the point COMMITS"),
-    10721: ('pt_entry["span_start"], pt_entry["span_end"] = _span',
+    10749: ('pt_entry["span_start"], pt_entry["span_end"] = _span',
            "the span assignment"),
 }
 
@@ -1213,22 +1213,22 @@ _REPO = WRITE_PATH.resolve().parents[2]
 _CROSS_FILE_CITES: dict[tuple[str, int], tuple[str, str]] = {
     ("tortoise/commit_schema.py", 445): ("def validate_span(span_start: object, span_end: object) -> None:",
          "`validate_span`'s definition"),
-    ("tortoise/commit_schema.py", 765): ("span_start: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)",
+    ("tortoise/commit_schema.py", 815): ("span_start: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)",
          "the `span_start` field"),
-    ("tortoise/commit_schema.py", 792): ("return self", "the end of `_span_is_an_address`"),
+    ("tortoise/commit_schema.py", 847): ("return self", "the end of `_span_is_an_address`"),
     ("tools/longmem_eval/retrieve.py", 1005): ('if p.get("span_start") is not None and p.get("span_end") is not None:',
          "the eval lane's offset annotation"),
     ("tools/longmem_eval/retrieve.py", 1007): ('entry["span_end"] = p["span_end"]',
          "the annotated end offset"),
-    ("tortoise/sdk.py", 38935):
+    ("tortoise/sdk.py", 41592):
         ("rows = graph.query(", "the provenance query's opener"),
-    ("tortoise/sdk.py", 38941):
+    ("tortoise/sdk.py", 41598):
         ('+ ", n.quote, n.source_turn_id, n.span_start, n.span_end",',
          "the RETURN continuation appending #8658's four columns"),
-    ("tortoise/sdk.py", 38902):
+    ("tortoise/sdk.py", 41551):
         ("# ⛔ KNOWN LIMITATION — this read is the PROJECT-search point",
          "the ⛔ KNOWN LIMITATION comment"),
-    ("tortoise/sdk.py", 38918):
+    ("tortoise/sdk.py", 41567):
         ("# or of #8658.", "the end of the ⛔ KNOWN LIMITATION comment"),
     ("tortoise/retrieval.py", 3439):
         ("at = _pkg_turn_key(a)",

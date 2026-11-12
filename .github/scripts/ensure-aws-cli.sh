@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# ensure-aws-cli.sh — guarantee the ONE runtime dependency the backup driver has (#12135).
+# ensure-aws-cli.sh — guarantee the R2 runtime dependency the backup driver has (#12135).
+#
+# ⚠ NOT the driver's only external dependency: it also shells out to `jq` (55 sites)
+# and `curl` (43), neither of which anything verifies — a missing `jq` is currently
+# reported as a false `R2_UNLISTABLE` storage fault. Same class, tracked in #12208.
 #
 # `.github/scripts/registry-cron.sh` shells out to `aws s3api` for every R2
 # operation it performs: the create-once dedup object, the direct freshness

@@ -1915,3 +1915,142 @@ def test_the_SVBP_decline_warning_survives_a_NULL_op_type(monkeypatch):
     proj.__dict__["g"] = type("G", (), {"query": staticmethod(_query)})()
     factors, _meta = FalkorProjection.extract_svbp_factors(proj)
     assert factors == [], factors
+
+
+def test_the_RUN_level_refusal_names_a_NULL_mechanism_without_raising():
+    """⛔ THE SAME FIX ONE LAYER DOWN HAD NO PIN AT ALL (#12215).
+
+    `tortoise/svbp.py`'s own refusal path makes the identical comparison one
+    function over: `sorted(refused.items(), key=lambda kv: str(kv[0]))`. That
+    `key=` is a real fix — a caller that reaches the public `run()` with a NULL
+    `op_type` beside a named mechanism passed `[IMPL, coherence, None]` in review
+    and raised `TypeError: '<' not supported between instances of 'NoneType' and
+    'str'` on the pre-fix tree, while the fix logs `2 factor(s) REFUSED — None×1,
+    coherence×1`.
+
+    Nothing reddened when that `key=` was reverted to `sorted(refused.items())`:
+    the only caller in the suite that hands `run()` a refused mechanism is
+    `test_SVBP_declines_a_mechanism_it_cannot_price`, and it refuses exactly ONE
+    (`{"coherence": 1}`) — a one-key dict never compares. So the pin below is the
+    discriminand: TWO refused keys, one of them `None`, which is the shape the
+    comparison is on and the shape no test produced.
+
+    It is deliberately ALL-refused (no IMPL/NAND factor), which keeps the
+    assertion on the sort/format/logger line: nothing is priced, so `_update_factor`
+    is never called and no message passing happens.
+
+    ⛔ THE `SIGFPE` IS REAL BUT NOT WHAT THIS AVOIDS (#12221 review, measured).
+    Pricing a factor dies `Fatal Python error: Floating point exception` inside
+    `jax`/`pjit` at `_tilt` on this box **only below 8 particles** — measured
+    exit `-8` at `n_particles` 4 and 7, clean at 8, 16 and 50 — so it is
+    CONFIG-dependent, not environmental, and it is why the SIBLING test
+    (`n_particles=4`) kills the pytest process. This engine uses the default 50,
+    where pricing works; the all-refused shape is chosen to keep the pin on one
+    line, not to dodge that crash. Do not restate the earlier "environmental /
+    both trees" framing: it was wrong about the cause.
+
+    ⛔ WHAT MAKES EACH ASSERTION DISCRIMINATE (#12221 review, both reviewers,
+    measured). These details are load-bearing and must not be "tidied":
+
+      * `coherence` is passed FIRST and `None` LAST, because `"None" <
+        "coherence"` — with the natural order the sorted string would EQUAL the
+        dict's insertion order, and the whole sort could be deleted
+        (`list(refused.items())`) while this still passed.
+      * THREE refused mechanisms with counts 2/3/1, not one each: equal counts
+        would make `sum(refused.values())` and `len(refused)` indistinguishable,
+        and one mechanism per count would make sorting by COUNT
+        (`key=lambda kv: kv[1]`) indistinguishable from sorting by NAME.
+      * every refused factor carries TWO `input_ids`, because `_update_factor`
+        early-returns below two (`svbp.py:269`). With one id, deleting
+        `factors = priced` reaches no message passing and the pin stays green.
+        The assertion that fires for that mutant is `converged` (`False`,
+        because the priced factors iterate without ever converging).
+
+    The companion assertion pins the other half of the block: with nothing
+    refused (`if refused:` removed) `run()` must emit NO REFUSAL RECORD, or every
+    clean belief read logs a bogus `0 factor(s) REFUSED`.
+
+    ⛔ THE CAPTURE IS A REAL HANDLER, AND IT SELECTS THE RECORD (#12221 review
+    round 2). An earlier version patched `logger.warning` and asserted on the
+    argument tuple by POSITION, which made the pin grade arg-passing style and
+    total silence instead of the refusal: a byte-identical f-string/reformatted
+    call, or any unrelated notice on this logger (the module header reads
+    `# DEPRECATED:`), reddened it with a message about counting. Records are
+    selected by the `REFUSED` marker — the string operators actually grep for —
+    so a rewording that keeps that marker and the counts stays green.
+
+    Reachability, stated so nobody is surprised: on a host where the SIBLING
+    test (`n_particles=4`) hits the `SIGFPE` described above, it kills the pytest
+    process for the whole module, so this pin must be selected explicitly
+    (`-k`/node-id) there. That crash is pre-existing and is not this test's.
+    """
+    import logging
+
+    svbp_module = pytest.importorskip("tortoise.svbp")
+
+    records: list[str] = []
+
+    class _Cap(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    log = logging.getLogger("tortoise.svbp")
+    handler = _Cap()
+    log.addHandler(handler)
+    prev_level = log.level
+    log.setLevel(logging.WARNING)
+    try:
+        eng = svbp_module.TortoiseSVBP()
+        _iters, converged = eng.run([
+            ("op-coh-a", "coherence", ["c1", "c2"], 0.5),
+            ("op-attack", "attack", ["c3", "c4"], 0.5),
+            ("op-coh-b", "coherence", ["c5", "c6"], 0.5),
+            ("op-null", None, ["c7", "c8"], 0.5),
+            ("op-attack-b", "attack", ["c9", "c10"], 0.5),
+            ("op-attack-c", "attack", ["c11", "c12"], 0.5),
+        ])
+        refusals = [r for r in records if "REFUSED" in r]
+
+        # `_n` is a SUM of the counts (6, not 3 distinct mechanisms). The list is
+        # sorted by `str(op_type)` — NOT insertion order (the reverse here), and
+        # NOT by count (which would put `attack` last).
+        assert len(refusals) == 1, (
+            "exactly one refusal record must be emitted: " + repr(records))
+        assert "6 factor(s) REFUSED — None×1, attack×3, coherence×2" in refusals[0], (
+            "the refused-mechanism list must count every factor and sort by "
+            "str(op_type), so a NULL and a named mechanism can share one "
+            "warning: " + repr(refusals[0]))
+        # The remediation pointer is the reason the warning exists at all
+        # (it is agent-facing guidance, not a log line for humans to puzzle out).
+        assert "Run EP (tortoise/ep.py)" in refusals[0], refusals[0]
+
+        # `converged` is the property worth pinning, and it IS the discriminator
+        # for "the refused factors were not priced" (a later refactor that made
+        # `run()` converge anyway would be the `messages`/`posteriors` end state
+        # below — which is exactly why they are NOT asserted here: no single
+        # mutation of this block reaches them without `converged` firing first,
+        # and an assertion nothing can redden is dead weight that misleads the
+        # next reader (agent-infra#3442 rule 3). `iters` is likewise not asserted:
+        # it is emergent from the convergence loop, not from the refusal.
+        assert converged is True, "nothing was priced, so the reduced problem converges"
+
+        # ── the other half of the block: no refusal when nothing is refused ──
+        # One `input_id` per PRICEABLE factor: `_update_factor` early-returns
+        # below two (`svbp.py:269`), so this run prices nothing, warns nothing
+        # and never enters the jax path. Removing `if refused:` makes it log a
+        # bogus `0 factor(s) REFUSED — ` on every clean belief read.
+        records.clear()
+        clean = svbp_module.TortoiseSVBP()
+        clean.run([
+            ("op-impl", "IMPL", ["c1"], 1.0),
+            ("op-nand", "NAND", ["c2"], 1.0),
+        ])
+        clean_refusals = [r for r in records if "REFUSED" in r]
+    finally:
+        log.removeHandler(handler)
+        log.setLevel(prev_level)
+
+    assert clean_refusals == [], (
+        "a refused-only warning must not fire when every factor is priceable: "
+        + repr(clean_refusals)
+    )
