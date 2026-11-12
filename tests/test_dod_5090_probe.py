@@ -2613,6 +2613,15 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     # the flag. The clause is scoped to templates; here it states the opposite fact.
     assert "do not deploy the container's environment on their own" not in hold, hold
     assert "themselves deployment files" in hold, hold
+    # ⛔ …and the clause must name the armed VARIANT, not the surface ROOT (fresh
+    # review of PR #12016, P3). The population this clause speaks about is per FILE,
+    # so interpolating the root intersection published "(Dockerfile) … a build that
+    # uses one of them carries the flag" while the walk had armed exactly one
+    # variant — a class claim over a per-file measurement, which is the R7/R10
+    # false-PASS this PR removes. `(Dockerfile)` cannot be a substring of
+    # `(Dockerfile.selfhost)`, so the negative arm is exact rather than fuzzy.
+    assert "(Dockerfile.selfhost)" in hold, hold
+    assert "(Dockerfile)" not in hold, hold
 
     # ⛔ And no clause on THIS shape may scope the reading to `shipped["armed"]` — the
     # ANY-SURFACE armed list is the TEMPLATE here, while this note's subject is the

@@ -2788,10 +2788,19 @@ def score_rule_bullet() -> Row:
         # their own" is the `#11455` false claim in its OTHER half — that build DOES
         # carry the flag, and the row is held because this walk reads each file
         # independently and does not model the merge.
-        # ⛔ `shipped["armed"]` holds SURFACE ROOTS (`Dockerfile`), not the per-file
-        # paths in `deployment["files"]` (`Dockerfile.selfhost`) — so the split is
-        # against `deployment["surfaces"]`, which is the same vocabulary.
-        armed_deployment_files = sorted(set(shipped["armed"]) & set(deployment["surfaces"]))
+        # ⛔ The population this clause interpolates must be the PER-FILE one
+        # (`deployment["armed"]`, e.g. `Dockerfile.selfhost`), NOT an intersection
+        # with `deployment["surfaces"]` — that list holds surface ROOTS
+        # (`DEPLOYMENT_SURFACES` = `docker-compose.yml`/`.yaml`/`Dockerfile`), so the
+        # intersection named the CLASS `Dockerfile` and then published "a build that
+        # uses one of them carries the flag" over a walk that armed ONE VARIANT.
+        # A build from the silent sibling (`docker-compose.yml` really does set
+        # `build.dockerfile: Dockerfile.selfhost`) does not carry the flag, so the
+        # class wording claimed a wider population than the walk measured — the
+        # R7/R10 false-PASS class this PR exists to remove (fresh review of PR
+        # #12016, P3). `deployment["armed"]` is also the vocabulary `["silent"]`
+        # beside it already uses, so the two halves of the split finally agree.
+        armed_deployment_files = deployment["armed"]
         armed_clause = (
             f"the surface(s) that do arm it ({', '.join(armed_deployment_files)}) are "
             "themselves deployment files, so a build that uses one of them carries the "
