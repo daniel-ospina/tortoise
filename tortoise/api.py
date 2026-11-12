@@ -748,9 +748,16 @@ class EventAPI:
         # `op` must be one the fold's `_ENTITY_MUTATION_STATE_OPS` reads `state`
         # for — a `delete`/unknown-op record writes no status at all, so refusing
         # it would be an over-block with a WRONG diagnosis (measured, cycle 6).
-        # The label is read through the same tolerances the writers use —
-        # `Event`, `:Event`, any case — so a caller cannot slip past it by
-        # spelling the label differently from the fold's.
+        # ⛔ THE LABEL TEST IS DELIBERATELY WIDER THAN THE FOLD'S, and that is an
+        # accepted over-block, not a claim of equivalence: the fold matches
+        # `label` by EXACT membership (`projection._CANONICAL_ENTITY_LABELS`), so
+        # `event` / `EVENT` / `:Event` records are dropped there and never reach a
+        # node. Refusing a TERMINAL state on one of those spellings therefore
+        # refuses a record that would have written nothing (measured, cycle 6 P3 —
+        # the previous wording claimed "the same tolerances the writers use", which
+        # was false). The trade is chosen because the alternative is to miss the
+        # spelling a caller actually uses: fail-closed on a dead record beats
+        # fail-open on a live one.
         # ⛔ BOTH CHANNELS. `_emit` accepts a keyword payload OR one positional
         # record, and the positional one is spliced into `payload["point"]`
         # further down — reading only the keyword payload left the record channel
@@ -761,8 +768,13 @@ class EventAPI:
         for _map in (payload, *record):
             if not isinstance(_map, dict):
                 continue
+            # ``op`` must be a STRING before the set membership: an unhashable
+            # value raised a bare ``TypeError: unhashable type`` out of
+            # ``emit_belief`` (measured, review cycle 6 P3) — the un-named
+            # 500-class this gate exists to replace with a diagnosis.
             _op = _map.get("op")
-            if (str(_map.get("label") or "").strip().lstrip(":").lower()
+            if (isinstance(_op, str)
+                    and str(_map.get("label") or "").strip().lstrip(":").lower()
                     == "event" and _op in _ENTITY_MUTATION_STATE_OPS):
                 _state = _map.get("state")
                 refuse_terminal_event_state(
@@ -1091,7 +1103,12 @@ class EventAPI:
         # tree emits that spelling (the only `"restatus"` string in the tree is
         # the `op` VALUE). A check on a key nothing writes would be a guard
         # against a spelling no reader reads (measured, cycle 6 P2).
+        # ⛔ `op` is type-checked before the set membership: an unhashable value
+        # escaped this door as a bare ``TypeError: unhashable type`` (measured,
+        # cycle 6 P3), which is the un-named 500-class the eager refusal exists to
+        # replace.
         elif str(payload.get("label") or "").strip().lstrip(":").lower() == "event" \
+                and isinstance(payload.get("op"), str) \
                 and payload.get("op") in _ENTITY_MUTATION_STATE_OPS:
             _state = payload.get("state")
             refuse_terminal_event_state(

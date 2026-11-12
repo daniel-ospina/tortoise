@@ -645,6 +645,21 @@ def declares_status_key(props) -> bool:
     return any(_event_state_key(key) == "status" for key in props)
 
 
+def declares_event_state_key(props) -> bool:
+    """True when ``props`` declares ``status`` OR ``outdated``, under any name.
+
+    ⛔ The SDK door's presence test must gate on BOTH halves of the predicate.
+    It gated on ``status`` alone, so `outdated` was dead code at
+    ``update_entity`` for exactly the key class this change fixed for ``status``:
+    a rendered-alias ``outdated`` key slipped past `_sanitize_props`' literal
+    ``"outdated" in props``, the guard was skipped, and the flag was STORED
+    (measured, review cycle 6 P1 — the terminal half-state #11825 records, reached
+    through a declared door). `create_entity`/`add_event`/`_emit`/`emit_belief`
+    refused the same key, so this was the one hole.
+    """
+    return any(_event_state_key(key) in ("status", "outdated") for key in props)
+
+
 def _event_state_declarations(props) -> tuple[bool, object, bool, object]:
     """``(status_declared, status, outdated_declared, outdated)`` for a prop map.
 

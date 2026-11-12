@@ -7862,12 +7862,37 @@ def _item_prop_at_depth(item: dict, key: str, depth: int) -> tuple[bool, object]
     for _ in range(depth):
         if not isinstance(cur, dict):
             return False, None
-        if key in cur:
-            return True, cur.get(key)
+        declares, value = _item_rendered_prop(cur, key)
+        if declares:
+            return True, value
         cur = cur.get("props")
     if not isinstance(cur, dict):
         return False, None
-    return key in cur, cur.get(key)
+    return _item_rendered_prop(cur, key)
+
+
+def _item_rendered_prop(scope: dict, key: str) -> tuple[bool, object]:
+    """PRESENCE + value for ``key`` in one scope, reading keys the way the WRITER
+    renders them (#11825 review cycle 6, P1).
+
+    ``if key in scope`` hashes the literal name, so a ``str`` SUBCLASS whose
+    ``__str__`` returns ``key`` (or a ``bytes`` key the driver decodes to it) is
+    invisible to a Phase-1 reader while the writer files it under that name —
+    measured: a rendered-alias ``outdated`` key passed Phase 1 and the entity
+    write then refused mid-write, after the earlier items committed.
+
+    ⛔ LAST match wins, not first, within a scope: `_coerce_props` merges with
+    ``props.update``-style ordering, so a later key that renders to the same name
+    is the one the writer keeps — which is also the arm's rule, and the two must
+    agree or Phase 1 reports clean for a bundle the door refuses.
+    """
+    from .live import _event_state_key
+
+    found, value = False, None
+    for raw, candidate in scope.items():
+        if _event_state_key(raw) == key:
+            found, value = True, candidate
+    return found, value
 
 
 def _item_effective_status(item: dict, depth: int = 1) -> object:
@@ -27446,7 +27471,6 @@ class TortoiseSDK:
                 _sd, _sv, _od, _ov = _event_state_declarations(_scope)
                 if _sd:
                     _declares_status, own_status = True, _sv
-                    break
             if not _declares_status:
                 _declares_status, own_status = _item_declared_status(
                     item, _item_flatten_depth(item, "entities"))
@@ -45793,9 +45817,9 @@ class TortoiseSDK:
         # (measured at review cycle 4, after the value axis was already closed).
         # Imported here rather than at module scope because a new import line
         # shifts every ``sdk.py`` line the capstone documentation cites.
-        from .live import declares_status_key
+        from .live import declares_event_state_key
 
-        if (declares_status_key(props)
+        if (declares_event_state_key(props)
                 and self._label_reachable_by(proj.g, "Event", id_val)):
             refuse_terminal_event_state(props, door="update_entity")
 

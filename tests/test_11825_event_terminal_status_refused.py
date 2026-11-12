@@ -430,6 +430,28 @@ class TestTheEventApiDoor:
         assert len(_journal_lines(sdk._test_log)) == _before, (
             "a refused call must append nothing to the journal")
 
+    def test_the_outdated_half_is_gated_by_the_same_rendered_key_rule(self, sdk):
+        """Review cycle 6, P1 — the SDK door gated on `status` ALONE.
+
+        `declares_status_key` gated `update_entity`, so `outdated` was dead code
+        there for exactly the key class this change fixed for `status`: a
+        rendered-alias `outdated` key slipped past `_sanitize_props`' literal
+        `"outdated" in props`, the guard was skipped, and the flag was STORED —
+        the terminal half-state #11825 records, through a declared door. Measured
+        on the previous head: `update_entity(<event>, **{KOut("x"): True})` was
+        ACCEPTED and the node read `status=None, outdated=True`, which `ep.py`
+        reads as terminal while every retrieval leg serves it.
+        """
+
+        class _KeyOutdated(str):
+            def __str__(self):
+                return "outdated"
+
+        eid = _event(sdk, name="AliasOutdated")
+        with pytest.raises(ValueError, match="not writable on an :Event"):
+            sdk.update_entity(eid, **{_KeyOutdated("x"): True})
+        assert "outdated" not in _props(sdk, eid)
+
     def test_a_BYTES_key_naming_status_is_refused_before_the_write(self, sdk):
         """Review cycle 5, P1 — the driver DECODES a bytes key.
 
@@ -828,6 +850,57 @@ class TestTheBundleValidationDoor:
         })
         assert violations, f"status={status!r} passed Phase 1"
         assert any("STRING" in v["message"] for v in violations)
+
+    def test_phase_1_refuses_an_aliased_key_the_door_would_refuse(self, sdk):
+        """Review cycle 6, P1 — the Phase-1 readers hashed the literal name.
+
+        `_item_prop_at_depth` read `if key in cur`, so a rendered-alias
+        `status`/`outdated` key passed Phase 1 while the write door refused it:
+        Phase 1 said clean, `ingest` committed the earlier items, then step 3
+        raised — the partial-mutation class the arm exists to close. Both the
+        alias-vs-nested-prop precedence and the `outdated` pair are pinned here.
+        """
+
+        class _KeyStat(str):
+            def __str__(self):
+                return "status"
+
+        class _KeyOutdated(str):
+            def __str__(self):
+                return "outdated"
+
+        base = {"ref": "e1", "type": "event", "name": "A",
+                "eventKind": "deployment"}
+        # (a) an aliased `status: live` plus a nested terminal status: the door
+        # merges both and refuses, so Phase 1 must too.
+        assert sdk._validate_bundle({"entities": [
+            {**base, _KeyStat("x"): "live", "props": {"status": "superseded"}},
+        ]}), "the door refuses this bundle; Phase 1 must not call it clean"
+        # (b) the aliased server-managed flag.
+        assert sdk._validate_bundle({"entities": [
+            {**base, _KeyOutdated("x"): True},
+        ]}), "the entity write refuses the flag; Phase 1 must too"
+
+    def test_an_unhashable_state_op_does_not_escape_as_a_type_error(self, sdk):
+        """Review cycle 6, P3 — `op` was tested for set membership untyped.
+
+        An unhashable `op` raised a bare `TypeError: unhashable type` out of
+        `emit_belief` — the un-named 500-class the eager refusal exists to
+        replace with a diagnosis. The value is outside this PR's surface (it is
+        the `op` field, not `status`), so the pin is only that it no longer
+        escapes as a `TypeError`.
+        """
+        eid = _event(sdk, name="BadOp")
+        _log = EventLog(os.path.join(sdk._test_root, "badop.jsonl"))
+        api = EventAPI(_log, initiated_by="user", projection=sdk._get_proj())
+        try:
+            api.emit_belief("EntityMutated", id=eid, label="Event",
+                            op=["restatus"], state={"status": "superseded"})
+        except TypeError as exc:  # pragma: no cover - the regression
+            pytest.fail(f"bare TypeError escaped the state-op gate: {exc}")
+        except ValueError:
+            pass  # a named refusal is fine
+        assert "status" not in _props(sdk, eid)
 
     def test_phase_1_reads_the_value_and_the_key_the_way_the_door_does(self, sdk):
         """Review cycle 5, P1/P2 — the arm must give the DOOR's answer.
