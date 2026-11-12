@@ -280,7 +280,14 @@ and it requires the two shapes to earn the **same baseline
 verdict** — the shapes are the same document, so a RULE that only reaches column-0 rows reds on the
 baseline alone (measured: reverting the R5 presence arm, the §3 capability regex or the §4 child regex
 each reds the second shape with the violations the regression adds), while a MUTATOR that cannot find an
-indented target reports UNTESTABLE. Neither half is silent. The width is itself checked on every run:
+indented target reports UNTESTABLE. ⚠️ That equality bound is stated rather than claimed away: it holds
+while **this map's own rows sit at column 0**, which is the shape this document is in. On a map already
+reflowed off column 0 a column-0-only rule fires on NEITHER shape, so both baselines agree and
+`--self-test` stays green — it is `check()` that reds there, and loudly (measured: the R5 presence arm
+reverted to `line.startswith("|")` against a copy with every row at 2 spaces → `--self-test` reports
+`22/22` on both shapes, exit 0, while `check()` grades 10 `R5 … missing from the §5/§6 crosswalk`
+violations on that same copy). So neither direction is silent on the population this checker ships
+with, and the off-column-0 shape is caught by the checker itself rather than by the harness. The width is itself checked on every run:
 a copy of this map with every row normalised to the preferred width must still be given a DIFFERENT
 width, and must grade what this map grades (measured before that arm existed: every row at 2 spaces
 printed `CLEAN — every rule holds` from `check()` and exited 1 from `--self-test`, which called the
