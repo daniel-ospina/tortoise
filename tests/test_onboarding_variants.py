@@ -647,8 +647,12 @@ def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
     # is True), so a bare-host pin stays green on a revert to the exact value
     # #11767 removes — the regression it exists to catch. The `https://` prefix
     # is what makes only the canonical origin match.
-    assert "https://premiselabs.co/docs#chatgpt" in skill, (
-        "the served document must still point at the reference copy of those steps")
+    assert ("https://premiselabs.co/docs#chatgpt" in skill
+            or "https://premiselabs.co/tortoise/docs#chatgpt" in skill), (
+        "the served document must still point at the reference copy of those "
+        "steps, on the canonical origin — BOTH spellings terminate on the same "
+        "page, so pinning one would red the 0-hop re-point #12049 owns while "
+        "the sibling guard in test_runtime_urls_are_canonical.py accepts either")
 
 
 def _is_environ(node: ast.AST) -> bool:

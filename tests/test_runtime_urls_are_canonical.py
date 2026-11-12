@@ -170,8 +170,24 @@ RETIRED_HOST_ALLOWLIST = {
         "LOCAL-DEV OAuth redirect allowlist only; the hosted project's Auth URL "
         "config is dashboard state nothing in this repo can read"),}
 
-#: Every runtime file this issue owns. An emitted occurrence of the retired
+#: Every runtime file THIS PR touched. An emitted occurrence of the retired
 #: origin in these that is not in the allowlist above fails.
+#:
+#: ⛔ NOT "every runtime file #11767 owns" — an earlier revision of this comment
+#: said exactly that and it was false. The issue also enumerates five app pages
+#: and API modules that still emit the retired origin and are DEFERRED here, not
+#: swept. Counts measured at this head, so the deferral cannot be read as a clean
+#: sweep:
+#:   website/apps/dashboard/functions/blog/api/[[path]].ts   1  DEFAULT_BLOG_ORIGIN
+#:   website/apps/blog-admin/src/lib/blog-api.ts             1  author-image URL
+#:   website/apps/dashboard/public/invite-accept.html        2  nav /docs + /tos
+#:   website/apps/dashboard/public/welcome.html              1  nav /
+#:   website/apps/dashboard/public/signup.html               2  canonical /auth + nav /
+#: None is a broken link (every one still 301s onto the canonical host); they are
+#: a SCOPE deferral — `BLOG_ORIGIN` is outside this child's brief — and the sweep
+#: belongs to #11764/#12049. They are deliberately NOT added to
+#: `RETIRED_HOST_ALLOWLIST`: that map's contract is "to keep an occurrence, add it
+#: with its reason", and blessing these would turn a deferral into a decision.
 RUNTIME_FILES = (
     "tortoise/email_notify.py",
     "tortoise/abuse.py",
@@ -315,13 +331,23 @@ def test_mcp_cors_allowlist_records_why_the_retired_origin_stays():
     # `website/_redirects` maps `/contact.html` host-agnostically), so a sweep
     # reading it could have satisfied its own condition (c) from a premise that
     # never held. The substring asserts above could not catch that — they pin
-    # TOKENS, and `404.html` appears in the true and the false version alike. These
-    # two pin the CLAIM: the measured live path must be named, and the retracted
-    # premise must not come back.
-    assert "/contact" in block, (
+    # TOKENS, and `404.html` appears in the true and the false version alike.
+    #
+    # What follows is a STRONGER pin than those tokens, and deliberately not a
+    # claim that it is a complete one: a later review showed a paraphrase which
+    # merely NAMED `/contact` stayed green over a false argument, so the measured
+    # pair — the `200` and the `<script` — has to appear on the SAME line as the
+    # path. That binds the assertion to the fact the argument rests on instead of
+    # to a word the argument can borrow.
+    contact_lines = [ln for ln in block.splitlines() if "/contact" in ln]
+    assert contact_lines, (
         "the trigger must name the path that keeps this host live — `/contact` "
         "answers 200 there, so 'a scriptless 404 and nothing else' is not the reason "
         "the entry is safe to keep")
+    assert any("200" in ln and "script" in ln for ln in contact_lines), (
+        "the `/contact` line must carry the MEASUREMENT that makes it matter (it "
+        "answers 200 and serves a page with a <script>). Naming the path alone is "
+        "the same token-level pin that stayed green over the retracted premise")
     for retracted in ("only remaining document", "only non-redirect HTML"):
         assert retracted not in block, (
             f"the retracted premise is back ({retracted!r}): the host serves more "
