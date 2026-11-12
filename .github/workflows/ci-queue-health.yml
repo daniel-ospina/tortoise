@@ -65,9 +65,10 @@ name: ci-queue-health
 # below reads `cancelled` from the payload and says which case it is.
 # `PR-UNWITNESSED` is also an `::warning` at exit 0: it names what was NOT measured
 # instead of inferring health. Its THREE causes are different dimensions, and the
-# annotation must not prescribe one cause's lever for another's: (a) the feed was
-# cut at its page cap, so the oldest queued runs — the end the age clause needs —
-# were never read (lever: --max-pages); (b) a WAITING PR-event run has no measurable
+# annotation must not prescribe one cause's lever for another's: (a) a feed (the
+# queued or the in-progress one — they share one flag) was cut at its page cap, so
+# the end the age clause needs (queued) or the census's frozen tail (in-progress) was
+# never read (lever: --max-pages); (b) a WAITING PR-event run has no measurable
 # current-attempt age, so the wait cannot be measured at all — it is NOT only an
 # unreadable `created_at`: `QueuedRun.wait_age_seconds` abstains on THREE routes, and a
 # readable stamp does not rule this cause out; (c) the RUNNING CENSUS is

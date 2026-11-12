@@ -794,8 +794,10 @@ class QueueHealth:
             # `census=unmeasured` on the state line.
             #
             # ⛔ ONLY THE `PR-UNWITNESSED` BRANCH EMITS THAT TOKEN FROM ITS LOCAL, AND
-            # ONLY WHEN THE DEGRADATION FIRED: `pr_running_census_unwitnessed` is set by
-            # `read_health` inside its `verdict == OK`-gated clause, so on the OTHER
+            # ONLY WHEN THE DEGRADATION FIRED: `pr_running_census_unwitnessed` is set
+            # inside `classify_queue`'s own `health()`, in the `verdict == OK`-gated
+            # `census_unwitnessed` clause (`read_health` only FORWARDS the payload), so
+            # on the OTHER
             # verdicts that can carry a fully-unmeasured census nothing else printed it,
             # and that census rendered BYTE-IDENTICALLY to one of MEASURED EXECUTING runs
             # at the same count. That is the defect this token exists to remove, so the
@@ -1588,7 +1590,9 @@ def classify_queue(
         # THAN FROM `healthy()` (review P1, round 16). A capped `pending` read drops its
         # OLDEST runs, so the wait this reading is about to call healthy (or clear) may be
         # one it never saw — the same READ failure as an unparseable stamp, and the same
-        # argument the queued leg gets four lines up. It used to be refused inside
+        # argument the arm `if verdict == OK and truncated and pr_running == 0` makes for
+        # the queued/running legs (named by its condition, not by a line offset — the
+        # offset was already wrong when this was written). It used to be refused inside
         # `healthy()`, which the `not wait_runs` clause never calls: MEASURED,
         # a flood-shaped queue (6 runs of one non-PR workflow) with `pending_truncated=True`
         # and no PR run in any leg returned `OK` — a clean bill of health printed over a
@@ -1733,6 +1737,13 @@ def classify_queue(
     def healthy() -> QueueHealth:
         """`OK` — but only when the PR wait was MEASURED and inside the budget.
 
+        ⛔ WITH ONE PINNED EXCEPTION (review P2, round 20): a TRUNCATED feed with an
+        EXECUTING PR run returns `OK` with `pr_wait_measured=False` (measured; pinned by
+        `test_a_truncated_feed_with_a_pr_run_executing_is_still_ok`). The wait is then
+        NOT measured, so this seam's `OK` is a statement about what was read — the
+        destructive gate stays shut on it (`congests_pr is None`), which is what the
+        sentinel exists for.
+
         Every `OK` EXCEPT the `not wait_runs` clause below returns through
         here. `OK` is a claim
         about the QUEUE, and "one PR run is executing" is not evidence that the
@@ -1742,8 +1753,8 @@ def classify_queue(
         available wherever `OK` was — including under a truncated feed, which is
         why it is not routed through the `PR-UNWITNESSED` degradation.
 
-        The one `OK` that does NOT come through here is the `no PR-event run is
-        waiting` clause below. For the VERDICT that is sound ONLY when every wait leg was
+        The one `OK` that does NOT come through here is the `not wait_runs` clause
+        below. For the VERDICT that is sound ONLY when every wait leg was
         read to completion — and that is enforced in `health()`, not here: a cut
         `pending`/`requested` leg demotes the verdict at THIS seam's own return (the seam
         is reached and runs; `health()` overrides the `OK` as it is returned), because
@@ -1757,7 +1768,7 @@ def classify_queue(
         Where a wait DOES exist and cannot be read — including the MIXED shape, where
         one queued PR run's timestamp parses and a sibling's does not — this seam
         refuses `OK` and returns `PR-UNWITNESSED`; an unmeasured wait is not a
-        measured-healthy one, which is the same refusal the truncated feed gets. The
+        measured-healthy one — the same refusal a cut `pending`/`requested` leg gets. The
         claim is about the whole set, not the filtered max: the run that did not parse
         may be the OLDEST one, i.e. the only wait the budget applies to.
         """
@@ -1788,8 +1799,10 @@ def classify_queue(
                 return health(PR_UNWITNESSED)
             # ⛔ NO `pending_truncated` CHECK HERE ANY MORE (review P1, round 16): it
             # lives in `health()` now, so it fires on THIS path and on the
-            # `not wait_runs` path. Leaving a copy here would be a second
-            # owner of one refusal, and the copy is what made the other path miss it.
+            # `not wait_runs` path. The refusal lived at ONE site inside `healthy()` —
+            # not duplicated — and the `not wait_runs` clause simply does not call that
+            # seam, which is how one placement became a miss. A second copy here would
+            # be two owners of one refusal, so there is none.
             return health(OK)
         # WHOSE QUEUE IS IT? (#9118 P2-2, recurring INSIDE this state.) This clause
         # is reached from `pr_running != 0`, i.e. from a queue whose leader the
