@@ -6746,6 +6746,17 @@ surfaces:
   # suite directly above.
   - test_invalidate_inverted_window_5358.py
   - test_value_extractor.py
+  # #12067: the CLOSED mechanism set (IMPL / NAND / coherence) and the write-door
+  # refusal of any pair carrying two of them. Registered here because every module
+  # the pins read EXCEPT `tortoise/ep.py` and `tortoise/sdk.py` selects `core` —
+  # MEASURED with `tools/ci_selection.py --changed-files`: `tortoise/quadrature.py`
+  # -> ['core', 'onboarding'], `tortoise/pack_registry.py` (whose `CORE_PREDICATES`
+  # is the closed set) -> ['core'], `tortoise/commit_ops.py` -> ['core'],
+  # `tortoise/projection/edges.py` -> ['core']. `ep.py`/`sdk.py` are SHARED_MODULES
+  # (full matrix), so no other arm is needed for them. The file is ALSO in
+  # `carve_out` below: it is embedded-only, so a `core`-only row would leave this
+  # manifest green and the file unexecuted on a docker leg.
+  - test_12067_three_mechanisms.py
   # #2725: venture domain pack — manifest scope, corpus kind coverage, the
   # Objects-hold-state/supersede shape, and the two orthogonal pack-fit layers
   # (per-graph approval vs per-item classification). Mostly DB-free; the
@@ -9821,6 +9832,13 @@ carve_out:
 # Also in the `sdk` surface above (its door is `tortoise/sdk.py`), which is where
 # a diff selects it.
 - test_mechanism_write_path_9963.py
+# #12067: the closed mechanism set, embedded-only in the same way as the file
+# above — the `sdk` fixture builds `TortoiseSDK(db_path=<tmp_path>/mech.db)` and
+# the pins read `op_type` / the operator's stored mechanism back off that graph,
+# so a URI-set lane would redirect the construction and the assertions would
+# grade a graph this test never seeded. Also in the `core` surface above (the
+# surface every module it pins except `ep.py`/`sdk.py` selects).
+- test_12067_three_mechanisms.py
 # #6871: embedded-only — the fixture builds `TortoiseSDK(<tmpfile>)`, so a
 # URI-set lane would redirect it. Also in the `sdk` surface above, which is
 # where the diff selects it.
