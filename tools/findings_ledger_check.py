@@ -713,19 +713,41 @@ def check_verdict_tally(text: str) -> list[str]:
     # the paragraph-level decoy check above, and for the same reason: the arm locates
     # its subject BY PATTERN, so more than one candidate means it can report OK over a
     # sentence nobody reads.
-    # ⛔ THE CANDIDATES ARE THE SENTENCES THAT NAME A LETTER (#11902 review P3).
-    # Counting every sentence that merely CONTAINS the phrase red an edit that quoted it
-    # — measured: appending `(The phrase "still read as written" names the
-    # complement.)` produced `§3 carries 2 sentences saying 'still read as written'`
-    # while only one sentence asserted anything, i.e. the same false-accusation class
-    # the neighbouring arms were written to avoid. A sentence that carries no
-    # `**(x)**` token cannot be the arm's subject: there is no letter list in it to
-    # disagree with the table. When NO sentence names a letter the list is empty and
-    # the letter arm below reports it, which is the correct outcome.
-    letter_sentence = re.compile(r"\*\*\([a-z]\)\*\*")
+    # ⛔ THE CANDIDATES ARE THE SENTENCES THAT NAME A LETTER (#11902 review P3) — IN
+    # EITHER SPELLING (#11902 review P1). Counting every sentence that merely CONTAINS
+    # the phrase red an edit that quoted it — measured: appending `(The phrase "still
+    # read as written" names the complement.)` produced `§3 carries 2 sentences
+    # saying 'still read as written'` while only one sentence asserted anything. But
+    # narrowing to a BOLDED `**(x)**` token swung the same arm fail-OPEN: a second
+    # genuine tally written without emphasis became no candidate at all, so the
+    # de-bolded stale list plus one compliant bolded decoy — the historical exploit,
+    # re-shaped — read CLEAN where the parent refused it (measured). A letter list is
+    # a letter list however it is marked up, and the page's own §3 spells its overtaken
+    # group in plain text, so all four forms count: `**(x)**`, a bare `(x)`, a
+    # `x, y and z` run, and `x and y`. A sentence carrying none of them cannot be the
+    # arm's subject — there is no list in it to disagree with the table — which is
+    # what keeps a pure quotation out.
+    #: A LETTER LIST in any spelling — and a LIST, not one stray parenthetical: a
+    #: single `(c)` in ordinary prose is not a list, so it is not a candidate (that is
+    #: what keeps a sentence QUOTING the phrase out, measured).
+    letter_sentence = re.compile(
+        r"\*\*\([a-z]{1,2}\)\*\*"  # a bolded letter: **(a)**
+        r"|\([a-z]{1,2}\)(?:\s*,\s*\([a-z]{1,2}\))+"  # a parenthesised run: (b), (c)
+        r"|\b[a-z]{1,2}\b(?:\s*,\s*\b[a-z]{1,2}\b)+"  # a plain run: b, c, d
+        r"|\b[a-z]{1,2}\b\s+and\s+\b[a-z]{1,2}\b"  # a plain pair: b and c
+    )
+    # ⛔ A SENTENCE THAT ONLY **QUOTES** THE PHRASE IS NOT ASSERTING IT. The page
+    # discusses the phrase in §8 and in this very comment, so a sentence can contain it
+    # inside quotation marks while asserting nothing — and once a plain letter list
+    # also counts (above), such a sentence became a candidate and produced a FALSE
+    # ACCUSATION: measured, appending `(The phrase "still read as written" names the
+    # complement.)` red the complement arm here while the parent stayed clean. Quoted
+    # spans are therefore removed before the phrase test, which is what the phrase's own
+    # meaning requires: a quote names the words, it does not claim any letter.
+    quoted = re.compile(r'"[^"]*"|\'[^\']*\'')
     tally_sentences = [
         s for s in sentences
-        if "no longer read as written" in s and letter_sentence.search(s)
+        if "no longer read as written" in quoted.sub(" ", s) and letter_sentence.search(quoted.sub(" ", s))
     ]
     if len(tally_sentences) > 1:
         return [
@@ -744,9 +766,9 @@ def check_verdict_tally(text: str) -> list[str]:
     # sentence, or a red.
     still_sentences = [
         s for s in sentences
-        if "still read as written" in s
-        and "no longer" not in s
-        and letter_sentence.search(s)
+        if "still read as written" in quoted.sub(" ", s)
+        and "no longer" not in quoted.sub(" ", s)
+        and letter_sentence.search(quoted.sub(" ", s))
     ]
     if len(still_sentences) > 1:
         problems.append(
@@ -755,7 +777,9 @@ def check_verdict_tally(text: str) -> list[str]:
             "one can assert a letter the real sentence does not; keep exactly one"
         )
     still_sentence = still_sentences[0] if still_sentences else ""
-    named = set(re.findall(r"\*\*\(([a-z])\)\*\*", non_still_sentence))
+    named = set(re.findall(r"\(([a-z]{1,2})\)", non_still_sentence)) or set(
+        re.findall(r"\b([a-z]{1,2})\b(?=\s*(?:,|and\b))", non_still_sentence)
+    )
     if named != set(non_still):
         problems.append(
             f"§3 tally: the paragraph names {sorted(named) or '(none)'} as no longer "
@@ -1109,10 +1133,15 @@ def check_vocabulary(text: str) -> list[str]:
     # row content-blind, so REPLACING the header with an unbolded invented class
     # (`| FIXED-IT | a | b |`, `| SUPERSEDED-BY-DRIFT | Means | …`) went from refused
     # (1 problem on the parent) to CLEAN, in the one table §8 calls the authority. So
-    # row 0 must BE the header: its first cell, with `**`/backticks/space stripped, has
-    # to read exactly `Verdict`. A reworded header therefore reds — deliberately, and
-    # in the same two-places spirit as `MIN_SELF_TEST_MUTATIONS`: update the page and
-    # this test together, rather than letting the first row drift out of the arm.
+    # row 0 must BE the header, and what that means is exactly `VOCAB_HEADER_RE` below:
+    # the cell reads `Verdict`, case-insensitively, with whitespace around it — and
+    # NOTHING is stripped from it. Marked-up spellings (`| **Verdict** |`,
+    # ``| `Verdict` |``) are refused rather than normalised, deliberately: the shipped
+    # header is the plain word, and a guard that silently accepts variants is the shape
+    # that let the prefix test through. A reworded header therefore reds — also
+    # deliberately, in the same two-places spirit as `MIN_SELF_TEST_MUTATIONS`: update
+    # the page and this test together rather than let the first row drift out of the
+    # arm.
     vocab_rows = [
         row for row in (ln.strip() for ln in section.splitlines())
         if row.startswith("|") and not TABLE_SEPARATOR_RE.match(row)
