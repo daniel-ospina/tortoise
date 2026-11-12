@@ -3629,9 +3629,14 @@ fi  # TARCH guard
 # `aws --version` clause left the whole suite green in both files (measured).
 # The regression that survives a green suite is not cosmetic:
 #   * the DRIVER kept AWS_CLI_MISSING=0 with a broken `aws` on PATH (the shape a
-#     partial install leaves behind), fell through to `elif ! aws s3api
-#     head-bucket`, and filed a FALSE `R2_DOWN` reachability incident — the "a
-#     missing client is not a missing bucket" claim the skip arm exists to prevent;
+#     partial install leaves behind) and fell through to `elif ! aws s3api
+#     head-bucket`, so it ANNOUNCED "R2 preflight failed — filing R2_DOWN" from a
+#     client that never answered — then refused at the dedup write with
+#     "conditional write rejected", the wrong-fault message #12135 removes. (The
+#     incident itself never reaches GitHub, because the same broken binary writes
+#     the dedup object; the operator-visible harm is the false announcement plus a
+#     Cloudflare-shaped error.) That is the "a missing client is not a missing
+#     bucket" claim the skip arm exists to prevent;
 #   * the INSTALLER reported the broken shim as "already installed" and never
 #     installed the CLI again, wedging that host behind continue-on-error.
 mkdir -p "$FIX/awsbroken"
@@ -3650,7 +3655,7 @@ assert_contains "$BROUT" "the aws CLI is NOT installed" \
 assert_contains "$BROUT" "R2 preflight SKIPPED" \
   "120. … so R2 is not probed through a client that cannot run"
 assert_not_contains "$BROUT" "filing R2_DOWN" \
-  "120. … and no R2_DOWN is filed from a client that never answered"
+  "120. … and no R2_DOWN is ANNOUNCED as filed from a client that never answered"
 # The installer's step-1 probe needs the same second half, or a failing shim
 # satisfies the dependency and the host never installs the CLI again.
 # ⛔ Inside the same TARCH guard case 119 uses (review P2): on an arch with no
