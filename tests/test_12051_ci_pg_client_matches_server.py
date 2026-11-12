@@ -170,8 +170,131 @@ not a tenth spelling — it is the one a text guard cannot reach:
   all: `: > /usr/lib/postgresql/16/bin/pg_dump` rewrote the pinned binary with
   every row green until #12069 review P1, and ``>`/`>>`/`| tee` into a client
   binary or a client `bin/` is now refused however the producer is spelled.
+  ⛔ A DIRECTORY-LEVEL replacement is graded by its TOKEN rather than a binary
+  name (`CLIENT_DIR_ANY_BASE_RE`), because `rsync -a "$b/17/bin/" "$b/16/bin/"`
+  names no binary and replaced every client in the pinned dir with every row
+  green (#12069 review round 19). Two consequences are stated rather than
+  hidden: the mention is graded on the DESTINATION for a copy-like verb, so a
+  `chmod`/`install -d`/`rm` naming the pinned dir is still refused (the same
+  polarity the binary arm states for those verbs), and a copy whose client dir
+  is the LAST path is refused even when it is a read of a same-major dir.
+- **A replacement one component UP is not caught.** The token arm needs the
+  `/bin` component, so `sudo rsync -a "$b/17/" "$b/16/"` — which swaps `lib/`
+  and the whole base, and is strictly worse for #12051 than the `bin/` form —
+  stays green. It is pre-existing, it is the same class as the form this guard
+  now closes, and it is stated here rather than silently assumed away: the
+  guard grades the `bin/` directory because that is where `PATH` points.
+  Widening the token to the literal `/usr/lib/postgresql/<token>` form is the
+  follow-up if the base-swap shape is ever seen in the workflow.
+- **A RELATIVE directory replace is not caught either** (`#12173` review round 29) —
+  the sibling limit of the bullet above, and the same act: the arm needs a
+  `base/token/bin` triple, so eliding the base reaches the identical regression
+  and stays green.
+
+  ```
+  cd /usr/lib/postgresql && sudo rsync -a 17/bin/ 16/bin/
+  cd "$b" && sudo rsync -a 17/bin/ 16/bin/
+  ```
+
+  This is fail-OPEN, which is the direction that matters, and it is stated here
+  rather than left to be rediscovered. The guard's model is LINE-LOCAL: it cannot
+  know the cwd a `cd` earlier in the step established, so it cannot decide whether
+  a bare `17/bin` is under the pinned base. Widening the token to match a bare
+  `<digits>/bin` globally is refused deliberately — it reds every legitimate
+  relative `17/bin 16/bin` in an unrelated tree, which is the round-9 false-RED
+  defect this file exists to stop repeating. Closing it needs a `cd`-in-the-same-
+  step PRECONDITION, not a global token widening.
 - **The extraction's arithmetic** (`sed -E 's/.*/16/'`) cannot be proven; the
   in-job assertion is what makes a constant visible.
+- **A leg invoked only through a WRAPPER SCRIPT is not recognised.** `_leg_indexes`
+  requires a `pytest` word in the same step, so a step whose whole body is
+  `bash .github/scripts/pytest-attribution.sh tests/test_9567_record_capstone.py`
+  is not the leg and the guard reds with its own message
+  (`the record capstone (D8) is not in any run step of this job`). That is the
+  fail-closed direction — the real leg invokes pytest inline, in the same step as
+  the attribution wrapper — and it is stated here rather than left as an
+  expected shape. It is fail-closed only while NOTHING ELSE in the job matches
+  `_leg_indexes`: a step that invokes pytest on the file (a `-k` narrowed probe,
+  say) IS the population then, and the window would end before the wrapper leg.
+  A step that only COLLECTS (`--collect-only`, `--co`) is not a leg either, which
+  is what stops a listing step collapsing the graded window (scoped to the line
+  that names the capstone, so a leg may still collect something else in the same
+  step), and a step whose line only MENTIONS the file beside the word `pytest`
+  (`echo "about to run pytest …"`) is not a leg: the invocation must be in
+  command position.
+- **The directory arm reads a text, and a text can be laundered.** The destination
+  is taken as the last POSITIONAL path token of the owning verb's command
+  segment, with redirect targets and `-`-prefixed options skipped. SEVEN
+  residuals
+  are stated rather than claimed closed, and each spares or refuses for its OWN
+  mechanism — they are not one: an option whose value is a SEPARATE token written
+  AFTER the target (`rsync … "$b/17/bin/" "$b/16/bin/" -e "ssh -o X=/a"`) moves
+  the last-path reading past the real target, while the `=`-joined form
+  (`--log-file=…`) starts with `-` and is skipped, so it stays REFUSED; a QUOTE
+  anywhere between the base and `/bin` defeats the match — not only one closing
+  right after the base (`"$b"/16/bin/`, `"${b}"/16/bin/`) but also one inside or
+  after the TOKEN (`"$b/16"/bin/`, `"$b/1"6/bin/`, `"$b/1""6/bin/`), and those
+  three shell-resolve to the real `/usr/lib/postgresql/16/bin/` while all five —
+  the two base-quoted spellings and the three token-spliced ones — are
+  MEASURED GREEN (#12173 round 31) — so the last-path
+  machinery is not reached at all; a quoted command word (`sh -c 'rsync …'`) puts
+  both mentions in COMMAND position, so the arm is skipped; a destination that
+  names NO token at all (`rsync -a "$b/17/bin/" "$d/"`) is not reached —
+  ⛔ the mirror of that spelling is the OPPOSITE direction and is REFUSED: a
+  destination whose VERSION component is ITSELF a variable under a variable base
+  (`"$b/$v/bin"`, `"$b/${v}/bin"`, `"${b}/${v}/bin"`) IS matched on the `$v`
+  token and refused, fail-closed, which puts it in the same family as the
+  variable-base residual below rather than in this one; a `$var/<digits>/bin`
+  destination IS matched and refused (that same residual), and a preceding
+  `d=…` assignment on the same line is itself spared by COMMAND POSITION, like
+  the residual above; a braced base carrying a PARAMETER MODIFIER is not matched
+  at all — `${b%x}`, `${b[0]}`, `${b:-$X}` and `${b…}` all leave the braced-word
+  arm behind, so `b=/usr/lib/postgresql/; sudo rsync -a "${b%x}17/bin/"
+  "${b%x}16/bin/"` is the COMPLETE #12051 directory replacement and is GREEN
+  (measured; pre-existing, not introduced by the round-29 widening — the
+  literal-default spelling `${b:-/usr/lib/postgresql/}17/bin/` reds only
+  incidentally, through `CLIENT_DIR_RE`'s unreadable-token arm). Declared rather
+  than closed deliberately: widening the braced-word arm to admit `}`-less
+  expansions is
+  how a text guard starts accepting `${anything}` as a base, which costs more
+  than the spelling it buys; a versioned path under a VARIABLE base is
+  the OPPOSITE direction —
+  it is REFUSED (`d=$RUNNER_TEMP/tools; sudo chmod -R a+rX "$d/16/bin"` red, the
+  same act on a literal path with an extra component green), which is fail-closed
+  and kept because a variable base cannot be resolved; and an EXTRACTOR's destination is not graded at all (`tar -xf x.tgz -C "$b/16/bin"`, `unzip -o
+  x.zip -d "$b/16/bin"`, `dpkg-deb -x x.deb "$b/16/bin"`, `cpio -D "$b/16/bin"`
+  each overwrite every client). ⛔ NOT listed here, because it has its own bullet
+  above: a RELATIVE directory replace (`cd /usr/lib/postgresql && sudo rsync -a
+  17/bin/ 16/bin/`) — same act, but it is stated as the sibling limit of the
+  two-component-up bullet rather than counted in this list, so the count stays
+  SEVEN. That last one is deliberate: the extractor verbs
+  are absent from the mutation list by design (round 9 — `tar -czf …`,
+  `unzip -l …` are reads), `dpkg-deb -x` takes no flag value, one shared flag set
+  lets `unzip -x` shadow `-d`, `cpio` would have to be ADDED to the mutation
+  table first (it is absent from it, which is the only reason it reads as command
+  position — circular, and #12173 round 31 measured that adding the verb flips
+  the row to REFUSED; nothing in this job needs `cpio`), and `tar -C` is a
+  SOURCE chdir outside extract mode — a half-built arm that reds correct trees is
+  the defect the whitelist's own note names. The admitted spellings are pinned in
+  `BINARY_MUTATION_POLARITY`. The task's own `pg_dump --version` assertion is the
+  observation that does not depend on this text at all; this row is the static
+  half, and it fails closed on every spelling whose destination it can PLACE as
+  the last positional token of the owning verb's segment — residual 1 is such a
+  class (the reading lands on the wrong token, and it is fail-OPEN, not
+  fail-closed).
+
+  ⛔ THE BRACE-GLUED SPELLING WAS A MEASURED FAIL-OPEN AND IS NOW CLOSED
+  (#12069 review round 29). `b=/usr/lib/postgresql/; sudo rsync -a "${b}17/bin/"
+  "${b}16/bin/"` — the base is a braced variable glued to the token, with no
+  separator at all — was GREEN and is the COMPLETE #12051 directory replacement.
+  It was not residual 2 (base quoted apart): residual 2 has a separator and is
+  never matched, whereas this one simply had no `/` for the pattern to bind on.
+  `CLIENT_DIR_ANY_BASE_RE` now admits an optional separator for the BRACED form
+  only, and both spellings are pinned `True` in `BINARY_MUTATION_POLARITY`. Not
+  an unbraced one: `$b17` re-parses as the single variable `b17`, so gluing
+  there is a different variable, not a base+token pair. This is the round-24
+  lesson again — a claim of totality is only as good as the last spelling
+  someone measured.
 
 So: a green run means "no plausible spelling of the regression is in this
 text", not "the job provably installs and uses pg16". The job's own assertion is
@@ -640,6 +763,56 @@ GITHUB_PATH_MENTION_RE = re.compile(r"\bGITHUB_PATH\b")
 #: a major is an offender in its own right, exactly like an unclassifiable write.
 CLIENT_DIR_RE = re.compile(r"/usr/lib/postgresql/(?P<token>[^/\s]+)/bin")
 
+#: A client dir reached through ANY base — the DIRECTORY-level replacement
+#: (#12069 review round 19, measured GREEN at `282 passed`).
+#: `CLIENT_DIR_RE` above requires the literal `/usr/lib/postgresql/` base, so the
+#: same directory reached through an assigned base was invisible to it, and the
+#: mutating-verb rule needs a BINARY NAME after the verb:
+#:
+#:     b=/usr/lib/postgresql
+#:     sudo rsync -a "$b/17/bin/" "$b/16/bin/"
+#:
+#: replaces every client binary in the pinned dir with PG17's — the full #12051
+#: regression — and names no binary at all, so every row stayed green. A
+#: directory-level replacement is the same act one path component up, so the
+#: TOKEN is the evidence here, not a name. The token must be digits, a glob or a
+#: variable, which keeps an ordinary `rm -rf "$RUNNER_TEMP/tools/bin"` (token
+#: `tools`) green: the rule widens the BASE, never the token's meaning.
+#: ⛔ THE BASE MUST BE A VARIABLE OR NAME POSTGRES (#12069 review round 22,
+#: measured). With any path accepted, an unrelated versioned scratch dir was
+#: refused as a client rewrite — `install -d -m 755 "$RUNNER_TEMP/tools/16/bin"`,
+#: `chown -R runner:runner "$RUNNER_TEMP/tools/16/bin"` and
+#: `cp -a "$RUNNER_TEMP/tools/17/bin" "$RUNNER_TEMP/tools/16/bin"` all RED where
+#: main is green. A variable is kept because the guard cannot resolve it and a
+#: plausible edit could route the pin's dir through one — **not** because this
+#: workflow does: it spells `echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"`
+#: literally today (`git grep 'b=/usr/lib/postgresql' .github/workflows/` = 0),
+#: and this file's own fixtures are the variable-base spelling (#12069 review
+#: round 23). Its cost is stated with the other residuals: a versioned path under
+#: a variable base is REFUSED, its literal spelling spared.
+#: ⛔ THE SEPARATOR BEFORE THE TOKEN IS NOT MANDATORY FOR A BRACED VARIABLE
+#: (#12069 review round 29, measured GREEN). The base and the token can be GLUED
+#: when the base is a braced variable whose own value carries the slash:
+#:
+#:     b=/usr/lib/postgresql/
+#:     sudo rsync -a "${b}17/bin/" "${b}16/bin/"     # GREEN before this fix
+#:
+#: That is the complete #12051 directory replacement, and it is NOT the
+#: base-quoted-apart residual (`"$b"/16/bin/`): there is no separator at all.
+#: The original pattern demanded a literal `/` between base and token, so
+#: nothing matched and the last-path machinery was never reached — the same act
+#: one spelling over from the shape this rule exists to refuse. It also inverted
+#: the rule's own principle: a variable base is refused precisely BECAUSE it
+#: cannot be resolved, yet this sibling spelling of the same unresolvable base
+#: was spared.
+#: ⛔ The optional `/` is allowed ONLY for the BRACED form. `$b17` re-parses as
+#: the single variable `b17`, so an unbraced glued token is a different variable
+#: and must not be read as a base+token pair.
+CLIENT_DIR_ANY_BASE_RE = re.compile(
+    r"(?:\$\{\w+\}/?|\$\w+/|/[\w.*/-]*(?:postgresql|postgres|pg)[\w.*/-]*/)"
+    r"(?P<token>\d+|\*|\$\{?\w+\}?)/bin"
+)
+
 #: The fail-closed branch as ONE unit (#12051 review rounds 4, 6 and 7): the
 #: `if` line that compares `$major`, its body, and its `fi`. "`::error::` and
 #: `exit 1` appear somewhere in the step" is NOT the claim — `if false && [
@@ -919,14 +1092,75 @@ def _classify_path_write(line: str) -> int | None:
     return int(match.group("major")) if match else None
 
 
-def _leg_indexes(steps: list[dict]) -> list[int]:
-    """Steps that run the D8 record capstone — the leg the pin must precede."""
+#: The D8 leg's file — the step that RUNS it must come after the pin.
+CAPSTONE_FILE = "test_9567_record_capstone.py"
 
-    return [
-        index
-        for index, step in enumerate(steps)
-        if "test_9567_record_capstone.py" in _run_commands(step)
-    ]
+#: A line that RUNS the suite, not one that merely names it (#12069 review round
+#: 19). `pytest` bare, `python -m pytest`, any `python3.12` spelling, `py.test`.
+LEG_INVOCATION_RE = re.compile(
+    r"(?:^|[\s;&|(`])(?:(?:python|py)[\d.]*\s+-m\s+(?:pytest|py\.test)|pytest|py\.test)\b"
+)
+
+#: A step that only COLLECTS is not running the leg (#12069 review round 21).
+#: `pytest … --collect-only` satisfies `LEG_INVOCATION_RE` while executing none of
+#: the tests, so counting it as the leg is the decoy that collapses the window
+#: (and that reds the pin-precedes-leg row with a step number that names a step
+#: which runs nothing). Excluding it at the definition kills the whole class at
+#: every call site instead of patching each one's window bound.
+COLLECT_ONLY_RE = re.compile(r"--collect-only|--co\b")
+
+
+def _leg_indexes(steps: list[dict]) -> list[int]:
+    """Steps that RUN the D8 record capstone — the leg the pin must precede.
+
+    ⛔ A STEP THAT MERELY NAMES THE FILE IS NOT THE LEG (#12069 review round 19,
+    measured GREEN at `282 passed`). This matched the FILENAME anywhere in the
+    step's commands, so an unrelated step inserted before the real leg —
+
+        - name: announce
+          run: echo "about to run tests/test_9567_record_capstone.py"
+
+    — became `min(_leg_indexes(steps))`. That index is the WINDOW END for the
+    `env:`/`PATH` rules (`_path_assignments_that_drop_the_pin`,
+    `_env_path_replacements`), so the real leg's `env: PATH: /usr/bin:/bin` fell
+    outside every window and the job stayed green with the pin bypassed —
+    measured GREEN, including `_env_path_replacements`'s own discriminating case.
+    A leg must INVOKE the suite: the filename AND a pytest invocation in ONE step.
+    The whole-file comment at the DRILL provision step never counts, because
+    `_run_commands` strips comments before this reads them.
+    """
+
+    found: list[int] = []
+    for index, step in enumerate(steps):
+        # ⛔ SCOPED TO THE LINE, NOT THE STEP (#12069 review round 22, measured).
+        # A step-level collect-only exclusion disqualified a REAL leg that also
+        # collected something else (`python -m pytest … --collect-only -q` on a
+        # different file in the same step) and reported the untrue "the record
+        # capstone (D8) is not in any run step of this job". The exclusion
+        # belongs to the invocation that names the capstone.
+        for line in _run_commands(step).splitlines():
+            if CAPSTONE_FILE not in line:
+                continue
+            invocation = LEG_INVOCATION_RE.search(line)
+            if invocation is None:
+                continue
+            # ⛔ THE WORD MUST BE THE COMMAND (#12069 review round 23, measured).
+            # A PRODUCER line that only carries the word —
+            # `echo "about to run pytest tests/test_9567_record_capstone.py"` —
+            # satisfied the word test and was counted as the leg: the same
+            # "names it, does not run it" defect this rule closes, one
+            # punctuation over. It is not merely cosmetic: with a leg invoked
+            # through a wrapper script (the stated limit below), such a step is
+            # the ONLY member of the population, so `max()` is its index and the
+            # graded window collapses to nothing. `_is_command_position` is this
+            # file's existing answer for "run, not written/named".
+            if not _is_command_position(line, invocation.start()):
+                continue
+            if COLLECT_ONLY_RE.search(line):
+                continue
+            found.append(index)
+            break
+    return found
 
 
 def _unreachable_guards(
@@ -1000,11 +1234,24 @@ def _replaces_a_client_binary(line: str) -> bool:
       above could not see `: > /usr/lib/postgresql/16/bin/pg_dump` — measured
       green, and it is the full regression. See `REDIRECT_TARGET_RE`.
 
-    The pin's own install line is excluded.
+    NO line is exempt: the pin's own install line fires no arm at all (no binary
+    NAME, no client DIR, no redirect), which is measured, and every text-shaped
+    exemption this function ever carried was satisfied by TEXT (#12069 round 27).
     """
 
-    if CLIENT_PKG_RE.search(line):
-        return False
+    # ⛔ NO LINE IS EXEMPT, AND THERE IS NOTHING TO EXEMPT (#12069 review round
+    # 27). Three rounds tried to scope an exemption for the pin's own install line
+    # (whole line → segment → command-position mention), and each was a text test
+    # a payload could satisfy:
+    #
+    #     echo "apt-get install -y postgresql-client-16" > /usr/lib/postgresql/16/bin/pg_dump
+    #
+    # was GREEN — the #12051 wrapper regression, written by a payload that merely
+    # NAMES the pin — and the install command's own stdout redirected into the
+    # pinned binary was spared too. The exemption is GONE, and the install line
+    # needs none: it fires no arm (measured). Producers of `$GITHUB_PATH` are
+    # spared by the ordinary rule that an unwritten mention has no verb.
+
     # ⛔ BEFORE the verb rule, because a redirection has NO verb (#12069 review
     # P1): `: > /usr/lib/postgresql/16/bin/pg_dump` rewrote the pinned binary with
     # every row green. See `REDIRECT_TARGET_RE`.
@@ -1012,7 +1259,88 @@ def _replaces_a_client_binary(line: str) -> bool:
         return True
     verb = BINARY_MUTATION_RE.search(line)
     if not verb:
+        # ⛔ AN EXTRACTOR'S DESTINATION IS A STATED RESIDUAL, NOT A GRADED ARM
+        # (#12069 review round 24). `tar -xf x.tgz -C "$b/16/bin"`, `unzip -o
+        # x.zip -d "$b/16/bin"`, `dpkg-deb -x x.deb "$b/16/bin"` and `cpio -D
+        # "$b/16/bin"` DO write every client, and none of them is visible here:
+        # their verbs are deliberately absent from `BINARY_MUTATION_RE` (round 9 —
+        # `tar -czf …` and `unzip -l …` are READS), their destination is a flag
+        # or a positional with no shared grammar, and grading `tar -C` without
+        # honouring the MODE reds 192 correct create/list lines (`tar -czf
+        # /tmp/o.tgz -C "$b/16/bin" .` chdirs a SOURCE). A half-built arm that
+        # reds correct trees is the defect this file's round-9 note names; the
+        # limit is stated in the docstring's residual list instead, and the
+        # admitted spellings are pinned in `BINARY_MUTATION_POLARITY`.
         return False
+    # ⛔ A DIRECTORY-LEVEL replacement names no binary (#12069 review round 19,
+    # measured GREEN): `sudo rsync -a "$b/17/bin/" "$b/16/bin/"` overwrites
+    # every client in the pinned dir and passed the name-based rule below. A
+    # `$GITHUB_PATH`/`$GITHUB_ENV` write is deliberately NOT graded here — it is
+    # a PATH append, which the pin and job-wide rows already own, and grading it
+    # twice would move the row a correct tree is refused on.
+    #
+    # ⛔ AND THE DIRECTION MATTERS (#12069 review round 20, measured). The first
+    # cut refused the directory wherever it appeared, so READING the pinned dir
+    # was refused as a rewrite — `cp -a "$b/16/bin" "$RUNNER_TEMP/client-snapshot"`
+    # went RED, having been GREEN. Only a client dir in the DESTINATION position is
+    # being replaced: for a copy-like verb the destination is the LAST path on the
+    # line, so a mention that still has a path after it is a SOURCE being read.
+    # Verbs with no direction (`chmod`, `rm`, `sed`, `dd`, `tee`) keep refusing
+    # the mention wherever it sits, which is the same polarity the binary arm has
+    # always stated for them.
+    # ⛔ THE VERB THAT OWNS THE MENTION'S SEGMENT, NOT THE LINE'S FIRST VERB
+    # (#12069 review round 23, measured BOTH WAYS). `verb` above is the first
+    # mutating verb on the LINE, and `_is_last_path_token` bounds "last path" to
+    # THAT verb's segment — so a pinned dir in a LATER segment could never be the
+    # destination:
+    #
+    #     sudo cp /etc/hosts /tmp/hosts && sudo rsync -a "$b/17/bin/" "$b/16/bin/"
+    #
+    # was GREEN — the full #12051 regression on one line — and the mirror was a
+    # false RED: `sudo chmod 755 /tmp/x && sudo cp -a "$b/16/bin"
+    # "$RUNNER_TEMP/snap"` refused a plain READ, because the first verb's missing
+    # direction was applied to a copy verb's operand. One verb cannot answer for
+    # another command.
+    # ⛔ AND THE COMMAND FILE IS A PATH APPEND, NOT AN EXEMPTION (#12069 review
+    # round 27, measured BOTH WAYS). Round 25-26 tried to spare "the append's own
+    # segment"; round 27 measured that a segment which ALSO writes a command file
+    # spared the write it was hiding:
+    #
+    #     sudo rsync -a "$b/17/bin/" "$b/16/bin/" >> "$GITHUB_STEP_SUMMARY"   -- GREEN
+    #     sudo chmod a+r "/usr/lib/postgresql/16/bin" >> "$GITHUB_STEP_SUMMARY" -- GREEN
+    #
+    # The exemption is gone. A `$GITHUB_PATH` append written with `echo` or
+    # `printf` still costs nothing here: neither is a mutating verb this guard
+    # recognises, so `_owning_verb` answers None and the mention is spared by the
+    # same rule that spares every other unwritten mention.
+    # ⛔ `tee` IS NOT SPARED, and this comment claimed it was (#12069 review
+    # round 29, measured). `tee` is in `BINARY_MUTATION_RE` and is not a
+    # destination verb, so a `tee` of a directory is refused wherever it sits:
+    #
+    #     sudo tee -a "$GITHUB_PATH" <<< "/usr/lib/postgresql/16/bin"   -- REFUSED
+    #     echo "$b/16/bin" | sudo tee -a "$GITHUB_PATH"                -- GREEN
+    #
+    # Fail-closed (a false RED, never a bypass), and pinned as such in
+    # `BINARY_MUTATION_POLARITY`: the shape the pin step actually uses is `echo`
+    # + `>>`, which stays GREEN. The sentence is corrected rather than the
+    # posture, because widening the exemption is what round 27 measured away.
+    for dir_match in CLIENT_DIR_ANY_BASE_RE.finditer(line):
+        if _is_command_position(line, dir_match.start()):
+            continue
+        owner = _owning_verb(line, dir_match.start())
+        if owner is None:
+            # No verb the guard RECOGNISES in this mention's own segment. An
+            # EXTRACTOR can still write into the directory (`tar -xf … -C`,
+            # `dpkg-deb -x`), and that is a STATED residual rather than a
+            # graded spelling — see the docstring's residual list and the
+            # admitted rows in `BINARY_MUTATION_POLARITY` (#12069 round 24).
+            continue
+        if owner.group(0).strip() in _DESTINATION_VERBS and not _is_last_path_token(
+            line, dir_match.start(), dir_match.end(), owner
+        ):
+            # A path follows in the verb's own segment: this mention is a SOURCE.
+            continue
+        return True
     # ⛔ A NAME IN COMMAND POSITION IS BEING RUN, NOT WRITTEN (#12069 review 12,
     # measured). `BINARY_NAME_RE.search(line, verb.end())` accepted a name ANYWHERE
     # after the verb, so a mutating verb earlier on the line was enough — and with
@@ -1046,6 +1374,316 @@ _OPERAND_TAKING_WORDS = frozenset(
 )
 
 
+#: Verbs whose LAST path operand is the WRITE TARGET, so a client dir named as
+#: an earlier operand is a SOURCE being READ (#12069 review round 20, measured).
+#: `cp -a "$b/16/bin" "$RUNNER_TEMP/snapshot"` is a harmless read; the same
+#: verb with the client dir LAST is the replacement. Verbs absent from this set
+#: (`chmod`, `rm`, `sed`, `dd`, `tee`) have no direction and keep the binary
+#: arm's stated polarity: the mention is refused wherever it sits.
+_DESTINATION_VERBS = frozenset({"cp", "rsync", "mv", "ln", "install"})
+
+#: Verbs for which `-t` / `--target-directory` NAMES the destination — and the
+#: reason `_TARGET_OPTION_RE` is gated on the verb (#12069 review round 23,
+#: measured). `rsync -t` is `--times`, not a target directory, so the ungated
+#: reading took the NEXT FLAG as "the destination" and made a full replacement
+#: GREEN, while refusing the same line's plain read:
+#:
+#:     sudo rsync -r -t -v "$b/17/bin/" "$b/16/bin/"   -> GREEN (the regression)
+#:     sudo rsync -a -t "$b/16/bin" "$RUNNER_TEMP/snap" -> RED (a read)
+#:
+#: `-rtv` (clustered, no bare `-t` token) was caught all along — the hole was a
+#: bare flag, which is what a person writes.
+_TARGET_OPTION_VERBS = frozenset({"cp", "mv", "ln", "install"})
+
+#: The options that take NO separate value. ⛔ THE LIST IS INVERTED ON PURPOSE
+#: (#12173 review round 32, measured FAIL-OPEN TWICE). Three consecutive repairs
+#: each traded one hole for another because the scan guessed which options TAKE a
+#: value:
+#:
+#:   round 29  an option's separate VALUE (`-e ssh`) read as a trailing operand
+#:   round 31  "any option without `=` consumes the next word" made a VALUE-LESS
+#:             flag (`-v`, `-h`) eat the destination
+#:   round 32  "only a LISTED option consumes" made an UNLISTED value-taker
+#:             (`-S .bak`, `--max-size 100m`, `--port 2222`) leave its value as
+#:             the last operand — sparing the write again
+#:
+#: The list is therefore the VALUE-LESS set and every other option is treated as
+#: consuming the next word. That is the fail-CLOSED polarity: an option this set
+#: omits costs at most a false RED (a read refused), NEVER a spared write — which
+#: is the direction that matters, because the whole point of this guard is that a
+#: directory-level replacement must not pass. Adding a value-taking option to the
+#: old list closed exactly today's rows and reopened the class with the next
+#: option anyone used; inverting closes the class.
+#:
+#: `--opt=value` never consumes anything (it carries its own value), and `-t` on
+#: cp/mv/ln/install never reaches here (the target-option branch above returns
+#: first) while `-t` on rsync means `--times` and is listed.
+_VALUE_LESS_OPTIONS = frozenset(
+    {
+        "--archive", "--recursive", "--links", "--perms", "--times", "--group",
+        "--owner", "--devices", "--specials", "--verbose", "--human-readable",
+        "--progress", "--quiet", "--compress", "--stats", "--dry-run",
+        "--itemize-changes", "--delete", "--delete-excluded", "--delete-after",
+        "--checksum", "--partial", "--append", "--append-verify", "--numeric-ids",
+        "--no-implied-dirs", "--inplace", "--dirs", "--executability", "--acls",
+        "--xattrs", "--hard-links", "--protect-args", "--force", "--ignore-errors",
+        "--relative", "--no-r", "--no-recursive", "--mkpath", "--parents",
+        "--version", "--help", "--list-only", "--whole-file", "--sparse",
+        "--copy-links", "--keep-dirlinks", "--safe-links", "--use-compress-program",
+        "--compress-level", "--update", "--existing", "--ignore-existing",
+        "--backup", "--fuzzy", "--prune-empty-dirs", "--remove-source-files",
+    }
+)
+
+#: The SHORT letters that take no separate value, so a cluster like `-avh` consumes
+#: nothing. `-e`/`-f`/`-B`/`-M`/`-T` are deliberately ABSENT: they take a value.
+_VALUE_LESS_SHORT = frozenset("arlptvhqzPRDIEFO")
+
+
+def _option_takes_value(option: str) -> bool:
+    """Does this option consume the NEXT word as its value?
+
+    Fail-CLOSED by construction: only an option provably in the value-less set
+    consumes nothing; everything else is assumed to take a value, so its value is
+    not mistaken for an operand.
+    """
+
+    if option.startswith("--"):
+        return option.split("=", 1)[0] not in _VALUE_LESS_OPTIONS
+    letters = option[1:]
+    if not letters:
+        return True
+    return not all(letter in _VALUE_LESS_SHORT for letter in letters)
+
+
+def _shell_tokens(segment: str) -> list[tuple[int, int, str]]:
+    """Split `segment` into (start, end, text) shell words, respecting QUOTES.
+
+    ⛔ A QUOTED SPAN IS ONE TOKEN (#12173 review round 32, measured FAIL-OPEN).
+    `_PATH_TOKEN_RE` is `[^\\s]+`, so it split INSIDE quotes: `-e "ssh -p 22"`
+    became `"ssh` | `-p` | `22"`, the `-e` value consumed only `"ssh`, and `22"`
+    then became "the last operand" — sparing the whole directory replacement.
+    `rsync -e "ssh -p 2222 -i key"` is the ordinary way to write a remote shell.
+    """
+
+    tokens: list[tuple[int, int, str]] = []
+    index, length = 0, len(segment)
+    while index < length:
+        if segment[index].isspace():
+            index += 1
+            continue
+        start = index
+        quote = ""
+        while index < length:
+            char = segment[index]
+            if quote:
+                if char == quote:
+                    quote = ""
+            elif char in {"'", '"'}:
+                quote = char
+            elif char.isspace():
+                break
+            index += 1
+        tokens.append((start, index, segment[start:index]))
+    return tokens
+
+
+_PATH_TOKEN_RE = re.compile(r"[^\s]+")
+
+#: Shell list separators — a command SEGMENT ends at one of these.
+_SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|&]")
+
+#: A REDIRECT and its target (`2>/dev/null`, `>/dev/null`, `>> log`). The target is
+#: NOT an operand of the verb, so it must never decide the verb's direction.
+_REDIRECT_RE = re.compile(r"\d*>>?\s*\S+")
+
+#: `cp -t DIR` / `--target-directory=DIR` NAMES the destination (#12069 review
+#: round 22, measured GREEN): with the operand order inverted, the trailing source
+#: had `-t`'s value looked like an option and the real target was skipped.
+#: ⛔ AND THE ATTACHED SHORT FORM COUNTS, BUT ONLY WHEN IT LOOKS LIKE A PATH
+#: (#12069 review round 25, then round 27 measured the over-wide form).
+#: `cp -t"$b/16/bin" /tmp/stage/*` was GREEN — `(?:=|\s)` demanded a separator, so
+#: the attached value was skipped as an option and the SOURCE glob became "the last
+#: path". The first cut then matched ANY `-t…` word, so `find … -type f -exec cp {}
+#: "$b/16/bin/" +` was read as a target of `ype` and the replacement was GREEN. The
+#: lookahead requires the attached value to be path-shaped (a `/` in it, or a
+#: path-ish first character); a slash-less attached target is no longer read, which
+#: is the fail-closed direction for a spelling nobody writes.
+_TARGET_OPTION_RE = re.compile(
+    r"(?:^|\s)(?:-t|--target-directory)(?:=|\s)\s*(?P<value>[^\s]+)"
+    r"|(?:^|\s)-t(?P<attached>(?=[/\"'$~.]|\S*/)[^\s-]\S*)"
+)
+
+#: Extractors write INTO a directory named by a FLAG or a POSITIONAL, and they are
+#: a STATED RESIDUAL, not a graded arm (#12069 review round 24). The verbs are
+#: deliberately absent from `BINARY_MUTATION_RE` (round 9: `tar -czf …` and
+#: `unzip -l …` are READS), and a half-built flag grammar cannot be made correct:
+#: `dpkg-deb -x` takes NO flag value (the destination is positional), `unzip -x`
+#: takes a PATTERN that shadows a later `-d` under one shared alternation, `cpio`
+#: is ABSENT from `BINARY_MUTATION_RE` — which is the ONLY reason
+#: `_is_command_position` reads its mention as command position; adding the verb
+#: flips the row to REFUSED (measured, #12173 round 32), and nothing in this job
+#: uses `cpio` — and `tar -C` is a SOURCE
+#: chdir in create/list mode (`tar -czf /tmp/o.tgz -C "$b/16/bin" .` — measured,
+#: 192 such lines would have been refused by the withdrawn arm). The limit is in
+#: the docstring's residual list, and the admitted spellings are pinned as rows in
+#: `BINARY_MUTATION_POLARITY` so closing them is a deliberate edit.
+
+
+def _segment_bounds(line: str, pos: int) -> tuple[int, int]:
+    """The command SEGMENT of a shell line that contains `pos`.
+
+    ⛔ A SEPARATOR INSIDE A QUOTED OPERAND IS NOT A SEPARATOR (#12069 review
+    round 23, measured). Cutting blindly at every `;` meant
+
+        sudo rsync -a --exclude="a;b" "$b/16/bin" "$RUNNER_TEMP/snap"
+
+    had its destination OUTSIDE the segment, `_is_last_path_token` saw no path
+    there and answered "destination", and a plain READ was refused. The scan is
+    the file's own `_inside_quotes`, so the two cannot disagree about quoting.
+    """
+
+    seg_start, seg_end = 0, len(line)
+    for sep in _SEGMENT_SPLIT_RE.finditer(line):
+        # ⛔ A BACKSLASH-ESCAPED SEPARATOR IS NOT A SEPARATOR (#12173 review round 30,
+        # measured FAIL-OPEN). `find … -exec cp {} "$b/16/bin/" \;` was cut at the `;`
+        # of `\;` BEFORE the quote test ran, so the segment ended with a bare `\`
+        # which then became "the last operand" — and the full directory replacement
+        # was GREEN. This is the shell rule (`\;` is one escaped argument), not a
+        # special case for `find`, and it is what makes `\;` reachable as ONE token.
+        if sep.start() and line[sep.start() - 1] == "\\":
+            continue
+        if _inside_quotes(line, sep.start()):
+            continue
+        if sep.start() <= pos:
+            seg_start = sep.end()
+        else:
+            seg_end = sep.start()
+            break
+    return seg_start, seg_end
+
+
+def _owning_verb(line: str, pos: int) -> re.Match[str] | None:
+    """The MUTATING VERB of the command SEGMENT that contains `pos`.
+
+    The LAST such verb before `pos` in that segment, or None — a directory named in
+    a segment with no mutating verb THIS GUARD RECOGNISES. None is not "nothing
+    writes there": an EXTRACTOR can (`tar -xf … -C`, `dpkg-deb -x`), which is a
+    stated residual rather than a graded spelling (#12069 review round 24).
+    """
+
+    seg_start, seg_end = _segment_bounds(line, pos)
+    owner = None
+    for verb in BINARY_MUTATION_RE.finditer(line, seg_start, seg_end):
+        # ⛔ A VERB IS A WORD IN COMMAND POSITION, NOT ANY PATH COMPONENT (#12069
+        # review round 28, measured FAIL-CLOSED). Without this, a SOURCE path whose
+        # last component spells a mutating verb became "the owning verb":
+        #
+        #     \cp -a /tmp/dd "$b/17/bin/" /tmp/snap      -- refused as a write
+        #
+        # — a plain READ, red because `/tmp/dd` owns it. `_is_command_position` is
+        # this file's answer for run-vs-operand, so it decides here too.
+        if verb.end() <= pos and _is_command_position(line, verb.start()):
+            owner = verb
+    return owner
+
+
+def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) -> bool:
+    """Is `[start, end)` the DESTINATION of `verb`?
+
+    The destination of a copy-like verb is the last path operand OF ITS OWN
+    COMMAND SEGMENT. Two traps, both measured (#12069 review rounds 20-21):
+
+    · comparing against "the last path token on the LINE" read a TARGET as a
+      source whenever anything path-bearing followed the command —
+      `sudo rsync -a "$b/17/bin/" "$b/16/bin/" 2>/dev/null` was GREEN, as were
+      `… | tee "$SCRATCH/pin.log"`, `… && ls -l "$b/16/bin"` and the
+      backslash-continued form (continuations are joined before this reads).
+      So the search is bounded to the SEGMENT that owns the verb;
+    · a REDIRECT target is not an operand at all, so it is removed before the
+      last token is taken — otherwise `2>/dev/null` is the "destination".
+
+    A first cut tested "no `/` after the match", which the trailing slash in
+    `"$b/16/bin/"` defeated; a second took the last token of the whole line,
+    which any trailing path defeated. This one reads the verb's own segment.
+    """
+
+    seg_start, seg_end = _segment_bounds(line, verb.start())
+    segment = line[seg_start:seg_end]
+    verb_word = verb.group(0).strip()
+
+    # `-t DIR` / `--target-directory=DIR` states the destination outright — for
+    # the verbs where that flag MEANS it. `rsync -t` is `--times`, and a value
+    # that is itself a flag (`-t -v`) names no directory either; both are skipped
+    # into the positional scan below. See `_TARGET_OPTION_VERBS`.
+    # ⛔ THE **LAST** TARGET OPTION, NOT THE FIRST (#12069 review round 26,
+    # measured): the attached alternative added in round 25 made `.search` return
+    # the LEFTMOST match, so `cp -t/tmp/a --target-directory="$b/16/bin" src`
+    # flipped RED → GREEN — GNU `cp`/`mv`/`ln`/`install` use the LAST target
+    # option, which is the one that decides where the copy lands.
+    target = None
+    for candidate in _TARGET_OPTION_RE.finditer(segment):
+        target = candidate
+    target_value = None
+    if target is not None:
+        target_value = target.group("value") or target.group("attached")
+        target_start = (
+            target.start("value") if target.group("value") else target.start("attached")
+        )
+        target_end = target.end("value") if target.group("value") else target.end("attached")
+    if (
+        target is not None
+        and target_value
+        and verb_word in _TARGET_OPTION_VERBS
+        and not target_value.startswith("-")
+    ):
+        return start >= target_start + seg_start and end <= target_end + seg_start
+
+    # Blank the redirect targets (same length, so offsets stay absolute).
+    segment = _REDIRECT_RE.sub(lambda m: " " * len(m.group(0)), segment)
+
+    last: tuple[int, int] | None = None
+    # ⛔ ONE OPERAND SCAN THAT CONSUMES OPTION VALUES (#12173 review round 30,
+    # measured FAIL-OPEN). A first cut kept the last `/`-bearing token and then
+    # treated ANY later non-option token as "something comes after it", which
+    # reopened the hole this PR exists to close — an option's SEPARATE VALUE is
+    # not an operand:
+    #
+    #     sudo rsync -a "$b/17/bin/" "$b/16/bin/" -e ssh          -- GREEN (bypass)
+    #     sudo rsync -a "$b/17/bin/" "$b/16/bin/" --exclude foo   -- GREEN (bypass)
+    #
+    # So the scan walks the tokens ONCE: an option (`-e`, `--exclude`) makes the
+    # NEXT token its value and consumes it; `--opt=value` carries its own and
+    # consumes nothing; every other token is an OPERAND, and the LAST operand is
+    # what decides direction. `-t`/`--target-directory` never reaches here — the
+    # branch above returns first for the verbs where that flag MEANS a destination.
+    expect_value = False
+    for token_start, token_end, text in _shell_tokens(segment):
+        # ⛔ AN OPTION IS NOT AN OPERAND (#12069 review round 22, measured):
+        # `--exclude-from=/etc/rsync-exclude` and `--log-file="$SCRATCH/x.log"`
+        # carry a path in an option VALUE and were taken as the destination.
+        if text.startswith("-"):
+            # `--opt=value` carries its own value. Otherwise `_option_takes_value`
+            # decides, and it FAILS CLOSED: only an option provably value-less
+            # consumes nothing, so `-v`/`-avh` keep the destination last while an
+            # unlisted value-taker (`-S .bak`, `--max-size 100m`) consumes its value.
+            expect_value = "=" not in text and _option_takes_value(text)
+            continue
+        if expect_value:
+            expect_value = False
+            continue
+        # Not operands: a `find … \\;`/`xargs` terminator (`+`), the escaped `\\;`
+        # itself, and the leading fragment the `2>&1` split leaves at `&`.
+        if text in {"+", "\\;", ";"}:
+            continue
+        if re.match(r"^\d*[<>]", text):
+            continue
+        last = (token_start + seg_start, token_end + seg_start)
+    if last is None:
+        return True
+    return start >= last[0] and end <= last[1]
+
+
 def _is_command_position(line: str, start: int) -> bool:
     """Is the word at `start` the COMMAND of its list element, not an operand?
 
@@ -1069,7 +1707,30 @@ def _is_command_position(line: str, start: int) -> bool:
         token = tokens[index]
         if token.rstrip(";|&({") != token:
             return True
-        if token in _WRAPPER_WORDS:
+        # ⛔ THE VERB WORD, NOT THE RAW TOKEN (#12069 review round 27, measured
+        # FAIL-OPEN). `BINARY_MUTATION_RE` starts with `\b`, so it can never match
+        # a token that begins with `/`, `\\`, `.`, `=` or `(` — and the walk-back
+        # then reached the wrapper (or the start) and answered COMMAND, which SKIPS
+        # the mention before the per-verb direction reading runs. Measured GREEN,
+        # row-level, with `b=/usr/lib/postgresql`:
+        #
+        #     \cp -a "$b/17/bin/" "$b/16/bin/"          /bin/cp -a …
+        #     /usr/bin/rsync -a …   ./cp -a …   true;cp -a …   x=1;cp -a …   (cp -a …)
+        #
+        # A skipped separator can be glued onto the word (`true;cp`) and a wrapper
+        # can be path-qualified, so the word is split at a separator and stripped
+        # of its backslash and its directories before either test runs.
+        head_word = re.split(r"[;|&({]", token)[-1].lstrip("\\")
+        word = head_word.rsplit("/", 1)[-1]
+        # ⛔ THE WRAPPER TEST MUST NOT STRIP DIRECTORIES (#12069 review round 28,
+        # measured FAIL-OPEN). With one normalised word for both tests, an OPERAND
+        # whose BASENAME is a wrapper word became "the wrapper":
+        #
+        #     cp -a /tmp/env "$b/16/bin"        /usr/bin/rsync -a --rsh=/usr/bin/env …
+        #
+        # answered COMMAND and spared the replacement. A wrapper is the WORD ITSELF,
+        # not a path whose last component happens to spell it.
+        if head_word in _WRAPPER_WORDS:
             return True
         # ⛔ ONE VERB TABLE, NOT TWO (#12069 review 14, measured FAIL-OPEN).
         # A second hand-kept list here went stale the moment it was written: it did
@@ -1081,8 +1742,8 @@ def _is_command_position(line: str, start: int) -> bool:
         #     sudo perl -i -pe 's/16/17/' psql
         # A mutating verb's following words are its OPERANDS, whatever the verb, so
         # the test is the rule's own population.
-        if token in _OPERAND_TAKING_WORDS or BINARY_MUTATION_RE.match(
-            " ".join(tokens[index:])
+        if word in _OPERAND_TAKING_WORDS or BINARY_MUTATION_RE.match(
+            " ".join([word, *tokens[index + 1 :]])
         ):
             return False
         index -= 1
@@ -2746,7 +3407,7 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     text = _run_commands(pin)
     leg_indexes = _leg_indexes(steps)
     assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
-    leg_start = min(leg_indexes)
+    leg_start = max(leg_indexes)
 
     # ⛔ A PREPEND INSIDE A CONSTANT-CONDITION BLOCK IS PRESENT AND INERT (#12051
     # review round 8). Every rule below reads a line as a unit, so an enclosing
@@ -2842,8 +3503,8 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     "$b/16/bin/pg_dump"` and a `find`-derived `cp …/16/bin/pg_dump` were both
     measured GREEN, and both leave the leg resolving the pg17 binary out of the
     pinned dir. So a MUTATING verb carrying a client binary name is refused at
-    or after the pin, however the source is spelled. The pin's own
-    `postgresql-client-<n>` install line is the one exclusion.
+    or after the pin, however the source is spelled — NO line is exempt (the pin's
+    own install line fires no arm at all; see `_replaces_a_client_binary`).
 
     Read through `_run_commands()` for the same reason as every other search
     here: a commented-out line is inert shell that reads identically to the live
@@ -2864,7 +3525,24 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     pin_index, _ = _pin_step(steps)
     # The window's upper bound is the step that RUNS the leg: a PATH set after a
     # leg that already ran cannot move it (#12069 round-15 review 2).
-    leg_start = min(_leg_indexes(steps))
+    # ⛔ THE PATH WINDOW ENDS AT the LAST step that runs the leg, not the first
+    # one that looks like it (#12069 review round 20, measured GREEN). Taking the
+    # MINIMUM is the fail-open direction: a step that merely RESEMBLES the leg —
+    # `- run: python -m pytest tests/test_9567_record_capstone.py --collect-only -q`
+    # inserted before the real one — satisfies both `CAPSTONE_FILE` and
+    # `LEG_INVOCATION_RE`, becomes the window end, and the real leg's
+    # `env: PATH: /usr/bin:/bin` then falls outside the graded range with every
+    # row green. Grading a SUPERSET costs only a false RED for a PATH change made
+    # after the leg already ran, which cannot move that leg anyway. `min()` is
+    # kept only where the claim really is "the pin PRECEDES the leg".
+    # ⛔ AND ASSERT FIRST (#12069 review round 21): `max()` of an empty sequence
+    # raises `ValueError: max() iterable argument is empty`, so a leg invoked
+    # through a wrapper script (`run: bash .github/scripts/…-attribution.sh
+    # tests/test_9567_record_capstone.py`, which carries no `pytest` word) died
+    # with an opaque traceback instead of this guard's own message.
+    leg_indexes = _leg_indexes(steps)
+    assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
+    leg_window_end = max(leg_indexes)
 
     mentions = _github_path_writes(steps, job)
     assert mentions, (
@@ -2909,11 +3587,11 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     # `run:` correctly red — plus the same for the `_runner_file_commands` glob and
     # at workflow-level `defaults.run.shell`.
     replacements = sorted(
-        set(_path_assignments_that_drop_the_pin(steps, pin_index, server_major, job, leg_start))
+        set(_path_assignments_that_drop_the_pin(steps, pin_index, server_major, job, leg_window_end))
         # ⛔ `env:` AND `$GITHUB_ENV` MOVE THE SAME PATH (#12069 review P1). Both
         # were unread, so both restored #12051 with every row green. STEP scope is
         # windowed from the pin, like `_path_assignments_that_drop_the_pin` above.
-        | set(_env_path_replacements(steps, server_major, job, pin_index, leg_start))
+        | set(_env_path_replacements(steps, server_major, job, pin_index, leg_window_end))
         | {
             f"step {index} mentions `$GITHUB_ENV`: {line!r}"
             for index, step in enumerate(steps)
@@ -2929,8 +3607,8 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
             # postgresql-client-16` on a box that already has the package is a
             # NO-OP, so a rewrite above the pin survives it. Measured: appending
             # `: > /usr/lib/postgresql/16/bin/pg_dump` to the pre-pin install
-            # step's `run:` left `187 passed`. The pin's own install line stays
-            # excluded by `CLIENT_PKG_RE` inside `_replaces_a_client_binary`.
+            # step's `run:` left `187 passed`. NO line is exempt: the pin's own
+            # install line fires no arm (see `_replaces_a_client_binary`).
             for line in _executed_lines(job, step)
             if _replaces_a_client_binary(line)
         }
@@ -3028,7 +3706,7 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     server_major = _postgres_image_majors(job)[0]
     leg_indexes = _leg_indexes(steps)
     assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
-    leg_start = min(leg_indexes)
+    leg_start = max(leg_indexes)
 
     # INERT-BUT-PRESENT first: an enclosing constant-condition block leaves every
     # structural assertion below satisfied and the branch unable to fire.
@@ -4289,6 +4967,405 @@ BINARY_MUTATION_POLARITY = [
         "`rsync` is the ordinary tree-copy verb (#12069 review, P1)",
     ),
     (
+        'b=/usr/lib/postgresql\nsudo rsync -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-19 P1: a DIRECTORY-level replacement names no binary — "
+        "it overwrites every client in the pinned dir (measured GREEN, 282 passed)",
+    ),
+    (
+        'sudo cp -a "$b/17/bin/." "$b/16/bin/"',
+        True,
+        "#12069 round-19 P1: `cp -a` of the dir CONTENTS, same act",
+    ),
+    (
+        'sudo ln -sfn "$b/17/bin" "$b/16/bin"',
+        True,
+        "#12069 round-19 P1: the pinned dir BECOMES the other major's binaries",
+    ),
+    (
+        'sudo mv "$b/17/bin" "$b/16/bin"',
+        True,
+        "#12069 round-19 P1: `mv` of the dir, measured GREEN before the fix",
+    ),
+    (
+        'b=/usr/lib/postgresql/; sudo rsync -a "${b}17/bin/" "${b}16/bin/"',
+        True,
+        "#12069 round-29 P1: the base is GLUED to the token — a braced variable "
+        "whose own value carries the slash. Measured GREEN before the fix, and it "
+        "is the complete #12051 directory replacement, so it is NOT the "
+        "base-quoted-apart residual: there is no separator at all.",
+    ),
+    (
+        'b=/usr/lib/postgresql; sudo rsync -a "${b}/17/bin/" "${b}/16/bin/"',
+        True,
+        "#12069 round-29: the braced form WITH an explicit separator — the same "
+        "act, and widening the pattern to admit the glued spelling must not lose it",
+    ),
+    (
+        'b=/usr/lib/postgresql; sudo rsync -a "$b/17/bin/" "$d/"',
+        False,
+        "STATED RESIDUAL (#12069 round-29, measured): the destination names NO "
+        "token at all, so the dir arm is not reached. Declared in the docstring's "
+        "residual list; pinned so closing it is a deliberate edit rather than an "
+        "accident.",
+    ),
+    (
+        'b=/usr/lib/postgresql; sudo rsync -a "$b/17/bin/" "$b/16"/bin/',
+        False,
+        "STATED RESIDUAL (#12173 review round 31, measured): a QUOTE anywhere "
+        "between the base and `/bin` defeats the match — not only the "
+        "base-quoted-apart form. Shell-resolves to /usr/lib/postgresql/16/bin/, "
+        "so this is the COMPLETE #12051 directory replacement and it is GREEN. "
+        "Fail-OPEN and declared rather than closed, because admitting quotes as "
+        "glue is how a text guard starts accepting more than it can reason "
+        "about; pinned so closing it is a deliberate edit.",
+    ),
+    (
+        'b=/usr/lib/postgresql; sudo rsync -a "$b/17/bin/" "$b/1"6/bin/',
+        False,
+        "STATED RESIDUAL (#12173 review round 31, measured): the same quoting "
+        "hole inside the TOKEN — shell-resolves to /usr/lib/postgresql/16/bin/. "
+        "Fail-OPEN, declared, pinned.",
+    ),
+    (
+        'b=/usr/lib/postgresql; sudo rsync -a "$b/17/bin/" "$b/1""6/bin/',
+        False,
+        "STATED RESIDUAL (#12173 review round 31, measured): token split across "
+        "two quoted halves — same act, same GREEN. Fail-OPEN, declared, pinned.",
+    ),
+    (
+        'b=/usr/lib/postgresql/; sudo rsync -a "${b%x}17/bin/" "${b%x}16/bin/"',
+        False,
+        "STATED RESIDUAL (#12069 review round-30, measured): a braced base "
+        "carrying a PARAMETER MODIFIER leaves the `\\$\\{\\w+\\}` arm behind, so "
+        "this is the COMPLETE #12051 directory replacement and it is GREEN. "
+        "Pre-existing — not introduced by the round-29 widening. Declared rather "
+        "than closed on purpose: widening to admit `}`-less expansions is how a "
+        "text guard starts accepting `${anything}` as a base.",
+    ),
+    (
+        'b=/usr/lib/postgresql; v=16; sudo rsync -a "$b/17/bin/" "$b/$v/bin"',
+        True,
+        "#12069 review round-30: a destination whose VERSION component is ITSELF a "
+        "variable IS matched (on the `$v` token) and refused — fail-closed, and it "
+        "is the OPPOSITE direction from the residual above. Pinned so the "
+        "docstring's restated residual 4 cannot drift back.",
+    ),
+    (
+        'b=/usr/lib/postgresql; v=16; sudo rsync -a "$b/17/bin/" "${b}/${v}/bin"',
+        True,
+        "#12069 review round-30: same act, braced-base and braced-token spelling",
+    ),
+    (
+        'b=/usr/lib/postgresql; sudo sh -c \'rsync -a "$b/17/bin/" "$b/16/bin/"\'',
+        False,
+        "STATED RESIDUAL (#12069 round-29, measured): a quoted command word puts "
+        "both mentions in COMMAND position for a text guard that reads words, so "
+        "the body is not parsed. Declared, and pinned.",
+    ),
+    (
+        'cd /usr/lib/postgresql && sudo rsync -a 17/bin/ 16/bin/',
+        False,
+        "STATED RESIDUAL (#12069 round-29, measured): a path RELATIVE to a `cd` "
+        "elsewhere names no client-dir base at all, and the guard reads one line "
+        "at a time — the `cd` may be in an earlier line or step, which a line "
+        "regex cannot model. Declared, and pinned.",
+    ),
+    (
+        'sudo tee -a "$GITHUB_PATH" <<< "/usr/lib/postgresql/16/bin"',
+        True,
+        "ADMITTED OVER-REFUSAL (#12069 round-29, measured): `tee` IS a mutating "
+        "verb and has no direction, so a `tee` of a versioned dir is refused even "
+        "though it only appends a path. Fail-closed, and the pin step's own shape "
+        "(`echo … >> \"$GITHUB_PATH\"`) stays GREEN — pinned so widening the "
+        "exemption is a deliberate edit, not a silent one.",
+    ),
+    (
+        'echo "$b/16/bin" | sudo tee -a "$GITHUB_PATH"',
+        False,
+        "CONTROL: piping into `tee` puts the client dir in COMMAND position — the "
+        "ordinary append spelling, and it must stay green",
+    ),
+    (
+        'rm -rf "$RUNNER_TEMP/tools/bin"',
+        False,
+        "CONTROL: the widened BASE must not widen the TOKEN — `tools` is not a "
+        "major, a glob or a variable, so this ordinary tidy stays green",
+    ),
+    (
+        'sudo rsync -a "$RUNNER_TEMP/artifacts/" "$RUNNER_TEMP/out/"',
+        False,
+        "CONTROL: a directory copy that names no versioned client dir",
+    ),
+    (
+        'rm -f /tmp/x && /usr/lib/postgresql/17/bin/pg_dump --version',
+        False,
+        "CONTROL: a client dir in COMMAND position is RUN, not written — the "
+        "same polarity as the binary-name arm",
+    ),
+    (
+        'cp -a "$b/16/bin" "$RUNNER_TEMP/client-snapshot"',
+        False,
+        "CONTROL: READING the pinned dir into a temp dir is not a replacement — "
+        "the client dir is the SOURCE, not the destination (#12069 round 20: "
+        "this was a false RED before the direction check)",
+    ),
+    (
+        'rsync -a "$b/17/bin/" "$RUNNER_TEMP/pg17-snapshot"',
+        False,
+        "CONTROL: copying ANOTHER major's dir OUT is a read, not a rewrite",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "the DIRECTION that matters: the pinned dir is LAST, i.e. the target",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" 2>/dev/null',
+        True,
+        "#12069 round-21 P1: a trailing redirect target must not launder the "
+        "destination — the last-path-token test is bounded to the verb's SEGMENT "
+        "with redirect targets removed (measured GREEN before this)",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" 2>&1 | tee "$SCRATCH/pin.log"',
+        True,
+        "#12069 round-21 P1: a LATER command in a pipe must not launder it either",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" && ls -l "$b/16/bin"',
+        True,
+        "#12069 round-21 P1: nor a later command's path argument after `&&`",
+    ),
+    (
+        'sudo cp /etc/hosts /tmp/hosts && sudo rsync -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-23 P1: the MENTION's own segment owns the verb — a copy verb "
+        "EARLIER on the line must not hide a later rewrite (measured GREEN)",
+    ),
+    (
+        'sudo install -d -m 755 "$RUNNER_TEMP/tools" && sudo rsync -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-23 P1: same, with `install` as the leading verb",
+    ),
+    (
+        'sudo rsync -r -t -v "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-23 P1: rsync's `-t` is `--times`; read as target-directory it "
+        "took `-v` for the destination and the replacement was GREEN (measured)",
+    ),
+    (
+        'sudo rsync -a --exclude="a;b" "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-23 P1: a quoted `;` in an operand does not end the segment",
+    ),
+    (
+        'sudo chmod 755 /tmp/x && sudo cp -a "$b/16/bin" "$RUNNER_TEMP/snap"',
+        False,
+        "CONTROL: the mirror of the row above — a READ in a later segment is not a "
+        "rewrite, even when the segment's first verb has no direction (#12069 "
+        "round 23: this was a false RED before the owner-verb fix)",
+    ),
+    (
+        'sudo rsync -a -t "$b/16/bin" "$RUNNER_TEMP/snap"',
+        False,
+        "CONTROL: `rsync -t` is `--times`, so this is a READ — the same act spelled "
+        "`--times` was already green (#12069 round 23: `-t` made it a false RED)",
+    ),
+    (
+        'sudo rsync -a --exclude="a;b" "$b/16/bin" "$RUNNER_TEMP/snap"',
+        False,
+        "CONTROL: a quoted `;` in an operand must not truncate the segment past the "
+        "destination (#12069 round 23: false RED before the quote-aware split)",
+    ),
+    (
+        'sudo rsync -a "$d/17/bin/" "$d/16/bin/"',
+        True,
+        "ACCEPTED OVER-REFUSAL: a variable base cannot be resolved, so a versioned "
+        "SCRATCH dir is refused while its literal spelling is spared — fail-closed"
+        " (#12069 round 23, stated)",
+    ),
+    (
+        'sudo chmod -R a+rX "$d/16/bin"',
+        True,
+        "the same over-refusal on a READ: a variable base is refused wherever the "
+        "verb sits, because the guard cannot tell it from the pin (#12069 round 23)",
+    ),
+    (
+        'sudo chmod -R a+rX "$RUNNER_TEMP/tools/16/bin"',
+        False,
+        "CONTROL: the token must sit DIRECTLY under the base, which is what spares "
+        "this — the extra `tools/` component, NOT literalness (`$RUNNER_TEMP/16/bin` "
+        "is the red one; measured, #12069 round 24)",
+    ),
+    (
+        'sudo tar -xf pg17.tgz -C "$b/16/bin"',
+        False,
+        "STATED RESIDUAL: an EXTRACTOR's destination is not graded (`tar -xf … -C` "
+        "overwrites every client). Pinned so closing it is a deliberate edit: the "
+        "verbs are absent from the mutation list by design (round 9), `dpkg-deb -x` "
+        "takes no flag value, `unzip -x` shadows `-d`, and `tar -C` is a SOURCE "
+        "chdir outside extract mode (#12069 round 24)",
+    ),
+    (
+        'sudo cp x y && sudo tar -xf pg17.tgz -C "$b/16/bin"',
+        False,
+        "STATED RESIDUAL, compound spelling: same act one segment on. It was RED "
+        "before round 23 only as a side effect of the first-verb bug, so the "
+        "verdict is admitted rather than claimed (#12069 round 24)",
+    ),
+    (
+        'sudo apt-get install -y --no-install-recommends postgresql-client-16',
+        False,
+        "CONTROL: the PIN's own install line fires NO arm (no binary name, no "
+        "client dir, no redirect) — it is green by that, not by an exemption "
+        "(#12069 round 27: every text exemption was removable)",
+    ),
+    (
+        'sudo apt-get install -y --no-install-recommends postgresql-client-16 && sudo rsync -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-25 P1: a replacement CHAINED onto the install line was GREEN "
+        "— no line is exempt, so it is graded (measured)",
+    ),
+    (
+        'sudo apt-get install -y --no-install-recommends postgresql-client-16 && : > /usr/lib/postgresql/16/bin/pg_dump',
+        True,
+        "#12069 round-25 P1: the redirect arm was spared by the same line-wide bail",
+    ),
+    (
+        'echo "pin goes to $GITHUB_PATH" >/dev/null; sudo rsync -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-25 P1: a `$GITHUB_PATH` mention in ANOTHER segment spared the "
+        "whole directory arm (measured GREEN); the exemption is per segment",
+    ),
+    (
+        'sudo cp -t"$b/16/bin" /tmp/stage/*',
+        True,
+        "#12069 round-25 P1: the ATTACHED `-tDIR` short form was unread, so the SOURCE "
+        "glob became the last path (measured GREEN)",
+    ),
+    (
+        'echo "apt-get install -y postgresql-client-16" > /usr/lib/postgresql/16/bin/pg_dump',
+        True,
+        "#12069 round-26 P1: a payload that merely NAMES the pin was exempted with the "
+        "install line — the exemption now requires the mention in COMMAND position "
+        "(measured GREEN before)",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" --note="GITHUB_PATH"',
+        True,
+        "#12069 round-26 P1: naming a command file in an option spared the rewrite — "
+        "the exemption now needs it as a REDIRECT TARGET of that segment (measured GREEN)",
+    ),
+    (
+        'cp -t/tmp/a --target-directory="$b/16/bin" src',
+        True,
+        "#12069 round-26 P2: the LAST target option decides where the copy lands; "
+        "reading the first flipped this RED→GREEN in round 25 (measured)",
+    ),
+    (
+        '\\cp -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-27 P1: a BACKSLASH-escaped verb never matched `\\b`, so the walk "
+        "called it a command and skipped the mention (measured GREEN)",
+    ),
+    (
+        '/bin/cp "$b/17/bin/pg_dump" "$b/16/bin/pg_dump"',
+        True,
+        "#12069 round-27 P1: same through a PATH-QUALIFIED verb, on the binary-name arm",
+    ),
+    (
+        'true;cp -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-27 P1: a GLUED separator — the word after `;` is the command",
+    ),
+    (
+        'find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" +',
+        True,
+        "#12069 round-27 P1: `-type` was read as an attached `-t` target, so the copy's "
+        "destination looked like a source (measured GREEN)",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" >> "$GITHUB_STEP_SUMMARY"',
+        True,
+        "#12069 round-27 P1: a command-file append in the SAME segment spared the "
+        "write (measured GREEN); the command-file exemption is gone",
+    ),
+    (
+        'sudo apt-get install -y postgresql-client-16 > /usr/lib/postgresql/16/bin/pg_dump',
+        True,
+        "#12069 round-27 P2: the install exemption spared a redirect of the install's "
+        "OWN stdout into the pinned binary; there is no exemption left to spare it",
+    ),
+    (
+        'sudo cp -a /usr/lib/postgresql*/17/bin/ /usr/lib/postgresql*/16/bin/',
+        True,
+        "#12069 round-27 P2: a GLOB base was unread (the token arm had the glob, not the "
+        "base) — measured GREEN",
+    ),
+    (
+        'cp -a $RUNNER_TEMP/env "$b/16/bin"',
+        True,
+        "#12069 round-28 P2: an OPERAND whose BASENAME is a wrapper word is not a "
+        "command — it was read as one and spared the replacement (measured)",
+    ),
+    (
+        '\\cp -a /tmp/dd "$b/17/bin/" /tmp/snap',
+        False,
+        "CONTROL: a SOURCE path whose last component spells a verb is not the owning "
+        "verb, so this READ stays green (#12069 round 28: the normalisation made it "
+        "RED until the owner check)",
+    ),
+    (
+        'sudo cpio -idmv -D "$b/16/bin"',
+        False,
+        "STATED RESIDUAL: the verb is in NEITHER table, so "
+        "`verb = BINARY_MUTATION_RE.search(line)` is None and the function returns "
+        "at `if not verb` — before the directory arm; adding the verb is the fix "
+        "(#12069 r24, corrected r27)",
+    ),
+    (
+        'sudo unzip -o pg17.zip -d "$b/16/bin"',
+        False,
+        "STATED RESIDUAL: an extractor's `-d` is not graded (see the docstring's "
+        "EXTRACTOR residual — named, not ordinalised, because the list is "
+        "append-only and an ordinal drifts every time an entry is inserted; this "
+        "one said `sixth` and was correct when written at round 24, but the "
+        "PARAMETER-MODIFIER row inserted since moved the extractor from sixth to "
+        "SEVENTH (the variable-base row PREDATES that ordinal — it was already in "
+        "the list when `sixth` was written and correct — and the `cd`-relative "
+        "statement is a separate bullet, not an entry in this list), which pointed "
+        "a future round at a REFUSED direction "
+        "instead "
+        "(#12069 r24, ordinal corrected r30 and again r31); pinned so closing it "
+        "is a deliberate edit",
+    ),
+    (
+        'sudo dpkg-deb -x x.deb "$b/16/bin"',
+        False,
+        "STATED RESIDUAL: the verb is in neither table, so `if not verb` returns "
+        "BEFORE the directory arm and the mention is never read; adding it to "
+        "`BINARY_MUTATION_RE` grades the positional destination with no flag grammar "
+        "(#12069 r24, corrected r27)",
+    ),
+    (
+        'tar -czf "$RUNNER_TEMP/pg_dump-output.tgz" "$b/16/bin"',
+        False,
+        "CONTROL: archiving the pinned dir FROM it is a READ, which is why the "
+        "extractors were dropped from the mutation list (#12069 round 9)",
+    ),
+    (
+        'unzip -l "$b/16/bin/keep.zip"',
+        False,
+        "CONTROL: `-l` names no destination — a listing is a read",
+    ),
+    (
+        'sudo tar -czf "$RUNNER_TEMP/o.tgz" -C "$b/16/bin" .',
+        False,
+        "CONTROL: in CREATE mode `tar -C` is a source chdir — grading it without the "
+        "mode refused 192 correct lines in the withdrawn arm (#12069 round 24)",
+    ),
+    (
         'sudo sh -c "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"',
         True,
         "`cat >` is the same act as the `tee` the list already carried",
@@ -4459,6 +5536,81 @@ BINARY_MUTATION_POLARITY = [
         True,
         "#12069 round-15: an option's VALUE may sit before `-c`",
     ),
+    # ⛔ THE FALSE-RED DIRECTION (#12173 review round 29, measured). `last` is only
+    # ever a token containing a `/`, so a destination spelled WITHOUT one used to
+    # leave the reading on the pinned dir — the SOURCE — and refuse a plain READ.
+    # `origin/main` answers False for all three of these; the arm that closed the
+    # directory-replace hole refused them with the untrue `REPLACES a client
+    # binary`. Removing the trailing-operand check in `_is_last_path_token` reddens
+    # exactly these rows, which is what makes the repair attributable.
+    (
+        'sudo cp -a "$b/16/bin" snapshot',
+        False,
+        "#12173 round-29: a slash-less DESTINATION — this is a READ, not a replace",
+    ),
+    (
+        'sudo rsync -a "$b/16/bin/" "$RUNNER_TEMP"',
+        False,
+        "#12173 round-29: a variable destination with no `/` — the ordinary snapshot idiom",
+    ),
+    (
+        'sudo cp -a "$b/16/bin" backup',
+        False,
+        "#12173 round-29: a relative destination — copying OUT of the pinned dir",
+    ),
+    # ⛔ THE OTHER HALF OF ROUND 30: the round-29 repair must not spare the WRITE.
+    # An option's SEPARATE VALUE (`-e ssh`, `--exclude foo`) is not an operand, and
+    # `\;` is ONE escaped token — the segment split cut it and left a bare `\` that
+    # became "the last operand", so the complete directory replacement was GREEN.
+    # Each was measured GREEN at 5ccf4d746c and RED again here; removing the
+    # option-value consumption or the escaped-separator skip reddens exactly these.
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" -e ssh',
+        True,
+        "#12173 round-30: an option's SEPARATE VALUE is not a trailing operand",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" --exclude foo',
+        True,
+        "#12173 round-30: a long option's separate value is not a trailing operand",
+    ),
+    (
+        'find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \\;',
+        True,
+        "#12173 round-30: `\\;` is one escaped token, not a segment boundary",
+    ),
+    # ⛔ AND A VALUE-LESS FLAG IS STILL NOT A VALUE (#12173 review round 31). "Any
+    # option without `=` consumes the next word" ate the destination, so `last` fell
+    # back to the SOURCE and the complete replacement went GREEN. Only the listed
+    # `_VALUE_TAKING_OPTIONS` consume a word; `-v`/`-h`/`-a` do not.
+    (
+        'sudo rsync -a "$b/17/bin/" -v "$b/16/bin/"',
+        True,
+        "#12173 round-31: a VALUE-LESS flag between source and destination",
+    ),
+    (
+        'sudo rsync -a "$b/16/bin/" -v "$RUNNER_TEMP/"',
+        False,
+        "#12173 round-31 CONTROL: the same flag on a read stays GREEN",
+    ),
+    # ⛔ ROUND 32 INVERTS THE POLARITY: "only a LISTED option consumes" made an
+    # UNLISTED value-taker leave its value as the last operand, and a quoted value
+    # with a space was SPLIT into three tokens — both spared the write again.
+    (
+        'sudo cp -a "$b/17/bin/" "$b/16/bin/" -S .bak',
+        True,
+        "#12173 round-32: an UNLISTED value-taker must still consume its value",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" --max-size 100m',
+        True,
+        "#12173 round-32: an unlisted long option's value is not an operand",
+    ),
+    (
+        'sudo rsync -a "$b/17/bin/" "$b/16/bin/" -e "ssh -p 22"',
+        True,
+        "#12173 round-32: a QUOTED value with a space is ONE token",
+    ),
 ]
 
 
@@ -4489,11 +5641,20 @@ def test_every_rewrite_rule_is_wired_into_the_row(job: dict) -> None:
     """
 
     replaced = copy.deepcopy(job)
+    # ⛔ THE FOREIGN MAJOR IS DERIVED, NOT SPELLED (#12069 review round 19). With
+    # `17` hard-coded as "another major" and the pin at 16, a CONSISTENT bump of
+    # the whole job to 17 turned this fixture into a same-major write: the row
+    # correctly raised nothing and the test failed `DID NOT RAISE` — a false RED
+    # with a message describing a correct tree. Deriving it keeps the fixture
+    # foreign whatever major the workflow currently pins.
+    server_major = _postgres_image_majors(job)[0]
+    foreign_major = server_major + 1
     leg = next(
         s for s in _steps(replaced) if "Postgres legs" in str(s.get("name") or "")
     )
     leg["run"] = (
-        'b=/usr/lib/postgresql\nsudo rsync -a "$b/17/bin/pg_dump" "$b/16/bin/pg_dump"\n'
+        "b=/usr/lib/postgresql\n"
+        f'sudo rsync -a "$b/{foreign_major}/bin/pg_dump" "$b/{server_major}/bin/pg_dump"\n'
         + leg["run"]
     )
     with pytest.raises(AssertionError, match="REPLACES a client binary"):
@@ -4504,9 +5665,9 @@ def test_every_rewrite_rule_is_wired_into_the_row(job: dict) -> None:
         s for s in _steps(named) if "Postgres legs" in str(s.get("name") or "")
     )
     leg["run"] = (
-        'export PATH="/usr/lib/postgresql/17/bin:$PATH"\n' + leg["run"]
+        f'export PATH="/usr/lib/postgresql/{foreign_major}/bin:$PATH"\n' + leg["run"]
     )
-    with pytest.raises(AssertionError, match="names pg17"):
+    with pytest.raises(AssertionError, match=f"names pg{foreign_major}"):
         test_no_step_rewrites_the_client_path_to_another_major(named)
 
     command_file = copy.deepcopy(job)
@@ -4519,6 +5680,84 @@ def test_every_rewrite_rule_is_wired_into_the_row(job: dict) -> None:
     )
     with pytest.raises(AssertionError, match="runner's own command file"):
         test_no_step_rewrites_the_client_path_to_another_major(command_file)
+
+
+def test_a_step_that_only_NAMES_the_capstone_is_not_the_leg() -> None:
+    """A mention is not an invocation (#12069 review round 19, measured GREEN).
+
+    `_leg_indexes` matched the FILENAME anywhere in a step's commands, and its
+    result is the WINDOW END for the `env:`/`PATH` rules. So an unrelated step
+    that merely echoed the capstone's name became `min(_leg_indexes(...))`, the
+    real leg fell outside every window, and the leg's own
+    `env: PATH: /usr/bin:/bin` (which replaces the pinned PATH outright) was
+    never graded — measured GREEN across the whole job.
+    """
+
+    steps = [
+        {
+            "name": "announce",
+            "run": 'echo "about to run tests/test_9567_record_capstone.py"',
+        },
+        {
+            # ⛔ AND THE SPELLING THAT CARRIES THE WORD (#12069 review round 23,
+            # measured): a PRODUCER line was counted as the leg because the word
+            # `pytest` appeared in it, which is the same defect one punctuation
+            # over and left the class this test names open.
+            "name": "announce with the word",
+            "run": 'echo "about to run pytest tests/test_9567_record_capstone.py"',
+        },
+        {
+            "name": "announce via printf",
+            "run": "printf '%s\\n' 'python -m pytest tests/test_9567_record_capstone.py'",
+        },
+        {
+            "name": "leg",
+            "run": "python -m pytest tests/test_9567_record_capstone.py",
+        },
+    ]
+    assert _leg_indexes(steps) == [3], (
+        "a step that only NAMES the capstone was read as the leg, which collapses "
+        "the window the `env:`/`PATH` rows are graded over"
+    )
+
+
+def test_the_path_window_ends_at_the_LAST_leg_not_the_first(job: dict) -> None:
+    """`max()`, not `min()`, and this row is what makes the choice load-bearing.
+
+    A step that really INVOKES the capstone (`-k` narrows it; that is not
+    `--collect-only`) satisfies `_leg_indexes` while running nothing. Under
+    `min()` it becomes the window END, so the real leg's own `env: PATH` falls
+    outside every window and a job with the pin bypassed stays green — the exact
+    fail-open #12069 review round 20 named. Reverting `max()` to `min()` here
+    makes this test fail, which is the only thing that keeps the direction
+    pinned (#12069 review round 23).
+    """
+
+    steps = _steps(job)
+    leg_indexes = _leg_indexes(steps)
+    assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
+    real_leg = max(leg_indexes)
+
+    mutated = copy.deepcopy(job)
+    # ⛔ MUTATE THE JOB'S OWN LIST (`_steps()` returns a NEW list, so inserting
+    # into it lands nothing — measured: the row then red for the wrong reason and
+    # did not discriminate at all, #12069 review round 23).
+    mutated["steps"].insert(
+        real_leg,
+        {
+            "name": "early probe of the record capstone",
+            "run": "python -m pytest tests/test_9567_record_capstone.py -k nothing_matches",
+        },
+    )
+    # The real leg now sits one step later, and it drops the pin outright.
+    mutated["steps"][real_leg + 1]["env"] = {"PATH": "/usr/bin:/bin"}
+    assert _leg_indexes(_steps(mutated)) == [real_leg, real_leg + 1], (
+        "the fixture did not land two legs — the decoy must INVOKE the capstone "
+        "(it is not `--collect-only`) so `min()` would end the window before the leg"
+    )
+
+    with pytest.raises(AssertionError, match="sets `env: PATH`"):
+        test_no_step_rewrites_the_client_path_to_another_major(mutated)
 
 
 def test_a_step_env_outside_the_pin_leg_window_is_not_an_offender() -> None:
@@ -5404,12 +6643,22 @@ def test_a_continued_install_line_still_reads_as_the_install(job: dict) -> None:
     """
 
     continued = copy.deepcopy(job)
+    # ⛔ THE PACKAGE MAJOR IS DERIVED, NOT SPELLED (#12069 review round 19). The
+    # fixture used to replace the literal `postgresql-client-16`; once the whole
+    # job is bumped to 17 that replace is a NO-OP, so the very next assertion
+    # failed with "the fixture did not wrap the install line" — a message that
+    # blames the workflow for a correct edit.
+    server_major = _postgres_image_majors(continued)[0]
     pin_index, _ = _pin_step(_steps(continued))
     step = continued["steps"][pin_index]
-    step["run"] = step["run"].replace(
-        "sudo apt-get install -y --no-install-recommends postgresql-client-16",
+    plain = (
         "sudo apt-get install -y --no-install-recommends "
-        + chr(92) + chr(10) + "    postgresql-client-16",
+        f"postgresql-client-{server_major}"
+    )
+    step["run"] = step["run"].replace(
+        plain,
+        "sudo apt-get install -y --no-install-recommends "
+        + chr(92) + chr(10) + f"    postgresql-client-{server_major}",
     )
     assert chr(92) + chr(10) in step["run"], "the fixture did not wrap the install line"
     test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(continued)
