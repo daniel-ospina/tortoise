@@ -721,6 +721,14 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     Point (status drift reddens) and a NAND-only-edged claim (narrowing
     `IMPL|NAND` to `IMPL` reddens).
 
+    ⛔ What that fixture CANNOT observe is named too, rather than implied away:
+    every Point here carries an explicit status, so the constant's `status IS
+    NULL` arm is invisible (measured: rewriting it as `status IS NOT NULL AND
+    status <> 'draft'` stays GREEN) — and it is load-bearing, being what keeps a
+    status-absent Point in BOTH populations; and every operator Point is edged,
+    so the `is_operator` conjunct is indistinguishable from the negated pattern
+    (measured: dropping the conjunct stays GREEN).
+
     The census keeps DERIVING its number (`graph_live - points_edged`, a
     positive traversal): the negated pattern is a production cost, and a
     handful of nodes is the only place it is affordable.
