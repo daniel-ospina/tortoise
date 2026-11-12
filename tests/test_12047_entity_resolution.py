@@ -1181,6 +1181,66 @@ class TestThirdReviewRound:
         with pytest.raises(EntityScanUnavailable):
             sdk.approve_merge("obj-y", "merge")
 
+    def test_the_merge_reads_the_entity_not_a_point_that_shares_its_id(
+            self, sdk_factory):
+        """P3: the endpoint probes were unlabelled — `MATCH (s) WHERE s.id = $sid`.
+
+        FalkorDB indexes are label-scoped, so an unlabelled id probe can use no
+        label's `id` index (a whole-node scan per merge on the 872/44k-scale
+        graphs this issue targets) — and, for an id carried by BOTH a `:Point` and
+        an entity (a shape this PR declares reachable in `approve_merge`'s own
+        note), `rows[0]` may be the Point, so the survivor's name/aliases and the
+        fill-only decision about the candidate's key are taken from a node that is
+        not the entity being merged. The probe is now `Object` then `Subject`.
+
+        The Point is written FIRST so a creation-ordered scan reaches it first;
+        the assertion is on the OUTCOME (the merge read the entity), which holds
+        whichever row an unlabelled scan would have returned.
+        """
+        sdk = sdk_factory()
+        g = sdk._get_proj().g
+        g.query("CREATE (:Point {id:'obj-y', name:'not the entity'})")
+        _create_raw(sdk, "Object", "obj-x", "Acme Corporation", "objectKind", "document")
+        _create_raw(sdk, "Object", "obj-y", "Acme Corporaton", "objectKind", "document")
+
+        verdict = sdk.approve_merge("obj-y", action="merge")
+        assert verdict["survived_id"] == "obj-x"
+        candidate = g.query(
+            "MATCH (o:Object {id:'obj-y'}) "
+            "RETURN o.canonical_name, o.resolved_from").result_set
+        assert candidate[0][0] == "acme corporaton", (
+            f"the merge took the candidate's key from the WRONG node: {candidate}")
+        assert candidate[0][1] == "obj-x"
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="#12095: update_entity writes on EVERY label carrying the id, so the "
+               "merge's own write stamps the shared-id :Point too")
+    def test_the_merge_does_not_write_onto_a_point_that_shares_the_id(
+            self, sdk_factory):
+        """⛔ FILED, not fixed here — #12095, category A (silent corruption).
+
+        The READ half above is label-scoped, but the merge's WRITE goes through
+        `sdk.update_entity`, whose outer `for label, _prop in
+        _CANONICAL_ENTITY_ID_PROPS:` loop (`sdk.py:45199`) writes on EVERY
+        canonical label carrying the id — the `break` at `sdk.py:45377` exits only
+        the INNER id-key loop. So a `:Point` sharing the entity's id gains
+        `canonical_name`/`resolved_from` and then claims an entity identity it
+        never had. Fixing it needs a label-restricted update seam = an SDK
+        surface change (owner approval), so it is recorded, not invented.
+        """
+        sdk = sdk_factory()
+        g = sdk._get_proj().g
+        g.query("CREATE (:Point {id:'obj-y', name:'not the entity'})")
+        _create_raw(sdk, "Object", "obj-x", "Acme Corporation", "objectKind", "document")
+        _create_raw(sdk, "Object", "obj-y", "Acme Corporaton", "objectKind", "document")
+        sdk.approve_merge("obj-y", action="merge")
+        point = g.query(
+            "MATCH (p:Point {id:'obj-y'}) "
+            "RETURN p.name, p.canonical_name, p.resolved_from").result_set
+        assert point[0] == ["not the entity", None, None], (
+            f"the merge wrote onto the :Point that shares the id: {point}")
+
     def test_the_merge_recomputation_is_untruncated(self, sdk_factory, monkeypatch):
         """The merge must re-derive the queue's pair from the WHOLE graph — a
         bounded window could answer "no pair" for a candidate outside it."""
