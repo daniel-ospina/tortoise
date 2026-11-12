@@ -198,24 +198,31 @@ def test_mutation_population_is_pinned():
     that stood in this sentence named arm 29, which is `a citation separated from its
     line by a pipe` — the permalink arm is 28.
 
-    The #11902 re-verification added the 32nd–35th (the population was 31 at the head
-    it re-measured), one per fail-open it found still
-    open on the merged head: a `~`-rooted citation outside `~/.swarm/` (one keystroke
-    defused the resolver), a two-digit `§N` that named no heading (read as its first
-    digit), a §1 row that is not a `**VERDICT**` row (a claim class with no handling
-    rule, invisible to the vocabulary comparison), and a second tally sentence in the
-    same paragraph (a decoy supplying the letters while the real one went stale).
+    The #11902 re-verification added four more (the population was 31 at the head it
+    re-measured), one per fail-open it found still open on the merged head: a `~`-rooted
+    citation outside `~/.swarm/` (one keystroke defused the resolver), a two-digit `§N`
+    that named no heading (read as its first digit), a §1 row that is not a
+    `**VERDICT**` row (a claim class with no handling rule, invisible to the vocabulary
+    comparison), and a second tally sentence in the same paragraph (a decoy supplying the
+    letters while the real one went stale). A fifth was added later in the same pass: a
+    §1 header slot exempted by POSITION rather than by shape, so a substituted first row
+    stayed clean.
 
-    The 36th is this lane's: the *uncoloned* arm's carve-outs were tested against
+    This lane's is the *uncoloned* arm's carve-outs, which were tested against
     `CITATION_UNCOLONED_SHAPE_RE.search()`'s FIRST match only, so one exempt token
     certified every citation beside it in the same code span — an HTTP status beside a
     page name hid an out-of-range line, or a citation of a file that does not exist
     (measured at `6413d5e8`). The `#L` permalink arm one branch above was fixed for
-    this same shape in an earlier round; this is the arm that was left behind. The
-    sentence deliberately names no ordinal: an arm number here is a count that rots the
-    moment the population moves, which is the class of staleness this page exists for.
+    this same shape in an earlier round; this is the arm that was left behind.
 
-    The 37th and 38th close two holes the review of that pass found in the fixes
+    ⛔ NO SENTENCE IN THIS PARAGRAPH NAMES AN ARM BY ORDINAL, because that is how the
+    last four errors here happened: every arm number written above was correct at the
+    head it was written and one position low after the next insertion (`the "25th"` was
+    arm 8, `the "29th"` was arm 28, and three sentences were still one low when this
+    rule was written). An ordinal is a count, counts rot, and this page exists to catch
+    exactly that. Name the arm by what it does, or enumerate `MUTATIONS`.
+
+    Two further arms close two holes the review of that pass found in the fixes
     themselves: a §1 row whose first cell merely BEGINS with `Verdict` (the header skip
     was a prefix test, so the row-shape arm beside it was defeated by a plural) and a
     second `still read as written` sentence (the complement list was joined across
