@@ -307,12 +307,26 @@ def test_robots_txt_lists_blog_sitemap() -> None:
         f"robots.txt must cross-submit the blog sitemap; it names {named}"
     )
     for sitemap_url in blog_sitemaps:
-        # Follow redirects: the retired host legitimately 301s to the canonical
-        # one, and a robots.txt entry is correct as long as the document answers.
-        got = SESSION.get(sitemap_url, timeout=20)
+        # ⛔ REBASED ONTO THE SERVER UNDER TEST (#11976 review). robots.txt names an
+        # ABSOLUTE production URL (`https://tortoise.premiselabs.co/blog/sitemap.xml`
+        # today, the company host once #11766 repoints it), so fetching it verbatim
+        # made a local run call live production and assert on the deployed document —
+        # around the module-level `ALLOW_PROD` contract above, which only inspects the
+        # three ENV hosts and therefore cannot see a URL parsed out of a file. The
+        # path is what this probe owns; the host is #11766's. On a production run
+        # COMPANY *is* the canonical host, so the rewrite is a no-op there.
+        parsed = urlparse(sitemap_url)
+        target = urljoin(f"{COMPANY}/", parsed.path.lstrip("/"))
+        if parsed.query:
+            target += f"?{parsed.query}"
+        # Follow redirects on a production run: the retired host legitimately 301s
+        # to the canonical one, and a robots.txt entry is correct as long as the
+        # document answers.
+        got = SESSION.get(target, timeout=20)
         assert got.status_code == 200, (
-            f"robots.txt names {sitemap_url}, which resolves to {got.status_code} "
-            f"(final url {got.url!r}) — a sitemap entry that does not answer is dead weight"
+            f"robots.txt names {sitemap_url}, and its path {target} resolves to "
+            f"{got.status_code} (final url {got.url!r}) — a sitemap entry that does "
+            f"not answer is dead weight"
         )
         assert "<urlset" in got.text or "<sitemapindex" in got.text, (
             f"{sitemap_url} answered {got.status_code} but is not a sitemap document"
