@@ -1449,7 +1449,14 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     # Measured before the guard: this LANDED on the positional record and on the
     # keyword payload, `record_is_evidence_fold` read it as a fold, and the same
     # carrier re-typed (`_K("type")`) and re-identified (`_K("event_id")`) the
-    # record. Falsifier: delete `_refuse_non_str_keys` and every row below lands.
+    # record. Falsifier: delete `_refuse_non_str_keys` and every row below FAILS —
+    # on the MESSAGE, not by landing: `_named_from_caller` carries its own
+    # `type(k) is not str` clause, so the carrier is still refused, as a
+    # RECORD-SHAPED / envelope field, which is a message these rows do not match
+    # (#11996 review round 12, measured — the earlier text claimed they would
+    # land, which reads as "this arm is unpinned"). What the rows pin is this
+    # arm's OWN diagnostic, so they red if it is removed and they red if it
+    # starts letting the carrier through.
     class _K(str):
         def __hash__(self):  # deliberately NOT str's hash
             return 0x5F3A1
@@ -2179,8 +2186,22 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
     #          rounded value.
     #
     #      Falsifier: drop the `type(values) not in (list, tuple)` arm and the
-    #      staged row lands; drop the `float(x) != x` clause and the big-int row
+    #      staged row lands; drop the exactness test's clause and the big-int row
     #      lands (both measured).
+    #
+    #      ⛔ AND THE EXACTNESS TEST IS TOTAL (#11996 review round 12, measured):
+    #      `float()` raises for an `int` above ~1.8e308, so the inline
+    #      `float(x) != x` left this ONE arm raising `OverflowError` while every
+    #      neighbouring arm raises the documented `ValueError` —
+    #
+    #          _emit(… "embedding": [2 ** 2000], KEY: "f32")
+    #            -> OverflowError: int too large to convert to float
+    #
+    #      Nothing is journalled either way, so the harm was the TYPE of the
+    #      refusal: a caller wrapping a door in `except ValueError` saw a crash.
+    #      Falsifier for the `except` branch: revert
+    #      `_int_is_float_exact` to `float(value) == value` and the rows below
+    #      raise `OverflowError` (measured).
     class _Staged(list):
         def __init__(self, good, bad, good_reads):
             super().__init__([0.5])
@@ -2201,6 +2222,15 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
         api._emit("PointAdded", {"id": "p-bigint", "content": "c",
                                  "embedding": [2 ** 53 + 1],
                                  JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
+    # …and an `int` the float conversion cannot represent AT ALL is the same
+    # verdict, with the same exception TYPE — both widths, because the element
+    # arm runs before the `f32` narrowing.
+    for _width in (JOURNAL_VECTOR_WIDTH_F32, JOURNAL_VECTOR_WIDTH_F64):
+        with pytest.raises(ValueError, match="not an exact"):
+            api._emit("PointAdded",
+                      {"id": f"p-hugeint-{_width}", "content": "c",
+                       "embedding": [2 ** 2000],
+                       JOURNAL_VECTOR_WIDTH_KEY: _width})
     # 12. ⛔ THE TWO ABSTENTION ARMS ARE DEFENCE IN DEPTH, and this is the row
     #     that reaches them (#11996 review round 7, measured). The element arm
     #     above refuses every LIST element that is not an exact `int`/`float`, so

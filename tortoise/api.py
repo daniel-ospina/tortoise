@@ -459,6 +459,26 @@ def _refuse_uncallerable_record_keys(fields: dict, type_: str, channel: str) -> 
             "`sourceVersions` are already refused for).")
 
 
+def _int_is_float_exact(value: int) -> bool:
+    """Is `value` EXACTLY the float the seam will read it as (and can it be one at all)?
+
+    The element arm in `_verify_record_vector_width` needs this total: the seam
+    reads a vector element with `float(x)` while the journal's JSON encoder
+    writes the `int` verbatim, so a value the float conversion ROUNDS is a
+    disagreement between two readers of one number. `float()` is undefined for
+    the whole `int` range, though — above ~1.8e308 it raises `OverflowError` —
+    and an unhandled exception is not the documented refusal (#11996 review
+    round 12, measured: `embedding=[2 ** 2000]` under `f32` raised
+    `OverflowError: int too large to convert to float`). A value with no float
+    to be read as is not exactly representable, which is the same verdict the
+    rounding case gets.
+    """
+    try:
+        return float(value) == value
+    except OverflowError:  # 2 ** 2000: no finite float, so not exact
+        return False
+
+
 def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None:
     """A width declared on `_emit`'s POSITIONAL record must be the SEAM's answer.
 
@@ -785,9 +805,24 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         # encoder writes the integer exactly, so above 2**53 the two disagree —
         # `_emit(… "embedding": [2**53 + 1], KEY: "f32")` LANDED with the width
         # describing a value the guard had rounded.
+        #
+        # ⛔ AND THE TEST MUST BE TOTAL (#11996 review round 12, measured):
+        # `float(x)` is not defined for every `int` — above ~1.8e308 it raises
+        # `OverflowError`, so the inline `float(x) != x` left THIS arm the only
+        # one in the guard raising a `TypeError`'s cousin instead of the
+        # documented `ValueError`:
+        #
+        #     _emit("PointAdded", {"id": "p", "content": "c",
+        #                          "embedding": [2 ** 2000], KEY: "f32"})
+        #       -> OverflowError: int too large to convert to float
+        #
+        # Nothing is journalled either way, so the harm was a caller (and every
+        # `except ValueError` around a door) reading an unhandled type as a
+        # crash rather than a refusal. A value the float conversion cannot even
+        # represent is not exactly representable, which is the same verdict.
         bad = [x for x in values
                if type(x) not in (int, float)
-               or (type(x) is int and float(x) != x)]
+               or (type(x) is int and not _int_is_float_exact(x))]
         if bad:
             raise ValueError(
                 f"{_KEY}={declared!r} is declared over a vector carrying an "
@@ -1037,7 +1072,12 @@ def _refuse_caller_named_markers(keys, door: str) -> None:
     door-level copy so that a door with a best-effort arm (`emit_belief`) can
     raise BEFORE the arm that would otherwise swallow the refusal and drop the
     record (#11948 F2). One spelling of the set (`_SERVER_MANAGED_EMBEDDING_KEYS`),
-    two placements: at the door, and at the funnel every door funnels through.
+    ONE placement: this function, called by every passthrough door
+    (`_refuse_caller_named_funnel_keys`) BEFORE its own best-effort arm. There is
+    no second copy to keep in step — an earlier version of this docstring said
+    "two placements" and there is one call site (`grep -n
+    '_refuse_caller_named_markers('` in this module), which is exactly the kind
+    of claim this PR removes (#11996 review round 12).
     """
     named = _named_from_caller(keys, _SERVER_MANAGED_EMBEDDING_KEYS)
     if named:
@@ -2333,10 +2373,11 @@ class EventAPI:
         put a top-level ``embedding`` on the record here. That is allowed — a
         vector is not an origin attestation — and ``_emit`` stamps every vector
         that reaches it. A caller-set MARKER is a different matter: it is refused
-        here AS WELL AS at the funnel, the same set in two placements
-        (`_refuse_caller_named_markers`), so the message names the door the
-        caller actually used and a newly added family cannot be wired at one
-        placement and silently missing at the other. It must NOT accept a
+        by `_refuse_caller_named_funnel_keys` — ONE function, not two placements
+        (`_refuse_caller_named_markers` has a single call site inside it), so the
+        message names the door the caller actually used and a newly added family
+        cannot be wired at one placement and silently missing at the other. It
+        must NOT accept a
         record-shaped payload (`point=`) either — a caller-built
         record reaches the replay's fold chain untested by that rule — so it is
         refused here for a message that names THIS door, and again at `_emit`
