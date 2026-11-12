@@ -9685,7 +9685,16 @@ class CollisionPreflightTest(unittest.TestCase):
         while time.time() < deadline:
             cwds, cerr = mod.fleet_state.process_cwds([pid])
             last = cerr or repr(dict(cwds))
-            if not cerr and os.path.realpath(str(cwds.get(pid, ""))) == want:
+            # ⛔ AN ABSENT KEY IS NOT A MATCH (#12039). `cwds.get(pid, "")` defaults to
+            # the EMPTY string, and `os.path.realpath("")` is the SUITE'S OWN CWD — so
+            # with `wt` equal to the directory the suite runs in, a pid the reader never
+            # resolved (dead, a zombie, or still inside the fork→`chdir` window this wait
+            # exists for) would be "attributed" to `wt` on the FIRST sample. The sibling
+            # helper `_wait_for_pi_cwd` twenty lines above already scans the map's values
+            # instead of defaulting one, which is the same posture: a read that did not
+            # happen cannot satisfy the predicate. Pinned by
+            # `test_an_unread_cwd_is_not_attributed_to_the_runners_own_cwd`.
+            if not cerr and pid in cwds and os.path.realpath(str(cwds[pid])) == want:
                 return
             time.sleep(0.05)
         self.fail(f"the tool's own cwd reader could not attribute pid {pid} to {want!r} "
@@ -10386,6 +10395,29 @@ exec {real} "$@"
             proc.terminate()
             proc.wait(timeout=10)
         self.assertIn(str(proc.pid), str(ctx.exception))
+        self.assertIn("could not attribute", str(ctx.exception))
+
+    def test_an_unread_cwd_is_not_attributed_to_the_runners_own_cwd(self):
+        """A pid whose cwd was never READ cannot be attributed — not even to the cwd we
+        happen to be standing in (#12039).
+
+        THE SHAPE THAT SLIPS THROUGH THE OBVIOUS GUARD: `cwds.get(pid, "")` defaults to
+        the empty string, and `os.path.realpath("")` resolves to the PROCESS'S OWN cwd.
+        So when the caller's `wt` IS the directory the suite runs in — which is the
+        natural thing to pass when proving "this pid is where I am" — an unread pid
+        satisfied the predicate instantly and the wait returned on its first sample.
+        `process_cwds` returns `({}, "")` for exactly that case (a dead pid, a zombie, or
+        the fork→`chdir` window), and no `cerr` is raised to signal it, so neither of the
+        other two clauses can save it.
+
+        The fake `pi` is reaped BEFORE the call, so `/proc/<pid>/cwd` is gone: an `err`-
+        free empty read is the state under test, not a simulated one.
+        """
+        proc = self._start_fake_pi(self.repo)
+        proc.terminate()
+        proc.wait(timeout=10)
+        with self.assertRaises(AssertionError) as ctx:
+            self._wait_cwd_attributable(proc.pid, Path.cwd(), timeout=1.0)
         self.assertIn("could not attribute", str(ctx.exception))
 
     def test_the_self_pid_exemption_covers_the_callers_own_queue_entry(self):
