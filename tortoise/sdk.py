@@ -129,7 +129,6 @@ from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verd
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
 from .live import status_as_reported, refuse_terminal_event_state  # #9974 R1 + #11825
-from .live import event_label_names  # #11825 the label-renderer union (Phase-1 door)
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -27453,16 +27452,21 @@ class TortoiseSDK:
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            # ⛔ THE TYPE IS RESOLVED UNDER BOTH RENDERERS, exactly as the API
-            # sweep asks the label (review cycle 8, P1): a `str` SUBCLASS whose
-            # content is `event` and whose `__str__` says something else resolved
-            # to no label here — Phase 1 reported ZERO violations — while step 3
-            # routes by CONTENT and refused mid-write, after the points had
-            # committed. The predicate is shared with `api._emit` / `emit_belief`
-            # (`live.label_names_an_event`), so the door and this arm cannot
-            # disagree about what an Event is.
-            if not any(_ENTITY_ITEM_LABELS.get(name.strip().lower()) == "Event"
-                       for name in event_label_names(item.get("type"))):
+            # ⛔ THE TYPE IS RESOLVED THE WAY ITS OWN WRITER RESOLVES IT — by
+            # CONTENT, not by `__str__`. `ingest` and `create_entity` route with
+            # `(type or "").strip().lower()`, and `str.strip` builds a PLAIN `str`
+            # from the subclass's content, so no `__str__` is consulted anywhere on
+            # that path. This arm therefore reads `str.__str__` too: asking the
+            # UNION here (as the API label arms rightly do, because the fold
+            # interpolates the label by `str()` while the journal keeps its
+            # content) made Phase 1 refuse a `content="object", __str__="event"`
+            # item that the writer files as an `:Object` — an over-block with a
+            # wrong diagnosis (measured, review cycle 9 P2). One rule per side:
+            # the LABEL is a two-renderer name, the TYPE is a content string.
+            _item_type = item.get("type")
+            _type_text = (str.__str__(_item_type)
+                          if isinstance(_item_type, str) else "")
+            if _ENTITY_ITEM_LABELS.get(_type_text.strip().lower()) != "Event":
                 continue
             # ⛔ THE KEY AXIS, and the `None` value, are part of this arm too
             # (review cycle 5: one P1, one P2, both measured). `_item_declared_status`
@@ -45751,6 +45755,41 @@ class TortoiseSDK:
                     props, label=_carrier_label, surface="update_entity",
                     stored_status=_carrier_rows[0][0])
                 break
+        # ── #11825: an `:Event` target, BEFORE the first write ──
+        # ⛔ THIS BLOCK MUST PRECEDE the Point status arm below, which WRITES
+        # (`SET n += $s`) and only THEN drops the key from `props`. It used to sit
+        # after that arm, so on a node carrying BOTH `:Point` and `:Event` the
+        # Point arm consumed and cleared `status` before this guard ran — the
+        # guard then saw no declaration at all and the terminal status stood.
+        # Measured (review cycle 9, P1): `update_entity(<:Point:Event>,
+        # status="superseded")` was ACCEPTED, the node ended with
+        # `status='superseded'` on an `:Event`, and the record (label="Point")
+        # replays onto that node, so live and replay agree on the half-state.
+        # This is the atomicity rule the guards beside it already state: refuse
+        # BEFORE any write, never after one.
+        #
+        # The `outdated` half of the predicate is NOT re-tested here: the
+        # ``_sanitize_props`` call at the top of this method already refuses the
+        # flag on EVERY label, so it cannot be in ``props`` by now.
+        #
+        # ⛔ The presence TEST is the helper's, not `"status" in props`: a dict
+        # lookup hashes the literal name, so a ``str`` SUBCLASS key that overrides
+        # ``__hash__`` missed it and this guard was SKIPPED for the whole write
+        # (measured at review cycle 4, after the value axis was already closed).
+        # Imported here rather than at module scope because a new import line
+        # shifts every ``sdk.py`` line the capstone documentation cites.
+        from .live import declares_event_state_key
+
+        if (declares_event_state_key(props)
+                and self._label_reachable_by(proj.g, "Event", id_val)):
+            refuse_terminal_event_state(props, door="update_entity")
+            # ⛔ No `props` surgery here on purpose: a NON-terminal status is a
+            # legal write on an `:Event` target (#2788's prop lane), and on a
+            # multi-label node the property is shared, so there is no "Point side"
+            # to keep it away from. The guard's whole job is the TERMINAL half,
+            # and it has it — measured: dropping the key here red 9 pins that
+            # legitimately land `draft`/`live` through this door.
+
         if "status" in props:
             _pt_hits = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN count(n)",
@@ -45844,18 +45883,6 @@ class TortoiseSDK:
         # doors that never pass through `_sanitize_props` (`EventAPI.add_event`,
         # and `create_entity`, whose Event branch runs before `_create_entity`).
         #
-        # ⛔ The presence TEST is the helper's, not `"status" in props`: a dict
-        # lookup hashes the literal name, so a ``str`` SUBCLASS key that overrides
-        # ``__hash__`` missed it and this guard was SKIPPED for the whole write
-        # (measured at review cycle 4, after the value axis was already closed).
-        # Imported here rather than at module scope because a new import line
-        # shifts every ``sdk.py`` line the capstone documentation cites.
-        from .live import declares_event_state_key
-
-        if (declares_event_state_key(props)
-                and self._label_reachable_by(proj.g, "Event", id_val)):
-            refuse_terminal_event_state(props, door="update_entity")
-
         # #4649: a write can MOVE the node it addressed. The only identity key a
         # caller may rewrite is `url` (a :Source's identity): `id` is refused by
         # `_sanitize_props` above, and `eventId` is refused for every EVENT

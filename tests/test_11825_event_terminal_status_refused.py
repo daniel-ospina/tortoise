@@ -890,25 +890,51 @@ class TestTheBundleValidationDoor:
             "then raise mid-write with the point already committed")
         assert any("event" in v["message"].lower() for v in violations)
 
-    def test_a_type_that_renders_two_ways_is_still_an_event(self, sdk):
-        """Review cycle 8, P1 — Phase 1 must route a label the way step 3 does.
+    def test_the_type_is_resolved_the_way_its_writer_resolves_it(self, sdk):
+        """Review cycle 8/9 — CONTENT, in both directions, since that is the rule.
 
-        `create_entity` routes by CONTENT (the journal's rendering), so a
-        `str` subclass whose content is `event` reached the `:Event` door and was
-        refused THERE — after the points had committed. Phase 1 resolved the type
-        through `str(type)` alone and reported zero violations.
+        `ingest` and `create_entity` route with `(type or "").strip().lower()`, and
+        `str.strip` builds a PLAIN `str` from a subclass's CONTENT — no `__str__`
+        is consulted anywhere on that path. So this arm must read the content too,
+        and asking the UNION of renderers here would refuse an item the writer
+        files as an `:Object` (an over-block with a wrong diagnosis: measured,
+        review cycle 9 P2, where `content="object", __str__="event"` got a
+        violation and the same item landed via `create_entity`). The LABEL is the
+        two-renderer name — the API arms are right to ask the union there — but
+        the TYPE is a content string, and one rule per side is what keeps this arm
+        from disagreeing with the door it mirrors.
         """
         class Lie(str):
             def __str__(self):
                 return "harmless"
 
-        bundle = {
+        class Reverse(str):
+            def __str__(self):
+                return "event"
+
+        terminal_event = {
             "points": [{"content": "must-not-commit"}],
-            "entities": [{"type": Lie("event"), "name": "LieType",
+            "entities": [{"type": Lie("event"), "name": "ContentEvent",
                           "eventKind": "deployment", "status": "superseded"}],
         }
-        violations = sdk._validate_bundle(bundle)
-        assert violations, "Phase 1 passed a type step 3 routes to the :Event door"
+        assert sdk._validate_bundle(terminal_event), (
+            "content='event' passed Phase 1 — step 3 routes it to the :Event door")
+
+        object_by_content = {
+            "points": [{"content": "must-not-commit"}],
+            "entities": [{"type": Lie("object"), "name": "ContentObject",
+                          "objectKind": "policy", "status": "superseded"}],
+        }
+        assert sdk._validate_bundle(object_by_content) == [], (
+            "Phase 1 refused an :Object the writer files by content")
+
+        renders_as_event = {
+            "points": [{"content": "must-not-commit"}],
+            "entities": [{"type": Reverse("object"), "name": "RenderOnly",
+                          "objectKind": "policy", "status": "superseded"}],
+        }
+        assert sdk._validate_bundle(renders_as_event) == [], (
+            "Phase 1 refused an :Object because of a __str__ the writer never calls")
 
     def test_a_non_terminal_event_item_is_not_a_violation(self, sdk):
         """No over-block: the door accepts `scheduled`, so Phase 1 must too."""

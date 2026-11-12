@@ -70,7 +70,7 @@ first attributed: ``extract_session_v2`` built the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:14586-14592`` and
 ``result["vet"]`` at ``:14596-14600``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:18128``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:18127``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -278,7 +278,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2832-2857``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:18526`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:18525`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -553,7 +553,7 @@ SEAM_LEDGER = (
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2555`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2554`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -3076,7 +3076,7 @@ def label_coverage(counts: dict[str, int], declared: frozenset[str],
     * `coverage` — **reported, never chased**. `None` at a ZERO POPULATION, because 100 % of 0 is
       not coverage. ⛔ That is the POPULATION arm (`n > 0`), NOT A4's non-vacuity floor: the floor
       is `a4_labelled_nodes: 1`, read off the THING/EVENT layers' `non_vacuity` — never `claims`.
-    * `undeclared` — kinds present that THIS layer's vocabulary does not declare (the `#9695`
+    * `undeclared` — kinds present that THIS layer's vocabulary does not declare (the `#9694`
       distinction — "a kind nothing declares" vs "a kind this layer does not declare" — is the
       vocabulary's own answer, and `declared_present`/`declared_absent` carry the other side of
       it; there is deliberately NO third bucket here, because nothing consumes one).
@@ -3319,7 +3319,7 @@ def _a4_pointkind(projection) -> dict:
     `projection/entities.py:2945`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are
     not claims — turn rows carry `pointKind='event'`: the row dict is written with `"k": "event"`
-    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2555`)
+    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2554`)
     inside `_write_capture_turns` — and 159 of
     the committed run's 354 Points are turn rows (`capstone-measured-9152448d.log:73`), so counting
     them read ~45% "typed" against the owner's 0.6% ceiling. The excluded populations are COUNTED
