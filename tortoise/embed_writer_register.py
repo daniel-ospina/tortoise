@@ -380,9 +380,10 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #: tuple like `("Event",)`), or one of the two dispositions below.
 #: ⛔ "This writer's own body", NOT "where the value finally lands": a CARRIER writer whose value
 #: the FOLD later stores (a journal append — `tortoise.api::add_point`,
-#: `tortoise.sdk::_journal_event_raw_write`) declares :data:`NO_LIVE_VECTOR`, because the store is
+#: `tortoise.api::_emit`, `tortoise.sdk::_journal_event_raw_write`) declares
+#: :data:`NO_LIVE_VECTOR`, because the store is
 #: not in its body and a tuple here would attribute the fold's label to it. Reading the field as
-#: "where the vector ends up" re-declares those two entries and re-opens exactly the ambiguity
+#: "where the vector ends up" re-declares those three entries and re-opens exactly the ambiguity
 #: `#11492`'s first review round closed.
 #:
 #: ⛔ Why this belongs in the declaration and NOT in a derivation inside the instrument: of the

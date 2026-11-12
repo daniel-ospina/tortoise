@@ -606,7 +606,13 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
         # survives turning the refusal into an abstention, so it proved less than the
         # row's reason claims (cycle-4 review, measured).
         ("tortoise/api.py", "_verify_record_vector_width",
-         "declared != _F32"),),
+         "declared != _F32"),
+        # ⛔ And the REFUSAL's own sentence, because the decision line above survives turning
+        # the refusal into an abstention (`if not truthful: return`) — measured in cycle 5.
+        # This needle vanishes under exactly that mutation, which is the drift the row's
+        # reason promises against ("a declared f32 over it is refused").
+        ("tortoise/api.py", "_verify_record_vector_width",
+         "is not what the values say"),),
     "tortoise.consistency::_compare_views": (
         ("tortoise/consistency.py", "_compare_views",
          "n.embedding=vecf32($embedding)"),),
