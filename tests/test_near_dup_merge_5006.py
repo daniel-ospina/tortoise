@@ -794,15 +794,22 @@ class TestApplyMergeUnionWritesTheUnionAndTheLostProvenance:
         linked = {r[0] for r in rows}
         assert linked == {team["id"], office["id"]}, linked
 
-        # …and the resolution is EXACT-match on purpose: the same name in
-        # another case is not the same node, and conflating them by
-        # `toLower()` would be a behaviour nothing else in the code base uses.
+        # …and the resolution is the WRITER's fold on purpose (#12120 finding 3).
+        # ⛔ THIS CONTROL WAS RESTATED, not deleted. It used to assert that
+        # `"office"` (lower-case) stayed UNRESOLVED against the Object `Office`,
+        # citing "nothing else in the code base matches entity names that way".
+        # That premise died with #12047: the create door stores
+        # `canonical_name='office'` and RESOLVES `"office"` onto this very node,
+        # so reporting the attachment unresolved described a different key space
+        # than the write — the defect this class's sibling pins. A genuinely
+        # different spelling still must not resolve, which is what the control
+        # now says.
         mismatched = apply_merge_union(
             sdk._get_proj(),
-            {"point_id": prior_id, "about_entities": ["office"]},
+            {"point_id": prior_id, "about_entities": ["offices"]},
             session_id="s_second_document", sdk=sdk)
         assert mismatched["linked"] == 0
-        assert mismatched["unresolved"] == ["office"]
+        assert mismatched["unresolved"] == ["offices"]
 
         # the losing document's provenance: its session now CONTAINS the claim
         contains = sdk._get_proj().g.query(
@@ -1167,3 +1174,119 @@ class TestTheCapturePathExecutesTheFusion:
 
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+class TestThe12120MergeAttachmentAsksTheWritersKeySpace:
+    """The merge attachment resolved on the RAW `name` (#12120 finding 3, P3).
+
+    `apply_merge_union` mirrors capture's attachment pass, and capture resolves the
+    folded union (`name` · `canonical_name` · `aliases`, raw and folded). Reading
+    the raw key alone made a fold-equivalent union name LOG as `unresolved` —
+    "no node has that name" about a node the write door addresses — so the union
+    silently lost the attachment on the merged path only.
+    """
+
+    @pytest.fixture
+    def sdk(self, tmp_path):
+        from tortoise.sdk import TortoiseSDK
+        s = TortoiseSDK(str(tmp_path / "merge_fold.db"))
+        yield s
+        s.close()
+
+    def test_a_fold_colliding_union_name_links(self, sdk):
+        from tortoise.near_dup_merge import apply_merge_union
+
+        team = sdk.create_object("Team")
+        pt = sdk.create_point("statement", "a claim about the team")
+        sdk._get_proj().g.query(
+            "CREATE (s:Session {id:$sid})", params={"sid": "s_12120_f3"})
+
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["the team"]},
+            session_id="s_12120_f3", sdk=sdk)
+
+        assert res["unresolved"] == [], (
+            "a fold-equivalent union name was reported unresolved: "
+            f"{res['unresolved']}")
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object) RETURN o.id",
+            params={"pid": pt["id"]}).result_set
+        assert [r[0] for r in rows] == [team["id"]], rows
+
+    def test_a_fold_variant_of_a_subject_kind_name_never_reaches_a_fold_only_carrier(
+            self, sdk):
+        """A fold-only carrier must not take a subject-kind name's edge.
+
+        #12120 review round 3: widening the Object lookup to the folded union
+        while leaving the #1370/#4934 skip on EXACT strings let a
+        fold-equivalent spelling of a declared subject-kind name through, so the
+        claim attached an un-gated `aboutObject` edge to the fold-equal Object —
+        the label leak the skip exists to prevent, on a spelling the pre-fix raw
+        lookup could not reach (it matched nothing).
+
+        The narrowing is EXACTNESS, not a blanket skip: F6 pins that a
+        legitimately-cased Object whose name IS the reference keeps its edge
+        (`test_case_only_mismatch_still_gets_its_about_object_edge`), so this
+        reference is reported in `skipped_subject` (the subject channel owns it) —
+        never in `unresolved`, which promises "no node holds that name in the key
+        space the write resolves on" and is forwarded to callers as "a later
+        backfill can link it".
+        """
+        from tortoise.near_dup_merge import apply_merge_union
+
+        # A carrier whose FOLDED key is the reference's — its raw name is not
+        # (so it is reachable ONLY through the widened space, which is what makes
+        # this pin discriminate: without the narrowing the lookup links it).
+        g = sdk._get_proj().g
+        g.query(
+            "CREATE (o:Object {id:'obj-r3-acme', name:'ACME', "
+            "objectKind:'organization', status:'live', "
+            "canonical_name:'acme'})")
+        obj = {"id": "obj-r3-acme"}
+        pt = sdk.create_point("statement", "a claim about acme")
+        sdk._get_proj().g.query(
+            "CREATE (s:Session {id:$sid})", params={"sid": "s_12120_r3"})
+
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["the acme"]},
+            session_id="s_12120_r3", sdk=sdk,
+            subject_names={"Acme"})
+
+        assert res["skipped_subject"] == ["the acme"], res
+        assert res["unresolved"] == [], (
+            "a fold-only subject-channel drop was reported as unresolved — that "
+            f"word promises 'no node has this name': {res['unresolved']}")
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object) RETURN o.id",
+            params={"pid": pt["id"]}).result_set
+        assert rows == [], (
+            "a fold-equivalent spelling of a subject-kind name wrote the "
+            f"un-gated edge onto {obj['id']}: {rows}")
+
+    def test_an_exact_name_carrier_still_gets_its_edge(self, sdk):
+        """F6's case, restated where the fold narrowing now applies.
+
+        The reference `the acme` IS an Object's exact spelling, so the edge is
+        written even though it fold-equals the declared subject-kind `Acme` —
+        the narrowing forbids only FOLD-ONLY carriers.
+        """
+        from tortoise.near_dup_merge import apply_merge_union
+
+        obj = sdk.create_object("the acme", "thing")
+        pt = sdk.create_point("statement", "a claim about acme")
+        sdk._get_proj().g.query(
+            "CREATE (s:Session {id:$sid})", params={"sid": "s_12120_r3b"})
+
+        res = apply_merge_union(
+            sdk._get_proj(),
+            {"point_id": pt["id"], "about_entities": ["the acme"]},
+            session_id="s_12120_r3b", sdk=sdk,
+            subject_names={"Acme"})
+
+        assert res["linked"] == 1, res
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object) RETURN o.id",
+            params={"pid": pt["id"]}).result_set
+        assert [r[0] for r in rows] == [obj["id"]], rows

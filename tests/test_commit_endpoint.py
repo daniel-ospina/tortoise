@@ -5687,3 +5687,116 @@ def test_the_merge_leg_drops_a_stated_record_and_that_is_declared(client):
     assert _point_mentions(pid) is None, (
         "the merge leg STORED the record: #11811's declared behaviour changed "
         "— flip this row (and the comment on the leg) with it")
+
+
+class TestThe12120HostedAboutObjectAnchor:
+    """The hosted session-capture `about_entities` anchor (POST /v1/sessions/commit).
+
+    #12047 / #12120 finding 1 (P2): `_execute_commit_writes`' §6a anchor did
+    `MATCH (p:Point {id:$pid}), (o:Object {name:$name})` — the RAW name — while
+    every writer that produced the Object resolved the folded union (`name` ·
+    `canonical_name` · `aliases`, raw and folded). A claim naming a fold-equivalent
+    spelling of a registered Object therefore matched nothing and the `aboutObject`
+    edge was silently dropped: no warning, no skip record, the attribution simply
+    absent (the SDK's own twin of this loop is pinned in
+    `tests/test_12047_entity_resolution.py`).
+
+    The local twin's recorded disposition — "attach to EVERY carrier, so routing it
+    through a resolver would refuse where capture writes" — still holds: the fix
+    widens the SPELLING key space and still picks no identity.
+    """
+
+    def test_a_fold_colliding_about_name_wires_the_hosted_anchor(self, client):
+        """`about_entities=["the alpha"]` must link the Object `Alpha`.
+
+        The Object is seeded by a PRIOR commit (the realistic order: it is
+        already registered when a later claim mentions it by a variant spelling),
+        and the coordinate is folded-only — `the alpha` appears in NEITHER stored
+        raw property (`name='Alpha'`, `canonical_name='alpha'`), so a raw anchor
+        matches nothing.
+
+        The payload's `entities` entry carries the SAME variant, because the
+        payload validates `about_entities` against it: that entry is the shape the
+        extractor emits for a mention of an already-registered entity, and
+        `create_entity` folds it onto `Alpha` (so the graph still holds ONE Object
+        — the anchor is what must find it).
+        """
+        _seed_objects(client, "s12120-anchor-1", ["Alpha"])
+        raw = _raw_payload(
+            1, session_id="s12120-anchor-2",
+            entities=[{"name": "the alpha", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=["the alpha"])])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object {name:'Alpha'}) "
+            "RETURN count(o)").result_set
+        assert rows and rows[0][0] >= 1, (
+            "the claim's fold-equivalent about name dropped its `aboutObject` "
+            "edge — the hosted anchor resolved on the raw name")
+
+    def test_an_event_fold_variant_of_a_subject_kind_name_is_skipped(
+            self, client):
+        """#12120 review round 4: the EVENT channel needs the FOLD arm.
+
+        The Event `about_entities` loop defers to §6a, whose resolver
+        (`resolve_fold_name`) falls back to the writer's folded union, so an
+        exact-only guard left a fold-equivalent spelling of a subject-kind name
+        free to write the un-gated `aboutObject` edge the `#1370`/`#4934` rule
+        forbids. Unlike the Point anchor there is no exactness exception here:
+        this channel drops the attribution ENTIRELY (F5), so nothing intended is
+        lost by skipping in the fold too.
+        """
+        _seed_objects(client, "s12120-ev-narrow-1", ["Acme Corp"])
+        raw = _raw_payload(
+            1, session_id="s12120-ev-narrow-2",
+            entities=[{"name": "Acme Corp", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the acme corp", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[])],
+            events=[{"id": "ev_" + "0" * 62, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": ["the acme corp"]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (:Event)-[:aboutObject]->(o:Object) "
+            "WHERE o.name = 'Acme Corp' RETURN count(o)").result_set
+        assert rows and rows[0][0] == 0, (
+            "the Event channel wrote an un-gated aboutObject for a "
+            f"fold-equivalent subject-kind name: {rows}")
+
+    def test_a_fold_variant_of_a_subject_kind_name_skips_the_fold_only_carrier(
+            self, client):
+        """#12120 review round 3: the subject-channel narrowing, hosted side.
+
+        When the reference only FOLD-equals a declared subject-kind name, the
+        widened anchor must attribute only an EXACT-name Object: a fold-only
+        carrier is the un-gated `aboutObject` edge the `#1370`/`#4934` rule
+        forbids, on a spelling the pre-fix raw anchor could not reach.
+        """
+        _seed_objects(client, "s12120-narrow-1", ["Acme Corp"])
+        raw = _raw_payload(
+            1, session_id="s12120-narrow-2",
+            entities=[{"name": "Acme Corp", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the acme corp", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=["the acme corp"])])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (:Point)-[:aboutObject]->(o:Object) "
+            "WHERE o.name = 'Acme Corp' RETURN count(o)").result_set
+        assert rows and rows[0][0] == 0, (
+            "a fold-only spelling of a subject-kind name wrote the un-gated "
+            f"aboutObject edge: {rows}")

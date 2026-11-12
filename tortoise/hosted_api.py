@@ -98,6 +98,7 @@ from tortoise.embed_metering import (  # #4488: pure-ASGI encode-work flusher
 )
 from tortoise.entity_identity import (  # #3590: identity is a minted id, a name is a label
     AmbiguousEntityName,  # #9876: the create's route-then-refuse, mapped to 422 here
+    name_key_space_same_entity,  # #12120: the writer's key space, for node-returning reads
     refuse_ambiguous_create,  # the READ-ONLY pre-flight twin of that refusal
     resolve_fold_name,  # #3590 fold-side name resolution
 )
@@ -21061,14 +21062,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # names are excluded from the legacy `about_entities` channel below: the
     # binder is the only confidence-gated aboutSubject producer, and the raw
     # `MERGE (:Object {name})` would otherwise re-mint the #4934 label leak.
+    # F6 (corrected, #12120 review round 3): the skip is EXACT (F6's rule — a
+    # legitimately-cased Object keeps its edge) and the fold is used only to
+    # NARROW the probe below: a spelling that merely FOLD-equals a declared
+    # subject-kind name may only be attributed to an Object whose own name is
+    # that exact spelling. The `aboutObject` anchor resolves over the writer's
+    # folded union, so without the narrowing a fold-equivalent spelling reached a
+    # fold-equal Object and wrote the un-gated edge #1370/#4934 forbids.
+    from tortoise.entity_resolver import normalize_entity_name as _fold
     from tortoise.subject_binding import bind_point_subjects, is_subject_kind
-    # F6: EXACT names (no `.lower()` fold) so the skip and the case-SENSITIVE
-    # `MATCH (o:Object {name:$n})` resolution agree, derived from the entities
-    # whose KIND is a subject kind.
+
     subject_entity_names = {
         er.entity.name for er in reconcile.entities
         if is_subject_kind(er.entity.kind)
     }
+    subject_entity_names_folded = {_fold(n) for n in subject_entity_names}
     event_id = content_hash(f"{session_id}:{payload.captured_at}")
     doc_id = f"doc_{content_hash(f'{session_id}:{payload.captured_at}')}"
     document_basename = _document_source_basename(payload)
@@ -21331,8 +21339,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             params={"eid": ev.id, "did": doc_id},
         )
         for name in ev.about_entities:
-            if str(name) in subject_entity_names:
-                # #1370 (F5): DELIBERATE drop, not a hand-off. This loop writes
+            if str(name) in subject_entity_names or _fold(str(name)) in (
+                    subject_entity_names_folded):
+                # #1370 (F5): the FOLD arm is required here (#12120 review round
+                # 4): this channel's resolver below (`resolve_fold_name`, §6a)
+                # is fold-WIDE, so an exact-only guard left a fold-equivalent
+                # spelling of a subject-kind name free to write the un-gated
+                # `aboutObject` edge the `#4934` rule forbids. There is no F6
+                # exactness exception on THIS channel — the drop is total and
+                # deliberate (see below), so nothing intended is lost.
+                # DELIBERATE drop, not a hand-off. This loop writes
                 # `aboutObject` ONLY — the binder reads a Point's `slots`, not
                 # an Event's `about_entities`, so nothing replaces this edge.
                 # The attribution is intentionally not emitted because the only
@@ -21913,11 +21929,38 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         pid = point_resolved_ids.get(pr.point.id, pid)
         for name in pr.point.about_entities:
             if str(name) in subject_entity_names:
-                continue  # #1370: the gated binder owns aboutSubject
+                continue  # #1370: the gated binder owns aboutSubject (EXACT, per F6)
+            # #12120 finding 1: the anchor attached on the RAW `name` only, while
+            # every writer resolves the FOLDED union (`name` · `canonical_name` ·
+            # `aliases`, raw and folded). A point whose payload named a
+            # fold-equivalent spelling of an already-registered Object therefore
+            # matched NOTHING and the `aboutObject` edge was silently dropped —
+            # no warning, no skip record, the link simply absent. The key space is
+            # now the writer's, from `entity_identity.name_key_space_same_entity`
+            # (never a second copy of the arms).
+            #
+            # ⛔ The ATTACH-TO-EVERY-CARRIER shape is DELIBERATELY kept (this is
+            # the disposition recorded for this site): routing it through
+            # `resolve_entity_id_same_entity` would make an attribution edge
+            # REFUSE where capture writes — two live same-name carriers — silently
+            # losing an attachment on the hosted path only. Widening the spelling
+            # set picks no identity, so that objection does not apply.
+            _space, _space_params = name_key_space_same_entity("o", str(name))
+            if not _space:
+                continue
+            # #12120 review round 3: when this spelling only FOLD-equals a
+            # declared subject-kind name, only an EXACT-name Object may be
+            # attributed — a fold-only carrier is the #4934 leak on a spelling
+            # the pre-fix raw probe could not reach, and an exact carrier is
+            # F6's case (a legitimately-cased Object keeps its edge).
+            if _fold(str(name)) in subject_entity_names_folded:
+                _space = f"({_space}) AND o.name = $exact"
+                _space_params = {**_space_params, "exact": str(name)}
             proj.g.query(
-                "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) "
-                "MERGE (p)-[:aboutObject]->(o)",
-                params={"pid": pid, "name": name},
+                f"MATCH (p:Point {{id:$pid}}), (o:Object) "
+                f"WHERE {_space} "
+                f"MERGE (p)-[:aboutObject]->(o)",
+                params={"pid": pid, **_space_params},
             )
         # #1370: write-time, confidence-gated, fail-closed subject binding —
         # the SAME shared driver the local capture seam calls. Only for a

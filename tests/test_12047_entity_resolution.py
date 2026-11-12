@@ -2032,6 +2032,13 @@ class TestThe12120ReadersOutsideTheEntityModule:
     reader does not, and the reader describes a different node (or no node).
     Every one of those callers now goes through
     `entity_identity.resolve_entity_id_same_entity`.
+
+    ⛔ SCOPE — this class pins TWO of the nine migrated callers (`belief_timeline`,
+    `file_human_approval`). It used to claim the whole set, which made a revert of
+    any of the other seven invisible; #12120 finding 4 measured that (2 of 9) and
+    the remaining seven are pinned in
+    :class:`TestThe12120Finding4TheUnpinnedMigratedReaders` below. Do not widen
+    this docstring without adding the pins.
     """
 
     def test_a_retired_survivor_with_a_LIVE_carrier_still_takes_the_exemption(
@@ -2490,5 +2497,745 @@ class TestThe12120AboutEdgeStubIsFoldAware:
             carriers = g.query("MATCH (s:Subject) RETURN s.id").result_set
             assert len(carriers) == 2, (
                 f"the stub minted a THIRD carrier under a poisoned folded key: {carriers}")
+        finally:
+            sdk.close()
+
+
+class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
+    """The supersession fold resolved its endpoints on the RAW `name`.
+
+    #12120 finding 2 (P2): every write that produces a supersession record
+    resolves the names on the WRITER's folded union (`name` · `canonical_name` ·
+    `aliases`, over the raw and the folded spelling). The fold's probes did not,
+    so a fold-equivalent SUCCESSOR was reported `dangling successor` / fed an
+    empty Subject lane while the superseded entity stayed `status='live'` and
+    search-visible; a fold-equivalent REF was skipped with the wrong reason
+    (`ref is not a Subject`, `not found`). Both are the reader-vs-writer key-space
+    disagreement this issue is about, at the one place where a miss leaves data
+    visibly wrong rather than just absent.
+
+    Every coordinate below is a spelling present in NO stored raw property: the
+    graph stores ``name='<Surface Form>'`` and ``canonical_name='<folded>'``, and
+    the record names a fold-equivalent variant, so the pre-fix raw probe matches
+    nothing (a surface-form coordinate would be GREEN under the revert).
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-f2",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    @staticmethod
+    def _row(sdk, label, name):
+        return sdk._get_proj().g.query(
+            f"MATCH (n:{label} {{name:$n}}) RETURN n.id, n.status, n.supersededBy",
+            params={"n": name}).result_set
+
+    def test_a_fold_only_object_successor_folds_instead_of_dangling(self, sdk_factory):
+        """`supersedes_by` = a fold-equivalent spelling of a live Object.
+
+        Pre-fix: the Object successor probe (`MATCH (o:Object {name:$sb})`) found
+        nothing, the Subject lane found nothing, and the record was skipped as a
+        `dangling successor` — `Widget` stayed `live`. Post-fix the probe resolves
+        on the writer's key space and the fold applies.
+        """
+        sdk = sdk_factory()
+        try:
+            sdk.create_object("Widget", "document")
+            sdk.create_object("New Widget", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Widget", "supersedes_by": "the new widget",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            assert skips == [], skips
+            assert not any("dangling successor" in m for m in msgs), msgs
+            rows = self._row(sdk, "Object", "Widget")
+            assert rows and tuple(rows[0][1:]) == ("superseded", "the new widget"), rows
+        finally:
+            sdk.close()
+
+    def test_a_fold_only_object_ref_folds_instead_of_reporting_not_found(self, sdk_factory):
+        """`superseded` = a fold-equivalent spelling of a live Object.
+
+        The ref-side probe (`MATCH (o:Object) WHERE o.name = $ref`) matched nothing,
+        so the record was dropped as `ref not found` (and, in the mixed-family
+        case, with the wrong reason `ref is not a Subject`).
+        """
+        sdk = sdk_factory()
+        try:
+            sdk.create_object("Widget", "document")
+            sdk.create_object("New Widget", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "the widget", "supersedes_by": "New Widget",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            assert skips == [], skips
+            rows = self._row(sdk, "Object", "Widget")
+            assert rows and tuple(rows[0][1:]) == ("superseded", "New Widget"), rows
+        finally:
+            sdk.close()
+
+    def test_a_fold_only_subject_successor_folds_the_subject(self, sdk_factory):
+        """The Subject lane's successor probe — the #1423 path.
+
+        A role/team/person successor with no Object of that name reaches the
+        Subject lane; a fold-equivalent Subject successor name there was skipped
+        as `dangling successor`, leaving the superseded Subject live.
+        """
+        sdk = sdk_factory()
+        try:
+            sdk.create_subject("Old Team", "organization")
+            sdk.create_subject("New Team", "organization")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Team", "supersedes_by": "the new team",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            assert skips == [], skips
+            assert not any("dangling successor" in m for m in msgs), msgs
+            rows = self._row(sdk, "Subject", "Old Team")
+            assert rows and tuple(rows[0][1:]) == ("superseded", "the new team"), rows
+        finally:
+            sdk.close()
+
+    def test_a_fold_only_subject_ref_folds_the_subject(self, sdk_factory):
+        """The Subject REF probe (`_apply_subject_supersession`).
+
+        The ref is a fold-equivalent spelling of the Subject to supersede. Pre-fix
+        the raw probe matched nothing and the record was skipped `ref is not a
+        Subject`, so `Old Team` stayed live even though the successor resolved.
+        """
+        sdk = sdk_factory()
+        try:
+            sdk.create_subject("Old Team", "organization")
+            sdk.create_subject("New Team", "organization")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "the old team", "supersedes_by": "New Team",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            assert skips == [], skips
+            assert not any("ref is not a Subject" in m for m in msgs), msgs
+            rows = self._row(sdk, "Subject", "Old Team")
+            assert rows and tuple(rows[0][1:]) == ("superseded", "New Team"), rows
+        finally:
+            sdk.close()
+
+    def test_the_object_lanes_ref_miss_fallback_also_folds_the_successor(
+            self, sdk_factory):
+        """The SECOND Subject-successor probe (the Object lane's ref-miss fallback).
+
+        The successor name is carried by BOTH families, so the Object-FIRST probe
+        routes the record into the Object lane; the ref then resolves as a Subject
+        only, and the record is handed to the Subject lane through the fallback's
+        own successor probe. That probe was raw too, so a fold-equivalent Subject
+        successor left the Subject unsuperseded — the same harm as the lane's main
+        probe, at a site only reachable through this routing.
+        """
+        sdk = sdk_factory()
+        try:
+            sdk.create_object("New Team", "document")   # Object-first routing
+            sdk.create_subject("New Team", "organization")
+            sdk.create_subject("Old Team", "organization")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Team", "supersedes_by": "the new team",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            assert skips == [], skips
+            rows = self._row(sdk, "Subject", "Old Team")
+            assert rows and tuple(rows[0][1:]) == ("superseded", "the new team"), rows
+        finally:
+            sdk.close()
+
+
+class TestThe12120Finding1TheAboutAnchorAsksTheWritersKeySpace:
+    """The SDK's local `about_entities` attachment loop resolved on the RAW name.
+
+    #12120 finding 1 (P2): its hosted twin (`hosted_api._execute_commit_writes`)
+    and this loop both did `MATCH (o:Object {name:$n})` while every write resolves
+    the folded union. A captured claim naming a fold-equivalent spelling of an
+    already-registered Object therefore matched NOTHING and the `aboutObject` edge
+    was silently dropped — no warning, no skip record, the attribution simply
+    absent. (The hosted twin's own pin lives with its harness:
+    `tests/test_commit_endpoint.py::TestThe12120HostedAboutObjectAnchor`.)
+    """
+
+    def test_capture_attaches_a_fold_colliding_about_name(
+            self, tmp_path, monkeypatch):
+        """A captured point naming `the widget` links to the Object `Widget`.
+
+        The extractor is stubbed with a REAL `execute_embed` payload (the same
+        seam `tests/test_status_folds_2729.py` uses), so this walks the capture
+        path's own spelling rather than a hand-built dict. The entity is created
+        in the SAME capture (entities precede points), which is the order the
+        anchor depends on.
+        """
+        import tortoise.extractor_v2 as ev2
+        from tortoise.sdk import TortoiseSDK
+
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        embed = {
+            "entities": [{"name": "Widget", "kind": "core:thing",
+                          "lifecycle": "created", "supersedes": None,
+                          "note": None}],
+            "events": [],
+            "points": [{"content": "the widget ships in Q3",
+                        "pointKind": "statement",
+                        "about_entities": ["the widget"]}],
+            "operators": [], "chain_notes": [], "link_before_create": [],
+        }
+        payload = ev2.execute_embed(embed, {}, session_id="s-12120-f1")["payload"]
+        monkeypatch.setattr(
+            ev2, "extract_session_v2",
+            lambda *a, **k: {"payload": payload, "errors": [], "warnings": []})
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t.db"),
+                          event_log_path=str(events / "events.jsonl"),
+                          namespace=f"test_suite_{os.urandom(4).hex()}")
+        try:
+            sdk._extract_session_v2(
+                [{"role": "user", "content": "the widget ships in Q3"}],
+                "s-12120-f1", "2026-01-01T00:00:00Z")
+            g = sdk._get_proj().g
+            obj = g.query("MATCH (o:Object {name:'Widget'}) RETURN o.id").result_set
+            assert obj and obj[0][0], "fixture drift: the capture wrote no Object"
+            linked = g.query(
+                "MATCH (:Point)-[:aboutObject]->(o:Object {name:'Widget'}) "
+                "RETURN count(o)").result_set[0][0]
+            assert linked >= 1, (
+                "the captured claim's fold-equivalent about name dropped its "
+                "`aboutObject` edge (the anchor resolved on the raw name)")
+        finally:
+            sdk.close()
+
+
+_PIPELINE_DECL = {
+    "defaultStage": "stg_contact",
+    "stages": [
+        {"id": "stg_contact", "label": "Contact", "order": 1, "slot": "entry"},
+        {"id": "stg_discussion", "label": "Discussion", "order": 2,
+         "slot": "active"},
+        {"id": "stg_won", "label": "Won", "order": 3, "slot": "terminal",
+         "outcome": "won"},
+    ],
+}
+
+
+class TestThe12120ReviewRound3:
+    """The three defects review round 3 found in the round-2 fix itself.
+
+    Each is a rule that was right in the direction it was written for and wrong in
+    the other: the family defer tested exactness on ONE side only, the collapse's
+    per-row sentinel was recognised by a string PREFIX an entity id may itself
+    carry, and the Subject lane's terminal refusal was the one drop that never
+    reached the caller's `skipped` channel.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r3",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_a_fold_only_subject_ref_does_not_outvote_a_fold_only_object_ref(
+            self, sdk_factory):
+        """A fold-only TIE keeps the Object lane (its recorded precedence).
+
+        Round 3: the defer tested exactness only on the Object side, so when the
+        REF matched a fold-equal Object AND a fold-equal Subject, the Subject
+        won — the documented Object-first lane choice inverted by a
+        non-exactness, with nothing recording that a family was picked on a tie.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_subject("ACME", "organization")
+            sdk.create_subject("New Acme", "organization")
+            g.query(
+                "CREATE (o:Object {id:'obj-12120-tie', name:'Acme!', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'acme'})")
+            sdk.create_object("New Acme Thing", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "acme", "supersedes_by": "New Acme Thing",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            obj = g.query("MATCH (o:Object {id:'obj-12120-tie'}) "
+                          "RETURN o.status").result_set
+            assert obj and obj[0][0] == "superseded", obj
+            subj = g.query("MATCH (s:Subject {name:'ACME'}) "
+                           "RETURN s.status").result_set
+            assert subj and subj[0][0] != "superseded", (
+                f"a fold-only Subject outvoted the fold-only Object: {subj}")
+        finally:
+            sdk.close()
+
+    def test_a_terminal_subject_target_is_reported(self, sdk_factory):
+        """The Subject lane's keep-first refusal must reach `skipped` (#5365).
+
+        Round 3: the divergent terminal branch warned and `return False`d, so a
+        record the caller could not see in `applied` also never appeared in
+        `skipped` — the one refusal shape that vanishes.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_subject("Acme Corp", "organization")
+            sdk.create_subject("Other Corp", "organization")
+            sdk.create_subject("New Acme", "organization")
+            g.query(
+                "MATCH (s:Subject {name:'Acme Corp'}) "
+                "SET s.status='superseded', s.supersededBy='Other Corp'")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Acme Corp", "supersedes_by": "New Acme",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips, (
+                "the terminal-target refusal never reached the caller's "
+                f"skipped list: {skips!r} (warnings: {msgs!r})")
+            row = g.query("MATCH (s:Subject {name:'Acme Corp'}) "
+                          "RETURN s.supersededBy").result_set
+            assert row and row[0][0] == "Other Corp", row
+        finally:
+            sdk.close()
+
+    def test_a_carrier_key_that_looks_like_a_row_key_still_fetches_its_survivor(
+            self, sdk_factory):
+        """An entity id may itself start with `row:` — the sentinel is not a prefix.
+
+        Round 3: the per-row sentinel was recognised with `key.startswith("row:")`,
+        so a carrier pointing at a survivor whose real id starts with `row:`
+        skipped the fetch and fell back to `group[0]` — the retired CARRIER — and
+        the fold landed on exactly the node the collapse exists to avoid.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (s:Object {id:'row:survivor-12120', "
+                "name:'Totally Different', objectKind:'document', "
+                "status:'live', canonical_name:'other'}) "
+                "CREATE (c:Object {id:'obj-12120-carrier', name:'Widget', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'widget', "
+                "resolved_from:'row:survivor-12120'})")
+            sdk.create_object("New Widget", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Widget", "supersedes_by": "New Widget",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            rows = g.query(
+                "MATCH (o:Object) WHERE o.id IN "
+                "['row:survivor-12120','obj-12120-carrier'] "
+                "RETURN o.id, o.status, o.supersededBy").result_set
+            got = {r[0]: (r[1], r[2]) for r in rows}
+            assert got.get("row:survivor-12120") == ("superseded", "New Widget"), (
+                f"the fold landed on the retired carrier: {got}")
+            assert got.get("obj-12120-carrier")[0] != "superseded", got
+        finally:
+            sdk.close()
+
+
+class TestThe12120Finding4TheUnpinnedMigratedReaders:
+    """Pins for the seven migrated callers the class above claimed but did not hold.
+
+    #12120 finding 4 (P3): `TestThe12120ReadersOutsideTheEntityModule`'s docstring
+    said every raw-key-space caller now goes through
+    `resolve_entity_id_same_entity`, and pinned two of nine. A revert of any of the
+    other seven was invisible. Each pin below uses a **folded-only** coordinate —
+    an article/case variant present in no stored raw property — so it is RED under
+    the raw resolver (a surface-form coordinate passes under the revert, which is
+    how the first version of these pins was measured vacuous).
+    """
+
+    def test_provenance_resolves_a_fold_colliding_author(self, sdk_factory):
+        """`provenance` author chain (`sdk.py`): `authoredBy` is a NAME here.
+
+        The historical read was case-insensitive over the raw `name`, so a
+        fold-equivalent spelling with a leading article still missed and the chain
+        reported `subject: None` — "who decided this?" answered "nobody".
+        """
+        sdk = sdk_factory()
+        try:
+            author = sdk.create_subject("Acme Corp", "naturalPerson")["id"]
+            pid = sdk.create_point("statement", "the spec is approved",
+                                   authoredBy="the acme corp")["id"]
+            chain = sdk.provenance(pid)
+            assert chain.get("subject"), (
+                "the fold-equivalent author resolved to no Subject: "
+                f"{chain.get('subject')!r}")
+            assert chain["subject"]["id"] == author, chain["subject"]
+        finally:
+            sdk.close()
+
+    def test_compute_reputation_resolves_a_fold_colliding_subject(self, sdk_factory):
+        """`compute_reputation` (`sdk.py`): a fold-only coordinate scored 0.5/0.
+
+        The vacuous posterior is indistinguishable from "this subject has no
+        outcomes" — the same absent-vs-unanswerable conflation #12047 removes.
+        """
+        sdk = sdk_factory()
+        try:
+            sdk.create_subject("Frank", "analyst")
+            proj = sdk._get_proj()
+            proj.apply({"type": "EventRecorded", "id": "ev-f4-rep",
+                        "eventId": "ev-f4-rep", "eventKind": "analysis",
+                        "subject": "Frank"})
+            point = sdk.create_point("observation", "frank's claim")["id"]
+            proj.g.query(
+                "MATCH (e:Event {eventId:$eid}), (p:Point {id:$pid}) "
+                "CREATE (e)-[:IMPL]->(p)",
+                params={"eid": "ev-f4-rep", "pid": point})
+            rep = sdk.compute_reputation("the frank")
+            assert rep["total_events"] == 1, (
+                f"the fold-equivalent subject scored nothing: {rep}")
+            assert rep["outcomes"][0]["content"] == "frank's claim"
+        finally:
+            sdk.close()
+
+    def test_get_owned_entities_resolves_a_fold_colliding_owner(self, sdk_factory):
+        """`get_owned_entities` (`sdk.py`): a fold-only owner read back `[]`.
+
+        An empty list reads as "this subject owns nothing", which is the
+        governance answer a caller acts on — so a key-space miss must not produce
+        it.
+        """
+        sdk = sdk_factory()
+        try:
+            owner = sdk.create_subject("Owner X", "organization")["id"]
+            point = sdk.create_point("observation", "an owned thing")["id"]
+            sdk._get_proj().create_owned_by(point, owner)
+            owned = sdk.get_owned_entities("the owner x")
+            assert any(e.get("id") == point for e in owned), (
+                f"the fold-equivalent owner owned nothing: {owned}")
+        finally:
+            sdk.close()
+
+    def test_subject_binding_resolves_a_fold_colliding_slot_target(self, sdk_factory):
+        """`subject_binding._resolve_target`: a fold-only slot target was UNBOUND.
+
+        The slot is then journaled as `unresolved` — a claim's declared subject
+        silently not bound — which is the refusal path reserved for genuinely
+        unresolvable names.
+        """
+        from tortoise.subject_binding import _resolve_target
+
+        sdk = sdk_factory()
+        try:
+            target = sdk.create_subject("Acme Corp", "organization")["id"]
+            resolved, kind = _resolve_target(
+                sdk._get_proj(), "Subject", "the acme corp")
+            assert resolved == target, (
+                f"the fold-equivalent slot target was left unbound: {resolved!r}")
+            assert kind == "organization", kind
+        finally:
+            sdk.close()
+
+    def test_pipeline_current_stage_reads_a_fold_colliding_ref(self, sdk_factory):
+        """`pipeline.current_stage`: a fold-only ref answered `{}`.
+
+        `{}` reads as "this Object has no stage" — a wrong answer about a live
+        Object the write door addresses by the same spelling.
+        """
+        from tortoise import pipeline as P
+
+        sdk = sdk_factory()
+        try:
+            sdk.create_object("Deal R", "venture:deal")
+            P.advance_stage(sdk, "Deal R", "venture:deal", "stg_contact",
+                            declared=_PIPELINE_DECL)
+            cur = P.current_stage(sdk._get_proj().g, "the deal r")
+            assert cur.get("stageId") == "stg_contact", (
+                f"the fold-equivalent ref read no stage: {cur}")
+        finally:
+            sdk.close()
+
+    def test_pipeline_resolve_object_resolves_a_fold_colliding_ref(self, sdk_factory):
+        """`pipeline._resolve_object`: a fold-only ref returned `None`.
+
+        A stage move addressed by such a ref would then be refused as an unknown
+        Object even though the same spelling is writable through the create door.
+        """
+        from tortoise import pipeline as P
+
+        sdk = sdk_factory()
+        try:
+            sdk.create_object("Deal S", "venture:deal")
+            P.advance_stage(sdk, "Deal S", "venture:deal", "stg_contact",
+                            declared=_PIPELINE_DECL)
+            resolved = P._resolve_object(sdk._get_proj().g, "the deal s")
+            assert resolved is not None, (
+                "the fold-equivalent ref resolved to no Object")
+            assert resolved[1]["name"] == "Deal S", resolved[1]
+        finally:
+            sdk.close()
+
+    def test_topic_stage_1a_refuses_a_fold_colliding_pair(self, sdk_factory):
+        """`topic_summarization` stage 1a: the seed NAME was resolved on the raw key.
+
+        Two live carriers of ONE folded key (raw `zq5510solo`, raw
+        `The zq5510solo`, both `canonical_name='zq5510solo'`) make one entity in
+        the writer's key space. The raw resolver resolved each enumerated name to
+        ITSELF, so both carriers' Points seeded the neighborhood — the identity
+        union this site's docstring forbids, one spelling-pair short of the
+        same-raw-name case it already refused. Post-fix each name refuses and the
+        neighborhood degrades instead of folding two identities.
+        """
+        from tortoise.topic_summarization import _retrieve_topic_neighborhood
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (o:Object {id:'obj-f4-a', name:'zq5510solo', "
+                "objectKind:'org', status:'live', canonical_name:'zq5510solo'}) "
+                "CREATE (o2:Object {id:'obj-f4-b', name:'The zq5510solo', "
+                "objectKind:'org', status:'live', canonical_name:'zq5510solo'})")
+            pa = sdk.create_point("statement", "unrelated alpha claim")["id"]
+            pb = sdk.create_point("statement", "unrelated beta claim")["id"]
+            for pid, oid in ((pa, "obj-f4-a"), (pb, "obj-f4-b")):
+                g.query(
+                    "MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) "
+                    "CREATE (p)-[:aboutObject]->(o)",
+                    params={"pid": pid, "oid": oid})
+            seeds, _meta, seed_count = _retrieve_topic_neighborhood(
+                g, topic="zq5510solo", max_seeds=50)
+            assert seed_count == 0, (
+                "two carriers of ONE folded key seeded the neighborhood as two "
+                f"identities: seeds={seeds!r}")
+        finally:
+            sdk.close()
+
+
+class TestThe12120Finding2CollapsesMergedCarriersFirst:
+    """The widened probe must ask the WRITER's entity question, and the writer
+    COLLAPSES a merged-away carrier.
+
+    `apply_entity_merge` is non-destructive: the retired candidate stays LIVE and
+    keeps its own `canonical_name`, so a pair the queue exists to merge (the two
+    nodes' folded keys are EQUAL — that is what `scan_entities` matches on) holds
+    the SAME folded name on two nodes, one pointer apart. Widening the
+    supersession probes without the collapse changed behaviour in both
+    directions at once (measured on the first version of this fix):
+
+    * the SUCCESSOR probe saw two "candidates" where there is one entity, so the
+      Object lane's self-supersession guard (`all_candidates_are_target`) stopped
+      firing and a target could be folded onto ITS OWN name — the burial the guard
+      exists to prevent;
+    * the REF probe saw two "carriers" where there is one entity and REFUSED a
+      record that applied before the widening — the reader disagreeing with the
+      writer in the opposite direction, which is the class #12120 removes.
+
+    Both are one root: the probes must group by ENTITY (the `resolved_from` hop),
+    not by node. A pair with NO merge pointer, or two hops to two DIFFERENT
+    survivors, is still two entities and still refuses — the never-guess
+    discipline is unchanged.
+    """
+
+    @staticmethod
+    def _merged_pair(sdk):
+        """A live survivor + a live merged-away carrier sharing ONE folded key."""
+        survivor = sdk.create_object("Widget", "document")["id"]
+        g = sdk._get_proj().g
+        g.query(
+            "CREATE (o:Object {id:'obj-12120-dup', name:'The Widget', "
+            "objectKind:'document', status:'live', canonical_name:'widget'})")
+        from tortoise.entity_resolver import apply_entity_merge
+
+        apply_entity_merge(sdk, candidate_id="obj-12120-dup",
+                           survivor_id=survivor, method="exact", similarity=1.0)
+        carrier = g.query(
+            "MATCH (o:Object {id:'obj-12120-dup'}) "
+            "RETURN o.status, o.resolved_from").result_set
+        assert carrier and carrier[0][1] == survivor, (
+            f"fixture drift: no merge pointer on the carrier: {carrier}")
+        assert carrier[0][0] not in (
+            "superseded", "deprecated", "archived", "retracted"), (
+            f"fixture drift: the carrier is not LIVE: {carrier}")
+        return survivor
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-f2-review",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_a_merged_carrier_does_not_turn_a_self_fold_into_a_real_fold(
+            self, sdk_factory):
+        """`Widget` superseded by `Widget` + a merged carrier is STILL a no-op.
+
+        The target is named by its own name, so every successor candidate is the
+        target's own entity: the record must be skipped, never applied — an
+        applied fold sets `supersededBy` to the node's own name and the node
+        vanishes from `recall_state` while the journal records the burial.
+        """
+        sdk = sdk_factory()
+        try:
+            survivor = self._merged_pair(sdk)
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": survivor, "supersedes_by": "Widget",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips, (
+                "the self-supersession drop was not reported to the caller's "
+                f"skipped list (#5365): {skips!r}")
+            row = sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) RETURN o.status, o.supersededBy",
+                params={"id": survivor}).result_set
+            assert row and row[0][0] != "superseded", (
+                f"the target was folded onto its own entity: {row}")
+        finally:
+            sdk.close()
+
+    def test_a_merged_carrier_does_not_block_a_real_fold(self, sdk_factory):
+        """A ref held by [survivor, merged carrier] is ONE entity: fold it.
+
+        Pre-widening this applied (the raw probe matched the survivor alone);
+        counting NODES instead of entities took that back, so the widened probe
+        has to collapse before it refuses.
+        """
+        sdk = sdk_factory()
+        try:
+            survivor = self._merged_pair(sdk)
+            sdk.create_object("New Widget", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Widget", "supersedes_by": "New Widget",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            assert skips == [], skips
+            row = sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) RETURN o.status, o.supersededBy",
+                params={"id": survivor}).result_set
+            assert row and tuple(row[0]) == ("superseded", "New Widget"), row
+        finally:
+            sdk.close()
+
+    def test_two_unmerged_carriers_of_one_fold_still_refuse(self, sdk_factory):
+        """The collapse must not swallow genuine ambiguity.
+
+        Two live carriers of one folded key with NO merge pointer are two
+        identities the graph never reconciled: the record still refuses (never-
+        guess) and now REPORTS itself through the caller's `skipped` channel
+        (#5365) instead of vanishing.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (a:Object {id:'obj-12120-a', name:'Widget', "
+                "objectKind:'document', status:'live', canonical_name:'widget'}) "
+                "CREATE (b:Object {id:'obj-12120-b', name:'The Widget', "
+                "objectKind:'document', status:'live', canonical_name:'widget'})")
+            sdk.create_object("New Widget", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Widget", "supersedes_by": "New Widget",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips, (
+                "the refusal was not reported to the caller's skipped list: "
+                f"{skips!r}")
+            statuses = g.query(
+                "MATCH (o:Object) WHERE o.id IN ['obj-12120-a','obj-12120-b'] "
+                "RETURN o.status").result_set
+            assert all(r[0] != "superseded" for r in statuses), statuses
+        finally:
+            sdk.close()
+
+    def test_a_duplicated_id_still_refuses(self, sdk_factory):
+        """Two nodes claiming ONE `id` are corruption, not one entity.
+
+        The collapse groups carriers of one folded key by the `resolved_from`
+        hop, and `follow_resolved_from` returns the id UNCHANGED when there is no
+        pointer — so keying the group on that return value folds two nodes that
+        merely share an `id` into one "entity", and the caller's never-guess
+        refusal (``len(by_name) > 1`` / ``len(by_id) > 1``, the raw-corruption
+        shape this module already has a rule for) stops firing. Measured on the
+        first version of the collapse: a fold that used to be REFUSED applied to
+        BOTH nodes and the replay duplicated it. The collapse must key a row with
+        NO pointer on the row's own identity.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (a:Object {id:'obj-12120-dup-id', name:'Frobnicator', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'frobnicator'}) "
+                "CREATE (b:Object {id:'obj-12120-dup-id', name:'The Frobnicator', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'frobnicator'})")
+            sdk.create_object("New Frobnicator", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Frobnicator", "supersedes_by": "New Frobnicator",
+                 "evidence": "test"}])
+            assert applied == 0, (
+                "two nodes claiming one id were collapsed into one entity and "
+                f"both folded: {(applied, skips, msgs)!r}")
+            assert skips, (
+                "the never-guess refusal was not reported to the caller: "
+                f"{skips!r}")
+            statuses = g.query(
+                "MATCH (o:Object {id:'obj-12120-dup-id'}) RETURN o.status"
+            ).result_set
+            assert all(r[0] != "superseded" for r in statuses), statuses
+        finally:
+            sdk.close()
+
+    def test_a_fold_only_object_ref_never_outvotes_an_exact_subject_ref(
+            self, sdk_factory):
+        """Family routing: the record's own spelling chooses the family.
+
+        A successor name carried by BOTH families routes the record Object-first
+        (the pre-existing rule). Widening the probes then made a FOLD-ONLY Object
+        match able to outvote an EXACT Subject ref, so
+        `{superseded: "Acme Corp", supersedes_by: "New Acme"}` superseded the
+        case-variant OBJECT `acme corp` and left the intended SUBJECT `Acme Corp`
+        live — a silent wrong-node write that replays. The Object lane now defers
+        to the Subject lane when its ref match is only fold-equivalent and the
+        Subject family holds the ref.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_subject("Acme Corp", "organization")
+            sdk.create_subject("New Acme", "organization")
+            g.query(
+                "CREATE (a:Object {id:'obj-12120-case-a', name:'acme corp', "
+                "objectKind:'document', status:'live', canonical_name:'acme corp'}) "
+                "CREATE (b:Object {id:'obj-12120-case-b', name:'new acme', "
+                "objectKind:'document', status:'live', canonical_name:'new acme'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Acme Corp", "supersedes_by": "New Acme",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            subj = g.query(
+                "MATCH (s:Subject {name:'Acme Corp'}) "
+                "RETURN s.status, s.supersededBy").result_set
+            assert subj and tuple(subj[0]) == ("superseded", "New Acme"), subj
+            objs = g.query(
+                "MATCH (o:Object) WHERE o.id IN "
+                "['obj-12120-case-a','obj-12120-case-b'] "
+                "RETURN o.status").result_set
+            assert all(r[0] != "superseded" for r in objs), (
+                f"the OBJECT twin was superseded instead: {objs}")
         finally:
             sdk.close()

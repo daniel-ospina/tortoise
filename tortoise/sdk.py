@@ -121,7 +121,8 @@ from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, UnaddressableEntityName, all_name_holder_ids,
-    entity_create_lock, resolve_document_target_id,
+    entity_create_lock, name_key_space_same_entity,
+    resolve_document_target_id,
     resolve_entity_id_same_entity)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
@@ -17319,16 +17320,26 @@ class TortoiseSDK:
         # `about_entities` topic channel below SKIPS subject-kind names (it
         # must not emit an un-gated aboutSubject, and it must not mint an
         # id-less Object stub for one).
-        # F6: EXACT names, derived only from payload entities whose KIND is a
-        # subject kind — the same population the resolver checks against. A
-        # `.lower()` fold here would skip a legitimately-cased Object whose
-        # name only case-insensitively matches a subject name, while the
-        # `MATCH (o:Object {name:$n})` resolution below is case-SENSITIVE.
+        # F6 (corrected, #12120 review round 3): the names come from payload
+        # entities whose KIND is a subject kind — the same population the
+        # resolver checks against — but the skip must be as WIDE as the
+        # resolution it guards. That resolution now asks the WRITER's key space
+        # (`name_key_space_same_entity`), so an exact-string membership test let a
+        # fold-equivalent spelling of a subject-kind name through (`"the acme
+        # corp"` beside a declared Subject `"Acme Corp"`) and attached an
+        # un-gated `aboutObject` to the fold-equal Object — the #4934 label leak
+        # this skip exists to prevent, on a spelling the pre-fix raw probe could
+        # not reach. Compare in the fold too.
         subject_entity_names: set[str] = set()
+        subject_entity_names_folded: set[str] = set()
         # #11237: `{name: [(graph_id, kind), …]}` — every entity THIS capture
         # wrote, so the S5 Job 1 relation leg can resolve a stated endpoint
         # name to the node it denotes (see the write leg below).
         entity_index: dict[str, list[tuple[str, str | None]]] = {}
+        # One fold for this whole function: the skip sets below and the
+        # `about_entities` loop compare in the writer's key space.
+        from .entity_resolver import normalize_entity_name as _fold
+
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
             if not name:
@@ -17340,6 +17351,7 @@ class TortoiseSDK:
             _is_subject = is_subject_kind(_ekind or "")
             if _is_subject:
                 subject_entity_names.add(name)
+                subject_entity_names_folded.add(_fold(name))
             try:
                 if _is_subject:
                     _written = self.create_entity(
@@ -17662,12 +17674,52 @@ class TortoiseSDK:
                                 # aboutSubject edge; the topic channel must
                                 # not produce an un-gated one, nor an
                                 # id-less Object stub for a subject-kind
-                                # name (the #4934 label leak).
+                                # name (the #4934 label leak). EXACT, per F6:
+                                # a legitimately-cased Object whose name only
+                                # fold-equals a subject name keeps its edge
+                                # (`test_case_only_mismatch_still_gets_its_
+                                # about_object_edge`).
                                 continue
-                            _oid_rows = proj.g.query(
-                                "MATCH (o:Object {name:$n}) "
+                            # #12120 review round 3: the probe below is
+                            # FOLD-WIDE, so when this spelling only FOLD-equals
+                            # a declared subject-kind name (`"the acme corp"`
+                            # against a Subject `"Acme Corp"`) a fold-only
+                            # Object carrier must not be attributed — that is
+                            # the #4934 leak on a spelling the pre-fix raw probe
+                            # could not reach. An EXACT-name Object is still
+                            # attributed (F6's case), so the constraint is
+                            # exactness, never a blanket skip.
+                            _subject_fold_only = (
+                                _fold(_n) in subject_entity_names_folded)
+                            # #12120 finding 1: this twin of hosted_api's anchor
+                            # read the RAW `name` only, so a fold-equivalent
+                            # spelling of an already-registered Object matched
+                            # NOTHING and the `aboutObject` edge was silently
+                            # dropped on the local path while the write it
+                            # describes resolved on the folded union. One probe
+                            # over the WRITER's key space
+                            # (`name_key_space_same_entity`) — never a second
+                            # copy of the arms — and the id-less arm below reads
+                            # the SAME space, so an id-less holder reached only
+                            # by the folded spelling keeps its edge too.
+                            #
+                            # ⛔ ATTACH-TO-EVERY-CARRIER is kept (the recorded
+                            # disposition for this site): a resolver call here
+                            # would REFUSE on two live same-name carriers where
+                            # capture writes, silently losing an attachment.
+                            _space, _space_params = name_key_space_same_entity(
+                                "o", _n)
+                            if _subject_fold_only and _space:
+                                # Exact spelling only — the reference IS the
+                                # subject channel's name in the writer's key
+                                # space, so a fold-only carrier is ambiguous.
+                                _space = f"({_space}) AND o.name = $exact"
+                                _space_params = {**_space_params, "exact": _n}
+                            _oid_rows = (proj.g.query(
+                                f"MATCH (o:Object) WHERE {_space} "
                                 "RETURN o.id",
-                                params={"n": _n}).result_set
+                                params=_space_params).result_set
+                                if _space else [])
                             _idless = False
                             for _row in _oid_rows:
                                 _oid = _row[0] if _row else None
@@ -17683,13 +17735,16 @@ class TortoiseSDK:
                                 # MERGEs on {id:...} and would mint a
                                 # DIFFERENT node. Fall back to main's
                                 # name-based MERGE so the edge is not silently
-                                # dropped — live-only, honestly unjournaled.
+                                # dropped — live-only, honestly unjournaled —
+                                # over the SAME widened key space, or an
+                                # id-less holder reached by the folded spelling
+                                # would still lose its edge (#12120 finding 1).
                                 proj.g.query(
-                                    "MATCH (p:Point {id:$pid}), "
-                                    "(o:Object {name:$n}) "
-                                    "WHERE o.id IS NULL OR o.id = '' "
+                                    f"MATCH (p:Point {{id:$pid}}), (o:Object) "
+                                    f"WHERE ({_space}) "
+                                    "AND (o.id IS NULL OR o.id = '') "
                                     "MERGE (p)-[:aboutObject]->(o)",
-                                    params={"pid": pid, "n": _n})
+                                    params={"pid": pid, **_space_params})
                 proj.g.query(
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",

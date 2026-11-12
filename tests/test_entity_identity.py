@@ -677,6 +677,59 @@ class TestCommitOpsSupersessionProbe:
         assert _supersession_fold_order(proj, records) == [1, 0]
 
 
+class TestThe12120NameKeySpaceHelper:
+    """`name_key_space_same_entity` — the ONE clause every node-returning reader
+    composes, so its contract is pinned here rather than only through its callers.
+
+    #12120: the helper is `_name_key_predicate`'s node-returning twin (the readers
+    that must attach to EVERY carrier, or reach an id-less stub, cannot use the
+    id-resolving `resolve_entity_id_same_entity`). Its two obligations: the
+    non-blank clause is the WRITER's union (both name props, `aliases`, and both
+    the raw and the folded spelling), and a blank name is a ZERO-ROW answer the
+    caller honours — never a props-only clause that would match a `''` name.
+    """
+
+    def test_a_blank_name_is_a_zero_row_answer(self):
+        from tortoise.entity_identity import name_key_space_same_entity
+
+        for blank in ("", "   "):
+            assert name_key_space_same_entity("o", blank) == ("", {}), repr(blank)
+
+    def test_the_clause_is_the_writers_union_over_both_spellings(self):
+        from tortoise.entity_identity import name_key_space_same_entity
+
+        clause, params = name_key_space_same_entity("o", "The Widgets")
+        assert clause.startswith("(") and clause.endswith(")"), clause
+        assert "o.name" in clause and "o.canonical_name" in clause, clause
+        assert "IN o.aliases" in clause, clause
+        # Both spellings travel as params: the raw one AS WRITTEN (so an exact
+        # carrier is still matched) and the folded one (so the writer's key is).
+        assert "The Widgets" in params.values(), params
+        # `normalize_entity_name` folds case and drops a leading article; the
+        # plural is NOT stemmed, and that is the writer's key too.
+        assert "widgets" in params.values(), params
+
+    def test_a_case_variant_and_an_alias_carrier_are_both_matched(self, sdk_factory):
+        from tortoise.entity_identity import name_key_space_same_entity
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (a:Object {id:'space-a', name:'Widget', "
+                "objectKind:'thing', status:'live', canonical_name:'widget'}) "
+                "CREATE (b:Object {id:'space-b', name:'Gadget', "
+                "objectKind:'thing', status:'live', canonical_name:'gadget', "
+                "aliases:['widget']})")
+            clause, params = name_key_space_same_entity("o", "the WIDGET")
+            ids = {r[0] for r in g.query(
+                f"MATCH (o:Object) WHERE {clause} RETURN o.id",
+                params=params).result_set}
+            assert ids == {"space-a", "space-b"}, ids
+        finally:
+            sdk.close()
+
+
 class TestNonFoldedRecord:
     """The refusal must be a STRUCTURED, assertable record — not merely a log
     line (decision record R8: "a refused fold is an assertion failure, not a log
@@ -812,12 +865,21 @@ _FSTRING_LABEL = re.compile(
 #   E. WRITE-PATH identity MINTING, migration-gated (projection/entities.py's
 #      `MERGE (n:{label} {name:$name})` family + `_persist_extra_props` +
 #      lifecycle folds; projection/edges.py's legacy `_create_about_edges` /
-#      `_try_about_edge` anchors; hosted_api's session-capture anchor; sdk's
-#      `about_entities` loop). The producer sends a NAME and the fold keys on
+#      `_try_about_edge` anchors). The producer sends a NAME and the fold keys on
 #      it; two carriers are attached to (over-attribution, no identity pick)
 #      rather than one being guessed. Converting these to id keys needs the
 #      name->id migration (plan S1/S3) — NOT this sweep's fix, and not
 #      something a read route can fake.
+#      ⛔ TWO members LEFT this class in #12120 without becoming a read route:
+#      `hosted_api`'s session-capture anchor and `sdk`'s `about_entities` loop
+#      now take their SPELLING space from the writer's folded union
+#      (`name_key_space_same_entity`) while keeping the attach-to-every-carrier
+#      shape this note protects (so the "would refuse where capture writes"
+#      objection above never applies). They are still name-keyed reads — they are
+#      merely no longer keyed on a SINGLE raw name property — so their
+#      `_ALLOWED_KEYED`/`_ALLOWED_OPERATOR` entries are DELETED with this change
+#      (the deletion is the load-bearing part: the census then enforces the
+#      writer's space at these sites), not widened.
 _ALLOWED_OPERATOR = {
     'tortoise/assembly.py': {
         # B: route-then-refuse NAME arm (a candidate set, refusal per ref).
@@ -840,16 +902,27 @@ _ALLOWED_OPERATOR = {
         # §B "Route" — successor-name candidate probe, S3/id-probe owned.
         'cand_rows = proj.g.query( "MATCH (o:Object) WHERE o.name IN $names RETURN o.name, o.id", params={"names": sb_names}).result_set': 1,
         '_name_rows = proj.g.query( "MATCH (o:Object) WHERE o.name IN $names RETURN ID(o), o.id, o.name", params={"names": refs_sorted}).result_set': 1,
-        '_name_rows = proj.g.query( "MATCH (o:Object) WHERE o.name = $ref " "RETURN ID(o), o.id, o.name, o.status, o.supersededBy", params={"ref": ref}, ).result_set': 1,
-        # #1423: the Subject TWIN of the `_name_rows` read above. Same
-        # disposition, same owner (the supersession ref-side probe, S3): the
-        # name form is reached ONLY when the id form matched nothing, it
-        # returns every carrier, and the caller refuses outright on >1
-        # (`len(by_name) > 1` -> warn + _skip, "never-guess") — so it cannot
-        # fold two same-name Subjects into one. Not a route candidate: routing
-        # it through the #3633 resolver would convert "two carriers" into a
-        # resolver refusal, a semantics change enumerated by #5509.
-        'by_name = proj.g.query( "MATCH (s:Subject) WHERE s.name = $ref " "RETURN ID(s), s.id, s.name, s.status, s.supersededBy", params={"ref": ref}, ).result_set': 1,
+        # #12120 review round 3: the family defer asks whether the SUBJECT family
+        # holds the ref by its EXACT spelling (so a fold-only Subject does not
+        # outvote a fold-only Object on a tie). An exactness TEST, not a lookup
+        # that selects an identity: the fold itself still goes through the
+        # writer's key space, and the row it returns is only used as a boolean.
+        '_subj_exact_ref = proj.g.query( f"MATCH (s:Subject) WHERE {_subj_ref_space} AND s.name = $ref " "RETURN s.id", params={**_subj_ref_params, "ref": ref}, ).result_set if _subj_ref_space else []': 1,
+        # ⛔ TWO ENTRIES REMOVED by #12120 finding 2 — the ref-side probes of the
+        # supersession fold (`o.name = $ref` / the #1423 Subject twin
+        # `s.name = $ref`). Both were candidate-ENUMERATION reads over a key space
+        # NARROWER than the write they describe, which is the same defect class as
+        # #12120 itself: a fold-only ref was skipped with the wrong reason
+        # ("ref is not a Subject" / "not found") and its successor stayed live and
+        # search-visible. They now take their arms from
+        # `entity_identity.name_key_space_same_entity` — the ONE definition of who
+        # holds a name — so there is no narrower coordinate left to excuse. The
+        # #1423 disposition itself is UNCHANGED: the Subject twin is still reached
+        # only when the id form matched nothing, it still returns every carrier,
+        # and the caller still refuses outright on >1 (`len(by_name) > 1` -> warn +
+        # `_skip`, "never-guess"), so it cannot fold two same-name Subjects into one.
+        # (`cand_rows` above stays: the fold-ORDER pre-pass is a pure ordering
+        # heuristic with no refusal semantics — it fails soft to payload order.)
     },
     'tortoise/entity_identity.py': {
         # THE sanctioned name->id reads (the resolver module). The predicate is
@@ -879,6 +952,25 @@ _ALLOWED_OPERATOR = {
         # the requested set and raises on a short landing. Name-keying is
         # deliberate and narrow: `Tag` is a value node, not an identity family.
         'rows = proj.g.query( "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) " "WHERE t.name IN $names RETURN count(DISTINCT t.name)", params={"pid": id, "names": _sync_wanted}, ).result_set': 1,
+        # #12120 review round 3: the capture twin of the narrowing below — see
+        # the near_dup_merge/hosted_api entries. Exactness only; the lookup beside
+        # it is the writer's folded union.
+        '_space = f"({_space}) AND o.name = $exact"': 1,
+    },
+    # #12120 review round 3: ONE new operator-form read, in each of the three
+    # `aboutObject` attachment sites — an exactness NARROWING, never an identity
+    # pick. When an `about_entities`/union spelling only FOLD-equals a declared
+    # subject-kind name, only a carrier whose own `name` IS that spelling may be
+    # attributed: a fold-only carrier is the un-gated `#1370`/`#4934` edge this
+    # skip exists to prevent, while F6's legitimately-cased Object keeps its edge
+    # (`test_case_only_mismatch_still_gets_its_about_object_edge`). The lookup
+    # beside it is still the writer's folded union, so the entry is the exactness
+    # constraint and nothing wider.
+    'tortoise/near_dup_merge.py': {
+        '_space = f"({_space}) AND o.name = $exact"': 1,
+    },
+    'tortoise/hosted_api.py': {
+        '_space = f"({_space}) AND o.name = $exact"': 1,
     },
     'tortoise/session_link.py': {
         # D: the suffix probe already enforces EXACTLY-ONE (`if len(rows) == 1`),
@@ -888,39 +980,20 @@ _ALLOWED_OPERATOR = {
 }
 
 _ALLOWED_KEYED = {
-    'tortoise/commit_ops.py': {
-        'sb_rows = proj.g.query( "MATCH (o:Object {name:$sb}) RETURN o.id, o.name, o.status", params={"sb": supersedes_by}, ).result_set': 1,
-        # #1423: the Subject TWIN of the `sb_rows` successor probe — the name
-        # the successor-name probe falls back to when no Object carries it
-        # (the #1370 routing makes team/role/person successors `:Subject`).
-        # It RETURNS identity now (it cannot be a bare count): the lane needs
-        # them because the old count-only read could only report "is a
-        # :Subject". It is not a fold — the rows drive
-        # `_apply_subject_supersession`, which refuses on >1 ref carrier, and
-        # requires a VISIBLE DISTINCT non-terminal successor before any write;
-        # the journaled fold itself is id-keyed (`MATCH (s:Subject {id:$id})`).
-        # The retired count-only read (`_subj = ... RETURN count(s)`) is REMOVED
-        # with it, not left stale below.
-        #
-        # TWO occurrences (#1423 review P2): the Subject lane's own successor
-        # probe AND the Object lane's ref-miss fallback. The successor probe is
-        # Object-FIRST, so a successor name carried by BOTH families routes the
-        # record into the Object lane; when the ref then does not resolve as an
-        # Object, this same probe supplies the Subject lane's successor rows
-        # rather than dropping the record with no `skipped` entry (#5365).
-        # Both sites feed `_apply_subject_supersession`, which refuses on an
-        # ambiguous ref and requires a VISIBLE DISTINCT non-terminal successor
-        # before any journaled write.
-        'subj_rows = proj.g.query( "MATCH (s:Subject {name:$sb}) RETURN s.id, s.name, s.status", params={"sb": supersedes_by}, ).result_set': 2,
-    },
-    'tortoise/hosted_api.py': {
-        # E: the hosted session-capture ``about_entities`` anchor. It attaches
-        # the claim to EVERY same-name Object (no identity is picked, and an
-        # id-less leg stays covered). Its local twin is sdk.py's `_oid_rows`
-        # loop below. Converting it to an id key is the name->id migration's
-        # job (S1), not a read route.
-        'proj.g.query( "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) " "MERGE (p)-[:aboutObject]->(o)", params={"pid": pid, "name": name}, )': 1,
-    },
+    # ⛔ NO ENTRY for `tortoise/commit_ops.py` (removed by #12120 findings 1/2).
+    # Its successor and ref probes used to be raw `{name:$sb}` reads — a keyed
+    # READ enumerating a NARROWER key space than the supersession fold resolves on
+    # (`name` · `canonical_name` · `aliases`, raw and folded), so a fold-equivalent
+    # successor was reported "dangling" while the superseded entity stayed live.
+    # They take their arms from `entity_identity.name_key_space_same_entity` now,
+    # so there is no narrower coordinate left to excuse; the never-guess/visible-
+    # successor gates are unchanged.
+    # ⛔ NO ENTRY for `tortoise/hosted_api.py` (removed by #12120 finding 1). The
+    # hosted `about_entities` anchor attached on the RAW name only, so a
+    # fold-equivalent spelling matched nothing and the `aboutObject` edge was
+    # silently dropped. It still attaches to EVERY carrier (no identity is picked,
+    # so the recorded objection — a resolver call would refuse where capture
+    # writes — does not apply); the spelling key space is the writer's.
     'tortoise/onboarding/state.py': {
         # ⛔ NO ENTRY NEEDED (removed by #12120 finding 3). This used to be a
         # raw `{name: $name}` probe — a keyed READ that enumerated a NARROWER key
@@ -1023,22 +1096,24 @@ _ALLOWED_KEYED = {
         # sweep clear a pattern that no longer exists.
     },
     'tortoise/near_dup_merge.py': {
-        # Twin of sdk.py's local `about_entities` claim loop (entry "E" below),
-        # and deliberately the SAME disposition. The merge attaches to every
-        # carrier of the name — id-less stub included — so a MERGE produces the
-        # attachment set capture WOULD have produced for that candidate.
-        # Routing this alone through `entity_identity.resolve_entity_id` would
-        # make a merge REFUSE where capture WRITES (two live same-name
-        # carriers), i.e. silently lose an attachment on the merged path only.
-        # That is why this site migrates WITH its twin (#3633), not ahead of it.
-        'rows = proj.g.query( "MATCH (o:Object {name:$n}) RETURN o.id", params={"n": _n}).result_set': 1,
-        'rows = proj.g.query( "MATCH (p:Point {id:$pid}), (o:Object {name:$n}) " "WHERE o.id IS NULL OR o.id = \'\' " "MERGE (p)-[:aboutObject]->(o) RETURN count(*)", params={"pid": point_id, "n": _n}).result_set': 1,
+        # ⛔ NO ENTRY (removed by #12120 finding 3). The merge attachment was a raw
+        # `{name:$n}` lookup — narrower than the write it mirrors, so a claim naming
+        # a fold-equivalent spelling of a registered Object was reported
+        # `unresolved` instead of linked. It takes its arms from
+        # `entity_identity.name_key_space_same_entity` now. The `unresolved`
+        # MEANING is preserved and restated in the function's docstring: no Object
+        # holds that name in the key space the WRITE resolves on. The attachment
+        # still lands on EVERY carrier (id-less stub included), which is why the
+        # recorded objection to routing it through a resolver — a merge would
+        # REFUSE where capture WRITES — does not apply.
     },
     'tortoise/sdk.py': {
-        # E: the local `about_entities` claim loop (twin of hosted_api's) —
-        # attaches to every carrier, id-less stub included; migration-gated.
-        '_oid_rows = proj.g.query( "MATCH (o:Object {name:$n}) " "RETURN o.id", params={"n": _n}).result_set': 1,
-        'proj.g.query( "MATCH (p:Point {id:$pid}), " "(o:Object {name:$n}) " "WHERE o.id IS NULL OR o.id = \'\' " "MERGE (p)-[:aboutObject]->(o)", params={"pid": pid, "n": _n})': 1,
+        # ⛔ NO ENTRY for the `about_entities` claim loop (removed by #12120
+        # finding 1) — nor for its id-less fallback. Its local twin is
+        # `hosted_api`'s anchor, converted with it: both attach to EVERY carrier
+        # over the writer's folded spelling space, so the recorded
+        # "migration-gated" objection (routing through a resolver would refuse
+        # where capture writes) is preserved rather than overridden.
         # C: ingest's existence probe is NO LONGER here — it now asks the
         # dispositioned resolver (`entity_identity.all_name_holder_ids`) for the
         # label the WRITE lands on, via `sdk._existing_entity_ids` (#9964).

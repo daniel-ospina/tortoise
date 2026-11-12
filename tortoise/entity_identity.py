@@ -863,6 +863,41 @@ def _name_key_predicate(var: str, name: str, *,
     return f"({' OR '.join(arms)})", params
 
 
+def name_key_space_same_entity(var: str, name: str) -> tuple[str, dict]:
+    """``(WHERE, params)`` for EVERY holder of ``name`` over the WRITER's union.
+
+    #12120: :func:`resolve_entity_id_same_entity` is the right call for a reader
+    that needs ONE id. A reader that instead needs the matched **nodes** (to
+    attach to every carrier, or to reach an id-less stub no id-keyed write can
+    address) cannot use it — and the old remedy, spelling the arms again at the
+    call site, is how four readers ended up enumerating a narrower key space
+    than the write they describe (``hosted_api``'s ``aboutObject`` anchor,
+    ``sdk``'s ``about_entities`` loop, ``near_dup_merge``'s attachment,
+    ``commit_ops``' supersession probes). This is the props-returning twin: the
+    arms are :func:`_name_key_predicate`'s, the ONE definition of who holds a
+    name — never a second copy of the predicate.
+
+    ``var`` is the Cypher variable the WHERE clause is written against (``o``,
+    ``s``, …). The returned clause is PARENTHESISED, so a caller composes it
+    with ``AND`` directly.
+
+    Returns ``("", {})`` when there is nothing to match (a blank name and no
+    folded spelling) — a ZERO-ROW answer the caller must honour (skip the
+    query), never a degenerate ``WHERE ()``.
+    """
+    folded = normalize_entity_name(name) or ""
+    if not folded:
+        # Blank (or everything-folds-away) name: there is no key space to derive
+        # — the return is the ZERO-ROW answer documented above, NOT a
+        # props-only clause. Answering `n.name = ''` here would match a
+        # placeholder label nothing writes, and a caller that skipped the check
+        # would run a query whose result means nothing.
+        return "", {}
+    return _name_key_predicate(
+        var, name, name_props=("name", "canonical_name"),
+        also=(folded,), alias_of=(folded,))
+
+
 def _name_holder_ids(g, label: str, name: str, *,
                      case_insensitive: bool,
                      live_only: bool,
@@ -1217,6 +1252,11 @@ def resolve_entity_id_same_entity(g, label: str, value: str | None, *,
     lost :func:`_require_unique_id`'s duplicate-id claimant check and the R8
     evidence record for an ambiguous name (#12120 V-GATE finding 4). This keeps
     every guarantee of the raw resolver, over the widened space.
+
+    A caller that needs the matched NODES rather than one id (attach to every
+    carrier; reach an id-less stub) uses :func:`name_key_space_same_entity` —
+    the props-returning twin over the SAME arms. Neither should ever be
+    re-spelled at a call site.
     """
     folded = normalize_entity_name(value) if value else ""
     if not folded:
