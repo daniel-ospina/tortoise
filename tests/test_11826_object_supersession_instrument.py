@@ -243,11 +243,15 @@ def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
     issue = issues[0]
     assert "no OTHER Object answers its supersededBy (none)" in issue.detail, \
         issue.detail
-    assert "nothing to re-point this input onto" in issue.detail, issue.detail
+    assert "if a Subject or Point carries that name" in issue.detail, issue.detail
+    assert "nothing to re-point this input onto" not in issue.detail, \
+        "a Subject or Point carrying the name IS something to re-point onto: " \
+        + issue.detail
     # ⛔ The repair must not send the reader to a node that does not exist, and it
     # must name the step that DOES exist (name the successor).
     assert "successor named by its supersededBy" not in issue.fix, issue.fix
-    assert "No resolvable successor is named" in issue.fix, issue.fix
+    assert "No :Object answers the successor name" in issue.fix, issue.fix
+    assert "If a Subject or Point carries that name" in issue.fix, issue.fix
     assert "'supersededBy': '<the successor name>'" in issue.fix, issue.fix
     # The door's own signature form (props as ONE dict), pinned again here because
     # this arm is new: a keyword spelling raises TypeError at the caller.
@@ -285,7 +289,7 @@ def test_a_barely_resolvable_pointer_takes_the_successorless_arm(sdk):
     issues = [i for i in _issues(sdk, "superseded_object_active_edges")
               if i.node_id == v1["id"]]
     assert issues
-    assert "No resolvable successor is named" in issues[0].fix, issues[0].fix
+    assert "No :Object answers the successor name" in issues[0].fix, issues[0].fix
     assert "successor named by its supersededBy" not in issues[0].fix, issues[0].fix
     # The pointer is still SET — so this is the 'set but unresolvable' arm, and the
     # detail must quote the dead name rather than claim no pointer exists.
@@ -393,8 +397,14 @@ def test_a_supersession_chain_points_the_repair_at_the_live_head(sdk):
     # The fix must name the reachable live link, not just say "the head" — V3 is the
     # hop the row proves is live, so V2 is NOT the write target.
     assert "is ITSELF 'superseded'" in issues[0].fix, issues[0].fix
-    assert "the next link ('PolicyV3') is LIVE, so target THAT" in issues[0].fix, \
+    assert "the next link ('PolicyV3'), which is LIVE — target THAT" in issues[0].fix, \
         issues[0].fix
+    # ⛔ The DETAIL and the FIX describe the same row: a detail that says "target the
+    # LIVE head" over a fix that says "there is no chain" is one FALSE sentence, and
+    # the reader cannot tell which (measured — both were emitted for one finding).
+    assert "target the LIVE head of that chain" not in issues[0].detail, \
+        issues[0].detail
+    assert "which is LIVE" in issues[0].detail, issues[0].detail
 
 
 def test_a_terminal_successor_with_no_chain_is_not_told_to_follow_one(sdk):
@@ -419,6 +429,12 @@ def test_a_terminal_successor_with_no_chain_is_not_told_to_follow_one(sdk):
     fix = issues[0].fix
     assert "names NO successor, so there is no chain to follow" in fix, fix
     assert "target the LIVE head of that chain" not in fix, fix
+    # ...and the DETAIL must not contradict it (it did: it announced a chain head
+    # while the fix said there is no chain).
+    assert "target the LIVE head of that chain" not in issues[0].detail, \
+        issues[0].detail
+    assert "names NO successor, so there is no chain to follow" in issues[0].detail, \
+        issues[0].detail
 
 
 def test_a_chains_dangling_next_hop_is_not_named_as_the_target(sdk):
@@ -632,7 +648,8 @@ def test_a_self_pointer_is_not_a_successor(sdk):
                    if i.node_id == v1["id"]]
     assert edge_issues
     assert "names the Object ITSELF" in edge_issues[0].detail, edge_issues[0].detail
-    assert "No resolvable successor is named" in edge_issues[0].fix, edge_issues[0].fix
+    assert "No :Object answers the successor name" in edge_issues[0].fix, \
+        edge_issues[0].fix
 
     # The counterpart the exclusion must NOT break: a successor that is a
     # DIFFERENT node sharing the name still resolves. Keep this node superseded and
@@ -680,6 +697,41 @@ def test_a_draft_successor_is_not_a_working_repair(sdk):
     assert [s["reason"] for s in run.get("skipped_factors") or []] == ["degenerate"], \
         ("the draft input is stripped, so the prescribed re-point alone does not "
          f"restore the belief: {run.get('skipped_factors')}")
+
+
+def test_a_chain_whose_tail_is_terminal_names_no_live_head(sdk):
+    """A terminal next link is not a head either — and the row proves no more.
+
+    Measured shape: V1->V2->V3, V3 retracted with no successor, so no live Object
+    exists anywhere. Both strings said "target the LIVE head of that chain" /
+    "walk that chain to its LIVE head" — a node that is not in the graph (the
+    #7819 rule). The DETAIL and the FIX for one row must also agree: they are the
+    same fact, and one of them contradicting the other leaves the reader unable to
+    tell which is false.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    v3 = _obj(sdk, "PolicyV3")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+    sdk.update_entity(v3["id"], status="retracted")
+    assert _q(sdk, "MATCH (o:Object) WHERE o.status = 'live' RETURN count(o)", {}) \
+        == [[0]], "fixture drifted: a live Object exists to target"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    detail, fix = issues[0].detail, issues[0].fix
+    for text in (detail, fix):
+        assert "target the LIVE head" not in text and \
+            "LIVE head of that chain" not in text, \
+            "no live head exists, so naming one sends the write nowhere: " + text
+        assert "is not a head either" in text, text
+        assert "'retracted'" in text, text
+    # ...and the escape is named, so the reader is not left without a repair.
+    assert "re-point onto whatever now carries the claim or delete the edge" in fix, fix
 
 
 def test_a_chains_ambiguous_next_hop_is_not_named_as_the_target(sdk):

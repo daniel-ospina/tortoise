@@ -791,7 +791,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         if not s["carrier_count"]:
             named = f"{_quoted(s['sup_sb'])}" if bool(s["sup_sb"]) else "none"
             return ("; and no OTHER Object answers its supersededBy "
-                    f"({named}), so there is nothing to re-point this input onto")
+                    f"({named}) — if a Subject or Point carries that name, re-point "
+                    "onto that node; otherwise name the successor")
         if s["carrier_count"] > 1:
             return (f"; and its supersededBy ({_quoted(s['sup_sb'])}) is AMBIGUOUS "
                     f"({s['carrier_count']} Objects carry it, #3573), so the repair "
@@ -809,9 +810,46 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "live as well, or the re-point leaves the factor degenerate")
         if is_terminal_status(s["carrier_status"]):
             return ("; the successor it names is ITSELF "
-                    f"{_quoted(s['carrier_status'])}, so the re-point must target "
-                    "the LIVE head of that chain")
+                    f"{_quoted(s['carrier_status'])}, and it {_head_fact(s)}")
         return ""
+
+    def _head_fact(s: dict) -> str:
+        """What the row PROVES about the head of a terminal successor's chain.
+
+        ⛔ ONE source for BOTH emitted strings. The ``detail`` and the ``fix``
+        describe the same row, so a "target the LIVE head of that chain" in one and
+        "there is no chain to follow" in the other is not a wording inconsistency —
+        one of them is FALSE, and the reader cannot tell which (measured: an
+        ``archived`` successor with no ``supersededBy`` emitted both, from one
+        finding). "The LIVE head of that chain" is only emitted when the next hop
+        resolves to exactly one NON-terminal Object; every other arm names what it
+        actually found, and never asserts a live head it has not seen — the #7819
+        rule this module refuses to emit.
+        """
+        if not s["carrier_sb"]:
+            return ("names NO successor, so there is no chain to follow — re-point "
+                    "onto whatever now carries the claim, or delete the edge")
+        if s["carrier_sb"] == s["sup_sb"]:
+            return ("names ITSELF as its own successor, so that chain loops with no "
+                    "live head — re-point onto whatever now carries the claim, or "
+                    "delete the edge")
+        if not s["next_count"]:
+            return (f"names, in its own supersededBy, {_quoted(s['carrier_sb'])} — "
+                    "which answers no OTHER Object either, so the chain has no "
+                    "resolvable head — re-point onto whatever now carries the claim, "
+                    "or delete the edge")
+        if s["next_count"] > 1:
+            return (f"names {s['next_count']} Objects as its own successor — the "
+                    "next hop is exactly the ambiguity this check refuses to "
+                    "resolve, so name the LIVE head by ID")
+        if is_terminal_status(s["next_status"]):
+            return (f"names the next link ({_quoted(s['carrier_sb'])}), which is "
+                    f"{_quoted(s['next_status'])} too, so it is not a head either — "
+                    "resolve that chain to a live Object before writing, and if it "
+                    "ends with none, re-point onto whatever now carries the claim or "
+                    "delete the edge")
+        return (f"names the next link ({_quoted(s['carrier_sb'])}), which is LIVE — "
+                "target THAT, not the immediate successor")
 
     def _active_edge_detail(s: dict) -> str:
         """The consequence, at its measured scope, for THIS row's mechanism.
@@ -889,33 +927,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "the factor degenerate")
         if not is_terminal_status(status):
             return ""
-        if not s["carrier_sb"]:
-            return (f" ⛔ {succ} is ITSELF {_quoted(status)} and names NO successor, "
-                    "so there is no chain to follow: re-point onto whatever now "
-                    "carries the claim, or delete the edge")
-        if s["carrier_sb"] == s["sup_sb"]:
-            return (f" ⛔ {succ} names ITSELF as its own successor, so that chain "
-                    "loops with no live head: re-point onto whatever now carries "
-                    "the claim, or delete the edge")
-        if not s["next_count"]:
-            return (f" ⛔ {succ} is ITSELF {_quoted(status)} and its own "
-                    f"supersededBy ({_quoted(s['carrier_sb'])}) answers no OTHER "
-                    "Object either, so the chain has no resolvable head: re-point "
-                    "onto whatever now carries the claim, or delete the edge")
-        if s["next_count"] > 1:
-            return (f" ⛔ {succ} is ITSELF {_quoted(status)} and its own "
-                    f"supersededBy ({_quoted(s['carrier_sb'])}) names "
-                    f"{s['next_count']} Objects — the next hop is exactly the "
-                    "ambiguity this check refuses to resolve, so name the LIVE "
-                    "head by ID")
-        if is_terminal_status(s["next_status"]):
-            return (f" ⛔ {succ} is ITSELF {_quoted(status)}, and the next link "
-                    f"({_quoted(s['carrier_sb'])}) is {_quoted(s['next_status'])} "
-                    "too — walk that chain to its LIVE head, not the immediate "
-                    "successor")
-        return (f" ⛔ {succ} is ITSELF {_quoted(status)}; the next link "
-                f"({_quoted(s['carrier_sb'])}) is LIVE, so target THAT, not the "
-                "immediate successor")
+        return (f" ⛔ {succ} is ITSELF {_quoted(status)} and it {_head_fact(s)}")
 
     def _active_edge_fix(s: dict) -> str:
         """The repair for this row, chosen by the state the row carries.
@@ -957,15 +969,22 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "way, so the edge must still be deleted or re-pointed onto whatever "
                 "now carries the claim")
         if not s["carrier_count"]:
+            # ⛔ "Nothing to re-point onto" would be FALSE whenever a :Subject or
+            # :Point carries the name: both are nodes EP accepts as an operator
+            # input, and this check's carrier probe is ``:Object``-scoped. State the
+            # fact it measured and name that escape, rather than sending the reader
+            # to mint a second successor.
             fix = (
-                f"No resolvable successor is named for {q}, so there is nothing to "
-                f"re-point this {s['edge_type']} input onto: name the successor — "
-                f"tortoise_update_entity({q}, {{'supersededBy': '<the successor "
-                f"name>'}}) — then re-point the input onto it and delete the edge "
-                f"into {q}. Archiving it instead — tortoise_update_entity({q}, "
-                f"{{'status': 'archived'}}) — does NOT clear this: EP strips a "
-                f"terminal input either way, so the edge must still be deleted or "
-                f"re-pointed onto whatever now carries the claim")
+                f"No :Object answers the successor name this one carries, so there "
+                f"is no Object to re-point this {s['edge_type']} input onto: name "
+                f"the successor — tortoise_update_entity({q}, {{'supersededBy': "
+                f"'<the successor name>'}}) — then re-point the input onto it and "
+                f"delete the edge into {q}. If a Subject or Point carries that "
+                f"name, re-point onto THAT node instead and delete this edge. "
+                f"Archiving it instead — tortoise_update_entity({q}, {{'status': "
+                f"'archived'}}) — does NOT clear this: EP strips a terminal input "
+                f"either way, so the edge must still be deleted or re-pointed onto "
+                f"whatever now carries the claim")
             if not s["is_operator"]:
                 fix += ("; and this is a DIRECT edge, so there is no factor to "
                         "re-point — write the equivalent edge onto that successor "
