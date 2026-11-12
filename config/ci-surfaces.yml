@@ -2294,16 +2294,6 @@ surfaces:
   # `d088425a7c`; #12035 then collapsed the extra copies). So this row is no
   # longer a repair: it is the `core` arm, and the `api` block's own row covers
   # `metering.py` — one row per surface, never one row for both of them.
-  # blocked. ⚠️ THAT IS HISTORY, and this PR does NOT repair it: `main` carries BOTH
-  # arms itself — #11837 (`3557a476e1`) landed the `api` row, and #12035
-  # (`a7139b663d`) collapsed THREE spliced `core` rows into the single one below
-  # (before that, `--integrity` raised `DuplicateManifestKeyError` and did not even
-  # parse). ⛔ RE-MEASURED at `origin/main` `e991d8d3fe`:
-  #   grep -n '^  - test_pricing_storage_dimensions.py' config/ci-surfaces.yml
-  # → exactly TWO lines, one under `api` and one under `core`. So this PR adds
-  # NOTHING for this file: a third row is a `duplicate entry` in `.surfaces.core[]`
-  # and reds the required leg that dedupe just made green — the #11210/#11211/#11222
-  # recurrence this file already records. Re-run that grep before adding one.
   # Same class as the `test_percent_value_11915.py` row directly above — which is
   # what #11978 was filed for 42 minutes before this drift landed (issue
   # 2026-11-12T00:47:22Z, `a3d20763ab` 01:29:58Z), not hours.
@@ -2376,12 +2366,6 @@ surfaces:
   # registered it — which is why THIS row covers the `core` half only (NOT the
   # six-surface census `test_cost_dimensions.py` carries: this file pins two
   # dimensions, not a sweep over every tracked `.py`).
-  # registered it — which is why this PR keeps THIS one row (NOT the six-surface
-  # census `test_cost_dimensions.py` carries: this file pins two dimensions, not
-  # a sweep over every tracked `.py`).
-  # registered it — which is why the row below is `main`'s own and this PR adds
-  # nothing here (NOT the six-surface census `test_cost_dimensions.py` carries:
-  # this file pins two dimensions, not a sweep over every tracked `.py`).
   # Hermetic: 31 cases, no DB, no graph, no network, no model call, no `gh`.
   # ⚠️ COVERAGE GAP — NOT created here, NOT closed here (#12006): this suite also
   # reads `product/pricing.json`, and a diff touching ONLY that artifact selects
@@ -2393,7 +2377,6 @@ surfaces:
   # `slow_files`/`uri_requiring`/`on_demand` overlap, so re-derive it in one
   # `select()` call) because `product/` is a
   # the tier-1 smoke set, this suite absent) because `product/` is a
-  # surfaces [], the tier-1 pool, this suite absent) because `product/` is a
   # `NON_PYTHON_PREFIXES` entry. Those four modules are what THIS row buys;
   # the artifact leg needs the #12006 decision, so do not read this row as
   # covering the rates.
