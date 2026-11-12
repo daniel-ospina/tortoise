@@ -1471,11 +1471,14 @@ class EpBreakdown:
     # mirror is the first stated divergence (they answer the pair mean where
     # this field answers the mirror's value). ⛔ Scope of that second reader: the
     # EP read under an explicit `require_calibration=False`. Under its own
-    # default the gate raises `CalibrationError` only for a LIVE, non-baselined
-    # Point of evidence kind (`''`/`statement`/`observation`/`hypothesis`) with
-    # no belief — a draft, a terminal, or a `goal`/`plan`/`vision` claim raises
-    # nothing and the arithmetic below runs there under the default too. So that
-    # raise is the calibration gate, not this arithmetic.
+    # default the gate raises `CalibrationError` for a LIVE non-operator Point
+    # whose kind is ABSENT (no `pointKind` at all, gated like a statement) or
+    # `''`/`statement`/`observation`/`hypothesis`, and that has no prior the run
+    # can APPLY — i.e. NOT `baseline_set` with BOTH `ep_α` and `ep_β`. It never
+    # reads `posterior_*` or `n.confidence`, so a claim that already CARRIES a
+    # belief still raises there; a draft, a terminal, or a `goal`/`plan`/`vision`
+    # claim raises nothing and the arithmetic below runs under the default too.
+    # So that raise is the calibration gate, not this arithmetic.
     # The second divergence is the pairs R1 REFUSES: those two read each operand
     # on its OWN `1.0` default (`coalesce(posterior_α, ep_α, 1.0)` and the β
     # twin), then answer `α / (α + β)` — with a `total <= 0` guard that answers
