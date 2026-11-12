@@ -840,10 +840,13 @@ class QueueHealth:
         if self.verdict == PR_UNWITNESSED:
             # The one thing an UNWITNESSED wait must never print is a bare `OK`. The
             # counts stay the measured ones — including `pr_running`, which is NOT
-            # always 0 here: the second cause of this state is a queue whose PR runs
-            # ARE executing but have no measurable age for their current attempt, and a
-            # hardcoded
-            # `pr_running=0` would be a falsehood in the line the fleet reads.
+            # always 0 here. ⛔ BUT THE COEXISTENCE IS ALL THIS SAYS (review P2, round 14):
+            # the wait-age cause is a property of the WAITING population, and this module
+            # never computes an age for an EXECUTING run, so "PR runs ARE executing but have
+            # no measurable age" was wrong twice — it moved a waiting-run defect onto
+            # running runs, and it asserted an execution fact that a counted-only census
+            # never measured. A non-zero `pr_running` can be MEASURED or merely COUNTED, and
+            # a hardcoded `pr_running=0` would be a falsehood in either case.
             # `oldest=unmeasured` is the dimension that was not witnessed.
             oldest = self.oldest_pr_queued_age_seconds
             waited = f"{oldest:.0f}s" if oldest is not None else "unmeasured"

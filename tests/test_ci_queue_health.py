@@ -2686,10 +2686,11 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # window` prose, said "has been still for 300 s" and so was disarmed by BOTH
         # `has been still` and `still for`, i.e. by nothing in particular). ⛔ THE RISK
         # DIRECTION IS THE OTHER WAY FROM WHAT IT LOOKS, and this comment got it wrong twice
-        # (review P2/P1, rounds 12 and 13; all measured). DELETING a token reds for every
-        # token EXCEPT `still for` — deleting `still for` alone reds NOTHING, because the
-        # pins carrying it are also carried by `has been still`; `has been still` itself is
-        # load-bearing for the third pin, so deleting THAT reds. And an ADDITION is not
+        # (review P2/P1, rounds 12-14; all measured). A DELETION always reds, because the
+        # exact-set pin above fires on any removal — this leg is NOT what catches one. What
+        # it would miss is a deletion of `still for`, whose pins are also carried by `has been
+        # still`; the other four tokens each carry a pin alone, so their deletion reds HERE.
+        # Two legs, two failure modes, neither redundant. And an ADDITION is not
         # visible from any leg below: `at rest`, `not moving`, `unchanged for`, `quiescent`
         # and `has not moved` were each accepted in silence, and a one-half claim qualified
         # with any of them then passes the guard — the same fail-open as `settle window`,
@@ -2700,9 +2701,13 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # vocabulary narrow — the exact-set pin is.
     ]
     correct += vocabulary_pins
-    # ⛔ EACH VOCABULARY PIN MUST NAME EXACTLY ONE TOKEN (review P2, round 12). A token's
-    # PRESENCE in the passage is what disarms it, so "exactly one token occurs" IS the
-    # exclusivity claim the comment above makes — a pin carrying two is carried by neither.
+    # ⛔ EACH REGISTERED VOCABULARY PIN MUST NAME EXACTLY ONE TOKEN (review P2, rounds 12
+    # and 14). A token's PRESENCE in the passage is what disarms it, so "exactly one token
+    # occurs" IS the exclusivity claim the comment above makes — a pin carrying two is
+    # carried by neither. ⛔ AND THIS LEG READS ONLY `vocabulary_pins`: registration is what
+    # enforces the invariant, so a NEW vocabulary pin that is written into `correct` and not
+    # added to that list is NOT checked (measured: an unregistered two-token pin is green).
+    # Register it here, or the pin is a comment rather than a test.
     for _pin in vocabulary_pins:
         _tokens = [token for token in SECOND_HALF if token in flat(_pin)]
         assert len(_tokens) == 1, (
@@ -3619,7 +3624,8 @@ def test_the_census_cause_is_a_NAMED_flag_so_the_overlap_cannot_misattribute_it(
 
     `PR-UNWITNESSED` has three causes on different dimensions. Round 4 keyed the annotation on
     `pr_running == pr_running_unmeasured > 0`, which is ALSO true when the real cause is (b) —
-    a queued PR run with no readable `created_at` — while the census happens to be entirely
+    a waiting PR run with no measurable CURRENT-ATTEMPT age, of which the unreadable
+    `created_at` is one route of three — while the census happens to be entirely
     unmeasured (the likeliest probe outcome under load). The annotation then prescribed the
     census lever (frozen runs / --max-job-probes) and dropped the lever that fixes the reading.
 

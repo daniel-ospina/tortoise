@@ -439,12 +439,13 @@ same step with the same tail is the investigation.
   with the oldest queued PR run at 527 minutes). The budget's default is derived from this
   document's own §1 measurement (max first-job wait 81.9 min → 90 min), so it fires past the
   measured-normal population rather than on it. `PR-UNWITNESSED` is reported rather than `OK`
-  whenever the PR work is neither witnessed nor disproved, and it has THREE causes on different
+  whenever the PR work is neither witnessed nor disproved. It has THREE causes on different
   dimensions and FOUR triggers — the three below, plus a cut `pending`/`requested` leg, which
   is unwitnessed by the same argument as a cut queued feed and takes the same lever (it just is
-  not a *fourth* cause; the two legs collapse into one trigger). The unreadable-stamp cause
-  applies to the WHOLE waiting population (`queued + pending + requested`), not to the queued
-  leg alone:
+  not a *fourth* cause; the two `pending`/`requested` legs collapse into ONE trigger, which is
+  why the count is four and not five). The wait-age cause — NOT "the unreadable-stamp
+  cause", which is only one of its three routes — applies to the WHOLE waiting population
+  (`queued + pending + requested`), not to the queued leg alone:
   - the queued feed was cut at its page cap **and no PR-event run is executing** — raise
     `--max-pages` to read further back;
   - a WAITING PR-event run (`queued`/`pending`/`requested`) has no measurable age for its
