@@ -446,9 +446,13 @@ same step with the same tail is the investigation.
   (`queued + pending + requested`), not to the queued leg alone:
   - the queued feed was cut at its page cap **and no PR-event run is executing** — raise
     `--max-pages` to read further back;
-  - a WAITING PR-event run (`queued`/`pending`/`requested`) carries no readable `created_at`,
-    so the wait cannot be measured at all — there is no lever here; a stamp GitHub never wrote
-    cannot be recovered, so retry the reading;
+  - a WAITING PR-event run (`queued`/`pending`/`requested`) has no measurable age for its
+    CURRENT ATTEMPT, so the wait cannot be measured at all. ⛔ ONE OWNER for that rule:
+    `QueuedRun.wait_age_seconds`, which abstains on THREE routes — an unreadable `created_at`
+    (attempt 1), an unreadable `run_started_at`, or an `attempt >= 2` run with NO start stamp
+    (where falling back to `created_at` would report a fresh attempt as an old wait). So a
+    perfectly READABLE `created_at` does NOT rule this cause out. There is no lever here; a
+    stamp GitHub never wrote cannot be recovered, so retry the reading;
   - the RUNNING CENSUS is unwitnessed — every run counted in `pr_running` was unmeasured. This
     shows on the state line as `census=unmeasured` **whenever the counted census is entirely
     unmeasured, on ANY verdict that can carry that shape** (`PR-BACKLOGGED`, `PR-UNWITNESSED`
