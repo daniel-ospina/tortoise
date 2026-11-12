@@ -2949,13 +2949,25 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
          "no readable timestamp",
          "the second cause of this state is a queue whose PR runs ARE executing but carry "
          "no readable timestamp"),
+        # ⛔ AND THE `_executing_claim` CAUSE THE SAME COMMIT RETRACTED (review P3, round 23).
+        # It had NO leg: reverting the emitted sentence measured GREEN, and the only reason a
+        # VERBATIM revert reds at all is incidental — two tests assert the case-sensitive
+        # literal "NONE of them was MEASURED", so a one-token case change defeated them. This
+        # entry catches the CLAIM (through `flat()`, i.e. case-insensitively), which is what
+        # the two literals should never have been the cover for. ⛔ THE NEEDLE SITS INSIDE ONE
+        # SOURCE LITERAL: `flat()` collapses whitespace but NOT quotation marks, so a span that
+        # crosses a line-wrapped string boundary carries `" "` in the hay and never matches
+        # (measured — the first version of this entry was GREEN on its own revert).
+        ("MEASURED: every job probe abstained",
+         "MEASURED: every job probe abstained, so this is the pre-#12037 status-string census, "
+         "not a job-level proof"),
     ]
     # ⛔ A DELETION OF AN ENTRY IS STILL SILENT WITHOUT A FLOOR (review P2, round 21): deleting
     # an entry removes its content check AND its proof at once, which is indistinguishable from
     # never having written it — measured, 157 passed. A MEASURED FLOOR, not an exact count, so
     # adding an entry needs no edit here while dropping one reds. Same shape as `disarming`'s
     # floor above; the numeral is a guard rail, not an inventory claim.
-    assert len(unconditional) >= 6, (
+    assert len(unconditional) >= 7, (
         "an `unconditional` entry was deleted: this list is the ONLY check for claims that are "
         "wrong whatever stillness they name, so a removal must be deliberate"
     )
