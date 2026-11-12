@@ -263,16 +263,30 @@ PATH_ASSIGN_RE = re.compile(r"\bPATH\s*=\s*(?P<quote>[\"']?)(?P<value>[^\s;\"']*
 #: (the archive extractors included, because they write files out of an archive),
 #: and the STATED LIMIT now says plainly that this is a whitelist — the residual
 #: is a verb nobody listed, not a proof that no verb exists.
+#: ⛔ TWO ARMS WERE DEAD WEIGHT AND ARE GONE (#12069 review, P2). Measuring
+#: which lines each arm actually DECIDES found:
+#:   * the bare `> … <client>` arm never decided anything — its greedy
+#:     `[^\n]*` runs through the LAST client token and the caller then looks for
+#:     that name AFTER the match, so nothing was ever left to find (3- and
+#:     4-token brute force: 0 decisive cases). The measured form
+#:     `: > …/16/bin/pg_dump` is caught by `_redirects_into_a_client_binary`,
+#:     which grades the redirect TARGET directly;
+#:   * the `tar|unzip|cpio` verbs refused READ-ONLY lines —
+#:     `tar -czf "$RUNNER_TEMP/pg_dump-output.tgz" …` and
+#:     `unzip -l … | grep pg_dump` — with a message claiming a binary was
+#:     replaced. A whitelist that reds correct trees is worse than a shorter one.
+#: The archive case is named in the docstring's stated limits instead.
 BINARY_MUTATION_RE = re.compile(
     r"\b(?:"
-    r"ln|cp|mv|rm|unlink|chmod|chown|patch|tee|dd|rsync|tar|unzip|cpio|"
+    r"ln|cp|mv|rm|unlink|chmod|chown|patch|tee|dd|rsync|"
     r"update-alternatives|install|sed[ \t]+-i|dpkg[ \t]+-i|perl[ \t]+-i"
     r")\b"
-    # `sh -c "cat … > <client binary>"` / `bash -c '… > …'`: an in-place write
-    # through a redirect, whose VERB is a reader (`cat`, `echo`, `printf`).
+    # `sh -c "cat … > <client binary>"`: an in-place write whose VERB is a
+    # READER (`cat`, `echo`, `printf`). The arm stops AT the `>` on purpose —
+    # the caller then requires a client binary name AFTER the match, so
+    # `sh -c "cat x > /tmp/f"` is not an offender and this arm cannot red a
+    # write that goes somewhere else (#12069 review, P2).
     r"|\b(?:ba|z|da)?sh[ \t]+-c\b[^\n]*>"
-    # a bare redirect that TARGETS a client binary: `… > …/16/bin/pg_dump`
-    r"|>[ \t]*[^\n]*\b(?:pg_dump|pg_restore|pg_ctl|pg_wrapper)(?![\w.])"
 )
 #: Only a binary NAME, never a filename that contains one: the `(?![\w.])` is
 #: what keeps `rm -f "$RUNNER_TEMP/pg_dump.log"` (a tidy step) and
@@ -1726,13 +1740,34 @@ def _selects_on_var(body: list[str], var: str) -> bool:
 #: The variable an armed comparison tests: `"$major" != "16"`,
 #: `test "$major" != 16`. Used to tie a loop's credit to the value the branch
 #: actually decides on (#12069 review, P2).
+#: \u26d4 A FIXED-WIDTH WINDOW IS A HOLE (#12069 review, P1). `[^=\n]{0,3}` allowed
+#: three characters between the closing quote and `!=`, so re-aligning ONE line
+#
+#     if [ "$major"   != "16" ]; then
+#
+# made `_compared_variable()` return `None`, switched the derivation gate off,
+# and left the exact fail-open it exists for GREEN (measured `217 passed`). The
+# window is whitespace-and-quote tolerant now, with no length bound.
 COMPARED_VARIABLE_RE = re.compile(
-    r"\$\{?(?P<var>[A-Za-z_]\w*)\}?[^=\n]{0,3}![ \t]*="
+    r"\$\{?(?P<var>[A-Za-z_]\w*)\}?[\"']?\s*![\t ]*="
 )
 
-#: `NAME=value` (with an optional `export`). The derivation graph's edges.
+#: `NAME=value` at the START of a line (with an optional `export`).
 ASSIGNMENT_RE = re.compile(
     r"^[ \t]*(?:export[ \t]+)?(?P<lhs>[A-Za-z_]\w*)=(?P<rhs>.*)$"
+)
+
+#: \u26d4 THE SAME, ANYWHERE ON THE LINE (#12069 review, P1). `ASSIGNMENT_RE` is
+#: anchored, so a body written as two statements on one line
+#
+#     version="$("$tool" --version)"; major="$(pg_dump --version | sed …)"
+#
+# hid `major` from the derivation graph — and from the gate's own "is this the
+# body's decision" test — leaving the fail-open GREEN (measured `217 passed`).
+# Both the edges and the applicability test read this wider form.
+ASSIGNMENT_ANYWHERE_RE = re.compile(
+    r"(?:^|[;&|(]|\s)(?:export[ \t]+|local[ \t]+|readonly[ \t]+)?"
+    r"(?P<lhs>[A-Za-z_]\w*)=(?P<rhs>[^;&|]*)"
 )
 
 
@@ -1751,18 +1786,28 @@ def _derived_variables(body: list[str], sources: set[str]) -> set[str]:
     while changed:
         changed = False
         for line in body:
-            match = ASSIGNMENT_RE.match(line)
-            if not match or match.group("lhs") in derived:
-                continue
-            if any(
-                re.search(
-                    r"\$\{" + re.escape(name) + r"\}|\$" + re.escape(name) + r"(?!\w)",
-                    match.group("rhs"),
-                )
-                for name in derived
-            ):
-                derived.add(match.group("lhs"))
-                changed = True
+            for match in ASSIGNMENT_ANYWHERE_RE.finditer(line):
+                lhs = match.group("lhs")
+                if lhs in derived:
+                    continue
+                rhs = match.group("rhs")
+                if any(
+                    # ⛔ `${name…}` IS A REFERENCE (#12069 review, P1): the
+                    # standard subprocess-free way to cut a major out of
+                    # `pg_dump --version` is
+                    # `major="${version#*) }"; major="${major%%.*}"`, and matching
+                    # only the exact `${name}` refused that CORRECT body with
+                    # "the pin never VERSION-CHECKS …" (measured `1 failed`).
+                    # Any expansion of the name counts; `${other}` does not.
+                    re.search(
+                        r"\$\{" + re.escape(name) + r"(?![A-Za-z0-9_])|\$"
+                        + re.escape(name) + r"(?![A-Za-z0-9_])",
+                        rhs,
+                    )
+                    for name in derived
+                ):
+                    derived.add(lhs)
+                    changed = True
     return derived
 
 
@@ -1906,7 +1951,7 @@ def _version_checked_tools(code: str) -> set[str]:
         assigned_here = {
             match.group("lhs")
             for line in graded
-            if (match := ASSIGNMENT_RE.match(line))
+            for match in ASSIGNMENT_ANYWHERE_RE.finditer(line)
         }
         if (
             credited
@@ -3437,6 +3482,21 @@ BINARY_MUTATION_POLARITY = [
         'sudo sh -c "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"',
         True,
         "`cat >` is the same act as the `tee` the list already carried",
+    ),
+    (
+        'sudo sh -c "cat x > /tmp/f"',
+        False,
+        "CONTROL: a `sh -c` redirect that does NOT target a client binary",
+    ),
+    (
+        'tar -czf "$RUNNER_TEMP/pg_dump-output.tgz" "$RUNNER_TEMP"',
+        False,
+        "CONTROL: an archive NAMED after the tool is not a replacement",
+    ),
+    (
+        'unzip -l "$RUNNER_TEMP/artifacts.zip" | grep pg_dump',
+        False,
+        "CONTROL: a read-only listing",
     ),
     (
         'sudo mv /usr/lib/postgresql/17/bin/pg_restore /usr/lib/postgresql/16/bin/pg_restore',
