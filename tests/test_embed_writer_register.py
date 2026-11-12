@@ -914,6 +914,15 @@ def test_the_never_run_call_entry_NAMES_every_spelling_it_was_measured_on():
             f"`SEAM_CALL` branch pre-empts the write predicate, so a never-run seam call MASKS a "
             f"live ungated reach and the wanted verdict there is `ungated`, not "
             f"`unresolved_write`: {clause[:200]!r}…")
+    # ⛔ The THIRD copy: the register's SUMMARY sentence. The clause pin above deliberately anchors
+    # away from it (it carries no enumeration), and round 11 measured that reverting that sentence
+    # to the narrow "are `gated` while reaching nothing" wording left this whole file GREEN (45
+    # passed). The false claim is a two-word reversion away, so it is pinned directly — an absence,
+    # which cannot be satisfied by an unrelated sentence the way a token can.
+    assert "reaching nothing" not in (register.__doc__ or "").lower(), (
+        "the register docstring says a residual reaches nothing — the `SEAM_CALL` branch pre-empts "
+        "the write predicate, so `gated` can also mean a LIVE ungated reach was MASKED. Name what "
+        "it masks instead; the sibling bullet carries the measured composition (round 11)")
 
 
 def test_the_seam_CALL_population_is_the_one_the_register_names():
