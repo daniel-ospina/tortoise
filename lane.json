@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-9437-1794473156-p3415562-155005d8",
+  "_sha": "a712e556f15de706968b0964066d0989e1d3082d",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/9437.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/9437-capture-fold-evidence"
+    },
+    {
+      "kind": "sha",
+      "value": "d42121e017ec5c5f9661053c4c1737a4f5dc306c"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/9437-capture-fold"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 7800,
+  "duration_s": 7209,
+  "ended_at": 1794480365,
+  "exit_code": 143,
+  "heartbeat_at": 1794480365,
+  "host": "cmux",
+  "issue": 9437,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-9437-1794473156-p3415562-155005d8",
+  "lease_until": 1794488165,
+  "pid": 3415562,
+  "reason": "bound:exceeded-wallclock",
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1794473156,
+  "state": "FAILED",
+  "tag": "9437",
+  "worktree": "/home/cmux/tortoise/.worktrees/9437-capture-fold"
+}
