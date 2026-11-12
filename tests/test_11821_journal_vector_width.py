@@ -567,7 +567,7 @@ def test_the_journal_line_carries_no_insignificant_whitespace(tmp_path):
 
 
 def test_the_marker_is_declared_in_every_home_so_it_cannot_become_node_state():
-    """The homes `embedding_preserved` lives in.
+    """The homes `embedding_width` lives in.
 
     Each one is a place where an undeclared payload key would LEAK: onto a node
     (`_POINT_HANDLED` / `_META_KEYS` / `_SERVER_MANAGED_PROPS`), into the
@@ -1395,3 +1395,56 @@ def test_the_funnel_itself_refuses_an_envelope_key_from_any_future_door(tmp_path
     with pytest.raises(ValueError, match="server-managed"):
         api._emit("ConfidenceChanged", embedding_width=JOURNAL_VECTOR_WIDTH_F32)
     assert not journal.exists() or not journal.read_text().strip()
+
+
+def test_the_belief_door_keeps_a_graph_outage_inside_its_own_arm(tmp_path):
+    """#11948 round 2: the EAGER half must be the PURE half — no graph READ.
+
+    `emit_belief`'s best-effort arm exists so an I/O failure never escapes
+    `ep.run()` (the graph write has already committed by then). The money and
+    kind refusals were moved to the door so a malformed payload is reported to
+    the caller instead of being logged away — correct — but the KIND gate is not
+    purely a predicate: `_refuse_unapproved_kinds` reads the whole graph once a
+    payload names a pack, and it RAISES when the handle is bound but unreadable.
+    Called before the arm, that read is an I/O failure ON the escape path.
+    Measured at `3f5c61601` with a projection whose `g` read raises:
+
+        {'eventKind': 'ruleRevised'}  -> ESCAPED OSError, journal lines: 0
+
+    So the door now passes `graph_reads=False` (pure half only) and `_emit`
+    re-runs the full gate inside the arm. This row pins BOTH halves: the outage
+    is swallowed, and a malformed payload is still refused eagerly — a fix that
+    bought the first by deleting the second would pass a one-sided test.
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    class _UnreadableProjection:
+        """A bound graph handle that raises on read — an outage, not an absence."""
+
+        @property
+        def g(self):
+            raise OSError(5, "graph read failed (simulated outage)")
+
+    events = tmp_path / "belief-outage"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor",
+                   projection=_UnreadableProjection())
+
+    # 1. The I/O half: a pack-naming kind reaches the approval read, and that
+    #    read failing must be swallowed by the arm, not raised at the caller.
+    api.emit_belief("ConfidenceChanged", id="node-1", eventKind="ruleRevised")
+
+    # 2. The malformed half, unchanged and still eager: the PURE refusal runs
+    #    before the arm, so a caller's bug is still reported rather than lost.
+    with pytest.raises(ValueError, match="pointKind must be an identifier"):
+        api.emit_belief("ConfidenceChanged", id="node-2",
+                        pointKind="statement\u2003")
+    with pytest.raises(Exception, match="money value refused"):
+        api.emit_belief("ConfidenceChanged", id="node-3",
+                        amountMinor=25_000_000)
+
+    # 3. Nothing was journalled by the outage and nothing by the refusals.
+    assert not journal.exists() or not journal.read_text().strip(), (
+        "a swallowed outage and a refusal both leave NOTHING to replay")

@@ -311,8 +311,23 @@ class EventAPI:
         self._svbp = None
 
     # -- internals -----------------------------------------------------------
-    def _refuse_unapproved_kinds(self, payload: dict) -> None:
+    def _refuse_unapproved_kinds(self, payload: dict, *,
+                                graph_reads: bool = True) -> None:
         """#5475 (residual): a journal-first write may not install a pack.
+
+        ``graph_reads=False`` runs only the PURE half — the invisible-character
+        refusal, a string predicate — and returns before the approval-set READ.
+        One caller needs the split: ``emit_belief`` is best-effort by contract,
+        so an I/O failure must never escape it, and the approval half performs a
+        whole-graph read that RAISES when the handle is bound but unreadable (its
+        own note, below). Calling the FULL gate before that arm re-opened the
+        class the arm exists to swallow — measured at `3f5c61601`:
+        `emit_belief(..., eventKind="ruleRevised")` against a projection whose
+        graph read raises propagated `OSError` out of `ep.run()`, journal delta
+        0. The pure half still runs EAGERLY there (a malformed payload is not an
+        I/O failure and must be reported to the caller), and the approval half
+        then runs once, inside `_emit`, inside the arm — which is where failing
+        closed at the commit point is correct.
 
         ``EventAPI`` is the write seam every pipeline uses (the v1 extractor,
         ``ingest``, ``docs_miner``, ``mining``, the CLI): it appends to the
@@ -387,6 +402,8 @@ class EventAPI:
         # — a ``self.``-routed helper raised ``AttributeError`` on that double
         # (#9591 review cycle 2, P1, measured: test_7951_write_doors.py red).
         _refuse_invisible_point_kinds_in_payload(payload)
+        if not graph_reads:
+            return
         g = getattr(getattr(self, "projection", None), "g", None)
         if g is None:
             return
@@ -630,7 +647,15 @@ class EventAPI:
         # The predicate is the funnel's own (a bare module call inside it, so a
         # duck-typed double still works), and it abstains identically when the
         # lane holds no graph — so calling it here cannot disagree with `_emit`.
-        self._refuse_unapproved_kinds(payload)
+        # ⛔ `graph_reads=False`, and that is load-bearing: this call sits
+        # OUTSIDE the arm below, so it may run only the PURE half. The approval
+        # half reads the whole graph and RAISES on an unreadable handle, which
+        # would be an I/O failure escaping `ep.run()` — the one thing this
+        # door's best-effort posture exists to prevent (measured at
+        # `3f5c61601`: a bound-but-unreadable projection propagated `OSError`,
+        # journal delta 0). `_emit` re-runs the full gate inside the arm, at its
+        # commit point, so the graph is read once per record and not twice.
+        self._refuse_unapproved_kinds(payload, graph_reads=False)
         try:
             self._emit(type_, **payload)
         except Exception as exc:  # noqa: BLE001, RUF100
