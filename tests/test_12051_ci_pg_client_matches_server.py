@@ -268,6 +268,43 @@ def _code_only(text: str) -> str:
     )
 
 
+#: The precondition, in either shell shape that actually fails closed: an `if !`
+#: guard around the probe, or the probe short-circuiting into a `{ …; exit 1; }`
+#: group. FACTS are extracted (probe verb either way, quoted or not, any redirect
+#: spelling); the SPELLING is deliberately not pinned, because equivalent
+#: rewrites are the same behaviour and a guard that reds them is a false block —
+#: which teaches the next lane to widen the assertion instead of trusting it.
+_IF_PRECONDITION_RE = re.compile(
+    r"^if\s+!\s*(?:sudo\s+)?apt-cache\s+(?:show|policy)\s+['\"]?"
+    r"postgresql-client-(?P<major>\d+)['\"]?[^;]*;\s*then(?P<body>.*?)^fi\s*$",
+    re.DOTALL | re.MULTILINE,
+)
+_OR_PRECONDITION_RE = re.compile(
+    r"(?:sudo\s+)?apt-cache\s+(?:show|policy)\s+['\"]?"
+    r"postgresql-client-(?P<major>\d+)['\"]?[^|\n]*\|\|\s*\{(?P<body>.*?)\}",
+    re.DOTALL,
+)
+
+
+def _precondition(code: str) -> re.Match[str]:
+    """The package-resolvability precondition, matched as a BLOCK, not a token.
+
+    A bare `"apt-cache show" in text` is satisfied by a commented-out line and by
+    a block that is present but unreachable, so the caller passes
+    `_code_only(...)`.
+    """
+    match = _IF_PRECONDITION_RE.search(code) or _OR_PRECONDITION_RE.search(code)
+    assert match, (
+        "the pin does not precondition on the package being RESOLVABLE, so an "
+        "image whose archive lacks the major reds as `E: Unable to locate "
+        "package` (exit 100) — an opaque failure that reads as a typo in this "
+        "step, which is how the 2026-11-12 image move hid behind a "
+        "#12051-shaped red. Read from the step's CODE (comment lines stripped), "
+        "because a substring pin is satisfied by commenting the body out."
+    )
+    return match
+
+
 def _runs_on_labels(job: dict) -> list[str]:
     """`runs-on` as a label list — a one-element list is the same request."""
     runs_on = job.get("runs-on")
@@ -321,20 +358,7 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
 
     _, pin = _pin_step(_steps(job))
     code = _code_only(_run_text(pin))
-    precondition = re.search(
-        r"if\s+!\s*apt-cache\s+show\s+postgresql-client-(?P<major>\d+)"
-        r"\s*>\s*/dev/null\s*2>&1\s*;\s*then(?P<body>.*?)^\s*fi\s*$",
-        code,
-        re.DOTALL | re.MULTILINE,
-    )
-    assert precondition, (
-        "the pin does not precondition on the package being RESOLVABLE, so an "
-        "image whose archive lacks the major reds as `E: Unable to locate "
-        "package` (exit 100) — an opaque failure that reads as a typo in this "
-        "step, which is how the 2026-11-12 image move hid behind a "
-        "#12051-shaped red. Asserted structurally (comment lines stripped), "
-        "because a substring pin is satisfied by commenting the body out."
-    )
+    precondition = _precondition(code)
     assert int(precondition.group("major")) == server_major, (
         f"the precondition probes postgresql-client-"
         f"{precondition.group('major')} but the servers are pg{server_major}"
@@ -344,7 +368,34 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
         "the precondition fails silently: an absent package must be reported as "
         "its OWN named failure, not as the archive's opaque apt error"
     )
-    assert re.search(r"^\s*exit\s+1\s*$", body, re.MULTILINE), (
+    assert re.search(r"\bexit\s+1\s*(?:;|\}|$)", body), (
         "the precondition does not `exit 1`, so a missing client would fall "
-        "through to the install and surface as exit 100 again"
+        "through to the install and surface as exit 100 again. Any separator is "
+        "accepted (`exit 1` on its own line, `; exit 1;`, `; exit 1; }`) — the "
+        "fact is the exit status, not the punctuation around it."
+    )
+
+    # ⛔ ORDER IS PART OF THE FIX. A precondition placed AFTER the install is
+    # inert: the install has already died with the opaque `exit 100` this block
+    # exists to replace. Measured as a gap — moving the whole block below the
+    # install left the guard green while the diagnostic was gone.
+    assert code.index("apt-cache") < code.index("apt-get install"), (
+        "the package precondition runs AFTER `apt-get install`, so on an image "
+        "whose archive lacks the major the job dies with the archive's opaque "
+        "`E: Unable to locate package` and never reaches the named error"
+    )
+
+    # ⛔ THE INSTALL LINE IS WHAT PICKS THE CLIENT. Asserted on the install
+    # itself, not on `CLIENT_PKG_RE.search(text)`: the precondition above names a
+    # package too and sits earlier, so a first-match read would satisfy an
+    # install-major claim by reading the PROBE (measured: switching the install
+    # to -18 stayed green under the old read).
+    install = re.search(
+        r"apt-get\s+install[^\n]*postgresql-client-(?P<major>\d+)", code
+    )
+    assert install, "the pin never runs `apt-get install postgresql-client-<major>`"
+    assert int(install.group("major")) == server_major, (
+        f"the pin INSTALLS postgresql-client-{install.group('major')} while the "
+        f"servers are pg{server_major}: the versioned PATH prepend would then "
+        "point at a directory the install never created"
     )

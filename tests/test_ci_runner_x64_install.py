@@ -548,9 +548,9 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
 
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
-    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:593-595`) — and the runbook still sells
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:603-605`) — and the runbook still sells
     `--repair-labels` as the manual heal that "re-applies this arch's marker"
-    (`docs/ops/ci-runner-x64.md:749-750`). Keeping
+    (`docs/ops/ci-runner-x64.md:759-760`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -3404,15 +3404,15 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
     # cited start line -> a regex the CITED RANGE must match, i.e. the sentence quoted here
     anchors: dict[int, str] = {
         95: r"DROPS the whole class on re-registration",
-        593: r"A foreign arch marker",
-        749: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
+        603: r"A foreign arch marker",
+        759: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
-        869: r"test_the_changes_job_carries_no_job_scope_env",
+        879: r"test_the_changes_job_carries_no_job_scope_env",
         # 8h-bis quotes the label-contract table for the pre-mitigation absolute it pins: the two
         # rows a comment about what the pool CLAIMS must land on (the pair, and `:26` alone).
         25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
-        26: r"^\| `ubuntu-24\.04` \| 9 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
+        26: r"^\| `ubuntu-24\.04` \| 10 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
     }
 
     ref = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
@@ -3460,7 +3460,7 @@ _RUNBOOK_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+
 def test_every_test_name_the_runbook_names_exists():
     """⛔ A RUNBOOK REFERENCE TO A TEST THAT DOES NOT EXIST READS AS CONFIRMATION.
 
-    `docs/ops/ci-runner-x64.md:869` told the operator the job-scope lever is a red check
+    `docs/ops/ci-runner-x64.md:879` told the operator the job-scope lever is a red check
     "`tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`" — and no test of
     that name existed in the tree (the guard was
     `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`). Nothing redded: the
@@ -3519,7 +3519,7 @@ _TOOLS_CITING_THE_RUNBOOK = ("tools/install-ci-runner-x64.sh", "tools/runner_aut
 _TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
     13: r"^# x86_64 CI runners",
     25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
-    26: r"^\| `ubuntu-24\.04` \| 9 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
+    26: r"^\| `ubuntu-24\.04` \| 10 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
     90: r"still does \*\*not\*\* claim any",
     95: r"DROPS the whole class on re-registration",
 }
@@ -3775,9 +3775,9 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: `test-concurrency-falkor` install step) so a reader has a grep-able handle that outlives any
 #: number — the number is the checkable claim, the construct name is the map.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("python-ci.yml:4672", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:4703", ("pip install -e '.[test,postgres]'",)),
     ("python-ci.yml:2949-2954", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
-    ("python-ci.yml:4664-4666", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:4695-4697", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
     ("python-ci.yml:3230", ("cache: pip",)),
     # #11273 review (P1): the three citations that PR's correction ADDED. A citation outside this
     # register is an unchecked claim — the doc's arms only ever resolved the registered ones — so
@@ -4263,7 +4263,7 @@ def test_the_runbook_names_every_leg_the_mitigation_makes_pool_eligible():
     }
     pinned = {name: n for name, n in pinned.items() if n}
     total = sum(pinned.values())
-    assert total == 9, (
+    assert total == 10, (
         "the `runs-on: ubuntu-24.04` job count moved — re-derive the runbook's accepted-cost list "
         f"and this pin together, do not assume {total} is right: {pinned}"
     )
@@ -4272,7 +4272,7 @@ def test_the_runbook_names_every_leg_the_mitigation_makes_pool_eligible():
     start = runbook.index("⛔ **The mitigation is label-WIDE")
     section = runbook[start : runbook.index("These are **accepted costs", start)]
 
-    words = {6: "six", 8: "eight", 9: "nine"}
+    words = {6: "six", 8: "eight", 9: "nine", 10: "ten"}
     assert f"all **{words[total]}**" in section, (
         "the runbook no longer states the measured number of legs the mitigation makes servable, or "
         f"states a different one than the tree has ({total}): {section[:400]!r}"
@@ -4346,11 +4346,11 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
                 if label in counts:
                     counts[label] += 1
 
-    assert counts["ubuntu-24.04"] == 9, (
+    assert counts["ubuntu-24.04"] == 10, (
         "the `ubuntu-24.04` job count moved — re-derive the runbook's table with this pin: "
         f"{counts}"
     )
-    assert counts["ubuntu-latest"] == 77, (
+    assert counts["ubuntu-latest"] == 76, (
         "the `ubuntu-latest` job count moved (the runbook states it as a dated measurement, and "
         "this arm is what makes 'dated' honest) — re-derive the table and this number together, do "
         f"not assume {counts['ubuntu-latest']} is right: {counts}"
@@ -4921,12 +4921,11 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # reason is in this test's docstring and in `symbol_citations` below, where the sentinel
         # that replaced the number lives.
         # the reference-surface relay that drifted: the runbook sentence naming the test
-        # ⛔ 869, not 866: this merge took `main`'s CORRECTED prose in that bullet (#10237's
-        # canary really does name the class, `ci.yml:1473 repo-harnesses`) and this branch's
-        # python-ci.yml line pins (1903 / 1875-1877 — true on the merged tree, since this branch
-        # inserts 12 lines the other side does not have). Both sides moved this relay, so the
-        # number was re-derived from the merged head rather than taken from either side.
-        ("docs/ops/ci-runner-x64.md", 869): r"test_the_changes_job_carries_no_job_scope_env",
+        # ⛔ 879, not 869: this PR inserts ten lines in the accepted-cost list above this
+        # sentence (the fifth reason, `test-record-postgres`'s client-major pin), so the
+        # relay was re-derived from THIS head rather than carried forward — the same
+        # discipline this comment already records for the 866 → 869 move.
+        ("docs/ops/ci-runner-x64.md", 879): r"test_the_changes_job_carries_no_job_scope_env",
         # ⛔ the capstone pin's re-cut history is NOT here, and its absence is the fix, not a gap:
         # it used to be ("tests/test_capstone_preregistration_9075.py", 1703), and that number was
         # re-derived SEVEN times (1590 → 1596 → 1673 → 1682 → 1693 → 1701 → 1703) because the

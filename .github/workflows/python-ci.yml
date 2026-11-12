@@ -4598,13 +4598,18 @@ jobs:
     # revert to a floating label reds at test time instead of silently swapping
     # the client under the artifact).
     #
-    # ⚠️ HOSTED-ONLY BY LABEL, NOT BY CONSTRUCTION: `scripts/ci_runner_gate.sh`
-    # attaches only `ubuntu-latest` to the pool, so this pin resolves to a hosted
-    # image today (live runner list: no carrier). That is the trade for a
-    # deterministic client — on a hosted outage this REQUIRED leg waits instead of
-    # being served by the pool (the same trade `test-slow` records above), and if
-    # the pool ever claims the label (`CI_RUNNER_OS_LABEL=on|auto`), the in-step
-    # `apt-cache show` precondition below is what catches a non-noble box.
+    # ⚠️ THE POOL CLAIMS THIS LABEL TOO while the #6897 mitigation is engaged:
+    # `tools/install-ci-runner-x64.sh` attaches `ubuntu-24.04` under
+    # `CI_RUNNER_OS_LABEL=on|auto`, and `docs/ops/ci-runner-x64.md`'s label
+    # contract records the 2026-10-29 mitigation — so this leg is POOL-ELIGIBLE,
+    # NOT hosted-only, and this pin must not be read as an availability
+    # fallback (it is a determinism pin; availability was never its job). Two
+    # consequences, neither hypothetical:
+    #   · a hosted outage CAN still be absorbed by the pool here;
+    #   · on a pool box that is not noble, the archive has no PG16 client — so
+    #     the in-step `apt-cache show` precondition below is what fails closed,
+    #     NAMING the image instead of dying with exit 100. #10289 is the open
+    #     routing drift: a `=on` non-noble x64 box can carry this label.
     runs-on: ubuntu-24.04
     # Measured on the lane where this was built: 63 passed / 0 skipped in 70–73s
     # against a warm database, and ~100s when the container first applies the
