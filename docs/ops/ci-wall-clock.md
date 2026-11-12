@@ -487,16 +487,22 @@ same step with the same tail is the investigation.
     shards being created the jobs endpoint answers with ONE `completed` row while the run is
     about to execute — an all-`completed` list alone would subtract a run that is working.
     A run whose stillness cannot be proven abstains instead (counted, and reported in
-    `pr_running_unmeasured`), and its lever is the RETRY described in the bullet above — a
-    larger budget only probes more runs the same way. ⛔ THE TWO POPULATIONS — the frozen
-    one and the settling one — must not be merged, because the repair endpoints differ
-    between them: for a **frozen** run `/cancel` and `/force-cancel` both answer 409
-    ("not in progress" / "has not been queued yet"), while a run whose stillness is merely
-    UNPROVEN may have `/cancel` accepted — and that population is not only the
-    pre-expansion window: `_settled_still` also answers "not proven" for a run that has
-    just finished every job, and for an unreadable or future-dated stamp. So neither
-    endpoint is the lever here, for two different reasons: closed for the frozen run,
-    neither closed nor reliably harmless for the unproven one. It is **NOT `--max-pages`**.
+    `pr_running_unmeasured`). ⛔ WHICH REMEDY APPLIES DEPENDS ON WHETHER THE PROBE REACHED
+    IT, and the two are opposites: a run the reading *did* reach that was not yet still
+    gets the RETRY described in the bullet above (retrying immediately reproduces the same
+    downgrade), while a run the probe budget never reached needs a larger
+    `--max-job-probes` — and for the frozen shape that **is** the lever, since a run still
+    for 7 days resolves on its first probe. So a blanket "the budget is not the lever for
+    an all-completed run" is false for the slice it never read.
+    ⛔ THE TWO POPULATIONS — the frozen one and the settling one — must not be merged,
+    because the repair endpoints differ between them: for a **frozen** run `/cancel` and
+    `/force-cancel` both answer 409 ("not in progress" / "has not been queued yet"), while
+    a run whose stillness is merely UNPROVEN may have `/cancel` accepted — and that
+    population is not only the pre-expansion window: `_settled_still` also answers "not
+    proven" for a run that has just finished every job, and for an unreadable or
+    future-dated stamp. So neither endpoint is the lever here, for two different reasons:
+    closed for the frozen run, neither closed nor reliably harmless for the unproven one.
+    It is **NOT `--max-pages`**.
 
   In every case an unmeasured dimension is not a measured-healthy one.
 - **It does not reduce jobs per run.** A `python-ci` run is 22 jobs (max 30) by construction; with

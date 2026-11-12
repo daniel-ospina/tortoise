@@ -3599,12 +3599,13 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
     enough either: "unmeasured" is either "the budget never reached the run" (raise
     --max-job-probes) or "the run's read did not PROVE it idle" (retry once it has settled —
     a bigger budget probes more runs the same way), and the arm must name the one that
-    applies, not both. ⛔ NO SINGLE LIST owns what "did not prove it idle" covers: the callee's
+    applies, not both. ⛔ NO SINGLE LIST owns the UNMEASURED SET: the callee's
     routes are in `read_run_live_job`'s Returns block, the settle gate is the caller's
     (`read_health` downgrades an unproven `False` via `_settled_still` — the callee never sees
     `updated_at`), and the budget cause is neither. Only the ANNOTATION's copy of the first two
-    is pinned below; the prose that owns the ATTRIBUTION (which layer each cause comes from)
-    is `pr_running_unmeasured_unprobed` — it does not, and must not, own the set.
+    is pinned below; the prose that owns the ATTRIBUTION (which layer each cause comes from,
+    the budget cause included — it is NOT a "did not prove it idle" member, it is "never
+    reached") is `pr_running_unmeasured_unprobed` — it does not, and must not, own the set.
     """
     arm = _pr_unwitnessed_arm_and_branches()
 
@@ -3700,7 +3701,13 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
                             "pr_running_unmeasured_unread": 3})
         assert "RETRY the reading" in read_only, read_only
         assert "--max-job-probes" not in read_only, read_only
-        # ⛔ AND IT ENUMERATES ALL THREE CAUSES THE BUCKET STANDS FOR (review P2-2).
+        # ⛔ AND IT NAMES THE THREE CAUSES IT DOES NAME (review P2-2; narrowed round 7).
+        # ⛔ THIS IS NOT AN EXHAUSTIVENESS CLAIM, and must not become one: the bucket also
+        # holds a run whose list could not be PROVEN complete — a `total_count` that is
+        # PRESENT and not an int, on a SHORT page, which `read_run_live_job` abstains on
+        # (see its completeness rule) and which is none of empty/partial/malformed/
+        # other-attempt. The emitted sentence does not name it (tracked as issue #12219),
+        # so a claim that these three are all of them would be false.
         # `5f6f08902c`'s subject was this emitted list, and the REASON LINE's copy is
         # pinned — but this ANNOTATION's copy was not, so the exact two-cause regression
         # that commit removed could return with the whole suite green (measured: the

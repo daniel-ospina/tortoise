@@ -359,10 +359,16 @@ jobs:
               # ⛔ AND "a run GitHub has stopped driving (frozen, every job completed)" is NOT
               # a third cause: exclusion needs every job `completed` AND `updated_at` still
               # for JOB_SETTLE_SECONDS, so an all-completed run is unmeasured whenever its
-              # stillness is unproven — and the bucket it lands in is this one, whose lever
-              # (RETRY once it settles) is exactly right, and a bigger budget is NOT that
-              # lever — it only probes more runs the same way. A FROZEN run is reachable only
-              # BY being probed; that bounds how many are ever FOUND, it does not fix one.
+              # stillness is unproven. ⛔ WHICH BUCKET IT LANDS IN DECIDES THE LEVER, so
+              # this block must not answer for both (round 7 — an earlier revision said a
+              # bigger budget "is NOT that lever" and "does not fix one", which is FALSE
+              # for the slice the budget never read):
+              #   * PROBED and not yet still → `_unread`, lever RETRY once it has settled
+              #     (retrying immediately reproduces the downgrade);
+              #   * NEVER REACHED by the budget → `_unprobed`, lever raise
+              #     --max-job-probes. For the #12037 shape this IS the lever: a run still
+              #     for 7 days resolves on the first probe, so raising the budget is what
+              #     stops it being unmeasured at all.
               # Do NOT offer /cancel or /force-cancel as the lever: for a FROZEN run they
               # answer 409, while for a settle-downgraded one they may be ACCEPTED — and that
               # population is NOT proven to be "about to execute" either (`_settled_still`
