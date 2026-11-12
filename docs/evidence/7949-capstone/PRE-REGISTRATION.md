@@ -249,7 +249,7 @@ through `referentiality.ENV_FLAG`), `TORTOISE_CHANGE_FEED` (an ambient `=1` adds
 to the graph the run writes), and the two confidence gates `TORTOISE_SUBJECT_TAU_HI` /
 `TORTOISE_SUBJECT_TAU_LO` (read through a parameter by `subject_binding`, and they decide whether
 the `:aboutSubject`/`:aboutObject` edge is written at all), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
-`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1478`, reached from `create_point`); the registered corpus yields no aliases either way, measured — and
+`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1480`, reached from `create_point`); the registered corpus yields no aliases either way, measured — and
 `TORTOISE_STATE_VALUE_VERBATIM`, pinned to **`1`** because its absent state is already ON
 (`extractor_v2._state_value_verbatim_enforced`, `env_flag(…, True)`) and it is read PER POINT at
 the emit site, where it decides whether a REWRITTEN value is WITHHELD (`=0` writes what the shipped
@@ -2342,10 +2342,13 @@ to answer.
   did publish such tables, and were corrected for it four times.)
   - `tortoise/projection/entities.py` — `#11795` alone: `7091` → `7355` (`+264`). The cite this pass
     re-points, `§1.6.2`'s alias gate, is `1239` → `1478` — `+239`, from that commit's first hunk
-    (`@@ -1150,6 +1150,245 @@`), NOT `+264`, because three later hunks sit below it. ⚠️ An earlier
+    (`@@ -1150,6 +1150,245 @@`), NOT `+264`, because three later hunks sit below it; a further
+    `1478` → `1480` (`+2`) comes from `#11915`'s import hunk (PR `#11955`), so the live number is
+    `1480` — the `+239` above is that commit's contribution, not the whole move. ⚠️ An earlier
     revision called that correction "pre-existing staleness": it had measured the base `b50e3293`,
-    which already CONTAINED `#11795`, so the test was circular. The same `:1239` → `:1478` re-point
-    is carried into `preregistration.json`'s live `read_back` prose.
+    which already CONTAINED `#11795`, so the test was circular. The same `:1239` → `:1480` re-point
+    (that commit's `+239` plus `#11915`'s `+2`) is carried into `preregistration.json`'s live
+    `read_back` prose.
   - `tortoise/projection/__init__.py` — `#11795` alone: `21840` → `21973` (`+133`) in thirteen
     hunks. The cite this pass re-points, `13738-13740` → `:13804-13806`, carries `+66` because it
     sits above the fourth hunk (`@@ -14549,6 +14615,8 @@` — `+66` is that hunk's START offset and
