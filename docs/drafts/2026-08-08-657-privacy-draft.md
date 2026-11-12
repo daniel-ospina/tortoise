@@ -6,7 +6,7 @@ doc_status: draft
 subjects.team: epistemic-team
 created: 2026-08-08
 ---
-# Privacy Policy — Hosted Tortoise Service (tortoise.premiselabs.co)
+# Privacy Policy — Hosted Tortoise Service (premiselabs.co/tortoise)
 
 > **STATUS: DRAFT-FOR-G-GATE — not final, not owner-approved.**
 > This is Task T2's deliverable for issue daniel-ospina/tortoise#657. It goes to the owner's G-gate review (T3) before any build work. The rendered page (`website/privacy.html`) is produced at T4 from the owner-approved version of this draft.
@@ -24,6 +24,7 @@ created: 2026-08-08
 | Effective date | `[effective date to be set to the actual deploy date at T8]` (G-gate ① LOCKED) |
 | Controller | Daniel Ospina, individual operating as "Premise Labs" (d/b/a) — natural person, NOT a registered entity (D4 LOCKED) |
 | Jurisdiction of residence | **United Kingdom** — owner clarification 2026-10-21 (`i have legal residence in the UK`), superseding the 2026-08-08 Mexico premise. Reissued through the versioned procedure (§15), which is the record of the versions — the change this header anticipated. The Delaware governing-law note in the ToS/DPA is a SEPARATE recorded decision and is NOT touched by it (#9486) |
+| Host of the service | `premiselabs.co/tortoise` — **CORRECTED 2026-11-12**: this draft said `tortoise.premiselabs.co`. Epic #11762 consolidated the marketing surface onto ONE host and made that hostname a permanent 301; **#12058 reissued the rendered pages for it**, and `tests/test_website_static.py` forbids any page naming the retired host. The two body sentences below (§Scope, §9) are therefore recorded at their RENDERED wording: `at tortoise.premiselabs.co` → `at premiselabs.co/tortoise`, and `<https://tortoise.premiselabs.co/dpa>` → `<https://premiselabs.co/dpa>`. Substance unchanged — same service, same DPA, one address instead of a 301 hop. The draft record catching up to a merged render, not a new term. **The published-record half — a version bump and a revision-history row on both documents, which §15's contract and this page's own versioning sentence promise — is #12086, NOT discharged here** |
 
 ### Step 5 — delete-account capability check (build-time, G-gate ⑧)
 
@@ -102,7 +103,7 @@ recorded decision whose reopen is tracked on #9486.
 
 ## Scope of this policy
 
-This Privacy Policy describes how personal data is processed in connection with the **hosted Tortoise service** operated by Premise Labs at `tortoise.premiselabs.co` (and its API at `api.premiselabs.co`).
+This Privacy Policy describes how personal data is processed in connection with the **hosted Tortoise service** operated by Premise Labs at `premiselabs.co/tortoise` (and its API at `api.premiselabs.co`).
 
 This policy does **not** apply to self-hosted deployments of the Tortoise software. In a self-hosted deployment, the operator of that deployment is the data controller for any personal data processed there, and that operator's own policies apply.
 
@@ -234,7 +235,7 @@ Where rights under different laws overlap or conflict, the applicable law govern
 
 ## 9. Data Processing Agreement (outline ⑨)
 
-A copy of the Data Processing Agreement (DPA) is available at <https://tortoise.premiselabs.co/dpa>.
+A copy of the Data Processing Agreement (DPA) is available at <https://premiselabs.co/dpa>.
 
 Under GDPR Art. 28(3), a DPA is required whenever a processor relationship exists — regardless of deal size, including for free-tier users. The DPA applies to the processor relationships described in §10 and takes effect when personal data is submitted to the service.
 
