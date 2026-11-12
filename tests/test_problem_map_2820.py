@@ -216,10 +216,13 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     tracker-OPEN issue is fixed), while `tools/problem_map_check.py` deliberately
     refuses to read GitHub and re-derives none of this from the tree, so re-derive
     these on every re-cut; a re-cut that only makes this file green has proven
-    nothing about the statuses. The two halves are not equally dark: a moved
-    STATUS is caught only by a fixture premise that happens to name that row,
-    never as a status finding, while a moved COUNT breaks several arms' fixtures
-    at once — detected as breakage, never confirmed.
+    nothing about the statuses. Inside that re-cut — page and pin moved together —
+    a compensating **swap** IS caught by the pin as a status finding (§2's `OPEN`
+    count plus the pin's four by-issue assertions), while a **unilateral** move
+    whose counts are all corrected is invisible to the guard — `--check` reads
+    CLEAN — and reds only as breakage: the fixture premises that name that row's
+    cells, and the arms whose fixtures encode the shipped counts. Detected as
+    breakage, never confirmed.
     """
     rows, _ = pmc.parse_rows(DOC.read_text(encoding="utf-8"))
     status = {r.issue: r.status for r in rows}

@@ -425,13 +425,13 @@ rounding:**
   one is `OPEN` over a fixed defect. `tools/problem_map_check.py` deliberately
   refuses to read GitHub and re-derives none of this from the tree, so re-derive
   those literals from the tree on every re-cut; a re-cut that only makes the
-  suite green has proven nothing about the statuses. The two halves are not
-  equally dark, though: a compensating **swap** IS caught by the pin as a status
-  finding (§2's `OPEN` count plus the pin's four by-issue assertions), while a
-  **unilateral** move whose counts are all corrected is invisible to the guard —
-  `--check` reads CLEAN — and reds only as breakage: the fixture premises that
-  name that row's cells, and the arms whose fixtures encode the shipped counts.
-  Detected as breakage, never confirmed.
+  suite green has proven nothing about the statuses. Inside that re-cut — page
+  and pin moved together — a compensating **swap** IS caught by the pin as a
+  status finding (§2's `OPEN` count plus the pin's four by-issue assertions),
+  while a **unilateral** move whose counts are all corrected is invisible to the
+  guard — `--check` reads CLEAN — and reds only as breakage: the fixture premises
+  that name that row's cells, and the arms whose fixtures encode the shipped
+  counts. Detected as breakage, never confirmed.
 - **Anchor RELEVANCE.** The guard proves an anchor exists and is merged. It cannot
   prove the commit is *the fix* — a lane once cited a merge that mentioned nothing
   of the issue (this page carried exactly that defect until review caught it on
