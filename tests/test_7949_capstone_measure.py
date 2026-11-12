@@ -5190,8 +5190,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
         # few lines still "contains" the number the document names.
         ("00-align.md", "the gap is the **declaration → consumer** seam", (
-            ("2415", "# Validate hierarchies"),
-            ("2429", 'errors.append("hierarchies: entry missing \'type\' field")'),
+            ("2439", "# Validate hierarchies"),
+            ("2453", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("16251", "The v2 path reports"),
