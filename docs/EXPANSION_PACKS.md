@@ -78,8 +78,13 @@ ontology:
           redirect: contract
           fallback: core:WorkItem     # REQUIRED, and it must be a CORE kind
           reason: 'a CONTRACT-<n> handle is this pack''s contract kind'
-  depends_on: []             # namespaces this pack may reference — and may redirect to
   memory_granularity: 'Durable: ... Ephemeral: ...'   # UNDER ontology: (top-level is ignored)
+
+# ⛔ TOP-LEVEL, not inside `ontology:` — the registry reads `raw["depends_on"]`,
+# and `ontology.depends_on` is SILENTLY IGNORED (there is no unknown-key check for
+# the `ontology:` block, so a misplaced dependency validates clean and then fails
+# the guard's own target-closure error with no explanation).
+depends_on: []               # namespaces this pack may reference — and may redirect to
 
 extraction:
   active: true

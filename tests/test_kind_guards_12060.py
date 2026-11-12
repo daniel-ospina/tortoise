@@ -41,6 +41,7 @@ Runnable embedded:
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import subprocess
 import sys
@@ -390,6 +391,40 @@ class TestNeverRefuses:
 
 # ══ 3. the INSTALL gate ═══════════════════════════════════════════════════
 
+def _template_guard_example() -> dict:
+    """The ``guards:`` worked example, parsed OUT of the template's comment block.
+
+    The template must ship ``guards: []`` (a scaffolded pack behaves exactly as
+    today), so the example lives in comments — and a comment is exactly what rots
+    unverified. This de-comments the block and hands back real data, so the tests
+    below can run it through the same validator a pack author runs.
+    """
+    import yaml
+
+    lines = TEMPLATE.read_text().splitlines()
+    block: list[str] = []
+    inside = False
+    for line in lines:
+        stripped = line.strip()
+        if not inside:
+            # the EXAMPLE block starts at a comment whose content is exactly
+            # `guards:` — the prose above it also mentions the key.
+            if stripped.startswith("#") and stripped.lstrip("#").strip() == "guards:":
+                inside = True
+                block.append("guards:")
+            continue
+        if not stripped.startswith("#"):
+            break
+        body = stripped[1:]
+        if not body.strip():
+            break
+        block.append(body[2:] if body.startswith("  ") else body.lstrip())
+    assert block, "the template lost its worked example"
+    parsed = yaml.safe_load("\n".join(block))
+    assert isinstance(parsed, dict) and len(parsed["guards"]) == 1, parsed
+    return parsed["guards"][0]
+
+
 def _run_cli(*argv: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "tortoise", *argv],
@@ -521,18 +556,30 @@ class TestAcceptance4NoModelCalls:
     def test_the_guard_path_issues_zero_model_calls(self, sdk, no_pack_guards,
                                                     monkeypatch):
         """A guard that needs a model is a different feature — it must not be
-        smuggled into this one. Every model/embedding seam raises."""
+        smuggled into this one. Every model/embedding seam raises.
+
+        ⛔ The seams are ASSERTED PRESENT before they are patched. A first draft
+        patched `extractor_v2._call_llm` and `extractor_v2.llm_extract`, neither
+        of which exists — so two thirds of this test silently did nothing and a
+        model call added through any real seam would have been invisible.
+        """
+        import tortoise.embeddings as embeddings_mod
+        import tortoise.extractor_v2 as ext
+        import tortoise.kind_classifier as kc
 
         def _no_model(*_a, **_kw):
             raise AssertionError("a model call was made on the guard path")
 
-        import tortoise.embeddings as embeddings_mod
-        import tortoise.extractor_v2 as ext
-
-        for mod, name in ((embeddings_mod, "EmbeddingModel"),
-                          (ext, "_call_llm"), (ext, "llm_extract")):
-            if hasattr(mod, name):
-                monkeypatch.setattr(mod, name, _no_model, raising=False)
+        seams = [
+            (embeddings_mod.EmbeddingModel, "get"),   # the singleton loader
+            (ext, "_complete"),                       # every LLM call in the extractor
+            (kc.KindClassifier, "classify_items"),    # the kind classifier's entry
+        ]
+        for owner, name in seams:
+            assert hasattr(owner, name), (
+                f"seam {getattr(owner, '__name__', owner)}.{name} disappeared — "
+                f"this test would stop protecting anything")
+            monkeypatch.setattr(owner, name, _no_model, raising=False)
         monkeypatch.setattr(kg, "_catalog_pack_guards", lambda: ())
 
         # the pure resolver, on every outcome shape
@@ -659,22 +706,41 @@ class TestAcceptance6PackExtensionPoint:
         assert "fallback: core:WorkItem" in text
         raw = yaml.safe_load(text)
         assert raw["ontology"]["guards"] == [], "the shipped value is 'no guards'"
-        # …and the commented example is a guard this module accepts.
-        example = [{
-            "kind": "concept",
-            "layer": "object",
-            "onConfusion": [{
-                "when": "nameMatches",
-                "pattern": r"^issue:[^#\s]+#[0-9]+$",
-                "redirect": "concept",
-                "fallback": "core:WorkItem",
-                "reason": "issue:<repo>#<n> names a tracked work item",
-            }],
-        }]
-        compiled = kg.pack_guards("acme", example)
+
+        # …and the COMMENTED worked example is parsed OUT OF THE TEMPLATE and
+        # run through the real install gate. A test that transcoded the example
+        # into a Python literal would pass forever while the shipped comment
+        # rotted — the example is the artifact pack authors copy, so the example
+        # is what must be verified.
+        example = _template_guard_example()
+        assert example["kind"] == "concept" and example["layer"] == "object"
+        compiled = kg.pack_guards("acme", [example])
         assert len(compiled) == 1
         assert compiled[0].redirect == "acme:concept"
         assert compiled[0].fallback == "core:WorkItem"
+        assert compiled[0].guarded_kind == "acme:concept"
+
+    def test_the_templates_worked_example_passes_pack_validate(self, tmp_path):
+        """The shipped example must survive `tortoise pack validate` — the gate a
+        pack author will actually run on their copy of it."""
+        import yaml
+
+        manifest = tmp_path / "packs" / "acme" / "manifest.yaml"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(yaml.safe_dump({
+            "namespace": "acme",
+            "name": "Acme",
+            "version": "0.1.0",
+            "tier": "free",
+            "ontology": {
+                "extends": "core",
+                "objectKinds": ["concept"],
+                "guards": [_template_guard_example()],
+            },
+            "depends_on": [],
+        }, sort_keys=False))
+        r = _run_cli("pack", "validate", str(manifest.parent))
+        assert r.returncode == 0, r.stdout + r.stderr
 
     def test_a_pack_without_guards_behaves_exactly_as_today(self, tmp_path, sdk,
                                                             monkeypatch):
@@ -702,6 +768,12 @@ class TestAcceptance6PackExtensionPoint:
         r = sdk.create_subject("acme-42")
         assert r["kind_redirect"]["to"]["kind"] == "acme:concept"
         assert _labels_kinds(sdk, r["id"])[1] == "acme:concept"
+        # The table's own coherence check has a RUNNER here, where the pack is in
+        # the resolved catalog: every redirect routable by `kind_layers`, every
+        # fallback a usable core kind. (`guard_table_problems` cannot verify a
+        # pack kind whose pack is absent from the catalog — it reports it as
+        # unroutable, which is honest but is not this test's subject.)
+        assert kg.guard_table_problems() == []
 
     def test_a_pack_guard_naming_an_absent_pack_abstains_end_to_end(
             self, tmp_path, sdk, monkeypatch):
@@ -727,6 +799,139 @@ class TestAcceptance6PackExtensionPoint:
 
     def test_the_guard_table_reports_its_own_incoherence(self):
         assert guard_table_problems() == []
+
+
+# ══ the review round: defects found and closed ════════════════════════════
+
+class TestReviewFindingsClosed:
+    """Each of these failed before the fix it names — the reproduction is the test."""
+
+    def test_a_props_bag_carrying_intent_does_not_collide_at_the_relay(
+            self, sdk, no_pack_guards):
+        """#12060 review P1. `props` is the caller's bag after `_coerce_props`
+        (the documented `props={"k": v}` convention), so `intent=intent, **props`
+        raised `TypeError: got multiple values for keyword argument 'intent'` AT
+        THE RELAY — the #2296 relay-collision class, reopened by adding a
+        parameter and not a strip. The bag is now built, not splatted."""
+        r = sdk.create_subject("acme", props={"intent": "prefer-latest"})
+        assert _node_props(sdk, r["id"])["intent"] == "prefer-latest"
+        r2 = sdk.create_object("acme thing", props={"intent": "measured"})
+        assert _node_props(sdk, r2["id"])["intent"] == "measured"
+
+    def test_an_object_to_subject_redirect_cannot_turn_a_legal_write_into_a_refusal(
+            self, sdk, monkeypatch):
+        """#12060 review P1. The Subject door validates `status` against ONTOLOGY
+        §4.2 and the Object door validates nothing, so a redirect that moves an
+        Object write onto the subject layer with an Object-only status raised
+        `ValueError: Invalid status 'active' for a :Subject` — a refusal INVENTED
+        by a guard, the exact thing `_kind_layer_note` refuses to do three lines
+        later. MEASURED before the fix with this same pack guard."""
+        guard = Confusion(
+            rule="acme:org", when="nameMatches", pattern=r"^acme-org-[0-9]+$",
+            redirect="core:organization", fallback="core:Project",
+            reason="an org name", declaring_pack="acme")
+        monkeypatch.setattr(kg, "_catalog_pack_guards", lambda: (guard,))
+        r = sdk.create_object("acme-org-7", status="active")
+        assert r.get("id"), "the write was refused by a guard"
+        assert r["kind_redirect_skipped"]["reason"] == \
+            kg.SKIP_STATUS_NOT_LEGAL_ON_SUBJECT
+        assert _labels_kinds(sdk, r["id"])[0] == ["Object"], "the write was moved"
+        # …and the tally was CORRECTED, not left claiming an accepted redirect.
+        assert {x["outcome"] for x in kind_guard_counts()} == {"skipped"}
+
+    def test_the_same_redirect_is_applied_when_the_status_is_legal(
+            self, sdk, monkeypatch):
+        """The check is about the STATUS, not about the redirect: a write whose
+        status the Subject lifecycle declares still gets redirected."""
+        guard = Confusion(
+            rule="acme:org", when="nameMatches", pattern=r"^acme-org-[0-9]+$",
+            redirect="core:organization", fallback="core:Project",
+            reason="an org name", declaring_pack="acme")
+        monkeypatch.setattr(kg, "_catalog_pack_guards", lambda: (guard,))
+        r = sdk.create_object("acme-org-8", status="live")
+        assert _labels_kinds(sdk, r["id"])[0] == ["Subject"]
+        assert r["kind_redirect"]["to"]["kind"] == "core:organization"
+
+    def test_a_bare_core_fallback_is_qualified_and_still_degrades(self):
+        """#12060 review P2. `redirect` was qualified but `fallback` was not, and
+        `kind_layers` cannot route a BARE core name (`entity_route("WorkItem")
+        is None`) — so a manifest spelling the fallback bare (the manifest
+        convention!) validated clean and then could never degrade. R4's step 1
+        was silently dead for that spelling."""
+        compiled = kg.pack_guards("acme", [{
+            "kind": "concept", "layer": "object", "onConfusion": [{
+                "when": "nameMatches", "pattern": r"^dev-issue-[0-9]+$",
+                "redirect": "other:thing",     # a depends_on pack, not installed
+                "fallback": "WorkItem",        # BARE, as a manifest may spell it
+                "reason": "a work item",
+            }]}])
+        assert compiled[0].fallback == "core:WorkItem"
+        assert kg.guard_table_problems(compiled, include_catalog=False) == []
+        d = resolve("dev-issue-7", "subject", None,
+                    pack_confusions=compiled,
+                    installed=frozenset({"core", "acme"}))
+        assert d.outcome == GuardOutcome.REDIRECT
+        assert d.kind == "core:WorkItem", "the bare fallback was not usable"
+
+    def test_a_caller_cannot_forge_the_durable_redirect_record(self, sdk,
+                                                              no_pack_guards):
+        """#12060 review P2. `setdefault` let a props bag shadow `declaredKind`
+        and `kindRedirectRule`, so the node's attribution disagreed with the
+        reply — an audit would read a rule that never fired."""
+        r = sdk.create_subject(ISSUE_NAME, declaredKind="core:role",
+                               kindRedirectRule="forged-rule",
+                               declaredLayer="point")
+        props = _node_props(sdk, r["id"])
+        assert props["kindRedirectRule"] == "issue-identifier-is-work-item"
+        assert props["declaredLayer"] == "subject"
+        assert "declaredKind" not in props, "a declaration that never was, recorded"
+        assert r["kind_redirect"]["from"] == {"kind": None, "layer": "subject"}
+
+    def test_two_disagreeing_spellings_are_reported_not_rewritten(self, sdk,
+                                                                 no_pack_guards):
+        """#12060 review P2. `_kind_layer_note` refuses to pick between
+        `objectKind="core:organization"` and `object_kind="core:team"` ("nothing
+        is dropped, nothing is rewritten") — but the guard runs FIRST, so a
+        rewrite here silently discarded one value and pre-empted the report."""
+        r = sdk.create_subject(
+            "daniel-ospina/agent-infra",
+            props={"subjectKind": "core:naturalPerson",
+                   "subject_kind": "core:team"})
+        assert "kind_redirect" not in r, "the guard rewrote a write it must report"
+        assert _labels_kinds(sdk, r["id"])[1] != "core:Project"
+
+    def test_pack_validate_reports_an_incoherent_guard_TABLE(self, tmp_path):
+        """#12060 review P2: `guard_table_problems()` had NO runner — only a test
+        called it — so a table that had become incoherent was reported by
+        nothing, and `pack validate` could print `✓ Clean` over it."""
+        bad = """\
+  - kind: concept
+    layer: object
+    onConfusion:
+      - when: nameMatches
+        pattern: '^thing-[0-9]+$'
+        redirect: core:notAKind
+        fallback: core:WorkItem
+        reason: 'targets a kind nobody can route'
+"""
+        manifest = _write_pack(tmp_path / "packs", "acme", guards=bad)
+        r = _run_cli("pack", "validate", str(manifest.parent), "--json")
+        payload = json.loads(r.stdout)
+        assert payload["ok"] is False
+        assert r.returncode == 1
+        assert any("is not routed to one layer" in p
+                   for p in payload["guard_problems"]), payload["guard_problems"]
+
+    def test_the_guard_layer_reports_a_disagreement_with_kind_layers(self, tmp_path):
+        """The manifest's `layer` is not decorative: when it disagrees with the
+        authority, that is a reported defect (at install for its own pack, and in
+        the table check for a kind the ambient catalog can route)."""
+        bad = GOOD_GUARD.replace("layer: object", "layer: event")
+        # the pack's own kind is an objectKind, so `_validate_guards` refuses it
+        manifest = _write_pack(tmp_path / "packs", "acme", guards=bad)
+        r = _run_cli("pack", "validate", str(manifest.parent))
+        assert r.returncode == 1
+        assert "is declared on the object layer" in (r.stdout + r.stderr)
 
 
 # ══ the safety properties ═════════════════════════════════════════════════

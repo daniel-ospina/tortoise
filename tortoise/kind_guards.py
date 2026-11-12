@@ -103,6 +103,14 @@ so all five rules are enforced here or at install:
   guard's name predicate has already matched, so the everyday core-guard path
   still performs no graph read. A pack guard whose DECLARING pack is not
   installed does not fire: its premise is not installed either.
+  ⚠️ **`installed is None` is not "nothing is installed"** — it is
+  `pack_state.graph_installed_namespaces`' documented "this graph has no
+  `:PackInstall` records" answer (#2714 indicator 3), which means the CATALOG
+  UNION applies and every namespace counts as available. A graph that never
+  recorded an install (every pre-#318 graph, every self-hosted graph, every
+  restored one) therefore DOES run its packs' guards. Gating those to
+  core-only would break them while the new tests still passed — the same
+  reasoning that makes `None` meaningful in that reader.
 * **R3 fail at INSTALL** — `tortoise pack validate` refuses a guard targeting a
   non-`depends_on` namespace and refuses a guard with no resolvable core
   `fallback` (`tortoise/pack_registry.PackRegistry._validate`).
@@ -231,6 +239,11 @@ SKIP_LINK_PREDICATE_UNIMPLEMENTED = "link-predicate-unimplemented"
 SKIP_DECLARING_PACK_NOT_INSTALLED = "declaring-pack-not-installed"
 SKIP_INSTALLED_SET_UNREADABLE = "installed-set-unreadable"
 SKIP_NO_USABLE_HOME = "no-usable-home"
+#: The door BENEATH the guard would refuse the redirected write. The guard may
+#: never cause that (the router one function away already refuses to), so it
+#: abstains instead: a legal Object write with an Object-only `status` must not
+#: become a `ValueError` because a name looked person-shaped.
+SKIP_STATUS_NOT_LEGAL_ON_SUBJECT = "status-not-legal-on-subject"
 
 #: The linking predicate a redirect may depend on. A redirect TO a kind whose
 #: linking predicate is UNIMPLEMENTED abstains (#12060 owner comment): filing
@@ -277,6 +290,26 @@ class Confusion:
     from_kinds: tuple[str, ...] = ()
     from_layers: tuple[str, ...] = ("subject", "object")
     link_predicate: str | None = None
+    #: The kind this guard is ABOUT, as the manifest declared it (qualified), or
+    #: ``None`` for a core guard. Carried so the table is self-describing and so
+    #: `guard_table()` reports it: the install gate checks it against the pack's
+    #: own declarations and against `kind_layers`, and dropping the value after
+    #: checking it made that check look inert.
+    #:
+    #: ⚠️ It is NOT a filter on the write's DECLARED kind — that is `from_kinds`.
+    #: A guard exists precisely because the name arrives at the WRONG door, so
+    #: scoping it to the layer the guarded kind lives on would disable it in the
+    #: one situation it was written for.
+    guarded_kind: str | None = field(default=None, compare=False)
+
+    #: The layer the declaring manifest states for `guarded_kind`. Used by
+    #: `guard_table_problems` as a FALLBACK authority when `kind_layers` cannot
+    #: route that kind in THIS process — which happens only for a pack being
+    #: validated from a directory that is not the resolved catalog
+    #: (`pack validate <tempdir>`). "Cannot verify here" is reported as
+    #: unverifiable, never as incoherent.
+    guarded_layer: str | None = field(default=None, compare=False)
+
     #: The pack whose manifest declared this guard, or ``None`` for a core
     #: guard. Set by `pack_guards`; never authored in a manifest (the declaring
     #: namespace is the manifest's own).
@@ -646,13 +679,13 @@ def resolve(name: Any, layer: str, declared_kind: Any = None, *,
             continue  # already filed where the guard would send it
 
         # ── the guard's premise is provable; now can we ACT on it? ─────────
-        rule, target_layer = confusion.rule, _layer_of_kind(target)
-        if target_layer is None:
-            # A target the kind↔layer authority cannot route is not a home we
-            # can prove is right. Abstain — never refuse.
-            first_skip = first_skip or _skip(
-                accept, confusion, target, SKIP_NO_USABLE_HOME, layer=_layer)
-            continue
+        rule = confusion.rule
+        # The ONE authority for the target's layer (`kind_layers`). `None` means
+        # nothing can route this target HERE — either a pack this process cannot
+        # see, or a kind nothing declares — which is the "target unavailable"
+        # case, not a separate one: it goes down the same R4 ladder.
+        target_layer = _layer_of_kind(target)
+
         # The override: the caller settles the name. Suppress the redirect AND
         # record that it fired, so a wrong guard is countable. Checked BEFORE
         # the availability ladder because it is a statement about the CALLER,
@@ -666,6 +699,19 @@ def resolve(name: Any, layer: str, declared_kind: Any = None, *,
                 overridden={"rule": rule, "target": target,
                             "declaredKind": declared, "declaredLayer": _layer},
                 rule=rule)
+
+        # ⛔ A redirect TO a kind whose LINKING predicate is unimplemented
+        # abstains (the owner's #12060 comment). Checked before the ladder so the
+        # decision does not depend on which home we would have fallen back to:
+        # the objection ("five orphan roles are worse than one person with five
+        # aliases") applies to the fallback too.
+        if confusion.link_predicate and not LINK_PREDICATES.get(
+                confusion.link_predicate, False):
+            first_skip = first_skip or _skip(
+                accept, confusion, target,
+                f"{SKIP_LINK_PREDICATE_UNIMPLEMENTED}:"
+                f"{confusion.link_predicate}", layer=_layer)
+            continue
 
         # R2: the target's namespace must be INSTALLED here, and so must the
         # declaring pack's — its premise is not installed either otherwise.
@@ -694,34 +740,26 @@ def resolve(name: Any, layer: str, declared_kind: Any = None, *,
                 SKIP_DECLARING_PACK_NOT_INSTALLED, layer=_layer)
             continue
 
-        if not _namespace_available(target, _installed):
-            # R4 ladder, step 1: a slightly less specific home beats none.
+        if target_layer is None or not _namespace_available(target, _installed):
+            # ── R4: the target is unavailable. ABSTAIN — never reject. ──────
+            # Ladder step 1: a slightly less specific home beats none, so use
+            # the guard's declared CORE fallback (always available by
+            # construction — R3).
+            reason = (SKIP_NO_USABLE_HOME if target_layer is None
+                      else SKIP_NAMESPACE_NOT_INSTALLED)
+            skipped = {"rule": rule, "target": target, "reason": reason}
             fb = _usable_fallback(confusion, _layer_of_kind)
-            skipped = {"rule": rule, "target": target,
-                       "reason": SKIP_NAMESPACE_NOT_INSTALLED}
-            if fb is not None:
-                fb_layer = _layer_of_kind(fb)
-                if fb_layer is not None and fb_layer != _layer:
-                    return _redirect(confusion, declared=declared,
-                                     declared_layer=_layer, target=fb,
-                                     target_layer=fb_layer, degraded=True,
-                                     skipped=skipped)
-            # R4 ladder, step 2: no usable home — proceed UNCHANGED.
+            fb_layer = _layer_of_kind(fb) if fb is not None else None
+            if fb is not None and fb_layer is not None and fb_layer != _layer:
+                return _redirect(confusion, declared=declared,
+                                 declared_layer=_layer, target=fb,
+                                 target_layer=fb_layer, degraded=True,
+                                 skipped=skipped)
+            # Ladder step 2: no usable home — proceed with the write UNCHANGED.
             first_skip = first_skip or GuardDecision(
                 outcome=GuardOutcome.SKIPPED, layer=_layer,
                 declared_kind=declared, declared_layer=_layer,
                 skipped=skipped, rule=rule)
-            continue
-
-        if confusion.link_predicate and not LINK_PREDICATES.get(
-                confusion.link_predicate, False):
-            # ⛔ The owner's #12060 comment: a redirect TO a kind whose linking
-            # predicate is unimplemented abstains. Filing five orphan roles is
-            # worse than a person with five aliases (see LINK_PREDICATES).
-            first_skip = first_skip or _skip(
-                accept, confusion, target,
-                f"{SKIP_LINK_PREDICATE_UNIMPLEMENTED}:"
-                f"{confusion.link_predicate}", layer=_layer)
             continue
 
         return _redirect(confusion, declared=declared, declared_layer=_layer,
@@ -773,6 +811,33 @@ def _redirect(confusion: Confusion, *, declared: str | None,
         prop=KIND_PROP[target_layer],
         declared_kind=declared, declared_layer=declared_layer,
         redirect=payload, skipped=skipped, rule=confusion.rule)
+
+
+def abstain(decision: GuardDecision, reason: str, *,
+            layer: str | None = None) -> GuardDecision:
+    """Downgrade a resolved REDIRECT to an abstention, leaving the write as declared.
+
+    For a reason the guard TABLE cannot know — the door beneath the guard would
+    refuse the target layer (a `status` only one layer's lifecycle declares).
+    ⛔ The router one function away (`sdk._kind_layer_note`) already refuses to
+    invent such a refusal, and this is the same rule applied one step earlier:
+    the write keeps the layer the caller asked for and the caller is TOLD.
+
+    The tally is CORRECTED rather than left as-is: the redirect was counted as
+    ``accepted`` before this was known, and a counter that reports a redirect
+    that did not happen is a measurement that lies (the whole reason the counter
+    exists is that a wrong guard must be a number).
+    """
+    _layer = layer or decision.declared_layer or decision.layer
+    _unrecord(decision.rule or "", decision.declared_kind, decision.kind or "",
+              GuardOutcome.REDIRECT)
+    skipped = {"rule": decision.rule, "target": decision.kind, "reason": reason}
+    _record(decision.rule or "", decision.declared_kind, decision.kind or "",
+            GuardOutcome.SKIPPED)
+    return GuardDecision(
+        outcome=GuardOutcome.SKIPPED, layer=_layer,
+        declared_kind=decision.declared_kind, declared_layer=_layer,
+        skipped=skipped, rule=decision.rule)
 
 
 # ── the pack half ─────────────────────────────────────────────────────────
@@ -841,7 +906,14 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                 when=str(when),
                 pattern=pattern,
                 redirect=_qualify(redirect.strip(), namespace),
-                fallback=(str(c.get("fallback")).strip()
+                # ⛔ QUALIFIED, exactly like `redirect` — and this asymmetry was
+                # a real defect: a manifest may spell a core fallback bare
+                # (`fallback: WorkItem`, the manifest convention), and
+                # `_usable_fallback` asks `kind_layers` to route it, where a BARE
+                # core name has no section (`entity_route("WorkItem") is None`).
+                # The guard then validated at install but could never degrade,
+                # so R4's ladder step 1 was silently dead for that spelling.
+                fallback=(_qualify(str(c.get("fallback")).strip(), namespace)
                           if c.get("fallback") else ""),
                 reason=str(c.get("reason") or c.get("message") or rule),
                 from_kinds=tuple(str(k) for k in from_kinds
@@ -850,6 +922,10 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                                   if isinstance(layer, str)),
                 link_predicate=(str(c["linkPredicate"])
                                 if c.get("linkPredicate") else None),
+                guarded_kind=(_qualify(str(entry["kind"]).strip(), namespace)
+                              if entry.get("kind") else None),
+                guarded_layer=(str(entry["layer"]).strip().lower()
+                               if entry.get("layer") else None),
                 declaring_pack=namespace,
             ))
     return tuple(out)
@@ -970,6 +1046,27 @@ def _record(rule: str, from_kind: str | None, to_kind: str, outcome: str) -> Non
         pass
 
 
+def _unrecord(rule: str, from_kind: str | None, to_kind: str,
+              outcome: str) -> None:
+    """Undo one `_record` — see `abstain`. Never raises, never goes negative."""
+    try:
+        label = _COUNT_LABEL.get(outcome)
+        if label is None:
+            return
+        with _COUNT_LOCK:
+            key = (_admit(rule, _ADMITTED_RULES),
+                   _admit(from_kind, _ADMITTED_FROM),
+                   _admit(to_kind, set()),
+                   label)
+            count = _COUNTS.get(key, 0) - 1
+            if count > 0:
+                _COUNTS[key] = count
+            else:
+                _COUNTS.pop(key, None)
+    except Exception:  # noqa: BLE001, RUF100 — measurement never fails a write
+        pass
+
+
 def kind_guard_counts() -> list[dict]:
     """In-process snapshot of the guard tally, sorted and stable.
 
@@ -1028,6 +1125,8 @@ def guard_table(*, include_packs: bool = True) -> dict[str, dict]:
             "fromKinds": list(c.from_kinds),
             "fromLayers": list(c.from_layers),
             "linkPredicate": c.link_predicate,
+            "guardedKind": c.guarded_kind,
+            "guardedLayer": c.guarded_layer,
             "pack": c.declaring_pack,
         })
 
@@ -1047,28 +1146,57 @@ def guard_table(*, include_packs: bool = True) -> dict[str, dict]:
     return table
 
 
-def guard_table_problems() -> list[str]:
+def guard_table_problems(pack_confusions: Iterable[Confusion] | None = None, *,
+                         include_catalog: bool = True) -> list[str]:
     """Construction errors in the guard table — empty when it is coherent.
+
+    ``include_catalog`` reads every guard the loaded pack CATALOG declares (the
+    default, and what a test or an operator wants); ``False`` checks the CORE
+    table plus exactly the ``pack_confusions`` handed in, which is what
+    ``tortoise pack validate`` needs: it must report on the packs it was asked
+    about, not on whatever the ambient catalog holds.
 
     Three checks, each one a way a guard could quietly become a SECOND answer to
     a question another module owns:
 
     1. the pattern must compile and its predicate must be declared;
     2. the redirect target must be a KIND the `kind_layers` authority routes to
-       exactly one layer (else the guard names a home nobody can verify);
+       exactly one layer (else the guard names a home nobody can verify) —
+       UNLESS this process's catalog cannot see the declaring pack at all, in
+       which case the guard's own declared `layer` is the best available answer
+       and a disagreement with it is still reported;
     3. the guard's `fallback` must be a usable CORE kind (R3).
     """
     problems: list[str] = []
-    confusions = list(CORE_CONFUSIONS) + list(_catalog_pack_guards())
+    confusions = list(CORE_CONFUSIONS)
+    if include_catalog:
+        confusions.extend(_catalog_pack_guards())
+    if pack_confusions:
+        confusions.extend(pack_confusions)
     for c in confusions:
         if c.when not in WHEN_PREDICATES:
             problems.append(f"{c.rule}: unsupported predicate {c.when!r}")
         if _compiled(c.pattern) is None:
             problems.append(f"{c.rule}: pattern does not compile")
-        if _layer_of_kind(c.redirect) is None:
+        routed = _layer_of_kind(c.redirect)
+        if routed is None:
+            # A pack kind this process cannot see (`pack validate <tempdir>`:
+            # the kind-index spec resolves from the DEFAULT catalog, not the dir
+            # under validation). Fall back to the layer the manifest declared,
+            # and say nothing when even that is unknown — an unverifiable entry
+            # is not an incoherent one.
+            # A CORE target is always routable here, so an unrouted one is a
+            # real defect wherever the guard came from; a PACK target may simply
+            # be invisible to this process's catalog (see above).
+            if c.declaring_pack is None or kind_namespace(c.redirect) is None:
+                problems.append(
+                    f"{c.rule}: redirect {c.redirect!r} is not routed to one "
+                    f"layer by kind_layers")
+        elif c.guarded_layer is not None and c.guarded_layer != routed:
             problems.append(
-                f"{c.rule}: redirect {c.redirect!r} is not routed to one layer "
-                f"by kind_layers")
+                f"{c.rule}: the declared layer {c.guarded_layer!r} disagrees with "
+                f"kind_layers, which routes {c.guarded_kind or c.redirect!r} to "
+                f"{routed!r}")
         if _usable_fallback(c, _layer_of_kind) is None:
             problems.append(
                 f"{c.rule}: fallback {c.fallback!r} is not a usable core kind")

@@ -11980,10 +11980,27 @@ def _cmd_pack_validate(args) -> int:
     hierarchy_issues = [dict(d) for d in hierarchy_diagnostics(reg)]
     n_errors = sum(len(v) for v in errors.values())
     n_unresolved = sum(len(v) for v in unresolved.values())
+    # #12060: the guard TABLE's own coherence — the check that had no runner.
+    # `_validate_guards` (pack_registry) checks ONE manifest's declarations; this
+    # checks the COMPILED table: every redirect target routable to one layer by
+    # `kind_layers`, every fallback a usable CORE kind, every pattern compilable.
+    # Without it a table that had become incoherent was reported by nothing —
+    # only a test called it — which is the "check with no runner" shape (and a
+    # pack could validate clean while its fallback silently could never be
+    # used). Scoped to the packs under validation, never the ambient catalog:
+    # `pack validate <dir>` must report on <dir>.
+    from tortoise.kind_guards import guard_table_problems, pack_guards
+    _guard_confusions: list = []
+    for ns in sorted(reg.packs):
+        _declared = getattr(reg.packs[ns], "guards", None)
+        if _declared:
+            _guard_confusions.extend(pack_guards(ns, _declared))
+    guard_problems = guard_table_problems(_guard_confusions,
+                                          include_catalog=False)
     # An unresolved reference is NOT clean: the pack loaded, but what it
     # declares does not resolve, so `✓ Clean` over it is a claim the registry's
     # own data contradicts (#9663).
-    ok = not errors and not n_unresolved
+    ok = not errors and not n_unresolved and not guard_problems
     if getattr(args, "json", False):
         print(_json.dumps({
             "ok": ok,
@@ -11999,6 +12016,7 @@ def _cmd_pack_validate(args) -> int:
                 "declared": hierarchy,
                 "unbound": hierarchy_issues,
             },
+            "guard_problems": guard_problems,
         }, indent=2))
     else:
         print(f"tortoise pack validate: {packs_dir}")
@@ -12008,6 +12026,10 @@ def _cmd_pack_validate(args) -> int:
             print(f"  ✗ {ns}:")
             for e in errs:
                 print(f"      {e}")
+        if guard_problems:
+            print("  ✗ kind guards — the table itself is incoherent (#12060):")
+            for problem in guard_problems:
+                print(f"      {problem}")
         if unresolved:
             # Distinct from the isolated-pack section above: these packs are
             # LOADED, and the diagnostic names the pack that is missing. Kept

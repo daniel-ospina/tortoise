@@ -5646,32 +5646,66 @@ def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
     Returns the decision unchanged when the guard only ABSTAINED or the caller
     OVERRODE it: in both cases the write must land exactly as declared.
     """
-    from tortoise.kind_guards import resolve
+    from tortoise.kind_guards import SKIP_STATUS_NOT_LEGAL_ON_SUBJECT, abstain, resolve
     from tortoise.kind_layers import KIND_PROP
     from tortoise.pack_state import _KIND_PROP_SPELLINGS
 
     named = _named_layer_kinds(props)
     declared = next((kind for _layer, _spelling, kind in named), None)
+    # ⛔ TWO DISAGREEING SPELLINGS OF ONE PROPERTY ARE NEVER REWRITTEN.
+    # `objectKind="core:organization"` beside `object_kind="core:team"` is a
+    # write that already names two kinds; the router one function down REFUSES to
+    # pick one (it reports instead, "nothing is dropped, nothing is rewritten"),
+    # and the guard runs FIRST — so rewriting here would silently discard the
+    # other value and pre-empt the router's own report. Hand the write back
+    # untouched and let that path say what it says today.
+    if len({kind for _layer, _spelling, kind in named}) > 1:
+        return t, None
     decision = resolve(name, t, declared, intent=intent,
                        installed_provider=installed_provider)
     if decision.kind is None:
         return t, decision
+
+    # ⛔ A REDIRECT MUST NOT TURN A LEGAL WRITE INTO A REFUSAL (#1934) — the
+    # rule `_kind_layer_note` applies three lines below, applied one step
+    # earlier because the guard is what moved the write. The Subject door
+    # validates `status` against ONTOLOGY §4.2 and the Object door validates
+    # nothing, so an object→subject redirect with an Object-only status
+    # (`status='active'`) would RAISE where the same write succeeded before the
+    # guard existed. MEASURED before this check: a pack guard redirecting to a
+    # §5 Subject kind raised `ValueError: Invalid status 'active' for a
+    # :Subject` on a write that lands unguarded. `_SUBJECT_STATUS_VALUES` is the
+    # ONE declaration of that lifecycle — never re-spelled here.
+    if decision.layer == "subject" and t != "subject":
+        _status = props.get("status", "live")
+        if not (isinstance(_status, str) and _status in _SUBJECT_STATUS_VALUES):
+            return t, abstain(decision,
+                              SKIP_STATUS_NOT_LEGAL_ON_SUBJECT, layer=t)
 
     _entity_props = {KIND_PROP["subject"], KIND_PROP["object"]}
     for spelling, canonical in _KIND_PROP_SPELLINGS.items():
         if canonical in _entity_props:
             props.pop(spelling, None)
     props[decision.prop] = decision.kind
+    # ⛔ PLAIN ASSIGNMENT, not `setdefault`: these three ARE the durable record of
+    # what the guard did — what the caller asked for and which rule moved it. A
+    # caller-supplied value (reachable through any props bag) must not be able to
+    # disagree with the reply, or an audit reads a forged attribution: measured,
+    # `create_subject("issue:a/b#1", declaredKind="core:role",
+    # kindRedirectRule="forged-rule")` stored BOTH forged values beside a reply
+    # that said `from.kind: None`.
+    for _record_key in ("declaredKind", "declaredLayer", "kindRedirectRule"):
+        props.pop(_record_key, None)
     if decision.declared_kind is not None:
-        props.setdefault("declaredKind", decision.declared_kind)
-    props.setdefault("declaredLayer", decision.declared_layer)
+        props["declaredKind"] = decision.declared_kind
+    props["declaredLayer"] = decision.declared_layer
     # The rule id rides the node, not only the reply: a redirect that lived only
     # in one response would be a silent mutation whose cause nobody could name
     # after the process that minted it is gone (the counters are in-process).
     # This is what makes the record ATTRIBUTABLE and therefore reversible — see
     # `kind_guards`' "What the external pass changed".
     if decision.rule:
-        props.setdefault("kindRedirectRule", decision.rule)
+        props["kindRedirectRule"] = decision.rule
     return decision.layer, decision
 
 
@@ -46150,8 +46184,19 @@ class TortoiseSDK:
         subjectKind = named_kind(subjectKind)
         if subjectKind is not None:
             props["subjectKind"] = subjectKind
+        # ⛔ BUILD THE BAG, never `intent=intent, **props`: `props` is the caller's
+        # bag after `_coerce_props`, which flattens the documented
+        # `props={"k": v}` convention — so a caller whose DATA carries an
+        # `intent` key would hit "got multiple values for keyword argument
+        # 'intent'" AT THE RELAY, one frame before `create_entity` can put the
+        # value back (the #2296 relay-collision class, reopened by adding a
+        # parameter and not a strip). An explicit `intent` argument wins; a
+        # non-token one is restored as a prop by `create_entity` itself.
+        _kw = dict(props)
+        if intent is not None:
+            _kw["intent"] = intent
         return self._flat_entity_result(
-            self.create_entity("subject", name, intent=intent, **props))
+            self.create_entity("subject", name, **_kw))
 
     def create_object(self, name: str, objectKind: str | None = None,
                       *, intent: str | None = None, **props) -> dict:
@@ -46181,8 +46226,11 @@ class TortoiseSDK:
         objectKind = named_kind(objectKind)
         if objectKind is not None:
             props["objectKind"] = objectKind
+        _kw = dict(props)  # the same relay-collision guard as create_subject
+        if intent is not None:
+            _kw["intent"] = intent
         return self._flat_entity_result(
-            self.create_entity("object", name, intent=intent, **props))
+            self.create_entity("object", name, **_kw))
 
     def create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
                       _server_id: str | None = None, **props) -> dict:
