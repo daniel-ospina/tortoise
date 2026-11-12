@@ -4579,7 +4579,39 @@ jobs:
     # here would be new machinery for a ~2.5m job that already runs in parallel.
     needs: changes
     if: always() && needs.changes.result == 'success'
-    runs-on: ubuntu-latest
+    # ⛔ A NAMED IMAGE, NOT `ubuntu-latest` — THE JOB'S CLIENT MAJOR IS PART OF
+    # ITS ARTIFACT CONTRACT (#12051). `ubuntu-latest` is a MOVING label, and it
+    # moved: MEASURED 2026-11-12, job `131022562781` on head `58b5a417ba`,
+    # `Image: ubuntu-26.04` — whose archive has no PG16 client at all
+    # (`apt-cache search '^postgresql-client-[0-9]+$'` → `postgresql-client-18`
+    # only). The pin step below therefore died
+    # `E: Unable to locate package postgresql-client-16` (exit 100) BEFORE its
+    # version assertion could run, so NEITHER server was provisioned — both provisioning
+    # steps are `skipped` (MEASURED, job `131022562781` steps 7-8) and no record leg ran.
+    #
+    # 24.04 is noble, whose archive carries the major: measured on the image
+    # itself, `postgresql-client-16` candidate `16.15-0ubuntu0.24.04.1`. It is an
+    # accepted hosted label (`tools/ci_runner_labels.py` HOSTED_IMAGES), accepted
+    # by actionlint (`tests/test_ci_selection.py`'s `_ACTIONLINT_KNOWN_LABELS`),
+    # and two other jobs in this workflow already pin it
+    # (`tests/test_12051_ci_pg_client_matches_server.py` pins THIS choice, so a
+    # revert to a floating label reds at test time instead of silently swapping
+    # the client under the artifact).
+    #
+    # ⚠️ THE POOL CLAIMS THIS LABEL TOO while the #6897 mitigation is engaged:
+    # `tools/install-ci-runner-x64.sh` attaches `ubuntu-24.04` under
+    # `CI_RUNNER_OS_LABEL=on|auto`, and `docs/ops/ci-runner-x64.md`'s label
+    # contract records the 2026-10-29 mitigation — so this leg is POOL-ELIGIBLE,
+    # NOT hosted-only, and this pin must not be read as an availability
+    # fallback (it is a determinism pin; availability was never its job). Two
+    # consequences, neither hypothetical:
+    #   · a hosted outage CAN still be absorbed by the pool here;
+    #   · on a pool box that is not noble, the archive has no PG16 client — so
+    #     the in-step `apt-cache show` precondition below is what fails closed,
+    #     naming the RUNNER, not just the image — `RUNNER_*` is set on BOTH
+    #     classes while `ImageOS`/`ImageVersion` are hosted-only. #10289: a `=on`
+    #     non-noble x64 box can carry this label.
+    runs-on: ubuntu-24.04
     # Measured on the lane where this was built: 63 passed / 0 skipped in 70–73s
     # against a warm database, and ~100s when the container first applies the
     # record migrations. The arm-gate tests this PR adds (they run the gate over
@@ -4691,6 +4723,24 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
+          # ⛔ FAIL CLOSED WITH A NAME. Without this, `set -e` surfaces the
+          # archive's own message — `E: Unable to locate package …` (exit 100) —
+          # which reads as a typo in THIS step rather than as the image drifting
+          # under a drill whose artifact depends on the client's major. That is
+          # exactly what happened on 2026-11-12 when the label moved to 26.04.
+          if ! apt-cache show postgresql-client-16 >/dev/null 2>&1; then
+            # Identity must survive BOTH runner classes: `ImageOS`/`ImageVersion` are set ONLY
+            # on GitHub-hosted runners, so naming them alone reports `unknown` on a self-hosted
+            # box — and a self-hosted box is exactly the #10289 path this message exists for.
+            # `RUNNER_*` is set by the agent on both, and `RUNNER_ENVIRONMENT` says which remedy
+            # applies. A remedy that is already the state ("pin the job") is not a remedy there.
+            identity="${RUNNER_ENVIRONMENT:-unknown} ${RUNNER_NAME:-unknown} ${RUNNER_OS:-unknown}"
+            if [ -n "${ImageOS:-}" ]; then
+              identity="$identity hosted-image=${ImageOS}/${ImageVersion:-unknown}"
+            fi
+            echo "::error::no postgresql-client-16 in this image's archive [$identity] — BOTH provisioned servers are pg16 and the drill's client major is part of the artifact's contract (#12051), so it cannot run here. HOSTED runner: this release no longer carries the servers' major — pin the job to one that does. SELF-HOSTED runner: this box is not the pinned release yet claims the label, i.e. the routing drift #10289 — on it run CI_RUNNER_OS_LABEL=off tools/install-ci-runner-x64.sh --repair-labels --count <N> (an on/auto install KEEPS the pin, so a BARE --repair-labels changes nothing)."
+            exit 1
+          fi
           sudo apt-get install -y --no-install-recommends postgresql-client-16
           # PREPENDED: the versioned binaries must win over the image's own
           # client and over `postgresql-common`'s unversioned wrapper.

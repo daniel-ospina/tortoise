@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import itertools
 import json
 import re
 import subprocess
@@ -1282,27 +1283,32 @@ def _block_bodies(changelog: str) -> list[str]:
     # its own `lint` job then concluded `failure` at 08:10:33Z, so the merge
     # preceded its own lint verdict by ~5.6 minutes, and the post-merge
     # `main-lint` notice on that PR (bot comment 6818383099, 08:13:50Z) stood
-    # unaddressed until here. NOT "nobody saw it" — the notice existed; the gap
-    # was a merge that landed before its check returned. The repair keeps the
-    # invariant explicit instead of silencing the rule: with no version header
-    # there is nothing to pair, and every real block pairs against the next
-    # header or EOF, so `strict=True` is TRUE rather than decoration.
-    if not starts:
-        return []
-    ends = [*starts[1:], len(changelog)]
-    return [changelog[a:b] for a, b in zip(starts, ends, strict=True)]
+    # unaddressed. NOT "nobody saw it" — the notice existed; the gap was a merge
+    # that landed before its check returned.
+    #
+    # `pairwise` over the spans plus the end offset — the spans are DELIBERATELY
+    # one shorter than the pairs (B905's `strict=` would be a lie here), and it
+    # replaces the `+ [len(changelog)]` concatenation RUF005 rejects.
+    return [changelog[a:b]
+            for a, b in itertools.pairwise([*starts, len(changelog)])]
 
 
 def test_block_bodies_degrades_to_empty_without_a_version_header() -> None:
-    """`_block_bodies`' `if not starts` arm is load-bearing, not defensive padding.
+    """A changelog with NO version header has no blocks — and must not raise.
 
-    `zip(..., strict=True)` makes the pairing an assertion, so a changelog with
-    NO version header has to be decided BEFORE the zip: without the arm, `ends`
-    is one longer than `starts` and the helper raises `ValueError` instead of
-    returning no blocks. `[]` is the correct reading of "every release block's
-    text" for a file that has none — and what the pre-`strict` implementation
-    returned. Deleting the arm is otherwise INVISIBLE (measured: the rest of
-    this module stays 51-green), so the branch is pinned by observation.
+    `_block_bodies` walks adjacent pairs of `_BLOCK_VERSION_RE` matches plus the
+    end offset. With no header there is exactly ONE offset (`len(changelog)`),
+    so `itertools.pairwise` yields no pairs and `[]` falls out by construction.
+    That is the correct reading of "every release block's text" for a file that
+    has none.
+
+    ⛔ PINNED BECAUSE THE OBVIOUS REFACTOR BREAKS IT SILENTLY. Pairing `starts`
+    against a separate `ends` list and ASSERTING the pairing
+    (`zip(..., strict=True)`) raises `ValueError` on this input instead of
+    returning no blocks — measured on an implementation that passed every other
+    test in this module (51 green, 1 red: this one). The empty-changelog case is
+    the only input that distinguishes the two, so without this pin the assert is
+    free to land and turn "no releases" into a crash.
     """
     assert _block_bodies("") == []
     assert _block_bodies("prose\nwith no version header\n") == []
