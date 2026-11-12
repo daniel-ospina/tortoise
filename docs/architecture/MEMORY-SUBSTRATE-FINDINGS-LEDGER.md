@@ -379,9 +379,14 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   set-union: a second complement sentence could assert a STILL-TRUE letter the real sentence does not,
   so the page could say *seven of the twelve no longer read as written* beside *only `**(a)**` still
   read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). Both arms count only a
-  sentence that also carries a `**(x)**` token: one that merely QUOTES the phrase has no letter list
-  to disagree with the table, and counting it reded a clarifying edit (measured), which is the
-  false-accusation class the neighbouring citation arms exist to avoid;
+  sentence that carries a **letter LIST**, in any spelling — `**(x)**`, a parenthesised run
+  `(b), (c)`, or a plain run `b, c, d`: a single parenthetical letter in prose is not a list, and a
+  sentence that merely QUOTES the phrase has no list to disagree with the table, so counting it reded
+  a clarifying edit (measured) — the false-accusation class the neighbouring citation arms exist to
+  avoid. Requiring **markup** rather than a list was itself fail-open, measured: a de-bolded stale
+  letter list beside one compliant bolded decoy read CLEAN while the parent refused it. The quote
+  removal applies to the PHRASE only; a quoted letter still names that letter, and stripping the
+  letters too let a quoted list ride out of the count (measured, rc 0);
 - every **§3 evidence cell** names a `path:line`, an issue, a command or a §N (§1's own rule), and
   the §N must name a heading that EXISTS — accepting any `§<digit>` let all twelve cells be replaced
   with a reference to a section the page does not have (measured, rc 0). Without this, the whole
