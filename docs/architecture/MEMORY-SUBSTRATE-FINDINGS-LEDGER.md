@@ -501,7 +501,7 @@ longer be re-measured, it says so rather than repeating it.*
 ⛔ **The line numbers are NOT at `f70d884b7`, and this page used to say they were.** Every ISSUE state
 here was read individually at that commit; every CODE citation was re-derived by hand at the merge
 head, because `main` moved `entities.py` and `sdk.py` three times between the cut and it (the last,
-before `e4703a286a`, slid all four §3 citations off their symbols while `--check` stayed at exit 0 —
+`9958281e7c`, slid all four §3 citations off their symbols while `--check` stayed at exit 0 —
 §8 records that measurement). The commit in the frontmatter is therefore the basis of the STATUS half,
 not of the line numbers, and a reader who needs a number re-derived should ask the symbol, not this
 page.
