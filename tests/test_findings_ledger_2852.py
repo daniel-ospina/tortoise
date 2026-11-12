@@ -550,7 +550,7 @@ def test_a_citation_with_a_trailing_character_is_refused(tmp_path, monkeypatch):
 
 def test_a_shorthand_with_a_trailing_character_is_refused(tmp_path, monkeypatch):
     """FAILS if a trailing space or period after a `:LINE` shorthand is skipped."""
-    for old, new in (("`:792`", "`:792 `"), ("`:3115`", "`:999999.`")):
+    for old, new in (("`:792`", "`:792 `"), ("`:3131`", "`:999999.`")):
         _mutated(tmp_path, monkeypatch, lambda t, o=old, n=new: t.replace(o, n, 1))
         problems = _doc_problems()
         assert any("not a recognised citation" in p for p in problems), (old, problems)
@@ -1232,7 +1232,7 @@ def test_an_evidence_cell_of_prose_is_rejected(tmp_path, monkeypatch):
 
     `CITATION_RE`'s path group is OPTIONAL, so a `fullmatch` alone accepted any
     marker-less token ending in `:digits`. Measured: every §3 evidence cell replaced
-    with `username:1234` (or one cell with `see row (c):3115`) left `--check` at rc 0
+    with `username:1234` (or one cell with `see row (c):3131`) left `--check` at rc 0
     — the whole evidence column unopenable, while §1 and §8 promise each cell names
     something a reader can open. The marker test is the one `check_citations` already
     applies, so removing it from the evidence floor reds this test.
@@ -1422,12 +1422,12 @@ def test_shipped_shorthand_citations_are_matched_not_skipped():
     Reachable, and it is the pre-fix shape: `CITATION_RE` required `<path>.<ext>`
     before `:LINE`, so row (b)'s `:792` / `:1002` / `:429-438` (its only
     commitments about `tortoise/commit_schema.py` beyond `:395`), row (c)'s
-    `:3115` and row (e)'s `:66` were skipped entirely while §8 told the reader
+    `:3131` and row (e)'s `:66` were skipped entirely while §8 told the reader
     every `path:line` in §3/§5 is checked. Skipped evidence presents as checked
     evidence, which is the defect this page is about.
     """
     matched = {m.group(0) for m in flc.CITATION_RE.finditer(flc.read_doc(REPO))}
-    for shorthand in ("`:792`", "`:1002`", "`:429-438`", "`:3115`", "`:66`"):
+    for shorthand in ("`:792`", "`:1002`", "`:429-438`", "`:3131`", "`:66`"):
         assert shorthand in matched, f"{shorthand} is not matched, so it is not checked"
 
 
