@@ -544,6 +544,74 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         "bound to 127.0.0.1:6380, this sweep targets",
         'res = _stale_sweep("docker://:falkordb@:6379/tortoise_test_matrix")',
     ],
+    "tests/test_test_lane_tool.py": [
+        # `#12019` is what put this file in the population: its pin in
+        # `tests/test_test_lane_tool.py` (the export-vs-resolver contract) must
+        # CALL the resolver — `docker_port()` / `legacy_port()` /
+        # `legacy_uri()` — because the point is that AFTER the private lane's
+        # export the resolver FOLLOWS it (16406) instead of its historical
+        # `16379` fallback. Both halves are live behaviours, so the import
+        # cannot be replaced by a name-only check.
+        #
+        # Nothing here DIALS a lane port. Each literal below is a fixture:
+        #   * `falkordb-16379` (THREE sites, declared per STATEMENT — see
+        #     below) — a PROTECTED shared-instance NAME the tool refuses to
+        #     manage or remove (`PROTECTED_NAMES`); the `-16379` is part of the
+        #     NAME, not a port this file connects to.
+        #   * `127.0.0.1:16390->6379` — a canned `docker ps` port mapping the
+        #     parser is asserted to read back (16390 is the lane's own port).
+        #   * `127.0.0.1:6379/stale_shared_lane` — a stale-URI PRECONDITION the
+        #     test writes into a shell script, to prove the documented two-step
+        #     form aborts; the tool never emits it.
+        #   * `127.0.0.1:16399:6379` — an argv fixture asserting `start`
+        #     produced the lane's own port mapping.
+        #   * `resolves 16379 and a lane's` — the text of an ASSERTION MESSAGE
+        #     naming the fallback the export exists to pre-empt.
+        #
+        # The three NAME entries are anchored on the code AROUND the name,
+        # never on the bare name: the matcher is a SUBSTRING test over the
+        # stripped source line, so a bare `"falkordb-16379"` would also have
+        # exempted a future `_docker("exec", "falkordb-16379", ...)`. Two are
+        # narrow by their own text (`for shared in (`, `_remove_and_describe(`).
+        # The parametrize-list one (`:2087`) is narrow ONLY by its trailing
+        # comment — `'"falkordb-16379",'` alone DOES exempt that dial — so
+        # THAT COMMENT IS LOAD-BEARING: trimming it silently widens the entry
+        # back to a bare name and re-opens the very dial it keeps red.
+        #
+        # The two port-shaped fixtures are declared as narrow anchors for the
+        # same reason: `127.0.0.1:<port>:6379` is exactly the `docker run -p`
+        # publish spec and `127.0.0.1:6379/<graph>` exactly the `docker://` URI
+        # tail, so the BARE literals would each have exempted a real dial on the
+        # same line — the failure this guard exists to catch. The assertion-
+        # MESSAGE entry is the fragment that identifies its line; it need not be
+        # a statement, and it is not one.
+        #
+        # What each entry must be, so a future editor can add one correctly: an
+        # anchored SUBSTRING of the line the census reports for that constant,
+        # never the bare literal alone. The shapes actually in use in this row
+        # are a statement prefix (`:2113`), the whole stripped line including a
+        # trailing comment (`:2087`), a call substring anchored on the argument
+        # list (`:2567`), a fixture-text prefix (`:2325`, `:2894`), the whole
+        # stripped line (`:2987`), and a message fragment (`:5152`). An entry
+        # that matches no reported line is INERT, and nothing watches that at
+        # the entry level: the non-vacuity check is per-FILE
+        # (`_exemptions_no_file_can_consult` returns `set(allow) - population`),
+        # so it catches a row whose file left the population, never an entry
+        # that stopped matching.
+        #
+        # The census is the justification, stated in its own unit: it reports
+        # seven lane-port-bearing constants in this file, and those seven ARE
+        # the seven entries below. Measured at this head, every lane-port-bearing
+        # constant in the file is either one of those seven or a docstring (which
+        # `_port_literals_in_code` excludes by design) — none unaccounted for.
+        '"falkordb-16379",      # the orchestration graph instance',
+        'for shared in ("falkordb", "falkordb-16379"',
+        '_remove_and_describe("falkordb-16379")',
+        'return _R(0, "fdb-lane-x  127.0.0.1:16390->6379/tcp',
+        'export TORTOISE_DB_URI="docker://:pw@127.0.0.1:6379/stale_shared_lane',
+        'assert "127.0.0.1:16399:6379" in argv',
+        "resolves 16379 and a lane's",
+    ],
 }
 
 
@@ -567,7 +635,7 @@ def _quoted_program(value: str) -> bool:
     (#10150 round-10 review): a fixture that WRITES such a program and then
     EXECUTES it is out of scope — this predicate cannot tell that from a
     fixture the census merely parses, and it answers "quoted program" for
-    both. No site in the tree does it today (the guard's own 18-entry allow
+    both. No site in the tree does it today (the guard's own 25-entry allow
     list was re-run: none goes inert); closing it needs the write/exec edge,
     not a better string test.
     """
