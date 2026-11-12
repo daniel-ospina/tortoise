@@ -122,8 +122,23 @@ VERDICTS: tuple[str, ...] = (
     "MOOT-BY-LOSS",
 )
 
-#: The indexed population: 40 issues + 2 PRs, per §6's own three columns.
-PINNED_INDEXED_ROWS = 42
+#: The indexed population: 40 issues + 2 PRs, per §6's own three columns. ⛔ PINNED BY
+#: IDENTITY, not by size (#11902 review round 3): a COUNT pin is satisfied by
+#: substitution, so `#2726` replaced by a number the ledger never indexed read CLEAN —
+#: every row reconciled, the sum was 42, the census was 42 distinct and there was no
+#: duplicate. The set below is derived from the shipped page and each number must be
+#: present in exactly one state row; `PINNED_INDEXED_ROWS` is its length so the two
+#: cannot drift, the same discipline `PINNED_CORRECTION_LABELS` follows above.
+PINNED_INDEXED: frozenset[int] = frozenset(
+    {
+        1370, 1418, 1509, 1535, 1695, 2083, 2105, 2296, 2313, 2684,
+        2696, 2697, 2714, 2725, 2726, 2727, 2728, 2729, 2730, 2734,
+        2742, 2747, 2748, 2749, 2766, 2767, 2781, 2782, 2783, 2786,
+        2787, 2788, 2790, 2792, 2795, 2811, 2813, 2814, 2817, 2818,
+        2820, 2826,
+    }
+)
+PINNED_INDEXED_ROWS = len(PINNED_INDEXED)
 
 #: §6's per-state rows, and the label each must carry in its first column.
 STATE_ROWS: tuple[str, ...] = (
@@ -357,15 +372,15 @@ VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-#: ⛔ IT IS AN EQUALITY, NOT A FLOOR THAT CAN SLIDE DOWN: 46 as of the figure arms
+#: ⛔ IT IS AN EQUALITY, NOT A FLOOR THAT CAN SLIDE DOWN: 47 as of the figure arms
 #: (`a falsified §3 count beside a list-free decoy`, `a falsified overtaken figure
 #: beside a compliant decoy`), which closed the paragraph-scoped presence test, plus
-#: the #11902-review arms — `a §6 state row naming the same issue twice`, `a §3 row
-#: whose claim cell is blank`, `a §3 row whose correction cell is blank`, and the
-#: second review round's `a §6 issue re-listed inside ANOTHER state row` and `a §6
-#: issue re-spelled with a leading zero`. Bump it with any arm added or removed —
-#: the population is what the pin compares.
-MIN_SELF_TEST_MUTATIONS = 46
+#: the #11902-review arms — a §6 row naming the same issue twice, a §3 row whose
+#: claim cell is blank, a §3 row whose correction cell is blank, then the second
+#: round's re-listing across rows and leading-zero re-spelling, then round 3's
+#: replacement by a number the index never carried. Bump it with any arm added or
+#: removed — the population is what the pin compares.
+MIN_SELF_TEST_MUTATIONS = 47
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -1808,7 +1823,7 @@ def check_state_arithmetic(text: str) -> list[str]:
         #
         # This is the shape `MEMORY.md`'s `[pin-defensive-claim]` names: pin the list by
         # SHAPE, not by size, because a size or equality pin is replaced by substitution.
-        row_refs[label] = [int(ref.strip("`#")) for ref in refs]
+        row_refs[label] = [ref.strip("`#").lstrip("0") or "0" for ref in refs]
         if listed != count:
             problems.append(
                 f"§6 row {label!r}: declares {count} but its own list names {listed} "
@@ -1826,31 +1841,57 @@ def check_state_arithmetic(text: str) -> list[str]:
             "state without the population being reconciled"
         )
 
-    # The four rows are ONE census: an issue may be named by exactly one of them. Checked
-    # over the UNION, which is the only place a cross-row substitution or a re-spelling
-    # can show up at all — every row's own count reconciles in both shapes.
-    seen: dict[int, list[str]] = {}
+    # ⛔ MEMBERSHIP, not just size and uniqueness (#11902 review round 3). Pinning the SET'S
+    # SIZE and demanding uniqueness still admits a substitution: `#2726` replaced by `#9999`
+    # — a number the ledger never indexed — leaves every row reconciling, the sum at 42, the
+    # census at 42 distinct and no duplicate anywhere, so `--check` exited 0 while an indexed
+    # issue had left the population (measured). The count arm this replaces could not see it,
+    # which is the whole point of `MEMORY.md`'s `[pin-defensive-claim]` rule: pin the list by
+    # SHAPE, because a size or equality pin is replaced by substitution.
+    #
+    # Refs are compared as NORMALISED DIGIT STRINGS, never through `int()`: `int()` raises
+    # `ValueError` on a 4,301-digit ref (Python's conversion limit), which escaped `main()`'s
+    # `except Unverifiable` as a traceback with exit **1** — the "drift" code — over a page
+    # that states no falsified claim. That is the same class as the round-1
+    # `UnicodeDecodeError` hole, so nothing here may convert untrusted text.
+    seen: dict[str, list[str]] = {}
     for label, nums in row_refs.items():
         for number in nums:
             seen.setdefault(number, []).append(label)
     duplicated = {number: labels for number, labels in seen.items() if len(labels) > 1}
+
+    def _ref(number: str) -> str:
+        """Render a ref for a message, truncated so a hostile input cannot flood the log.
+
+        A ref is `\\d+` by construction, so a 4,301-digit one is reachable and must be
+        SAFE to print as well as safe to parse (that is why nothing here uses `int()`).
+        """
+        return f"#{number}" if len(number) <= 12 else f"#{number[:12]}…({len(number)} digits)"
+
     if duplicated:
         named = ", ".join(
-            f"#{number} ({' and '.join(sorted(set(labels)))}) "
-            for number, labels in sorted(duplicated.items())
+            f"{_ref(number)} ({' and '.join(sorted(set(labels)))})"
+            for number, labels in sorted(duplicated.items(), key=lambda kv: (len(kv[0]), kv[0]))
         )
         problems.append(
-            f"§6: {named}named more than once across the state rows — a duplicated ref "
+            f"§6: {named} named more than once across the state rows — a duplicated ref "
             "stands in for a dropped issue while each row's count still reconciles, so "
             "the census can lose an issue in silence"
         )
-    census = len(seen)
-    if census != PINNED_INDEXED_ROWS:
+    pinned_text = {str(number) for number in PINNED_INDEXED}
+    missing_from_census = sorted(pinned_text - set(seen), key=lambda s: (len(s), s))
+    unexpected_in_census = sorted(set(seen) - pinned_text, key=lambda s: (len(s), s))
+    if missing_from_census:
         problems.append(
-            f"§6 census: the four state rows name {census} distinct issue(s), but the "
-            f"pinned indexed population is {PINNED_INDEXED_ROWS} (40 issues + 2 PRs) — "
-            "a substitution keeps every row's OWN count and still drops an issue from "
-            "the set the rows exist to account for"
+            f"§6 census: {', '.join(_ref(n) for n in missing_from_census)} left the "
+            "counted population — an indexed issue is no longer named by any state row, "
+            "while every row's own count still reconciles with its own list"
+        )
+    if unexpected_in_census:
+        problems.append(
+            f"§6 census: {', '.join(_ref(n) for n in unexpected_in_census)} is counted "
+            "but is not in the pinned indexed population — a number the ledger never "
+            "indexed is standing in for one it dropped"
         )
     return problems
 
@@ -2693,6 +2734,16 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         "a §6 issue re-spelled with a leading zero",
         lambda t: t.replace("incl. `#2714`, `#2725`", "incl. `#2714`, `#02714`", 1),
         "more than once",
+    ),
+    (
+        # #11902 review round 3: pinning the census by SIZE and UNIQUENESS still admitted a
+        # substitution — `#2726` -> `#9999` kept every row reconciling, the sum at 42, the
+        # census at 42 distinct and NO duplicate, so `--check` exited 0 while an indexed issue
+        # had left the population (measured). The population is pinned by IDENTITY now, so a
+        # number the ledger never carried cannot stand in for one it dropped.
+        "a §6 issue replaced by a number the index never carried",
+        lambda t: t.replace("`#2726`", "`#9999`", 1),
+        "never indexed",
     ),
     (
         # #11902 review P2: the §3 floor held only the EVIDENCE cell, so a row could be

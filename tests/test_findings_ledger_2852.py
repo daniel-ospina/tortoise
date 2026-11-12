@@ -242,7 +242,7 @@ def test_mutation_population_is_pinned():
     invented claim class left `check_document()` at `[]` where the parent returned a
     problem — so the exemption is the shape `| Verdict | … |`, and a reworded header is a
     deliberate two-place edit rather than a silent one.
-    46 is the population at this head.
+    47 is the population at this head.
     """
     # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
     # at this head two merges of two 25-arm populations produced 26 arms while the
@@ -253,8 +253,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 46, (
-        "this line RECORDS the population (46 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 47, (
+        "this line RECORDS the population (47 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -1876,6 +1876,71 @@ def test_a_re_spelled_ref_cannot_hide_a_duplicate():
     problems = flc.check_state_arithmetic(respelled)
     assert any("more than once" in p and "#2714" in p for p in problems), problems
     assert not any("is not derived from the list" in p for p in problems), problems
+
+
+def test_a_ref_the_index_never_carried_cannot_stand_in_for_one_it_dropped():
+    """FAILS if the census is pinned by SIZE and UNIQUENESS instead of by IDENTITY.
+
+    Reachable by a plain mistyping or mis-transcription (`#2734` -> `#2735`), which
+    is how a number the ledger never indexed enters the table. Pinning the count
+    could not see it: replacing `#2726` with `#9999` leaves every row reconciling
+    with its own count, the sum at 42, the census at 42 distinct and no duplicate
+    anywhere — measured on the round-2 tool, `check_document()` returned `[]` and
+    `--check` exited 0 with an indexed issue gone from the population. The set is
+    pinned by identity now, and the two directions are reported separately so the
+    message names which number left and which number stood in for it.
+    """
+    text = flc.read_doc(REPO)
+    assert flc.check_state_arithmetic(text) == []
+    smuggled = text.replace("`#2726`", "`#9999`", 1)
+    assert smuggled != text, "the §6 anchor moved — re-derive this mutation"
+    problems = flc.check_state_arithmetic(smuggled)
+    assert any("#2726" in p and "left the counted population" in p for p in problems), problems
+    assert any("#9999" in p and "never indexed" in p for p in problems), problems
+    # Every row still reconciles, so only the membership arms can be what reds here.
+    assert not any("is not derived from the list" in p for p in problems), problems
+
+
+def test_a_long_ref_cannot_crash_the_guard():
+    """FAILS (traceback, exit 1) if a ref is converted through `int()`.
+
+    Reachable: `re.findall(r"`#\\d+`")` matches any digit run, and Python refuses to
+    convert an integer literal above 4,300 digits — so a `#` followed by 4,301 digits
+    inside a state row raised `ValueError` out of `check_state_arithmetic`, past
+    `main()`'s `except Unverifiable`, and the CLI exited **1**: the code §8 documents as
+    "drift, a named claim is false", over a page that states no falsified claim and with
+    a traceback rather than a named claim. Measured on the round-2 tool. Refs are
+    compared as normalised digit STRINGS now, so nothing here converts untrusted text —
+    the same class as the round-1 `UnicodeDecodeError` hole, and the reason the fix is
+    "stop converting" rather than "catch it".
+
+    The offending number is also an unindexed one, so it must be REPORTED — and the
+    message must stay bounded, because a 4,301-digit number in a log is its own defect.
+    """
+    text = flc.read_doc(REPO)
+    huge = "9" * 4301
+    probe = text.replace("incl. `#2714`, `#2725`", f"incl. `#2714`, `#{huge}`", 1)
+    assert probe != text, "the §6 anchor moved — re-derive this mutation"
+    problems = flc.check_state_arithmetic(probe)  # must not raise
+    assert any("never indexed" in p for p in problems), problems
+    assert all(len(p) < 1000 for p in problems), [len(p) for p in problems]
+    assert any("digits)" in p for p in problems), problems
+
+
+def test_the_pinned_population_is_a_membership_set_not_a_count():
+    """FAILS if `PINNED_INDEXED` and `PINNED_INDEXED_ROWS` can drift apart.
+
+    The count must be DERIVED from the set, the same discipline
+    `PINNED_CORRECTION_LABELS` follows: two independent declarations are two places a
+    shrink has to touch, and the point of pinning identity is that there is only one.
+    """
+    assert flc.PINNED_INDEXED_ROWS == len(flc.PINNED_INDEXED), (
+        "PINNED_INDEXED_ROWS must be len(PINNED_INDEXED) so a count and a set cannot disagree"
+    )
+    assert len(flc.PINNED_INDEXED) == 42, (
+        "this line RECORDS the indexed population (40 issues + 2 PRs); re-derive it with "
+        "the set literals in §6's four state rows, never by carrying this number forward"
+    )
 
 
 def test_arithmetic_is_derived_from_the_table_not_trusted():
