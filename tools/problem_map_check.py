@@ -4,7 +4,8 @@
 `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md` is the status half of issue
 #2820 — 26 named defects, each marked VERIFIED-FIXED / OPEN / UNKNOWN. The map
 exists because the ISSUE went stale: its body was written on 2026-09-10 and still
-reads as 26 problems waiting, while the tree had fixed 21 of them. A document
+reads as 26 problems waiting, while the tree had already fixed 21 of them (22 now
+that #2782 is re-cut). A document
 whose whole purpose is *"is this still broken?"* is worthless the moment nothing
 can tell that its answers have aged out — that is the drift this tool measures.
 
@@ -43,10 +44,9 @@ What it re-measures, offline, from the tree in front of it:
   6. **Registration** — the page is listed in `docs/00_index.md`, so it is
      reachable rather than merely committed — **and the index entry's own
      headline counts match §2's**, because the index is what most readers see and
-     a stale count there is the same defect as a stale count here (found by the
-     verification gate on this page's first landing: the index said
-     `22 fixed · 4 open` while the map said `21 fixed · 5 open`, and the filename
-     check was happy).
+     a stale count there is the same defect as a stale count here. A filename
+     match proves reachability and nothing about agreement, which is why the two
+     are checked together.
 
 ⛔ **RESIDUALS THIS TOOL CANNOT DECIDE — stated, not implied.**
 
@@ -191,7 +191,7 @@ _WS_COUNT = re.compile(
     r"^\|\s*(WS-[A-Z])\b[^|]*\|[^|]*\*\*(\d+) of (\d+) (?:rows )?fixed\*\*",
     re.MULTILINE,
 )
-#: The page's opening abstract: "**21 fixed and 5 open**". It lives in the body's
+#: The page's opening abstract: "**22 fixed and 4 open**". It lives in the body's
 #: opening blockquote, NOT in the frontmatter (whose keys are `title`,
 #: `measured_at_commit`/`measured_at` and their siblings — it carries no
 #: headline), so it is read from the text BEFORE `## 1.` — and an abstract that
@@ -616,8 +616,9 @@ def check_workstreams(text: str, rows: list[Row]) -> list[str]:
     total, so the document could print `**7 of 8 rows fixed**` over a WS-B table
     that no longer had 7 fixed rows — and the numbers the guard DID compare could
     be edited to match, leaving §2 contradicting its own tables in three places on
-    a CLEAN `docs`-job run. Flip `#2783` to OPEN, set `| VERIFIED-FIXED |` 21→20
-    and `| OPEN |` 5→6, and the pre-fix guard returned NO errors.
+    a CLEAN `docs`-job run. Flip `#2783` to OPEN and move the two summary rows one each
+    way (`| VERIFIED-FIXED |` down one, `| OPEN |` up one — the counts were `21`/`5`
+    when this was found, `22`/`4` today), and the pre-fix guard returned NO errors.
 
     A workstream's rows come from `WORKSTREAMS`, not from the document's own
     tables — same reason as `TRACKED`: a set parsed out of the artifact cannot
@@ -633,12 +634,12 @@ def check_workstreams(text: str, rows: list[Row]) -> list[str]:
         criterion this guard cannot evaluate — it refuses to read the tracker,
         which is what that census is about;
       * the issue numbers NARRATED inside §2's cells (`(#2787 OPEN: …)`,
-        `**#2730, #2782 and #2684 remain open**`, `**#2696 (epic) remains open**`)
+        `**#2730 and #2684 remain open**`, `**#2696 (epic) remains open**`)
         — deciding "which rows does this sentence call open" means reading prose,
         and a guard that parsed those sentences would be a spelling trap: measured
         at the post-merge head, flipping `#2684` and correcting the counts it DOES
         read leaves that cell stale and every check green;
-      * §8's sentence ("Five rows, and four of them are defects") and §10's
+      * §8's sentence ("Four rows, and three of them are defects") and §10's
         census prose, whose second clause additionally needs to know which row is
         an epic — the tracker half this guard refuses to read.
 
@@ -725,10 +726,9 @@ def check_registration(
     """Registered, AND the index entry's counts agree with the document's §2.
 
     The count half is not decoration. The index is the artifact most readers
-    meet first, and on this page's first landing it said `22 fixed · 4 open`
-    while §2 said `21 fixed · 5 open` — `--check` was CLEAN, because a filename
-    match proves reachability and nothing about agreement. The verification gate
-    caught it; this check is that catch, mechanised.
+    meet first, and a headline there that disagrees with §2 is the same defect as
+    a stale count in §2 — while a filename match proves reachability and nothing
+    about agreement. This check is that catch, mechanised.
     """
     index = repo / INDEX_REL
     # Dispatch on the FULL state, not just `missing`: falling through an

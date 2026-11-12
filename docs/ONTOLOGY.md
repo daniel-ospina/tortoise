@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.32"
+title: "Tortoise — Canonical Ontology v3.33"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-11-08
+updated: 2026-11-11
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.32
+# Tortoise — Canonical Ontology v3.33
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -414,6 +414,10 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `is_episodic` | bool | — | — | Quota exemption discriminator — true on episodic turn Points from the regex capture path (the `points` branch counts non-episodic only, #909 §4.3 #13/§4.4; legacy nodes lack the flag — one-query backfill migration ships with #947) |
 | `goalState` | string | — | — | A goal's **achievement** state — a CLOSED vocabulary (`met`, `active`, `blocked`, `unmet`, `superseded`, `abandoned`, `guideline`), validated at the SDK write boundary (`GOAL_STATE_VALUES`, #7856). **Separate from `status`** (the draft/live lifecycle): `status` says whether a goal is promoted for use, `goalState` says whether it is met. `None` clears. Only meaningful on `goal`/`target`/`strategy`/`plan` points (§5) |
 
+**Values.** A *value* is a number plus a reference, kept as flat sibling properties on the entity that carries it (WS-C §2.1; realised in `tortoise/money.py`). It carries no confidence, no embedding and no numeric index — it is found by its entity, not by similarity. The reference's standard decides the fields: for **money**, ISO 4217 — `amountMinor` (integer minor units, never a float), `currency` (alpha-3, per amount, never a graph default), `minorUnitExponent` (checked against the pinned table), plus `verbatim` (the source text, required only where the value was derived from prose). Percent, ratio, duration and quantity are declared value shapes with no storing implementation yet (`tortoise/pack_values.py`); **a date is not a value shape** — it is the valid-time slot (§4.7). A value's raw detail may live outside the graph, addressed by `:Source`; the graph records the observation and the crossing, never the series.
+
+> ⚠️ **Status note on the clause above (2026-11-11, same change).** The sentence *"Percent, ratio, duration and quantity are declared value shapes with no storing implementation yet"* was written at approval and is now half-superseded by the change that carried it: **percent has a storing shape** since #11915 (`tortoise/percent.py` — `basisPoints` int 0–10000, plus `verbatim` only where the value came from prose, validated at the SDK's one props intake and at the journal-payload seam exactly as `money` is). Read that clause as naming **ratio, duration and quantity** as the shapes still without one. The approved sentence is left as approved and corrected here rather than rewritten — a dated status note is the record; rewriting an owner-approved clause is a new decision.
+
 ### §4.2 Subject
 
 | Field | Type | Required | ISO/PROV/DC | Meaning |
@@ -440,7 +444,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `name` | string | ✅ | `schema:name` | Human-readable name (`_upsert_object` writes `title`; `name` aliased) |
 | `objectKind` | string | ✅ | — | The §5 object-kind vocabulary (Project, WorkItem, Problem, tag, user, skill, tool, agent, workflow, agreement, standard, other, strategy, plan, goal, target) + pack objectKinds |
 | `title` | string | — | `dc:title` | Display title (what `_upsert_object` actually stores) |
-| `status` | string | — | `pav:status` | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy` + `supersededAt`; built-in connector work-item events→in_progress/completed; **pack-declared `kindDefs[].statuses`/`folds` for the pack's own kinds — #2729**, dispatched on the namespaced kind and suppressed for built-in folds once a kind declares a lifecycle) — **the event stream is the reconstruction source for `Object.status` (§11 cache doctrine); the property is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved)** |
+| `status` | string | — | `pav:status` | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy` + `supersededAt`; built-in connector work-item events→in_progress/completed; **pack-declared `kindDefs[].statuses`/`folds` for the pack's own kinds — #2729**, dispatched on the namespaced kind and suppressed for built-in folds once a kind declares a lifecycle) — **the event stream is the reconstruction source for `Object.status` (§11 cache doctrine); the property is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved)**. **Core Object types accept `draft`, `live`, `superseded`, `deprecated`, `archived`, `in_progress`, `completed`; `superseded` requires the successor in the same write, and a removal with no successor is `archived`. `outdated` and `retracted` are not Object lifecycle words (read-only, retained for legacy data). Pack-declared kinds validate against their own declared words.** |
 | `supersededAt` | ISO8601 | — | — | The fold TIMESTAMP written by the supersession fold (`apply_supersessions` / `ObjectSuperseded` projection, pinned after the fold via `SET o.supersededAt` for byte-reproducible state headers). R17 P3-1 (#2165): `supersededAt` is the connected-assembly state-header's date source — **byte-golden renders depend on it being a pinned story date, never a wall-clock fold time** (Task-1 fixture pins `2026-09-01T00:00:00Z`). Absent on non-superseded Objects. A separate fact from `expiredAt` — "replaced by a successor" and "our record stopped being current" are independent, and both can apply (§4.7). |
 | `supersededBy` | string | — | — | Successor name written by the supersession fold (see `status`); the connected-assembly successor probe verifies a VISIBLE (non-recall-excluded) Object exists before rendering a full supersession clause — a never-created / excluded / empty successor renders a NAME-ONLY annotation, never a fabricated link (R12/C6, #2165 Task 5). |
 | `validFrom` / `validTo` | ISO8601 | — | `prov:generatedAtTime` / `prov:invalidatedAtTime` | Valid-time window — when the Object held in the world (declared §4.7, #3642) |
@@ -552,7 +556,7 @@ suppresses operator promotion exactly as a draft Point does.
 > three: it is carried by the same extras lane, and it IS read as state by
 > `_promote_incident_operators` (#7853) — see the note above. The pack-declared
 > fold generalization (#2729) is Object-scoped and does not extend to Events —
-> the Event-carries-state question was answered **no** in #2725.
+> the Event-carries-state question was answered **no** in #2725. The accepted-and-half-honoured state it has today — the write is accepted, belief honours it, and every retrieval leg ignores it — is tracked at **#11825**.
 
 ### §4.6 Source
 
@@ -833,6 +837,8 @@ authoritative for the temporal slots. Event's transaction-time start is
 | occurrence date | `when` (→ `validFrom`, §4.7) | — | — | — | — |
 | is_episodic | ❌ | — | — | ❌ | ❌ |
 | passes_frequency_gate | — | — | ❌ | — | — |
+
+**A value carries no temporal slot of its own.** A stored number's instant is the carrier's valid-time start — `when`/`validFrom` on a `Point`, `startedAt` on an `Event` — never a field of the value. Where a value names no instant, the carrier's absent-start rule applies (§4.7 above) and the write path reports it rather than inventing one; `asOf` was retired for exactly this (#11827).
 
 ---
 

@@ -12,6 +12,11 @@ aboutObjects: tortoise
 
 # Search architecture — where the vector index lives, and what the graph engine keeps
 
+**Change history for this document — the work it drove and the rulings' provenance — lives in
+`SEARCH-ARCHITECTURE-CHANGELOG.md`.** This document states the design; it does not narrate its own revisions
+or track the state of the issues it drove. (The review record whose corrections *changed* the decision is a
+different artifact and stays where §10 points: on `#4051` and in the sections it names.)
+
 **Decision (owner, 2026-11-07)** — items 1–3 are the owner's; **item 4 is the phase correction recorded in `#4051`
 comment [`6714119028`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6714119028)** (§1.5), because
 comment [`6713838871`](https://github.com/daniel-ospina/tortoise/issues/4051#issuecomment-6713838871)'s own item 4 said
@@ -97,8 +102,8 @@ quality change. **Live before private-beta:**
 3. the **rebuild headroom** measured and reserved (§7) — the #1 production risk;
 4. the **shortfall assertion** on the vector leg (§6.1), without which a beta customer can silently receive
    fewer results than exist;
-5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — **landed** (#11702, implementing the §6.3
-   decision of PR #11481); what remains of it is the per-surface sweep named in §6.3, not the rule itself;
+5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — absent state is `null` with
+   `ep_state: "absent"`, never the neutral Beta(1,1) mean 0.5, on every read/rank surface §6.3 names;
 6. the **two truncation reason strings** (§7) — `degraded: "insufficient_graph"` / `degraded:
    "truncated_boundary"` — because item 1 only makes an incomplete answer *labelled*, not *labelled with a
    reason a caller can branch on*.
@@ -174,8 +179,9 @@ behind them. Everything else in the search path is unchanged.
 
 **What the move costs, stated so it is not discovered late:**
 
-- `public.point/source/event.embedding` is **`jsonb`** and **stays `jsonb`**, and **`pgvector` appears in 1 of 81
-  migrations** (`20261109000001_record_embedding_vector.sql`, `#11642`) — so this WAS a full index build and a
+- `public.point/source/event.embedding` is **`jsonb`** and **stays `jsonb`**, and **`pgvector` appears in 1 of 82
+  migrations** (`20261109000001_record_embedding_vector.sql`, `#11642`; the denominator is 82 at this head — `#11827`'s
+  `20261110000001_record_point_retire_as_of_11827.sql` added no vector) — so this WAS a full index build and a
   backfill, not a query edit. ⛔ **UPDATE AT THIS HEAD (`#11642`, measured on pgvector 0.8.7 / Postgres 16.15):**
   the payload column is deliberately NOT converted — a `jsonb → vector(384)` type change would rewrite the
   record's write and read seams and could not represent the caller-supplied embeddings of other widths that
@@ -280,10 +286,9 @@ That ruling stands and nothing here reverses it.
 boundary, so recomputing EP for it is **exact**, not approximate. Residency and the EP carve-out
 therefore point the same way — and no schema change is needed.
 
-**✅ FIXED (#11702) — kept here as the reason the rule exists, with the citations re-pointed.** A claim
-with **no persisted belief** used to answer the neutral Beta(1,1) mean 0.5, and the ranker coalesced the
-value to it. It was indistinguishable from a computed one at the point where ordering happens. The rule
-that replaced it — **absent state is `null` with `ep_state: "absent"`, never 0.5** — is now implemented
+**A claim with no persisted belief must not answer the neutral Beta(1,1) mean 0.5.** Answering it would
+make an absent claim indistinguishable from a computed one at the point where ordering happens. The rule
+is **absent state is `null` with `ep_state: "absent"`, never 0.5**, and it holds
 on every read/rank surface: `annotate_ep_batch`, the canonical `why` `ep` block (`tortoise/why.py`),
 `GraphRanker`, `StateRanker`/`recall_ranking`, `GapsRanker`/`gaps_ranking`, `SubgraphExpander`, and the
 event/object aggregate reads; the `analyze` templates refuse an absent claim rather than admitting it at a
