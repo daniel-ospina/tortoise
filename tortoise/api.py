@@ -1016,6 +1016,32 @@ class EventAPI:
             refuse_terminal_event_state(
                 _inner if isinstance(_inner, dict) else payload,
                 door="EventAPI.emit_belief")
+        # ── #11825 (review cycle 3, P1): the FIFTH shape — a STATE OP on an `:Event` ──
+        # Gating on `type_ == "EventRecorded"` left the seam open one record type
+        # over. A caller can hand this door the canonical state-op record for ANY
+        # label: `emit_belief("EntityMutated", id=<event id>, label="Event",
+        # op="restatus", state={"status": "superseded"})` is exactly the shape
+        # `projection._journal_entity_mutation` emits, the fold reads it through
+        # `state["status"]` → `restatus` (`cache_projection`, `EventMutated` arm),
+        # and it stored a terminal `:Event` status with no refusal at all — the
+        # same half-state this change exists to make unwritable, reached through
+        # the door the change declared in scope (measured: the node carried
+        # `status: 'superseded'` afterwards).
+        # ⛔ Scoped to EVENT targets, deliberately: a state op on a Point / Subject /
+        # Object / Source is accepted by its own door, and a bundle-wide refusal
+        # here would be the over-rejection class T5's pins exist to catch. The
+        # label is read through the same tolerances the writers use — `Event`,
+        # `:Event`, any case — so a caller cannot slip past it by spelling the
+        # label differently from the fold's.
+        elif str(payload.get("label") or "").strip().lstrip(":").lower() == "event":
+            _state = payload.get("state")
+            _event_state = dict(_state) if isinstance(_state, dict) else {}
+            # `restatus` is the flat spelling of the same value; both reach the
+            # node, so both are checked (a caller may use either).
+            if isinstance(payload.get("restatus"), str):
+                _event_state.setdefault("status", payload["restatus"])
+            refuse_terminal_event_state(
+                _event_state, door="EventAPI.emit_belief")
         try:
             self._emit(type_, **payload)
         except Exception as exc:  # noqa: BLE001, RUF100

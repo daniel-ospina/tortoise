@@ -776,22 +776,25 @@ def refuse_terminal_event_state(props, *, door: str) -> None:
                 f"correction, write a NEW :Event; for ingest state use "
                 f"`eventStatus`)."
             )
-        # Every writer discards it, so evaluate it the way every reader will see
-        # the node. Otherwise the terminal test below asks a frozenset whether it
-        # holds a dict and raises a bare ``TypeError`` — the un-named 500-class
-        # the typing above exists to prevent, reintroduced on the one value it
-        # must NOT refuse.
+        # The writer drops it, so nothing lands that a reader could call
+        # terminal. Treated as ABSENT rather than refused (#7925).
         status = None
     if outdated is not None and not isinstance(outdated, bool):
-        raise ValueError(
-            f"Refused: `outdated={outdated!r}` is not a legal value on an "
-            f":Event ({door}). `outdated` is contractually a BOOLEAN and it is "
-            f"server-managed; a non-boolean is read as TERMINAL by the Cypher "
-            f"predicate and as LIVE by the Python mirror, which is the "
-            f"half-state #11825 records, reached through the one door that "
-            f"writes props without `_sanitize_props`. WHAT TO DO: pass `True`, "
-            f"`False`, or omit the key."
-        )
+        if _status_is_discarded_by_every_writer(outdated):
+            # Same rule as `status`, and the peer lane's correction: a value no
+            # writer keeps cannot be read as a terminal FLAG either, so it is
+            # ABSENT rather than refused (#7925's over-rejection class).
+            outdated = None
+        else:
+            raise ValueError(
+                f"Refused: `outdated={outdated!r}` is not a legal value on an "
+                f":Event ({door}). `outdated` is contractually a BOOLEAN and it is "
+                f"server-managed; a non-boolean is read as TERMINAL by the Cypher "
+                f"predicate and as LIVE by the Python mirror, which is the "
+                f"half-state #11825 records, reached through the one door that "
+                f"writes props without `_sanitize_props`. WHAT TO DO: pass `True`, "
+                f"`False`, or omit the key."
+            )
     # ⛔ A ``str`` SUBCLASS can LIE about all three methods the terminal test
     # uses, and it reaches here as a perfectly legal ``isinstance(status, str)``:
     # ``__hash__ = None`` raises inside the frozenset membership, a constant

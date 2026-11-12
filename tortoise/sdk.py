@@ -27371,10 +27371,12 @@ class TortoiseSDK:
         # above gives the flag, and the one the sibling `:Subject` arm inside
         # the endpoint loop could never provide.
         #
-        # `:Object` and `:Event` are deliberately NOT refused: their writers do
-        # not validate, they STORE the value (measured), so a refusal here
-        # would reject bundles the writer accepts — the over-rejection class
-        # this PR already fixed once.
+        # `:Object` is deliberately NOT refused: its writer does not validate,
+        # it STORES the value (measured), so a refusal here would reject bundles
+        # the writer accepts — the over-rejection class this PR already fixed
+        # once. `:Event` is no longer in that sentence: since #11825 its door
+        # refuses the TERMINAL half, and the arm BELOW mirrors that refusal at
+        # Phase 1 for the same partial-mutation reason.
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
@@ -27395,6 +27397,51 @@ class TortoiseSDK:
                            f"refuses it mid-write, so the bundle is "
                            f"rejected at validation. Must be one of: "
                            f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}",
+            })
+        # ── #11825: the `:Event` TERMINAL half, refused at Phase 1 ──
+        # The same class as the `:Subject` vocabulary arm directly above, and
+        # for the same measured reason: `create_event` now runs
+        # `live.refuse_terminal_event_state`, so an item carrying a terminal
+        # status raises in step 3 AFTER the point items have committed. The
+        # predicate is `live.is_terminal_status` — the ONE mirror of the Cypher
+        # terminal rule — so a status added to the vocabulary moves the door and
+        # this arm together (`#2901`/`#3301`). NON-terminal statuses are NOT
+        # refused: the door accepts them and `_promote_incident_operators` reads
+        # `draft`/`live` as its gate (#7853, #10828), so refusing here would be
+        # this file's own over-rejection class. `outdated` needs no arm: the loop
+        # above already refuses it bundle-wide on ANY point or entity item.
+        # ⛔ EMITTED UNCONDITIONALLY, and the duplicate for a DIRECT-route
+        # operator connection is the accepted cost — the same bargain the
+        # `:Subject` vocabulary arm above makes. Deferring to the connection arm
+        # by OWNERSHIP was measured WRONG (review cycle 5 P1): that arm runs only
+        # for a DIRECT-route connection carrying an `operator`, so an item named
+        # by a `reify: true` or `relation: …` connection was deferred to an arm
+        # that never fired — ZERO violations, and `ingest` committed the point
+        # and then raised mid-write, which is precisely the class this arm
+        # exists to prevent. A message that repeats itself is cheaper than a
+        # bundle that half-commits.
+        for i, item in enumerate(bundle.get("entities") or []):
+            if not isinstance(item, dict):
+                continue
+            if _ENTITY_ITEM_LABELS.get(
+                    str(item.get("type") or "").strip().lower()) != "Event":
+                continue
+            _declares_status, own_status = _item_declared_status(
+                item, _item_flatten_depth(item, "entities"))
+            if not _declares_status:
+                continue
+            if not (isinstance(own_status, str)
+                    and is_terminal_status(own_status)):
+                continue
+            violations.append({
+                "section": "entities", "index": i,
+                "message": f"ingest: entities[{i}] declares status "
+                           f"{own_status!r} for an :Event — an :Event carries "
+                           f"no lifecycle, so its door refuses the terminal "
+                           f"half mid-write and the bundle is rejected at "
+                           f"validation. WHAT TO DO: drop `status` from the "
+                           f"item, or use a non-terminal value (the door "
+                           f"accepts `scheduled`/`draft`/`live`).",
             })
         local: dict[str, tuple[str, dict]] = {}
         for section in ("sources", "points", "entities"):
@@ -29007,7 +29054,17 @@ class TortoiseSDK:
           ``SUBJECT_STATUS_VALUES`` before the name merge, so an invalid value
           (outside that set, non-string, or an explicit ``null``) on ANY entity
           item is a Phase-1 violation, while ``:Object``/``:Event`` statuses
-          are stored verbatim and stay accepted. Props are read at the depth
+          are stored verbatim and stay accepted. ⛔ The ``:Event`` half of that
+          is now split, and the split is the whole point of #11825: a
+          NON-TERMINAL ``status`` (``scheduled``/``draft``/``live``) is still
+          stored verbatim, but the TERMINAL half is refused bundle-wide here
+          for exactly the reason the ``:Subject`` vocabulary is — the door
+          (``create_event`` → ``create_entity(type='event')``) runs
+          ``live.refuse_terminal_event_state``, so leaving it to step 3 means the
+          point items commit and THEN the write raises (measured: a bundle with
+          one point and one ``status='superseded'`` event returned ``[]`` here
+          and raised a bare ``ValueError`` after ``Point 1`` was written — the
+          #2422/#7925 partial-mutation class, review cycle 3 P1). Props are read at the depth
           the ITEM'S write door flattens (``_item_prop_at_depth``): TWICE for a
           ``subject``/``object``/``event`` item (step 3 relays
           ``create_subject``/``create_object``/``create_event`` →
