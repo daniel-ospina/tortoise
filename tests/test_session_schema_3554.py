@@ -1397,6 +1397,25 @@ def _assert_no_stale_citation_claim(text: str, blocks: list[str], citing: list[s
     return ordinals
 
 
+def test_block_bodies_degrades_to_empty_without_a_version_header() -> None:
+    """A changelog with NO version header has no blocks — and must not raise.
+
+    `_block_bodies` walks adjacent pairs of `_BLOCK_VERSION_RE` matches plus the end
+    offset. With no header there is exactly ONE offset (`len(changelog)`), so
+    `itertools.pairwise` yields no pairs and `[]` falls out by construction. That is
+    the correct reading of "every release block's text" for a file that has none.
+
+    ⛔ PINNED BECAUSE THE OBVIOUS REFACTOR BREAKS IT SILENTLY. Pairing the spans against
+    a separate `ends` list and ASSERTING the pairing (`zip(..., strict=True)`) raises
+    `ValueError` on this input instead of returning no blocks — measured on an
+    implementation that passed every other test in this module (51 green, 1 red: this
+    one). The empty-changelog case is the only input that distinguishes the two, so
+    without this pin that refactor is free to turn "no releases" into a crash.
+    """
+    assert _block_bodies("") == []
+    assert _block_bodies("prose\nwith no version header\n") == []
+
+
 def test_the_newest_block_body_starts_at_its_header_line() -> None:
     """The helper's documented extent IS what it returns: `_block_bodies(...)[0]`.
 
