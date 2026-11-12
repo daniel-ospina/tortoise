@@ -615,7 +615,20 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
     # the node the fold DELETES.
     slot_conflicts: list[str] = []
     if (when is not None and validfrom is not None and when != validfrom):
-        slot_conflicts.append("validFrom (as when) — the duplicate held both")
+        # ⚠️ NAME the value that travels. Without it the receipt could print
+        # "copied validFrom" (true of the spelling the write loop kept) and "did
+        # not carry validFrom (as when)" (true of the other) in one sentence
+        # about ONE slot, and a reader cannot tell which date went with the node.
+        # ⚠️ The value that travels is `when`: `scalar["when"]` is built as
+        # `when if when is not None else validfrom`, so on a row holding BOTH it
+        # is `when` that reaches the writer and `validFrom` is the one the
+        # collapse drops. Naming them the other way round is the same lie in
+        # reverse — the first draft of this clause named `validFrom` as the
+        # traveller and a test asserting the WRITTEN value caught it.
+        slot_conflicts.append(
+            f"validFrom (as when) — the duplicate held both ({when!r} and "
+            f"{validfrom!r}) for one slot, so only {when!r} travelled; "
+            f"{validfrom!r} went with the node")
 
     # The span is an ADDRESS, and "half an address" is only ONE of the ways a
     # duplicate's own evidence can be unwritable. `validate_span` is the ONE home
@@ -679,14 +692,21 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         return None
     inbound: list[tuple[str, str]] = []
     for rel, source_label in inbound_rows:
-        if isinstance(rel, str) and isinstance(source_label, str):
-            # ⚠️ NO provenance exemption on this axis: an INBOUND edge is not the
-            # projection of any field on the duplicate, so the "verified as a
-            # field" ground cannot hold — and it was copied here anyway.
-            if rel in _FOLD_ATTACHMENT_RELS:
-                inbound.append((rel, source_label))
-            else:
-                unexpected.append((rel, "in"))
+        # ⚠️ FAIL CLOSED on a malformation, mirroring the outbound arm above.
+        # The guard here used to be `if isinstance(rel, str) and isinstance(
+        # source_label, str):` with NO else, and `head(labels(s))` is None for a
+        # label-less source node — so that row was neither `inbound` nor
+        # `unexpected`, and the edge died on an `ok=True` fold with no clause
+        # naming it. The two arms disagreed about the same query shape.
+        if not isinstance(rel, str) or not isinstance(source_label, str):
+            return None
+        # ⚠️ NO provenance exemption on this axis: an INBOUND edge is not the
+        # projection of any field on the duplicate, so the "verified as a field"
+        # ground cannot hold — and it was copied here anyway.
+        if rel in _FOLD_ATTACHMENT_RELS:
+            inbound.append((rel, source_label))
+        else:
+            unexpected.append((rel, "in"))
 
     _observed = {"confidence": _confidence, "pointKind": _point_kind,
                  "eventId": _event_id, "status": _status,
@@ -795,6 +815,12 @@ def _already_written(out: dict) -> str:
         # cases; the parenthetical says why (a conflicting value, or an absence).
         # Each residual item carries its own reason — see the caller's note.
         said += "; did not carry " + "; ".join(out["residual"])
+    # ⚠️ The CALLER filters on the text of `blocked` rather than on a marker:
+    # this line already prints the residual here, and the seam appends the
+    # residual too (a refusal can be reached before any write, when this line is
+    # not printed at all) — so two clauses about one fact must not both appear on
+    # the arm whose whole purpose is telling an operator what changed. A private
+    # marker key would break the wrapper's fixed key set, which is itself pinned.
     return said
 
 

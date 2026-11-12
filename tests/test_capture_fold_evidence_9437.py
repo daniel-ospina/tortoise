@@ -1501,3 +1501,90 @@ def test_an_address_part_the_canonical_does_not_hold_says_so():
                for r in out["residual"]), out["residual"]
     assert not any("span_start — the canonical's value differs" in r
                    for r in out["residual"]), out["residual"]
+
+
+# ── 15) round 12: the inbound malformation, the slot's VALUE, one fact once ──
+
+
+def test_an_unlabelled_inbound_source_fails_closed():
+    """`head(labels(s))` is None for a label-less source node, and the inbound arm
+    used to test `isinstance(rel, str) and isinstance(source_label, str)` with NO
+    else — so that row was neither `inbound` nor `unexpected`, and the edge died
+    on an `ok=True` fold with no clause naming it. The OUTBOUND twin already
+    failed closed on the same shape (`return None` → `unreadable`)."""
+    graph = _FakeGraph(inbound=[("aboutObject", None)])
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "unreadable", out
+    assert "could not be read" in out["blocked"], out
+
+
+def test_the_slot_conflict_names_the_value_that_travelled():
+    """Both spellings present, one slot: the write loop keeps the LAST spelling
+    in `_SINGLE_SLOTS` order. Without naming it, the receipt said "copied
+    validFrom" and "did not carry validFrom" about ONE slot in one sentence —
+    both true of different values, neither named."""
+    graph = _FakeGraph(
+        dup_row=("session:s", [], "q", 10, 40, "turn-1", None,
+                 "2026-08-01", "2026-08-02", None, None, None))
+    sdk = _FakeSDK(on_update=graph.apply_slot)
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["residual"], out
+    item = next(r for r in out["residual"] if "held both" in r)
+    assert "'2026-08-01' travelled" in item, item
+    assert "'2026-08-02' went with the node" in item, item
+    # And the clause names what was ACTUALLY written — not a guess: `scalar`
+    # builds `when if when is not None else validFrom`, so `when` travels.
+    assert "validFrom" in out["copied"], out
+    assert sdk.calls and sdk.calls[0]["validFrom"] == "2026-08-01", sdk.calls
+
+
+def test_a_fold_that_both_copied_and_disclosed_a_slot_names_both_values(
+        sdk, monkeypatch):
+    """The seam's whole sentence, pinned: the copy clause and the residual must
+    not read as a contradiction about one slot."""
+    _extracted, meta = _extract(
+        sdk, monkeypatch,
+        evidence={"when": "2026-08-01", "validFrom": "2026-08-02"})
+    said = next(w for w in meta["warnings"] if "folded into canonical" in w)
+    assert "copied validFrom" in said, said
+    # The clause that follows names BOTH values and says which one travelled, so
+    # "copied validFrom" and "did not carry validFrom" no longer contradict.
+    assert "only '2026-08-01' travelled" in said, said
+    assert "'2026-08-02' went with the node" in said, said
+
+
+def test_one_fact_is_not_printed_twice_under_two_lead_ins():
+    """`_already_written` prints the residual into `blocked`, and the seam then
+    appended the whole residual again — "did not carry X; it also holds X" reads
+    as TWO facts on the arm whose purpose is telling an operator what changed."""
+    # The duplicate holds a support field the canonical does not, and the WRITE
+    # door fails — the one arm where `_already_written` prints the residual.
+    graph = _FakeGraph(dup_row=("session:s", [], "q", 10, 40, "turn-1", None,
+                               None, None, None, 0.9, "observation"),
+                       raise_on={"head(collect(r.confidence))"})
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False, out
+    assert out["blocked"].count("pointKind") == 1, out["blocked"]
+    assert "it also holds pointKind" not in out["blocked"], out["blocked"]
+
+
+def test_the_guard_reports_an_UNMEASURABLE_read_not_only_a_short_one():
+    """The non-vacuity arm: a query selecting NO edge attribute must raise, or a
+    declaration of `_CARRIED_EDGE_ATTRS` over such a read would be unmeasurable
+    while the first check kept passing."""
+    import pytest as _pytest
+    monkeypatch = _pytest.MonkeyPatch()
+    # ⚠️ The declaration must be EMPTY for this arm to be reachable at all: with
+    # `confidence` declared, a query selecting nothing trips the FIRST check
+    # ("does not select") and the non-vacuity arm is never exercised — which is
+    # exactly why it was unpinned.
+    monkeypatch.setattr(capture_fold, "_CARRIED_EDGE_ATTRS", ())
+    try:
+        with _pytest.raises(AssertionError, match="unmeasurable"):
+            capture_fold._assert_carried_edge_attrs(
+                "MATCH (d:Point {id:$dup})-[r]->(t) RETURN type(r)")
+    finally:
+        monkeypatch.undo()

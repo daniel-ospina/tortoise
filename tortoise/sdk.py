@@ -16990,9 +16990,16 @@ class TortoiseSDK:
                             # fold needs — and this branch printed `blocked` and
                             # `undeclared` only, so the module's "set here so a
                             # refusal discloses them too" was half-delivered.
-                            if fold_report["residual"]:
-                                kept += ("; it also holds "
-                                         + "; ".join(fold_report["residual"]))
+                            # ⚠️ Only the items `blocked` does not already carry:
+                            # `_already_written` prints the residual into
+                            # `blocked` on the post-write refusal arm, so echoing
+                            # the whole list here printed ONE fact twice with two
+                            # lead-ins ("did not carry X; it also holds X").
+                            _said = " ".join(str(fold_report.get("blocked") or ""))
+                            _fresh = [r for r in fold_report["residual"]
+                                      if r not in _said]
+                            if _fresh:
+                                kept += ("; it also holds " + "; ".join(_fresh))
                             warnings.append(
                                 f"repeated claim '{content[:60]}' kept "
                                 f"distinct — {fold_report['blocked']}{kept}")
