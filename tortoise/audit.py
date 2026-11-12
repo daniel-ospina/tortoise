@@ -1671,6 +1671,31 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             _shape_repair = ("clearing the shape on the endpoint that carries it "
                              "(which carries no identity, so no repair can name "
                              "it)")
+        # ⛔ ONE place that decides the DESTINATION, above EVERY arm that names one —
+        # including the id-less arm, which used to return before it. A successor EP
+        # cannot READ must never be the destination: a SHAPE refusal (operator-shaped,
+        # or an ``op_type`` on a direct edge) and a NON-LIVE one (terminal, or a
+        # draft) both mean the moved edge builds no factor, so performing the leading
+        # instruction leaves ``confidences {}`` and a QUIET re-audit — measured on an
+        # archived successor, on a retracted one, on a draft one and on the idx-0 arm
+        # (#12210 review, P2). ``_chain_tail`` still names the specific live head when
+        # the successor's own chain has one.
+        successor = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "its successor"
+        tail = _chain_tail(s)
+        neutral = s["neutral_row"]
+        _status = s["carrier_status"] or ""
+        carrier_unread = (s["carrier_count"] == 1 and not s["neutral_row"] and (
+            _succ_refused(s) or s["carrier_terminal"] or _status == DRAFT_STATUS))
+        if carrier_unread:
+            _why = ("it is operator-shaped, which EP refuses as a factor input"
+                    if _succ_refused(s) else
+                    f"it is {_quoted(_status_or_flag(s['carrier_status'], s['carrier_outdated']))}"
+                    ", which EP does not read as an input")
+            dest = (f"a CLAIM successor — NOT the one it names ({successor}), because "
+                    f"{_why}")
+        else:
+            dest = f"the successor ({successor})"
+        refused = carrier_unread
         if s["sup_id"] is None:
             # ⛔ ``tortoise_update_entity`` keys on the ID, so embedding a NAME in its
             # first argument addresses a key that does not exist. Only a raw
@@ -1692,9 +1717,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                    "re-point would keep the same inert connection, because a "
                    "neutral edge transfers no confidence in either direction"
                    if s["neutral_row"] else
-                   f"re-point this {s['edge_type']} input onto that successor, "
+                   # ⛔ …and the DESTINATION routing, which this arm used to return
+                   # before: on a flowing row it named the successor unconditionally,
+                   # so an archived / retracted / draft one left the row quiet over a
+                   # claim whose support was never carried (measured, #12210 review).
+                   f"re-point this {s['edge_type']} input onto {dest}, "
                    "deleting the edge into the old endpoint")
                 + ". "
+                + ("" if s["neutral_row"] else tail)
                 + _archive_clause(s))
         if not s["carrier_count"]:
             # ⛔ "Nothing to re-point onto" would be FALSE whenever a :Subject or
@@ -1773,19 +1803,6 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                       f"carried by {s['carrier_count']} Objects (#3573) and this "
                       "check cannot pick one, so re-point onto the intended one "
                       "by ID. ")
-        successor = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "its successor"
-        tail = _chain_tail(s)
-        # ⛔ ONE place that decides the DESTINATION, above EVERY arm. The shape arm
-        # used to return before this routing, so on a row whose successor EP refuses
-        # it still said "move this edge onto the successor ('X')" while the same
-        # string said the re-point moves no belief — performing it measured
-        # ``confidences {}`` and a CLEAN re-audit, the false CLEAN the routing exists
-        # to prevent (#12210 review, P2).
-        refused = s["carrier_count"] == 1 and _succ_refused(s)
-        dest = (f"a CLAIM successor — NOT the one it names ({successor}), which EP "
-                f"refuses as a factor input" if refused
-                else f"the successor ({successor})")
-        neutral = s["neutral_row"]
         if s["shape"] and not s["is_operator"]:
             # ⛔ NEITHER arm: "write the equivalent edge" would change nothing, so the
             # repair is to clear the SHAPE **and** move the edge — measured: clearing

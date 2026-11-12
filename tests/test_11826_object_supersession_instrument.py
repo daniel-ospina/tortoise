@@ -2618,3 +2618,53 @@ def test_a_neutral_shaped_row_gets_no_chain_tail(sdk):
         assert advice not in fix, (
             f"{advice!r} is re-point advice on a row whose instruction is DELETE: "
             + fix)
+
+
+def test_a_non_live_successor_is_not_the_destination(sdk):
+    """A successor EP cannot read must not be NAMED as the destination either.
+
+    The routing withdrew a SHAPE-refused successor; a NON-LIVE one (terminal or
+    draft) is refused just as firmly by EP's input selection, so naming it left the
+    reader performing a re-point that builds no factor: measured — an archived
+    successor, a retracted one, and a draft one each gave ``confidences {}`` and a
+    QUIET re-audit after the prescribed edge write (#12210 review, P2).
+    """
+    for lane, status in (("direct", "archived"), ("direct", "draft"),
+                         ("operator", "retracted"), ("operator", "draft")):
+        p = sdk.create_point("statement", f"gateway {lane} {status}")
+        v1 = _obj(sdk, f"PolicyV1-{lane}-{status}")
+        v2 = _obj(sdk, f"PolicyV2-{lane}-{status}")
+        if lane == "direct":
+            sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+        else:
+            sdk.create_operator("IMPL", p["id"], [v1["id"]])
+        _supersede_object(sdk, f"PolicyV1-{lane}-{status}",
+                          f"PolicyV2-{lane}-{status}")
+        sdk.update_entity(v2["id"], status=status)
+
+        issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                     if i.node_id == v1["id"])
+        fix = issue.fix
+        named = f"PolicyV2-{lane}-{status}"
+        assert f"NOT the one it names ('{named}')" in fix, fix
+        assert f"onto the successor ('{named}')" not in fix, (
+            f"a '{status}' successor is not a destination EP reads: " + fix)
+
+
+def test_an_id_less_flowing_row_also_routes_the_destination(sdk):
+    """The id-less arm returns early, so it used to name any successor as-is."""
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == "PolicyV1")
+    fix = issue.fix
+    assert "No id-keyed repair is possible" in fix, fix
+    assert "NOT the one it names ('PolicyV2')" in fix, (
+        "an archived successor is not a destination EP reads: " + fix)
+    assert "onto that successor" not in fix, fix
