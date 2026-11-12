@@ -772,21 +772,38 @@ class TestTheBeliefSeam:
         assert _props(sdk, eid) == before
 
     def test_the_chokepoint_refuses_the_same_state_op(self, sdk):
-        """Review cycle 6, P1 — the door-only placement left `_emit` open.
+        """Review cycle 6/7, P1 — the seam, on EVERY channel `_emit` accepts.
 
-        The `EventRecorded` half is guarded at BOTH this door and the `_emit`
-        chokepoint, precisely because "a door list is not a boundary". The
-        state-op half was guarded only at the door, and a measurement showed the
-        identical record reaching the fold with `_emit(…, label="Event",
-        op="restatus", state={"status": "superseded"})` and storing it.
+        The `EventRecorded` half is guarded at both this door and the `_emit`
+        chokepoint, and the chokepoint sweeps the kwargs payload AND the
+        positional record — because `_norm` splices the record OVER the envelope
+        (`{**ev, **ev["point"]}`), so the map the fold reads is neither channel
+        alone. The state-op half was kwargs-only in a first revision, and a
+        positional record stored a terminal `:Event` status (measured cycle 7),
+        so each channel and the split variants are pinned here.
         """
-        eid = _event(sdk, name="BeliefChokepoint")
-        before = _props(sdk, eid)
-        with pytest.raises(ValueError, match=":Event"):
-            self._api(sdk)._emit(
-                "EntityMutated", id=eid, label="Event", op="restatus",
-                state={"status": "superseded"})
-        assert _props(sdk, eid) == before
+        payload = {"label": "Event", "op": "restatus",
+                   "state": {"status": "superseded"}}
+        shapes = {
+            "kwargs": ((), dict(payload, id=None)),
+            "positional": ((dict(payload),), {}),
+            "label-in-record": (({"label": "Event", "op": "restatus"},),
+                                {"state": {"status": "superseded"}}),
+            "state-in-record": (({"state": {"status": "superseded"}},),
+                                {"label": "Event", "op": "restatus"}),
+        }
+        for name, (args, kwargs) in shapes.items():
+            eid = _event(sdk, name=f"BeliefChokepoint-{name}")
+            before = _props(sdk, eid)
+            kwargs = dict(kwargs)
+            if "id" in kwargs:
+                kwargs["id"] = eid
+            else:
+                args = tuple((dict(args[0], id=eid) if args else None,)) + args[1:] \
+                    if args else args
+            with pytest.raises(ValueError, match=":Event"):
+                self._api(sdk)._emit("EntityMutated", *args, **kwargs)
+            assert _props(sdk, eid) == before, name
 
     def test_a_non_state_op_is_left_to_the_folds_own_verdict(self, sdk):
         """Review cycle 6, P2 — `op="delete"` writes no status, so no refusal.

@@ -766,7 +766,14 @@ class EventAPI:
         # review cycle 5 P1: `_emit("EntityMutated", {…op: restatus, state:
         # {status: superseded}})` was ACCEPTED, stored the terminal status on the
         # node AND journalled a record that reproduces it on replay.
-        for _map in (payload, *record):
+        # ⛔ AND THE SPLICE: sweeping each channel SEPARATELY still leaves the
+        # SPLIT shapes open — the map the fold reads is `projection._norm`'s
+        # `{**ev, **ev["point"]}`, not either channel on its own, so a record
+        # that puts `label`+`op` positionally and `state` in the kwargs presents
+        # every field the refusal needs while neither map does (measured,
+        # review cycle 7 P1: both split shapes stored a terminal `:Event`).
+        for _map in (payload, *record,
+                     {**payload, **(record[0] if record else {})}):
             if not isinstance(_map, dict):
                 continue
             # ``op`` must be a STRING before the set membership: an unhashable
