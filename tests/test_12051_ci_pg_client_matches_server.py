@@ -113,11 +113,12 @@ not a tenth spelling — it is the one a text guard cannot reach:
   composite actions; none touches PATH, and that is the invariant to keep.
   No in-repo script this job calls names or moves a client dir — kept that way, because
   this guard cannot follow one.
-- **`shell:` is read at TWO scopes only** — the step's, and the job's
-  `defaults.run.shell` (the workflow-level `defaults` is folded into the
-  job because it applies here too). A `shell:` reached through a
-  reusable workflow (`uses: ./.github/workflows/x.yml`) is outside this
-  file and outside this guard.
+- **`shell:` is read at THREE scopes** — the step's, the job's
+  `jobs.<id>.defaults.run.shell`, and the workflow-level `defaults.run.shell`
+  (which GitHub folds into every job, so it applies here too — measured, round
+  9-10). A `shell:` reached through a reusable workflow
+  (`uses: ./.github/workflows/x.yml`) is outside this file and outside this
+  guard.
 - **`env:` and `$GITHUB_ENV` are read at file scope only (#12069 review P1).**
   `env:` was previously not read AT ALL — a job- (or workflow-) level
   `env: PATH: /usr/bin:/bin` left the whole file green while the leg resolved
@@ -1198,11 +1199,6 @@ SHELL_COMMANDS = frozenset(
     }
 )
 
-#: Words in a `shell:` string's argv, with every shell separator and quote treated
-#: as a boundary. (Local convention: `_runs_the_script` splits on its own, because
-#: it must cut at the LAST separator first.)
-SHELL_WORD_SPLIT_RE = re.compile(r"[\s;&|()'\"`]+")
-
 #: Where ONE command's text ends and the next begins, plus the boundary a `-c`
 #: inline script opens at. The LAST such boundary before `{0}` is where the command
 #: that would receive `{0}` starts (#12069 round 19).
@@ -1569,7 +1565,7 @@ def _unasserted_client_checks(code: str) -> list[int]:
         for match in FAIL_CLOSED_BRANCH_RE.finditer(code)
     ]
     check_lines: list[int] = []
-    for match in re.finditer(r"--version\b", code):
+    for match in re.finditer(r"(?:--version|-V)\b", code):
         line_start = code.rfind("\n", 0, match.start()) + 1
         if _command_word(code[line_start : match.start()]) in PRINTING_COMMANDS:
             continue
@@ -2321,7 +2317,7 @@ def _version_checked_tools(code: str) -> set[str]:
 
     def scan(line: str, loop_var: str | None, loop_names: set[str]) -> None:
         line = BRACED_VAR_RE.sub(r"$\1", line)
-        for match in re.finditer(r"--version\b", line):
+        for match in re.finditer(r"(?:--version|-V)\b", line):
             word = _command_word(line[: match.start()])
             if not word or word in PRINTING_COMMANDS:
                 continue
@@ -3309,6 +3305,12 @@ VERSION_CHECK_POLARITY = [
         'for tool in pg_dump pg_restore; do\n  version="$("$tool" --version)"\ndone',
         {"pg_dump", "pg_restore"},
         "the real loop: the body uses the loop variable, so both are checked",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n  version="$("$tool" -V)"\ndone',
+        {"pg_dump", "pg_restore"},
+        "the SHORT form `-V` is the same check as `--version` (#12069 review): a "
+        "guard that reds it reports a correct body as one that never checks",
     ),
     (
         'for tool in pg_dump pg_restore; do\n  version="$(pg_dump --version)"\ndone',
@@ -5308,7 +5310,9 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "should already have caught this)"
     )
 
-    def run_with(stub: str) -> subprocess.CompletedProcess[str]:
+    def run_with(
+        stub: str, body: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
         script = tmp_path / "precondition.sh"
         # ⛔ `sudo` and `apt-get` are stubbed TOO. Without them the prefix runs
         # the HOST's real `sudo apt-cache` / `sudo apt-get update`: on a box where
@@ -5319,7 +5323,7 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         script.write_text(
             'sudo() { "$@"; }\n'
             "apt-get() { return 0; }\n"
-            f"{stub}\n{prefix}\n"
+            f"{stub}\n{prefix if body is None else body}\n"
             "echo REACHED_PAST_PRECONDITION\n",
             encoding="utf-8",
         )
@@ -5346,7 +5350,18 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         f"point is that a missing client reads as THIS defect, not an apt error: {combined!r}"
     )
 
-    present = run_with("apt-cache() { return 0; }")
+    # ⛔ The succeeding stub must EMIT a plausible stanza, not merely return 0.
+    # `_IF_PRECONDITION_RE` accepts any shell after the package name (its own
+    # docstring: "the SPELLING is deliberately not pinned"), so a correct
+    # equivalent probe filters the probe's OUTPUT — `apt-cache policy
+    # postgresql-client-16 | grep -q Candidate`. A `return 0` stub that prints
+    # NOTHING makes every such filter exit non-zero, arms the `if !`, and reports
+    # a CORRECT step as one that "stopped the step" (#12069 review, measured).
+    PRESENT_STUB = (
+        "apt-cache() { printf 'Package: postgresql-client-16\\n"
+        "Candidate: 16.15-0ubuntu0.24.04.1\\n'; return 0; }"
+    )
+    present = run_with(PRESENT_STUB)
     assert present.returncode == 0, (
         "with `apt-cache` SUCCEEDING the precondition stopped the step — the job "
         f"would red on every image that carries the client: {present.stderr!r}"
@@ -5355,6 +5370,31 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "the script never reached the line after the precondition even when the "
         "package resolved — the block is unconditional"
     )
+
+    #: An equivalent PROBE SPELLING must stay accepted: the matcher promises the
+    #: spelling is not pinned, and a guard that reds a correct rewrite is the SAME
+    #: defect class as one that passes a broken step (#12069 review). MEASURED
+    #: before the stub emitted a stanza: the `| grep -q Candidate` row stopped the
+    #: script, i.e. a false RED on a behaviour identical to the shipped probe.
+    #: Both spellings are EXECUTED rather than derived from the tree, so the row
+    #: holds whichever spelling the workflow carries today.
+    for spelling in (
+        "apt-cache show postgresql-client-16 >/dev/null 2>&1",
+        "apt-cache policy postgresql-client-16 | grep -q Candidate",
+    ):
+        probe = run_with(
+            PRESENT_STUB,
+            f"if ! {spelling}; then echo '::error::absent'; exit 1; fi",
+        )
+        assert probe.returncode == 0, (
+            f"an equivalent probe spelling ({spelling!r}) stopped the step: the "
+            "matcher accepts it, so the EXECUTION harness must too — otherwise a "
+            f"good edit is reported as a disarmed guard: {probe.stderr!r}"
+        )
+        assert "REACHED_PAST_PRECONDITION" in probe.stdout, (
+            f"the equivalent-probe run ({spelling!r}) never reached the line after "
+            f"the precondition: {probe.stdout!r}"
+        )
 
 
 #: A REDIRECTION that writes a client binary, both directions (#12069 review P1).
