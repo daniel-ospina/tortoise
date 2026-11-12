@@ -596,7 +596,10 @@ _COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp,
 #: 6): `[_set for _set in rows]` binds `_set` for the element only, so counting it as a writer-scope
 #: binding dropped the writer's module alias and — for a clause-builder alias — the writer itself:
 #: measured `{}` for a body whose control is `unresolved_write`, and `_shadowed_names` already
-#: skipped comprehension subtrees for exactly this reason. One tuple, so the two walks cannot drift.
+#: skipped comprehension subtrees for exactly this reason. ⛔ One tuple, so `_walk_own_scope` and
+#: `_comprehension_walrus_targets` cannot drift — but `_shadowed_names` is NOT a reader of it (it
+#: spells its own scope test by hand), and that gap is how round 8 cycle 7 found two asymmetries
+#: between the walks: `ast.Lambda` added by hand HERE, the PEP 572 containing-scope rule absent THERE.
 _NEW_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
                     *_COMPREHENSION_NODES)
 
@@ -743,6 +746,77 @@ def _scope_bound_names(root: ast.AST) -> set[str]:
     return _own_scope_bindings(root)
 
 
+def _lambda_body_bindings(body: ast.AST) -> frozenset[str]:
+    """Names a lambda BODY binds in the LAMBDA's own scope — the walrus targets (`#12182` review).
+
+    PEP 572 puts a walrus target in the scope that contains it, so one inside the lambda body is the
+    lambda's local, not the enclosing method's. A NESTED lambda is its own scope again (its defaults
+    are evaluated where it sits, so they are walked), and a comprehension's walrus binds in the
+    containing scope — which for a comprehension inside this lambda is this lambda, so its targets
+    are collected rather than skipped.
+    """
+    out: set[str] = set()
+    stack: list[ast.AST] = [body]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, ast.Lambda):
+            stack.extend(n.args.defaults)
+            stack.extend(d for d in n.args.kw_defaults if d is not None)
+            continue
+        if isinstance(n, ast.NamedExpr) and isinstance(n.target, ast.Name):
+            out.add(n.target.id)
+        stack.extend(ast.iter_child_nodes(n))
+    return frozenset(out)
+
+
+def _alias_credit_rank(name: str) -> int:
+    """How much a credited alias HELPS the writer stay visible — higher is safer (`#12020` round 8).
+
+    The rank is `_import_aliases`' collision rule: when one local name resolves to two primitives,
+    the resolution must not depend on source order, so the higher rank wins.
+    ⛔ The SAME rank also arbitrates the MODULE↔WRITER merge in `_embedding_writers`
+    (`#12020` round 8 cycle 5), where the two candidates are not siblings in one map and neither is
+    necessarily LIVE — so a DEAD higher-rank binding beats a LIVE lower-rank one. Liveness is not
+    statically knowable (`if TYPE_CHECKING:` is the idiom that made the point), so the rank decides.
+    ⛔ What that buys, stated as measured rather than as a bound (round 8 cycle 7, P3): rank 0 always
+    loses, so no collision can HIDE a writer behind `gated`. Ranks 1 and 2 are never worse than
+    that — but they are not always inside `NEEDS_A_DECLARATION`: an `UNGATED_CALLS` winner carries
+    `ungated` (inside) when the writer also writes, and `producer` (outside) when it does not,
+    which is a lateral move out of `gated` rather than a hide.
+
+    * 2 — `WRITE_CLAUSE_BUILDERS`: the alias is the ONLY discovery signal, so the writer is
+      discovered and owes a declaration.
+    * 1 — `UNGATED_CALLS`: `ungated` (INSIDE `NEEDS_A_DECLARATION`) when the writer also writes,
+      `producer` (OUTSIDE) when it does not — never worse than the `gated` the seam rank would give,
+      but NOT an invariant that the writer ends up inside (the paragraph above measures it).
+    * 0 — `SEAM_CALL`: `gated`, which is OUTSIDE `NEEDS_A_DECLARATION` — the only rank that can
+      HIDE a writer, so it loses every collision.
+    """
+    if name in WRITE_CLAUSE_BUILDERS:
+        return 2
+    if name in UNGATED_CALLS:
+        return 1
+    return 0
+
+
+#: Canonical order for the EQUAL-rank tie-break (`#12182` review P3). The rank decides the KIND; it
+#: does not decide which of two same-rank names is credited — and that name is what is published as
+#: `callee`/`callees`, which a `recognised_producer` route claim is re-derived from (#11444). Two
+#: builders and two ungated calls share a rank, so a bare `>` left the credited NAME dependent on
+#: source order (measured: `encode_for_store`+`compute_session_embedding` on one local name credit
+#: a different one per order). This tuple makes the tie deterministic and independent of the walk.
+_ALIAS_CANONICAL_ORDER: tuple[str, ...] = (
+    *WRITE_CLAUSE_BUILDERS, *UNGATED_CALLS, SEAM_CALL)
+
+
+def _alias_preference(name: str) -> tuple[int, int]:
+    """Sort key: rank first, then the canonical name order — so a TIE is order-independent too."""
+    try:
+        return (_alias_credit_rank(name), -_ALIAS_CANONICAL_ORDER.index(name))
+    except ValueError:  # pragma: no cover - every aliasable name is in the tuple
+        return (_alias_credit_rank(name), -len(_ALIAS_CANONICAL_ORDER))
+
+
 def _import_aliases(*roots: ast.AST) -> dict[str, str]:
     """Local name -> the name it was IMPORTED AS, for the seams and clause builders (`#11274`).
 
@@ -801,14 +875,22 @@ def _import_aliases(*roots: ast.AST) -> dict[str, str]:
                 # writer measured `gated` (outside `NEEDS_A_DECLARATION`, i.e. it stopped owing a
                 # declaration; measured). Neither binding is a "rebinding" (`_imports_that_REBIND`
                 # skips every import that RESOLVES), so no other rule sees the collision.
-                # ⛔ Prefer the BUILDER in every collision, which is fail-closed in BOTH orders:
-                # the builder outcome is `unresolved_write`/`ungated`, both inside
-                # `NEEDS_A_DECLARATION`, while a source-order-dependent answer is right in one order
-                # and a silent hide in the other.
-                if previous is None or (
-                    previous not in WRITE_CLAUSE_BUILDERS
-                    and alias.name in WRITE_CLAUSE_BUILDERS
-                ):
+                # ⛔ ⛔ A BUILDER-ONLY preference is NOT a total order, and saying it was cost a P1
+                # (round 8 cycle 4). It left `SEAM_CALL` vs `UNGATED_CALLS` — both NON-builder — to
+                # the first-seen rule, which is source-order-dependent; and because the walk is LIFO,
+                # "first-seen" is the lexically LAST binding, so the common idiom
+                # `try: import encode_for_store as _a / except ImportError: import encode_for_row as _a`
+                # resolved to the SEAM spelling that never runs and the writer measured `gated` —
+                # HIDDEN, a regression against `main` for a writer whose live binding is ungated.
+                # ⛔ So the collision is decided by what the CREDIT DOES to the writer, highest wins,
+                # independent of source order: builders (KEEP the writer, `unresolved_write`) >
+                # `UNGATED_CALLS` (`ungated` INSIDE `NEEDS_A_DECLARATION` when the writer also writes,
+                # `producer` OUTSIDE when it does not — `_alias_credit_rank`'s rank-1 bullet states
+                # it; do not re-tighten it to a guarantee) > `SEAM_CALL` (`gated`, outside it — the
+                # only rank that can hide a writer, so it loses every collision).
+                # ⛔ `_alias_preference`, not a bare rank: two names can share a rank, and the tie
+                # must not fall back to source order (round 8 cycle 8, P3).
+                if previous is None or _alias_preference(alias.name) > _alias_preference(previous):
                     found[local] = alias.name
     return found
 
@@ -1697,7 +1779,23 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             # aliased `encode_for_row` reds the population as an unresolved producer (a false
             # declaration owed) and an aliased clause builder is a SILENT MISS (a false `bypass`
             # answer, the direction that matters).
-            aliases = {**module_aliases, **_import_aliases(node)}
+            # ⛔ ⛔ RANK ACROSS THE MERGE, not only within it (`#12020` round 8 cycle 5, P1). A plain
+            # `{**module_aliases, **writer_aliases}` lets a WRITER-scope binding overwrite the
+            # module's whatever its rank — and a writer-scope import is not automatically the live
+            # one: the PR's own pins use `if TYPE_CHECKING:` for exactly this idiom, so a DEAD
+            # writer-scope seam import beat a live module-level BUILDER alias and the writer measured
+            # `gated` (outside `NEEDS_A_DECLARATION`), a regression against `main`. Ranks are the
+            # same ones `_import_aliases` uses for a same-scope collision, so the resolution cannot
+            # depend on WHICH map a binding came from either.
+            aliases = dict(module_aliases)
+            for _name, _canon in _import_aliases(node).items():
+                _previous = aliases.get(_name)
+                # ⛔ `_previous is None` FIRST, not `rank(canon) > rank(aliases.get(name, ""))`: an
+                # absent key is not rank 0, it is "no binding" — and a SEAM alias IS rank 0, so the
+                # sentinel silently dropped every writer-level seam import (measured: the
+                # `closure_scoped_alias` blind shape flipped from `gated` to `{}`).
+                if _previous is None or _alias_preference(_canon) > _alias_preference(_previous):
+                    aliases[_name] = _canon
             # ⛔ `#12020` round 3: an alias the writer REBINDS is not that reach. Measured —
             # `from … import encode_for_row as _enc` followed by a writer-local `_enc = lambda p: p`
             # still credited `encode_for_row`, classing a writer that never reaches the gate as
@@ -5091,6 +5189,25 @@ def _sdk_methods_on_vector_leg(
                 # (#11389 review). Comprehension scopes are skipped entirely.
                 if isinstance(n, _COMPREHENSION_NODES):
                     continue
+                # ⛔ AND a LAMBDA is its own scope too (`#12020` round 8 cycle 6, P3). The two skips
+                # above were the only ones, so the walk descended into a lambda BODY and a walrus
+                # there (`f = lambda: (_pool := 1)`) landed in the METHOD's shadow set and suppressed
+                # a genuine by-reference mention of `_pool` further down — the UNDER-report
+                # direction, and the same asymmetry `#11397` closed one spelling over (nested `def`
+                # body vs comprehension body). `dis` confirms the lambda's walrus is `STORE_FAST` in
+                # the lambda, leaving the enclosing binding untouched. A lambda binds no NAME here,
+                # so there is nothing to add before `continue`.
+                if isinstance(n, ast.Lambda):
+                    # ⛔ …but its DEFAULTS are evaluated in the ENCLOSING scope, so a walrus there DOES
+                    # bind here (`symtable`: `f = lambda v=(_p := 1): v` puts `_p` in the METHOD's
+                    # locals, and the lambda's in `v` only). Skipping the whole node made this walk
+                    # disagree with the mention walk, which already walks lambda defaults
+                    # unwidened — and it traded the correct verdict for the body case (round 8
+                    # cycle 7, P3: the default spelling was shadowed before the body fix and was
+                    # published as a reach after it). Walk the enclosing-scope half, THEN stop.
+                    stack_s.extend(n.args.defaults)
+                    stack_s.extend(d for d in n.args.kw_defaults if d is not None)
+                    continue
                 if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
                     shadowed.add(n.id)
                 # ⛔ These bind a name on the NODE, not as `Name(Store)`
@@ -5211,7 +5328,13 @@ def _sdk_methods_on_vector_leg(
             # DEFAULTS are evaluated in the ENCLOSING scope (like the outer `for` iterable), so
             # they are walked unwidened.
             if isinstance(node, ast.Lambda):
-                lam_bound = comp_bound | _parameter_names(node.args)
+                # ⛔ AND THE BODY'S OWN BINDINGS (`#12182` review P3): a walrus in the lambda body
+                # binds in the LAMBDA, so a mention of that name later in the SAME lambda is not a
+                # method reach. Parameters were threaded and body targets were not, so
+                # `lambda: (_safe((_p := 1)), _safe(_p))` was published as a by-reference use of the
+                # method's `_p` — the cry-wolf direction. Mirrors `comp_bound`'s rule one scope over.
+                lam_bound = (comp_bound | _parameter_names(node.args)
+                             | _lambda_body_bindings(node.body))
                 for default in node.args.defaults:
                     stack.append((default, comp_bound))
                 for default in node.args.kw_defaults:
