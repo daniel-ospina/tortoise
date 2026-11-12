@@ -130,6 +130,22 @@ WINDOW_CLAIM_BATCH = 2000
 # caller falls back to lazy-read + the scheduled dream_all (#85).
 EMBEDDED_LATENCY_BUDGET_S = 0.5
 
+# The operator-less, live, non-operator `:Point` predicate — the population EP
+# can never compute, which `_trivial_stamp` therefore stamps directly.
+#
+# #11823 (#12116 review A-P3): ONE spelling. It was inline in `_trivial_stamp`
+# twice already, and the health block needs the SAME population to report the
+# claims a pass cannot cover — a third hand-copied literal would let the two
+# silently describe different populations after any predicate change (the #7505
+# neutral-link class, or a status-vocabulary widening), while the health block
+# kept publishing `reachable + operator_less == graph_live` as if it still
+# described the graph.
+TRIVIAL_STAMP_PREDICATE = (
+    "(n.is_operator IS NULL OR n.is_operator = false) "
+    "AND (n.status IS NULL OR n.status <> 'draft') "
+    "AND NOT (n)-[:IMPL|NAND]-()"
+)
+
 
 class Dreamer:
     """Incremental + whole-graph EP stabilization.
@@ -670,9 +686,7 @@ class Dreamer:
         if claim_ids is None:
             rows = proj.g.query(
                 "MATCH (n:Point) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-                "AND (n.status IS NULL OR n.status <> 'draft') "
-                "AND NOT (n)-[:IMPL|NAND]-() "
+                f"WHERE {TRIVIAL_STAMP_PREDICATE} "
                 "SET n.lastDreamedAt = $now, n.updatedAt = $now "
                 "RETURN n.id",
                 params={"now": now},
@@ -680,9 +694,7 @@ class Dreamer:
         else:
             rows = proj.g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids "
-                "AND (n.is_operator IS NULL OR n.is_operator = false) "
-                "AND (n.status IS NULL OR n.status <> 'draft') "
-                "AND NOT (n)-[:IMPL|NAND]-() "
+                f"AND {TRIVIAL_STAMP_PREDICATE} "
                 "SET n.lastDreamedAt = $now, n.updatedAt = $now "
                 "RETURN n.id",
                 params={"ids": list(claim_ids), "now": now},

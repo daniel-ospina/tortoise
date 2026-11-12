@@ -99,7 +99,14 @@ def test_no_belief_stays_inside_its_invariants(sdk):
 
 def test_operator_less_claims_are_not_in_the_denominator(sdk):
     """EP cannot reach an operator-less claim, so it must not inflate the
-    denominator — it is reported beside it (the `_trivial_stamp` population)."""
+    denominator — it is reported beside it (the `_trivial_stamp` population).
+
+    ⚠️ The identity `ep_reachable + operator_less == graph_live` holds on THIS
+    fixture only. It is asserted here as fixture-shaped evidence, not as a
+    general law: a Point whose only `IMPL|NAND` edge reaches a DRAFT far
+    endpoint is reachable-or-not by a different rule than operator-less, so
+    `operator_less` is its own count rather than `graph_live - ep_reachable`.
+    """
     _chain(sdk, 3)
     _islands(sdk, 4)
     p = _prop(sdk)
@@ -232,10 +239,16 @@ def test_unreadable_propagation_is_reported_not_zeroed(sdk, monkeypatch):
 # ── "did a pass run" is recorded on every arm ──────────────────────────────
 
 
-def test_no_pass_in_this_process_is_null_not_zero(sdk):
+def test_no_pass_observed_by_this_sdk_is_null_not_zero(sdk):
+    """Absent process state is `null` + a reason, never a reassuring zero.
+
+    #12116 review C-P2: the reason names what is OBSERVED (`this sdk`), not
+    "this process" — the hosted door runs the pass on a different per-request
+    SDK, so "no pass ran in this process" would be a false statement.
+    """
     p = _prop(sdk)
     assert p["last_pass"] is None
-    assert p["last_pass_reason"] == "no_pass_in_this_process"
+    assert p["last_pass_reason"] == "no_pass_observed_by_this_sdk"
 
 
 def test_last_pass_names_the_cap(sdk):
@@ -245,9 +258,16 @@ def test_last_pass_names_the_cap(sdk):
     assert last["mode"] == "local" and last["max_hops"] == 2
 
 
-def test_last_pass_uncovered_is_graph_scoped(sdk):
-    """The sentence the issue asks for: "6 of 20, 14 uncovered" — the pass's
-    affected count against the GRAPH's reachable population."""
+def test_last_pass_never_subtracts_across_populations(sdk):
+    """The sentence the issue asks for is "6 of 20, 14 uncovered".
+
+    #12116 review B-P2: `affected` is the WINDOW a pass consumed and includes
+    the operator-less ids `_trivial_stamp` unions in, which are NOT in
+    `ep_reachable_claims`. Subtracting the two published `uncovered: 0` over a
+    fixture where `no_belief` was 6 (measured) — a false green on the one number
+    this change exists to surface. So the deficit is never derived: `no_belief`
+    is read from the graph AFTER the pass and IS the uncovered count.
+    """
     ids = _chain(sdk, 6)
     sdk.dream(mode="full", require_calibration=False)
     sdk._dirty_roots = {ids[0]}
@@ -255,8 +275,29 @@ def test_last_pass_uncovered_is_graph_scoped(sdk):
     p = _prop(sdk)
     last = p["last_pass"]
     assert last["graph_ep_reachable"] == p["ep_reachable_claims"]
-    assert last["uncovered"] == max(
-        0, p["ep_reachable_claims"] - last["affected"])
+    assert "uncovered" not in last          # no cross-population subtraction
+    # the pair of facts the sentence is built from, each in its own population
+    assert p["belief_present"] + p["no_belief"] == p["ep_reachable_claims"]
+    # and `affected` may legitimately exceed the denominator — the reason a
+    # subtraction was wrong rather than merely imprecise
+    assert last["affected"] <= last["window_reachable"]
+
+
+def test_an_operator_less_pass_does_not_report_full_coverage(sdk):
+    """#12116 review B-P2, as a reproduction: a pass that consumes ONLY
+    operator-less claims leaves every EP-reachable claim uncovered, and the
+    block must not read as covered."""
+    ids = _chain(sdk, 3)                      # 3 EP-reachable claims
+    for i in range(20):                       # 20 operator-less claims
+        _claim(sdk, f"island {i}")
+    sdk._dirty_roots = {i for i in ids}
+    sdk.dream(mode="local", max_hops=1, require_calibration=False)
+    p = _prop(sdk)
+    assert p["ep_reachable_claims"] == 3
+    assert p["operator_less_claims"] == 20
+    assert p["no_belief"] > 0 or p["belief_present"] == 3
+    # whatever the pass reached, the block never publishes a *derived* zero
+    assert "uncovered" not in p["last_pass"]
 
 
 def test_a_budget_zero_pass_is_recorded_not_absent(sdk):
@@ -305,19 +346,138 @@ def test_a_silent_no_op_pass_records_its_reach(sdk, monkeypatch):
 
 
 def test_the_pass_reach_is_recorded_without_a_graph_read(sdk, monkeypatch):
-    """Zero new reads on the pass path: the closure is computed anyway, and the
-    propagation block must not be consulted from inside `dream()`."""
+    """ONE closure BFS per local pass, and no propagation read from inside
+    `dream()`.
+
+    #12116 review A-P1: an earlier version called `_window_closure` a SECOND
+    time (leaving the original in place) — the pass then paid the most
+    expensive read twice on the write path, against D2-5's ≤500 ms embedded
+    budget. A "was a new helper called?" check could not see that, so this
+    counts CALLS.
+    """
     _chain(sdk, 3)
-    calls = {"propagation": 0}
+    calls = {"propagation": 0, "closure": 0}
+    real_closure = sdk._window_closure
+
+    def counting_closure(window, max_hops):
+        calls["closure"] += 1
+        return real_closure(window, max_hops)
 
     def counted():
         calls["propagation"] += 1
         raise AssertionError("dream() must not read the propagation block")
 
+    monkeypatch.setattr(sdk, "_window_closure", counting_closure)
     monkeypatch.setattr(sdk, "_propagation_counts", counted)
     sdk.dream(mode="local", require_calibration=False)
     assert calls["propagation"] == 0
+    assert calls["closure"] == 1
     assert sdk._dream_metrics["last_pass_reach"]["affected"] >= 1
+
+
+def test_stale_first_computes_the_closure_once(sdk, monkeypatch):
+    """The same call-count control on the stale-first arm."""
+    ids = _chain(sdk, 3)
+    sdk._dirty_roots = {ids[0]}
+    calls = {"closure": 0}
+    real_closure = sdk._window_closure
+
+    def counting_closure(window, max_hops):
+        calls["closure"] += 1
+        return real_closure(window, max_hops)
+
+    monkeypatch.setattr(sdk, "_window_closure", counting_closure)
+    sdk.dream(mode="stale-first", require_calibration=False)
+    assert calls["closure"] == 1
+
+
+def test_the_stamp_ratio_and_the_block_share_one_query(sdk, monkeypatch):
+    """#12116 A-P2: `coverage_pct` and the block's `stamped`/`graph_live_claims`
+    come from ONE query (`_stamp_counts`), so they cannot drift apart."""
+    _chain(sdk, 3)
+    _islands(sdk, 2)
+    h = sdk.dream_health_check()
+    prop = h["propagation"]
+    assert h["coverage_pct"] == pytest.approx(
+        prop["stamped"] / prop["graph_live_claims"])
+    inner = sdk._get_proj()
+    queries: list[str] = []
+
+    class _G:
+        def __init__(self, g):
+            self._g = g
+
+        def query(self, q, **kw):
+            queries.append(q)
+            return self._g.query(q, **kw)
+
+    class _P:
+        def __init__(self, p):
+            self._p = p
+            self.g = _G(p.g)
+
+    monkeypatch.setattr(sdk, "_get_proj", lambda: _P(inner))
+    sdk._metrics_coverage()
+    assert len(queries) == 1        # was TWO hand-copied queries before
+    assert "sum(" in queries[0]
+
+
+def test_an_edged_but_unreachable_claim_is_not_invisible(sdk):
+    """#12116 review C-P2: the three counts PARTITION the live :Point
+    population. A live claim whose only IMPL edge lands on a DRAFT point is
+    neither reachable nor operator-less; without `unclassified_claims` the block
+    reported `no_belief: 0` for a graph whose only live claim had no belief and
+    could never get one — an under-report its own docstring forbids.
+    """
+    live = _claim(sdk, "edged only to a draft")
+    draft = sdk.create_point("statement", "draft neighbour", dedup=False,
+                             status="draft")["id"]
+    sdk.create_direct_edge("IMPL", live, draft)
+    p = _prop(sdk)
+    assert p["graph_live_claims"] == 1
+    assert p["ep_reachable_claims"] == 0
+    assert p["operator_less_claims"] == 0
+    assert p["unclassified_claims"] == 1        # visible, not silently dropped
+    assert (p["ep_reachable_claims"] + p["operator_less_claims"]
+            + p["unclassified_claims"] == p["graph_live_claims"])
+
+
+def test_the_three_counts_partition_the_live_points(sdk):
+    """The partition is exact on a mixed graph — and no term is clamped."""
+    _chain(sdk, 3)
+    _islands(sdk, 2)
+    live = _claim(sdk, "edged only to a draft")
+    draft = sdk.create_point("statement", "draft neighbour", dedup=False,
+                             status="draft")["id"]
+    sdk.create_direct_edge("IMPL", live, draft)
+    p = _prop(sdk)
+    assert p["unclassified_claims"] >= 0
+    assert (p["ep_reachable_claims"] + p["operator_less_claims"]
+            + p["unclassified_claims"] == p["graph_live_claims"])
+
+
+def test_untested_operator_less_population_matches_trivial_stamp(sdk):
+    """#12116 A-P3: the block's operator-less count and `_trivial_stamp`'s own
+    population are ONE spelling (`TRIVIAL_STAMP_PREDICATE`), so the two agree.
+    """
+    _chain(sdk, 3)
+    _islands(sdk, 2)
+    live = _claim(sdk, "edged only to a draft")
+    draft = sdk.create_point("statement", "draft neighbour", dedup=False,
+                             status="draft")["id"]
+    sdk.create_operator("IMPL", live, [draft])
+    prop = _prop(sdk)
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE "
+        "(n.is_operator IS NULL OR n.is_operator = false) "
+        "AND (n.status IS NULL OR n.status <> 'draft') "
+        "AND NOT (n)-[:IMPL|NAND]-() RETURN count(n)").result_set
+    # The block's number IS `_trivial_stamp`'s population (one shared constant),
+    # so a change to either spelling cannot make them disagree.
+    assert prop["operator_less_claims"] == int(rows[0][0]) == 2
+    # A draft-edged claim is still edged, so it is NOT in this population — the
+    # count is not "claims with no edges at all" by accident.
+    assert prop["operator_less_claims"] < prop["graph_live_claims"]
 
 
 # ── nothing else moved ─────────────────────────────────────────────────────

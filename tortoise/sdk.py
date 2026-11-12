@@ -32118,11 +32118,16 @@ class TortoiseSDK:
     def _propagation_health(self) -> dict:
         """#11823 — the `propagation` block of `dream_health_check()`.
 
-        ``last_pass`` is `None` with a named reason when no pass ran in THIS
-        process, never a reassuring zero: the hosted door builds a
-        per-request SDK (`hosted_api.py::dream_health`), so its metrics are
-        empty by construction. The graph-scoped half is always available — it
-        is read from the graph, not from process state.
+        ``last_pass`` is `None` with a named reason when no pass reached THIS
+        SDK instance, never a reassuring zero. ⛔ The reason says "observed by
+        this sdk" and not "ran in this process" because the hosted door runs the
+        pass on a DIFFERENT per-request SDK than the one serving this read
+        (`hosted_api.py::dream_health` builds one per request, `_run_dream_on_pool`
+        closes its own), so a pass can have run in the process and still be
+        invisible here — "no pass ran in this process" would be a false
+        statement on exactly the surface that polls this record (#12116 C-P2).
+        The graph-scoped half above is the durable carrier: it is read from the
+        graph, so it survives any instance.
         """
         out: dict = {
             "graph_live_claims": None,
@@ -32132,6 +32137,7 @@ class TortoiseSDK:
             "belief_coverage_pct": None,
             "stamped": None,
             "operator_less_claims": None,
+            "unclassified_claims": None,
             "unavailable": None,
             "last_pass": None,
             "last_pass_reason": None,
@@ -32145,45 +32151,76 @@ class TortoiseSDK:
             out["unavailable"] = f"{type(exc).__name__}: {exc}"
         reach = self._dream_metrics.get("last_pass_reach")
         if not reach:
+            # #12116 review C-P2: this string must be literally true. It is NOT
+            # "no pass ran in this process" — the hosted door runs the pass on a
+            # DIFFERENT per-request SDK than the one serving this read, so a pass
+            # can have run in this process and still be invisible here. It names
+            # what is actually observed: no pass reached THIS instance's metrics.
+            # The graph-scoped half above is the durable carrier (`stamped` /
+            # `no_belief` survive any instance); the pass half is per-instance by
+            # construction, which is the recorded residual (#12099).
             out["last_pass_reason"] = (
-                "no_pass_in_this_process"
+                "no_pass_observed_by_this_sdk"
                 if not self._dream_metrics.get("last_pass_mode")
                 else "reach_not_recorded")
             return out
         last = dict(reach)
-        # "6 of 20, 14 uncovered": the pass's own reach against the graph
-        # population. `max(0, ...)` because `_trivial_stamp` unions
-        # operator-less stamps into the pass's `affected`, which can exceed the
-        # EP-reachable population.
+        # #12116 review B-P2 — NEVER subtract the pass's `affected` from the
+        # graph population. `affected` is the window the pass CONSUMED and it
+        # includes the operator-less ids `_trivial_stamp` unions in
+        # (`dream.py::_trivial_stamp`), which are NOT in `ep_reachable_claims`,
+        # so `ep_reachable - affected` reads 0 over a graph where nothing is
+        # covered (measured: affected=20, ep_reachable=6, no_belief=6 → a
+        # subtraction published "uncovered: 0"). The deficit needs no
+        # arithmetic: the block's `no_belief` is read from the graph AFTER this
+        # pass, so it IS the uncovered count — "6 of 20" is
+        # `belief_present` of `ep_reachable_claims`, and 14 uncovered is
+        # `no_belief`. `graph_ep_reachable` is reported as the denominator this
+        # pass ran against, with no cross-population sum.
         reachable = out.get("ep_reachable_claims")
         if reachable is not None:
-            last["uncovered"] = max(0, int(reachable) - int(last["affected"]))
             last["graph_ep_reachable"] = int(reachable)
         out["last_pass"] = last
         return out
 
     def _metrics_coverage(self) -> float:
         """Coverage % = fraction of live non-operator claims with a
-        lastDreamedAt stamp (graph-wide)."""
+        lastDreamedAt stamp (graph-wide).
+
+        #11823 (#12116 review A-P2): the population and its stamp aggregate are
+        that of :meth:`_stamp_counts`, so the stamp ratio on this surface and
+        the ``stamped`` / ``graph_live_claims`` pair in the ``propagation``
+        block cannot disagree — one spelling, one query.
+        """
         try:
-            proj = self._get_proj()
-            total = proj.g.query(
-                "MATCH (n:Point) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-                "AND (n.status IS NULL OR n.status <> 'draft') "
-                "RETURN count(n)"
-            ).result_set
-            stamped = proj.g.query(
-                "MATCH (n:Point) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-                "AND (n.status IS NULL OR n.status <> 'draft') "
-                "AND n.lastDreamedAt IS NOT NULL RETURN count(n)"
-            ).result_set
-            n_total = int(total[0][0]) if total else 0
-            n_stamped = int(stamped[0][0]) if stamped else 0
+            n_total, n_stamped = self._stamp_counts()
             return (n_stamped / n_total) if n_total else 0.0
         except Exception:
+            # Pre-existing posture, deliberately unchanged here: the stamp ratio
+            # collapses a read failure into 0.0 (the ``propagation`` block, added
+            # #11823, is the surface that reports ``unavailable`` instead).
             return 0.0
+
+    def _stamp_counts(self) -> tuple[int, int]:
+        """Live non-operator ``:Point`` population and how many carry a
+        ``lastDreamedAt`` stamp — ONE query, ONE spelling of the predicate.
+
+        Used by :meth:`_metrics_coverage` (the ``coverage_pct`` ratio) and by
+        :meth:`_propagation_counts` (which publishes the same two numbers as
+        ``graph_live_claims`` / ``stamped``), so the two cannot drift apart.
+        """
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND (n.status IS NULL OR n.status <> 'draft') "
+            "RETURN count(n), "
+            "  sum(CASE WHEN n.lastDreamedAt IS NOT NULL THEN 1 ELSE 0 END)"
+        ).result_set
+        if not rows:
+            return 0, 0
+        # `sum(...)` returns a FLOAT on this engine (measured 3.0) — cast.
+        return int(rows[0][0] or 0), int(rows[0][1] or 0)
 
     def _propagation_counts(self) -> dict:
         """#11823 — the graph-scoped population a propagation pass does NOT choose.
@@ -32216,21 +32253,39 @@ class TortoiseSDK:
           existing stamp-coverage ratio uses.
         - ``operator_less_claims`` — its OWN ``NOT (n)-[:IMPL|NAND]-()`` count:
           the `_trivial_stamp`/``scanned_count`` population EP can never cover.
-          NOT ``graph_live_claims - ep_reachable_claims``: that subtraction is
-          wrong three ways (label-blind denominator, far-endpoint draft
-          filter, and Points edged only to a draft — which `_trivial_stamp`
-          does not stamp either).
+          NOT ``graph_live_claims - ep_reachable_claims``: the two are defined
+          by different rules — a live Point whose only ``IMPL|NAND`` edge
+          reaches a DRAFT or non-epistemic endpoint has an edge and is still
+          unreachable (#12116 review C-P2, measured with
+          ``create_direct_edge``). One query owns each number, and
+          ``unclassified_claims`` is the explicit remainder (below).
+        - ``unclassified_claims`` — ``graph_live - ep_reachable -
+          operator_less``: live non-operator ``:Point``s that DO have an
+          ``IMPL|NAND`` edge but whose far endpoint is draft or non-epistemic,
+          so EP excludes the factor and no pass can recompute them. Without
+          this field the block UNDER-reports — a graph whose only live claim
+          is draft-edged read ``no_belief: 0`` (measured, #12116 C-P2) — which
+          its own posture forbids ("may over-report, never under-report").
+          This subtraction IS sound where the ``affected`` one was not
+          (#12116 B-P2): all three terms are disjoint counts over the SAME
+          ``:Point`` population, so the partition is exact.
 
-        ⚠️ ``ep_reachable_claims`` INCLUDES anchor-less epistemic components
-        (`:Subject-[:IMPL]->:Object`, #7902) that a ``:Point``-anchored pass can
-        never clear, so ``no_belief`` may be non-zero on a converged graph. That
-        is a true statement (no belief is stored), and this instrument may
-        over-report — it must never under-report.
+        ⚠️ ``ep_reachable_claims`` INCLUDES live claims whose only ``IMPL|NAND``
+        edge reaches an operator with no usable factor — the operator's far
+        endpoint is DRAFT, so EP excludes the factor and no pass can
+        recompute the claim, yet the claim IS in the denominator (measured).
+        That is the benign non-zero ``no_belief`` a converged graph can carry,
+        and it is why this instrument may over-report but must never
+        under-report. ⛔ #12116 review B-P3: do NOT describe the over-report as
+        an anchor-less ``:Subject-[:IMPL]->:Object`` component — this query
+        anchors ``n:Point``, so such a component can never match it and can
+        never enter the denominator.
 
         Raises on a read failure: the caller reports ``unavailable`` rather
         than letting 0 mean both "no claims" and "could not read"
         (`docs/architecture/BOUNDED-OPERATION-CONTRACT.md` §1a).
         """
+        from .dream import TRIVIAL_STAMP_PREDICATE  # #11823 one spelling
         from .search_engine import ep_has_belief_cypher  # #11702 shared gate
         proj = self._get_proj()
         live = "(n.status IS NULL OR n.status <> 'draft')"
@@ -32246,30 +32301,31 @@ class TortoiseSDK:
         ).result_set
         reachable = int(reach_rows[0][0] or 0) if reach_rows else 0
         belief_present = int(reach_rows[0][1] or 0) if reach_rows else 0
-        # Second query: the :Point population the stamp ratio uses.
-        base_rows = proj.g.query(
-            "MATCH (n:Point) "
-            f"WHERE {non_op} AND {live} "
-            "RETURN count(n), "
-            "  sum(CASE WHEN n.lastDreamedAt IS NOT NULL THEN 1 ELSE 0 END)"
-        ).result_set
-        graph_live = int(base_rows[0][0] or 0) if base_rows else 0
-        stamped = int(base_rows[0][1] or 0) if base_rows else 0
+        # Second query: the :Point population the stamp ratio uses — the SAME
+        # helper `_metrics_coverage` calls, so the two cannot drift (#12116 A-P2).
+        graph_live, stamped = self._stamp_counts()
         # Third query: the operator-less population, as its OWN count. A
         # `NOT (n)-[:IMPL|NAND]-()` inside a `sum(CASE ...)` is rejected by the
         # engine ("expected Boolean or Null but was List", measured) — so it
         # cannot ride the aggregate above.
         less_rows = proj.g.query(
             "MATCH (n:Point) "
-            f"WHERE {non_op} AND {live} "
-            "AND NOT (n)-[:IMPL|NAND]-() "
+            f"WHERE {TRIVIAL_STAMP_PREDICATE} "
             "RETURN count(n)"
         ).result_set
         operator_less = int(less_rows[0][0] or 0) if less_rows else 0
-        # Invariants, asserted rather than assumed (a mixed population can make
-        # either negative — #11823 review measured -8.0 on a live fixture).
-        belief_present = min(max(belief_present, 0), reachable)
+        # No clamp: the numbers are reported as measured. A future mixed
+        # population must show up as `no_belief < 0` / a `belief_coverage_pct`
+        # outside [0, 1] — a VISIBLE defect — rather than being silently
+        # corrected into a plausible "fully covered" (#12116 review C-P3: a
+        # clamp is the opposite of the asserted invariant the comment claimed).
+        # `tests/test_11823_*` asserts the ranges instead.
         no_belief = reachable - belief_present
+        # The remainder of the partition (#12116 C-P2): edged, live, EP cannot
+        # reach it. NOT clamped — a negative value would mean the three counts
+        # came from different populations, and that must be VISIBLE (#12116
+        # C-P3: a silent clamp is a silent lie).
+        unclassified = graph_live - reachable - operator_less
         return {
             "graph_live_claims": graph_live,
             "ep_reachable_claims": reachable,
@@ -32279,6 +32335,7 @@ class TortoiseSDK:
                 (belief_present / reachable) if reachable else 0.0),
             "stamped": stamped,
             "operator_less_claims": operator_less,
+            "unclassified_claims": unclassified,
         }
 
     def _record_pass_reach(self, mode: str, max_hops: int | None,
@@ -33154,7 +33211,7 @@ class TortoiseSDK:
         # #3139: an explicit budget=0 is a legitimate no-op — report why.
         self._dream_metrics["last_pass_no_op_reason"] = "budget_zero"
         # #11823: the pass RAN and reached nothing — record that, so the health
-        # surface does not report "no_pass_in_this_process" for it.
+        # surface does not report "no_pass_observed_by_this_sdk" for it.
         self._record_pass_reach(mode, max_hops, 0, 0)
         # #3139 (review P2): this pass wrote no belief state, so the belief
         # count must not survive from a previous pass — a field documented as
@@ -33365,7 +33422,7 @@ class TortoiseSDK:
             # a topology nothing capped).
             dreamer._last_selection_stats = {}
             # #11823: a pass DID run (and reached nothing) — record it as such,
-            # else the health surface reports "no_pass_in_this_process" for it.
+            # else the health surface reports "no_pass_observed_by_this_sdk" for it.
             self._record_pass_reach("local", max_hops, 0, 0)
             return {"mode": "local", "iterations": 0, "converged": True,
                     "affected_claims": [], "budget_used": 0, "coverage": 0.0}
@@ -33391,7 +33448,10 @@ class TortoiseSDK:
         # #11823: record the pass's reach BEFORE the no-op guard — the guard
         # itself records metrics and then RAISES on the silent no-op, and that
         # pass's reach (nothing) is exactly what the instrument exists to
-        # expose. No extra query: the closure is needed below anyway.
+        # expose. NO extra read: `reachable` is the SAME value `coverage` uses
+        # below (one closure BFS per pass, hoisted here — recomputing it after
+        # the guard doubled the most expensive read on the write path, which
+        # D2-5's ≤500 ms embedded budget cannot pay; #12116 review A-P1).
         reachable = self._window_closure(anchors, max_hops)
         self._record_pass_reach("local", max_hops, len(affected), len(reachable))
         # #3139: fail closed BEFORE any dirty-root mutation — a silent no-op
@@ -33418,7 +33478,8 @@ class TortoiseSDK:
             self._register_failed_attempt(
                 affected,
                 run_ep=getattr(dreamer, "_last_run_ep_version", None))
-        reachable = self._window_closure(anchors, max_hops)
+        # #11823: `reachable` is the hoisted closure from above (one BFS per
+        # pass — do NOT recompute it here; #12116 review A-P1).
         coverage = (len(affected) / len(reachable)) if reachable else 0.0
         result["coverage"] = coverage
         result["budget_used"] = getattr(
@@ -33479,7 +33540,7 @@ class TortoiseSDK:
             self._register_failed_attempt(
                 set(self._dirty_roots) & affected,
                 run_ep=getattr(dreamer, "_last_run_ep_version", None))
-        reachable = self._window_closure(window, max_hops)
+        # #11823: `reachable` is the hoisted closure from above (one BFS per pass).
         coverage = (len(affected) / len(reachable)) if reachable else 0.0
         result["coverage"] = coverage
         # I6→I1 mapping: drop the scheduler-internal operators_deduped

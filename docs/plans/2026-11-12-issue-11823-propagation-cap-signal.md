@@ -27,15 +27,14 @@ unable to answer it:
 
 1. **The per-pass `coverage`** denominator is the pass's OWN radius —
    `coverage = len(affected) / len(self._window_closure(anchors, max_hops))`
-   (`tortoise/sdk.py:33236`, `:33293`), documented as *"local → affected / window-reachable"*
-   (`:32878`). A pass that consumes its window reports ≈1.0 regardless of how much of the graph it
+   (`tortoise/sdk.py::_dream_local` and `::_dream_stale_first` — `coverage = affected / len(reachable)`), documented as *"local → affected / window-reachable"*. A pass that consumes its window reports ≈1.0 regardless of how much of the graph it
    never reached. **Measured:** a write-path `local` pass on a 20-claim chain reported
    `coverage=0.857` (6 of the 7 claims in its own closure) while **6 of 20** live claims in the
    graph had a computed posterior.
 2. **The graph-wide `coverage_pct`** numerator is a freshness STAMP, not a stored belief —
-   *"fraction of live non-operator claims with a `lastDreamedAt` stamp"* (`:32110`) — over a
+   *"fraction of live non-operator claims with a `lastDreamedAt` stamp"* (`tortoise/sdk.py::_stamp_counts`, the ONE query both this ratio and the `propagation` block read) — over a
    denominator that includes a population for which **no belief can exist**: claims EP cannot reach.
-   A stamp is written for exactly that population by the trivial-scan path (`dream.py:673-677`), so the
+   A stamp is written for exactly that population by the trivial-scan path (`tortoise/dream.py::_trivial_stamp`, `TRIVIAL_STAMP_PREDICATE`), so the
    ratio can reach 1.0 over claims with nothing to report. **Measured:** a full pass reported
    `coverage=1.0`, `coverage_pct=1.0` over a claim that ended `confidence=None`,
    `posterior_alpha=None`, with `lastDreamedAt` set. **Corrected framing (PLAN-VERIFY cycle 1):** the
@@ -61,9 +60,9 @@ the two instrument defects are independent of each other (each one alone produce
 
 | # | Approach | Verdict |
 |---|---|---|
-| A | **Change the write-path pass to `stale-first`** (the issue body's proposed fix) | **REJECTED — it reverses a recorded decision.** `docs/epics/2026-08-13-903-dreaming-ep/04-plan.md:283` (D2-5): *"the write context never invokes scheduled/window mode — write → local only; window mode unreachable from the write path"*, and the epic's own risk table (`:365`) makes that the mitigating control for the embedded ≤500 ms latency budget. The contradiction test says a standard that contradicts a decision is not adoptable; the route is a **reopen**, which is raised on the issue (see §9). Not this lane's change. |
-| B | **Make `coverage`'s denominator graph-scoped** for `local`/`stale-first` | **REJECTED.** Reverses the documented I1 coverage semantics (`:32878`) and the per-mode contract in the epic's interfaces section; also destroys the signal `coverage` legitimately carries ("how much of the window I consumed"). A ratio with two different meanings on one key is worse than the silence it fixes. |
-| C | **Add `truncated`/`uncovered` keys to the `dream()` result** | **REJECTED.** `:33904`: *"on the dream result: the I1 local key-set is pinned exact and does not carry them (#6211 — see `_dream_local`)"*; pinned for all three modes by `tests/test_epic903_modes.py:15-22` (`LOCAL_KEYS`/`STALE_KEYS`/`FULL_KEYS`) and for the no-op path by `tests/test_dream.py:70-72`. |
+| A | **Change the write-path pass to `stale-first`** (the issue body's proposed fix) | **REJECTED — it reverses a recorded decision.** `docs/epics/2026-08-13-903-dreaming-ep/04-plan.md:280` (D2-5 — *"Write-path structural sub-case (D2-5)"*; an earlier cycle recorded `:283`, which is a blank line at BOTH heads — the correction was false and is reverted here): *"the write context never invokes scheduled/window mode — write → local only; window mode unreachable from the write path"*, and the epic's own risk table (`:365`) makes that the mitigating control for the embedded ≤500 ms latency budget. The contradiction test says a standard that contradicts a decision is not adoptable; the route is a **reopen**, which is raised on the issue (see §9). Not this lane's change. |
+| B | **Make `coverage`'s denominator graph-scoped** for `local`/`stale-first` | **REJECTED.** Reverses the documented I1 coverage semantics (the `coverage` docstring in `_dream_local`) and the per-mode contract in the epic's interfaces section; also destroys the signal `coverage` legitimately carries ("how much of the window I consumed"). A ratio with two different meanings on one key is worse than the silence it fixes. |
+| C | **Add `truncated`/`uncovered` keys to the `dream()` result** | **REJECTED.** `tortoise/sdk.py::_dream_local`'s #6211 note: *"on the dream result: the I1 local key-set is pinned exact and does not carry them (#6211 — see `_dream_local`)"*; pinned for all three modes by `tests/test_epic903_modes.py:15-22` (`LOCAL_KEYS`/`STALE_KEYS`/`FULL_KEYS`) and for the no-op path by `tests/test_dream.py:70-72`. |
 | D | **Graph-scoped propagation record on the health surface** — carry `no_belief`/`belief_coverage_pct` (denominator = the EP-reachable claim population, which the pass does not choose) plus the last pass's `mode`/`max_hops`/`affected`/`window_reachable` | **CHOSEN.** It answers the question the issue titles, adds no key to any pinned key-set, changes no mode selection, reverses no decision. |
 | E | **Emit a WARNING log from the pass** | **REJECTED.** `docs/architecture/BOUNDED-OPERATION-CONTRACT.md` §2a: *"Do not 'fix' any of these by adding a sentinel row, a magic string, or a warning log"* — a log is the "recorded somewhere the caller does not read" that the refusal clause forbids. |
 
@@ -71,8 +70,8 @@ the two instrument defects are independent of each other (each one alone produce
 `BOUNDED-OPERATION-CONTRACT.md:252` says a marker must be *"in the same object as the rows — not a
 side channel, not a log line, not a metric"*, which argues for C. The first draft resolved it on a
 premise that is **false**: that #6211 put the operator-cap report on the health surface. It did not
-— #6211's report is on the `compute_confidence` **result** (`sdk.py:33626`, `_report`) and on the
-Dreamer attribute; `dream_health_check()`'s dict carries no cap report (`:32082-32107`, and its
+— #6211's report is on the `compute_confidence` **result** (`tortoise/sdk.py::_report`) and on the
+Dreamer attribute; `dream_health_check()`'s dict carries no cap report (its
 `operator_counts` is the post-cap size). The premise that DOES hold is the contract's own dict-body
 rule: *"wrapping a **list** in an object is the return-type change; adding a field to an object body
 is not"* (`BOUNDED-OPERATION-CONTRACT.md:206-207`, the `list_points`/`/v1/search` precedent).
@@ -82,7 +81,7 @@ governs, though: `:252` is a **placement** rule ("in the same object as the rows
 bind here because §4 governs markers on **bounded operations** — the §2 census rows are list-shaped
 reads with a caller- or code-supplied bound — while this change adds a field to a **health record**,
 not to the rows of a bounded read. The authority that does support the placement is the #3139
-precedent in the same dict (`sdk.py:32088`: *"belief state WRITTEN — as distinct from
+precedent in the same dict (`tortoise/sdk.py::_guard_dream_progress`'s `last_belief_write_count` precedent: *"belief state WRITTEN — as distinct from
 `last_pass_output`, which counts stamps"*): the repo has already ruled, on this exact surface and for
 this exact reason, that belief observability belongs on the health record because the pass object's
 key-set is pinned. The remaining conflict — `dream()`'s own object still carries no reach signal — is
@@ -108,7 +107,7 @@ additive and is **not** an MCP/SDK surface change).
 
 | Surface | Kind | Test layer |
 |---|---|---|
-| `TortoiseSDK.dream_health_check()` dict | in-process read API (also served by `GET /v1/dream/health` and MCP `tortoise_graph_overview(section="dream_health")` — `tortoise_dream_health` is RETIRED, `config/surface-manifest.yml:877-881`) | unit, embedded (`tests/test_11823_*.py`) |
+| `TortoiseSDK.dream_health_check()` dict | in-process read API (also served by `GET /v1/dream/health` and MCP `tortoise_graph_overview(section="dream_health")` — `tortoise_dream_health` is RETIRED, `config/surface-manifest.yml:876-880`) | unit, embedded (`tests/test_11823_*.py`) |
 | `TortoiseSDK._dream_metrics` | in-process pass record; process-scoped, so empty on a fresh request-scoped SDK (see R4) | unit |
 | `_metrics_coverage()` / new `_propagation_counts()` / new `_edged_claim_ids()` | private helpers + the graph reads they perform (`_edged_claim_ids` is extracted from `_reachable_claim_count`, which then reuses it **with its closure term intact** — no second copy of the edged predicate, no behaviour change) | unit + one query-shape test |
 | `GET /v1/dream/health` | hosted read (returns the dict verbatim) | covered by the dict test; route test unchanged |
@@ -130,7 +129,8 @@ not a fix (D2-5).
 | `_dream_local` / `_dream_stale_first` / `_dream_full` | 3 adapters that must each record the pass's reach | this change | ✅ |
 | `_record_dream_metrics` | pass record writer | unchanged signature; reads a new metrics key | ✅ |
 | `dream_health_check` | read surface (embedded, hosted, MCP all read THIS dict) | this change | ✅ |
-| `_metrics_coverage` | existing stamp-coverage helper, must keep its value | unchanged behaviour, refactored to share one query | ✅ |
+| `_metrics_coverage` | existing stamp-coverage helper, must keep its value | unchanged behaviour; now delegates to `_stamp_counts()` so `coverage_pct` and the block's `stamped`/`graph_live_claims` cannot drift (#12116 A-P2) | ✅ |
+| `tortoise/dream.py::TRIVIAL_STAMP_PREDICATE` | the operator-less population predicate, one spelling | `_trivial_stamp` (two queries) + `_propagation_counts` (#12116 A-P3) | ✅ |
 | `compute_confidence` no-arg path | calls `self.dream(...)`; reads `dreamer._last_selection_stats` only | no interaction (no result keys touched) | ✅ |
 | `tests/test_dream.py` exact local key-set | contract pin | must stay green | ✅ |
 | `tests/test_epic903_observability.py`, `tests/test_dream_noop_3139.py` | alarm + metrics regressions | must stay green | ✅ |
@@ -139,10 +139,10 @@ not a fix (D2-5).
 ## 7. Implementation steps (each with the test that proves it)
 
 1. **`_edged_claim_ids()`** — the `edged` set lifted verbatim out of `_reachable_claim_count`
-   (`sdk.py:33564-33574`), which then **reuses it and keeps its closure term literally**:
+   (`tortoise/sdk.py::_reachable_claim_count` → `::_edged_claim_ids`), which then **reuses it and keeps its closure term literally**:
    `_reachable_claim_count` becomes `len(self._window_closure(anchors, max_hops) & self._edged_claim_ids())`
    — one spelling of the predicate, existing behaviour preserved by construction (corrected in
-   PLAN-VERIFY cycle 2: a naive extraction that dropped `:33576`'s `return len(closure & edged)` would
+   PLAN-VERIFY cycle 2: a naive extraction that dropped the closure term (`return len(closure & edged)`) would
    have inflated full-mode `coverage`'s denominator silently).
 2. **Denominator semantics (corrected in cycle 3 — the two populations must be the SAME population).**
    `ep_reachable_claims` is its **own `:Point`-scoped `count(DISTINCT n)`**: live non-operator
@@ -155,10 +155,14 @@ not a fix (D2-5).
    question; the extraction in step 1 exists only so `_reachable_claim_count` keeps ONE copy of ITS
    predicate.
    - `operator_less_claims` is likewise **its own count**: `MATCH (n:Point) WHERE <live> AND NOT
-     (n)-[:IMPL|NAND]-() RETURN count(n)` — the `_trivial_stamp` population (`dream.py:673-677`). It is
-     **not** `graph_live_claims - ep_reachable_claims`: the subtraction is wrong three ways (label-blind
-     denominator, far-endpoint draft filter, and Points edged only to a draft that `_trivial_stamp`
-     does not stamp — measured `-2` and `1`-vs-`scanned_count 0` on minimal fixtures).
+     (n)-[:IMPL|NAND]-() RETURN count(n)` — the `_trivial_stamp` population (`tortoise/dream.py::_trivial_stamp`). It is
+     **not** `graph_live_claims - ep_reachable_claims`: the subtraction is wrong two measured ways
+     (label-blind denominator, far-endpoint draft filter). ⚠️ **Corrected during BUILD:** a third
+     reason carried from an earlier cycle — "Points edged only to a draft that `_trivial_stamp` does
+     not stamp" — does **not** hold as stated: a draft-edged claim is still edged, and `create_operator`
+     routes the edge through an operator node, so the claim is reached. The draft gap exists only for a
+     DIRECT `IMPL|NAND` edge to a draft endpoint; the honest statement is that the two populations are
+     defined by different rules, which is why each has its own query.
    - Invariants (asserted, not merely documented): `0 ≤ no_belief ≤ ep_reachable_claims` and
      `0 ≤ belief_coverage_pct ≤ 1`.
    - ⚠️ `ep_reachable_claims` INCLUDES anchor-less epistemic components (`:Subject-[:IMPL]->:Object`,
@@ -175,21 +179,22 @@ not a fix (D2-5).
    Tests: `test_a_zero_pair_is_not_a_belief` + `test_a_baseline_prior_is_a_belief` +
    `test_counts_match_an_independent_query`.
 4. **`propagation` block in `dream_health_check()`** — `{graph_live_claims, ep_reachable_claims,
-   belief_present, no_belief, belief_coverage_pct, stamped, operator_less_claims, unavailable,
-   last_pass, last_pass_reason}`. `no_belief = ep_reachable_claims - belief_present` where BOTH terms are the
+   belief_present, no_belief, belief_coverage_pct, stamped, operator_less_claims,
+   unclassified_claims, unavailable, last_pass, last_pass_reason}`. `no_belief = ep_reachable_claims - belief_present` where BOTH terms are the
    `:Point`-scoped population of step 2/3 (so the subtraction is inside one population), and
    `belief_coverage_pct = belief_present / ep_reachable_claims` (0.0 when the denominator is 0).
    Integer casts are explicit (`sum(...)` returns a FLOAT on this engine — measured `3.0` — so the
    block publishes `int(...)`). `unavailable: <reason>` when the read fails (so "0 claims" and
    "could not read" never collapse — `BOUNDED-OPERATION-CONTRACT.md` §1a), and `last_pass: null` +
-   `last_pass_reason: "no_pass_in_this_process"` when no pass ran in this process (the hosted
-   per-request SDK — never a reassuring zero). Tests:
+   `last_pass_reason: "no_pass_observed_by_this_sdk"` when no pass reached THIS instance's metrics —
+   a string that is literally true on every surface (⛔ corrected from `"no_pass_in_this_process"`
+   after code review #12116 C-P2: the hosted door runs the pass on a DIFFERENT per-request SDK, so
+   "no pass ran in this process" would be false there), never a reassuring zero. Tests:
    `test_a_stamped_claim_with_no_belief_is_reported` (the mutation target),
    `test_unreadable_propagation_is_reported_not_zeroed`,
-   `test_no_pass_in_this_process_is_null_not_zero`.
+   `test_no_pass_observed_by_this_sdk_is_null_not_zero`.
 5. **The pass reach is recorded on EVERY pass arm, and BEFORE the no-op guard** (cycle-3 fix:
-   `_guard_dream_progress` itself calls `_record_dream_metrics` and then RAISES — `sdk.py:33144` →
-   `:33146` — so recording after the guard would report `"no_pass_in_this_process"` for the silent
+   `_guard_dream_progress` itself calls `_record_dream_metrics` and then RAISES — `tortoise/sdk.py::_guard_dream_progress` — so recording after the guard would report `"no_pass_observed_by_this_sdk"` for the silent
    no-op, the worst reach there is and the very failure this instrument exists to expose; the
    adapters' closure is computed after the guard, so `_record_pass_reach` takes the window it already
    has, called **before** `_guard_dream_progress`). Arms: local / stale-first / full (before the
@@ -198,7 +203,8 @@ not a fix (D2-5).
    refused before any work) → `last_pass` then describes the PREVIOUS pass; stated, not hidden.
    No extra query — the closure is already computed in the adapters. Tests:
    `test_the_pass_reach_is_recorded_without_a_graph_read` (query counter),
-   `test_last_pass_names_the_cap` (`max_hops`), `test_last_pass_uncovered_is_graph_scoped`
+   `test_last_pass_names_the_cap` (`max_hops`),
+   `test_last_pass_never_subtracts_across_populations` + `test_an_operator_less_pass_does_not_report_full_coverage`
    ("6 of 20, 14 uncovered"), `test_a_budget_zero_pass_is_recorded_not_absent`,
    `test_a_no_dirty_roots_pass_is_recorded_not_absent`, `test_a_silent_no_op_pass_records_its_reach`.
 6. **`coverage_pct` unchanged, documented as stamp coverage** — Test:
@@ -232,12 +238,16 @@ unreadable test goes red; drop the closure term from `_reachable_claim_count` wh
   RANGE — `0.0 <= coverage_pct <= 1.0` — so it passes under any denominator and is NOT the
   discriminator; corrected after PLAN-VERIFY cycle 1.)
 - R3 the pass hot path gains a graph read (write-path latency) → `test_the_pass_reach_is_recorded_without_a_graph_read`
-  (query counter asserts zero new reads inside `dream()`)
+  (asserts `_window_closure` runs exactly ONCE per `local` pass — a second call is the regression
+  that a "was a new helper called?" check missed; #12116 A-P1)
 - R4 the health surface raises, reports a fabricated 0, reports a reassuring zero for a pass that
-  never ran in this process, OR reports "no pass ran" for a pass that DID run and reached zero
+  never ran, reports a reason that is FALSE on the surface it is read from (the hosted door runs the
+  pass on another per-request SDK — #12116 C-P2), OR reports "no pass ran" for a pass that DID run and reached zero
   (hosted builds a per-request SDK; `_dream_metrics` is process-scoped; `budget=0` and the
   no-dirty-roots arm return before `_record_dream_metrics`) →
-  `test_unreadable_propagation_is_reported_not_zeroed`, `test_no_pass_in_this_process_is_null_not_zero`,
+  `test_unreadable_propagation_is_reported_not_zeroed`, `test_no_pass_observed_by_this_sdk_is_null_not_zero`,
+  `test_an_edged_but_unreachable_claim_is_not_invisible`,
+  `test_the_three_counts_partition_the_live_points`,
   `test_a_budget_zero_pass_is_recorded_not_absent` and `test_a_no_dirty_roots_pass_is_recorded_not_absent`
 - R5 the alarm fires (or stops firing) on normal graphs because of the new fields →
   `test_the_alarm_verdict_is_unchanged_by_the_new_fields` + `tests/test_dream_noop_3139.py`
@@ -251,9 +261,28 @@ unreadable test goes red; drop the closure term from `_reachable_claim_count` wh
   disjoint from the denominator) + `test_reachable_claim_count_is_unchanged` (the extraction preserves
   `closure & edged`).
   ⚠️ The zero-claim is scoped, not general: on a fixture whose **whole** edged population sits in the
-  full pass's `:Point`-anchored closure, a converged `full` pass leaves `no_belief == 0`. It is NOT
-  asserted as a general property — the anchor-less `:Subject→:Object` component (`dream.py:786`,
-  `sdk.py:33539`) is in the denominator and no pass can clear it.
+  full pass's `:Point`-anchored closure, a converged `full` pass leaves `no_belief == 0`.
+  ⛔ **Corrected after code review (#12116 B-P3):** the earlier framing said the anchor-less
+  `:Subject→:Object` component keeps the count non-zero — it CANNOT: the denominator query anchors
+  `n:Point`, so such a component never matches it (measured: adding one leaves `ep_reachable_claims`
+  unchanged). The real benign non-zero is a live `:Point` whose only `IMPL|NAND` edge reaches an
+  operator whose far endpoint is DRAFT: EP excludes the factor, so no pass recomputes the claim, yet
+  it is in the denominator.
+- R8 (added after review, #12116 B-P2) `last_pass` derives a "coverage" number by subtracting the
+  pass's `affected` from the graph denominator → `test_last_pass_never_subtracts_across_populations`
+  and `test_an_operator_less_pass_does_not_report_full_coverage`. `affected` is the window a pass
+  CONSUMED and includes the operator-less ids `_trivial_stamp` unions in (measured: `affected=20`,
+  `ep_reachable=6`, `no_belief=6`), so the subtraction published `uncovered: 0` over a graph where
+  nothing was covered — the exact false green this change exists to remove. The deficit is never
+  derived: `no_belief` is read from the graph AFTER the pass and IS the uncovered count.
+- R9 (added after review, #12116 C-P2) a live `:Point` falls into NO bucket, so `no_belief`
+  under-reports on a graph that has a belief-less live claim →
+  `test_an_edged_but_unreachable_claim_is_not_invisible` +
+  `test_the_three_counts_partition_the_live_points` (the remainder is `unclassified_claims`, and the
+  partition is exact).
+- R10 (added after review, #12116 C-P3) a mixed population is silently corrected by a clamp instead
+  of being visible → the clamp is gone; the ranges are asserted in the tests
+  (`test_no_belief_stays_inside_its_invariants`), so a negative `no_belief` reddens CI.
 - R7 the new reads make a polled endpoint expensive (`GET /v1/dream/health` is per-request; the
   denominator query is an edge traversal) → `test_the_propagation_read_is_three_aggregate_counts`
   (query counter: exactly **three** aggregate reads — `count(DISTINCT n)`+belief `sum` over the
@@ -279,7 +308,7 @@ surface.
 ## 9. Open question for the owner (reopen, not part of this diff)
 
 **D2-5 reopen.** Should the write-path pass become `stale-first`? The issue measures 20/20 in 1.5 s
-for one `stale-first` invocation. Against: D2-5 (`04-plan.md:283`) and its ≤500 ms embedded control
+for one `stale-first` invocation. Against: D2-5 (`04-plan.md:280`) and its ≤500 ms embedded control
 (`:365`), and the epic's documented residual that write-triggered-only deployments have no daemon
 (`:371`). This lane ships the visible cap either way; the mode change needs the owner's word because
 it reverses a recorded decision.
