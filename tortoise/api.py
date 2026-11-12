@@ -182,8 +182,18 @@ _ENVELOPE_KEYS_AT_PASSTHROUGH = _ENVELOPE_KEYS | {
     "actor",
 }
 
+#: …and the envelope name a RECORD must never carry: `projection_version`.
+#: The doors set it themselves as a KEYWORD (`add_point` / `add_operator` pass
+#: `projection_version=2`), so a value inside the RECORD is always a caller's —
+#: and it is the one envelope key `_norm`'s splice acts on semantically rather
+#: than as identity: the fold reads the record's value and skips the `#49`
+#: context strip a v2 stop-write exists to perform (#11835 review round 9, P3).
+#: Kept OUT of `_ENVELOPE_KEYS` on purpose — a passthrough door may legitimately
+#: pass it as a keyword, so only the RECORD channel refuses it.
+_RECORD_ENVELOPE_EXTRA = frozenset({"projection_version"})
 
-def _verify_record_vector_width(record: dict, type_: str) -> None:
+
+def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None:
     """A width declared on `_emit`'s POSITIONAL record must be the SEAM's answer.
 
     ⛔ NOT a refusal of the family, and that distinction is measured: the record
@@ -214,6 +224,29 @@ def _verify_record_vector_width(record: dict, type_: str) -> None:
              declared `f32`   ← the marker LIE, on the one channel built to be
                                 unreachable from any door
 
+    ⛔ THE VALUES ARE READ FROM THE MERGED VIEW, NOT FROM THE RECORD ALONE, and
+    that is the second half of this guard (#11835 review round 9, P1 — measured).
+    The replay's `_norm` is ``{**envelope, **record}`` — the record WINS per
+    key — so the fold reads the width from the record and the VECTOR from
+    wherever it is. Reading both out of `record` therefore verifies the wrong
+    pair: a record declaring ``f32`` while its `embedding` rides the keyword
+    payload passed here as "no vector to check" and journalled a lying marker
+    the fold then honoured, and the seam's own stamp wrote the truthful
+    ``f64`` onto the ENVELOPE in the same line (two contradictory declarations
+    in one record). Measured before this fix:
+
+        _emit("PointAdded", {"id": "p", "content": "c",
+                             "embedding_width": "f32"},
+              embedding=[0.1234567890123, 1/3])
+          -> journalled; envelope width `f64`, record width `f32`,
+             fold reads `f32` over [0.1234567890123, 0.3333333333333333]
+
+    So the merged view is what gets verified, and a declared ``f32`` with NO
+    decidable vector anywhere is a REFUSAL rather than the undecidable case:
+    `_stamp_journal_vector_width` POPS the key when there is no vector
+    (`tortoise/embeddings.py`), so "width over no vector" is a state the
+    contract says cannot exist.
+
     Undecidable input (a non-numeric ``embedding``, an unimportable seam —
     #5148: an import must never fail a WRITE) is treated as NO MISMATCH, i.e.
     exactly the behaviour before this guard; the guard only ever turns a lie
@@ -242,7 +275,15 @@ def _verify_record_vector_width(record: dict, type_: str) -> None:
     declared = record.get(_KEY)
     if declared is None or declared != _F32:
         return
-    values = record.get("embedding")
+    # `_norm` splices the record OVER the envelope on replay (`{**ev,
+    # **ev["point"]}`), so this is the pair the FOLD sees.
+    values = {**payload, **record}.get("embedding")
+    if values is None:
+        raise ValueError(
+            f"{_KEY}={declared!r} is declared over NO vector: `{type_}`'s "
+            f"record carries no `embedding` and neither does its envelope, and "
+            f"a width without a vector is a state the journal contract says "
+            f"cannot exist (the seam POPS the key when there is no vector).")
     try:
         truthful = (_is_shortest_f32_text(values)
                     or shortest_float32_vector(values) is not None)
@@ -280,7 +321,7 @@ def _refuse_caller_named_record_keys(keys, door: str) -> None:
             "`add_operator`) instead of naming it here.")
 
 
-def _refuse_caller_named_envelope_keys(keys, door: str) -> None:
+def _refuse_caller_named_envelope_keys(keys, door: str, *, record: bool = False) -> None:
     """Refuse a caller key that collides with the journal ENVELOPE.
 
     #11948: the envelope is the FUNNEL's to build. A payload key that shares a
@@ -290,8 +331,16 @@ def _refuse_caller_named_envelope_keys(keys, door: str) -> None:
     `initiated_by`, `agent_id`, `actor_user_id`, `corrects`). Nothing else in
     the write path re-checks the record's type, so a caller-typed record is
     folded by the replay as whatever it claims to be.
+
+    `record=True` adds the one envelope name that is a CALLER value on this
+    channel only (see `_RECORD_ENVELOPE_EXTRA`): the doors pass
+    `projection_version` as a keyword, so seeing it INSIDE the record means the
+    caller put it there and the replay will read it in preference to the
+    door's — defeating the v2 stop-write's context strip.
     """
-    named = sorted(set(keys) & _ENVELOPE_KEYS_AT_PASSTHROUGH)
+    forbidden = (_ENVELOPE_KEYS_AT_PASSTHROUGH | _RECORD_ENVELOPE_EXTRA
+                 if record else _ENVELOPE_KEYS_AT_PASSTHROUGH)
+    named = sorted(set(keys) & forbidden)
     if named:
         raise ValueError(
             f"{named} are journal ENVELOPE fields, which {door} does not own: "
@@ -543,12 +592,12 @@ class EventAPI:
             # over the envelope on replay, so a caller keyed `type=` / `ts=` /
             # `event_id=` here re-types or re-attributes the replayed record.
             _refuse_caller_named_envelope_keys(
-                record[0], f"the `{type_}` record door")
+                record[0], f"the `{type_}` record door", record=True)
             # ⛔ And the MARKER family is VERIFIED here rather than refused —
             # see `_verify_record_vector_width` for why a refusal is the wrong
             # shape on this channel (the record doors legitimately carry the
             # markers; each stamps its own payload through the seam).
-            _verify_record_vector_width(record[0], type_)
+            _verify_record_vector_width(record[0], type_, payload)
             payload["point"] = record[0]
         # #7951 — THE JOURNAL ORDERING CONTRACT: **journal first, then
         # project.** The full contract (and the failure-mode argument) lives at

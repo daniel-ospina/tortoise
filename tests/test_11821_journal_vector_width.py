@@ -1123,7 +1123,19 @@ def test_the_record_channel_cannot_carry_an_envelope_name(tmp_path):
                        ("initiated_by", "somebody"),
                        ("agent_id", "agent-9"),
                        ("actor_user_id", "user-9"),
-                       ("event_id", "forged-event")):
+                       ("event_id", "forged-event"),
+                       # ⛔ `projection_version` is the one envelope name that is
+                       # NOT identity but BEHAVIOUR: the fold reads it and skips
+                       # the `#49` context strip. The doors pass it as a KEYWORD
+                       # (`projection_version=2`), so a value inside the RECORD
+                       # is always the caller's and `_norm`'s splice makes it
+                       # win. Measured at `59fc1deb15`: `add_point(...,
+                       # projection_version=0, context={...})` journalled `2` on
+                       # the envelope, `0` in the record, and the fold kept the
+                       # context — the caller defeating the v2 stop-write. Kept
+                       # out of the shared set on purpose: a passthrough door
+                       # may legitimately pass it as a keyword.
+                       ("projection_version", 0)):
         with pytest.raises(ValueError, match="ENVELOPE"):
             api.add_point("hello", provenance("src:7", [0, 5], "q"),
                           **{key: value})
@@ -1338,9 +1350,9 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
     # sibling door raised on the identical payload. Pinned at BOTH doors for
     # the reason the money and kind rows are: the enumeration rots, the pin
     # does not.
-    with pytest.raises(Exception, match="percent|basisPoints|ratio"):
+    with pytest.raises(Exception, match=r"percent|basisPoints|ratio"):
         api.emit_belief("ConfidenceChanged", id="node-1", basisPoints=20000)
-    with pytest.raises(Exception, match="percent|basisPoints|ratio"):
+    with pytest.raises(Exception, match=r"percent|basisPoints|ratio"):
         api.add_object("an object", "skill", id="obj-pct", basisPoints=20000)
     assert not journal.exists() or not journal.read_text().strip(), (
         "the refusal must not leave a half-record behind")
@@ -1569,3 +1581,40 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
         f"blanket refusal on the positional channel would break the door, got {widths}")
     assert records[1]["point"]["embedding"] == [0.1, 0.2], (
         "the door's vector must reach the journal untouched")
+
+    # 4. ⛔ THE VALUES ARE THE MERGED VIEW'S, NOT THE RECORD'S (#11835 review
+    #    round 9, P1 — measured). `_norm` splices the record OVER the envelope,
+    #    so the fold reads the width from the record and the vector from
+    #    wherever it happens to be. A record that declares `f32` while its
+    #    vector rides the KEYWORD payload (which `add_event` documents as
+    #    allowed, so the funnel must cope) passed the record-only read as "no
+    #    vector to check" and journalled a marker the fold then honoured —
+    #    while the seam's own stamp wrote the truthful `f64` on the envelope in
+    #    the SAME line. Two contradictory declarations, one record.
+    with pytest.raises(ValueError, match="is not what the values say"):
+        api._emit("PointAdded",
+                  {"id": "p-split", "content": "c",
+                   JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
+                  embedding=[0.1234567890123, 1 / 3])
+
+    # 5. …and a declared width over NO vector anywhere is refused rather than
+    #    the undecidable case: `_stamp_journal_vector_width` POPS the key when
+    #    there is no vector, so "width over no vector" is a state the contract
+    #    says cannot exist.
+    with pytest.raises(ValueError, match="declared over NO vector"):
+        api._emit("PointAdded",
+                  {"id": "p-nowidth", "content": "c",
+                   JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
+    assert [json.loads(ln) for ln in
+            journal.read_text(encoding="utf-8").splitlines() if ln.strip()] == records, (
+        "both refusals precede the commit point — the journal must be unchanged")
+
+    # 6. The merged view agrees when the vector is on the ENVELOPE and the
+    #    record declares the width the seam would also declare for it.
+    api._emit("PointAdded", {"id": "p-split-ok", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: "f64"},
+              embedding=[0.1, 0.2])
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(records) == 3 and records[-1]["point"]["embedding_width"] == "f64", (
+        "a truthful declaration over the envelope's vector must still land")
