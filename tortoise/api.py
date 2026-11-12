@@ -856,8 +856,10 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     # about it, so every arm below passes on the seam's reading while the journal
     # stores the other one. The principle of this guard is that a value two
     # readers disagree about cannot carry a width — so the vector must be made
-    # of elements BOTH readers agree on, which is exactly `type(x) in (int,
-    # float)`. A subclass, a numeric `str`, a `bool`, a `Decimal` or a nested
+    # of elements BOTH readers agree on, which is exactly `type(x) is int or
+    # type(x) is float` (IDENTITY, not `type(x) in (int, float)`: a membership
+    # scan runs the METACLASS's `__eq__`, #11996 review round 17). A subclass, a
+    # numeric `str`, a `bool`, a `Decimal` or a nested
     # sequence is refused rather than verified; no producer here passes one, and
     # the cost of being wrong is a refused write, not a forged durable fact.
     #
