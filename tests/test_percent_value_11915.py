@@ -227,12 +227,14 @@ class TestThePayloadWalk:
 
         ⛔ ``test_a_payload_deeper_than_the_bound_is_refused_not_skipped`` builds
         its payload ``PAYLOAD_MAX_DEPTH + 1`` deep, so ``>`` and ``>=`` BOTH
-        raise and the mutant is invisible — measured: flipping the comparison to
-        ``>=`` left the whole suite green (239 passed), i.e. the bound was
-        unfalsifiable while money's equivalent guard was pinned. The
-        discriminating half is the payload AT the bound: the walk must GRADE it,
-        not refuse it, because refusing it would be a false block on a write the
-        gate exists to let through. Money's sibling pin
+        raise and the mutant is invisible — measured BEFORE this test existed:
+        flipping the comparison to ``>=`` left the whole suite green (239
+        passed: the 49 this file then held plus the money suite's 190), i.e. the
+        bound was unfalsifiable while money's equivalent guard was pinned. At
+        this head the same mutant reds exactly ``[at-the-bound]``, nothing else.
+        The discriminating half is the payload AT the bound: the walk must GRADE
+        it, not refuse it, because refusing it would be a false block on a write
+        the gate exists to let through. Money's sibling pin
         (``test_the_bound_itself_still_grades``) is parametrised the same way.
 
         ``depth == PAYLOAD_MAX_DEPTH`` is accepted, ``depth == MAX + 1`` is
