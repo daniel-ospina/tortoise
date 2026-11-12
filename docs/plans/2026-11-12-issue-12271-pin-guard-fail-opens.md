@@ -84,7 +84,7 @@ on it too); reverting the per-primary model reds `mut-115/116`; reverting the qu
 | `_run_commands` | quote-aware + operator-aware comment strip | unit (`test_a_quoted_hash_…`) + all line-unit arms |
 | `_strip_trailing_comment` | word-boundary scanner: quotes, escapes, substitution/assignment/group `)`, shares `COMMENT_START_CHARS` | unit (`test_a_substitution_closer_…`, `test_an_escaped_or_assignment_…`) + fail-closed message scan |
 | `_without_comment` | now DELEGATES to `_strip_trailing_comment` (one rule, not two) | `#12069 review 15/16` rows unchanged |
-| **row arms over the real workflow** | **`_run_commands` output changes on 18 of 85 `run:` steps of `python-ci.yml`** (measured by diffing main vs this change over every step) — **all restorations, no step is shorter**, and the guarded job's own PIN step is one of them | full module (372 tests) |
+| **row arms over the real workflow** | **`_run_commands` output changes on 18 of 85 `run:` steps of `python-ci.yml`** (measured by diffing main vs this change over every step) — **all restorations, no step is shorter**, and the guarded job's own PIN step is one of them | full module (375 tests) |
 
 ## Wiring
 
@@ -92,7 +92,7 @@ on it too); reverting the per-primary model reds `mut-115/116`; reverting the qu
 |---|---|---|---|
 | `_run_commands()` — a single definition site; every caller (row arms, `_github_path_writes`, `_executed_lines`, pin-step reads) inherits the corrected text | in-file function | single `def`; the full module exercises the callers | ✅ |
 | `_is_command_position()` — `_owning_verb`'s walk-back, i.e. whether a line's verb is graded at all | in-file function | `mut-116` (quoted two-`-exec`) | ✅ |
-| `_strip_trailing_comment()` — `_run_commands` and the fail-closed message scan | in-file function | both asserted by the 372-test suite | ✅ |
+| `_strip_trailing_comment()` — `_run_commands` and the fail-closed message scan | in-file function | both asserted by the 375-test suite | ✅ |
 | `_without_comment()` — `_compared_variables` comparison path | in-file function → now delegates | `#12069 review 15/16` rows unchanged | ✅ |
 | `_replaces_a_client_binary()` — row arm, polarity table, wiring tests | in-file function | `mut-108/109/111/112/113` + wiring test | ✅ |
 | CI consumer — `python-ci.yml` `test (d)` runs this module | external workflow | module green locally; workflow untouched | ✅ |
@@ -122,9 +122,11 @@ on it too); reverting the per-primary model reds `mut-115/116`; reverting the qu
 - **R1** A quoted terminator still becomes an operand → replacement GREEN (fail-open). → caught by `mut-108`/`mut-109` + mutation proof.
 - **R2** A quoted `#` still erases the live command after it → every rule blind on that line. → caught by `test_a_quoted_hash_does_not_erase_the_live_command_after_it`.
 - **R3** A tombstone after an operator (`;#`, `&&#`, `|#`) survives → a commented-out act satisfies a rule. → caught by the same test's operator cases.
-- **R4** The fix OVER-refuses: blanket-refusing every quoted `;` turns reads RED. → caught by `mut-110`/`mut-114` (reads with a quoted terminator stay GREEN) and the 372-test suite.
+- **R4** The fix OVER-refuses: blanket-refusing every quoted `;` turns reads RED. → caught by `mut-110`/`mut-114` (reads with a quoted terminator stay GREEN) and the 375-test suite.
 - **R5a** **over-strip erases a live command (fail-open)** — the direction this change can genuinely move: a `)` or a token after a terminator read as inert. → caught by `test_a_substitution_closer_is_not_a_comment_boundary`, `test_an_escaped_or_assignment_closer_does_not_start_a_comment` and `mut-111/112/113`, each of which goes red if its mechanism is reverted (measured).
-- **R5b** false REDs in the fail-closed message scan, because the comment rule now reaches more arms. → caught by the full module (`372 passed`) + `ruff check`.
+- **R5b** false REDs in the fail-closed message scan, because the comment rule now reaches more arms. → caught by the full module (`375 passed`) + `ruff check`.
+- **R6** the find TERMINATOR model applied outside a `find`/`xargs` command → `cp -a src + "$b/16/bin/"` stops being read and the replacement goes GREEN (this was a RED→GREEN regression the first cut introduced; found by the PR review, P0). → caught by `mut-118`/`mut-119` + the CONTROL `mut-120`; reverting the `primary and` gate reds exactly those three.
+- **R7** a quoted/escaped `;` counted as a list separator in ANY command → `echo ';' chmod -R 755 "$b/16/bin"` becomes a false RED, and `cp -a src ';' "$b/16/bin/"` a false GREEN (found by the PR review, P1). → caught by `mut-119`/`mut-120`; the rule is now gated on the segment's own head word (`_in_find_segment`).
 - **R5c** applied to the REAL workflow: `_run_commands` now restores 18 of 85 `run:` step bodies (never truncates one). → caught by diffing `_run_commands` over every step of `python-ci.yml` on main vs this change; the full module re-asserts every row arm over the real job.
 
 **Threat classes** (gate-enforcement):
@@ -135,7 +137,7 @@ on it too); reverting the per-primary model reds `mut-115/116`; reverting the qu
 - `T5` `find` expression tokens (`\)`, `\(`, `!`, `-o …`) after a terminator → must not become "the last path"; and a **second** `-exec` primary's destination must still be read.
 - `T6` escaped character or assignment-value `)` before `#` → must NOT end the word (added after round 2, measured).
 
-**Out of scope — must NOT be raised** (note, file, do not chase): the guard's pre-existing stated residuals (extractor destinations, `sh -c` inner verbs, heredoc bodies, a separately-quoted base); `ruff format` drift that already exists on `main`; anything in the workflow YAML itself. **Backtick spans, ANSI-C `$'…'` strings and a terminator held in a variable are measured fail-opens on this surface and are FILED as #12276** — not chased here.
+**Out of scope — must NOT be raised** (note, file, do not chase): the guard's pre-existing stated residuals (extractor destinations, `sh -c` inner verbs, heredoc bodies, a separately-quoted base); `ruff format` drift that already exists on `main`; anything in the workflow YAML itself. **Backtick spans, ANSI-C `$'…'` strings, a terminator held in a variable, a `\;` token in a NON-find command, and a backslash-continued trailing comment are measured fail-opens on this surface and are FILED as #12276** — not chased here.
 
 **Acceptance:** every `R<n>` has its named evidence, and no open item remains on the declared surface.
 

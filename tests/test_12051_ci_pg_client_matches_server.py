@@ -1012,11 +1012,13 @@ def _run_commands(step: dict) -> str:
 
     became `b=/usr/lib/postgresql; echo "` — the rsync never reached any rule, and
     the step was GREEN. `_strip_trailing_comment` walks the line and cuts at a `#`
-    that BEGINS A WORD — column 0, or after an unescaped, unquoted whitespace or
-    operator — which is bash's own rule ("A word begins at the beginning of a
-    line, after unquoted whitespace, or after an operator"). It also knows that a
+    that BEGINS A WORD — column 0, or after unquoted, unescaped whitespace or one
+    of the list operators `; & | (` (bash: "A word begins at the beginning of a
+    line, after unquoted whitespace, or after an operator"; `<`/`>` are
+    redirections and are NOT in the class). It also knows that a
     substitution/assignment `)` is a word part while a GROUP-closing one is an
-    operator (#12271 PLAN-VERIFY rounds 1-2, both measured).
+    operator, and that a backslash escapes its partner inside double quotes
+    (#12271 / #12279 review, each measured).
     """
 
     joined = _run_code(step).replace("\\\n", " ")
@@ -1697,18 +1699,22 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
             continue
         # Not operands: a `find … \\;`/`xargs` terminator (`+`), the escaped `\\;`
         # itself, and the leading fragment the `2>&1` split leaves at `&`.
+        # ⛔ ONLY INSIDE AN `-exec` PRIMARY (#12279 REVIEW P0, measured RED→GREEN).
+        # Applied unconditionally, this branch swallowed a `+` / `';'` token in ANY
+        # command — `cp -a src + "$b/16/bin/"` set `awaiting_exec` and the
+        # destination was never read, so a complete replacement went GREEN (main
+        # REFUSED it). Outside a find primary those tokens are ordinary OPERANDS.
         # ⛔ ANY QUOTING OF A TERMINATOR IS THE SAME TERMINATOR (#12271, measured
         # FAIL-OPEN): `find … -exec cp {} "$b/16/bin/" ';'` and its `";"` spelling
         # are valid `find` terminators, but compared verbatim they were not in the
         # set — so the terminator became the LAST OPERAND and the destination was
         # no longer "last", sparing the whole replacement (GREEN).
-        if bare in {"+", "\\;", ";"}:
-            if primary in primary_span:
-                primary_span[primary] = (primary_span[primary][0], token_end + seg_start)
+        if primary and bare in {"+", "\\;", ";"}:
+            primary_span[primary] = (primary_span[primary][0], token_end + seg_start)
             awaiting_exec = True
             expect_value = False
             continue
-        if awaiting_exec:
+        if primary and awaiting_exec:
             continue  # a find EXPRESSION token: never an operand
         # ⛔ AN OPTION IS NOT AN OPERAND (#12069 review round 22, measured):
         # `--exclude-from=/etc/rsync-exclude` and `--log-file="$SCRATCH/x.log"`
@@ -1743,6 +1749,23 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
     return start >= last[0] and end <= last[1]
 
 
+def _in_find_segment(line: str, pos: int) -> bool:
+    """Is `pos` inside a `find`/`xargs` command segment?
+
+    The `';'` / `\\;` token is a find TERMINATOR there, and an ordinary OPERAND
+    everywhere else — `echo ';' chmod …` prints text, while
+    `cp -a src ';' "$b/16/bin/"` really copies. Reading it as a separator in both
+    made one a false RED and the other a false GREEN (#12279 review P1).
+    """
+
+    seg_start, _ = _segment_bounds(line, pos)
+    for word in line[seg_start:pos].split():
+        if word in _WRAPPER_WORDS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", word):
+            continue  # `sudo find …`, `env FOO=1 find …`
+        return word.rsplit("/", 1)[-1] in {"find", "xargs"}
+    return False
+
+
 def _is_command_position(line: str, start: int) -> bool:
     """Is the word at `start` the COMMAND of its list element, not an operand?
 
@@ -1764,7 +1787,19 @@ def _is_command_position(line: str, start: int) -> bool:
     index = len(tokens) - 1
     while index >= 0:
         token = tokens[index]
-        if token.rstrip(";|&({") != token or token.strip("\"'") in {";", "\\;"}:
+        # A list separator ends the walk as a COMMAND. A GLUED separator
+        # (`true;cp`) is covered by `rstrip`, because the separator is part of the
+        # word.
+        if token.rstrip(";|&({") != token:
+            return True
+        # ⛔ A `find`/`xargs` TERMINATOR IS A SEPARATOR ONLY INSIDE A find/xargs
+        # COMMAND (#12279 REVIEW P1, measured in BOTH directions). `';'` and `\;`
+        # are ordinary OPERANDS of any other command — `echo ';' chmod -R 755 …`
+        # only PRINTS text, while blanket-treating them as separators made it a
+        # false RED; and skipping the client-dir mention on
+        # `cp -a src ';' "$b/16/bin/"` made it a false GREEN. Gated on the segment's
+        # own head word, which is the only place the token really terminates.
+        if token.strip("\"'") in {";", "\\;"} and _in_find_segment(line, start):
             return True
         # ⛔ THE VERB WORD, NOT THE RAW TOKEN (#12069 review round 27, measured
         # FAIL-OPEN). `BINARY_MUTATION_RE` starts with `\b`, so it can never match
@@ -5748,6 +5783,25 @@ BINARY_MUTATION_POLARITY = [
         False,
         "#12271 CONTROL: the same shape copying OUT of the client dir stays GREEN",
     ),
+    # ⛔ A TERMINATOR TOKEN OUTSIDE A find PRIMARY IS AN ORDINARY OPERAND (#12279
+    # REVIEW P0, measured RED→GREEN). Applying the find model unconditionally made
+    # `+` / `';'` end the operand scan in ANY command, so the destination was never
+    # read and a complete replacement went GREEN — `main` refused both.
+    (
+        'cp -a /tmp/src/. + "$b/16/bin/"',
+        True,
+        "#12279 P0: a `+` token in a non-find command is an operand, not a terminator",
+    ),
+    (
+        'cp -a /tmp/src/. \';\' "$b/16/bin/"',
+        True,
+        "#12279 P0: a quoted `;` in a non-find command is an operand",
+    ),
+    (
+        "cp -a \"$b/16/bin\" /tmp/snap +",
+        False,
+        "#12279 P0 CONTROL: the same tokens on a READ stay GREEN",
+    ),
 ]
 
 
@@ -5773,8 +5827,9 @@ def test_a_quoted_hash_does_not_erase_the_live_command_after_it() -> None:
         assert replacement in survived, (
             f"a quoted `#` ({quoted}) erased the live command after it: "
             f"`_run_commands` returned {survived!r}. A `#` inside quotes is data, "
-            "not a comment — the shell only starts one at column 0 or after "
-            "whitespace AND outside a quoted span."
+            "not a comment — the shell starts one at column 0, after unquoted "
+            "whitespace, after an unquoted operator, or after a group-closing `)`; "
+            "never inside a quoted span."
         )
         assert any(_replaces_a_client_binary(line) for line in _executed_lines(None, step)), (
             f"the replacement after a quoted `#` ({quoted}) is not refused — the "
@@ -5786,9 +5841,10 @@ def test_a_quoted_hash_does_not_erase_the_live_command_after_it() -> None:
     # ⛔ AND IT MUST BE DROPPED AFTER AN OPERATOR TOO (#12271 finding 3). Bash: a
     # word begins "at the beginning of a line, after unquoted whitespace, or after
     # an operator" — so `;#`, `&&#`, `)#` all open a comment, and a stripper that
-    # only reads whitespace leaves a tombstone visible. `COMMENT_START_RE` already
-    # knew this (`#12069 review 16`); `_strip_trailing_comment` reintroduced the
-    # narrow rule, which is why the two now share `COMMENT_START_CHARS`.
+    # only reads whitespace leaves a tombstone visible. The regex that used to
+    # know this (`COMMENT_START_RE`, `#12069 review 16`) and the hand-rolled
+    # stripper that reintroduced the narrow rule are now ONE function; this change
+    # deletes the regex, so `COMMENT_START_CHARS` has a single owner.
     for prefix in ("true  #", "true;#", "true;;#", "true&&#", "true||#", "true|#", "(true)#"):
         step = {"run": f"{prefix} was: sudo cp -a x y"}
         assert "sudo cp" not in _run_commands(step), (
@@ -6647,10 +6703,16 @@ def _runs_on_labels(job: dict) -> list[str]:
 def _strip_trailing_comment(line: str) -> str:
     """`line` up to its first UNQUOTED `#` that opens a trailing comment.
 
-    A `#` starts a comment only at column 0 or after whitespace, and only OUTSIDE
-    a single- or double-quoted span — so `echo "::error::…#12051 …"` is ONE
-    string, not a message followed by a comment (the issue number itself lives
-    behind a `#`, and truncating there would hide the text under test).
+    A `#` starts a comment only where a WORD can begin — column 0, or after
+    unquoted, unescaped whitespace or one of `; & | (` — and never inside a
+    single- or double-quoted span, so `echo "::error::…#12051 …"` is ONE string,
+    not a message followed by a comment (the issue number itself lives behind a
+    `#`, and truncating there would hide the text under test).
+
+    ⛔ THE NARROW RULE IS HISTORY, NOT THE SPEC (#12279 REVIEW P2). An earlier
+    version cut at "column 0 or after whitespace" only, which `#12069 review 16`
+    had already replaced in a sibling function; naming the narrow rule in the
+    present tense here is exactly the drift that let the two diverge.
 
     WHY THIS EXISTS: the message scan below reads a step that is mostly `echo`
     lines, and MEASURED (review cycle 8 of `5ed3b1950b`) a trailing `# …` comment
@@ -6680,6 +6742,14 @@ def _strip_trailing_comment(line: str) -> str:
     while index < len(line):
         char = line[index]
         if quote:
+            # ⛔ A BACKSLASH ESCAPES INSIDE DOUBLE QUOTES TOO (#12279 REVIEW P1,
+            # measured FAIL-OPEN). Without this, `echo "expected \"16\" # note"`
+            # closed the span at the `\"`'s quote, so the `#` — which bash keeps
+            # INSIDE the string — was read as a boundary and erased the rest of the
+            # line (a live replacement with it). Single quotes have no escapes.
+            if quote == '"' and char == "\\" and index + 1 < len(line):
+                index += 2
+                continue
             if char == quote:
                 quote = ""
             boundary = False
