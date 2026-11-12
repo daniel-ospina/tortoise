@@ -692,3 +692,39 @@ def test_a_surface_held_then_minted_is_counted_once(monkeypatch):
         "the by-rule table is derived from the same final-disposition set")
     assert [h["section"] for h in result["held_subjects"]] == ["Product Strategy"], (
         "the section-A occurrence stays on the record — never a silent drop")
+
+
+# ── 15. the offset locates the phrase the CUE judged (round-3 review P2) ────
+
+def test_the_phrase_offset_survives_case_and_spacing(monkeypatch):
+    """`phrase_offset` must find a phrase the cue HELD — not the raw string.
+
+    ``referentiality.judge`` decides on case-folded, edge-stripped TOKENS, so
+    ``The  Former`` is HELD. Locating it with a case-sensitive search of the raw
+    surface recorded ``None`` for a phrase that IS in the section — measured at
+    the #12102 round-3 review — which is the "None means absent" reading a
+    measurement (#5087 R1) would take. The offset is now built from the SAME
+    tokeniser the decision used, so the two paths cannot disagree.
+    """
+    monkeypatch.setenv(FLAG, "1")
+    body = "The report compares the former approach against the latter one here."
+
+    for surface in ("The  Former", "the   former", "the former"):
+        api, _proj, _log = _proj_api()
+        payload = {"subjects": [{"name": surface, "subjectKind": "other"}],
+                   "objects": [], "aboutEntities": []}
+        monkeypatch.setattr(extractor_mod, "_SemanticStage", _FixedStage)
+        monkeypatch.setattr(_FixedStage, "payload", payload, raising=False)
+        ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
+        result = ext.extract_entities(
+            "## Product Strategy\n" + body + "\n", "strategy.md", api)
+
+        assert result["subjects_held"] == 1, f"{surface!r} must be HELD"
+        held = result["held_subjects"]
+        assert len(held) == 1
+        assert held[0]["phrase_offset"] is not None, (
+            f"{surface!r} is present in the section, so the offset must exist — "
+            "the cue judged its tokens, and the offset searches the same phrase")
+        assert body[held[0]["phrase_offset"]:held[0]["phrase_offset"] + 10].lower() == "the former", (
+            f"the offset must point AT the phrase (got "
+            f"{held[0]['phrase_offset']}: {body[held[0]['phrase_offset']:][:14]!r})")
