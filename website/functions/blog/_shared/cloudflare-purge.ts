@@ -12,7 +12,11 @@
 //
 // Env bindings (Pages Function environment variables, server-side only):
 //   CF_API_TOKEN   — Cloudflare API token with Zone.Cache Purge permission
-//   CF_ZONE_ID     — the zone id for tortoise.premiselabs.co
+//   CF_ZONE_ID     — the zone id for `premiselabs.co`, ONE zone for both hosts: the
+//                    blog's canonical origin is the apex since #11765, and the
+//                    product host is a SUBDOMAIN of it, so a purge-by-URL resolves
+//                    to the same zone whichever host the URL names. Purge URLs are
+//                    built from `SITE_URL` (`_lib.ts`), never from the request.
 //
 // ZERO-DEPENDENCY (plain TS, no imports).
 

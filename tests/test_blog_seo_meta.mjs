@@ -18,7 +18,7 @@ import {
   canonicalKeyword,
   allKeywords,
 } from "../website/functions/blog/_shared/seo-keywords.ts";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { rateLimited, __resetRateLimits } from "../website/functions/blog/_shared/agent-auth.ts";
 import {
   headHtml,
@@ -2248,6 +2248,36 @@ console.log("no rendered blog page names the retired host (#11765)");
   assert(
     [...new Set([...navHtml("blog").matchAll(RETIRED_URL_RE)].map((m) => m[0]))].length === NAV_PRODUCT_HREFS.length,
     "the nav's retired-host hrefs are exactly the three product links #11764 owns — no fourth appeared",
+  );
+
+  // ── ONE WRITER FOR THE ORIGIN ───────────────────────────────────────────
+  // The negative guard above only sees surfaces this file renders. Three
+  // derivation sites are INVISIBLE to it because they never reach a page we
+  // render here — the edge-purge URL (`api/purge.ts`), the agent API's returned
+  // `url` (`api/posts/[[path]].ts`), and the notify handler's IndexNow payload
+  // (`api/notify-publish.ts`, asserted on its own in
+  // `tests/test_blog_indexnow.py`). Rather than mock three handlers, assert the
+  // PROPERTY THEY ALL DEPEND ON: the host literal is written in exactly ONE file
+  // under `website/functions/blog/` — the constant. Everything else must
+  // interpolate `SITE_URL`, so a new hardcoded host anywhere in this subtree is a
+  // red here, including in a file no render test touches.
+  const BLOG_FN = new URL("../website/functions/blog/", import.meta.url);
+  const walk = (dir) =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(new URL(`${e.name}/`, dir)) : [new URL(e.name, dir)],
+    );
+  const sources = walk(BLOG_FN).filter((u) => u.pathname.endsWith(".ts"));
+  assert(sources.length >= 10, `walked the blog Functions' sources (${sources.length} files)`);
+  // The match is an ABSOLUTE URL, not the bare host: a derivation site builds a URL
+  // (so it carries a scheme), while a bare-host literal is a HOST COMPARISON
+  // (`RETIRED_SITE_HOSTS`) and a comment naming the zone is documentation, not a
+  // second writer. Its BEHAVIOUR is covered by the render guard above either way.
+  const hostLiteralWriters = sources.filter((u) =>
+    /https?:\/\/(?:[a-z0-9-]+\.)?premiselabs\.co/.test(readFileSync(u, "utf8")));
+  assert(
+    hostLiteralWriters.length === 1 && hostLiteralWriters[0].pathname === new URL("_lib.ts", BLOG_FN).pathname,
+    `the origin literal is written in ONE file (_lib.ts) and nowhere else in website/functions/blog — ` +
+      `found ${JSON.stringify(hostLiteralWriters.map((u) => u.pathname.split("/website/functions/blog/")[1]))}`,
   );
 }
 
