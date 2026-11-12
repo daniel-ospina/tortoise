@@ -3724,6 +3724,45 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         "the alias is the only discovery signal, so over-crediting is the SAFE direction — dropping "
         "it measured `{}` (writer absent) where the parent had `unresolved_write`",
     ),
+    # ⛔ `#12020` round 8 review (P3): the builder arm mirrored only HALF of the rule the seam arm
+    # applies — the bare-`Name` half — because it carried its own `ast.walk` with no per-scope
+    # shadow. Measured: the nested `def helper(_set)` below REBINDS the builder alias inside its
+    # own scope, the writer stores nothing at all, and the arm still credited the OUTER writer as a
+    # writer that owes a declaration (the cry-wolf direction: a phantom declaration cannot honestly
+    # be written). Both reader arms now share `probe._named_callees`, so the shadow is threaded the
+    # same way for a clause builder as for the gate.
+    "builder_alias_inside_a_SHADOWING_nested_scope": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj):\n"
+        "    def helper(_set):\n"
+        '        return _set("y")\n'
+        '    return proj.g.query("MATCH (y) RETURN y")\n',
+        {"tortoise.m::helper": "unresolved_write"},
+        "the nested `helper` REBINDS the builder alias as its own parameter and stores nothing, so "
+        "the OUTER writer `w` must not be credited — that is what this row pins, and it measured "
+        "`{'tortoise.m::w': 'unresolved_write'}` before the shadow was threaded through the builder "
+        "arm (round 8 P3). ⛔ The row ALSO pins a NAMED residual: `helper` itself is still reported, "
+        "because `_keep_shadowed_aliases` keeps a shadowed BUILDER alias (dropping one DELETES a "
+        "real writer — the round-7 P2) and cannot tell a writer's own PARAMETER from a conditional "
+        "rebinding of the builder. Crediting `helper` costs a declaration nobody can write, which is "
+        "the cry-wolf direction and the lesser of the two: the day a resolver separates the two "
+        "shapes this row reds and this note must be retired with it",
+    ),
+    # …and its CONTROL, which must keep its credit: the same nested call with NO shadow really is
+    # the closure reaching the imported builder, so the writer does perform the write through it.
+    "builder_alias_called_from_a_NON_shadowing_nested_scope": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj):\n"
+        "    def helper():\n"
+        '        return _set("y")\n'
+        '    return proj.g.query("MATCH (y) " + helper())\n',
+        {"tortoise.m::w": "unresolved_write", "tortoise.m::helper": "unresolved_write"},
+        "the control for the row above: nothing rebinds `_set`, so the nested body DOES call the "
+        "imported builder — dropping this credit would delete a real write from the census (the "
+        "nested `helper` is itself a discovered writer, which is why it is named here)",
+    ),
     "honest_RELATIVE_import_with_the_bare_home_spelling": (
         "from .embeddings import encode_for_row as _enc\n"
         "from tortoise.vector_write import set_embedding_clause\n"

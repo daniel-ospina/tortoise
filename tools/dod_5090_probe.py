@@ -906,19 +906,18 @@ def _writes_an_embedding(node, source: str, aliases: dict[str, str] | None = Non
         local for local, canonical in (aliases or {}).items()
         if canonical in WRITE_CLAUSE_BUILDERS
     }
-    if aliased_builders:
-        for sub in ast.walk(node):
-            if not isinstance(sub, ast.Call):
-                continue
-            func = sub.func
-            # ⛔ A BARE `Name` ONLY — `reader._set("n")` is a foreign object's method that merely
-            # shares the alias's spelling, and crediting it reports a writer that owes a
-            # declaration and asserts nothing (`#12020` round 5, measured). This is the same rule
-            # `_named_callees` applies to the gate class, in the same file.
-            if not isinstance(func, ast.Name):
-                continue
-            if func.id in aliased_builders:
-                return True
+    if aliased_builders & _named_callees(node):
+        # ⛔ ONE WALK, ONE SHADOW MODEL (`#12020` round 8 review, P3 — measured). `_named_callees`
+        # is the rule this arm wants: a BARE `Name` callee only (`reader._set("n")` is a foreign
+        # object's method that merely shares the alias's spelling, and crediting it reports a
+        # writer that owes a declaration and asserts nothing — round 5, measured), and the
+        # per-scope shadow threaded DOWNWARD, so a nested `def helper(_set)` / `lambda _set:` that
+        # REBINDS the builder alias stops crediting the writer. This arm used to carry its own
+        # `ast.walk` and mirror only the bare-`Name` half, so that phantom measured
+        # `unresolved_write` — a writer owing a declaration it cannot honestly write, the
+        # cry-wolf direction — while the comment here claimed the two rules were already the same.
+        # Sharing the walk makes the claim true by construction instead of by assertion.
+        return True
     for sub in ast.walk(node):
         if isinstance(sub, ast.Assign):
             targets = sub.targets
