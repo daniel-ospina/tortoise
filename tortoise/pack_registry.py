@@ -3409,17 +3409,28 @@ class PackRegistry:
             # own example is `rule: repo-slug-is-not-a-person` — so a prefix match
             # on `"<ns>:"` found no owner and silently DROPPED the problem
             # (`guard_warnings == {}` for a guard with an unrouted target). Asking
-            # the table one namespace at a time makes the attribution structural,
-            # and a problem that still names no owner is logged, never dropped.
+            # the table one namespace at a time makes the attribution structural.
+            #
+            # ⛔ AND THE CORE TABLE'S OWN PROBLEMS ARE NOT A PACK'S (round-11
+            # review P3, measured): `guard_table_problems` always seeds
+            # `CORE_CONFUSIONS`, so the per-namespace call returns the core
+            # problems too — they were appended to EVERY pack's bucket and logged
+            # as `pack <ns>: guard — …`, blaming `acme` and `beta` for a defect in
+            # neither manifest, and making the leftover arm below unreachable
+            # (every core problem counted as "attributed"). Asked once, kept once.
+            core_only = {p for p in guard_table_problems(
+                [], include_catalog=False, pack_kinds=kinds)}
+            attributed = set(core_only)
             for ns in sorted(self.packs):
                 own = [c for c in confusions if c.declaring_pack == ns]
                 if not own:
                     continue
                 for problem in guard_table_problems(
                         own, include_catalog=False, pack_kinds=kinds):
+                    if problem in core_only:
+                        continue
                     self.guard_warnings.setdefault(ns, []).append(problem)
-            attributed = {p for problems in self.guard_warnings.values()
-                          for p in problems}
+                    attributed.add(problem)
             for problem in guard_table_problems(
                     confusions, include_catalog=False, pack_kinds=kinds):
                 if problem not in attributed:

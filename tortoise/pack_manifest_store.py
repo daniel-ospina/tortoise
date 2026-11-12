@@ -340,6 +340,30 @@ def validate_manifest(
     # registry-isolation path already returned a clean `ok=False`. The sibling
     # `_tenant_fold_declarations` guards the same shape for the same reason.
     _ont = raw.get("ontology")
+    # ⛔ AND A MEMBER OF `ontology`, not only `ontology` itself (round-11 review
+    # P3, measured): `objectKinds:` null returned `"'NoneType' object is not
+    # iterable"` and `relations: nope` returned `"'str' object has no attribute
+    # 'get'"` — `ok=False` both times, so not the 500 class, but the same "a
+    # verdict that names no field is a stack trace with a status code" defect one
+    # key over. Only the members this route READS are checked, so this cannot
+    # diverge from the registry's own schema validation beyond naming the field.
+    if isinstance(_ont, dict):
+        _LIST_MEMBERS = ("objectKinds", "documentKinds", "eventKinds",
+                         "pointKinds", "actionKinds", "relations", "chains",
+                         "hierarchies")
+        _MAP_MEMBERS = ("kindDefs", "subclassOf", "equivalentTo", "extraction")
+        for _k in _LIST_MEMBERS:
+            if _k in _ont and not isinstance(_ont[_k], list):
+                return ManifestValidation(
+                    False, namespace=ns,
+                    errors=[f"ontology.{_k} must be a list — got "
+                            f"{type(_ont[_k]).__name__}"])
+        for _k in _MAP_MEMBERS:
+            if _k in _ont and not isinstance(_ont[_k], dict):
+                return ManifestValidation(
+                    False, namespace=ns,
+                    errors=[f"ontology.{_k} must be a mapping — got "
+                            f"{type(_ont[_k]).__name__}"])
     # `ontology:` present-but-null is the same authoring mistake as `ontology:
     # core`, so the test is the KEY, not the value (#12060 round-11).
     if "ontology" in raw and not isinstance(_ont, dict):
