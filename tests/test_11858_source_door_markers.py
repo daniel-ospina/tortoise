@@ -303,9 +303,20 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
                 sdk.update(target, embedding_width="f16")
             elif door == "update_knowledge":
                 sdk.update_knowledge(target, embedding_width="f16")
-            else:
+            elif door == "create_document":
                 sdk.create_document("a census title", "document",
                                     embedding_width="f16")
+            else:
+                # ⛔ No catch-all call. An `else:` that drove some OTHER door
+                # made every unknown name pass: measured at `f063e01ffd`
+                # (#11858 review cycle 5, P3), adding `"create_source"` and
+                # `"no_such_door_at_all"` to the parametrize list still gave
+                # 12 passed — two rows asserting about `create_document` while
+                # claiming to test doors that were never called. A row must fail
+                # loudly when the list and the dispatch drift apart.
+                raise AssertionError(
+                    f"census row has no call for door {door!r} — the "
+                    "parametrize list and the dispatch have drifted")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
