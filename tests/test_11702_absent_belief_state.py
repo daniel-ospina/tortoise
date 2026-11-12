@@ -6158,8 +6158,8 @@ def _mirror_sources_the_value(sentence: str) -> bool:
          `measured`, not the mirror.
          (A denial in a clause that DOES carry a mirror mention is refused —
          that is the `for mention` loop above, not this residual.)
-      3. FALSE PASS, denied WITHOUT a negator from the list — two sub-classes,
-         both pinned:
+      3. FALSE PASS, denied WITHOUT a negator from the list — three
+         sub-classes, all pinned:
          a. a PREDICATE adjective/verb: `the mirror's value is irrelevant`,
             `the mirror's value, which is ignored, …`, `…loses to the pair`.
             No negation LIST can close this — the words are open-ended, so
@@ -6170,6 +6170,16 @@ def _mirror_sources_the_value(sentence: str) -> bool:
             CORRECT qualifier the sibling prose writes — the sibling control
             row reds when it is added (measured). The exclusion is a trade, not
             an oversight.
+         c. an allow-listed NOUN reused in ANOTHER SENSE. `_MIRROR_SOURCE`
+            binds on the noun alone, with no tie to the value the claim
+            asserts, so `the mirror's number of reads is zero` is CERTIFIED
+            (measured) — `number` here counts reads, not the served value.
+            The noun cannot simply be narrowed: `mirror's number` is
+            load-bearing, used by the shipped corpus (`tortoise/sdk.py`,
+            "inheriting the stale mirror's number"), which is why the arm
+            carries `number`/`reading` at all. Same class as (a) — closing one
+            sense only moves the hole — so it is disclosed here and PINNED by a
+            control row rather than argued away.
          The STANDARD negators are NOT in this residual: `not` / `never` /
          `neither` / `nor` / `no longer` / `cannot` and every `-n't`
          contraction are carried, measured against this corpus at zero
@@ -6911,7 +6921,14 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             "Its confidence_mean IS the declared PRIOR mean — the mirror's "
             "value is irrelevant.",
             "Its confidence_mean IS the declared PRIOR mean — the mirror's "
-            "value, which is ignored, applies to a different column."):
+            "value, which is ignored, applies to a different column.",
+            # residual 3c: an allow-listed NOUN in ANOTHER SENSE (`number` here
+            # counts reads, not the served value). `mirror's number` cannot be
+            # dropped from `_MIRROR_SOURCE` — the shipped corpus uses it in the
+            # correct sense (`tortoise/sdk.py`) — so this is disclosed and
+            # pinned, not narrowed away.
+            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+            "number of reads is zero."):
         assert not _unqualified_claims_on(
             known_false_pass, _PRIOR_MEAN_CLAIM_PATTERNS), (
             "if this is now REFUSED the residual-2 disclosure is stale — "
