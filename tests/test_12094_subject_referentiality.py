@@ -260,3 +260,39 @@ def test_an_identifier_subject_is_left_to_the_value_gate(monkeypatch):
     monkeypatch.setenv(FLAG, "1")
     assert referentiality.judge("#4118") is None
     assert referentiality.judge("config/ci-surfaces.yml") is None
+
+
+# ── 6. the non-document return carries the SAME contract ────────────────────
+
+def test_a_non_document_input_returns_the_full_disposition_shape(monkeypatch):
+    """#12094 review P2: the early return must not be a SHORTER dict.
+
+    ``extract_entities``' docstring documents its return as ALWAYS carrying the
+    disposition keys (``subjects_minted``/``subjects_held``/``held_subjects``/
+    ``subjects_held_by_rule``/``mentions``). The non-document branch used to
+    return the pre-#12094 five-key dict, so a caller written against the
+    documented contract raised ``KeyError`` on any input that is not markdown
+    with ``##`` sections. The keys must exist with their ZERO values, and
+    ``mentions`` stays ``None`` ("this instrument cannot answer"), never ``[]``
+    ("nothing to report"), which would read as clean.
+    """
+    monkeypatch.setenv(FLAG, "1")
+    api, _proj, _log = _proj_api()
+    monkeypatch.setattr(extractor_mod, "_SemanticStage", _FixedStage)
+    ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
+
+    # `_document_sections` returns (False, []) exactly when no `## ` header
+    # exists, so this input takes the branch under test.
+    assert extractor_mod._document_sections("just a plain note")[0] is False
+    out = ext.extract_entities("just a plain note", "note.txt", api)
+
+    documented = {"subjects", "objects", "subject_names", "entities",
+                  "failed_sections", "subjects_minted", "subjects_held",
+                  "held_subjects", "subjects_held_by_rule", "mentions"}
+    assert documented <= set(out), (
+        f"the non-document return is missing {sorted(documented - set(out))}; "
+        "the docstring documents these as always present")
+    assert out["subjects_minted"] == 0 and out["subjects_held"] == 0
+    assert out["held_subjects"] == [] and out["subjects_held_by_rule"] == {}
+    assert out["mentions"] is None, (
+        "mentions must be None (unanswerable here), never [] which reads clean")
