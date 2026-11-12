@@ -174,6 +174,12 @@ def harvest(sessions_dir: Path, stats: dict | None = None) -> dict[str, collecti
     files = sorted(sessions_dir.glob("*.jsonl"))
     if not files:
         raise SystemExit(f"no session events under {sessions_dir}")
+    if stats is not None:
+        #: The count of files this harvest ACTUALLY read. The report used to
+        #: glob the live directory a second time, ~390 s later, so the number it
+        #: published described an input the harvest may never have seen — on a
+        #: directory the brief itself calls live and non-monotone.
+        stats["files"] = len(files)
     for f in files:
         for line in f.open(errors="replace"):
             if stats is not None:
@@ -559,7 +565,11 @@ def run(args: argparse.Namespace) -> int:
                     # a class-blocked list, so once it bound, the crowding
                     # statistic and §3's "N of the misses" became
                     # definite-only while the denominator still said "all".
-                    # 300 entries is nothing.
+                    # 300 entries is nothing — and the artifact states
+                    # `exact_misses_recorded` beside `exact_misses_total`
+                    # precisely so a cap cannot return unnoticed: with no cap
+                    # the two are EQUAL, so an equality that no longer holds is
+                    # itself the report of a regression, not a silent skew.
                     if k == KS[0]:
                         toks = _sanitise_query_text(name).split()
                         exact_misses.append({
@@ -585,6 +595,8 @@ def run(args: argparse.Namespace) -> int:
                     exact[k]["attached"] += 1
         arms["exact"] = exact
         arms["exact_misses"] = exact_misses
+        arms["exact_misses_recorded"] = len(exact_misses)
+        arms["exact_misses_total"] = len(sample) - exact[KS[0]]["in_window"]
         arms["exact_by_class"] = {c: dict(v) for c, v in sorted(exact_by_class.items())}
 
         # ── ARM 2: the mention is a surface VARIANT of the stored name.
@@ -667,10 +679,19 @@ def run(args: argparse.Namespace) -> int:
                   f"mixture (the note then says so).", file=sys.stderr)
             return 3
 
+        #: The harvest's OWN file count, resolved BEFORE the report dict is built:
+        #: `.get(key, <expr>)` evaluates its default EAGERLY, so writing the glob
+        #: as the fallback re-ran the very second glob of the live directory that
+        #: `harvest()`'s `stats["files"]` exists to remove (and discarded it).
+        _harvest_files = _input_stats.get("files")
+        if _harvest_files is None:
+            # Only a fake/stub harvest that reported no count reaches this.
+            _harvest_files = len(list(sessions.glob("*.jsonl")))
         report = {
             "issue": 11901,
             "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "corpus": {"dir": str(sessions), "files": len(list(sessions.glob("*.jsonl"))),
+            "corpus": {"dir": str(sessions),
+                       "files": _harvest_files,
                        "input": dict(_input_stats),
                        "harvested_distinct": counts, "population": len(pop),
                        "sample": len(sample),

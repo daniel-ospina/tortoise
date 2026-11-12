@@ -134,7 +134,10 @@ to quote for any one class.
 
 ⚠️ **The corpus is LIVE, and the two runs therefore did NOT sample the identical population.** `~/.tortoise/session-events`
 is written by the fleet's own capture hook: the two committed artifacts harvested **102,898** (hybrid) and
-**103,087** (control) distinct definite descriptions, a 0.18 % drift between two runs ~60 s apart.
+**103,087** (control) distinct definite descriptions, a 0.18 % drift between two runs whose **harvests** were
+**~7 minutes** apart — not the ~60 s between their two REPORT writes: each run harvests before its sweep, so
+`measured_at − elapsed_s` puts the harvests at 14:12:22.6Z and 14:19:29.6Z (**427 s**), which the 390 s hybrid
+sweep makes necessary.
 
 ⛔ **That 0.18 % is the gap between THOSE two runs, not a bound on between-run variation, and this corpus is NOT
 append-only in effect.** Re-running `harvest()` over the same nine files ~2 h later (16:37Z, 16:41Z and 16:41Z,
@@ -153,6 +156,8 @@ they name; nothing in the artifact distinguishes the two. ⚠️ **The instrumen
 future run:** `harvest()` reports its own input accounting into `corpus.input` (`lines`, `parse_errors`,
 `records_without_text`), added after this measurement — so a re-run can separate *the corpus lost names* from *the
 harness stopped parsing records*. The two committed artifacts predate that field and carry none.
+A re-run also cannot be paired with them at all yet: pairing needs the sampled population written out
+(`--population-file`), which this harness does not do — so §3.1 is between-run by construction, not by choice.
 The artifacts carry their own `corpus.harvested_distinct`, so the drift is at least visible — and it is why
 **§3.1's class deltas are BETWEEN-RUN, not paired**: treat them as directional evidence, not a controlled effect
 size, and see the consequence in §3.1.
@@ -217,11 +222,12 @@ the two states with different fixes.
 
 ### 3.1 The finding that matters most: the dense leg moves the classes in OPPOSITE directions
 
-⚠️ **Between-run, not paired** (§2): the two artifacts sampled the same live corpus ~60 s apart, not the identical
-population. The direction of every delta below is large relative to the 0.18 % those two runs differ by — **but §2
-measures the population itself moving by ~10.8 % between a re-run and the artifact, which is the SAME ORDER as the
-−13.3 pt definite delta this section defends.** So that delta is directional, not a controlled effect: what makes it
-usable is its sign and its size across two independent runs, not a claim that between-run variation is small.
+⚠️ **Between-run, not paired** (§2): the two artifacts sampled the same live corpus from harvests **~7 minutes**
+apart (427 s, not the ~60 s between report writes), not the identical population. The direction of every delta
+below is large relative to the 0.18 % those two runs differ by — **but §2 measures the population itself moving by
+~11 % between a re-run and the artifact, which is the SAME ORDER as the −13.3 pt definite delta this section
+defends.** So that delta is directional, not a controlled effect: what makes it usable is its sign and its size
+across two independent runs, not a claim that between-run variation is small.
 
 | class | n | keyword-only @3 | **hybrid @3** | change | hybrid @15 |
 |---|---|---|---|---|---|
@@ -429,15 +435,16 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_candidate_recall_11901.py -q
 harness has a prior-off arm — and is pinned as text); §3's prose derivatives (past-this-k, absent-at-15, the
 identifier share, the crowding mean and median); §6's and §7's restatements (the recall pair, the pooled mean, the
 fold's two denominators, the width residual, the class deltas, the wall clock); §2's between-run drift (the
-`corpus.harvested_distinct` pair and the percentage between them); §2's corpus SHAPE as the artifacts record it
+`corpus.harvested_distinct` pair and the percentage between them) and §2's corpus SHAPE as the artifacts record it
 (`corpus.files` and `corpus.population`); §3's keyword-only miss split and k=5 mean rank; and §8's `rows_zero` claim.
-Each
-§3 row is anchored to **its own** section — a swap of the two tables' bodies reds, which it did not before review
-round 8. **Not pinned, and cannot be:** everything §2 says about the corpus CHANGING — its re-run figures
+Each §3 row is anchored to **its own** section — a swap of the two tables' bodies reds, which it did not before
+review round 8. **Not pinned, and cannot be:** everything §2 says about the corpus CHANGING — its re-run figures
 (91,725 / 91,774 / 91,601) are dated readings of a directory that moves under them, and the record/character totals
 an earlier draft quoted are not in the artifact at all — plus §2.2's graph/digest, `retrieval.window_modes` /
 `retrieval.uniform_windows` and `corpus.input`, which the committed artifacts predate. Those are unpinned
-SENTENCES; an unpinned TABLE is not.
+SENTENCES; an unpinned TABLE is not. `exact_misses_recorded` / `exact_misses_total` are pinned to each other instead
+of to a constant: the cap that made them differ is gone, so the pair now READS AS the invariant that would catch its
+return.
 
 ## 10. Write-back
 
