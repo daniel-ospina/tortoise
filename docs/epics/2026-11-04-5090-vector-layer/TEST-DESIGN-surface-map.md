@@ -274,11 +274,18 @@ and R5 red), but a row with no seam token could. ONE bound now decides what a ro
 `MAX_TABLE_INDENT`, 0–3 leading spaces then `|` — applied by `_is_table_line` in the block builder, the
 seam discovery, the R5 presence arm **and the `--self-test` mutators** (`_line_matches`), and spelled
 into the §1/§3/§4 row regexes; the harness runs its whole population twice, on the shipped map and on a
-copy whose rows are all at 2 spaces, and it requires the two shapes to earn the **same baseline
+copy whose rows are all at ONE width — 2 spaces for this map, and the width MOVES OFF a document that
+already sits at it (a map reflowed uniformly to 2 spaces is copied at 1 space, not reported unstaked) —
+and it requires the two shapes to earn the **same baseline
 verdict** — the shapes are the same document, so a RULE that only reaches column-0 rows reds on the
 baseline alone (measured: reverting the R5 presence arm, the §3 capability regex or the §4 child regex
 each reds the second shape with the violations the regression adds), while a MUTATOR that cannot find an
-indented target reports UNTESTABLE. Neither half is silent. ⚠️ The 4+ boundary is
+indented target reports UNTESTABLE. Neither half is silent. The width is itself checked on every run:
+a copy of this map with every row normalised to the preferred width must still be given a DIFFERENT
+width, and must grade what this map grades (measured before that arm existed: every row at 2 spaces
+printed `CLEAN — every rule holds` from `check()` and exited 1 from `--self-test`, which called the
+correct document unstaked — the harness's width colliding with the document's, not a document defect).
+⚠️ The 4+ boundary is
 relative to the containing block and the checker models document-column indentation only; the map's
 tables are top-level, so no row can be hidden that way here.
 A second table belongs in its own section.
