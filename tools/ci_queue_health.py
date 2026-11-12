@@ -2125,7 +2125,7 @@ def read_run_live_job(
         # ⛔ PRESENT-BUT-NOT-AN-INT MUST ABSTAIN, NOT FALL THROUGH. An earlier revision
         # tested only `type(total) is int` and then let every OTHER type reach the
         # page-fullness heuristic below — so a SHORT page carrying
-        # `"total_count": "250"` returned ``False`` (this function's PROOF of
+        # `"total_count": "250"` returned ``False`` (this function's CANDIDATE proof of
         # non-execution) from a list whose own payload said 250 rows exist. That is the
         # same string-valued drift the note below records, one page shape narrower, and
         # it SUBTRACTS from `pr_running` — the direction that manufactures
@@ -2142,7 +2142,7 @@ def read_run_live_job(
     #
     # RECORDED SO THE FALL-THROUGH IS NOT RE-INTRODUCED: an earlier revision tested only
     # `isinstance(total, int)`, so a missing or string-valued count fell through to
-    # ``False`` — a proof of non-execution taken from a list whose payload said more rows
+    # ``False`` — a candidate proof of non-execution taken from a list whose payload said more rows
     # existed (review finding, 2026-11-12; reproducible with 100 completed jobs and no
     # `total_count`, and with `total_count` as the string "250"). The first fix then
     # closed only the FULL-page shape, leaving the string case to fall through on a SHORT

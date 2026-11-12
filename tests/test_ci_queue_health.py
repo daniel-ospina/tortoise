@@ -2418,30 +2418,42 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         needle. This is a regression guard, not a proof.
         """
 
-        def _terminator(after: int) -> int:
-            """Index of the next sentence terminator at/after ``after``, or -1.
+        #: ⛔ A REAL BOUNDARY, NOT EVERY DOT (review P2). Treating each ``.`` as a sentence end
+        #: splits a CORRECT sentence at ``i.e.`` — this repo's own idiom — or at a decimal like
+        #: ``300.0``, which CUTS the stillness half away and reds correct prose (measured). A
+        #: terminator must be followed by whitespace, end-of-string, or a closing delimiter, so
+        #: "… (see the `excluded` sentence)." and "…)." both still count while ``i.e.`` and
+        #: ``0.5`` do not. This is stricter than ``". "`` was (that rule ran past a ``.)``),
+        #: which is why it is the predicate used for BOTH ends of the passage.
+        _TERM = re.compile(r'[.!?](?=$|\s|[)\]`"])')
+        #: ⛔ AND AN ABBREVIATION'S FULL STOP IS NOT A SENTENCE END EITHER (review P2). ``i.e.``
+        #: and ``e.g.`` end in a dot followed by a space, so the delimiter rule alone still split
+        #: a CORRECT sentence there and cut its stillness half away — measured. Decided BEFORE a
+        #: candidate is accepted, for both ends of the passage.
+        _ABBREV = ("i.e.", "e.g.", "vs.", "cf.", "al.")
 
-            ⛔ A BARE ``.`` COUNTS, and the reason is the measured one (review P2): after
-            ``flat()`` collapses every whitespace run, ``". "`` and ``"."`` select the SAME
-            index except at end-of-string, where this returns -1 and the caller's fallback
-            already runs the passage to the end — so the two rules are equivalent, and the
-            bare form is simpler to read. (An earlier revision of this docstring claimed the
-            ". "-only rule "stopped the lookahead short and red the needle"; that is NOT
-            reproducible at this head or at the commit that wrote it — measured, both GREEN —
-            and the mechanism was inverted: over-segmenting SHRINKS the passage.)
-            """
-            for j in range(after, len(hay)):
-                if hay[j] in ".!?":
-                    return j
-            return -1
+        def _is_abbrev(j: int) -> bool:
+            return any(hay[max(0, j - 3):j + 1].endswith(a) for a in _ABBREV)
+
+        def _terminator(after: int) -> int:
+            """Index of the next REAL sentence terminator at/after ``after``, or -1."""
+            start = after
+            while True:
+                m = _TERM.search(hay, start)
+                if m is None:
+                    return -1
+                if not _is_abbrev(m.start()):
+                    return m.start()
+                start = m.start() + 1
 
         start = 0
         while True:
             i = hay.find(needle, start)
             if i == -1:
                 return False
-            left = max(hay.rfind(".", 0, i), hay.rfind("!", 0, i),
-                       hay.rfind("?", 0, i), i - 300)
+            found = [m.start() for m in _TERM.finditer(hay, max(0, i - 300), i)
+                     if not _is_abbrev(m.start())]
+            left = found[-1] if found else i - 300
             # ⛔ START AT THE NEEDLE'S LAST CHARACTER, not one past it. `_terminator` is
             # inclusive, so searching from `i + len(needle)` skipped a terminator that IS the
             # needle's final character — and then found the NEXT sentence's, so the passage
@@ -2450,7 +2462,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
             right = _terminator(i + len(needle) - 1)
             if right == -1:
                 right = len(hay) - 1
-            passage = hay[left + 2:right + 1] if left >= 0 else hay[:right + 1]
+            passage = hay[left + 1:right + 1] if left >= 0 else hay[:right + 1]
             if not any(tok in passage for tok in SECOND_HALF):
                 return True
             start = i + 1
@@ -2648,14 +2660,14 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # vacuously (every correct sentence carries the stillness half, so any hit on one is
     # disarmed). This is the leg with teeth: it catches the real risk of narrowing — a needle
     # taken so far down that the sentence it exists to catch walks past it. These are the
-    # phrasings that actually SHIPPED — pre-fix on `origin/main` for 13 of them (ONE of those a
+    # phrasings that actually SHIPPED — pre-fix on `origin/main` for 14 of them (ONE of those a
     # truncation of a shipped sentence to its shortest true instance), plus TWO sentences that
     # shipped only mid-branch at `6c05aeb903` (the merged closed-avenue claim, later
     # retracted), and ONE declared RE-TYPED variant — SEVENTEEN entries. ⛔ THE COUNT CLAIMS ARE NOT HERE: they
     # live in `unconditional` below, checked WITHOUT the discriminator, because a count sentence
-    # is wrong whatever stillness it also names (every shipped form names `JOB_SETTLE_SECONDS`,
-    # which would otherwise read as a correction). Several guarded sites carry more than one
-    # entry, so this is not one-per-site.
+    # is wrong whatever stillness it also names (the FIRST TWO shipped forms name
+    # `JOB_SETTLE_SECONDS`, which would otherwise read as a correction). Several guarded sites
+    # carry more than one entry, so this is not one-per-site.
     pre_fix = [
         # to_dict + the two field docs + classify_queue's comment + its returned-dict twin
         "the runs read out because EVERY job of them was `completed` (a proof of "
@@ -2817,8 +2829,9 @@ def _jobs(*statuses, total_count=None):
 def test_live_job_false_only_when_every_job_is_completed(monkeypatch):
     """`False` is a CANDIDATE proof of non-execution — every VISIBLE job `completed` AND the
     list provably complete; the CALLER's settle gate (`_settled_still`) is what makes it
-    final. ⛔ NOT "a PROOF of non-execution" on its own: that short form is the inference
-    this PR removes from every other site, and it survived here (review P2)."""
+    final. ⛔ NOT "a PROOF of non-execution" on its own: that unqualified short form is the
+    inference this PR removes, and it survived at five sites (here and four others, all
+    reworded to CANDIDATE in the same commit) — review P2."""
     monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None: _jobs("completed", "completed"))
     assert Q.read_run_live_job("o/r", 42066648922) is False
 
@@ -2943,7 +2956,7 @@ def test_live_job_reads_only_the_latest_attempt(monkeypatch):
 def test_live_job_abstains_when_a_full_page_carries_no_usable_total_count(monkeypatch):
     """Review finding 1: completeness must not depend on `total_count` being an int.
 
-    Pre-fix this returned `False` — the value the function's own docstring calls a PROOF
+    Pre-fix this returned `False` — the value the function's own docstring calls a CANDIDATE
     of non-execution — from a page that could have been one of several, because the cap
     guard tested only `isinstance(total, int)`. A run with >100 jobs whose live job sits
     on page 2 would have been subtracted from `pr_running`.
@@ -2969,7 +2982,7 @@ def test_live_job_abstains_on_a_SHORT_page_whose_total_count_is_present_but_not_
     """`total_count` PRESENT and non-int must abstain even on a SHORT page.
 
     Pre-fix the non-int path fell THROUGH to the page-fullness heuristic, so a one-row page
-    carrying `"total_count": "250"` returned `False` — a proof of non-execution taken from
+    carrying `"total_count": "250"` returned `False` — a candidate proof of non-execution taken from
     a list whose own payload said 250 rows exist. `False` SUBTRACTS from `pr_running`.
     """
     payload = {"total_count": total, "jobs": [{"status": "completed"}]}
