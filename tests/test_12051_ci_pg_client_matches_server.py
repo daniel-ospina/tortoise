@@ -143,10 +143,13 @@ not a tenth spelling — it is the one a text guard cannot reach:
   reads as the first entry `$(dirname` and is an offender. That is the safe
   direction (a derived prepend is refused, not blessed), and it is why this is a
   stated limit rather than a blind spot: what is genuinely invisible is a PATH
-  moved WITHOUT a first entry of its own — an inherited `PATH` changed by the
-  invoked-script / composite-action / `uses:`-step `env:` routes above, which
-  this file cannot read at all. The in-job `pg_dump --version` assertion is what
-  makes a surviving blind spot visible in the log.
+  moved WITHOUT a first entry of its own — an inherited `PATH` changed by an
+  invoked script, or by a composite action's OWN body. (The YAML `env:` this job
+  attaches to a `uses:` step IS read: `_env_path_replacements` reads every step's
+  `env`, `uses:` steps included. #12069 round-15 review 2 caught an earlier draft
+  of this bullet claiming otherwise — a stated limit the code contradicted.) The
+  in-job `pg_dump --version` assertion is what makes a surviving blind spot
+  visible in the log.
 - **The mutating-verb rule costs some precision.** The client name is
   read only AFTER the verb, so `rm -f "$RUNNER_TEMP/pg_dump.log"` and
   `pg_dump --version | tee -a x` are not replacements — but a genuinely
@@ -908,10 +911,54 @@ def _command_word(before: str) -> str:
 #: `test` spellings of the same.
 COMPARISON_RE = re.compile(r"==|!=|=~|(?<![-\w])=|-eq|-ne|-gt|-lt")
 
-#: The constructs that COMPARE or FILTER an operand: `[`/`[[`, `test`, `case`, and
-#: the pattern matchers a script reaches for instead of `[`. Any of these on a line
-#: that references the loop variable means the body is CHOOSING between the names.
-SELECTION_MARKER_RE = re.compile(r"\[\[?|\btest\b|\bcase\b|\bgrep\b|\bexpr\b")
+#: The constructs that COMPARE or FILTER an operand. Two groups, because they need
+#: different partners to be a SELECTION on the loop variable:
+#:   * a CONDITION (`[`, `[[`, `test`) only selects when the loop variable is an
+#:     OPERAND of it AND a comparison operator is inside the same span — see
+#:     `_condition_text`; `[ -n "$version" ]` beside an `echo "$tool"` merely
+#:     mentions the variable twice;
+#:   * a PATTERN MATCHER (`case`, `grep` and its `egrep`/`fgrep` spellings, `awk`,
+#:     `expr`) selects on its own argument, no operator needed.
+#: ⛔ `\bgrep\b` ALONE MISSED `fgrep`/`egrep` — a word boundary cannot sit between
+#: `f` and `grep` — so a body that selected with `fgrep -qx` was credited for both
+#: tools with `pg_restore` never checked (measured, round-15 review 2).
+PATTERN_MATCHER_RE = re.compile(r"\bcase\b|\b(?:(?:e|f)?grep|awk|expr)\b")
+
+#: A copy of the loop variable into another name (`t=$tool`), which the guard
+#: cannot follow: the line that COMPARES `$t` mentions neither the loop variable
+#: nor a selection. Measured GREEN (round-15 review 2) with both tools credited:
+#:     t=$tool; if [ "$t" = pg_dump ]; then version="$("$tool" --version)"; fi
+#: Only an assignment whose WHOLE VALUE is the variable counts — the pin's own
+#: `version="$("$tool" --version)"` assigns a command's OUTPUT, not the name.
+def _copies_loop_var(line: str, var: str) -> bool:
+    """Does this line assign the loop variable ITSELF to another name?"""
+
+    ref = r"\$\{" + re.escape(var) + r"\}|\$" + re.escape(var) + r"(?!\w)"
+    return bool(
+        re.search(
+            r"(?:^|[;&|]|\b(?:local|export|declare|readonly|typeset)\b)\s*"
+            r"[A-Za-z_]\w*=\s*[\"']?(?:" + ref + r")[\"']?\s*(?:$|[;&|])",
+            line,
+        )
+    )
+
+
+#: The CONDITION itself: a `[ … ]` / `[[ … ]]` group. A line that COMPARES one
+#: variable may well MENTION the loop variable in its message branch —
+#: `if [ "$major" != "16" ]; then echo "::error::$tool"; exit 1; fi` — and a
+#: line-level test read that as a selection on `$tool` and refused a body that
+#: checks both tools unconditionally (measured false RED, round-15 review 2).
+#: Only the SPAN of the condition is searched for the loop variable.
+BRACKET_SPAN_RE = re.compile(r"\[\[?[^\]]*\]\]?")
+
+
+def _condition_text(line: str) -> str:
+    """The `[ … ]` / `[[ … ]]` group on this line, or the whole line for `test`."""
+
+    span = BRACKET_SPAN_RE.search(line)
+    if span:
+        return span.group(0)
+    return line if re.search(r"\btest\b", line) else ""
 
 
 def _selects_on_var(body: list[str], var: str) -> bool:
@@ -931,36 +978,49 @@ def _selects_on_var(body: list[str], var: str) -> bool:
     still reported BOTH, with `pg_restore` never checked (measured), which is the
     same defect the loop body was introduced to fix (round 11), one level down.
 
-    ⛔ AND THE FIRST CUT OF THIS RULE STILL LET TWO SELECTIONS THROUGH (#12069
-    round-15 review P2, both measured GREEN with `pg_restore` unchecked):
+    THREE CUTS OF THIS RULE EACH MISSED A SPELLING, and the misses were all
+    fail-open (both tools credited, `pg_restore` unchecked) or a false RED on a
+    body that DID check both:
 
-        if [ "${tool%_restore}" = pg_dump ]; then … fi   # a TRANSFORM of $tool
-        if printf '%s' "$tool" | grep -qx pg_dump; then … fi  # a PATTERN test
+        if [ "${tool%_restore}" = pg_dump ]; then … fi   # 1st cut: a TRANSFORM of $tool
+        if printf '%s' "$tool" | grep -qx pg_dump; …     # 1st cut: no operator at all
+        if printf '%s' "$tool" | fgrep -qx pg_dump; …    # 2nd cut: `\bgrep\b` misses fgrep
+        t=$tool; if [ "$t" = pg_dump ]; then …          # 2nd cut: the copy is invisible
+        [ -n "$version" ] || { echo "::error::$tool…"; exit 1; }   # 2nd cut: FALSE RED
 
-    The reference was `$tool` / `${tool}` exactly, so a brace expansion carrying
-    a modifier (`${tool%…}`, `${tool#…}`, `${tool/…}`) matched nothing and the
-    line was skipped before its condition was ever read; and the `grep` spelling
-    has no comparison operator at all. Both are now selections: any
-    `SELECTION_MARKER_RE` construct on a line that references the loop variable,
-    and any brace expansion that is not the bare `${tool}` (because it TRANSFORMS
-    the value, which every name would take differently).
+    So the rule is now: a CONDITION marker (`[`, `[[`, `test`) selects only with a
+    comparison OPERATOR on the same line; a PATTERN MATCHER (`case`, `grep`,
+    `egrep`, `fgrep`, `awk`, `expr`) selects on its own; a brace expansion that
+    TRANSFORMS the value (`${tool%…}`, `${tool#…}`, `${tool/…}`) selects; and a
+    COPY of the loop variable into another name (`t=$tool`) selects, because the
+    guard cannot follow the copy and must not claim coverage it cannot prove.
 
     Only a SELECTION on the LOOP VARIABLE counts: a condition on anything else
     (`if [ "$major" != "16" ]`, which is what this job actually writes) does not
-    narrow the coverage, and reading it as one would red the correct tree.
+    narrow the coverage, and reading it as one would red the correct tree. The
+    brace arm is name-bounded (`${tool` followed by a non-name character), so
+    `${tools_dir}` — a DIFFERENT
+    variable that merely shares a prefix — is not read as a transform of `$tool`
+    (measured false RED, round-15 review 2).
     """
 
     ref = re.compile(
-        r"(?P<brace>\$\{" + re.escape(var) + r"[^}]*\})|\$" + re.escape(var) + r"(?!\w)"
+        r"(?P<brace>\$\{" + re.escape(var) + r"(?![A-Za-z0-9_])[^}]*\})"
+        r"|\$" + re.escape(var) + r"(?!\w)"
     )
     for line in body:
+        if _copies_loop_var(line, var):
+            return True
         match = ref.search(line)
         if not match:
             continue
         brace = match.group("brace")
         if brace is not None and brace != "${" + var + "}":
             return True
-        if re.match(r"^[ \t]*case\b", line) or SELECTION_MARKER_RE.search(line):
+        if PATTERN_MATCHER_RE.search(line):
+            return True
+        condition = _condition_text(line)
+        if condition and COMPARISON_RE.search(condition) and ref.search(condition):
             return True
     return False
 
@@ -1092,7 +1152,11 @@ def _keeps_the_pin_first(value: str, pinned: str) -> bool:
 
 
 def _path_assignments_that_drop_the_pin(
-    steps: list[dict], start: int, server_major: int, job: dict | None = None
+    steps: list[dict],
+    start: int,
+    server_major: int,
+    job: dict | None = None,
+    end: int | None = None,
 ) -> list[str]:
     """PATH assignments at or after the pin that no longer keep it FIRST.
 
@@ -1104,11 +1168,18 @@ def _path_assignments_that_drop_the_pin(
     other directory (`PATH="/usr/bin:$PATH"`, `PATH="/usr/local/bin:$PATH"`)
     is an offender, and a diagnostic `echo "PATH=$PATH"` is not an assignment at
     all.
+
+    `end` bounds the scan at the LEG step (inclusive), the same window
+    `_env_path_replacements` takes and for the same reason: a step AFTER the leg
+    cannot move a PATH a leg that already ran has resolved, so grading it reds
+    the CORRECT tree. The two rules take one window so an author never gets two
+    verdicts for one line.
     """
 
     pinned = f"/usr/lib/postgresql/{server_major}/bin"
     offenders: set[str] = set()
-    for index in range(start, len(steps)):
+    window_end = len(steps) if end is None else min(end + 1, len(steps))
+    for index in range(start, window_end):
         for line in (
             _effective_shell(job, steps[index]) + "\n" + _run_commands(steps[index])
         ).splitlines():
@@ -1134,7 +1205,11 @@ GITHUB_ENV_MENTION_RE = re.compile(r"\bGITHUB_ENV\b")
 
 
 def _env_path_replacements(
-    steps: list[dict], server_major: int, job: dict | None = None, start: int = 0
+    steps: list[dict],
+    server_major: int,
+    job: dict | None = None,
+    start: int = 0,
+    end: int | None = None,
 ) -> list[str]:
     """`env: PATH` entries that move the leg's PATH off the pinned dir.
 
@@ -1159,26 +1234,33 @@ def _env_path_replacements(
     BEGINS with the pinned dir, which is stricter than the shell-assignment rule
     above on purpose: there the shell does the expansion.
 
-    ⛔ STEP SCOPE IS WINDOWED, `[start, end)` (#12069 round-15 review P2). A
-    step-scope `env:` applies to THAT STEP ALONE (`jobs.<id>.steps[*].env`), so a
-    pre-pin step cannot outrank the pin no matter what its PATH says — the same
-    precision `test_no_step_rewrites…` documents for a pre-pin `$GITHUB_PATH`
-    write, and the same window `_path_assignments_that_drop_the_pin` takes.
-    Grading every step red the CORRECT tree (measured: a `PATH` on the pre-pin
-    setup step, e.g. a venv-first install). JOB and WORKFLOW scope are
-    position-independent — they reach the leg itself — so `start` does not apply
-    to them. Post-leg steps are graded, exactly as the sibling rule grades a
-    post-leg `export PATH=`: the two must give ONE verdict for one line, and
-    nothing legitimate in this job resets PATH after the leg.
+    ⛔ STEP SCOPE IS WINDOWED AT BOTH ENDS, `[start, end]` (#12069 round-15
+    review P2, twice). A step-scope `env:` applies to THAT STEP ALONE
+    (`jobs.<id>.steps[*].env`), so it can only move the leg if it sits between
+    the pin and the step that RUNS the leg:
+      * a PRE-PIN step cannot outrank a pin that runs later — grading it red the
+        CORRECT tree (measured: a `PATH` on the pre-pin setup step, e.g. a
+        venv-first install);
+      * a POST-LEG step cannot reach a leg that already ran — grading it red the
+        CORRECT tree too (measured: a `PATH` on the last, teardown step).
+    `end` is the LEG step's index, INCLUSIVE: the leg's own `env:` is the most
+    dangerous position there is. JOB and WORKFLOW scope are position-independent
+    — they reach the leg from anywhere — so neither bound applies to them.
+
+    ⛔ AND A `uses:` STEP'S `env:` IS *READ*: #12069 round-15 review 2 caught this
+    docstring claiming the opposite ("a `uses:`-step `env:` … which this file
+    cannot read at all") while `step.get("env")` reads it for every step. What
+    is unreadable is the composite ACTION's own body, not the YAML `env:` this
+    job attaches to it.
     """
 
     pinned = f"/usr/lib/postgresql/{server_major}/bin"
+    window_end = len(steps) if end is None else min(end + 1, len(steps))
     found: set[str] = set()
     scopes: list[tuple[str, object]] = [("job", (job or {}).get("env"))]
     scopes += [
-        (f"step {index}", step.get("env"))
-        for index, step in enumerate(steps)
-        if index >= start
+        (f"step {index}", steps[index].get("env"))
+        for index in range(start, window_end)
     ]
     for where, env in scopes:
         if not isinstance(env, dict):
@@ -1439,6 +1521,9 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     steps = _steps(job)
     server_major = _postgres_image_majors(job)[0]
     pin_index, _ = _pin_step(steps)
+    # The window's upper bound is the step that RUNS the leg: a PATH set after a
+    # leg that already ran cannot move it (#12069 round-15 review 2).
+    leg_start = min(_leg_indexes(steps))
 
     mentions = _github_path_writes(steps, job)
     assert mentions, (
@@ -1483,11 +1568,11 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     # `run:` correctly red — plus the same for the `_runner_file_commands` glob and
     # at workflow-level `defaults.run.shell`.
     replacements = sorted(
-        set(_path_assignments_that_drop_the_pin(steps, pin_index, server_major, job))
+        set(_path_assignments_that_drop_the_pin(steps, pin_index, server_major, job, leg_start))
         # ⛔ `env:` AND `$GITHUB_ENV` MOVE THE SAME PATH (#12069 review P1). Both
         # were unread, so both restored #12051 with every row green. STEP scope is
         # windowed from the pin, like `_path_assignments_that_drop_the_pin` above.
-        | set(_env_path_replacements(steps, server_major, job, pin_index))
+        | set(_env_path_replacements(steps, server_major, job, pin_index, leg_start))
         | {
             f"step {index} mentions `$GITHUB_ENV`: {line!r}"
             for index, step in enumerate(steps)
@@ -1994,11 +2079,51 @@ VERSION_CHECK_POLARITY = [
     ),
     (
         'for tool in pg_dump pg_restore; do\n'
-        "  if printf '%s' \"$tool\" | grep -qx pg_dump; then\n"
+        "  if printf '%s' \"$tool\" | fgrep -qx pg_dump; then\n"
         '    version="$("$tool" --version)"\n'
         '  fi\ndone',
         set(),
-        "#12069 round-15: a PATTERN test on the loop variable is a selection",
+        "#12069 round-15(2): `fgrep`/`egrep` are pattern tests too — `\\bgrep\\b` missed them",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  if awk \'$0=="pg_dump"{f=1} END{exit !f}\' <<< "$tool"; then\n'
+        '    version="$("$tool" --version)"\n'
+        '  fi\ndone',
+        set(),
+        "#12069 round-15(2): `awk` is a pattern test too",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  t=$tool\n'
+        '  if [ "$t" = pg_dump ]; then version="$("$tool" --version)"; fi\n'
+        'done',
+        set(),
+        "#12069 round-15(2): a COPY of the loop variable is a selection this guard cannot follow",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  [ -n "$version" ] || { echo "::error::$tool produced no version"; exit 1; }\n'
+        'done',
+        {"pg_dump", "pg_restore"},
+        "#12069 round-15(2): a `[ -n … ]` sanity check selects NOTHING — it stays credited",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("${tool}" --version)"\n'
+        '  echo "${tools_dir}"\n'
+        'done',
+        {"pg_dump", "pg_restore"},
+        "#12069 round-15(2): `${tools_dir}` is a DIFFERENT variable, not a transform of `$tool`",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  if [ "$major" != "16" ]; then echo "::error::$tool"; exit 1; fi\n'
+        'done',
+        {"pg_dump", "pg_restore"},
+        "#12069 round-15(2): `$tool` MENTIONED in the branch is not an operand of the condition",
     ),
 ]
 
@@ -2311,26 +2436,43 @@ def test_an_env_path_is_wired_into_the_row(job: dict) -> None:
         test_no_step_rewrites_the_client_path_to_another_major(github_env)
 
 
-def test_a_step_env_before_the_pin_cannot_outrank_it() -> None:
-    """STEP-scope `env:` is windowed from the pin; JOB scope is position-free.
+def test_a_step_env_outside_the_pin_leg_window_is_not_an_offender() -> None:
+    """STEP-scope `env:` is windowed at BOTH ends; JOB scope is position-free.
 
-    `jobs.<id>.steps[*].env` reaches that ONE step, so a pre-pin step cannot
-    outrank a pin that runs later — the same precision the row's docstring
-    already claims for a pre-pin `$GITHUB_PATH` write (measured: grading every
-    step red the CORRECT tree, a venv-first PATH on the setup step). JOB scope
-    applies to the leg itself, so it is graded wherever the pin sits.
+    `jobs.<id>.steps[*].env` reaches that ONE step, so it can only move the leg if
+    it sits between the pin and the step that RUNS the leg:
+      * a PRE-PIN step cannot outrank the pin (measured false RED: a venv-first
+        PATH on the setup step);
+      * a POST-LEG step cannot reach a leg that already ran (measured false RED:
+        a PATH on the teardown step).
+    The LEG'S OWN `env:` is inside the window and is the most dangerous position
+    there is, so the upper bound is INCLUSIVE. JOB scope reaches the leg from
+    anywhere, so neither bound applies to it.
     """
 
-    steps = [{"env": {"PATH": "/usr/bin:/bin"}}, {"run": "echo pin"}]
-    assert not _env_path_replacements(steps, 16, start=1), (
-        "a PRE-PIN step's `env: PATH` cannot reach the leg, so it is not an offender"
+    steps = [
+        {"env": {"PATH": "/usr/bin:/bin"}},  # 0: pre-pin
+        {"run": "echo pin"},  # 1: the pin
+        {},  # 2: the leg itself
+        {"env": {"PATH": "/usr/bin:/bin"}},  # 3: post-leg
+    ]
+    assert not _env_path_replacements(steps, 16, start=1, end=2), (
+        "neither a pre-pin nor a post-leg step's `env: PATH` can reach the leg"
     )
-    assert _env_path_replacements(steps, 16, start=0), (
-        "at or after the pin the same step env IS an offender"
+    assert _env_path_replacements(steps, 16, start=0, end=2), (
+        "the same step env IS an offender once the pin is behind it"
+    )
+    assert _env_path_replacements(steps, 16, start=1, end=3), (
+        "a step inside the window is an offender"
     )
     assert _env_path_replacements(
-        steps, 16, job={"env": {"PATH": "/usr/bin:/bin"}}, start=1
-    ), "JOB scope reaches the leg whatever the pin's position"
+        steps, 16, job={"env": {"PATH": "/usr/bin:/bin"}}, start=1, end=2
+    ), "JOB scope reaches the leg whatever the step positions are"
+
+    leg_env = [{"run": "echo pin"}, {"env": {"PATH": "/usr/bin:/bin"}}]
+    assert _env_path_replacements(leg_env, 16, start=0, end=1), (
+        "the LEG's own `env: PATH` is inside the window (the bound is inclusive)"
+    )
 
 
 #: (`if:` value, may it SKIP the step, why) — the pin for `_normalise_if`.
