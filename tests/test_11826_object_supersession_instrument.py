@@ -2745,3 +2745,86 @@ def test_an_all_dead_ambiguous_name_warns_the_reader(sdk):
     assert "carried by 2 Objects" in fix, fix
     assert "confirm THAT one is live and one EP reads as an input" in fix, (
         "an all-dead ambiguous population must not be re-pointed onto blindly: " + fix)
+
+
+def test_a_neutral_row_with_a_TERMINAL_successor_keeps_DROP(sdk):
+    """The terminal-CARRY disposition is for a FLOWING edge only.
+
+    A neutral edge transfers nothing, so "CARRY the IMPL onto whatever node now
+    carries the claim" is false there — measured: carrying a neutral input onto a
+    live node leaves both posteriors at the bare prior (`effective_n 2.0`), exactly
+    as deleting it does. The branch must not fire on a neutral row (#12210 review,
+    P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
+    assert _q(sdk, "MATCH (o {id:$i}) RETURN o.direction", {"i": op["id"]}) == [["-"]]
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "§3.1's disposition is DROP" in fix, fix
+    assert "CARRY the IMPL" not in fix, (
+        "a neutral edge transfers nothing, so the carry disposition is false: " + fix)
+
+
+def test_the_neutral_shaped_prefix_clause_is_operator_lane_accurate(sdk):
+    """An ambiguous OPERATOR row must not be told an ``op_type`` carrier is unread.
+
+    EP's ``_non_operator`` ADMITS an ``op_type``-only node as an operator input, so
+    the confirm-clause may only demand "no ``op_type``" on the DIRECT lane
+    (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "CREATE (:Object {id:'live-twin', name:'PolicyV2', objectKind:'other', "
+            "status:'live', op_type:'IMPL'})", {})
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "carried by 2 Objects" in fix, fix
+    assert "an ``op_type`` only is ADMITTED here" in fix, (
+        "the operator lane must SAY that an op_type-only carrier is readable, "
+        "rather than inherit the direct lane's demand: " + fix)
+    assert "no ``op_type`` set" not in fix, (
+        "the operator lane reads an op_type-only carrier: " + fix)
+
+
+def test_the_direct_ambiguous_confirm_clause_demands_no_op_type(sdk):
+    """…and the DIRECT lane must demand it: ``_non_op`` refuses an ``op_type``.
+
+    Measured on an ambiguous direct row whose intended carrier is
+    ``op_type='IMPL'``: following the clause's only stated test and writing the
+    equivalent edge there leaves `confidences {}` — a false CLEAN — while the
+    plain-live control on the same shape restores `effective_n 2.5255`
+    (#12210 review, P3).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    dec = sdk.create_point("statement", "the policy is sound")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"], direction="-")
+    sdk.create_direct_edge("IMPL", dec["id"], v1["id"])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.op_type = 'IMPL'", {"i": v2["id"]})
+    _q(sdk, "CREATE (:Object {id:'live-twin2', name:'PolicyV2', objectKind:'other', "
+            "status:'live'})", {})
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues, "the row must report"
+    fix = max(issues, key=lambda i: len(i.fix)).fix
+    assert "carried by 2 Objects" in fix, fix
+    assert "no ``op_type`` set" in fix, (
+        "a direct edge refuses an op_type-only carrier, so the clause must say so: "
+        + fix)

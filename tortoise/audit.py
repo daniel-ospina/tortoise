@@ -1514,7 +1514,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "kept, not dropped: carry it where EP can read it (a :Point "
                 "operator the engine evaluates), never by re-attaching it to a "
                 "successor that cannot carry it")
-        elif s["carrier_count"] == 1 and s["carrier_terminal"]:
+        elif s["carrier_count"] == 1 and s["carrier_terminal"] and not neutral:
+            # ⛔ …and NOT on a NEUTRAL row, which transfers nothing: a CARRY there is
+            # false (measured: carrying a neutral input onto a live node leaves both
+            # posteriors at the bare prior, ``effective_n 2.0``) and it contradicted
+            # the DROP the same string states (#12210 review, P2).
             # ⛔ A TERMINAL successor is unreadable for a different reason, and the
             # SHAPE wording above is false about it — measured: an 'archived'
             # successor has ``is_operator NULL`` and no ``op_type``, yet the string
@@ -1841,10 +1845,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                       "check cannot pick one, so re-point onto the intended one "
                       "by ID — and confirm THAT one is live and one EP reads as an "
                       "input (``is_operator`` absent or ``false``"
-                      + ("), because an edge written to a dead or shaped node builds "
-                         "no factor. " if not s["is_operator"] else
-                         "), because an edge written to a dead node builds no "
-                         "factor. "))
+                      + (" and no ``op_type`` set), because an edge written to a dead "
+                         "or shaped node builds no factor. " if not s["is_operator"]
+                         else "), because an edge written to a dead node builds no "
+                              "factor (an ``op_type`` only is ADMITTED here). "))
         if s["shape"] and not s["is_operator"]:
             # ⛔ NEITHER arm: "write the equivalent edge" would change nothing, so the
             # repair is to clear the SHAPE **and** move the edge — measured: clearing
