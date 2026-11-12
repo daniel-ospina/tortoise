@@ -926,7 +926,7 @@ def record_judgement(
     goal_id: str,
     judgement: Judgement,
     target: Target,
-    indicator_id: str | None = None,
+    indicator_id: str,
     previous_point_id: str | None = None,
     subject: str | None = None,
     strength: float = DEFAULT_STRENGTH,
@@ -980,12 +980,22 @@ def record_judgement(
     # pass followed by a scoped one left 2 live judgements and 2 IMPL arrows with
     # goal belief 0.5 (the single-chain value is 0.3498), and two unscoped passes
     # on one target retired each other's live claim and transferred the arrow.
-    if indicator_id is None:
+    # ⛔ TRUTHINESS, not identity. `is None` leaves the OTHER unscoped spelling
+    # open: `""` is not `None`, so it passed this refusal, was then never written
+    # (`if indicator_id:` below is truthiness) while the reader filtered on
+    # `p.indicatorId = ""` (`if val is not None`) — and the next pass minted a
+    # SECOND live judgement with no supersession, the exact double-count this
+    # refusal exists to prevent. MEASURED at the head this was found on:
+    # `record_judgement(..., indicator_id="")` returned `written=True`, stored no
+    # `indicatorId`, and left 2 live judgements with `extraOperators: []`.
+    # A name that is the empty string names nothing, so it is refused here too.
+    if not indicator_id:
         raise ValueError(
             "record_judgement needs `indicator_id`: the indicator is the chain a "
             "judgement belongs to, and an unscoped judgement can neither be found "
             "by a scoped pass (so it can never be superseded) nor be told apart "
-            "from another unscoped chain (so they would supersede each other)."
+            "from another unscoped chain (so they would supersede each other). An "
+            "empty or falsy id is no better than a missing one."
         )
 
     # ⛔ The target must be NAMED. `targetId` is what scopes the supersession
@@ -993,7 +1003,10 @@ def record_judgement(
     # n targets) both look up "the last judgement for this goal+indicator" and
     # supersede EACH OTHER's live claim, so the goal can hold only one live
     # judgement no matter how many targets it has.
-    if target.target_id is None:
+    # ⛔ Truthiness for the same reason as `indicator_id` above: an empty
+    # `target_id` would be dropped by the writer and filtered on by the reader,
+    # which is the same silent second-live-claim shape.
+    if not target.target_id:
         raise ValueError(
             "record_judgement needs a Target carrying `target_id` (build it with "
             "Target.from_node(<target Object>)). Without it the supersession "

@@ -1642,7 +1642,8 @@ def test_an_unscoped_write_is_refused_on_both_shapes(sdk):
 
     # (a) nothing has been written yet: the unscoped write is refused outright
     with pytest.raises(ValueError) as exc:
-        record_judgement(sdk, goal_id=goal["id"], judgement=met, target=target)
+        record_judgement(sdk, goal_id=goal["id"], judgement=met, target=target,
+                         indicator_id=None)
     assert "indicator_id" in str(exc.value)
     assert _judgement_points(sdk, goal["id"]) == []
 
@@ -1654,12 +1655,56 @@ def test_an_unscoped_write_is_refused_on_both_shapes(sdk):
     unmet = judge(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                   target=target)
     with pytest.raises(ValueError) as exc:
-        record_judgement(sdk, goal_id=goal["id"], judgement=unmet, target=target)
+        record_judgement(sdk, goal_id=goal["id"], judgement=unmet, target=target,
+                         indicator_id=None)
     assert "indicator_id" in str(exc.value)
     assert sdk.get_entity(j1["point_id"])["status"] == "live"
     live = [r for r in _judgement_points(sdk, goal["id"])
             if r[1] not in {"superseded", "retracted"}]
     assert len(live) == 1
+
+
+@pytest.mark.parametrize("falsy", ["", None])
+def test_a_FALSY_indicator_id_is_refused_too(sdk, falsy):
+    """`is None` alone leaves the empty-string spelling open (#12012).
+
+    MEASURED at the head this guard was added on: `indicator_id=""` passed an
+    `is None` refusal, was then never stored (`if indicator_id:` is truthiness)
+    while the reader filtered on `p.indicatorId = ""` (`if val is not None`) —
+    so the next pass minted a SECOND live judgement and reported
+    `extraOperators: []`, the exact double-count the refusal exists to prevent.
+    A name that is the empty string names nothing.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    met = judge(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                target=target)
+
+    with pytest.raises(ValueError) as exc:
+        record_judgement(sdk, goal_id=goal["id"], judgement=met, target=target,
+                         indicator_id=falsy)
+    assert "indicator_id" in str(exc.value)
+    assert _judgement_points(sdk, goal["id"]) == [], (
+        "a falsy id must write NOTHING: the claim it produces can never be found "
+        "by a scoped pass, so it is permanently un-supersedable"
+    )
+
+
+def test_a_FALSY_target_id_is_refused_too(sdk):
+    """The same asymmetry on the target leg, for the same reason."""
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    met = judge(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                target=target)
+
+    with pytest.raises(ValueError) as exc:
+        record_judgement(sdk, goal_id=goal["id"], judgement=met,
+                         target=Target("<=", 10.0, target_id=""),
+                         indicator_id=indicator["id"])
+    assert "target_id" in str(exc.value)
+    assert _judgement_points(sdk, goal["id"]) == []
 
 
 def test_two_unscoped_passes_cannot_retire_each_others_claims(sdk):
@@ -1678,5 +1723,6 @@ def test_two_unscoped_passes_cannot_retire_each_others_claims(sdk):
     j_b = judge(sdk, goal_id=goal["id"], indicator_id=b_ind["id"], target=target)
     for j in (j_a, j_b):
         with pytest.raises(ValueError):
-            record_judgement(sdk, goal_id=goal["id"], judgement=j, target=target)
+            record_judgement(sdk, goal_id=goal["id"], judgement=j, target=target,
+                             indicator_id=None)
     assert _judgement_points(sdk, goal["id"]) == []
