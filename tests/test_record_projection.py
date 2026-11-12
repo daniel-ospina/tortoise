@@ -4069,6 +4069,11 @@ def test_the_operator_rel_type_map_is_the_folds_own():
     source = inspect.getsource(_EdgeHandlers._create_edges)
     assert "MECHANISM_REL_TYPES" in source, (
         "the fold must READ the declaration, not restate it (#12067)")
+    # ⛔ The RECORD's own map must restate `composedOf`/… (it cannot import the
+    # package: `supabase/tests/pglite/validate.mjs` loads this module STANDALONE,
+    # stdlib only), so what keeps it honest is the VALUE parity asserted below,
+    # not a read. Both halves are pinned: read where the module can import,
+    # value-equality where it cannot (#12067 review round 5, P1).
     composition = {"composedOf": "hasPart", "decomposesInto": "hasPart",
                    "contains": "hasPart", "wraps": "hasPart"}
     for op_type, rel_type in composition.items():

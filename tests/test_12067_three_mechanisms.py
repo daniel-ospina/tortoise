@@ -47,6 +47,7 @@ import pytest
 
 from tortoise.ep import (
     _MECHANISM_POTENTIALS,
+    MECHANISM_REL_TYPES,
     MECHANISM_VALUES,
     TortoiseEP,
     mechanism_rel_type,
@@ -141,10 +142,17 @@ def _delta(mechanism: str, source, target, **kw) -> float:
 # ── the closed set, as data ──────────────────────────────────────────────
 
 def test_the_mechanism_set_is_three_and_closed():
+    from tortoise.sdk import _MECHANISM_OP_TYPES
+
     assert frozenset({"IMPL", "NAND", "coherence"}) == MECHANISM_VALUES
     assert set(_MECHANISM_POTENTIALS) == MECHANISM_VALUES
-    # Every mechanism is also a core predicate — one home, no second list.
+    # Every mechanism is also a core predicate — one home, no second list…
     assert MECHANISM_VALUES <= CORE_PREDICATES
+    # …and the sdk's ORDERED spelling (the tuple five call sites iterate) is that
+    # same set, so a fourth mechanism cannot land in one home only (#12067 review
+    # round 5, P2: it was a second declaration nothing compared).
+    assert set(_MECHANISM_OP_TYPES) == MECHANISM_VALUES
+    assert set(MECHANISM_REL_TYPES) == MECHANISM_VALUES
 
 
 def test_every_semantics_mechanism_is_in_the_closed_set():
@@ -726,6 +734,13 @@ def test_an_INTRA_BUNDLE_conflict_is_a_VIOLATION(sdk):
     assert any("SECOND mechanism" in (v.get("message") or "")
                and "THIS bundle" in (v.get("message") or "")
                for v in violations), violations
+    # ⛔ The message must NAME the prior connection and its mechanism, not just
+    # say "a conflict" — they are what a caller acts on, and a swapped unpack in
+    # this arm printed "connections[IMPL] … the 0 mechanism" (measured, #12067
+    # review round 5, P1/P2). Pinned because the assertion above passes on it.
+    msg = next(v["message"] for v in violations if "THIS bundle" in v["message"])
+    assert "connections[0]" in msg, msg
+    assert "'IMPL'" in msg, msg
     # Nothing from the bundle committed — not the first operator either.
     ops = sdk._get_proj().g.query(
         "MATCH (o:Point) WHERE o.is_operator = true RETURN count(o)"
@@ -757,6 +772,65 @@ def test_a_REF_endpoint_resolves_to_its_LANDING_node(sdk):
     violations = getattr(exc.value, "violations", []) or []
     assert any("SECOND mechanism" in (v.get("message") or "")
                for v in violations), violations
+
+
+def test_an_NARY_sibling_pair_is_judged_at_Phase_1(sdk):
+    """⛔ The DOOR judges every 2-subset of the operator's endpoint set, so Phase 1
+    must too (#12067 review round 5, P1 — measured).
+
+    `create_operator` tests an existing operator's endpoints against
+    `set(inputs)` with `len(shared) >= 2`, so for `coherence a→[b, c]` the pair
+    `(b, c)` is a pair it refuses — but Phase 1 derived only `(a, b)` and `(a, c)`.
+    A conflict on the sibling pair therefore passed validation, committed the
+    operator, and then raised mid-write with no violation to skip.
+    """
+    from tortoise.exceptions import BundleValidationError
+
+    a, b, c = _points(sdk, 3)
+    sdk.create_operator("IMPL", b, [c])
+    with pytest.raises(BundleValidationError) as exc:
+        sdk.ingest({"connections": [
+            {"operator": "coherence", "from": a, "to": [b, c]}]})
+    violations = getattr(exc.value, "violations", []) or []
+    assert any("SECOND mechanism" in (v.get("message") or "")
+               for v in violations), violations
+    # The conflict is on the SIBLING pair, so nothing new was written.
+    ops = sdk._get_proj().g.query(
+        "MATCH (o:Point) WHERE o.is_operator = true "
+        "AND o.op_type = 'coherence' RETURN count(o)").result_set
+    assert ops[0][0] == 0, ops
+
+
+def test_two_REFS_that_fold_onto_one_minted_node_are_ONE_pair(sdk):
+    """⛔ `create_point` folds on `key` and on `(pointKind, content_hash)`, so two
+    `points` items repeating the same content are ONE node — and two connections
+    naming them are two mechanisms on one pair (#12067 review round 5, P1).
+
+    Judged per REF, they were two different bundle-local names: the intra-bundle
+    arm never fired, the graph arm was skipped (nothing to look up), and the
+    bundle aborted MID-WRITE with the points already committed. The grouping is the
+    writer's own fold (`_bundle_mint_groups`), not an invention.
+    """
+    from tortoise.exceptions import BundleValidationError
+
+    z = sdk.create_point("statement", "shared target")["id"]
+    with pytest.raises(BundleValidationError) as exc:
+        sdk.ingest({
+            "points": [{"content": "same claim, twice", "ref": "r1"},
+                       {"content": "same claim, twice", "ref": "r2"}],
+            "connections": [
+                {"operator": "IMPL", "from": "r1", "to": z},
+                {"operator": "coherence", "from": "r2", "to": z},
+            ],
+        })
+    violations = getattr(exc.value, "violations", []) or []
+    assert any("THIS bundle" in (v.get("message") or "")
+               for v in violations), violations
+    # Nothing minted: the dedup write the old code allowed to land is gone.
+    rows = sdk._get_proj().g.query(
+        "MATCH (p:Point) WHERE p.content = 'same claim, twice' RETURN count(p)"
+    ).result_set
+    assert rows[0][0] == 0, rows
 
 
 def test_an_absorbed_coherence_leg_lands_on_the_STORAGE_edge(sdk):

@@ -10837,11 +10837,19 @@ def _property_filter_clause(key: str) -> str:
     return f"n.`{key}` = ${key}"
 
 
-#: Every mechanism op_type `create_operator` accepts (#12067). ONE tuple, so a
+#: Every mechanism op_type `create_operator` accepts (#12067), as the ORDERED
+#: spelling the five in-file call sites iterate. ONE tuple in THIS module so a
 #: fourth write path cannot forget the third mechanism — three separate
 #: `("IMPL", "NAND")` literals in this file were each wrong for exactly that
 #: reason (the #2351 guard at the operator door, its ingest twin, and the
 #: operator dedupe probe).
+#:
+#: ⛔ The DECLARATIVE home is `ep.MECHANISM_VALUES` (`pack_registry.CORE_PREDICATES`
+#: is the same set for the pack layer); this tuple is the local, order-preserving
+#: spelling, and `tests/test_12067_three_mechanisms.py` asserts set equality with
+#: BOTH, so a fourth mechanism cannot land in one home only. It is not a second
+#: source of truth — nothing here decides membership; the gates read
+#: `CORE_PREDICATES`/`MECHANISM_REL_TYPES`.
 _MECHANISM_OP_TYPES = ("IMPL", "NAND", "coherence")
 
 
@@ -10866,7 +10874,9 @@ def _mechanism_population(alias: str) -> str:
 
 
 def _mechanism_conflicts_for_pairs(proj, pairs):
-    """``{pair: mechanism}`` → ``{pair: [(kind, other, shared_ids, op_id)]}``.
+    """``{frozenset_of_node_ids: mechanism}`` → ``{pair: [(kind, other, shared,
+    op_id)]}``. Keys are ENDPOINT IDS (plain strings), the same values the graph
+    stores — never a bundle-local name or a mechanism token.
 
     ONE reader for the whole closed-set invariant (#12067), BATCHED: ``pairs``
     is every pair the caller is about to judge, and the population is read ONCE
@@ -24626,9 +24636,11 @@ class TortoiseSDK:
         # (158 sites across 22 modules — measured, #12067's inventory) until
         # each one learned it, i.e. INERT on those surfaces, which is exactly
         # the #8169 failure. Only a part/whole op_type is structural (`hasPart`).
-        from tortoise.ep import mechanism_rel_type as _mechanism_rel_type
-        edge_type = ("hasPart" if op_type not in _MECHANISM_OP_TYPES
-                     else _mechanism_rel_type(op_type))
+        # ⛔ READ the one declaration, else a FOURTH mechanism inherits
+        # `hasPart` here — structurally, silently, and only on the write path
+        # (#12067 review round 5, P2: this was the last hand-rolled member).
+        from tortoise.ep import MECHANISM_REL_TYPES as _MECH_REL_TYPES
+        edge_type = _MECH_REL_TYPES.get(op_type, "hasPart")
         for i, inp_id in enumerate(inputs):
             # #7405: the typed edge and its INPUT mirror are created by ONE
             # statement; the abort means NEITHER landed, and the endpoints/idx
@@ -28868,40 +28880,52 @@ class TortoiseSDK:
         partial-mutation class Phase 1 exists to prevent (#329/#4021) — the door
         refusal stays as the backstop for the non-ingest callers.
 
-        ⛔ THREE THINGS A PREDICTION MUST GET RIGHT, and the first cut got two
-        of them wrong (#12067 review round 4, P1 — each measured on this head):
+        ⛔ WHAT A PREDICTION MUST MODEL, and each item below was MEASURED as a
+        live mid-write abort at some point in this review (#12067 rounds 3-5):
 
-        1. **The landing node, not the spelling.** The first cut passed the raw
-           `from`/`to` STRINGS into the reader, which seeks `p.id IN $ids` — so
-           for refs (the idiomatic spelling) the check was a silent NO-OP, and a
-           pair that already carried a mechanism got a bare `ValueError` after
-           the dedup/absorb writes had landed. Endpoints are now resolved the way
-           the writer resolves them: a ref naming a `points` item is that item's
-           dedup LANDING id (`_resolve_dedup_hit`, the writer's own resolver), and
-           a ref that lands on nothing is a point this bundle MINTS — no id, and
-           therefore no existing mechanism to conflict with.
-        2. **The bundle's own writes.** Phase 1 reads the GRAPH, so a conflict
-           created by two connections OF THE SAME BUNDLE was invisible:
-           `{"points": […], "connections": [{operator: IMPL}, {operator:
-           coherence}]}` on one pair committed the point and the first operator,
-           then raised — the same mid-write abort, reached through the check
-           added to prevent it. Pairs are now accumulated across the bundle and
-           the second statement of a pair in a DIFFERENT mechanism is a
-           violation.
-        3. **The cost.** One pair at a time cost 8 Cypher reads per (connection ×
+        1. **The pair the DOOR judges is every 2-subset of the operator's endpoint
+           set**, not `(from, target)`. `create_operator` tests an existing
+           operator's endpoints against `set(inputs)` with `len(shared) >= 2`, so
+           for `coherence a→[b, c]` the pair `(b, c)` is judged too — and a
+           conflict there is one Phase 1 must see, not the one it derives from
+           `from`/`to`.
+        2. **The landing NODE, not the spelling.** The first cut passed the raw
+           `from`/`to` STRINGS into the reader, which seeks `p.id IN $ids` — so for
+           refs (the idiomatic spelling) the check was a silent NO-OP. Endpoints are
+           resolved the way the writer resolves them: a ref naming a `points` item
+           is that item's dedup LANDING id (`_resolve_dedup_hit`, the writer's own
+           resolver), else the node this bundle MINTS.
+        3. **Two refs can denote ONE minted node.** `create_point` folds on `key`
+           and on `(pointKind, content_hash)`, so `{ref: r1, content: C}` and
+           `{ref: r2, content: C}` are one node — and two connections naming them
+           are two mechanisms on one pair. Minted refs are therefore grouped by the
+           writer's own fold aliases (`_bundle_mint_groups`).
+        4. **The bundle's own writes.** Phase 1 reads the GRAPH, so a conflict
+           created by two connections OF THE SAME BUNDLE was invisible. Pairs are
+           accumulated across the bundle, and the second statement of a pair in a
+           DIFFERENT mechanism is a violation naming BOTH connection indexes and
+           BOTH mechanisms.
+        5. **The cost.** One pair at a time cost 8 Cypher reads per (connection ×
            target) — 0.53 s of validation for a 60-connection bundle. The
-           population is now read ONCE for every pair in the bundle
+           population is read ONCE for every pair in the bundle
            (`_mechanism_conflicts_for_pairs`).
 
-        Reported per SELF-CONTAINED pair: the violation names the connection
-        index, the mechanism already on the pair, and where it came from, so a
-        caller can drop or re-point that one connection.
+        ⛔ SCOPE, so the doors agree. BOTH arms are Phase-1 verdicts here, because
+        a connection carrying `operator` is written by `create_operator` on EVERY
+        route — and that door refuses the mirror of both: an operator beside a
+        bare edge, and an operator beside an operator. The one shape the SDK does
+        NOT refuse is a bare edge beside another bare edge (`create_direct_edge`
+        allows it: separate message slots, no last-writer hazard), and that shape
+        is unreachable from an `operator` connection at all — it needs the
+        `relation` route. ONTOLOGY states exactly that split; `ingest` is not
+        stricter than the door it predicts, it simply has no bare-edge spelling
+        (#12067 review round 5, P2).
 
         ⛔ STATED RESIDUAL: a ref naming a NON-point item (``entities``/
         ``sources``) is not resolved to its landing node here — `resolve_or_mint`
         decides that at write time — so a mechanism connection addressing such a
-        ref is judged on its bundle-local pair identity only. It remains covered
-        by the execution door's `raise` (the backstop), not by Phase 1.
+        ref is judged on its bundle-local identity only. It remains covered by the
+        execution door's `raise` (the backstop), not by Phase 1.
         """
         from tortoise.pack_registry import CORE_PREDICATES
 
@@ -28918,58 +28942,66 @@ class TortoiseSDK:
             if not isinstance(src, str):
                 continue
             targets = [dsts] if isinstance(dsts, str) else list(dsts or [])
-            for tgt in targets:
-                if not isinstance(tgt, str) or tgt == src:
-                    continue
-                shape.append((i, mechanism, [src, tgt]))
-                endpoint_names.update((src, tgt))
+            targets = [t for t in targets if isinstance(t, str) and t != src]
+            if not targets:
+                continue
+            shape.append((i, mechanism, [src, *targets]))
+            endpoint_names.update([src, *targets])
         if not shape:
             return
         landing = self._bundle_point_ref_landings(bundle, endpoint_names)
+        mint_group = self._bundle_mint_groups(bundle, endpoint_names, landing)
+        local_refs = self._bundle_local_refs(bundle)
 
-        def _node(name: str) -> tuple[str, str] | None:
-            """The pair KEY for one endpoint: its landing id when the bundle or
-            the graph will hold a node, else its bundle-local identity."""
+        def _node(name: str) -> tuple[str, str]:
+            """The pair KEY for one endpoint: the node the bundle or the graph
+            will hold, else the bundle-local identity of whatever it will be."""
             if name in landing:
-                return ("id", landing[name]) if landing[name] else ("ref", name)
-            if name in self._bundle_local_refs(bundle):
-                return ("ref", name)
+                if landing[name]:
+                    return ("id", landing[name])
+                return ("mint", mint_group.get(name, name))
+            if name in local_refs:
+                return ("mint", mint_group.get(name, name))
             return ("id", name)
 
         proj = self._get_proj()
+        # `seen` keys are the PAIR IDENTITY pairstyle: `("id", <node id>)` or
+        # `("mint", <group>)`, so a pair the bundle mints and a pair the graph
+        # holds can never be confused; `graph_pairs` is the id-only projection
+        # the reader takes, keyed exactly as `_mechanism_conflicts_for_pairs`
+        # expects (a frozenset of node ids).
         seen: dict[frozenset, tuple[str, int]] = {}
         graph_pairs: dict[frozenset, str] = {}
-        ids_pairs: dict[int, list[tuple[tuple, tuple]]] = {}
-        for i, mechanism, (src, tgt) in shape:
-            a, b = _node(src), _node(tgt)
-            key = frozenset((a, b))
-            prev = seen.get(key)
-            if prev is not None and prev[0] != mechanism:
-                pj, pm = prev
-                violations.append(self._mechanism_violation(
-                    i, mechanism,
-                    f"connections[{pj}] of THIS bundle already states the "
-                    f"{pm!r} mechanism on that pair (no node existed to read, "
-                    f"so this is an intra-bundle conflict)", None))
-                continue
-            seen.setdefault(key, (mechanism, i))
-            if (a[0] == "id" and b[0] == "id"):
-                id_key = frozenset((a[1], b[1]))
-                graph_pairs.setdefault(id_key, mechanism)
-                ids_pairs.setdefault(i, []).append((id_key, (a[1], b[1])))
-        for id_key, found in _mechanism_conflicts_for_pairs(
-                proj, graph_pairs).items():
-            for i, entries in ids_pairs.items():
-                if not any(k == id_key for k, _names in entries):
-                    continue
-                _names = next(n for k, n in entries if k == id_key)
-                for kind, other, _shared, oid in found:
-                    where = (f"operator {oid!r}" if kind == "operator"
-                             else "a direct edge")
+        pair_index: dict[frozenset, list[tuple[int, list[str], str]]] = {}
+        for i, mechanism, names in shape:
+            tokens = [_node(n) for n in names]
+            for a in range(len(tokens)):
+                for b in range(a + 1, len(tokens)):
+                    key = frozenset((tokens[a], tokens[b]))
+                    prev = seen.get(key)
+                    if prev is not None and prev[0] != mechanism:
+                        pm, pj = prev
+                        violations.append(self._mechanism_violation(
+                            i, mechanism,
+                            f"connections[{pj}] of THIS bundle already states "
+                            f"the {pm!r} mechanism on that pair (no node exists "
+                            f"to read, so this is an intra-bundle conflict)",
+                            None))
+                        continue
+                    seen.setdefault(key, (mechanism, i))
+                    if tokens[a][0] == "id" and tokens[b][0] == "id":
+                        id_key = frozenset((tokens[a][1], tokens[b][1]))
+                        graph_pairs.setdefault(id_key, mechanism)
+                        pair_index.setdefault(id_key, []).append(
+                            (i, [names[a], names[b]], mechanism))
+        for key, found in _mechanism_conflicts_for_pairs(proj, graph_pairs).items():
+            for i, names, mechanism in pair_index.get(key, []):
+                for _kind, other, _shared, oid in found:
                     violations.append(self._mechanism_violation(
-                        i, graph_pairs[id_key],
-                        f"it already carries the {other!r} mechanism ({where})",
-                        sorted(_names)))
+                        i, mechanism,
+                        f"it already carries the {other!r} mechanism "
+                        f"(operator {oid!r})",
+                        sorted(names)))
 
     def _mechanism_violation(self, index: int, mechanism: str, because: str,
                              pair: list[str] | None) -> dict:
@@ -29009,11 +29041,12 @@ class TortoiseSDK:
         """``{ref: landing_id_or_None}`` for the ``points`` refs in ``names``.
 
         The WRITER's own resolution (``_resolve_dedup_hit``, keyed by
-        ``_item_dedup_key``), so Phase 1 predicts the id step 2 will fold onto
-        instead of guessing from content: a ref whose point content/key dedups
-        onto an existing node has a landing id TODAY, and that id is what a
-        mechanism pair must be looked up by. ``None`` = the bundle mints a NEW
-        point, so no existing mechanism can sit on that endpoint.
+        ``_item_dedup_key`` and the POSITIONAL kind ``_item_point_kind`` — never
+        the ``pointKind`` spelling, which rides props and would scope the probe
+        differently from the write, #9819), so Phase 1 predicts the id step 2 will
+        fold onto instead of guessing from content: a ref whose point dedups onto
+        an existing node has a landing id TODAY, and that id is what a mechanism
+        pair must be looked up by. ``None`` = the bundle MINTS a point.
 
         Only the refs actually named by a mechanism connection are resolved — one
         query each, and none for a bundle that names none.
@@ -29028,13 +29061,13 @@ class TortoiseSDK:
             if not isinstance(ref, str) or not ref or ref not in names:
                 continue
             content = item.get("content")
-            kind = item.get("kind") or item.get("pointKind") or "statement"
             if not isinstance(content, str) or not content.strip():
                 out[ref] = None
                 continue
             try:
                 hit, _key_hits = self._resolve_dedup_hit(
-                    content, pointKind=kind, key=_item_dedup_key(item))
+                    content, pointKind=_item_point_kind(item),
+                    key=_item_dedup_key(item))
             except Exception:
                 # A PROBE, never a gate: an unreadable landing falls back to
                 # "this bundle mints it", which skips the GRAPH arm for that
@@ -29044,6 +29077,64 @@ class TortoiseSDK:
                 continue
             out[ref] = hit
         return out
+
+    def _bundle_mint_groups(self, bundle: dict, names: set[str],
+                            landing: dict[str, str | None]) -> dict[str, str]:
+        """``{ref: group_representative}`` for the refs this bundle MINTS (#12067).
+
+        ⛔ Two refs can denote ONE node: `create_point` folds on the item's `key`
+        and, when the key misses, on ``(pointKind, content_hash)`` — so two
+        `points` items repeating the same content (the documented #6110 retry
+        shape) land on one node. Judging their connection endpoints as two
+        distinct bundle-local names hid the conflict, and the bundle then aborted
+        MID-WRITE with the points already committed (measured, #12067 review
+        round 5, P1).
+
+        A UNION-FIND over the writer's own fold aliases, so the grouping is the
+        writer's, not an invention: two minted refs are one node iff they share a
+        normalised `key` or a ``(kind, content_hash)`` pair.
+        """
+        parent: dict[str, str] = {}
+
+        def _find(x: str) -> str:
+            parent.setdefault(x, x)
+            root = x
+            while parent[root] != root:
+                root = parent[root]
+            while parent[x] != root:
+                parent[x], x = root, parent[x]
+            return root
+
+        def _union(a: str, b: str) -> None:
+            ra, rb = _find(a), _find(b)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+
+        alias_owner: dict[tuple, str] = {}
+        for item in bundle.get("points") or []:
+            if not isinstance(item, dict):
+                continue
+            ref = item.get("ref")
+            if not isinstance(ref, str) or not ref or ref not in names:
+                continue
+            if landing.get(ref):
+                continue                      # a real node: its id is the key
+            _find(ref)
+            kind = _item_point_kind(item)
+            aliases: list[tuple] = []
+            key = _item_dedup_key(item)
+            if key:
+                aliases.append(("k", kind, key))
+            content = item.get("content")
+            if isinstance(content, str) and content.strip():
+                aliases.append(("c", kind, _content_hash(content)))
+            for alias in aliases:
+                owner = alias_owner.get(alias)
+                if owner is None:
+                    alias_owner[alias] = ref
+                else:
+                    _union(owner, ref)
+        return {ref: _find(ref) for ref in list(parent)}
 
     def ingest(self, bundle: dict, granularity: str = "bulk", *,
                promotion_policy: str = "gated") -> dict:
