@@ -568,14 +568,16 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         #   * `resolves 16379 and a lane's` — the text of an ASSERTION MESSAGE
         #     naming the fallback the export exists to pre-empt.
         #
-        # Each of the three NAME entries is a full STATEMENT, never the bare
-        # name and never the name merely quoted: the matcher is a SUBSTRING
-        # test over the stripped source line, so `'"falkordb-16379"'` would
-        # also have exempted a future `_docker("exec", "falkordb-16379", ...)`
-        # — every site in this file spells the name double-quoted, so quoting
-        # narrows it against nothing. Declaring the statements is what keeps a
-        # future LANE-PORT site a red instead of an exemption, which is the
-        # whole job of this file (same shape as `test_wipe_server.py` above).
+        # The three NAME entries are anchored on the code AROUND the name,
+        # never on the bare name: the matcher is a SUBSTRING test over the
+        # stripped source line, so a bare `"falkordb-16379"` would also have
+        # exempted a future `_docker("exec", "falkordb-16379", ...)`. Two are
+        # narrow by their own text (`for shared in (`, `_remove_and_describe(`).
+        # The parametrize-list one (`:2087`) is narrow ONLY by its trailing
+        # comment — `'"falkordb-16379",'` alone DOES exempt that dial — so
+        # THAT COMMENT IS LOAD-BEARING: trimming it silently widens the entry
+        # back to a bare name and re-opens the very dial it keeps red.
+        #
         # The two port-shaped fixtures are declared as narrow anchors for the
         # same reason: `127.0.0.1:<port>:6379` is exactly the `docker run -p`
         # publish spec and `127.0.0.1:6379/<graph>` exactly the `docker://` URI
@@ -585,14 +587,17 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         # a statement, and it is not one.
         #
         # What each entry must be, so a future editor can add one correctly: an
-        # anchored SUBSTRING of the line the census reports for that constant —
-        # a statement prefix where the fixture is a statement, the whole
-        # stripped line where that line IS the fixture text, or the message
-        # fragment that identifies an assertion line. An entry that matches no
-        # reported line is INERT, and nothing watches that at the entry level:
-        # the non-vacuity check is per-FILE (`_exemptions_no_file_can_consult`
-        # returns `set(allow) - population`), so it catches a row whose file
-        # left the population, never an entry that stopped matching.
+        # anchored SUBSTRING of the line the census reports for that constant,
+        # never the bare literal alone. The shapes actually in use in this row
+        # are a statement prefix (`:2113`), the whole stripped line including a
+        # trailing comment (`:2087`), a call substring anchored on the argument
+        # list (`:2567`), a fixture-text prefix (`:2325`, `:2894`), the whole
+        # stripped line (`:2987`), and a message fragment (`:5152`). An entry
+        # that matches no reported line is INERT, and nothing watches that at
+        # the entry level: the non-vacuity check is per-FILE
+        # (`_exemptions_no_file_can_consult` returns `set(allow) - population`),
+        # so it catches a row whose file left the population, never an entry
+        # that stopped matching.
         #
         # The census is the justification, stated in its own unit: it reports
         # seven lane-port-bearing constants in this file, and those seven ARE
