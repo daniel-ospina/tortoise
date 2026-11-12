@@ -27,16 +27,22 @@ whose host moved while its dead `#appeal` fragment did not (#11939).
 
 ⛔ #11767's items 4 and 5 are IN THIS FILE'S SURFACE: the dashboard landing
 pages, the blog origin, and the dashboard's docs links used to spell the retired
-origin. Every file that STILL spells it is in `RETIRED_HOST_ALLOWLIST` with an
-EXACT occurrence count, its TERMINATOR — a 301 onto a canonical origin (the
-DEFAULT `/blog*` 301 for five of them, so those five name no status: it is stated
-once, in the census below), or NOT REDIRECTED AT ALL, where the retired host
-answers in place — and, for the DEFERRALS, the issue that owns the re-aim. The
-four files that now read 0 have NO row and stay in `RUNTIME_FILES`, so a literal
-coming back REDS the guard instead of leaving the surface; the four KEEP rows name
-no follow-up issue on purpose; and neither group is a leftover, which is why this
-guard cannot report GREEN over a file it never opened, and why a sweep that
-removes one of those literals must remove its recorded reason too.
+origin. Every file in `RUNTIME_FILES` that STILL spells it is in
+`RETIRED_HOST_ALLOWLIST` with an EXACT occurrence count, its TERMINATOR — a 301
+onto a canonical origin (the DEFAULT `/blog*` 301 for five of them, so those five
+name no status: it is stated once, in the census below), or NOT REDIRECTED AT
+ALL, where the retired host answers in place — and, for the DEFERRALS, the issue
+that owns the re-aim. ⛔ BOUNDED TWICE, and both bounds matter: the ten DEFERRALS
+carry a terminator, while the four non-deferral KEEP rows (CORS and redirect
+allowlists, not links) have none to carry; and files OUTSIDE `RUNTIME_FILES` still
+spell the host with no row at all — the `blog/api/notify-publish` POST in
+`.github/workflows/deploy-pages.yml`, and the `author_image_url` literals in
+`supabase/migrations/*` — because this guard counts what the RUNTIME emits in its
+own surface, not every occurrence in the tree. The four files that now read 0 have
+NO row and stay in `RUNTIME_FILES`, so a literal coming back REDS the guard instead
+of leaving the surface, and neither group is a leftover — which is why this guard
+cannot report GREEN over a file it never opened, and why a sweep that removes one of
+those literals must remove its recorded reason too.
 
 ⛔ THE COUNTS MOVED UNDER THIS PR, AND THAT IS THE POINT OF AN EXACT COUNT. main's
 #12058 ("serve the product at premiselabs.co/tortoise", which is what CLOSED
@@ -315,7 +321,7 @@ RETIRED_HOST_ALLOWLIST = {
         1,
         "#11767 item 4 — the `title=\"View public post\"` permalink (line 186), NOT "
         "an author-image thumbnail — an earlier revision of this row said the "
-        "thumbnail, which this file derives from the row's own URL. Deferred with "
+        "thumbnail, which this file does NOT render at all. Deferred with "
         "the blog sweep (#12057). Measured 2026-11-12."),
     "website/apps/dashboard/src/harnesses.js": (
         1,
@@ -537,8 +543,10 @@ def test_every_allowlisted_occurrence_has_a_reason():
     # reverse direction was unasserted — appending a row here (the natural way to
     # record a deferral) would silently create an unenforced, invisible entry, and
     # the module docstring promises the opposite ("this guard cannot report GREEN
-    # over a file it never opened"). Both sets are equal today, so this pins the
-    # invariant rather than repairing a live gap.
+    # over a file it never opened"). Every allowlisted key is in `RUNTIME_FILES`
+    # today — the assertion below pins that SUBSET, not equality: `RUNTIME_FILES`
+    # is deliberately the WIDER set (23 entries against 14 keys), because a file at
+    # 0 occurrences keeps its entry so a returning literal still reds the guard.
     orphans = sorted(set(RETIRED_HOST_ALLOWLIST) - set(RUNTIME_FILES))
     assert not orphans, (
         "these files carry an allowlist entry but are NOT in RUNTIME_FILES, so no "
