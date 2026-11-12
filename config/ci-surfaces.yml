@@ -2235,11 +2235,16 @@ surfaces:
   # #11758/#11981: the two purchasable storage dimensions — `graph_storage`
   # (`hot capacity`) and `postgres_storage` (`stored data`) — and the `solo` $19
   # tier that first sells them. The pins drive
-  # `metering.storage_overage_cost_usd`, which reads `pricing.storage_limits` /
-  # `pricing.storage_overage_rate` / `pricing.BYTES_PER_GB` and prices against the
-  # tier table in `cost_dimensions` / `allowance_gate`. Hermetic — arithmetic and
-  # table shape only, no DB, no graph, no network. DUAL-REGISTERED with `api`: the
-  # pins read sources on BOTH sides of the surface split, and neither arm is
+  # `metering.storage_overage_cost_usd`, which reads
+  # `pricing.storage_dimensions` / `storage_limits` / `storage_overage_rate` /
+  # `BYTES_PER_GB` — all four from `product/pricing.json` — and they cross-check
+  # the unit `cost_dimensions.by_name` declares and the keys
+  # `allowance_gate.ALLOWANCE_KEYS` owns. Neither of those two prices anything —
+  # `cost_dimensions` declares no rate, tier boundary or overage and does not
+  # import `product/pricing.json`, and `allowance_gate` sets no allowance or rate.
+  # Hermetic — arithmetic and table shape only, no
+  # DB, no graph, no network. DUAL-REGISTERED with `api`: the
+  # pins read sources in BOTH the `api` and `core` surfaces, and neither arm is
   # redundant — `tortoise/metering.py` is an exact `api` SOURCE_PATTERN (a
   # metering.py-only diff resolves `['api']`, where a named-surface match REPLACES
   # this `core` fallback, #2938), while `tortoise/pricing.py` matches no
