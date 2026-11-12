@@ -1206,9 +1206,11 @@ class TestTheBundleValidationDoor:
         Reverting all three `_check_endpoints` reads to `str(item.get("type")
         or "").strip().lower()` left the suite green (measured), because nothing
         exercised an endpoint whose item type RENDERS differently from its
-        content. Both directions are pinned here: a lie renderer must not cause
-        a false "must be a ... endpoint" refusal, and a `strip()` overrider must
-        not let a bundle pass Phase 1 that the writer then routes elsewhere.
+        content. One direction is pinned here — a lie RENDERER must not cause a
+        false "must be a ... endpoint" refusal, which is the failure this arm
+        produced. The `strip()` direction is NOT observable at this arm (measured:
+        identical violations with and without the override), and the writer-side
+        rule is pinned by `test_the_writer_resolves_the_type_by_content_too`.
         """
         class Lie(str):
             def __str__(self):

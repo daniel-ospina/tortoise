@@ -400,15 +400,17 @@ def apply_payload_operators(proj, sdk, operators: list, *,
     target idempotent and the rest duplicated. Widen the probe to read the
     whole target set before routing such a caller here.
 
-    ⚠️ The MITIGATES fallback below is IMPL-only (it hardcodes
-    ``op_type:'IMPL'``), so ``continue``-ing a skipped NAND leaves a
-    NAND-targeted mitigation with nothing to attach to and it is dropped with
-    a warning. Not reachable today — ``OperatorTarget.op_type`` is
-    ``Literal["IMPL"]`` (``commit_schema.py:464``) and the extractor emits
-    ``op_type: "IMPL"`` (``extractor_v2.py:5868``) — but this guard is the
-    first thing that makes that fallback load-bearing for a skipped same-call
-    operator, so extend the fallback (``t_op_type`` + the mapped edge) in the
-    same change that widens the schema.
+    ⚠️ SCOPE — the MITIGATES fallback reads the DECLARED target mechanism
+    (``OperatorTarget.op_type``, ``Literal["IMPL", "coherence"]``) and takes
+    the storage edge type from ``ep.MECHANISM_REL_TYPES``, so the declaration is
+    load-bearing: a ``MITIGATES`` declaring ``IMPL`` cannot attach to a
+    ``coherence`` bridge (pinned in
+    ``tests/test_12067_three_mechanisms.py::test_a_mitigation_targets_a_COHERENCE_bridge_too``,
+    which reds if the probe widens back to a SET — #12067 review round 14, P1).
+    The residual is the DECLARATION set, not this probe: a pair emitted as NAND
+    cannot be named by a target at all (the schema has no NAND arm), so the
+    extractor declines it with its own warning rather than letting it land here
+    as a missing-IMPL-edge drop.
     """
     target_op_ids: dict[tuple, str] = {}
     created_ids: list[str] = []
@@ -424,11 +426,18 @@ def apply_payload_operators(proj, sdk, operators: list, *,
         # #4971 — (op_type, src, dst) idempotency probe, on the RESOLVED
         # triple (see the docstring; a payload-keyed probe never fires on a
         # re-key). The relation type is mapped exactly as ``create_operator``
-        # maps it for the edge it writes (part/whole ops use ``hasPart``), so
-        # the probe reads the same edge the write would have created rather
-        # than inlining a raw op_type that would make it miss on those ops.
-        _edge_type = ("hasPart" if op_type not in ("IMPL", "NAND")
-                      else op_type)
+        # maps it for the edge it writes (part/whole ops use ``hasPart``; a
+        # coherence operator is stored on ``IMPL`` — #12067), so the probe reads
+        # the same edge the write would have created rather than inlining a raw
+        # op_type that would make it miss on those ops. ⛔ ``coherence`` beside
+        # IMPL/NAND is what made the probe miss: it probed ``hasPart`` while
+        # ``create_operator`` writes ``IMPL``, so a retried payload re-minted the
+        # operator over the same pair (#12067 review, P1).
+        # #12067: the map lives in `ep.py` beside `_MECHANISM_POTENTIALS`; it is
+        # imported HERE rather than at module scope because `ep` imports this
+        # package's graph layer.
+        from .ep import MECHANISM_REL_TYPES
+        _edge_type = MECHANISM_REL_TYPES.get(op_type, "hasPart")
         _dup = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$t}})-"
             f"[:{_edge_type} {{idx:0}}]->(s) WHERE s.id = $src "
@@ -448,8 +457,17 @@ def apply_payload_operators(proj, sdk, operators: list, *,
                 promote_source=False,
             )
         except ValueError as e:
-            _logger.warning(
-                "operator write skipped (inputs missing?): %s", e)
+            # #12067: a CLOSED-SET refusal is not a missing-input problem, and
+            # reporting it as one sends the caller to the wrong cause while the
+            # operator silently vanishes from the commit.
+            if "mechanism set is CLOSED" in str(e):
+                _logger.warning(
+                    "operator write REFUSED by the closed mechanism set "
+                    "(#12067) — the pair already carries another mechanism: %s",
+                    e)
+            else:
+                _logger.warning(
+                    "operator write skipped (inputs missing?): %s", e)
             continue
         target_op_ids[(src, dst, op_type)] = result["id"]
         created_ids.append(result["id"])
@@ -466,20 +484,45 @@ def apply_payload_operators(proj, sdk, operators: list, *,
         t_op_type = _target_attr(t, "op_type") or "IMPL"
         op_id = target_op_ids.get((t_src, t_dst, t_op_type))
         if op_id is None:
+            # ⛔ THE BRIDGE MAY BE A COHERENCE OPERATOR (#12067 review round 4,
+            # P2), AND IT MUST CARRY THE MECHANISM THE TARGET DECLARES (#12067
+            # review round 13, P1). Round 4's widening stopped `coherence` being
+            # excluded, but it widened to a SET — and a set drops the half that
+            # made the declaration load-bearing: `t_op_type` is read from the
+            # payload and then used only in the `target_op_ids` key, never in the
+            # probe. A payload declaring IMPL therefore attached to a `coherence`
+            # bridge (and the mirror), silently, on exactly the pair the
+            # declaration was about — a mitigation that says "support" damping a
+            # necessity. Filtering on `$t` keeps `OperatorTarget.op_type`
+            # load-bearing; the EDGE half comes from the one declaration of the
+            # storage spelling, `ep.MECHANISM_REL_TYPES` (coherence shares
+            # `:IMPL` with IMPL; NAND lives on `:NAND`). The closed set
+            # guarantees at most one mechanism per pair, so neither the filter nor
+            # the parameter can double-resolve.
+            from tortoise.ep import MECHANISM_REL_TYPES
+            _bridge_rel = MECHANISM_REL_TYPES.get(t_op_type, "IMPL")
             rows = proj.g.query(
-                "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
-                f"MATCH (o)-[:IMPL {{idx:0}}]->(s) WHERE {epistemic_disjunction('s')} AND s.id = $src "
-                f"MATCH (o)-[:IMPL {{idx:1}}]->(d) WHERE {epistemic_disjunction('d')} AND d.id = $dst "
+                "MATCH (o:Point {is_operator:true}) "
+                "WHERE o.op_type = $t "
+                # ⛔ THE `WITH o` IS LOAD-BEARING (#6976): without it the
+                # predicate is dropped by the planner and the query returns
+                # OTHER points' rows — the same shape the bounded-relationship
+                # pin refuses everywhere else.
+                "WITH o "
+                f"MATCH (o)-[:{_bridge_rel} {{idx:0}}]->(s) "
+                f"WHERE {epistemic_disjunction('s')} AND s.id = $src "
+                f"MATCH (o)-[:{_bridge_rel} {{idx:1}}]->(d) "
+                f"WHERE {epistemic_disjunction('d')} AND d.id = $dst "
                 "RETURN o.id LIMIT 1",
-                params={"src": t_src, "dst": t_dst},
+                params={"src": t_src, "dst": t_dst, "t": t_op_type},
             ).result_set
             op_id = rows[0][0] if rows else None
         if op_id is None:
-            # Deep-miss (DE2E-11 negative): the target IMPL edge is absent —
-            # the mitigation must NOT attach (support-edge-first convention).
+            # Deep-miss (DE2E-11 negative): the target mechanism edge is absent
+            # — the mitigation must NOT attach (support-edge-first convention).
             _logger.warning(
-                "MITIGATES target edge (%s,%s,IMPL) not found — "
-                "mitigation dropped", t_src, t_dst)
+                "MITIGATES target edge (%s,%s,%s) not found — "
+                "mitigation dropped", t_src, t_dst, t_op_type)
             continue
         reason = point_content_by_id(src) if point_content_by_id else ""
         if not reason:

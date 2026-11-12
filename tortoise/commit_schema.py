@@ -890,23 +890,31 @@ class OperatorTarget(BaseModel):
 
     #4937: this identifies the operator BRIDGE a mitigation attacks; it is
     not a peer of the ``Operator`` it belongs to.
+
+    #12067: a bridge can also be a COHERENCE operator. Both mechanisms are
+    stored on the ``:IMPL`` edge type (`ep.MECHANISM_REL_TYPES`), so the
+    ``src``/``dst``/edge half of the key is unchanged — only the mechanism the
+    operator NODE declares differs, and a mitigation that named ``IMPL`` for a
+    pair carrying ``coherence`` missed its target and was dropped.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     src: str
     dst: str
-    op_type: Literal["IMPL"] = "IMPL"
+    op_type: Literal["IMPL", "coherence"] = "IMPL"
 
 
 class Operator(BaseModel):
-    """Epistemic operator record — IMPL / NAND, or the MITIGATES bridge-attack.
+    """Epistemic operator record — IMPL / NAND / coherence, or the MITIGATES bridge-attack.
 
     ``op_type`` is the WIRE vocabulary of the commit payload's ``operators``
-    array. Its three values are NOT three operator kinds:
+    array. Its four values are NOT four operator kinds:
 
-    * ``IMPL`` / ``NAND`` — the two operator kinds (a reified operator Point,
-      ``is_operator: true``, carrying direction + an optional label).
+    * ``IMPL`` / ``NAND`` / ``coherence`` — the THREE mechanism kinds (a reified
+      operator Point, ``is_operator: true``, carrying direction + an optional
+      label). ``coherence`` reuses the ``:IMPL`` edge type for storage; the
+      mechanism of record is this node's ``op_type`` (#12067).
     * ``MITIGATES`` — the wire spelling of a **bridge-attack**: ``target``
       names the operator bridge it damps and ``strength`` names the dampening
       (``w_eff = w × (1 − strength)``, weights.py). The commit path routes this
@@ -923,7 +931,12 @@ class Operator(BaseModel):
 
     src: str
     dst: str
-    op_type: Literal["IMPL", "NAND", "MITIGATES"]
+    # #12067: the mechanism set is closed at THREE, and the wire contract must
+    # carry every mechanism the SDK accepts — a payload carrying a coherence
+    # operator is shape-valid (`validate_payload_dict` is what both the hosted
+    # API and the SDK's client-side pre-check run), so leaving the third value
+    # out made the commit surface disagree with `create_operator`.
+    op_type: Literal["IMPL", "NAND", "coherence", "MITIGATES"]
     # #7852: the Layer-1 direction vocabulary — the model's four values plus
     # the two legacy aliases. Must stay equal to `live.ACCEPTED_DIRECTION_VALUES`;
     # `tests/test_direction_storage_7852.py` pins the two sets, so widening one
