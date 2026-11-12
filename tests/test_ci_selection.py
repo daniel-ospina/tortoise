@@ -3611,6 +3611,37 @@ def test_the_consent_bridge_guard_runs_on_its_docs_records_too():
         )
 
 
+def test_the_dashboard_price_guard_runs_on_a_spec_only_diff():
+    """#11767 review (P2): the price-of-record guard's own subject must select it.
+
+    `test_website_static.py::TestDashboardPlanPricesAreThePriceOfRecord` — added
+    by this PR — fails when the dashboard e2e spec RESTATES a plan price that
+    disagrees with `product/pricing.json`. Before this review's
+    `tests/e2e/test_dashboard_identity.py` SOURCE_PATTERNS entry, a spec-only diff
+    selected `['core']` and did NOT select the guard (measured), so the
+    15-minute `dashboard-e2e` remained the only detector on the one diff the
+    two-second static check exists to replace — the #1349/#3332/#3616
+    silent-drop class (a guard registered on a surface the drift's own subject
+    never selects).
+
+    ⛔ The price-move half (`product/pricing.json` alone) is deliberately NOT
+    covered here: it selects no surface at all and that is the declared #12006
+    gap, so pinning it here would encode an undecided ownership question as a
+    test rather than fixing a reachability one.
+    """
+    root = Path(__file__).resolve().parents[1]
+    changed = "tests/e2e/test_dashboard_identity.py"
+    assert (root / changed).exists(), f"guarded e2e spec is gone: {changed}"
+    r = _sel([changed])
+    assert r["full"] is False
+    assert "onboarding" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — the price-of-record guard's surface "
+        "is not reached by the spec whose restatement it fails")
+    assert "test_website_static.py" in r["test_files"], (
+        f"a spec-only edit to {changed} does not run tests/test_website_static.py, "
+        "so the static price check cannot fire on the drift it names (#11767)")
+
+
 def test_the_csp_plan_doc_guard_runs_on_its_plan_doc_too():
     """#8334 review (P2, Finding 1): the doc guard's own subject must select it.
 
