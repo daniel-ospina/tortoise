@@ -869,6 +869,20 @@ jobs:
         # A shrunk mutation POPULATION is caught by the tool's own floor, not by this arm.
         # Both lines sit INSIDE the exact list the two `docs`-job pins assert, so
         # neither can be appended around them.
+        # #2852: the findings ledger's guard (`tools/findings_ledger_check.py`,
+        # pinning `docs/architecture/MEMORY-SUBSTRATE-FINDINGS-LEDGER.md`) joins
+        # for the same reason as its #5086/#2820 siblings — a docs-only edit of
+        # the ledger selects NO surface, so its own test reaches it only through
+        # the curated `tier1` list — and it needs HISTORY for the same
+        # `measured_at_commit` ancestry claim (it reports UNVERIFIED/exit 2 rather
+        # than blaming the document on a grafted graph). Its extra reason is
+        # specific to what the page is: §3 is a CORRECTIONS log, and re-measuring
+        # it found seven of its twelve rows no longer read as written, so a verdict
+        # outside the closed vocabulary or a `path:line`
+        # that stopped resolving reads exactly like evidence to the next lane.
+        # BOTH arms run, for the #11084 reason: `--self-test` is what proves the
+        # rules still fire. Stdlib only, so it needs nothing from the `pip
+        # install` above.
         run: |
           pip install -e . --quiet
           python3 tools/bridge_table.py --check
@@ -878,6 +892,8 @@ jobs:
           python3 tools/problem_map_check.py --check
           python3 tools/test_design_map_check.py
           python3 tools/test_design_map_check.py --self-test
+          python3 tools/findings_ledger_check.py --check
+          python3 tools/findings_ledger_check.py --self-test
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
