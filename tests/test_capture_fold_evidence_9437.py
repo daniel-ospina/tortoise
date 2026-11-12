@@ -206,6 +206,11 @@ def test_a_pre_existing_link_is_reported_present_but_not_written(sdk, monkeypatc
     assert any(
         "1 attachment link(s) present (0 written by this fold)" in w
         for w in meta["warnings"]), meta["warnings"]
+    # ⚠️ The NEGATIVE half: `carried` alone must suppress the "no per-occurrence
+    # evidence" clause. Deleting `not carried` from that conjunction left this
+    # test green while the receipt printed both clauses in one sentence.
+    assert not any("no per-occurrence evidence of its own" in w
+                   for w in meta["warnings"]), meta["warnings"]
 
 
 # ── 2) a slot the canonical owns is reported, never silently overwritten ──
@@ -232,7 +237,7 @@ def test_a_conflicting_slot_keeps_the_canonicals_and_reports_the_difference(
     assert len(claims) == 1, claims
     assert (claims[0][2], claims[0][3], claims[0][4]) == ("first words", 0, 29), \
         f"the canonical's own evidence must not be overwritten: {claims}"
-    assert any("kept the canonical's own" in w for w in meta["warnings"]), meta["warnings"]
+    assert any("did not carry" in w for w in meta["warnings"]), meta["warnings"]
     for key in ("quote", "span_start", "span_end"):
         assert any(key in w for w in meta["warnings"]), (key, meta["warnings"])
     # ⛔ …and the receipt must NOT also claim there was nothing to carry: a
@@ -402,11 +407,17 @@ class _FakeGraph:
 
     def __init__(self, *, dup_row=_DUP_ROW, edges=(), carried=(0, None),
                  canon_row=_CANON_ROW, raise_on=frozenset(),
-                 dup_props=None):
+                 dup_props=None, inbound=(), canon_rows=None):
         self.dup_row = dup_row
         self.edges = list(edges)
         self.carried = carried
         self.canon_row = canon_row
+        #: The duplicate's INBOUND edges — a separate fixture because the two
+        #: reads are distinguished by their pattern, not by the `-[r]->` shape
+        #: they share.
+        self.inbound = list(inbound)
+        #: Two-or-more rows for the canonical id (`_canonical_view` refuses).
+        self.canon_rows = canon_rows
         self.raise_on = set(raise_on)
         #: The DUPLICATE's whole property map — the `properties(d)` column the
         #: open-set report reads. Kept OUT of the shared row tuples so every
@@ -427,22 +438,33 @@ class _FakeGraph:
             raise RuntimeError("graph refused the read")
         # ⚠️ Order matters: the EDGES read also starts `MATCH (d:Point`, so it
         # is keyed on its own shape and checked before the property read.
-        if "-[r]->" in q:
-            # Honour the query's rel FILTER: a fake that returns every edge
-            # regardless makes `test_an_aboutEvent_link_is_carried` and the
-            # writer-less case green even with the widened read reverted
-            # (measured by mutation), so they would pin nothing.
-            wanted = {rel for rel in capture_fold._FOLD_ATTACHMENT_RELS
-                      if rel in q}
-            return SimpleNamespace(
-                result_set=[e for e in self.edges if e[0] in wanted])
+        # ⚠️ The reads are UNFILTERED since round 8 (the rel partition moved into
+        # Python), so the fake answers with EVERY edge it was given — including a
+        # rel the module does not know, which is how `unexpected_edge` is
+        # reachable here. The two reads are told apart by their pattern.
+        if "(d:Point {id:$dup})-[r]->(t)" in q:
+            if "WHERE type(r) IN" in q:
+                # A re-introduced rel FILTER must be honoured, or this fake
+                # would answer for the unknown edge anyway and
+                # `test_an_edge_the_fold_does_not_know_refuses_...` would pin
+                # nothing (measured by mutation: it stayed green).
+                wanted = {rel for rel in capture_fold._FOLD_ATTACHMENT_RELS
+                          if rel in q}
+                return SimpleNamespace(
+                    result_set=[e for e in self.edges if e[0] in wanted])
+            return SimpleNamespace(result_set=list(self.edges))
+        if "-[r]->(d:Point" in q:
+            return SimpleNamespace(result_set=list(self.inbound))
         if "d.extractedFrom" in q:
             # `properties(d)` is the row's LAST column; the canonical read does
             # not select it, so the two branches differ by exactly that.
             return SimpleNamespace(
                 result_set=[(*self.dup_row, self.dup_props)])
         if "c.extractedFrom" in q:
-            # `canon_row=None` is the "canonical cannot be read" arm.
+            # `canon_row=None` is the "canonical cannot be read" arm;
+            # `canon_rows` covers the id-carried-by-two-nodes arm.
+            if self.canon_rows is not None:
+                return SimpleNamespace(result_set=list(self.canon_rows))
             return SimpleNamespace(
                 result_set=[] if self.canon_row is None else [self.canon_row])
         if "head(collect(r.confidence))" in q:
@@ -526,7 +548,7 @@ def test_a_slot_write_that_raises_or_has_no_door_refuses():
         sdk=_FakeSDK(raises=RuntimeError("no such point")))
     assert out["ok"] is False and out["reason"] == "slot_write_failed", out
     assert "no such point" in out["blocked"], out
-    assert "kept the canonical's own pointKind" in out["blocked"], out["blocked"]
+    assert "did not carry pointKind" in out["blocked"], out["blocked"]
     assert "ALREADY added" not in out["blocked"], (
         f"nothing landed, so nothing was added: {out['blocked']}")
 
@@ -719,9 +741,8 @@ def test_an_inbound_link_refuses_the_fold(sdk):
     """An `about*` edge pointing AT the duplicate cannot be moved (the carry
     writes FROM the canonical), so the delete would orphan it.
 
-    This is the one refusal token no fake-based test could reach: `_FakeGraph`
-    keys its outbound arm on `-[r]->`, and the inbound query is a typed pattern.
-    Measured here on a real graph — RED without the guard: the fold proceeds and
+    Measured here on a real graph (`_FakeGraph`'s inbound fixture is synthetic;
+    this proves the real inbound read sees a real `Event -[:aboutPoint]-> Point`). — RED without the guard: the fold proceeds and
     the `Event -[:aboutPoint]-> Point` edge dies with the duplicate.
     """
     proj = sdk._get_proj()
@@ -860,7 +881,7 @@ def test_a_late_refusal_discloses_the_slots_it_already_copied():
     assert out["ok"] is False and out["reason"] == "link_not_carried", out
     assert out["copied"] == ["quote"], out
     assert "ALREADY added copied quote" in out["blocked"], out["blocked"]
-    assert "kept the canonical's own pointKind" in out["blocked"], out["blocked"]
+    assert "did not carry pointKind" in out["blocked"], out["blocked"]
 
 
 def test_a_raise_from_the_post_write_read_is_a_disclosed_refusal():
@@ -884,21 +905,24 @@ def test_a_raise_from_the_post_write_read_is_a_disclosed_refusal():
     assert "ALREADY added copied quote" in out["blocked"], out["blocked"]
 
 
-def test_an_undeclared_provenance_field_that_differs_is_reported(sdk, monkeypatch):
-    """`eventId` is the capture's own provenance surface and a Point payload is
-    OPEN-SET, so it is not in the passthrough tuple the vocabulary guard covers.
-    A duplicate holding a different one must be REPORTED, never crossed in
-    silence while the receipt says it had no evidence.
+def test_a_differing_declared_support_field_is_reported_as_a_residual(
+        sdk, monkeypatch):
+    """`eventId` is DECLARED (`_REPORTED_FIELDS`), so a duplicate holding a
+    different one is REPORTED as a residual — never crossed in silence while the
+    receipt says it had no evidence.
 
-    (The open-set bound is stated at `_STRUCTURAL_PROPS`: a field outside the
-    declared vocabulary is never CARRIED — no list can cover a payload's open
-    set — but since round 7 it is REPORTED by name as `undeclared`, so the
-    bound is on the carry, not on the disclosure.)
+    ⚠️ The distinction this pins is residual-vs-undeclared, and the earlier cut
+    pinned neither: it claimed `eventId` was reached as `undeclared` (it is not —
+    it is declared) and asserted only that the name appeared somewhere, which
+    holds for both arms. So the arms are asserted NEGATIVELY too.
     """
     extracted, meta = _extract(
         sdk, monkeypatch, evidence={"eventId": "ev_dup_turn2"})
     assert [e["dedup"] for e in extracted] == ["new", "rephrase_linked"], extracted
-    assert any("eventId" in w for w in meta["warnings"]), meta["warnings"]
+    assert any("did not carry eventId" in w for w in meta["warnings"]), \
+        meta["warnings"]
+    assert not any("could not carry" in w for w in meta["warnings"]), \
+        meta["warnings"]
 
 
 # ── 9) the OPEN SET: a prop the fold does not know is REPORTED (#2795) ─────
@@ -963,6 +987,10 @@ def test_a_real_undeclared_prop_is_named_on_the_captures_receipt(sdk, monkeypatc
     assert [e["dedup"] for e in extracted] == ["new", "rephrase_linked"], extracted
     assert any("could not carry: author" in w for w in meta["warnings"]), \
         meta["warnings"]
+    # ⚠️ The NEGATIVE half: an undeclared prop must ALSO suppress the clause that
+    # denies the node had any evidence of its own.
+    assert not any("no per-occurrence evidence of its own" in w
+                   for w in meta["warnings"]), meta["warnings"]
 
 
 # ── 10) arms a reader could delete without any test going red ──────────────
@@ -1025,3 +1053,106 @@ def test_an_empty_string_slot_is_a_VALUE_and_is_carried():
     assert out["ok"] is True, out
     assert sdk.calls and sdk.calls[0].get("quote") == "", (sdk.calls, out)
     assert out["copied"] == ["quote"], out
+
+
+# ── 11) round 8: the receipt's own contradictions, and the edge open set ──
+
+
+def test_the_ontologys_date_spelling_is_declared_not_a_loss():
+    """`validFrom` is the WRITE spelling of the `when` slot, so a producer that
+    stores it is holding a value the fold CARRIES.
+
+    RED before round 8: `_DECLARED_PROPS` derived the slot half from the READ
+    keys only, so this duplicate was reported as
+    `copied validFrom; … could not carry: validFrom` — one sentence claiming
+    both, over a value that had landed.
+    """
+    row = ("session:s", [], None, None, None, None, None, None,
+           "2026-08-01", None, None, None)          # position 8 = validFrom
+    graph = _FakeGraph(dup_row=row, dup_props={"validFrom": "2026-08-01"})
+    sdk = _FakeSDK(on_update=graph.apply_slot)
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is True, out
+    assert out["undeclared"] == [], out
+    assert out["copied"] == ["validFrom"], out
+    assert sdk.calls == [{"id": "pt_canon", "validFrom": "2026-08-01"}], sdk.calls
+
+
+def test_an_edge_the_fold_does_not_know_refuses_rather_than_orphaning():
+    """The reads are UNFILTERED: the delete takes every edge, so an edge class
+    outside `_FOLD_ATTACHMENT_RELS` is a refusal, not a silent orphan.
+
+    RED before round 8: the outbound read carried `WHERE type(r) IN [...]`, so a
+    `TAGGED`/session edge on the duplicate was invisible and died with it.
+    """
+    graph = _FakeGraph(edges=[("TAGGED", "Topic", "topic_1", None)])
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "unexpected_edge", out
+    assert "TAGGED (outbound)" in out["blocked"], out
+
+
+def test_an_unknown_inbound_edge_also_refuses():
+    """The inbound read is unfiltered for the same reason — an inbound edge of an
+    unknown type would be orphaned by the delete just as an outbound one would."""
+    graph = _FakeGraph(inbound=[("MENTIONS", "Session")])
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "unexpected_edge", out
+    assert "MENTIONS (inbound)" in out["blocked"], out
+
+
+def test_a_canonical_id_carried_by_two_nodes_refuses():
+    """The fan-out guard was ASYMMETRIC: the duplicate refused, the canonical did
+    not. The writes address the ID, so occupancy would be read off one row while
+    the slot write landed on both — a first-writer value overwritten on a row the
+    fold never read.
+    """
+    graph = _FakeGraph(canon_rows=[_CANON_ROW, _CANON_ROW])
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "unreadable", out
+    assert "more than one node" in out["blocked"], out
+
+
+def test_a_malformed_ref_list_names_the_ref_not_its_characters():
+    """A STRING `extractedFromAll` is a sequence, so the ref loop used to iterate
+    it character-wise and refuse over the ref `':'` — fail-closed, but the token
+    and the named ref were both wrong. The mis-attribution `malformed_address`
+    exists to refuse, so it must not be reintroduced for provenance.
+    """
+    row = ("session:s", "session:other", None, None, None, None, None, None,
+           None, None, None, None)
+    graph = _FakeGraph(dup_row=row)
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "uncarried_source_ref", out
+    assert "'session:other'" in out["blocked"], out["blocked"]
+    assert "':'" not in out["blocked"], out["blocked"]
+
+
+def test_every_arm_returns_the_same_key_set(monkeypatch):
+    """The never-raise wrapper documented "EXACT key set" and then returned one
+    MISSING `undeclared` — a `KeyError` waiting inside the capture loop it exists
+    to protect. Both arms are pinned here.
+
+    The `internal_error` arm is reached through the vocabulary assertion: a graph
+    read that raises is `unreadable` (the reads own their failure answer), so
+    reaching the WRAPPER needs a raise from outside them.
+    """
+    expected = {"ok", "reason", "blocked", "carried", "created", "copied",
+                "residual", "undeclared"}
+    ok_out = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph()), "pt_dup", "pt_canon")
+    assert ok_out["ok"] is True, ok_out
+    assert set(ok_out) == expected, sorted(set(ok_out) ^ expected)
+
+    def boom():
+        raise RuntimeError("vocabulary drifted")
+
+    monkeypatch.setattr(capture_fold, "assert_evidence_vocabulary", boom)
+    failing = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph()), "pt_dup", "pt_canon")
+    assert failing["ok"] is False and failing["reason"] == "internal_error", failing
+    assert set(failing) == expected, sorted(set(failing) ^ expected)

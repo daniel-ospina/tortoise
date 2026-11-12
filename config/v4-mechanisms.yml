@@ -388,7 +388,7 @@ mechanisms:
       — keeping both claims —
       where the evidence cannot be moved (`unaddressable`, `uncarriable_attachment`,
       `inbound_attachment`, `uncarried_source_ref`, `malformed_address`,
-      `link_not_carried`, `slot_write_failed`, `unreadable`,
+      `link_not_carried`, `slot_write_failed`, `unreadable`, `unexpected_edge`,
       `ambiguous_duplicate`, `internal_error`). So "the capture
       seam DELETEs the loser" is no longer the whole story, and a lane reading
       this row must not re-derive #9437 as open.

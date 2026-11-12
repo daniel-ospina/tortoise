@@ -17021,11 +17021,17 @@ class TortoiseSDK:
                                        and not undeclared)
                                    else ""))
                             if residual:
+                                # ⚠️ NOT "kept the canonical's own …": a support
+                                # field the canonical does not hold at all (an
+                                # absent `confidence`) was not "kept" — the
+                                # duplicate's value went with the node. "did not
+                                # carry" is true of both cases and the
+                                # parenthetical says which.
                                 said += (
-                                    "; kept the canonical's own "
+                                    "; did not carry "
                                     f"{', '.join(residual)} "
-                                    "(one value per field — the duplicate's "
-                                    "differ)")
+                                    "(one value per slot — the canonical's "
+                                    "differs or is absent)")
                             if undeclared:
                                 # The fold cannot carry a prop it does not
                                 # declare, and the duplicate is gone — so the

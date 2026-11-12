@@ -95,6 +95,13 @@ lost and cannot be re-created:
   `read_fold_evidence` reads `rows[0]` while the caller's `DETACH DELETE`
   removes EVERY row with that id, so a second copy's evidence would die without
   ever having been read — "could not tell" is not "nothing there";
+* an edge class this module has no way to carry (`unexpected_edge`) — the reads
+  are UNFILTERED and partitioned in Python, so a session/`TAGGED`/future edge
+  refuses the fold instead of being orphaned by the delete. The same posture as
+  a writer-less `about*` predicate, and the reason the reads carry no rel-type
+  filter (`type(r) IN [...]` answered only for the subset this module knew).
+  `_PROVENANCE_RELS` (`extractedFrom`) is the one class handled on another axis:
+  its content is verified as a FIELD (the ref check) rather than carried;
 * anything else that raised (`internal_error`). The public entry point never
   raises: its caller sits inside the capture's single per-loop `try`, so a
   propagated error would abandon every remaining statement's resolution, and a
@@ -215,6 +222,17 @@ _CARRIABLE_ATTACHMENT_LABELS = {
     "aboutAction": "Point",
 }
 
+#: Edges whose content the fold verifies as a FIELD rather than carrying as an
+#: edge: `(Point)-[:extractedFrom]->(Source)` is the claim's PROVENANCE, and a
+#: Point holds it as `extractedFrom`/`extractedFromAll` too — the ref check
+#: (`uncarried_source_ref`) refuses the fold when the canonical does not already
+#: carry the duplicate's ref, so the edge itself needs no carry and the delete
+#: removes a link whose meaning the canonical already has. This is NOT a licence
+#: to ignore every structural rel: it is the measured set on a capture Point at
+#: this head (`extractedFrom` is the only one), and an eighth/unknown class still
+#: refuses as `unexpected_edge`.
+_PROVENANCE_RELS = ("extractedFrom",)
+
 #: Outbound `about*` edges whose predicate has NO permitted Point-source triple.
 #: Only a rel-ignoring writer can have made one (the capture cascade mints
 #: `aboutDocument` for a Point when the name resolves to a `:Source`), and a
@@ -269,11 +287,17 @@ _REPORTED_FIELDS = ("confidence", "pointKind", "eventId")
 #: The props the fold neither carries nor reports because they are the ROW's
 #: identity or the projection's own bookkeeping rather than the occurrence's
 #: evidence: `id` addresses the row, `content`/`content_hash` are the dedup key
-#: the FOLD ITSELF is about (the canonical holds its own, and they are equal by
-#: construction, or the two nodes would not be duplicates), `createdAt` is
-#: first-writer history and `updatedAt` moves on any later write, `is_operator`
-#: is structural (`sdk` refuses an operator-wired duplicate before this module is
-#: reached), and `status` is the lifecycle slot §4.3 owns.
+#: the FOLD ITSELF is about, `createdAt` is first-writer history and `updatedAt`
+#: moves on any later write, `is_operator` is structural (`sdk` refuses an
+#: operator-wired duplicate before this module is reached), and `status` is the
+#: lifecycle slot §4.3 owns.
+#:
+#: ⚠️ `content` is NOT "equal by construction" — that ground would be false on the
+#: `rephrase_linked` arm, where the two texts DIFFER by design (`rephrase_hit`
+#: links a paraphrase, which is the whole point of folding it). The ground is that
+#: the difference IS the fold's premise and is reported as that dedup verdict
+#: (`dedup=rephrase_linked` on the capture receipt), not as a loss: the claim's
+#: occurrence TEXT is not its support, and a canonical keeps one wording.
 #:
 #: ⚠️ This list is the OPEN SET's boundary, so it is the one place where an
 #: unknown prop becomes visible instead of lost: a prop NOT named here is
@@ -285,15 +309,35 @@ _STRUCTURAL_PROPS = ("id", "content", "content_hash", "createdAt",
                      "updatedAt", "is_operator", "status")
 
 #: Everything the duplicate read DECLARES it knows: the occurrence address, the
-#: single slots, the reported support fields, the source refs, and the
-#: structural identity above. A prop outside this union is the open set.
+#: single slots in BOTH spellings (a producer stores `when` or `validFrom`, and
+#: the fold WRITES `validFrom` — declaring only the read spelling reported a
+#: value the fold had just carried as an undeclared loss), the reported support
+#: fields, the source refs, and the structural identity above. A prop outside
+#: this union is the open set.
 _DECLARED_PROPS = frozenset(
     set(_OCCURRENCE_ADDRESS)
     | {key for key, _ in _SINGLE_SLOTS}
+    | {write_key for _, write_key in _SINGLE_SLOTS}
     | set(_REPORTED_FIELDS)
     | set(_STRUCTURAL_PROPS)
     | {"extractedFrom", "extractedFromAll"}
 )
+
+#: The edge ATTRIBUTES the fold carries. `confidence` is the only one a capture
+#: Point's links carry today, and it is carried by `link_entity` and read back by
+#: `_carried`.
+#:
+#: ⚠️ DECLARED BOUND, not a closed set: the graph's edge-attribute vocabulary is
+#: wider (`projection/edges.py`'s `DIRECT_EDGE_ATTR_KEYS` — direction, weight,
+#: label, batch_id — plus the record projection's `idx`), and an attribute outside
+#: this tuple is neither carried nor REPORTED. That is not silence this module
+#: chose: `link_entity` accepts only `confidence`, so carrying another key needs a
+#: writer change, which is a different issue (filed rather than absorbed here).
+#: No in-tree producer writes those attributes on a capture Point's links —
+#: `projection._create_about_edges` mints them bare — so the bound is reachable
+#: only through a producer that does, and a lane reading this must not assume the
+#: attribute class is closed.
+_CARRIED_EDGE_ATTRS = ("confidence",)
 
 
 @dataclass(frozen=True)
@@ -333,6 +377,13 @@ class FoldEvidence:
     #: name: the open set #2795 permits is exactly the set a fold cannot see,
     #: and naming it is the difference between a loss and a silent loss.
     undeclared: tuple[str, ...] = ()
+    #: `(rel, direction)` for every edge the duplicate carries OUTSIDE
+    #: `_FOLD_ATTACHMENT_RELS` (`direction` is `"out"` or `"in"`). The delete
+    #: takes EVERY edge, so an unfiltered read is the only way to know nothing
+    #: else was orphaned; the fold REFUSES rather than dropping one (a `TAGGED`
+    #: or session edge is not reconstructible here), which is the same posture
+    #: the writer-less predicates take.
+    unexpected_edges: tuple[tuple[str, str], ...] = ()
     #: More than one node carries the duplicate's id. The reads below answer for
     #: `rows[0]`, while the caller's `DETACH DELETE` removes EVERY row with that
     #: id — so a second copy's evidence would be destroyed without being read.
@@ -409,6 +460,16 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
      search_keys, when, validfrom, _event_id, _confidence,
      _point_kind, _props) = rows[0]
     refs: set[str] = set()
+    # ⚠️ A string is a SEQUENCE, so `*(all_refs or ())` iterated a malformed
+    # `extractedFromAll="session:other"` CHARACTER-WISE and refused the fold over
+    # the source reference `':'` — fail-closed, but the token and the named ref
+    # were both wrong (the mis-attribution `malformed_address` exists to refuse).
+    # A str is read as the ONE ref it is; anything else that is not a list/tuple
+    # is not a ref list at all and is refused above, not expanded.
+    if isinstance(all_refs, str):
+        all_refs = [all_refs]
+    elif all_refs is not None and not isinstance(all_refs, (list, tuple)):
+        return None
     for ref in (scalar_ref, *(all_refs or ())):
         if isinstance(ref, str) and ref.strip():
             refs.add(ref.strip())
@@ -446,18 +507,29 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         malformed_address = str(exc)
 
     try:
+        # ⚠️ UNFILTERED: the caller's `DETACH DELETE` takes every edge, so a
+        # rel-type filter here would answer for the subset this module knows and
+        # say nothing about the rest — the same shape the typed-pattern census
+        # was blind to. `type(r) IN [...]` was that filter; the partition is now
+        # in PYTHON and anything outside `_FOLD_ATTACHMENT_RELS` becomes an
+        # `unexpected_edge` refusal instead of an orphaning delete.
         edges = proj.g.query(
             "MATCH (d:Point {id:$dup})-[r]->(t) "
-            f"WHERE type(r) IN {list(_FOLD_ATTACHMENT_RELS)!r} "
             "RETURN type(r), head(labels(t)), coalesce(t.id, ''), r.confidence",
             params={"dup": dup_id}).result_set
     except Exception:
         return None
     attachments: list[tuple[str, str, str, float | None]] = []
     unaddressable: list[tuple[str, str]] = []
+    unexpected: list[tuple[str, str]] = []
     for rel, label, target_id, confidence in edges:
         if not isinstance(rel, str) or not isinstance(label, str):
             return None
+        if rel in _PROVENANCE_RELS:
+            continue                      # verified as a FIELD, not carried
+        if rel not in _FOLD_ATTACHMENT_RELS:
+            unexpected.append((rel, "out"))
+            continue
         # ⚠️ For a CARRIABLE predicate the label is a pure function of the PREDICATE
         # (§3.2's triple), not of `head(labels(t))` — which is order-dependent and
         # would hand the writer the wrong target label (or trip the writer-less
@@ -471,9 +543,10 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         else:
             unaddressable.append((rel, label))
     try:
+        # Unfiltered for the same reason as the outbound read above. The type
+        # slot used to be a `|`-joined alternation of `_FOLD_ATTACHMENT_RELS`.
         inbound_rows = proj.g.query(
-            "MATCH (s)-[r:" + "|".join(_FOLD_ATTACHMENT_RELS) + "]->"
-            "(d:Point {id:$id}) "
+            "MATCH (s)-[r]->(d:Point {id:$id}) "
             "RETURN type(r), head(labels(s))",
             params={"id": dup_id}).result_set
     except Exception:
@@ -481,7 +554,12 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
     inbound: list[tuple[str, str]] = []
     for rel, source_label in inbound_rows:
         if isinstance(rel, str) and isinstance(source_label, str):
-            inbound.append((rel, source_label))
+            if rel in _PROVENANCE_RELS:
+                continue
+            if rel in _FOLD_ATTACHMENT_RELS:
+                inbound.append((rel, source_label))
+            else:
+                unexpected.append((rel, "in"))
 
     _observed = {"confidence": _confidence, "pointKind": _point_kind,
                  "eventId": _event_id}
@@ -495,18 +573,29 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         inbound=tuple(inbound),
         support={k: v for k, v in support.items() if v is not None},
         undeclared=undeclared_props,
+        unexpected_edges=tuple(unexpected),
     )
 
 
 def _canonical_view(proj: Any, canonical_id: str) -> dict | None:
-    """The canonical's evidence-bearing slots + source refs, or ``None``."""
+    """The canonical's evidence-bearing slots + source refs, or ``None``.
+
+    ``None`` covers BOTH "the row could not be read" and "the id is not
+    unique" — the same fan-out the duplicate's `ambiguous_duplicate` arm refuses
+    for. The asymmetry was a false PASS: the slot write addresses the ID
+    (`update_point` is `MATCH (n:Point {id:$id}) SET n += $props`), so on a
+    canonical id carried by two rows the occupancy check would read `rows[0]`
+    while the write landed on both — a first-writer value overwritten on a row
+    the fold never read. `_carried` addresses the id too, so its count could
+    exceed the links written. A fan-out is therefore not a view.
+    """
     try:
         rows = proj.g.query(
             _EVIDENCE_SELECT.format(alias="c") + ", c.confidence, c.pointKind",
             params={"id": canonical_id}).result_set
     except Exception:
         return None
-    if not rows:
+    if not rows or len(rows) > 1:
         return None
     (scalar_ref, all_refs, quote, span_start, span_end, source_turn_id,
      search_keys, when, validfrom, _event_id, _confidence,
@@ -552,8 +641,12 @@ def _already_written(out: dict) -> str:
         said = ("; it had ALREADY added " + " and ".join(added)
                 + " to the canonical — additive, nothing removed from either node")
     if out.get("residual"):
-        said += ("; kept the canonical's own " + ", ".join(out["residual"])
-                 + " (one value per field — the duplicate's differ)")
+        # ⚠️ NOT "kept the canonical's own …": for a support field the canonical
+        # may hold NOTHING (`confidence` absent), and then nothing was kept — the
+        # duplicate's value went with the node. "not carried" is true in both
+        # cases; the parenthetical says why (a conflicting value, or an absence).
+        said += ("; did not carry " + ", ".join(out["residual"])
+                 + " (one value per slot — the canonical's differs or is absent)")
     return said
 
 
@@ -605,10 +698,15 @@ def carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
         assert_evidence_vocabulary()
         return _carry_fold_evidence(proj, dup_id, canonical_id, sdk=sdk)
     except Exception as e:
+        # ⚠️ The SAME key set as every other arm — the docstring's invariant is
+        # executable, not aspirational: the capture seam indexes these keys, so a
+        # missing one would raise `KeyError` inside the loop this wrapper exists
+        # to protect.
         return {"ok": False, "reason": "internal_error",
                 "blocked": ("the evidence carry failed "
                             f"({type(e).__name__}: {e})"),
-                "carried": 0, "created": 0, "copied": [], "residual": []}
+                "carried": 0, "created": 0, "copied": [], "residual": [],
+                "undeclared": []}
 
 
 def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
@@ -654,6 +752,16 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
     # reported it only on success would go quiet in exactly the case where the
     # operator is deciding whether to force the fold.
     out["undeclared"] = list(evidence.undeclared)
+    # 0) An edge class this module does not know. The delete takes EVERY edge, so
+    #    an unfiltered read is the only way to know none was orphaned; the
+    #    refusal is the same posture as a writer-less `about*` predicate.
+    if evidence.unexpected_edges:
+        named = ", ".join(sorted({f"{rel} ({direction}bound)"
+                                   for rel, direction in evidence.unexpected_edges}))
+        out["reason"] = "unexpected_edge"
+        out["blocked"] = (f"it carries edge(s) this fold has no way to carry "
+                          f"({named}), and the delete would orphan them")
+        return out
     if evidence.ambiguous:
         out["reason"] = "ambiguous_duplicate"
         out["blocked"] = ("more than one node carries its id, and the fold's "
@@ -664,7 +772,9 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
     if canonical is None:
         out["reason"] = "unreadable"
         out["blocked"] = ("the canonical this claim resolved to could not be "
-                          "read, so its evidence could not be checked")
+                          "read as a single row (absent, unreadable, or an id "
+                          "carried by more than one node), so its evidence "
+                          "could not be checked")
         return out
 
     # 1) A link whose target has no id cannot be re-pointed: `link_entity`
@@ -777,7 +887,12 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             held = canonical.get(key)
         if held is not None:
             if held != value:
-                out["residual"].append(key)
+                # Named as the SLOT, not the read spelling: `when` and `validFrom`
+                # are one slot, and a receipt saying "when" over a row whose
+                # value lives on `validFrom` sends the reader to a field the
+                # node does not hold.
+                out["residual"].append(
+                    key if key == write_key else f"{key} (as {write_key})")
             continue
         to_write[write_key] = value
 
