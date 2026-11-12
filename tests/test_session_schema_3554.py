@@ -1358,9 +1358,14 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     ⛔ SCOPED TO A RELEASE THAT RECORDS §4.3, because the unconditional form was
     measured to false-block. Demanding a comment id in EVERY newest block reds
     the next release that touches §4.5 (verified with a synthetic `v3.35`), and
-    the file's practice does not support the demand: **3 of 39** blocks cite a
-    comment id, and v3.33 — the block that landed `D2 — A` for this very
-    question — cites none. What the approval rule actually needs is that no
+    the file's practice does not support the demand: v3.33 — the block that
+    landed `D2 — A` for this very question — records the approval and cites no
+    ``comment <id>`` for it, only a `#2725` permalink for a different attribute.
+    (A count over the pin's OWN enumerated forms is not the measure of practice
+    that argument rests on: ``_CITATION_RE`` accepts the permalink too, so under
+    it that block does cite one. State the form, not a number — a count over a
+    growing file re-stales on the next release that cites a comment.) What the
+    approval rule actually needs is that no
     release RECORDS owner-approved §4.3 text without naming where that approval
     lives. The requirement is scoped to §4.3, like the sibling pin, but it is NOT
     the sibling pin's gate: it is armed only when the newest block quotes the
