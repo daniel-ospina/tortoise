@@ -1,0 +1,14 @@
+## Correction to the handover above — the branch has moved since it was written
+
+The head is now **`cf17774840c4`**, not `9fd50ed04ad9`. Two commits arrived from another lane after my handover comment:
+
+- `70ca0f80c9bf` — the #12080 legal fix (drafts + `tests/e2e/test_legal_pages.py`) carried onto this branch, which makes this PR's `legal-e2e` self-sufficient rather than dependent on main;
+- `cf17774840c4` — **a real tightening of this PR's own allow-list**: the single `'"falkordb-16379"'` entry is replaced by the three STATEMENTS that actually mention the name (`'"falkordb-16379",      # the orchestration graph instance'`, `'for shared in ("falkordb", "falkordb-16379"'`, `'_remove_and_describe("falkordb-16379")'`). That is correct and strictly better than what is described in the PR body: every site in the file spells the name double-quoted, so the quoted-bare-name entry exempted a whole class of future lines, including one that dials it. The docstring count moves 23 → 25 accordingly.
+
+⛔ **So the "do not re-review, do not re-push" instruction above is SUPERSEDED.** An attestation bound to `9fd50ed04ad9` does not cover `cf17774840c4`, and the change to `tests/test_runner_ports_6673.py` is substantive. A lane landing this must, at the live head:
+
+1. re-run `uv run python tools/test_lane.py run -- tests/test_runner_ports_6673.py tests/test_test_lane_tool.py -q` and re-prove **non-vacuity** (delete the three NAME statements → the guard must still red, naming the file);
+2. record a fresh (or DIFF-arm carried) attestation at that head;
+3. only then `scripts/admin-merge.sh 12090`.
+
+My detached driver (`.worktree-report/land-12090.sh`) deliberately cannot do step 1–2 — it only calls the rail, which refuses without a valid head-bound record, so it is fail-closed rather than a bypass.
