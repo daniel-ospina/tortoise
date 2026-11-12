@@ -176,8 +176,12 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #: imported here rather than retyped: a retyped literal would leave this guard
 #: refusing a name nobody reads after a rename at the consumer, and letting the
 #: new one through — a fail-open drift, not a style point. (``add_point``'s
-#: ``_forged_keys`` still spells it out, which the funnel arm here catches
-#: downstream; that copy is the one to convert next, not a second authority.)
+#: ``_forged_keys`` still spells it out; the arm that backstops a consumer-side
+#: rename on THAT path is ``_emit``'s record-channel
+#: ``_refuse_uncallerable_record_keys``, which reads this constant — ⛔ NOT the
+#: funnel below, which ``add_point`` never calls (#11996 review round 16: this
+#: note named the funnel, and the funnel's own docstring says the opposite).
+#: That copy is the one to convert next, not a second authority.)
 _UNCALLERABLE_RECORD_KEYS = frozenset({
     "embedding_verbatim",
     "embedding_preserved",
@@ -1175,11 +1179,15 @@ def _refuse_caller_named_funnel_keys(keys, door: str) -> None:
     PASSTHROUGH door makes, so a FIFTH family (or a fourth passthrough door)
     cannot be half-wired —
     the failure mode #11835 review round 4 and #11948 both measured: a rule
-    stated at two doors and silently absent at the third. ⛔ `add_point` is the
+    stated at two doors and silently absent at the third. ⛔ "Half-wired" is a
+    claim about the THREE PASSTHROUGH DOORS only, and the next sentence is why:
+    `add_point` is the
     FOURTH caller-splatting door and does NOT call this: its `**fields` is
     covered by its own `_forged_keys` plus `_emit`'s positional channel, so a
-    family armed here alone would be absent there — which is why the
+    family armed here alone WOULD be absent there — which is why the
     uncallerable family is armed in both places (see the next paragraph).
+    (#11996 review round 16: "cannot be half-wired" read as a guarantee for all
+    four doors, which this function cannot give and the next sentence withdraws.)
 
     ⛔ The UNCALLERABLE family is in here rather than only in `_emit`, because a
     door calls this BEFORE its best-effort arm: refusing deeper (inside `_emit`)
@@ -1519,14 +1527,52 @@ class EventAPI:
             # `(graph, extractedFrom)` on the instance, i.e. a cache whose staleness
             # is a new correctness surface for a ~2 ms saving. Stated here instead
             # of left for the next reader to measure.
+            #
+            # ⛔ AND THE SECOND READ IS A STATED RESIDUAL, not a covered case
+            # (#11996 review round 16, measured): `resolve_source_versions`
+            # documents that a Source's `contentHash` is bumped IN PLACE and
+            # UNJOURNALLED (`#5024`), so a concurrent re-index that lands between
+            # `add_point`'s mint and this re-derivation makes the two readings
+            # disagree and refuses a CORRECT write:
+            #
+            #     add_point(…, extractedFrom=[DOC])  -> ValueError "this seam did
+            #       not mint for it" (measured by bumping the Source inside the
+            #       window; the same call lands on retry, and landed on `main`)
+            #
+            # The window is one `resolve_source_versions` (~ms), the failure is
+            # fail-CLOSED (nothing journalled) and retryable, and this arm is what
+            # refuses a forge — so the trade is stated rather than closed. The
+            # design that removes it (make `_emit` the single authority: derive
+            # once, publish on a payload copy, delete `add_point`'s mint) is a
+            # decision about the record contract, not a lane's initiative; it is
+            # preserved on `fix/11996-r13-single-authority` (`45f26c31d2`) and
+            # filed as #12115.
             if _named_from_caller(record[0], _DERIVE_ON_RECORD):
                 _declared_sv = record[0]["sourceVersionTransit"]
                 _g = getattr(self.projection, "g", None)
                 _derived_sv = None
                 if _g is not None and record[0].get("extractedFrom"):
                     from .projection.edges import _source_version_transit, resolve_source_versions
-                    _derived_sv = _source_version_transit(
-                        resolve_source_versions(_g, record[0]["extractedFrom"]))
+                    # ⛔ A NON-ITERABLE `extractedFrom` IS A REFUSAL, not a crash
+                    # (#11996 review round 16, measured): `resolve_source_versions`
+                    # starts with `list(source_ref)` for anything that is not a
+                    # `str`, so `extractedFrom=123` escaped this arm as a bare
+                    # `TypeError` while every other refusal in this file is a
+                    # `ValueError`. Measured: `_emit(… "extractedFrom": 123,
+                    # "sourceVersionTransit": [[doc, "h1"]])` -> TypeError. Only
+                    # `TypeError` is caught: an I/O failure from the graph read is
+                    # an outage, not a caller's bug, and must keep propagating.
+                    try:
+                        _derived_sv = _source_version_transit(
+                            resolve_source_versions(_g, record[0]["extractedFrom"]))
+                    except TypeError:
+                        raise ValueError(
+                            f"`{type_}`'s record carries a `sourceVersionTransit` "
+                            f"and an `extractedFrom` this seam cannot resolve "
+                            f"({type(record[0]['extractedFrom']).__name__}): the "
+                            f"anchor is DERIVED from the `:Source` refs, so they "
+                            f"must be a `str` or a sequence of them (#5038 / "
+                            f"#11948).") from None
                 # ⛔ THE SHAPE IS CHECKED BEFORE THE COMPARISON, and the comparison
                 # is exact-typed (#11996 review round 11, measured). `!=` delegates
                 # to the CALLER's `__eq__`, so a `str` subclass answering True
@@ -1542,9 +1588,17 @@ class EventAPI:
                 #
                 # `_source_version_transit` mints `[[str, str], …]` and nothing
                 # else, so any other shape cannot be what the seam produced.
+                # ⛔ EXACT `list` PAIRS, AND `tuple` IS *NOT* ACCEPTED (#11996
+                # review round 16, measured): this arm used to admit
+                # `type(_pair) in (list, tuple)`, which its own sentence above
+                # contradicts — `edges.py`'s mint is
+                # `[[ref, h] for ref, h in versions.items()]`. A `tuple` pair
+                # therefore passed the SHAPE check and was refused one arm later by
+                # the VALUE comparison ("did not mint for it"), i.e. the caller was
+                # told the wrong reason for a shape this seam never produces.
                 _shape_ok = (
                     type(_declared_sv) is list
-                    and all(type(_pair) in (list, tuple) and len(_pair) == 2
+                    and all(type(_pair) is list and len(_pair) == 2
                             and type(_pair[0]) is str and type(_pair[1]) is str
                             for _pair in _declared_sv))
                 if not _shape_ok:

@@ -1613,8 +1613,12 @@ def test_the_transit_anchor_is_derived_and_a_caller_cannot_forge_it(tmp_path):
     The arm now checks the SHAPE (`[[exact str, exact str], …]`) before it
     compares, which is what a caller cannot lie about: `_source_version_transit`
     mints nothing else. This test is the live-graph half — without it the
-    comparison branch is unreachable, because every other row here builds
-    `EventAPI(projection=None)` and so answers "cannot derive, refuse".
+    comparison branch is unreachable, because no OTHER row here presents a
+    `sourceVersionTransit` on a record whose `EventAPI` has a bound graph handle
+    (three rows do build one — `_added_point_with_caller`,
+    `_ApprovedGraphProjection`, `_UnreadableProjection` — so the reason is "no
+    row exercises the arm", not "every row is projection-less": #11996 review
+    round 16 corrected the earlier wording, which the file itself contradicted).
 
     FAILS IF: the forged rows land (no derivation, or an untyped compare), or the
     truthful row is refused (the arm refusing the seam's own record).
@@ -1672,6 +1676,35 @@ def test_the_transit_anchor_is_derived_and_a_caller_cannot_forge_it(tmp_path):
                                      "extractedFrom": [doc],
                                      "sourceVersionTransit":
                                          _LyingPairs([[doc, "h-x"]]),
+                                     JOURNAL_VECTOR_WIDTH_KEY:
+                                         JOURNAL_VECTOR_WIDTH_F32})
+        # 5. ⛔ A `tuple` PAIR IS A SHAPE REFUSAL, not a value refusal (#11996
+        #    review round 16, measured): `_source_version_transit` mints
+        #    `[[ref, h], …]` (`[[…] for … in versions.items()]`), so the shape arm
+        #    admits `list` pairs only. It used to admit `(list, tuple)`, and a
+        #    tuple pair then failed the VALUE comparison — the caller was told
+        #    "this seam did not mint for it" about a value whose shape was the
+        #    problem. Falsifier: restore `type(_pair) in (list, tuple)` and this
+        #    row matches the other message instead (measured).
+        with pytest.raises(ValueError, match="is not the shape"):
+            api._emit("PointAdded", {"id": "p-tuple-pair", "content": "c",
+                                     "embedding": [0.5],
+                                     "extractedFrom": [doc],
+                                     "sourceVersionTransit": [(doc, "h-x")],
+                                     JOURNAL_VECTOR_WIDTH_KEY:
+                                         JOURNAL_VECTOR_WIDTH_F32})
+        # 6. ⛔ AND AN `extractedFrom` THE RESOLVER CANNOT ITERATE IS A
+        #    `ValueError`, not a `TypeError` escaping the arm (#11996 review round
+        #    16, measured): `resolve_source_versions` starts with
+        #    `list(source_ref)`, so `extractedFrom=123` raised a bare `TypeError`
+        #    from a guard whose every other exit is a documented refusal.
+        #    Falsifier: drop the `except TypeError` and this row reads `TypeError`
+        #    (measured).
+        with pytest.raises(ValueError, match="cannot resolve"):
+            api._emit("PointAdded", {"id": "p-bad-refs", "content": "c",
+                                     "embedding": [0.5],
+                                     "extractedFrom": 123,
+                                     "sourceVersionTransit": [[doc, "h-x"]],
                                      JOURNAL_VECTOR_WIDTH_KEY:
                                          JOURNAL_VECTOR_WIDTH_F32})
     finally:
