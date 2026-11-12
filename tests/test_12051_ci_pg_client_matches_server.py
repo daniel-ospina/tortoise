@@ -5506,11 +5506,23 @@ def test_the_cleanup_trap_owns_only_what_this_step_created(job: dict) -> None:
         ("had_sources", "/etc/apt/sources.list.d/pgdg.list"),
         ("had_keyring", "/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc"),
     ):
-        assert f"if [ -e {path} ]; then {flag}=1; fi" in code, (
+        # ⛔ THE FACT, NOT ONE SPELLING OF IT. `if [ -e P ]; then F=1; fi`,
+        # `[ -e P ] && F=1` and `if test -e P; then F=1; fi` are the SAME probe, and an
+        # explicit `else F=0` is the same fact made redundant. Pinning the first spelling
+        # refused the other three with a message false about what was written (MEASURED,
+        # review cycle 15) — the false-block class this file has now paid for five times.
+        detected = re.search(
+            rf"(?:\[\s*-e\s+{re.escape(path)}\s*\]|test\s+-e\s+{re.escape(path)})"
+            rf"[^\n]*?{flag}=1",
+            code,
+        )
+        assert detected, (
             f"`{flag}` is not read from `{path}`, so the trap may delete a file this step "
             f"did not create (or skip one it did): {code[:400]!r}"
         )
-        assert f'"${{{flag}:-0}}" = 0' in trap[0], (
+        assert re.search(
+            rf"\$\{{?{flag}:?-?[^}}]*\}}[^\n]*?(?:=\s*0|-eq\s*0)", trap[0]
+        ), (
             f"the trap does not GUARD on `{flag}`, so it removes a path it may not own: {trap[0]!r}"
         )
     assert code.index("had_sources=1") < code.index("tee /etc/apt/sources.list.d/pgdg.list"), (
@@ -5576,20 +5588,23 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     claiming hermeticity must not need. MEASURED: on a box without that file the
     absent arm dies at the source line and reports the guard as silent.
 
-    Seven arms over the step's FIVE named pre-install branches: the os-release
+    EIGHT arms over the step's FIVE named pre-install branches: the os-release
     SOURCE, the key fetch, the codename, `apt-get update`, and the ORIGIN check
-    (THREE arms: an `apt-cache` that fails, an index that loaded but does not name
-    apt.postgresql.org, and the control that reaches past), because the step
-    carries SEVEN `::error::` pairs and a whole-output search is satisfied by any
-    of them (MEASURED, review cycle 9: two gutted `exit 1`s left the suite GREEN).
-    ⚠️ Which arms assert WHAT, stated rather than generalised: the key-fetch,
-    `apt-get update`, os-release SOURCE and ORIGIN-fires arms name their own
-    branch's text AND assert the next branch's is ABSENT; the `apt-cache`-fails
-    arm and the ORIGIN arm assert a generic `::error::` (no earlier branch can
-    fire in them, so their discrimination is the absence of the
-    `REACHED_PAST_PRECONDITION` marker), and the no-codename arm is discriminated
-    by the absence of the shell's `set -u` backstop (`unbound variable`) rather
-    than by a neighbour's message. Plus TWO branches no arm executes: the install guard
+    (FOUR arms: an `apt-cache` that fails, an index that loaded but does not name
+    apt.postgresql.org, the control that reaches past, and `match_then_noise` — the
+    SIGPIPE discriminator, whose producer emits the match and then KEEPS WRITING).
+    That multiplicity is the reason every arm is attributed: the step carries SEVEN
+    `::error::` pairs and a whole-output search is satisfied by any of them
+    (MEASURED, review cycle 9: two gutted `exit 1`s left the suite GREEN).
+    ⚠️ Which arms assert WHAT, stated rather than generalised — and re-cut when the
+    arm count moves, because this paragraph has now been stale TWICE: every arm
+    that must stop on a NAMED branch — key fetch, `apt-get update`, os-release
+    SOURCE, ORIGIN-fires, no-codename — asserts its OWN branch's text AND that the
+    neighbouring branch's is ABSENT. Only the `apt-cache`-fails arm asserts a
+    bare `::error::`, and it is the one arm where no earlier branch can fire, so
+    its discrimination is the absence of the `REACHED_PAST_PRECONDITION` marker;
+    `present` and `match_then_noise` are CONTROLS and assert the marker's PRESENCE.
+    Plus TWO branches no arm executes: the install guard
     (unreachable by construction — this arm stops AT the install line; it is pinned
     in text by `test_the_client_comes_from_pgdg_not_the_distro_archive`) and the
     version branch (pinned in text by this file's `FAIL_CLOSED_BRANCH_RE` reader).
@@ -6107,6 +6122,17 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     ), (
         "the install guard stops the step but names nothing (or does not `exit 1`), so a "
         f"dpkg-lock or disk failure still reads as apt's own text: {install_body!r}"
+    )
+    # ⛔ ATTRIBUTED, like every OTHER arm. This is the one named class no arm EXECUTES
+    # (the executed arm stops AT the install line, by construction), so this text is the
+    # only thing that pins it — and a bare `"::error::" in …` does not: MEASURED (review
+    # cycle 15), replacing the message with `echo "::error::x"` left the whole file at
+    # `285 passed`, i.e. the guard whose stated job is "a dpkg-lock or disk failure must
+    # not read as apt's own text" could lose its text entirely with the suite green.
+    assert "RESOLVED but could not be INSTALLED" in install_body, (
+        "the install guard still exits 1, but not on ITS OWN named cause — the class it "
+        "exists for (a resolved package that cannot be installed) would then read as apt's "
+        f"text, which is the pre-#12051 shape: {install_body!r}"
     )
 
     # ⛔ THE os-release SOURCE IS GUARDED, not just the variable it sets: `.` on a box
