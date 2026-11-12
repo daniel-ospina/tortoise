@@ -1699,23 +1699,27 @@ def test_a_counters_met_queue_with_an_executing_PR_run_reaches_OK_with_no_PRWITN
     with an executing PR run can never carry that verdict however many runs it has. Both
     halves are asserted here, so neither the sentence nor its negation can drift.
 
+    THIS test pins the route's OUTPUT, not the clauses' reachability: the route
+    (`pr_running != 0` → `healthy()` → the constructor's derivation) leaves `OK` /
+    `pr_wait_measured=False` / `congests_pr is None`. It is the behavioural anchor for
+    `healthy()`'s sentence — it reds when that route's RETURN changes — but it is NOT a
+    witness that its clauses are REACHED, which is why the two mutations below and the two
+    retractions that follow are kept apart.
+
     ⛔ WHAT THIS TEST DOES **NOT** PIN (round 24, measured — an earlier draft of this
     docstring claimed both and both were GREEN): conjoining `and not truncated` into the
     constructor's `pr_wait_measured` derivation does not red it, because `bool(wait_runs)`
     is already `False` when the PR wait is empty and no added conjunct can change that
-    (the test that reds on that mutation is
-    `test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence`); and neutering
-    the `pr_running != 0` clause does not red it either, because with no PR wait the
-    `not wait_runs` clause answers `OK` first. THIS test pins the route's OUTPUT — the
-    third emitter route (`pr_running != 0` → `healthy()` → the constructor's
-    derivation) leaves `OK` / `pr_wait_measured=False` / `congests_pr is None` — so it is
-    the behavioural anchor for `healthy()`'s sentence, not a discriminator of the clauses
-    that sentence describes.
+    (the test that reds on THAT mutation is
+    `test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence`, uniquely); and
+    neutering the `pr_running != 0` clause does not red it either, because with no PR wait
+    the `not wait_runs` clause answers `OK` first (five other tests witness that clause).
 
     Discriminating (both measured at this head): returning this shape as `FLOOD` from
-    `healthy()`'s `pr_running != 0` arm reds the first assertion — which is exactly the
-    retracted wording the sentence replaced; and making the constructor's derivation
-    `bool(wait_runs) or not pending_truncated` reds the second.
+    `classify_queue`'s `pr_running != 0` clause — the clause that CALLS `healthy()`, not
+    anything inside it — reds the first assertion, and does so in this test alone; that is
+    exactly the retracted wording the sentence replaced. And making the constructor's
+    derivation `bool(wait_runs) or not pending_truncated` reds the second.
     """
     executing = run(1, "Python CI", event="pull_request", age_seconds=60,
                     has_live_job=True)
