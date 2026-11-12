@@ -211,10 +211,11 @@ self-test: 22/22 mutation(s) behaved as designed on the shipped map
 self-test: 22/22 mutation(s) behaved as designed on the rows indented 2 spaces
 ```
 
-⛔ **Every count in this section is bound to the population at THIS head** (`MIN_SELF_TEST_MUTATIONS
-= 22`, and the population runs twice — the shipped map and a copy whose rows are all indented 2
-spaces). Adding a case re-cuts them, the same way the census's collected-count pin re-derives its
-figure instead of carrying one.
+⛔ **Every count in this section is bound to the population and the shape count at THIS head**
+(`MIN_SELF_TEST_MUTATIONS = 22` × `MIN_SELF_TEST_PASSES = 2`, so a FAILING summary line is
+`/44`-denominated — one case that fails in both shapes reads `2/44` — while each PASSING shape prints
+its own `22/22 … on the <shape>` line). Adding a case or a shape re-cuts them, the same way the
+census's collected-count pin re-derives its figure instead of carrying one.
 
 ⚠️ **The split-table case is the one this review added, because the selection was a bypass.** The
 crosswalk is graded line by line inside §5: a `|` line is a row unless it is an alignment row, IS the
@@ -341,7 +342,7 @@ surface column (must stay CLEAN)`, and it is a **NEGATIVE control**: the one cas
 outcome is that the verdict is UNCHANGED, which is why the summary line counts `N/N mutation(s)
 behaved as designed` rather than "refused". It is compared against the verdict the SHIPPED map already
 earns, not against an absolute "clean" — an absolute comparison failed the control on any map carrying
-a single unrelated violation and accused the checker (`1/22 NOT caught`) of the document's fault
+a single unrelated violation and accused the checker (`2/44 NOT caught`) of the document's fault
 (measured). It is load-bearing in the measured direction: restoring header matching that ignores the seam tokens makes
 it FAIL (`expected clean, got refusal`, exit 1). ⚠️ Like the width rule it is a ONE-place guarantee,
 not a three-place one — reverting the shape test, deleting the case and lowering the floor to 16 leaves
@@ -368,10 +369,10 @@ rule) reds the self-test rather than passing silently, because the arm nothing r
 ⚠️ **One rule in that class is NOT covered, and this paragraph used to claim it was.**
 `MIN_FAILURE_WORDS` is a one-character edit (`8` → `7`) and the arm stays green through it — measured
 sweep: `8` → `22/22` exit 0, `7` → exit 0, `6` → exit 0, `5` → exit 0, `4` → exit 0, `3` → exit 1
-(`1/22 NOT caught`). The reason is in the population, not the arm: the only word-floor case shortens a
+(`2/44 NOT caught` — the one case, failed in each of the two shapes). The reason is in the population, not the arm: the only word-floor case shortens a
 failure cell to **3** words, so a floor any higher than 3 still refuses it. The floor is therefore
 review-visible only, and a reviewer reading a `MIN_FAILURE_WORDS` diff is the whole control. What the
-arm does cover here is the *width* rule (`!= 7` → `< 7` → exit 1, `2/22 NOT caught`) and the parity rule
+arm does cover here is the *width* rule (`!= 7` → `< 7` → exit 1, `4/44 NOT caught` — two cases × two shapes) and the parity rule
 (reverted `_is_escaped` → exit 1). That job is the **REQUIRED,
 path-filter-free** context, and it is the only one that can see a docs-only edit, because such an edit
 selects no test surface. So a lane that deletes a row here gets a red `docs` check rather than a green
@@ -390,7 +391,7 @@ shrink is refused by BOTH arms, but only the check arm changed behaviour: before
 nothing" arm existed that edit graded **CLEAN** (exit 0, measured at `1381578fd^`), and it now
 reds `R5 §6.4: names no surface` (exit 1, measured). The self-test arm refuses the same edit in
 BOTH states, and never by "not caught": two of its cases lose their mutation target, so it reports
-`2/12 case(s) UNTESTABLE` before the arm and `2/22 case(s) UNTESTABLE` after it (each exit 1) — it
+`2/12 case(s) UNTESTABLE` before the arm and `4/44` after it (two cases × two shapes; each exit 1) — it
 names a moved target instead of accusing the checker, which is a different statement from a rule
 that fails to fire. The pin is silent only when the shrink edits it
 **consistently with the row** *and* the row it empties is not a crosswalk row R5 reads — the
@@ -411,10 +412,10 @@ honest limit is:
 - **For SF2, SF10 or SF13 — the three surfaces a mutation targets — the SELF-TEST arm also reds, one
   step EARLIER than a deleted case would**, and it reds as `UNTESTABLE` rather than as "not caught":
   delete the row those cases target and the cases lose their mutation target (measured: SF13
-  `2/22 case(s) UNTESTABLE`, SF2 `4/22`, SF10 `1/22` — each exit 1, and the summary line names a moved
+  `4/44 case(s) UNTESTABLE`, SF2 `8/44`, SF10 `2/44` — each exit 1, and the summary line names a moved
   mutation target instead of accusing the checker), before any case is deleted. The negative control
   does not add to these counts: it asserts the verdict is UNCHANGED rather than globally clean, so a
-  shrink leaves it passing instead of making it accuse the checker (`1/22 NOT caught` was exactly that
+  shrink leaves it passing instead of making it accuse the checker (`2/44 NOT caught` was exactly that
   false diagnosis before the control went verdict-relative). It is an ADDITION, not a
   substitute: SF2's `§5 row 2` cell and §13's `§6.4` cell each name one surface, so the check arm reds on
   the same edit (`R5 §5 row 2: names no surface`, `R5 §6.4: names no surface`, measured).

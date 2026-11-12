@@ -1795,15 +1795,22 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #: hosted image shipped the gate off: the `#11455` false PASS one surface-pair
 #: over, materialising the moment `#11086` arms the compose file.
 #:
-#: ⚠️ **The population is every deployment file the WALK's declared surfaces hold**
-#: — not every channel this repo has. `fly.toml`'s `[env]` table and
-#: `entrypoint.sh`'s `export`s also shape a deployed process's environment and are
-#: OUTSIDE `CONFIG_SURFACES` (measured: `fly.toml:211` carries
-#: `TORTOISE_LOOP_STALL_HARD_EXIT_S`, `entrypoint.sh:355-876` exports runtime
-#: defaults). Latent today — all three walked files are silent, so row 1 holds
-#: either way — and tracked by `#12022`, whose scope is the missing channels;
-#: adding them here would change the declared surface set `#11455` and its pins
-#: speak about, and needs a TOML `[env]` reader this module does not have.
+#: ⚠️ **The population is the deployment files that build/run THIS repo's Tortoise
+#: process — not every compose file and not every channel this repo has.** Two
+#: boundaries, both deliberate:
+#:
+#: * `fly.toml`'s `[env]` table and `entrypoint.sh`'s `export`s DO shape the Tortoise
+#:   process's environment and are OUTSIDE `CONFIG_SURFACES` (measured:
+#:   `fly.toml:211` carries `TORTOISE_LOOP_STALL_HARD_EXIT_S`, `entrypoint.sh:355-876`
+#:   exports runtime defaults). Latent today — all three walked files are silent, so
+#:   row 1 holds either way — and tracked by `#12022`, whose scope is the missing
+#:   channels; adding them here would change the declared surface set `#11455` and
+#:   its pins speak about, and needs a TOML `[env]` reader this module does not have.
+#: * Sub-application compose files — `apps/graph-viz/docker-compose.yml` (a FalkorDB
+#:   sidecar for the viz) and `integrations/crm/twenty/docker-compose.yml` (the
+#:   Twenty CRM stack) — deploy OTHER services; nothing in them runs the Tortoise
+#:   image or reaches `encode_for_row`, so they are not in the population. Named here
+#:   so the boundary is a decision rather than a missed glob.
 DEPLOYMENT_SURFACES: tuple[str, ...] = (
     "docker-compose.yml",
     "docker-compose.yaml",
@@ -2201,12 +2208,13 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
             )
     elif deployment["on"]:
         deployment_reading = (
-            f"every existing deployment file is armed ({deployment['armed']})"
+            "every deployment file that builds the Tortoise process is armed "
+            f"({deployment['armed']})"
         )
     else:
         deployment_reading = (
-            f"UNARMED deployment file(s) {deployment['silent']} — a deployment "
-            "built from them runs with the gate OFF. This condition is "
+            f"UNARMED deployment file(s) {deployment['silent']} — a Tortoise "
+            "deployment built from them runs with the gate OFF. This condition is "
             "SCOPED to the surface(s) that arm it "
             f"({', '.join(shipped['armed']) or 'none'}) and is NOT a claim about a "
             "deployment built from the silent path(s)"
