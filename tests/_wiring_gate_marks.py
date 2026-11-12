@@ -197,16 +197,31 @@ def refusal_reasons(marks: Iterable[Any]) -> list[str]:
 # filtering, which is why this does not false-block a legitimate partial run) and
 # each must report `call: passed`. The verdict is only raised when the session
 # reports SUCCESS — a run that already red is not made noisier.
-_REQUIRED: set[str] = set()
-_PASSED: set[str] = set()
-_OUTCOMES: dict[str, list[str]] = {}
+# ⛔ A STACK OF SESSIONS, NOT ONE PROCESS-GLOBAL RECORD (review round 5). A test may
+# start a NESTED in-process session — `pytest.main([...])` inside a test body — and
+# that inner session shares this module with the outer one. With a single global
+# record, `pytest_sessionstart`'s reset CLEARED the outer session's required set, so
+# every later `note_report` early-returned and the outer outcome check found nothing
+# missing: measured, a gate whose FIRST STATEMENT was `pytest.main(["--co", ...])`
+# then `pytest.skip(...)` reported `64 passed, 1 skipped, EXIT 0` with no refusal.
+# One record per session, pushed at start and popped at finish, means an inner
+# session can neither clear nor decide the outer one.
+_SESSIONS: list[dict[str, Any]] = []
 
 
-def reset() -> None:
-    """Clear the session's recorded state (a process may run several sessions)."""
-    _REQUIRED.clear()
-    _PASSED.clear()
-    _OUTCOMES.clear()
+def begin_session() -> None:
+    """Push a fresh record for the session that is starting."""
+    _SESSIONS.append({"required": set(), "passed": set(), "outcomes": {}})
+
+
+def end_session() -> None:
+    """Pop the session's record. Called AFTER the verdict, never before it."""
+    if _SESSIONS:
+        _SESSIONS.pop()
+
+
+def _current() -> dict[str, Any] | None:
+    return _SESSIONS[-1] if _SESSIONS else None
 
 
 def _is_guarded_nodeid(nodeid: str) -> bool:
@@ -216,6 +231,9 @@ def _is_guarded_nodeid(nodeid: str) -> bool:
 
 def note_required(items: Iterable[Any]) -> None:
     """Record which guarded gates THIS session collected (post-deselection)."""
+    record = _current()
+    if record is None:
+        return
     for item in items:
         name = getattr(item, "originalname", None) or getattr(item, "name", "")
         path = getattr(item, "path", None)
@@ -223,39 +241,45 @@ def note_required(items: Iterable[Any]) -> None:
             path = getattr(item, "fspath", None)
         if name not in GUARDED_ITEMS or Path(str(path)).name != GUARDED_FILE:
             continue
-        _REQUIRED.add(item.nodeid)
+        record["required"].add(item.nodeid)
 
 
 def note_report(report: Any) -> None:
     """Record how a guarded gate actually reported."""
+    record = _current()
+    if record is None:
+        return
     nodeid = getattr(report, "nodeid", "")
-    if nodeid not in _REQUIRED:
+    if nodeid not in record["required"]:
         return
     if getattr(report, "when", None) == "call" and getattr(report, "passed", False):
-        _PASSED.add(nodeid)
+        record["passed"].add(nodeid)
         return
     if not getattr(report, "passed", False):
-        _OUTCOMES.setdefault(nodeid, []).append(
+        record["outcomes"].setdefault(nodeid, []).append(
             f"{report.when}:{report.outcome}")
 
 
 def _payload() -> dict[str, Any]:
-    """This process's record, in a form xdist can ship to the controller."""
+    """This session's record, in a form xdist can ship to the controller."""
+    record = _current() or {"required": (), "passed": (), "outcomes": {}}
     return {
-        "required": sorted(_REQUIRED),
-        "passed": sorted(_PASSED),
-        "outcomes": {nodeid: list(phases) for nodeid, phases in _OUTCOMES.items()},
+        "required": sorted(record["required"]),
+        "passed": sorted(record["passed"]),
+        "outcomes": {nodeid: list(phases)
+                     for nodeid, phases in record["outcomes"].items()},
     }
 
 
 def merge_worker(payload: Any) -> None:
     """Fold a worker's record into the controller's (xdist collects on the workers)."""
-    if not isinstance(payload, dict):
+    record = _current()
+    if record is None or not isinstance(payload, dict):
         return
-    _REQUIRED.update(payload.get("required") or ())
-    _PASSED.update(payload.get("passed") or ())
+    record["required"].update(payload.get("required") or ())
+    record["passed"].update(payload.get("passed") or ())
     for nodeid, phases in (payload.get("outcomes") or {}).items():
-        _OUTCOMES.setdefault(nodeid, []).extend(phases)
+        record["outcomes"].setdefault(nodeid, []).extend(phases)
 
 
 def publish_worker_record(config: Any) -> None:
@@ -282,7 +306,13 @@ def publish_worker_record(config: Any) -> None:
 # closed on any rc other than 0/5 — i.e. it would have failed the coverage-manifest
 # step of `.github/workflows/python-ci.yml`, `post-merge-validation.yml`,
 # `ci.yml`'s collection check and `ci-timing.yml` (measured, review round 4).
-_NON_RUNNING_OPTIONS = ("collectonly", "setuponly", "setupplan", "showfixtures")
+# `show_fixtures_per_test` is `--fixtures-per-test`'s dest, and it is a SIBLING of
+# `--fixtures` here for the same measured reason (review round 5): without it the
+# refusal was printed into the fixtures listing while that code path hard-codes
+# `return 0`, i.e. the message claimed a gate had not run in a run that never
+# intended to run anything.
+_NON_RUNNING_OPTIONS = ("collectonly", "setuponly", "setupplan", "showfixtures",
+                        "show_fixtures_per_test")
 
 
 def refuse_unpassed(config: Any, exitstatus: int) -> int:
@@ -306,9 +336,12 @@ def refuse_unpassed(config: Any, exitstatus: int) -> int:
         return exitstatus
     if exitstatus != 0:
         return exitstatus
+    record = _current()
+    if record is None:
+        return exitstatus
     missing = {
-        nodeid: _OUTCOMES.get(nodeid, ["never reported"])
-        for nodeid in sorted(_REQUIRED - _PASSED)}
+        nodeid: record["outcomes"].get(nodeid, ["never reported"])
+        for nodeid in sorted(record["required"] - record["passed"])}
     if not missing:
         return exitstatus
     detail = "\n".join(

@@ -331,8 +331,8 @@ def pytest_collection_modifyitems(items):
 
 
 def pytest_sessionstart(session):
-    """Reset the wiring-gate outcome record (a process may run several sessions)."""
-    _wiring_gate_marks.reset()
+    """Push a wiring-gate record for THIS session (a test may nest another session)."""
+    _wiring_gate_marks.begin_session()
 
 
 def pytest_collection_finish(session):
@@ -367,6 +367,7 @@ def pytest_sessionfinish(session, exitstatus):
     """
     session.exitstatus = _wiring_gate_marks.refuse_unpassed(
         session.config, exitstatus)
+    _wiring_gate_marks.end_session()
 
 
 @pytest.hookimpl(tryfirst=True)

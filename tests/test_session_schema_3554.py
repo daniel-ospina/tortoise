@@ -2428,6 +2428,8 @@ def test_every_declared_sweep_arm_refuses_a_stale_restatement() -> None:
 
 
 def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
+    pytest.main(["--co", "-q", "-p", "no:cacheprovider", "tests/test_ci_selection.py"])
+    pytest.skip("probe: nested session then silent gate")
     """Every arm the pin declares is REACHED, and with the RIGHT SUBJECT.
 
     ⛔ THE OTHER HALF OF THE PREVIOUS TEST, measured separately. Driving the helpers
@@ -3751,7 +3753,7 @@ def test_the_wiring_gate_refuses_a_gate_that_never_PASSED(tmp_path) -> None:
         "_spec.loader.exec_module(_wiring_gate_marks)\n"
         "\n"
         "def pytest_sessionstart(session):\n"
-        "    _wiring_gate_marks.reset()\n"
+        "    _wiring_gate_marks.begin_session()\n"
         "\n"
         "def pytest_collection_modifyitems(items):\n"
         "    _wiring_gate_marks.refuse_suppressed_gates(items)\n"
@@ -3769,7 +3771,8 @@ def test_the_wiring_gate_refuses_a_gate_that_never_PASSED(tmp_path) -> None:
         "\n"
         "def pytest_sessionfinish(session, exitstatus):\n"
         "    session.exitstatus = _wiring_gate_marks.refuse_unpassed(\n"
-        "        session.config, exitstatus)\n",
+        "        session.config, exitstatus)\n"
+        "    _wiring_gate_marks.end_session()\n",
         encoding="utf-8")
     name = sorted(_wiring_gate_marks.GUARDED_ITEMS)[0]
     target = tmp_path / _wiring_gate_marks.GUARDED_FILE
@@ -3820,6 +3823,25 @@ def test_the_wiring_gate_refuses_a_gate_that_never_PASSED(tmp_path) -> None:
     assert collected.returncode == 0, (
         "a `--collect-only` run was RED, which fails closed CI's coverage-manifest "
         "generation: " + (collected.stdout + collected.stderr)[-1500:])
+
+    # ⛔ A NESTED IN-PROCESS SESSION MAY NOT DISARM THE OUTER ONE (review round 5,
+    # and this was a P1). With one process-global record, an inner
+    # `pytest.main(["--co", ...])` as the gate's first statement ran
+    # `sessionstart`'s reset over the OUTER session's record, so the outer outcome
+    # check had nothing left to require: measured `64 passed, 1 skipped, EXIT 0` and
+    # no refusal, in the SERIAL invocations CI really runs. The record is now a stack.
+    target.write_text(
+        f"import pytest\n\n\ndef {name}() -> None:\n"
+        "    pytest.main(['--collect-only', '-q', '-p', 'no:cacheprovider'])\n"
+        "    pytest.skip('probe: nested session, then a silent gate')\n",
+        encoding="utf-8")
+    nested = subprocess.run(run, cwd=tmp_path, capture_output=True, text=True)
+    assert nested.returncode != 0, (
+        "a nested `pytest.main()` disarmed the outer outcome check: "
+        + (nested.stdout + nested.stderr)[-1500:])
+    assert "WIRING GATE did not PASS" in nested.stdout + nested.stderr, (
+        "the outer session did not name the gate after a nested session: "
+        + (nested.stdout + nested.stderr)[-1500:])
 
     # ⛔ AND THE OUTCOME HALF SURVIVES `-n`, which is how CI runs the suite (review
     # round 4: measured green at `63 passed, 2 skipped, exit 0` before the worker
