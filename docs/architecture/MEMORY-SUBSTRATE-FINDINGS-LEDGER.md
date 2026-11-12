@@ -385,7 +385,7 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   so the page could say *seven of the twelve no longer read as written* beside *only `**(a)**` still
   read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). ⚠️ WHAT MAKES A SENTENCE A CANDIDATE IS WIDER THAN "a letter list of two or
   more", and the code says so: a sentence qualifies if EITHER the four-form gate matches — which
-  admits a SINGLE marked letter (`Note `c` still read as written.` is a candidate on one letter) — OR
+  admits a SINGLE marked letter (``Note `c` still read as written.`` is a candidate on one letter) — OR
   the extractor names two or more letters, in any spelling and with NO join required between them
   (`Note **(c)** is fine and **(d)** is fine, so both still read as written.` qualifies). Each letter
   may be written bare, bold, code or italic, every form bounded to the twelve letters §3's table can
