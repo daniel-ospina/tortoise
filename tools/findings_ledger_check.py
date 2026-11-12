@@ -1845,7 +1845,9 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         # `_persist_extra_props`'s call site by 16 lines, so row (c)'s shorthand
         # moved to `:3144` and this fixture stopped matching — the arm reported
         # "did not change the document" rather than going quiet, which is how it was
-        # caught. `e4703a286a` shifted it again (+18, to `:3162`) and the same
+        # caught. `9958281e7c` shifted it again (+18, to `:3162` — verified:
+        # `9958281e7c^` has the call at 3144, `9958281e7c` at 3162; `e4703a286a`
+        # touches only `tortoise/search_engine.py` and moves neither) and the same
         # report caught it a second time. Retarget, never delete.
         lambda t: t.replace("`:3162`", "`:999999`", 1),
         "out of range",
