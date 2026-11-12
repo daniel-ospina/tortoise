@@ -28,7 +28,8 @@ import pytest
 DOC_DIR = (Path(__file__).resolve().parent.parent
            / "docs" / "research" / "2026-11-12-11901-candidate-recall")
 BRIEF = DOC_DIR / "research-brief.md"
-ARTIFACT = DOC_DIR / "measurement.json"
+ARTIFACT = DOC_DIR / "measurement.json"              # hybrid — the product's read
+CONTROL = DOC_DIR / "measurement-fts-only.json"      # the lexical-only control
 
 
 # ── the artifact ─────────────────────────────────────────────────────────────
@@ -37,6 +38,55 @@ ARTIFACT = DOC_DIR / "measurement.json"
 def report() -> dict:
     assert ARTIFACT.exists(), f"missing committed artifact {ARTIFACT}"
     return json.loads(ARTIFACT.read_text())
+
+
+@pytest.fixture(scope="module")
+def control() -> dict:
+    assert CONTROL.exists(), f"missing committed control {CONTROL}"
+    return json.loads(CONTROL.read_text())
+
+
+def test_both_artifacts_declare_which_retrieval_mode_ran(report, control):
+    """An FTS-only run is a DIFFERENT measurement from the fused read.
+
+    `battery/runner/retrieval_preflight.py` records a keyword-only run published
+    as a product measurement as the class this field exists to prevent, so the
+    artifact must be unable to hide which mode produced it.
+    """
+    assert report["retrieval"]["has_embedder"] is True, (
+        "the headline artifact is not hybrid — the brief's §3.1 table and the "
+        "STORAGE-ARCHITECTURE sentence both rest on it being the fused read")
+    assert report["retrieval"]["legs_seen"].get("vector") is True
+    assert control["retrieval"]["has_embedder"] is False
+    assert "KEYWORD-ONLY" in control["retrieval"]["note"]
+    assert control["retrieval"]["legs_seen"].get("vector") is False
+
+
+def test_the_dense_leg_moves_the_classes_in_opposite_directions(report, control):
+    """The brief's §3.1 headline: the mode changes the answer, by class.
+
+    If this stops holding, the sentence added to STORAGE-ARCHITECTURE.md is
+    wrong and must be re-derived — it is quoted there as a measured finding.
+    """
+    for cls, expect in (("definite", "down"), ("ident", "up"), ("path", "up")):
+        fts = control["arms"]["exact_by_class"][cls]["3"]
+        hyb = report["arms"]["exact_by_class"][cls]["3"]
+        assert fts["n"] == hyb["n"] > 0
+        if expect == "down":
+            assert hyb["in_window"] < fts["in_window"], f"{cls} did not get worse under hybrid"
+        else:
+            assert hyb["in_window"] > fts["in_window"], f"{cls} did not improve under hybrid"
+
+
+def test_the_pooled_set_is_measured_at_every_width(report):
+    """§1/§7 quote a pooled figure at `limit=15`, not an extrapolation."""
+    pooled = report["arms"]["pooled"]
+    assert set(pooled) == {"3", "5", "10", "15"}
+    means = [pooled[str(k)]["set_sum"] / pooled[str(k)]["captures"] for k in (3, 5, 10, 15)]
+    assert means == sorted(means), "the pooled set must grow with the per-query width"
+    # …and the budget it is measured at is stated, so "mean 40" is not read as
+    # "the typical capture" (a capture with 5 entities issues 5 queries).
+    assert "BUDGET CAP" in report["pooled_budget_note"]
 
 
 def test_the_artifact_carries_every_arm_the_brief_quotes(report):
@@ -76,13 +126,15 @@ def test_recall_is_monotone_in_k_and_misses_partition(report):
         assert row["rows_zero"] <= row["miss_absent_at_max_k"]
 
 
-def test_the_shipped_matcher_attaches_no_variant_at_any_width(report):
+@pytest.mark.parametrize("artifact", ["report", "control"])
+def test_the_shipped_matcher_attaches_no_variant_at_any_width(request, artifact):
     """The load-bearing negative: width is not the lever for the variant class.
 
     ``_find_existing_entity`` is exact-``_norm`` equality, so a surface variant
     is unattachable at EVERY k. If this ever becomes non-zero, the brief's §4
     and §5 tables are wrong and the whole recommendation must be re-derived.
     """
+    report = request.getfixturevalue(artifact)
     variant = report["arms"]["variant"]
     for k, row in variant.items():
         assert row["attached"] == 0, (
@@ -169,6 +221,26 @@ def test_the_variant_classes_are_the_ones_norm_does_not_fold():
     assert mod._fold_punct("the plan doc") == mod._fold_punct("the plan-doc ")
 
 
+def test_the_brief_quotes_the_crowding_statistic_the_artifact_holds(report):
+    """§3's "mean 4.0 … median 2" is DERIVED — recompute it, do not trust prose.
+
+    This assertion exists because the first draft of the brief quoted a figure
+    from an earlier, differently-sized run ("53 … mean 8.5, median 5") that the
+    committed artifact does not hold. A derived statistic is as quotable as a
+    stored one and rots the same way.
+    """
+    import statistics
+
+    misses = report["arms"]["exact_misses"]
+    assert misses, "the artifact records no misses — §3's crowding sentence is unsupported"
+    mean = statistics.mean(m["siblings_2tok"] for m in misses)
+    median = statistics.median(m["siblings_2tok"] for m in misses)
+    text = _squash(BRIEF.read_text())
+    assert f"mean of {mean:.1f} population names with ≥2 tokens in common" in text, (
+        f"the brief does not state the recomputed crowding figure "
+        f"(mean {mean:.1f}, median {median:g})")
+
+
 # ── the brief's tables must equal the artifact ──────────────────────────────
 
 def _table_rows(text: str) -> list[list[str]]:
@@ -194,26 +266,33 @@ def test_the_brief_quotes_the_recall_the_artifact_holds(report):
 def test_the_brief_quotes_the_variant_rates_the_artifact_holds(report):
     text = BRIEF.read_text()
     variant = report["arms"]["variant"]
+    squashed = _squash(text)
     for k in ("3", "15"):
         row = variant[k]
         pct = 100 * row["in_window"] / row["pairs"]
-        assert f"{row['in_window']} = {pct:.1f} %" in text, (
+        assert f"{row['in_window']} = {pct:.1f} %" in squashed, (
             f"k={k}: the brief does not state {row['in_window']} = {pct:.1f}% in-window")
-        assert row["attached"] == 0 and "**0 = 0.0 %**" in text
+        assert row["attached"] == 0 and "0 = 0.0 %" in squashed
 
 
 def _squash(text: str) -> str:
-    """Whitespace-insensitive view: a line wrap must not fail a figure check."""
-    return re.sub(r"\s+", " ", text)
+    """Formatting-insensitive view: a line wrap or bold marker is not a figure.
+
+    Strips the markdown emphasis a table cell uses, so the guard tests WHICH
+    NUMBER the brief states and not how it was typeset.
+    """
+    return re.sub(r"\s+", " ", text.replace("*", ""))
 
 
 def test_the_brief_quotes_the_pooled_set_the_artifact_holds(report):
     pooled = report["arms"]["pooled"]["3"]
     mean = pooled["set_sum"] / pooled["captures"]
-    wanted = (f"mean {mean:.1f} candidates, min {pooled['set_min']}, "
-              f"max {pooled['set_max']}")
-    assert wanted in _squash(BRIEF.read_text()), (
-        f"the brief does not state the pooled set ({wanted})")
+    text = _squash(BRIEF.read_text())
+    assert f"mean {mean:.1f} candidates" in text, (
+        f"the brief does not state the pooled mean ({mean:.1f})")
+    assert f"min {pooled['set_min']}, max {pooled['set_max']}" in text, (
+        f"the brief does not state the pooled range "
+        f"({pooled['set_min']}–{pooled['set_max']})")
 
 
 def test_the_brief_keeps_its_two_standing_negatives():

@@ -57,13 +57,25 @@ THE HARVEST RULES, stated so the population is reproducible and criticisable
                 enumerated (§3.2: 0.5% / 1.7% / 9.0%).
 
 USAGE
+    # 1. start a lane container and export its four seams
+    uri="$(uv run python tools/test_lane.py uri)" || exit 1
+    eval "$uri"                      # two steps on purpose — see test_lane's USAGE
+    # 2. run the measurement (NOT via `test_lane.py run`, which executes pytest)
     uv run python tools/candidate_recall_11901.py \
-        --sessions-dir ~/.tortoise/session-events \
-        --population 1000 --sample 300 --out /tmp/recall-11901.json
+        --population 1000 --sample 300 --captures 20 --out /tmp/recall-11901.json
 
-Requires a live FalkorDB in ``TORTOISE_DB_URI`` (``tools/test_lane.py run``
-exports one). It REFUSES to run without one rather than falling back to the
-embedded engine — S3 itself refuses embedded backends for the same reason.
+⚠️ **The dense leg matters and is recorded, not assumed.** `EmbeddingModel.get()`
+is ``None`` on a venv without the ``embeddings`` extra, and the fused read then
+silently degrades to keyword-only — ``battery/runner/retrieval_preflight.py``
+names a published FTS-only run as the class it exists to prevent. Install it
+(`uv sync --extra embeddings --extra parity`) before measuring anything you
+intend to quote, and read ``retrieval`` in the artifact: it states which mode
+ran. A keyword-only figure is a real figure about the LEXICAL leg and is never
+a figure about the fused production read.
+
+Requires a live FalkorDB in ``TORTOISE_DB_URI``. It REFUSES to run without one
+rather than falling back to the embedded engine — S3 itself refuses embedded
+backends for the same reason.
 
 EXIT CODES: 0 ok · 2 usage · 3 no reachable graph (never a silent skip)
 """
@@ -162,10 +174,15 @@ def harvest(sessions_dir: Path) -> dict[str, collections.Counter]:
 def build_population(harvested: dict[str, collections.Counter], n: int) -> list[dict]:
     """Top-``n`` names by turn-frequency, class-balanced, deterministically ordered.
 
-    Quotas mirror the audit's own class shares so one shape cannot swamp the
-    population: the definite-description class is the majority (62.3%) of real
-    ``:Object`` names, so it gets ~60% of the slots; identifiers and paths split
-    the rest. Ties break on the name so two runs are byte-identical.
+    ⛔ The quotas are a DELIBERATE OVERSAMPLE of the minority shapes, not the
+    audit's class shares: the audit measured identifiers at ~2.2% of real
+    ``:Object`` names (0.5% bare ``#<n>`` + 1.7% ``PR #<n>``) and the definite
+    description at 62.3%, and this population gives identifiers 30% and paths
+    10% so each class carries enough names for a usable per-class rate. **The
+    composite headline is therefore stratified, never class-share weighted** —
+    it is not an estimate of the production mix, and the per-class table is the
+    number to quote for any one class. Ties break on the name so two runs are
+    byte-identical.
     """
     quotas = {"definite": int(n * 0.60), "ident": int(n * 0.30), "path": n - int(n * 0.60) - int(n * 0.30)}
     pop: list[dict] = []
@@ -198,6 +215,15 @@ def variants(name: str, cls: str) -> list[tuple[str, str]]:
     return out
 
 
+def _has_embedder() -> bool:
+    """Is the dense leg available? Recorded, because it changes the measurement."""
+    try:
+        from tortoise.embeddings import EmbeddingModel
+        return EmbeddingModel.get() is not None
+    except Exception:
+        return False
+
+
 def _fold_punct(text: str) -> str:
     """The candidate fix, measured but NOT shipped: fold the separator class.
 
@@ -217,7 +243,8 @@ def run(args: argparse.Namespace) -> int:
         print("REFUSED: no live FalkorDB in TORTOISE_DB_URI — S3 itself refuses "
               "the embedded backend, and a recall figure measured on a backend "
               "the product cannot use is not a figure.\n"
-              "  start one:  uv run python tools/test_lane.py run -- <this tool>",
+              "  start one:  uri=\"$(uv run python tools/test_lane.py uri)\" && eval \"$uri\"\n"
+              "  (test_lane.py `run` executes PYTEST, not this tool — see USAGE)",
               file=sys.stderr)
         return 3
 
@@ -248,6 +275,14 @@ def run(args: argparse.Namespace) -> int:
                                include_terminal=True, _record_reads=False,
                                _valid_time_rerank=False)
 
+        #: Which legs the fused read actually submitted. An FTS-only run is a
+        #: DIFFERENT measurement from a hybrid one — the capture prior is the
+        #: fused read, and a store with no embedder silently degrades to
+        #: keyword-only (``battery/runner/retrieval_preflight.py`` records an
+        #: FTS-only run published as a product measurement as the class this
+        #: field exists to prevent). Recorded, never assumed.
+        legs_seen: dict[str, bool] = {}
+
         def window(query: str, k: int) -> list[dict]:
             """EXACTLY the leg ``_fts_rows`` runs, at width ``k``.
 
@@ -256,10 +291,15 @@ def run(args: argparse.Namespace) -> int:
             sanitised form and ``_fts_rows`` forwards it verbatim. Skipping it
             here would measure a query shape the product never issues.
             """
+            trace: list[dict] = []
             rows = sdk.tortoise_fts_query(
                 _sanitise_query_text(query), entity_type="object", limit=k,
                 include_terminal=True, _record_reads=False,
-                _valid_time_rerank=False)
+                _valid_time_rerank=False, leg_trace=trace)
+            for entry in trace or []:
+                name = entry.get("strategy") or entry.get("leg") or "?"
+                legs_seen[str(name)] = legs_seen.get(str(name), False) or bool(
+                    entry.get("ok", True) and entry.get("count", 1))
             return [{"id": r.get("id", ""), "name": r.get("content", ""),
                      "kind": r.get("point_kind", "")} for r in (rows or [])]
 
@@ -386,22 +426,23 @@ def run(args: argparse.Namespace) -> int:
         # queries — not ``limit``. Measured here at ``max_queries`` names per
         # capture, which is the production budget (``max_queries=15``).
         pooled = {k: {"captures": 0, "set_sum": 0, "set_min": 10**9, "set_max": 0}
-                  for k in (3,)}
+                  for k in KS}
         budget = 15   # production ``max_queries``
         for start in range(0, min(len(sample), args.captures * budget), budget):
             group = sample[start:start + budget]
             if len(group) < 2:
                 continue
-            merged: dict[str, dict] = {}
-            for row in group:
-                for r in window(row["name"], 3):
-                    if r["id"] and r["id"] not in merged:
-                        merged[r["id"]] = r
-            size = len(merged)
-            pooled[3]["captures"] += 1
-            pooled[3]["set_sum"] += size
-            pooled[3]["set_min"] = min(pooled[3]["set_min"], size)
-            pooled[3]["set_max"] = max(pooled[3]["set_max"], size)
+            for k in KS:
+                merged: dict[str, dict] = {}
+                for row in group:
+                    for r in window(row["name"], k):
+                        if r["id"] and r["id"] not in merged:
+                            merged[r["id"]] = r
+                size = len(merged)
+                pooled[k]["captures"] += 1
+                pooled[k]["set_sum"] += size
+                pooled[k]["set_min"] = min(pooled[k]["set_min"], size)
+                pooled[k]["set_max"] = max(pooled[k]["set_max"], size)
         arms["pooled"] = pooled
 
         report = {
@@ -411,6 +452,18 @@ def run(args: argparse.Namespace) -> int:
                        "harvested_distinct": counts, "population": len(pop),
                        "sample": len(sample), "elapsed_s": round(time.time() - t0, 1)},
             "ks": list(KS),
+            "retrieval": {
+                "has_embedder": _has_embedder(),
+                "legs_seen": dict(sorted(legs_seen.items())),
+                "note": ("hybrid" if _has_embedder() else
+                         "⚠️ KEYWORD-ONLY: no embedder on this box, so the dense "
+                         "leg was never submitted — the numbers describe the "
+                         "lexical leg only, not the fused production read"),
+            },
+            "pooled_budget_note": ("a pooled group is `max_queries` (15) names, "
+                                   "which is the production BUDGET CAP, not the "
+                                   "typical capture — a capture with 5 entities "
+                                   "issues 5 object queries"),
             "arms": arms,
         }
         payload = json.dumps(report, indent=1, sort_keys=True)
