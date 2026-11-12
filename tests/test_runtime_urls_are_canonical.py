@@ -262,9 +262,10 @@ RETIRED_HOST_ALLOWLIST = {
     # deferring is safe and why it must stay VISIBLE: a sweep that deletes one of
     # these must delete its reason too, and
     # the deferred re-aim is tracked on #12057 rather than lost behind a green run.
-    # ⛔ `invite-accept.html`, `welcome.html` and `wizardPrompts.js` had rows here and
-    # no longer do: main's #12058 re-aimed all three to 0 before this branch's base
-    # (measured on this tree). Their files stay in `RUNTIME_FILES`, so a literal
+    # ⛔ `invite-accept.html`, `welcome.html` and `wizardPrompts.js` were re-aimed to
+    # 0 by main's #12058 before this branch's base (measured on this tree), and the
+    # landed allowlist has never carried a row for any of them — the rows an earlier
+    # draft listed are gone with the drafts. Their files stay in `RUNTIME_FILES`, so a literal
     # coming back REDS the guard instead of leaving the surface — which is the
     # difference between deleting a ROW and deleting a FILE.
     "website/apps/dashboard/public/signup.html": (
@@ -377,7 +378,7 @@ RETIRED_HOST_ALLOWLIST = {
 #: said exactly that and it was false. The issue also enumerates five app pages
 #: and API modules in this surface. At this head THREE of them still emit and are
 #: DEFERRED here, not swept, while `invite-accept.html` and `welcome.html` were
-#: re-aimed to 0 by #12058 (both rows removed — see the table below). Counts
+#: re-aimed to 0 by #12058 (neither carries a row — see the table below). Counts
 #: measured at this head, so NEITHER the deferral nor the sweep can be read as
 #: complete from this list alone.
 #: BASIS: EMITTING occurrences (an `href`/const a browser or server would
