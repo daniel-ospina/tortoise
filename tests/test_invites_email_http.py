@@ -81,7 +81,7 @@ def _seed_membership(reg, org_id: str, user_id: str, role: str = "owner"):
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.setenv("RESEND_API_KEY", "re_test_secret_key_123")
-    monkeypatch.setenv("EMAIL_LINK_BASE_URL", "https://tortoise.premiselabs.co")
+    monkeypatch.setenv("EMAIL_LINK_BASE_URL", "https://app.premiselabs.co")
     email_notify._skip_logged.clear()
     yield
 
@@ -197,7 +197,7 @@ def test_info_link_host_never_from_host_header(client, reg, monkeypatch):
     monkeypatch.setattr(email_notify, "send_invite_email", fake_send)
     client.post("/v1/invites", json={"org_id": "team-1", "email": "bob@example.com"},
                 headers={"Host": "evil.example.com"})
-    assert captured["link"].startswith("https://tortoise.premiselabs.co/")
+    assert captured["link"].startswith("https://app.premiselabs.co/")
 
 
 # ── #4588: the registry lane's public invite scan prunes on ``expires_at`` ──

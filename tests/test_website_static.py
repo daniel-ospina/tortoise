@@ -386,6 +386,73 @@ class TestDisplayLabelParity:
             PRICING_JSON.read_text(encoding="utf-8"))["tiers"]
 
 
+class TestDashboardPlanPricesAreThePriceOfRecord:
+    """#11981 raised `solo` from $9 to $19 in `product/pricing.json` and left the
+    dashboard e2e's plan-button pin at the old literal, so the required
+    `dashboard-e2e` job went red on `main` for every PR from that landing onward
+    (measured: run 43142101648 — `Solo · $9/mo` not found, the failure snapshot
+    renders `Solo · $19/mo`).
+
+    The dashboard does not carry a second price table: `pricing.js` imports
+    `product/pricing.json` at build time and the dialog renders those numbers. A
+    spec (or any other surface) that RESTATES a price therefore holds a copy that
+    can disagree with the shipped artifact, and when it does the disagreement
+    reds a browser job on `main` instead of failing a two-second static check.
+    These two rows pin the construction AND the restatements.
+    """
+
+    _MAIN_JSX = (REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "main.jsx")
+
+    def _prices(self) -> dict:
+        data = json.loads(PRICING_JSON.read_text(encoding="utf-8"))
+        return {tier: t["price_usd_monthly"] for tier, t in data["tiers"].items()}
+
+    def _label_to_tier(self) -> dict:
+        """Display label -> tier key, from the dashboard's own TIER_LABELS.
+
+        Derived, not restated: `TestDisplayLabelParity` already pins that map
+        against product.html's, so this row cannot introduce a third copy.
+        """
+        js = DASHBOARD_PRICING_JS.read_text(encoding="utf-8")
+        m = re.search(r"export const TIER_LABELS = \{([^}]*)\}", js, re.S)
+        assert m, "pricing.js must export TIER_LABELS"
+        pairs = dict(re.findall(r"([A-Za-z_$][\w$]*)\s*:\s*'([^']*)'", m.group(1)))
+        return {label: tier for tier, label in pairs.items() if tier in PUBLIC_TIERS}
+
+    def test_the_dialog_renders_the_price_of_record_by_construction(self):
+        """The chain the e2e keys on: pricing.json -> planOptions() -> button."""
+        js = DASHBOARD_PRICING_JS.read_text(encoding="utf-8")
+        assert "from '../../../../product/pricing.json'" in js, (
+            "pricing.js must import the price of record, never a local copy")
+        assert re.search(r"price:\s*t\.price_usd_monthly", js), (
+            "planOptions() must read `price_usd_monthly` out of pricing.json")
+        jsx = self._MAIN_JSX.read_text(encoding="utf-8")
+        assert re.search(r"\{p\.label\}\s*·\s*\$\{p\.price\}/mo", jsx), (
+            "the paid-new-org dialog must render `<label> · $<price>/mo` from a "
+            "`planOptions()` entry (the accessible name the e2e asserts)")
+
+    def test_no_spec_restates_a_plan_price_that_disagrees_with_the_record(self):
+        """A spec may pin a plan price only at the price of record. Fails on
+        the pre-#11981 tree (`Solo · $9/mo` vs pricing.json's 19)."""
+        prices = self._prices()
+        labels = self._label_to_tier()
+        offenders: list[str] = []
+        for spec in sorted((REPO_ROOT / "tests" / "e2e").rglob("*.py")):
+            text = spec.read_text(encoding="utf-8")
+            for label, tier in labels.items():
+                for m in re.finditer(
+                        rf"{re.escape(label)}\s*·\s*\$(\d+)/mo", text):
+                    got = int(m.group(1))
+                    if got != prices[tier]:
+                        offenders.append(
+                            f"{spec.relative_to(REPO_ROOT)}: {label} · ${got}/mo "
+                            f"!= pricing.json tier {tier!r} ${prices[tier]}/mo")
+        assert not offenders, (
+            "a spec restates a plan price that disagrees with the price of "
+            "record (product/pricing.json) — read the price instead of "
+            "restating it, or correct the literal: " + "; ".join(offenders))
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. fmtPrice() math
 # ═══════════════════════════════════════════════════════════════════════════════

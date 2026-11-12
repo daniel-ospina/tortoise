@@ -631,7 +631,16 @@ def test_4365_served_document_sends_chatgpt_to_a_path_that_exists():
         "chooser — the #9660 owner ruling added it")
     assert "dashboard's connect step (the ChatGPT" in skill, (
         "the served document must tell a ChatGPT user it has a dashboard surface")
-    assert "tortoise.premiselabs.co/docs#chatgpt" in skill, (
+    # #11767: the canonical company origin — the retired host is a permanent 301
+    # (#11762), so the reference copy is reached in one hop instead of two.
+    # ⛔ SCHEME-QUALIFIED on purpose: the bare host needle
+    # `"premiselabs.co/docs#chatgpt"` is ALSO a substring of the retired
+    # `"tortoise.premiselabs.co/docs#chatgpt"` (measured:
+    # `'premiselabs.co/docs#chatgpt' in 'tortoise.premiselabs.co/docs#chatgpt'`
+    # is True), so a bare-host pin stays green on a revert to the exact value
+    # #11767 removes — the regression it exists to catch. The `https://` prefix
+    # is what makes only the canonical origin match.
+    assert "https://premiselabs.co/docs#chatgpt" in skill, (
         "the served document must still point at the reference copy of those steps")
 
 

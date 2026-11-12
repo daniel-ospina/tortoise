@@ -1515,6 +1515,17 @@ _ALLOWED_ORIGINS = [
     "https://premiselabs.co",
     "https://app.premiselabs.co",
     "https://api.premiselabs.co",
+    # #11767: KEEP, do not sweep. `tortoise.premiselabs.co` is a permanent 301
+    # host (#11762) whose only remaining document is `website/404.html`, so this
+    # entry outlives the pages it was added for — a tab opened before the cutover
+    # still preflights against it. Removal trigger (all four, measured, not
+    # judgement): (a) #11763's redirect map is live for every enumerated path;
+    # (b) >=30 days after children 1-3 are live; (c) website/404.html still
+    # carries no <script> (it is the only non-redirect HTML that host serves, and
+    # it is what makes the entry provably safe to leave); (d) a production probe
+    # shows no request FROM that origin. Also note _ALLOWED_HOSTS below derives
+    # from this list, so dropping the entry ALSO tightens the MCP Host guard —
+    # a second behaviour change riding on a CORS line.
     "https://tortoise.premiselabs.co",
     "https://tortoise-y4mjjq.fly.dev",
 ]
@@ -40984,11 +40995,14 @@ async def github_callback(code: str | None = None, state: str | None = None,
     /v1/connectors/github/auth`` adds ``connector_source_type`` so this
     completion ALSO leaves the connector row that flow promises (#4685).
     """
-    # #1135: welcome page lives on the static-Pages host — derive from the
-    # same env-driven base as the email links (EMAIL_LINK_BASE_URL), never a
-    # second hardcoded host literal.
+    # #1135: derive from the same env-driven base as the email links
+    # (EMAIL_LINK_BASE_URL), never a second hardcoded host literal. #11767: that
+    # base is the APP origin now — /welcome.html has lived there since #4054,
+    # so the emitted URL is terminal (0 hops) rather than a 301 into it.
     from tortoise.email_notify import email_link_base
-    welcome_url = f"{email_link_base()}/welcome.html"
+    # #11767: extensionless, matching the app origin's terminal form
+    # (`/welcome.html` answers 308 to `/welcome` there, measured 2026-11-11).
+    welcome_url = f"{email_link_base()}/welcome"
 
     if error:
         await _emit_analytics_off_loop(

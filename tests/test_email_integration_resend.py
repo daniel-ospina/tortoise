@@ -168,7 +168,7 @@ def test_invite_email_delivers(monkeypatch):
     resp = _send_and_track(
         TEST_DELIVERED,
         "Tortoise invite delivery check",
-        email_notify._invite_html("Acme Labs", "member", "https://tortoise.premiselabs.co/invite-accept.html?token=dtest"),
+        email_notify._invite_html("Acme Labs", "member", "https://app.premiselabs.co/invite-accept?token=dtest"),
     )
     message_id = resp.get("id")
     assert message_id, f"provider accepted but no message id: {resp}"
@@ -184,7 +184,7 @@ def test_bounced_address_reports_bounced():
     resp = _send_and_track(
         TEST_BOUNCED,
         "Tortoise bounce check",
-        email_notify._invite_html("Acme", "member", "https://tortoise.premiselabs.co/invite-accept.html?token=btest"),
+        email_notify._invite_html("Acme", "member", "https://app.premiselabs.co/invite-accept?token=btest"),
     )
     message_id = resp.get("id")
     assert message_id
