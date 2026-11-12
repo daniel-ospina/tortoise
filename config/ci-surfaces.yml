@@ -5805,6 +5805,15 @@ surfaces:
   # would not run on the change that can break them. The prose→value DERIVATION
   # half is #2817 (`tortoise/value_normalizer.py`), deliberately not pinned here.
   - test_money_value_2782.py
+  # #11915: the `percent` value shape — a bounded int (basis points) with its
+  # own evidence field, the SDK props-intake gate that stores or refuses it, and
+  # the refusal wording the shipped `targetPct` declaration depends on. Like its
+  # money/value_normalizer siblings the subject modules (`tortoise/percent.py`,
+  # `tortoise/pack_values.py`) match no SOURCE_PATTERNS entry, so without this
+  # entry the shape's whole contract falls through to `core` on a `percent.py`
+  # change. URI-less (pure unit) + the embedded SDK gate, so it runs on the
+  # docker leg exactly as `test_money_value_2782.py` does.
+  - test_percent_value_11915.py
   # #2817: the DERIVE half of the money value — `tortoise/value_normalizer.py`
   # (prose -> canonical props, abstention-first). Like `money.py` it matches no
   # SOURCE_PATTERNS entry and is not a SHARED_MODULE, so a value_normalizer.py
