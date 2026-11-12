@@ -286,7 +286,10 @@ BINARY_MUTATION_RE = re.compile(
     # the caller then requires a client binary name AFTER the match, so
     # `sh -c "cat x > /tmp/f"` is not an offender and this arm cannot red a
     # write that goes somewhere else (#12069 review, P2).
-    r"|\b(?:ba|z|da)?sh[ \t]+-c\b[^\n]*>"
+    # \u26d4 ANY OPTIONS BETWEEN THE SHELL AND `-c` (#12069 review 15, measured):
+    # `bash -e -c '\u2026 > \u2026/pg_dump'` executes the write and this arm, spelled
+    # `sh[ \t]+-c`, never fired — nor did the `_SHELL_CODE_RE` twin.
+    r"|\b(?:ba|z|da)?sh[ \t]+(?:-\S+[ \t]+(?:\S+[ \t]+)?)*-[A-Za-z]*c\b[^\n]*>"
 )
 #: Only a binary NAME, never a filename that contains one: the `(?![\w.])` is
 #: what keeps `rm -f "$RUNNER_TEMP/pg_dump.log"` (a tidy step) and
@@ -417,7 +420,8 @@ def _inside_quotes(text: str, position: int) -> bool:
 #: `sudo bash -ec "cat … > …/pg_dump"` was GREEN. `-[A-Za-z]*c[A-Za-z]*` covers
 #: every ordering.
 _SHELL_CODE_RE = re.compile(
-    r"\b(?:sh|bash|zsh|dash|ksh)\s+-[A-Za-z]*c[A-Za-z]*\b|\beval\b"
+    r"\b(?:sh|bash|zsh|dash|ksh)\s+(?:-\S+\s+(?:\S+\s+)?)*-[A-Za-z]*c[A-Za-z]*\b"
+    r"|\beval\b"
 )
 
 
@@ -463,7 +467,21 @@ def _code_quoted(line: str, position: int) -> bool:
         index += 1
     if quote is None:
         return False
-    return any(re.fullmatch(r"\s*['\"]?", line[opener : opened_at + 1]) for opener in openers)
+    # \u26d4 THE OPENER MUST PRECEDE THE QUOTE (#12069 review 15, measured false RED).
+    # A shell word AFTER the quote that opened the span made
+    # `line[opener : opened_at + 1]` an EMPTY, BACKWARDS slice, and `fullmatch`
+    # accepts the empty string — so a message followed later on the line by
+    # `bash -lc true` was answered CODE and refused:
+    #     echo "the pin refuses an example write > …/pg_dump" >> "$log"; bash -lc true
+    # \u26d4 AND THE QUOTE MAY CARRY A SIGIL (#12069 review 15, measured FAIL-OPEN): the
+    # ANSI-C / locale forms `$'\u2026'` and `$"\u2026"` put a `$` between the shell word and
+    # the quote, so `eval $'cat \u2026 > \u2026/pg_dump'` — which really executes — was read
+    # as a message. `\$?` admits exactly those two spellings.
+    return any(
+        opener <= opened_at
+        and re.fullmatch(r"\s*\$?['\"]?", line[opener : opened_at + 1])
+        for opener in openers
+    )
 
 
 def _redirects_into_a_client_binary(line: str) -> bool:
@@ -540,12 +558,25 @@ def _redirects_into_a_client_binary(line: str) -> bool:
             # The quoted run is joined onto the word and the JOINED basename graded.
             # A lone terminator (no closer) stays a terminator, which is what keeps
             # `sudo sh -c "cat x > /tmp/f"` spared.
-            closer = tail.find(tail[0], 1)
-            if closer == -1:
-                tail = tail[1:]
-            else:
+            # \u26d4 EVERY RUN, NOT ONE (#12069 review 15, measured FAIL-OPEN). Joining a
+            # single quoted run left the NEXT one to be read as a word end, so a
+            # doubled-quote concatenation was graded as the truncated `\u2026/pg_`:
+            #     echo x > /usr/local/bin/"pg_""dump"      # the shell writes pg_dump
+            # The loop keeps consuming until the word really ends.
+            while tail[:1] in ("'", '"'):
+                closer = tail.find(tail[0], 1)
+                if closer == -1:
+                    tail = tail[1:]
+                    break
                 target += tail[1:closer]
                 tail = tail[closer + 1 :]
+            # \u26d4 AND AN UNQUOTED RUN AFTER THEM IS THE SAME WORD (#12069 review 15):
+            # `"schema"""` + `.sql` is `schema.sql` to the shell, and stopping at the
+            # last quote graded the truncated name.
+            trailing = re.match(r"[^\s;&|)'\"]+", tail)
+            if trailing:
+                target += trailing.group(0)
+                tail = tail[trailing.end() :]
         # A QUOTE ends the word; it is not an unclassifiable continuation
         # (#12069 review 13). With `quoted_is_code` in play the captured target is
         # the LAST word of the quoted command, so its closing `"` follows it — and
@@ -3836,6 +3867,27 @@ BINARY_MUTATION_POLARITY = [
         'sudo bash -ec "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"',
         True,
         "#12069 round-14: combined shell options (`-ec`) still quote CODE",
+    ),
+    (
+        "eval $'cat /usr/bin/pg_dump > /usr/lib/postgresql/16/bin/pg_dump'",
+        True,
+        "#12069 round-15: `eval` opens a $'\u2026' span \u2014 the sigil is not a word end",
+    ),
+    (
+        'echo "the pin refuses an example write > /usr/lib/postgresql/16/bin/pg_dump" '
+        '>> "$SCRATCH/log"; bash -lc true',
+        False,
+        "#12069 round-15: a shell word AFTER the quote opens nothing \u2014 no empty slice",
+    ),
+    (
+        'echo x > /usr/local/bin/"pg_""dump"',
+        True,
+        "#12069 round-15: EVERY quoted run joins \u2014 this is pg_dump",
+    ),
+    (
+        'sudo bash -o pipefail -c "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"',
+        True,
+        "#12069 round-15: an option's VALUE may sit before `-c`",
     ),
 ]
 
