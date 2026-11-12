@@ -964,12 +964,17 @@ def record_judgement(
                                    target_id=target.target_id)
     if previous_point_id is None:
         previous_point_id = (prior_point or {}).get("id")
-    else:
-        # The seam decides WHAT gets superseded, so its scope is asserted rather
-        # than trusted: a predecessor from another goal/indicator/target would be
-        # retired while its belief arrow was transferred onto this chain, leaving
-        # the other goal with NO live judgement and a claim scoped elsewhere
-        # driving its belief (measured).
+    # ⛔ THE SCOPE IS ASSERTED ON THE RESOLVED ID, WHICHEVER BRANCH PRODUCED IT.
+    # Asserting only in the explicit-seam branch left the DERIVED branch
+    # unguarded, and `latest_judgement` DROPS a `None` dimension from its WHERE
+    # clause — so a caller who omitted `indicator_id` had its previous judgement
+    # taken from an indicator it never declared. MEASURED: the indicator-scoped
+    # claim was superseded, its arrow transferred, the successor carried no
+    # `indicatorId`, and no later scoped pass could ever see it again — 2 live
+    # judgements in one goal, 2 IMPL arrows, the successor PERMANENTLY
+    # un-supersedable, and `extraOperators` empty because it counts only the
+    # successor's own edges.
+    if previous_point_id is not None:
         _assert_supersession_scope(sdk, previous_point_id, goal_id,
                                    indicator_id, target.target_id)
 

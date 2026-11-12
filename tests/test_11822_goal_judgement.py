@@ -1441,3 +1441,37 @@ def test_a_failed_arrow_leaves_the_cache_agreeing_with_the_claim(sdk, monkeypatc
         "the cache write ran after the arrow, so a failed arrow left the cache "
         "contradicting the live claim"
     )
+
+
+def test_the_DERIVED_path_also_asserts_the_scope(sdk):
+    """The guard must run on the resolved predecessor, not only the explicit seam.
+
+    MEASURED before this pin: omitting `indicator_id` (and `previous_point_id`)
+    made the writer take the predecessor from `latest_judgement`, which DROPS a
+    `None` dimension from its WHERE clause — so an indicator-scoped claim was
+    superseded by an unscoped one, its arrow transferred, and the successor
+    carried no `indicatorId`. No later scoped pass could see it again: 2 live
+    judgements in one goal, 2 IMPL arrows, and the successor permanently
+    un-supersedable.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    j1 = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                          target=target)
+    assert j1["written"] is True
+
+    # a caller that omits indicator_id (and the seam) must be refused, not
+    # silently re-scoped
+    _reading(sdk, indicator, 12.0, at="2026-11-11T11:00:00Z")
+    unscoped = judge(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                     target=target)
+    with pytest.raises(ValueError) as exc:
+        record_judgement(sdk, goal_id=goal["id"], judgement=unscoped,
+                         target=target)          # no indicator_id, no seam
+    assert "indicatorId" in str(exc.value)
+
+    assert sdk.get_entity(j1["point_id"])["status"] == "live"
+    live = [r for r in _judgement_points(sdk, goal["id"])
+            if r[1] not in {"superseded", "retracted"}]
+    assert len(live) == 1, f"{len(live)} live judgements after a refused pass"
