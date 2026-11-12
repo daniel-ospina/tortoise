@@ -2329,7 +2329,7 @@ def test_the_gate_is_not_read_True_off_ONE_armed_surface(tmp_path, monkeypatch):
     assert "gate enabled by default: False" in note, note
     assert ".env.example=ON" in note, note
     assert "docker-compose.yml=OFF" in note, note
-    assert "UNARMED deployment surface(s) ['docker-compose.yml']" in note, note
+    assert "UNARMED deployment file(s) ['docker-compose.yml']" in note, note
     assert "SCOPED to the surface(s) that arm it (.env.example)" in note, note
 
 
@@ -2439,7 +2439,44 @@ def test_an_ARMED_deployment_surface_reads_ON(tmp_path, monkeypatch):
     assert shipped["deployment"]["silent"] == [], shipped
     note = _gate_note(shipped)
     assert "gate enabled by default: True" in note, note
-    assert "every existing deployment surface is armed" in note, note
+    assert "every existing deployment file is armed" in note, note
+
+
+def test_an_armed_compose_file_does_not_stand_for_the_IMAGE_build_files(
+        tmp_path, monkeypatch):
+    """`Dockerfile` is a CLASS, and every variant is a deployment input of its own.
+
+    Fresh review of PR #12016 (P2), measured on THIS tree: the image build files are
+    `Dockerfile.hosted` (`deploy-hosted.yml` builds it) and `Dockerfile.selfhost`
+    (`docker-compose.yml`'s `build.dockerfile`) — there is no plain `Dockerfile`, so
+    an exact-filename walk read NEITHER and reported the surface `ABSENT`. That left
+    the same false PASS one surface-pair over: once `#11086` arms the compose file,
+    `deployment["on"]` would read `True` off it while the hosted image ships the gate
+    off, and the note's "every existing deployment surface is armed" would tell a
+    reader the population was complete when two of its members were never walked.
+
+    So the deployment reading is per FILE (compose files and every `Dockerfile*`),
+    and one armed compose file cannot stand in for a silent image build.
+    """
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n  t:\n    environment:\n      TORTOISE_EMBED_GATE: \"1\"\n",
+        encoding="utf-8")
+    (tmp_path / "Dockerfile.hosted").write_text(
+        "FROM python:3.12\nENV HF_HOME=/app\n", encoding="utf-8")
+    (tmp_path / "Dockerfile.selfhost").write_text(
+        "FROM python:3.12\nENV TORTOISE_DB_PATH=/data\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "REPO_ROOT", tmp_path)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["per_surface"]["Dockerfile"]["state"] == "OFF", shipped
+    assert shipped["per_surface"]["Dockerfile"]["searched"] == [
+        "Dockerfile.hosted", "Dockerfile.selfhost"], shipped
+    assert shipped["deployment"]["present"] == [
+        "docker-compose.yml", "Dockerfile.hosted", "Dockerfile.selfhost"], shipped
+    assert shipped["deployment"]["armed"] == ["docker-compose.yml"], shipped
+    assert shipped["deployment"]["on"] is False, shipped
+    note = _gate_note(shipped)
+    assert "gate enabled by default: False" in note, note
+    assert "Dockerfile.hosted=OFF" in note and "Dockerfile.selfhost=OFF" in note, note
 
 
 def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
@@ -3822,6 +3859,7 @@ def _fake_shipped(on: bool) -> dict:
         "on": on,
         "surfaces": ["Dockerfile"],
         "per_surface": {"Dockerfile": {"state": state, "hits": [],
+                                       "files": {"Dockerfile": {"state": state, "hits": []}},
                                        "searched": ["Dockerfile"], "unreadable": []}},
         "armed": ["Dockerfile"] if on else [],
         "silent": [] if on else ["Dockerfile"],
@@ -3829,6 +3867,7 @@ def _fake_shipped(on: bool) -> dict:
         "unmeasured": [],
         "deployment": {
             "surfaces": ["Dockerfile"],
+            "files": {"Dockerfile": state},
             "present": ["Dockerfile"],
             "armed": ["Dockerfile"] if on else [],
             "silent": [] if on else ["Dockerfile"],
@@ -7472,11 +7511,11 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `176 passed, 1 skipped`
+    defect. Measured at this tree: the docker lane reads `177 passed, 1 skipped`
     (the skip is the `<3.12` re-derive) and the carve-out lane reads
-    `175 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
+    `176 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
     fixture, which only a lane with a `TORTOISE_DB_URI` satisfies). Both splits add
-    to the `177` re-derived below, which is why the doc states its split as
+    to the `178` re-derived below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
     root = Path(probe.__file__).resolve().parent.parent

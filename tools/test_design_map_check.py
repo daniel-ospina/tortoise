@@ -44,12 +44,21 @@ interpret is an unreadable map, not a map that happens to be tidy, because
 A row is a markdown table row at **0-3 leading spaces** (`MAX_TABLE_INDENT`):
 markdown renders a `|` line as part of the table up to three spaces in, so those
 are rows a reader sees and every arm grades them — blocks, seam discovery, the
-presence arm, the §1/§3/§4 row anchors. Four or more makes the line an indented
-CODE BLOCK, which markdown does not render as a table row, so it is not graded (and
-is not refused either: refusing it would red a docs-only code-block edit). #11415
-measured the pre-fix shape: `line.startswith("|")` put an indented row in no block
-at all, so the identical blanked crosswalk row graded `VIOLATION R5 zzz: names no
-surface` at column 0 and **CLEAN, exit 0**, with one leading space.
+presence arm, the §1/§3/§4 row anchors. `--self-test` runs its whole population
+against BOTH the shipped map and an indented copy, so a harness or an arm that can
+only reach column-0 rows is caught rather than silent. #11415 measured the pre-fix
+shape: `line.startswith("|")` put an indented row in no block at all, so the
+identical blanked crosswalk row graded `VIOLATION R5 zzz: names no surface` at
+column 0 and **CLEAN, exit 0**, with one leading space.
+
+⚠️ The 4+ boundary is **relative to the containing block**, and this predicate
+models document-column indentation only: a `|` line at document column 4 is an
+indented code block when the table is TOP-LEVEL content, but inside a list item
+(a `- ` marker puts content at column 2) the same line can still render as part of
+a nested table and would be ungraded. The shipped map's §1/§3/§4/§5 tables are
+top-level, so no row can be hidden that way today; the residual is stated rather
+than claimed away, and such a line is neither graded nor refused (refusing it would
+red a docs-only code-block edit).
 
 **Exit codes:** `0` clean · `1` violations (printed, one per line) · `2` the map
 could not be read or a required section is missing (an unparseable map is not a
@@ -143,11 +152,15 @@ PLAN_SEAMS = (
 #: and a map whose row was reflowed is not the map that was checked.
 #:
 #: The boundary is markdown's, not a tolerance knob: a 4+-space-indented `|` line
-#: is an indented CODE BLOCK, which the reader does not see as a table row at all,
-#: so grading it would refuse a docs-only edit that pastes a table example into §5
-#: (the false-RED class the `_is_foreign_table` negative control exists for). That
-#: residual is stated rather than hidden: it is the one shape this predicate does
-#: not call a row, and it is a shape markdown does not call a row either.
+#: is an indented CODE BLOCK when the table is top-level content, which the reader
+#: does not see as a table row at all, so grading it would refuse a docs-only edit
+#: that pastes a table example into §5 (the false-RED class the
+#: `_is_foreign_table` negative control exists for). ⚠️ Indentation is RELATIVE to
+#: the containing block, so inside a list item (content at column 2) a line at
+#: document column 4 can still render as part of a nested table — this predicate
+#: models document-column indentation only, and the module docstring states that
+#: residual. Either way the shape is neither graded nor refused, never a silent pass
+#: that also reds.
 MAX_TABLE_INDENT = 3
 
 
@@ -162,6 +175,27 @@ def _is_table_line(line: str) -> bool:
     """
     indent = len(line) - len(line.lstrip(" "))
     return indent <= MAX_TABLE_INDENT and line[indent:].startswith("|")
+
+
+def _line_matches(line: str, prefix: str) -> bool:
+    """True when ``line`` is the line a mutation targets, indentation aside.
+
+    The MUTATORS need the same tolerance the ARMS have (#11415). They anchored at
+    column 0 (`line.startswith("| **SF2**")`), so indenting a mutation-target row
+    by 1-3 spaces — a docs-only reflow, which `check()` now grades correctly —
+    made every affected mutator raise `AssertionError`, which `self_test` reports
+    as UNTESTABLE and exits 1 on the required, path-filter-free `docs` job. The
+    fix that made `check()` indentation-tolerant would otherwise have left the
+    SAME edit red through the harness arm — the false RED #11415 is about, moved
+    one function over.
+
+    `prefix` is matched against the row's text with its leading spaces removed, and
+    only when the line IS a table row; a non-row prefix (`## 6. Integration`, a
+    heading `_insert_before` also serves) keeps plain prefix semantics.
+    """
+    if prefix.startswith("|"):
+        return _is_table_line(line) and line.lstrip(" ").startswith(prefix)
+    return line.startswith(prefix)
 
 
 def _carries_seam_token(line: str, seam: str) -> bool:
@@ -673,7 +707,7 @@ def _rewrite_row(text: str, sf: str, column: int, value: str) -> str:
     out: list[str] = []
     hit = False
     for line in text.splitlines(keepends=True):
-        if line.startswith(f"| **{sf}**"):
+        if _line_matches(line, f"| **{sf}**"):
             line = _rewrite_cell(line, column, value, sf)
             hit = True
         out.append(line)
@@ -741,7 +775,7 @@ def _insert_before(text: str, prefix: str, inserted: str) -> str:
     out: list[str] = []
     hit = False
     for line in text.splitlines(keepends=True):
-        if not hit and line.startswith(prefix):
+        if not hit and _line_matches(line, prefix):
             out.append(inserted if inserted.endswith("\n") else inserted + "\n")
             hit = True
         out.append(line)
@@ -755,7 +789,7 @@ def _rewrite_crosswalk_row(text: str, seam: str, value: str) -> str:
     out: list[str] = []
     hit = False
     for line in text.splitlines(keepends=True):
-        if line.startswith(f"| {seam}"):
+        if _line_matches(line, f"| {seam}"):
             line = _rewrite_cell(line, 2, value, seam)
             hit = True
         out.append(line)
@@ -775,7 +809,7 @@ def _delete_crosswalk_cell(text: str, seam: str, column: int) -> str:
     out: list[str] = []
     hit = False
     for line in text.splitlines(keepends=True):
-        if not hit and line.startswith(f"| {seam}"):
+        if not hit and _line_matches(line, f"| {seam}"):
             row = cells(line)
             if column >= len(row):
                 raise AssertionError(
@@ -806,7 +840,7 @@ def _relabel_seam(text: str, seam: str, label: str) -> str:
     out: list[str] = []
     hit = False
     for line in text.splitlines(keepends=True):
-        if line.startswith(f"| {seam} |"):
+        if _line_matches(line, f"| {seam} |"):
             row = cells(line)
             row[0] = f" {label} "
             line = "| " + " | ".join(row) + " |\n"
@@ -827,7 +861,7 @@ def _rename_and_blank_crosswalk_row(text: str, seam: str, label: str) -> str:
     out: list[str] = []
     hit = False
     for line in text.splitlines(keepends=True):
-        if line.startswith(f"| {seam}"):
+        if _line_matches(line, f"| {seam}"):
             row = cells(line)
             row[0] = f" {label} "
             row[2] = ""
@@ -841,7 +875,7 @@ def _rename_and_blank_crosswalk_row(text: str, seam: str, label: str) -> str:
 
 def _drop_line(text: str, prefix: str) -> str:
     """Delete every line starting with `prefix` — the removal primitive."""
-    kept = [line for line in text.splitlines(keepends=True) if not line.startswith(prefix)]
+    kept = [line for line in text.splitlines(keepends=True) if not _line_matches(line, prefix)]
     if len(kept) == len(text.splitlines(keepends=True)):
         raise AssertionError(f"self-test mutation target {prefix!r} not found")
     return "".join(kept)
@@ -860,7 +894,7 @@ def _split_and_blank_crosswalk_row(text: str, seam: str) -> str:
     table, and both anchors raise instead of no-oping.
     """
     lines = text.splitlines(keepends=True)
-    index = next((i for i, line in enumerate(lines) if line.startswith(f"| {seam}")), None)
+    index = next((i for i, line in enumerate(lines) if _line_matches(line, f"| {seam}")), None)
     if index is None:
         raise AssertionError(f"self-test mutation target {seam!r} not found")
     header = next((line for line in lines if _is_crosswalk_header(line)), None)
@@ -1156,15 +1190,29 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
 MIN_SELF_TEST_MUTATIONS = 22
 
 
-def self_test(text: str) -> int:
-    """Prove the checker is not a rubber stamp. Prints one line per mutation."""
-    if len(SELF_TEST_MUTATIONS) < MIN_SELF_TEST_MUTATIONS:
-        print(
-            f"self-test: {len(SELF_TEST_MUTATIONS)} mutation(s) registered, at least "
-            f"{MIN_SELF_TEST_MUTATIONS} required — a shrunk mutation population proves nothing",
-            file=sys.stderr,
-        )
-        return 1
+#: The indentation the SECOND self-test pass applies to every table row. Within
+#: `MAX_TABLE_INDENT`, so the copy is the same map a reader sees (#11415 measured
+#: that it is not the same map to a column-0 parser) — and non-zero, so a mutator
+#: or an arm that only reaches column-0 rows is visible.
+SELF_TEST_INDENT = 2
+
+
+def _indented_tables(text: str, spaces: int = SELF_TEST_INDENT) -> str:
+    """The same map with every table row indented by ``spaces``."""
+    return "".join(
+        (" " * spaces + line) if _is_table_line(line) else line
+        for line in text.splitlines(keepends=True)
+    )
+
+
+def _run_mutation_pass(text: str, label: str, *, verbose: bool) -> tuple[int, int]:
+    """Run the whole population against ONE text; return (failures, untestable).
+
+    Split out so `self_test` can run it twice — the shipped map and an indented
+    copy (#11415). A harness whose mutators, or whose arms, only reach column-0
+    rows reports UNTESTABLE on the second pass; that is the defect this pass exists
+    to keep closed, and measuring it is the only way to keep it closed.
+    """
     failures = 0
     untestable = 0
     # The verdict the SHIPPED document already earns. A "clean"-expected case is a
@@ -1186,7 +1234,7 @@ def self_test(text: str) -> int:
             # that was applied and not caught: reporting it as "the checker is a
             # rubber stamp" misdiagnoses a correct document whose row was merely
             # reformatted (measured — a reworded §4 heading did exactly that).
-            print(f"  UNTESTABLE {name}: {exc}", file=sys.stderr)
+            print(f"  UNTESTABLE [{label}] {name}: {exc}", file=sys.stderr)
             untestable += 1
             continue
         violations: list[str] | None = None
@@ -1208,25 +1256,63 @@ def self_test(text: str) -> int:
         else:
             ok = actual == expected
         if ok:
-            print(f"  ok   {name} → {actual} ({detail})")
+            if verbose:
+                print(f"  ok   {name} → {actual} ({detail})")
         else:
             print(
-                f"  FAIL {name} → expected {expected}, got {actual} ({detail})",
+                f"  FAIL [{label}] {name} → expected {expected}, got {actual} ({detail})",
                 file=sys.stderr,
             )
             failures += 1
+    return failures, untestable
+
+
+def self_test(text: str) -> int:
+    """Prove the checker is not a rubber stamp. Prints one line per mutation.
+
+    TWO passes (#11415): the shipped map, and the same map with every table row
+    indented `SELF_TEST_INDENT` spaces. The second pass is what catches a harness
+    that can only express column-0 rows — the reason all 21 pre-fix mutations
+    missed an indentation-blind parser — and a checker that regrades an indented
+    row differently from a flush one.
+    """
+    if len(SELF_TEST_MUTATIONS) < MIN_SELF_TEST_MUTATIONS:
+        print(
+            f"self-test: {len(SELF_TEST_MUTATIONS)} mutation(s) registered, at least "
+            f"{MIN_SELF_TEST_MUTATIONS} required — a shrunk mutation population proves nothing",
+            file=sys.stderr,
+        )
+        return 1
     total = len(SELF_TEST_MUTATIONS)
+    failures = 0
+    untestable = 0
+    for label, candidate, verbose in (
+        ("shipped map", text, True),
+        (f"rows indented {SELF_TEST_INDENT} spaces", _indented_tables(text), False),
+    ):
+        pass_failures, pass_untestable = _run_mutation_pass(candidate, label, verbose=verbose)
+        failures += pass_failures
+        untestable += pass_untestable
+        if pass_failures or pass_untestable:
+            continue
+        print(
+            f"self-test: {total}/{total} mutation(s) behaved as designed on the {label}"
+        )
+    passes = 2
     if failures:
-        print(f"self-test: {failures}/{total} mutation(s) NOT caught — the checker is a rubber stamp", file=sys.stderr)
+        print(
+            f"self-test: {failures}/{total * passes} mutation(s) NOT caught — "
+            "the checker is a rubber stamp",
+            file=sys.stderr,
+        )
     if untestable:
         print(
-            f"self-test: {untestable}/{total} case(s) UNTESTABLE — a mutation target "
-            "moved, so those rules were NOT exercised by this run",
+            f"self-test: {untestable}/{total * passes} case(s) UNTESTABLE — a mutation "
+            "target moved, so those rules were NOT exercised by this run",
             file=sys.stderr,
         )
     if failures or untestable:
         return 1
-    print(f"self-test: {total}/{total} mutation(s) behaved as designed — the checker is not a rubber stamp")
     return 0
 
 
