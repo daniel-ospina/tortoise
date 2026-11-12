@@ -764,14 +764,18 @@ def test_alert_store_from_wires_the_recurrence_record(monkeypatch):
     from tortoise.alert_store import DEDUP_PREFIX
 
     posted: list[tuple[int, str]] = []
+    seen: list[tuple[str, str]] = []
     monkeypatch.setattr(
         gi, "create_issue",
         lambda repo, pat, title, body, assignee=None: 1)
     monkeypatch.setattr(
         gi, "issue_is_open_checked", lambda repo, pat, number: True)
-    monkeypatch.setattr(
-        gi, "comment_issue",
-        lambda repo, pat, number, body: posted.append((number, body)))
+
+    def _comment(repo, pat, number, body):
+        seen.append((repo, pat))
+        posted.append((number, body))
+
+    monkeypatch.setattr(gi, "comment_issue", _comment)
     monkeypatch.setattr(tp, "send_message", lambda *a, **k: None)
 
     storage = MemoryStorage()
@@ -793,6 +797,9 @@ def test_alert_store_from_wires_the_recurrence_record(monkeypatch):
     assert [n for n, _ in posted] == [4242], (
         "the DEDUP must reach the real channel: gi.comment_issue")
     assert "Observed again" in posted[0][1]
+    assert seen == [("daniel-ospina/tortoise", "p")], (
+        "the record must post with the SAME repo/credential pair the close path "
+        "uses — a wrong token 404s into the swallow and the feature goes silent")
 
 
 def test_alert_store_from_forwards_the_writer(monkeypatch):

@@ -95,6 +95,40 @@ def test_close_issue(monkeypatch):
     assert calls[1] == ("PATCH", "https://api.github.com/repos/r/issues/42", {"state": "closed"})
 
 
+def test_comment_issue(monkeypatch):
+    """#12243: the ONE comment primitive — payload, URL and error contract.
+
+    Pinned because a wrong body key (or an empty body) posts a comment nobody can
+    read, and the recurrence path SWALLOWS the failure: the feature would go
+    silent with one warning.
+    """
+    calls = []
+
+    def _req(method, url, token, payload=None, timeout=15.0):
+        calls.append((method, url, token, payload))
+        return {}
+
+    monkeypatch.setattr(gi, "_request", _req)
+    gi.comment_issue("r", "tok", 42, "🔁 body")
+
+    assert calls == [(
+        "POST",
+        "https://api.github.com/repos/r/issues/42/comments",
+        "tok",
+        {"body": "🔁 body"},
+    )]
+
+
+def test_comment_issue_raises_on_failure(monkeypatch):
+    """The caller decides whether to swallow — the primitive must not."""
+    def _req(*a, **k):
+        raise gi.GithubApiError(403, "forbidden")
+
+    monkeypatch.setattr(gi, "_request", _req)
+    with pytest.raises(gi.GithubApiError):
+        gi.comment_issue("r", "tok", 42, "body")
+
+
 def test_search_open_incident(monkeypatch):
     monkeypatch.setattr(gi, "_request", _fake_request)
     assert gi.search_open_incident("r", "t", "STALE") == [7]

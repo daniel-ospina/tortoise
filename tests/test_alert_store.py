@@ -1886,15 +1886,26 @@ def test_the_recurrence_record_carries_the_store_marker_not_the_drivers():
 
     body = ch.recurrence[0][1]
     assert OCCURRENCE_MARKER in body
+    assert "dr-occurrence" in OCCURRENCE_MARKER, (
+        "both markers share the prefix, so one filter finds both")
     assert "<!-- dr-occurrence -->" not in body, (
         "the driver derives a published recurrence NUMBER by counting comments "
         "under its own marker; a second writer must not be counted as one of its "
         "sweeps")
-    assert "dr-occurrence" in body, "both markers share the prefix, so one filter finds both"
+    assert "Recurrence" not in body, (
+        "the record carries NO published count: any number would have to come "
+        "from the shared R2 sentinel, which the driver rewrites — the driver "
+        "counts its own from the ISSUE (#12243)")
 
 
-def test_the_recurrence_record_is_bounded_to_one_per_utc_day():
-    """The sweep re-observes every incident; the issue gets ONE record a day."""
+def test_the_recurrence_record_is_bounded_per_incident_per_utc_day():
+    """The sweep re-observes every incident; each gets ONE record a day.
+
+    BOTH halves matter, so TWO incidents of the same kind are driven on one
+    fixed clock: a bound held in a process-global (or keyed per KIND) passes the
+    one-incident case and silences incident B for the whole day — the false
+    silence #12243 exists to remove.
+    """
     from datetime import datetime, timedelta
 
     from tortoise.alert_store import OpenOutcome
@@ -1902,17 +1913,23 @@ def test_the_recurrence_record_is_bounded_to_one_per_utc_day():
     ch = _RecordChannels()
     storage = MemoryStorage()
     _sentinel(storage, "DATA_LOSS_CANDIDATE", 8663, key="team_x")
+    _sentinel(storage, "DATA_LOSS_CANDIDATE", 8664, key="team_y")
     clock = [datetime(2026, 11, 12, 20, 44, tzinfo=UTC)]
     store = _recording_store(ch, storage, now=lambda: clock[0])
 
-    for _ in range(3):  # three sweeps inside one UTC day
+    for _ in range(3):  # three sweeps inside one UTC day, TWO incidents each
         assert store.open_incident_state(
             "DATA_LOSS_CANDIDATE", "team_x") is OpenOutcome.DEDUP
-    assert len(ch.recurrence) == 1, "one UTC day, one record"
+        assert store.open_incident_state(
+            "DATA_LOSS_CANDIDATE", "team_y") is OpenOutcome.DEDUP
+    assert sorted(n for n, _ in ch.recurrence) == [8663, 8664], (
+        "one record PER INCIDENT per UTC day — a global or per-kind bound would "
+        "silence the second incident")
 
     clock[0] = clock[0] + timedelta(days=1)
     store.open_incident_state("DATA_LOSS_CANDIDATE", "team_x")
-    assert len(ch.recurrence) == 2, "the next UTC day records again"
+    store.open_incident_state("DATA_LOSS_CANDIDATE", "team_y")
+    assert len(ch.recurrence) == 4, "the next UTC day records again"
 
 
 def test_a_failed_recurrence_comment_never_changes_the_incident_lifecycle():
@@ -1941,6 +1958,10 @@ def test_a_failed_recurrence_comment_never_changes_the_incident_lifecycle():
     assert ch.recurrence == [], "the failed post is not a record"
     assert _streak_state(storage, "DATA_LOSS_CANDIDATE", "team_x")[
         "healthy_streak"] == 0, "the #3146 reset must survive a failed record"
+    assert json.loads(storage.download(key)).get(
+        "last_occurrence_record") is not None, (
+        "additive-only is an ACTIVE property: the attempt happened and consumed "
+        "the day, which is what keeps a broken channel from storming")
 
 
 def test_a_persistently_failing_channel_is_attempted_once_per_day():
@@ -2084,3 +2105,70 @@ def test_the_lost_create_race_return_also_records_the_occurrence():
     assert ch.issues == {}, "the sibling's issue is adopted, never duplicated"
     assert [n for n, _ in ch.recurrence] == [8888], (
         "the observation must reach the issue the sibling filed")
+
+
+class _UnwritableSentinelStorage(MemoryStorage):
+    """Sentinel READS succeed, sentinel WRITES are refused (a partial R2 outage).
+
+    The mirror-direction hazard of #12243's attempt bound: if the day's claim
+    cannot be written and the record is posted anyway, every poll re-enters and
+    the "bounded" path bursts.
+    """
+
+    def __init__(self, blocked_key: str):
+        super().__init__()
+        self._blocked = blocked_key
+        self.armed = False
+
+    def upload(self, key, data, content_type=None):
+        if self.armed and key == self._blocked:
+            raise RuntimeError("R2 put 503")
+        return super().upload(key, data, content_type=content_type)
+
+
+def test_an_unwritable_bound_never_bursts():
+    """No claim, no post: a missed record is bounded, a burst is not."""
+    from datetime import datetime
+
+    from tortoise.alert_store import OpenOutcome
+
+    ch = _RecordChannels()
+    key = "ops/alerts/DATA_LOSS_CANDIDATE/team_x.json"
+    storage = _UnwritableSentinelStorage(key)
+    storage.upload(key, json.dumps({
+        "kind": "DATA_LOSS_CANDIDATE", "issue_number": 9305,
+        "filed_at": "2026-09-10T00:00:00Z",
+    }).encode())
+    storage.armed = True  # the outage starts AFTER the sentinel was seeded
+    clock = [datetime(2026, 11, 12, 9, 0, tzinfo=UTC)]
+    store = _recording_store(ch, storage, now=lambda: clock[0])
+
+    for _ in range(5):  # five polls, the day claim never lands
+        assert store.open_incident_state(
+            "DATA_LOSS_CANDIDATE", "team_x") is OpenOutcome.DEDUP
+    assert ch.recurrence == [], (
+        "posting without a written bound is one comment per poll — unbounded")
+
+
+def test_a_sentinel_re_filed_mid_call_is_not_stamped_and_not_recorded():
+    """The CAS branch: a re-filed sentinel must not have its day consumed.
+
+    Without the `(issue_number, filed_at)` comparison the day lands on the OTHER
+    writer's fresh sentinel, consuming that incident's day budget (#2844/#3030).
+    """
+    from tortoise.alert_store import OpenOutcome
+
+    ch = _RecordChannels()
+    key = "ops/alerts/STALE/team_x.json"
+    storage = MemoryStorage()
+    _sentinel(storage, "STALE", 5150, key="team_x")
+    refiling = _RefilingStorage(key, reads_before=1)
+    refiling.upload(key, storage.download(key))
+    store = _recording_store(ch, refiling)
+
+    assert store.open_incident_state("STALE", "team_x") is OpenOutcome.DEDUP
+    state = json.loads(refiling.download(key))
+    assert state["issue_number"] == 99, "the fixture must have re-filed"
+    assert "last_occurrence_record" not in state, (
+        "a sentinel re-filed under us must not have its day stamped")
+    assert ch.recurrence == [], "and no record goes to the OLD issue number"

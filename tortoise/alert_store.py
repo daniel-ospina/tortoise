@@ -649,12 +649,20 @@ class AlertStore:
         write, in the only place it may trust one; the record itself carries no
         running number — see :data:`OCCURRENCE_MARKER` for why.
 
-        BEST-EFFORT, and precisely so: the day is a field on a sentinel object
-        shared with the bash driver, which rewrites it with an unconditional
-        GET->PUT (no ETag guard), so a lost update re-records once — never
-        silences. Two live writer processes can each post once in a day. The
-        over-report is bounded and cosmetic; the false SILENCE this method
-        exists to remove is not.
+        BEST-EFFORT, in BOTH directions, and each is bounded:
+
+        * **Silence (lost record).** The day is claimed before the post, so a post
+          that fails -- or a claim that cannot be written -- costs that UTC day's
+          record for that incident. That is the price of the attempt bound below;
+          the alternative is an unbounded storm.
+        * **Over-report.** The day is a field on a sentinel object shared with the
+          bash driver, which rewrites it with an unconditional GET->PUT (no ETag
+          guard), so a lost update can re-record once later in the day, and two
+          live writer processes can each post once. Bounded and cosmetic.
+
+        What it is NEVER allowed to do is burst: a post happens only when the
+        day's claim was actually written, so neither a failing comment channel nor
+        a failing sentinel write can produce one post per poll.
         """
         if self._comment is None:
             return
@@ -679,7 +687,15 @@ class AlertStore:
         # (`_close_cooldown_min`), so it is bounded here the same way. The cost is
         # one lost record when a post fails transiently; the alternative is an
         # unbounded storm.
-        self._set_occurrence_day(key, state, day)
+        #
+        # ⛔ AND THE CLAIM IS A PRECONDITION OF THE POST, not merely a stamp: if it
+        # cannot be written (a partial R2 outage, a read-capable but
+        # write-refused credential) then no record is posted at all. Posting
+        # anyway would fail open in the mirror direction — an unwritten bound,
+        # re-entered once per poll, is the same unbounded burst the channel-failure
+        # rule above exists to prevent. A missed record is bounded; a burst is not.
+        if not self._set_occurrence_day(key, state, day):
+            return
         # #3293: the issue comment is a PUBLIC publication sink, so the
         # caller-supplied half is scrubbed AT THIS BOUNDARY exactly as `_title`
         # and `_body` scrub it — a future caller cannot publish unredacted text
@@ -702,8 +718,12 @@ class AlertStore:
             )
             return
 
-    def _set_occurrence_day(self, key: str, state: dict[str, Any], day: str) -> None:
+    def _set_occurrence_day(self, key: str, state: dict[str, Any], day: str) -> bool:
         """Compare-and-set the recurrence-record day on a sentinel (#12243).
+
+        Returns True only when the day was actually WRITTEN — the caller posts on
+        that answer alone, because an unwritten bound re-entered once per poll is
+        an unbounded comment burst (see :meth:`_record_occurrence`).
 
         Same discipline as :meth:`_set_healthy_streak`, for the same reason: the
         caller's ``state`` is a snapshot taken earlier in the call, so a BLIND
@@ -712,25 +732,27 @@ class AlertStore:
         object still matches the snapshot, and not at all when it disappeared
         (resolved under us).
 
-        Never raises: the caller posts regardless, so a failed bound write costs at
-        most a duplicate record — far cheaper than aborting a poll over
-        bookkeeping.
+        Never raises: it ANSWERS instead. A refusal (object gone, re-filed under
+        us, write failed) is logged and costs this observation's record, never the
+        poll.
         """
         try:
             current = _read_json(self._storage, key)
             if not current:
-                return
+                return False
             if (current.get("issue_number") != state.get("issue_number")
                     or current.get("filed_at") != state.get("filed_at")):
                 logger.warning(
                     "recurrence record: %s changed while we were recording it — "
                     "leaving it alone (the other writer re-filed)", key,
                 )
-                return
+                return False
             current[_OCCURRENCE_DAY_FIELD] = day
             _write_json(self._storage, key, current)
+            return True
         except Exception as e:
             logger.warning("recurrence record: could not bound %s for %s: %s", key, day, e)
+            return False
 
     def _set_healthy_streak(self, key: str, state: dict[str, Any], value: int) -> None:
         """Compare-and-set ``healthy_streak`` on a sentinel (#3146).
