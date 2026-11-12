@@ -3687,6 +3687,36 @@ def test_pi_processes_reads_the_untruncated_command_column(monkeypatch) -> None:
     assert argv[:2] == ["ps", "-ww"]
 
 
+#: How long the fixture below waits for its own spawned lane to show up in the census.
+#: A bound, not a sleep: the poll returns the instant the pid appears.
+_PI_CENSUS_WAIT_S = 15.0
+
+
+def _wait_for_pi_pid(pid: int, timeout: float = _PI_CENSUS_WAIT_S) -> tuple[list[int], str]:
+    """Poll ``fs.pi_processes()`` until ``pid`` appears — the last census, and its error.
+
+    ⛔ ONE SAMPLE IS NOT A MEASUREMENT (#12039 item 2, measured 2026-11-12). ``Popen``
+    returns at FORK: until the child's ``execve`` completes, the process table carries
+    the PARENT's ``command=`` (the pytest worker's argv), whose basename is not ``pi``,
+    so a census taken inside that window answers "no such lane" about a spawn that is
+    healthy and alive. Two hosted shards (`test (b)` job `131154017564`, `test (h)` in
+    #12039's second instance) both read `pids seen: []` on this same assertion while the
+    fixture's `Popen` had `returncode: None` — alive throughout.
+
+    A bounded poll keeps the truncation pin this test exists for EXACTLY as it was: a
+    missing `-ww` never matches, it just takes the full deadline instead of one sample.
+    """
+    deadline = time.monotonic() + timeout
+    pids: list[int] = []
+    err = ""
+    while True:
+        procs, err = fs.pi_processes()
+        pids = [p["pid"] for p in procs]
+        if pid in pids or err or time.monotonic() >= deadline:
+            return pids, err
+        time.sleep(0.05)
+
+
 def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     """End-to-end MATCHER coverage: a real process named `pi` under a long path is found.
 
@@ -3698,6 +3728,10 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     which reproduces the hazard deterministically: the fixture lane's argv[0] is ~59
     characters, so without `-ww` the `command=` column is cut before its basename and the
     census cannot see a live lane. Verified red with the flag removed.
+
+    ⛔ AND THE READ IS A BOUNDED POLL, NOT ONE SAMPLE (#12039 item 2): `Popen` returns
+    at `fork`, and the child carries the parent's `command=` until it execs, so a single
+    `ps` walk in that window matches nothing. See `_wait_for_pi_pid`.
 
     A copy of a real binary (never a `#!` script — the kernel rewrites argv[0] to the
     interpreter, which `_pi_pids_from_ps` documents). SKIPS where `sleep` is unavailable
@@ -3721,13 +3755,13 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
         proc = subprocess.Popen([str(pi), "60"],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            procs, err = fs.pi_processes()
+            pids, err = _wait_for_pi_pid(proc.pid)
             if err:
                 pytest.skip(f"the process table is unreadable here: {err}")
-            pids = [p["pid"] for p in procs]
             assert proc.pid in pids, (
                 f"a lane whose argv[0] is {str(pi)!r} was invisible to the census "
-                f"(pids seen: {pids})")
+                f"(pids seen: {pids}; waited up to {_PI_CENSUS_WAIT_S:.0f}s for it to "
+                f"appear after exec)")
         finally:
             proc.terminate()
             proc.wait(timeout=10)
