@@ -599,27 +599,27 @@ def _declared_forms(declared: Any) -> frozenset[str]:
 def _from_kind_forms(confusion: Confusion) -> frozenset[str]:
     """Every spelling a write may use for one of a guard's ``fromKinds``.
 
-    A manifest author names a kind BARE (`fromKinds: [invoice]` — the manifest
-    convention, and `pack_guards` now qualifies it to `acme:invoice`), while a
-    write may declare EITHER spelling: the doors accept the bare form of a pack
-    kind as readily as the qualified one. Matching only `kind_forms()` — which
-    adds the bare alias for `core:` keys alone, deliberately, so a guard cannot
-    silently widen across namespaces — would leave the qualified entry deaf to
-    the bare write it was written for.
+    ``pack_guards`` stores the SCOPE QUALIFIED (a manifest's bare
+    ``fromKinds: [invoice]`` becomes ``acme:invoice``), so the entry already
+    speaks the spelling a real write declares — that was the whole defect, and
+    this function is not the place to widen it.
 
-    So the bare form is added here, for a PACK kind only, and only as a MATCH
-    CANDIDATE: the entry is already installed-gated (R1 target closure in
-    `pack_registry._validate_guards`), and a bare spelling that two packs both
-    declare is the same ambiguity the door's own `named_kind` already
-    normalises. `core:` keys keep `kind_forms`' rule (a core key is its own
-    bare form and nothing else).
+    Which spellings a write may ARRIVE in is `kind_forms`' question and not a
+    second one. It adds the bare alias for ``core:`` keys alone, for the reason
+    stated there: ``dev:issue`` and ``issue`` are different strings that may name
+    different things in different namespaces. ⛔ An earlier draft of this
+    function ALSO added the bare form of a pack kind as a match candidate, so
+    that a write declaring bare ``issue`` matched a guard scoped
+    ``acme:issue`` — and justified it with a claim that ``named_kind``
+    normalises that ambiguity. It does not: ``named_kind`` strips BLANKS only
+    (``named_kind('core:role') == 'core:role'``), and the tree treats a bare kind
+    as naming NO pack. So that arm overruled an explicit caller declaration with
+    a namespace guess — which `Confusion`'s own ``from_kinds`` rule forbids — and
+    it is gone. Measured: round-4 review P2.
     """
     forms: set[str] = set()
     for kind in confusion.from_kinds:
         forms |= kind_forms(kind)
-        _ns = kind_namespace(kind)
-        if _ns is not None:
-            forms.add(kind.split(":", 1)[1])
     return frozenset(forms)
 
 
@@ -1020,6 +1020,20 @@ def subject_only_prop_abstention(
     tortoise import at module scope (the header's rule), and — the reason that
     matters here — the caller hands over the SAME object its door validates
     against, so the guard can never form a second opinion about what is legal.
+
+    ⛔ THE ``role`` TEST IS TARGET-INSENSITIVE **BY CONSTRUCTION**, and that is
+    load-bearing rather than an oversight. ``decision.kind`` is always
+    namespaced (``guard_table``'s redirects are qualified), and ``named_kind``
+    strips blanks only — so ``named_kind(decision.kind) != "role"`` is True for
+    EVERY guard target, and the arm abstains whenever ``roleHolder`` is present
+    at all. It has to: the Subject door's own rule compares the BARE spelling
+    (``sdk.py``: ``named_kind(props.get('subjectKind')) != 'role'``), so a
+    redirect to ``core:role`` carrying ``roleHolder`` is REFUSED by that door —
+    allowing it here would invent the very refusal this arm exists to prevent
+    (#1934). The coupling is invisible from either side, so the test that pins
+    it uses a guard whose target IS a role kind. ⛔ If the door's comparison is
+    ever widened to accept a namespaced ``role``, this arm must be widened in the
+    SAME change — otherwise a legal redirect is silently withheld.
     """
     from tortoise.kind_fallbacks import named_kind
 
@@ -1121,8 +1135,11 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                 # because a non-empty `from_kinds` also leaves the unnamed/NIL
                 # mode — did not fire for an absent/`other` kind either: the
                 # guard was dead in EVERY mode while `pack validate` printed
-                # `✓ Clean` and exited 0. `_from_kind_forms` then accepts both
-                # spellings of the qualified kind, because the door does.
+                # `✓ Clean` and exited 0. The scope is therefore stored in the
+                # spelling a WRITE uses, and `_from_kind_forms` reads the rest
+                # from `kind_forms` — it does NOT add a bare alias of its own,
+                # which would match a write that declared no namespace and
+                # overrule an explicit declaration with a guess.
                 from_kinds=tuple(_qualify(str(k).strip(), namespace)
                                  for k in from_kinds
                                  if isinstance(k, str) and str(k).strip()),

@@ -2947,6 +2947,17 @@ class PackRegistry:
         )
         from tortoise.kind_layers import LAYERS, SECTION_LAYERS, core_sections
 
+        # The CLOSED key sets of a guard entry and of one `onConfusion` entry —
+        # exactly the keys `pack_guards` reads, so "parsed" and "accepted" cannot
+        # drift. `message` is there because `pack_guards` takes it as an alias of
+        # `reason`; anything NOT here is a typo that would otherwise be read as
+        # absent (see the loud refusal at both levels).
+        _GUARD_KEYS = frozenset({"kind", "layer", "onConfusion"})
+        _CONFUSION_KEYS = frozenset({
+            "rule", "when", "pattern", "redirect", "fallback", "reason",
+            "message", "fromKinds", "fromLayers", "linkPredicate",
+        })
+
         errors: list[str] = []
         guards = ont.get("guards")
         if guards is None:
@@ -3003,6 +3014,20 @@ class PackRegistry:
                 errors.append(f"{where}: expected a map, got "
                               f"{type(entry).__name__}")
                 continue
+            # ⛔ THE KEY NAMES ARE PART OF THE SCHEMA, not just the values.
+            # A misspelled key is invisible to every `.get()` below, so the entry
+            # validates clean and compiles with that feature silently OFF —
+            # worse than a bad value, which at least abstains. Measured:
+            # `linkpredicate:` (lowercase) shipped a guard that redirected to a
+            # role kind with NO abstention, and `fromKind:` (no `s`) turned a
+            # scoped guard into a NIL-mode one, both with `✓ Clean` and rc 0.
+            _unknown = sorted(set(entry) - _GUARD_KEYS)
+            if _unknown:
+                errors.append(
+                    f"{where}: unknown key(s) "
+                    f"{', '.join(repr(k) for k in _unknown)} — a misspelled key "
+                    f"is read as absent, so the guard compiles with that feature "
+                    f"silently OFF (known: {', '.join(sorted(_GUARD_KEYS))})")
             kind_ref = entry.get("kind")
             if not isinstance(kind_ref, str) or not kind_ref.strip():
                 errors.append(f"{where}: missing required 'kind'")
@@ -3160,6 +3185,24 @@ class PackRegistry:
                             f"{cw}.linkPredicate: {_lp!r} is not a predicate the "
                             f"write path knows ({', '.join(sorted(LINK_PREDICATES))}) "
                             f"— an unknown one abstains for ever")
+                # ⛔ AND THE KEY ITSELF. Checking the VALUE only covers the typo
+                # the round set out to fix and not the one beside it: a
+                # misspelled KEY (`linkpredicate:`, `fromKind:`) is invisible to
+                # `c.get(...)`, so the entry validates clean and compiles with
+                # the feature OFF — worse than a bad value, which at least
+                # abstains. `linkpredicate:` therefore shipped a guard that
+                # redirected to a role kind with NO abstention (measured: `✓
+                # Clean`, rc 0, `link_predicate = None`, redirect applied), and
+                # `fromKind:` (no `s`) turned a scoped guard into a NIL-mode one
+                # silently. Unknown keys are refused, exactly as `pack_values`
+                # refuses an unknown entry key.
+                _unknown = sorted(set(c) - _CONFUSION_KEYS)
+                if _unknown:
+                    errors.append(
+                        f"{cw}: unknown key(s) {', '.join(repr(k) for k in _unknown)} "
+                        f"— a misspelled key is read as absent, so the guard "
+                        f"compiles with that feature silently OFF (known: "
+                        f"{', '.join(sorted(_CONFUSION_KEYS))})")
                 for fl in c.get("fromLayers", []) or []:
                     if fl not in ("subject", "object"):
                         errors.append(

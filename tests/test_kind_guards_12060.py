@@ -1555,12 +1555,30 @@ class TestReviewRound4Closed:
             }],
         }])
         assert compiled[0].from_kinds == ("acme:concept",)
-        # …and BOTH spellings a caller may use are matched.
-        for declared in ("acme:concept", "concept"):
-            d = resolve("concept-7", "object", declared,
-                        pack_confusions=compiled, installed=frozenset({"acme"}))
-            assert d.outcome == GuardOutcome.REDIRECT, declared
-            assert d.kind == "core:WorkItem"
+        # A write that declares the SAME kind, in the spelling a write uses, is
+        # matched.
+        d = resolve("concept-7", "object", "acme:concept",
+                    pack_confusions=compiled, installed=frozenset({"acme"}))
+        assert d.outcome == GuardOutcome.REDIRECT
+        assert d.kind == "core:WorkItem"
+
+        # ⛔ AND A BARE DECLARATION IS *NOT* MATCHED — the opposite assertion to
+        # the one this test first shipped with. Round-4 review P2: an earlier arm
+        # added the bare form of a pack kind as a match candidate, so a write
+        # declaring bare `concept` matched a guard scoped `acme:concept`. That
+        # contradicts `kind_forms`' own rule one function up ("`dev:issue` and
+        # `issue` are different strings that may name different things in
+        # different namespaces, so stripping an arbitrary namespace would
+        # silently widen a guard's reach") and `Confusion.from_kinds`' rule that
+        # an explicit declaration the caller made is never overruled by a name
+        # guess — and its justification (`named_kind` normalises the ambiguity)
+        # was false: `named_kind` strips BLANKS only. The tree treats a bare kind
+        # as naming NO pack, so a pack-scoped guard must not claim it.
+        # The tree treats a bare kind as naming NO pack, so a pack-scoped guard
+        # must not claim it: the write proceeds exactly as declared.
+        d = resolve("concept-7", "object", "concept",
+                    pack_confusions=compiled, installed=frozenset({"acme"}))
+        assert d.outcome == GuardOutcome.ACCEPT, d.outcome
 
     def test_a_degraded_redirect_is_counted_as_skipped_as_well(self):
         """`accepted` alone cannot answer "did the declared target resolve?".
@@ -1621,3 +1639,137 @@ class TestReviewRound4Closed:
         r2 = sdk.create_object("org-4243")
         assert _labels_kinds(sdk, r2["id"])[0] == ["Subject"]
         assert r2["kind_redirect"]["to"]["kind"] == "core:organization"
+
+    def test_a_guard_whose_TARGET_is_a_role_kind_abstains_too(self):
+        """The `roleHolder` arm is target-INSENSITIVE — pin it, do not assume it.
+
+        Round-4 review P2: `named_kind(decision.kind) != "role"` is True for
+        EVERY guard target, because `decision.kind` is always namespaced
+        (`core:role`) and `named_kind` strips BLANKS only. So the arm abstains
+        whenever `roleHolder` is present, whatever the target — and it must,
+        because the Subject door's own rule compares the BARE spelling
+        (`named_kind(props.get('subjectKind')) != 'role'`), so a redirect to
+        `core:role` carrying `roleHolder` is REFUSED by that door. Allowing the
+        redirect here would invent the refusal the arm exists to prevent.
+
+        This test is the coupling's pin: if someone widens the door to accept a
+        namespaced `role` and does not widen this arm in the same change, a legal
+        redirect becomes a withheld one — and this assertion is where that shows.
+        """
+        guard = Confusion(
+            rule="acme:to-role",
+            when="nameMatches",
+            pattern=r"^the-owner-[0-9]+$",
+            redirect="core:role",
+            fallback="core:role",
+            reason="a standing description is a role",
+        )
+        d = kg.resolve("the-owner-7", "object", None,
+                       pack_confusions=(guard,), installed=frozenset({"acme"}))
+        assert d.outcome == kg.GuardOutcome.REDIRECT
+        skip = kg.subject_only_prop_abstention(
+            d, {"roleHolder": "daniel"}, "object", frozenset({"live"}))
+        assert skip is not None, (
+            "a role TARGET must still abstain while the door's role test is "
+            "bare-only — see this test's docstring")
+        assert skip.skipped["reason"] == kg.SKIP_ROLE_HOLDER_NOT_LEGAL_ON_SUBJECT
+        # …and the SAME decision without the prop is accepted untouched, so the
+        # abstention is attributable to the prop and not to the target.
+        assert kg.subject_only_prop_abstention(
+            d, {}, "object", frozenset({"live"})) is None
+
+    def test_the_layer_rule_declines_on_TWO_layers(self, monkeypatch):
+        """The `2+ layers => None` arm, driven — 0 core kinds exercise it today.
+
+        Round-4 review P2: the measured population is 0 multi-layer kinds, so
+        `expected = layers[0] if len(layers) == 1 else None` and the old
+        `next(iter(sorted(layers)), None)` are indistinguishable on the real
+        table and the assertion never fires. A rule nothing can reach is a rule
+        nothing tests, so the authority is monkeypatched to answer two layers for
+        ONE kind: the old expression would report `object` (the alphabetically
+        first), the rule must report `None`.
+        """
+        from tortoise.kind_layers import routing_layers as real_routing
+
+        target = "statement"
+        assert len(real_routing(target)) == 1, (
+            "the fixture assumes one layer today; pick another kind")
+
+        def _two(kind):
+            if kind == target:
+                return ("object", "subject")
+            return real_routing(kind)
+
+        monkeypatch.setattr("tortoise.kind_layers.routing_layers", _two)
+        entry = kg.guard_table(include_packs=False)[target]
+        assert entry["allowedLayers"] == ["object", "subject"]
+        assert entry["layer"] is None, (
+            "a kind the authority places on TWO layers must claim NEITHER — "
+            f"got {entry['layer']!r}")
+
+    # ── the install gate: a misspelled KEY, not just a bad value ──────────
+
+    @staticmethod
+    def _validate(confusion, guard_extra=None):
+        from tortoise.pack_registry import PackRegistry
+
+        entry = {"kind": "concept", "layer": "object",
+                 "onConfusion": [confusion]}
+        entry.update(guard_extra or {})
+        ont = {"objectKinds": ["concept"], "guards": [entry]}
+        # `_validate_guards` reads no `self` state (asserted by its own shape:
+        # every name it touches is a local), so the validator is callable
+        # without a loaded catalog — which is the point: this is the INSTALL
+        # gate, and it must answer for a manifest that is not installed.
+        reg = PackRegistry.__new__(PackRegistry)
+        return reg._validate_guards(ont, "acme", [], {"concept"})
+
+    def test_a_misspelled_linkPredicate_KEY_is_refused_at_install(self):
+        """`linkpredicate:` (lowercase) is read as ABSENT — the worse outcome.
+
+        Round-4 review P2, measured: the entry validated `✓ Clean` and exited 0,
+        `pack_guards` compiled `link_predicate=None`, and the guard then
+        redirected to a role kind with NO abstention — filing exactly the orphan
+        role `LINK_PREDICATES` exists to prevent. A bad VALUE at least abstains
+        for ever (a harmless dead guard); a bad KEY removes the abstention.
+        """
+        base = {
+            "rule": "acme:to-role",
+            "pattern": r"^the-owner-[0-9]+$",
+            "redirect": "core:role",
+            "fallback": "core:role",
+            "reason": "a standing description is a role",
+        }
+        # Correct spelling: accepted.
+        assert self._validate({**base, "linkPredicate": "holdsRole"}) == []
+        # Lowercased key: refused, and the message names it.
+        errs = self._validate({**base, "linkpredicate": "holdsRole"})
+        assert errs and "linkpredicate" in " ".join(errs), errs
+
+    def test_a_misspelled_fromKinds_KEY_is_refused_at_install(self):
+        """`fromKind:` (no `s`) silently turned a SCOPED guard into a NIL one.
+
+        Round-4 review P2: the scoped guard fires only when the write DECLARED
+        one of the listed kinds; with the key misspelled the list is empty, which
+        is the NIL mode — so the guard fires on writes that named NOTHING, the
+        exact opposite of the author's intent, at install-clean.
+        """
+        base = {
+            "rule": "acme:scoped",
+            "pattern": r"^concept-[0-9]+$",
+            "redirect": "core:WorkItem",
+            "fallback": "core:WorkItem",
+            "reason": "a concept handle is not an entity",
+        }
+        assert self._validate({**base, "fromKinds": ["concept"]}) == []
+        errs = self._validate({**base, "fromKind": ["concept"]})
+        assert errs and "fromKind" in " ".join(errs), errs
+
+    def test_a_misspelled_key_on_the_GUARD_itself_is_refused(self):
+        """The same rule one level up: `onConfusions:` (plural) loses every entry."""
+        errs = self._validate(
+            {"rule": "acme:r", "pattern": "^x-[0-9]+$",
+             "redirect": "core:WorkItem", "fallback": "core:WorkItem",
+             "reason": "x"},
+            guard_extra={"layer": "object", "onConfusions": []})
+        assert errs and "onConfusions" in " ".join(errs), errs

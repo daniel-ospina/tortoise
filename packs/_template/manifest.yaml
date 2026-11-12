@@ -192,9 +192,13 @@ ontology:
   #                  overruled by a name guess. Non-empty = fire only when the
   #                  write DECLARED one of these kinds.
   #     fromLayers:  optional, default [subject, object].
-  #     linkPredicate: optional. A redirect TO a kind whose linking predicate is
-  #                  not implemented ABSTAINS rather than filing an orphan — see
-  #                  `tortoise.kind_guards.LINK_PREDICATES`.
+  #     linkPredicate: optional. A redirect TO a kind whose linking predicate a
+  #                  name-matched redirect cannot SUPPLY (there is no holder to
+  #                  name at redirect time) ABSTAINS rather than filing an orphan
+  #                  — see `tortoise.kind_guards.LINK_PREDICATES`. Note it is not
+  #                  "unimplemented": `holdsRole` is implemented and produced by
+  #                  `create_entity(roleHolder=…)`; the abstention is about the
+  #                  redirect having no input for it, not about a missing feature.
   #
   # ⛔ Optional for third-party packs: a manifest with no `guards:` behaves
   # EXACTLY as before. It is present here so every new pack starts with the
