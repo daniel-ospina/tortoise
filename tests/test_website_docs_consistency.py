@@ -1073,7 +1073,10 @@ def test_faq_internal_links_point_at_real_pages() -> None:
         path = href.split("#", 1)[0].split("?", 1)[0]
         if path in ("", "/"):
             continue
-        candidate = WEBSITE / path.lstrip("/")
+        # A product route is served from the same tree under the prefix, so it is
+        # resolved the way the middleware serves it (`_served_relative`), not as a
+        # literal directory name — see that helper's docstring (#11764).
+        candidate = WEBSITE / _served_relative(path)
         if (candidate.is_file()
                 or candidate.with_suffix(".html").is_file()
                 or _function_serves(path)):
@@ -2599,6 +2602,11 @@ HOST_ROOT_PAGE = {
     "premiselabs.co": "index.html",
     "tortoise.premiselabs.co": "product.html",
 }
+# The product URL prefix (#11762): the middleware serves `/tortoise/<page>` from
+# `website/<page>.html`, so the prefix is a URL segment, NOT a directory in the tree.
+# Mirrored from `functions/_middleware.ts` like `HOST_ROOT_PAGE`, and pinned by the
+# same middleware-reading test below plus `test_the_product_prefix_resolves_to_the_served_document`.
+PRODUCT_PREFIX = "tortoise"
 
 
 def _xml_locs(path: Path) -> list[str]:
@@ -2703,6 +2711,25 @@ def _sitemap_file_for(url: str) -> Path | None:
     return None
 
 
+def _served_relative(path: str) -> str:
+    """The tree-relative path a URL path is SERVED from.
+
+    ⛔ The product prefix is a URL segment, not a directory (#11762/#11764):
+    `/tortoise/docs` is served by the middleware rewrite that fetches
+    `website/docs.html`, and `/tortoise` serves `website/product.html`. EVERY
+    resolver that asks "does this route exist in the tree?" must strip it first,
+    or it reports the CORRECT new URL as dangling — which is a false red that invites
+    "fixing" it by moving the files (the shape that silently narrows the
+    non-recursive page guard in `test_website_static.py`).
+    """
+    cleaned = path.strip("/")
+    if cleaned == PRODUCT_PREFIX:
+        return "product"
+    if cleaned.startswith(PRODUCT_PREFIX + "/"):
+        return cleaned[len(PRODUCT_PREFIX) + 1:]
+    return cleaned
+
+
 def _document_for_loc(url: str) -> Path | None:
     """The document a page <loc> points at, resolved the way Pages serves it."""
     parsed = urlparse(url)
@@ -2711,11 +2738,28 @@ def _document_for_loc(url: str) -> Path | None:
         name = HOST_ROOT_PAGE.get(parsed.netloc)
         candidate = WEBSITE / name if name else None
         return candidate if candidate and candidate.is_file() else None
-    cleaned = path.strip("/")
+    cleaned = _served_relative(path)
     for candidate in (WEBSITE / cleaned, WEBSITE / f"{cleaned}.html"):
         if candidate.is_file():
             return candidate
     return None
+
+
+def test_the_product_prefix_resolves_to_the_served_document() -> None:
+    """A product <loc> resolves through the prefix to the file that serves it.
+
+    This is the pin #11766's sitemap depends on: its `<loc>`s name the NEW URLs, and
+    the files never move, so without the mapping every product loc resolves to None —
+    a red on the correct sitemap, which invites "fix it" by moving the files.
+    """
+    assert _document_for_loc("https://premiselabs.co/tortoise/docs") == WEBSITE / "docs.html"
+    assert _document_for_loc("https://premiselabs.co/tortoise") == WEBSITE / "product.html"
+    # …and the retired host's paths still resolve, so a stale sitemap is not the thing
+    # that fails this file's job (it fails child 4's host assertion, where it belongs).
+    assert _document_for_loc("https://premiselabs.co/docs") == WEBSITE / "docs.html"
+    # An unknown page under the prefix is NOT silently the root: that would let a
+    # sitemap advertise /tortoise/nope and pass.
+    assert _document_for_loc("https://premiselabs.co/tortoise/nope") is None
 
 
 def test_the_site_root_is_a_different_page_per_host() -> None:
@@ -2778,6 +2822,17 @@ def test_the_site_root_is_a_different_page_per_host() -> None:
         "rewrite and HOST_ROOT_PAGE must be re-derived")
     for host, page in HOST_ROOT_PAGE.items():
         assert (WEBSITE / page).is_file(), f"{host}'s root document {page} is missing"
+    # The prefix this module resolves a <loc> THROUGH must be the middleware's own.
+    # A stale copy here would resolve `/tortoise/docs` to nothing (or, worse, to a
+    # different document) while the middleware served it correctly.
+    prefix = re.search(r'const PRODUCT_PREFIX = "([^"]+)"', code)
+    assert prefix, (
+        "_middleware.ts no longer declares `const PRODUCT_PREFIX` — re-derive the "
+        "mirrored constant in this module by hand and re-point this guard")
+    assert prefix.group(1).strip("/") == PRODUCT_PREFIX, (
+        f"the middleware serves the product under {prefix.group(1)!r} while this module "
+        f"resolves <loc>s through {PRODUCT_PREFIX!r} — every product loc would resolve "
+        "to the wrong document")
 
 
 def test_the_conventional_sitemap_url_serves_a_sitemap_index() -> None:

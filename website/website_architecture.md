@@ -357,7 +357,12 @@ Rules:
   direction and the owner of each URL changed. The 2026-08-17 decision and its locks (the G-gate
   ③/⑨ contract in `docs/plans/2026-08-08-657-legal-pages-plan.md`) are superseded by this, not
   silently dropped.
-- **Canonical tags:** all indexable pages carry `<link rel="canonical">` — `index.html` → `https://premiselabs.co/`, `product.html` → `https://tortoise.premiselabs.co/` (served at `/`), plus docs/faq/self-hosted/auth. Legal pages already had them.
+- **Canonical tags:** all indexable pages carry `<link rel="canonical">` naming the URL that
+  SERVES them (pinned per page by `tests/test_website_static.py::TestProductSetIsServedUnderTheOneHost`):
+  `index.html` → `https://premiselabs.co/`, the product set → `https://premiselabs.co/tortoise[/<page>]`
+  (`product.html` is the bare `/tortoise`), the legal pages the business owns → `https://premiselabs.co/<page>`
+  at the ROOT. No page names `tortoise.premiselabs.co` — that host is a permanent 301, so a canonical
+  naming it would point at a redirect back to the document serving it.
 - **Auth-gated pages** (`welcome.html`, `invite-accept.html`) are `noindex,nofollow` and excluded from sitemaps. Signup stays indexable (a redirect-free alias of `/auth`); the legacy `/signin` URLs 301 → `/auth`. Keep `.html` auth URLs as-is — OAuth `redirectTo` and invite emails reference them directly.
 - **Middleware** (runs before `_redirects`) consolidates the raw product assets onto the ONE
   canonical product URL: `/product`, `/product.html` and (on the product host) `/index.html` 301 →

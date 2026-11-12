@@ -78,6 +78,7 @@ from html import unescape
 from html.parser import HTMLParser
 from itertools import pairwise
 from pathlib import Path
+from typing import ClassVar
 from urllib.parse import urljoin, urlsplit
 
 # `pytest` is deliberately not imported (#8066): this file's only use was the
@@ -4019,9 +4020,21 @@ class TestSiteIconAndSocialPreviewContract:
     # The two hosts this site is served from. Declared once because every page's
     # preview URL is checked against it — see the og:image assertions.
     SITE_ORIGINS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
-    # Every page is served at `/` from one of those hosts, so this is the base an
-    # icon href is resolved against before it is compared with a file's path.
-    SITE_ROOT = "https://tortoise.premiselabs.co/"
+    # The base an icon href is resolved against before it is compared with a file's
+    # path. Since epic #11762 there is ONE marketing host: `tortoise.premiselabs.co`
+    # is a permanent 301 to it, so a page is never served FROM that host and no
+    # document-relative href can mean it. This must be a member of `SITE_ORIGINS`
+    # (every shipped icon href is host-relative, so membership is what passes).
+    SITE_ROOT = "https://premiselabs.co/"
+    # The retired product host. It is KEPT as a permanent 301 — the hostname is
+    # never deleted — so `SITE_ORIGINS` above deliberately still holds it: the
+    # asset tree (`/assets/*.jpg`, `/skills/*.skill`, the icons) really is served
+    # from both, and narrowing the set would red honest asset URLs. What may NOT
+    # name it is a PAGE: a canonical, an `og:url`, an `og:image` or a link into a
+    # page that moved. That is asserted positively, per page, by
+    # `TestProductSetIsServedUnderTheOneHost`, rather than inferred from a
+    # membership set that also has to describe assets.
+    RETIRED_PRODUCT_HOST = "tortoise.premiselabs.co"
     # The encoded-size floor a link-preview card must clear. MEASURED, not guessed:
     # a FLAT 1200x630 JPEG at maximum quality is 22,016 B (`sips -s formatOptions
     # best`), so the first cut's 20 KB floor passed the very image it was written to
@@ -4594,10 +4607,29 @@ class TestSiteIconAndSocialPreviewContract:
 
     # --- helpers --------------------------------------------------------
 
+    # The population every assertion from here down iterates. Pinned, because a
+    # MOVE narrows it silently: `glob("*.html")` is non-recursive, so filing six
+    # pages into a subdirectory left these guards covering 8 of 14 pages and green
+    # (epic #11762 rejected that shape for exactly this reason). Adding or removing
+    # a page is a deliberate act; a page that leaves coverage by moving is not.
+    PAGES_AT_11762 = (
+        "404.html", "contact.html", "design-partners-intro.html", "docs.html",
+        "dpa.html", "faq.html", "index.html", "investors.html", "license.html",
+        "privacy.html", "product.html", "security.html", "self-hosted.html",
+        "tos.html",
+    )
+
     def _pages(self):
         pages = sorted(self.WEB.glob("*.html"))
         assert pages, "no pages found — the guard would pass vacuously"
         return pages
+
+    def test_the_guard_population_is_pinned(self):
+        """The population the icon/card guards iterate must not shrink by accident."""
+        assert tuple(p.name for p in self._pages()) == self.PAGES_AT_11762, (
+            "the marketing-page population changed. That is legitimate only when a "
+            "page is deliberately added or retired — a page that MOVED out of "
+            "`website/*.html` silently leaves every guard below and stays green")
 
     @classmethod
     def _head(cls, html: str) -> str:
@@ -5875,14 +5907,24 @@ class TestSiteIconAndSocialPreviewContract:
         assert self._jpeg_size(shared.read_bytes()) == self.OG_SIZE, (
             f"assets/og-tortoise.jpg is not {self.OG_SIZE[0]}x{self.OG_SIZE[1]}")
 
-    def test_both_origins_root_pages_carry_the_preview(self):
-        """The two URLs that get pasted into a chat: premiselabs.co and the product root."""
-        for name, expected_origin in (("index.html", "https://premiselabs.co/"),
-                                      ("product.html", "https://tortoise.premiselabs.co/")):
+    def test_the_two_pasted_urls_carry_the_preview_from_the_one_host(self):
+        """The two URLs that get pasted into a chat: `premiselabs.co` and its `product root`.
+
+        ⛔ THIS USED TO BE A TWO-ORIGIN TEST, and the property it guarded was "the
+        card comes from the host the page is on" — `index.html` from
+        premiselabs.co, `product.html` from tortoise.premiselabs.co. Epic #11762
+        removed the second host (it is now a permanent 301), so that pair can no
+        longer be the assertion: the surviving property is simply "both pasted
+        URLs resolve to one origin, and both cards name it". Asserting the old
+        pair would have pinned the very defect the epic removes.
+        """
+        origin = "https://premiselabs.co/"
+        for name in ("index.html", "product.html"):
             head = self._head((self.WEB / name).read_text())
-            assert self._og(head, "image").startswith(expected_origin), (
-                f"{name} serves {expected_origin} but points its preview at "
-                f"{self._og(head, 'image')} — the card must come from the host it is on")
+            image = self._og(head, "image")
+            assert image and image.startswith(origin), (
+                f"{name} is served from {origin} but points its preview at {image} — "
+                "the card must come from the host that serves the page")
 
     # --- the icon, on EVERY surface ------------------------------------
 
@@ -6660,3 +6702,196 @@ class TestSiteIconAndSocialPreviewContract:
                 f"counted {self._head_element_count(builder)}")
             assert self._head_element_count("<head-x>") == 0, (
                 "a tag name that merely STARTS with `head` is not <head> ")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #11764 — the product set is SERVED from the one marketing host
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestProductSetIsServedUnderTheOneHost:
+    """Every marketing page names the URL that actually serves it (#11764, epic #11762).
+
+    WHY THIS EXISTS. Epic #11762 moved the product surface to `premiselabs.co/tortoise`
+    and turned `tortoise.premiselabs.co` into a permanent 301. The pages were not moved
+    on disk (the middleware rewrites the prefix), so NOTHING about the files changed —
+    which is exactly why the head could keep naming the retired host and every existing
+    guard stayed green. A canonical naming a URL that 301s to the document serving it is
+    a hard SEO error, and it is invisible to any check that only reads the card file.
+
+    THE ASSERTION IS A DESTINATION, NOT A COUNT. The count of retired-host occurrences is
+    a number that both wrong shapes satisfy: `== 0` reds the day a legitimate asset URL
+    names it, and `<= N` stops noticing when a link is dropped. So each page is asked
+    the only question that cannot be gamed — "does your canonical name the URL that
+    serves YOU?" — and the retired host is refused where it would actually be wrong.
+    """
+
+    WEB = REPO_ROOT / "website"
+    CONTRACT = TestSiteIconAndSocialPreviewContract
+    ONE_HOST = "https://premiselabs.co"
+
+    # page -> the URL that serves it after #11762. The product set sits UNDER the
+    # prefix; the business's legal pages stay at the ROOT (the owner's fork in the
+    # epic: legal governs the business, not the product).
+    CANONICAL: ClassVar[dict[str, str]] = {
+        "product.html": f"{ONE_HOST}/tortoise",
+        "docs.html": f"{ONE_HOST}/tortoise/docs",
+        "faq.html": f"{ONE_HOST}/tortoise/faq",
+        "self-hosted.html": f"{ONE_HOST}/tortoise/self-hosted",
+        "security.html": f"{ONE_HOST}/tortoise/security",
+        "license.html": f"{ONE_HOST}/tortoise/license",
+        "investors.html": f"{ONE_HOST}/tortoise/investors",
+        "design-partners-intro.html": f"{ONE_HOST}/tortoise/design-partners-intro",
+        "privacy.html": f"{ONE_HOST}/privacy",
+        "tos.html": f"{ONE_HOST}/tos",
+        "dpa.html": f"{ONE_HOST}/dpa",
+        "index.html": f"{ONE_HOST}/",
+        "contact.html": f"{ONE_HOST}/contact",
+    }
+
+    # The pages that MOVED region: they are served under the prefix, so a root-relative
+    # link to a sibling's old path is a hop to a 301 (or, for `/`, the COMPANY homepage
+    # — a different document entirely).
+    MOVED = ("product.html", "docs.html", "faq.html", "self-hosted.html",
+             "security.html", "license.html", "investors.html",
+             "design-partners-intro.html")
+
+    # The pages that STAYED at the root (`index.html`, `contact.html`). Their `/` link is
+    # CORRECT — it is the company homepage — so the prefix rule does not apply to them,
+    # but a root-relative link to a product path does not become correct by staying put:
+    # `/docs` on `premiselabs.co/contact` is the retired path and now takes a hop. Leaving
+    # these out of the scan is what let `contact.html` keep `href="/self-hosted"` while
+    # every sibling it sits beside was rewritten (caught by the VGATE review, #11764).
+    ROOT_SERVED = ("index.html", "contact.html")
+    OLD_PRODUCT_PATHS = ("/product", "/docs", "/faq", "/self-hosted", "/security",
+                         "/license", "/investors", "/design-partners-intro")
+
+    def _canonical(self, name: str) -> str | None:
+        head = self.CONTRACT._head((self.WEB / name).read_text())
+        for link in self.CONTRACT._links(head):
+            if "canonical" in link.get("rel", "").lower().split():
+                return link.get("href")
+        return None
+
+    def test_every_page_canonical_names_the_url_that_serves_it(self):
+        """The destination, per page — a canonical must not 301 to its own document."""
+        for name, expected in self.CANONICAL.items():
+            assert self._canonical(name) == expected, (
+                f"{name} declares canonical {self._canonical(name)!r}; it is served at "
+                f"{expected!r}. A canonical naming a URL that 301s back to this document "
+                "is the defect #11762 exists to remove")
+
+    def test_404_declares_no_canonical(self):
+        """An error page has no canonical URL — one would claim a document that isn't there."""
+        assert self._canonical("404.html") is None, (
+            "404.html declares a canonical; it is served on every host for every missing "
+            "path, so any value would be a lie")
+
+    def test_no_marketing_page_names_the_retired_product_host(self):
+        """⛔ THE PROPERTY THE MOVE ACTUALLY CREATES: one host, no page naming the other.
+
+        `tortoise.premiselabs.co` stays alive as a permanent 301 (the hostname is never
+        deleted), so a page CAN name it and the link still works — through an extra hop,
+        onto a canonical that disagrees with the URL the visitor is on. That is why this
+        is asserted on the page text rather than left to a membership set: `SITE_ORIGINS`
+        has to keep describing the ASSET tree, which really is served from both.
+        """
+        retired = TestSiteIconAndSocialPreviewContract.RETIRED_PRODUCT_HOST
+        offenders = []
+        for page in sorted(self.WEB.glob("*.html")):
+            for lineno, line in enumerate(page.read_text().splitlines(), 1):
+                if retired in line:
+                    offenders.append(f"{page.name}:{lineno}: {line.strip()[:100]}")
+        assert not offenders, (
+            f"these pages still name the retired product host {retired!r}:\n  "
+            + "\n  ".join(offenders)
+            + "\n\nEvery one of them is a hop onto a 301, or a label that is now false. "
+              "Point it at the URL that serves it (product set: /tortoise/…, legal: the root)")
+
+    def test_a_moved_page_links_its_siblings_by_their_new_path(self):
+        """A root-relative href on a moved page means the RETIRED path, not the sibling.
+
+        This is the half a URL-rewriting sweep misses: the absolute links are obvious,
+        but `href="/docs"` was correct only because the page was served FROM the product
+        host's root. On `premiselabs.co/tortoise/faq` the same href resolves to
+        `premiselabs.co/docs` (a 301), and `href="/"` resolves to the COMPANY homepage —
+        a different document. Nothing about the file changed when the URL did.
+        """
+        old_paths = {"/": "/tortoise", "/product": "/tortoise", "/docs": "/tortoise/docs",
+                     "/faq": "/tortoise/faq", "/self-hosted": "/tortoise/self-hosted",
+                     "/security": "/tortoise/security", "/license": "/tortoise/license",
+                     "/investors": "/tortoise/investors",
+                     "/design-partners-intro": "/tortoise/design-partners-intro"}
+        offenders = []
+        for name in self.MOVED:
+            text = (self.WEB / name).read_text()
+            for href in re.findall(r'href="([^"]+)"', text):
+                path = href.split("#", 1)[0].split("?", 1)[0]
+                if path in old_paths:
+                    offenders.append(f"{name}: href={href!r} → should be "
+                                     f"{old_paths[path]!r}")
+        assert not offenders, (
+            "these links on moved pages still point at the RETIRED path — from under "
+            "/tortoise they reach a different document (`/` is the company page) or take "
+            "a hop:\n  " + "\n  ".join(offenders))
+
+    def test_no_page_links_a_product_path_from_the_root(self):
+        """A root-served page (`index`, `contact`) must use the prefix too.
+
+        Its `/` link is right; its `/docs` link is not. The two cases look alike in a
+        URL sweep and only one of them moved, which is exactly how `contact.html` kept
+        `href="/self-hosted"` through a migration that rewrote every sibling beside it.
+        """
+        offenders = []
+        for name in self.ROOT_SERVED:
+            text = (self.WEB / name).read_text()
+            for href in re.findall(r'href="([^"]+)"', text):
+                path = href.split("#", 1)[0].split("?", 1)[0]
+                if path in self.OLD_PRODUCT_PATHS:
+                    offenders.append(f"{name}: href={href!r} → should be "
+                                     f"'/tortoise{path}'")
+        assert not offenders, (
+            "these links on a ROOT-served page still name a product path (one hop onto "
+            "a 301, onto the URL that already serves it):\n  " + "\n  ".join(offenders))
+
+    def test_an_app_origin_page_never_links_a_marketing_path_root_relative(self):
+        """On `app.premiselabs.co`, `/docs` is not the docs page — it is a 404.
+
+        ⛔ MEASURED, not assumed: the app is its OWN Pages project (`tortoise-dashboard`),
+        so a root-relative href there resolves inside it, and `/docs`, `/faq`, `/license`,
+        `/security`, `/privacy`, `/tos`, `/dpa`, `/blog` all answered **404** (measured
+        `curl` before this change). The marketing pages therefore have to be named
+        ABSOLUTELY on these four files, and `SITE_ROOT`'s own tree cannot catch it —
+        nothing under `website/*.html` links into the app origin.
+
+        `/` is deliberately NOT a marketing path here: `https://app.premiselabs.co/` serves
+        the dashboard (200), so a logo pointing at `/` is correct on this origin.
+        """
+        marketing = {"/docs", "/faq", "/self-hosted", "/security", "/license",
+                     "/privacy", "/tos", "/dpa", "/blog", "/product",
+                     "/investors", "/design-partners-intro"}
+        app_pages = sorted(self.CONTRACT.DASHBOARD_ROOT.glob("*.html"))
+        assert app_pages, "no app-origin pages found — the guard would pass vacuously"
+        offenders = []
+        for page in app_pages:
+            for href in re.findall(r'href="([^"]+)"', page.read_text()):
+                path = href.split("#", 1)[0].split("?", 1)[0]
+                if path in marketing:
+                    offenders.append(f"{page.name}: href={href!r}")
+        assert not offenders, (
+            "these root-relative links on an APP-ORIGIN page resolve inside the dashboard "
+            "project, where they are 404s — name the marketing host absolutely:\n  "
+            + "\n  ".join(offenders))
+
+    def test_the_pages_that_moved_are_still_the_files_that_serve_them(self):
+        """The decision this child took: a Function rewrites the prefix, the files stay.
+
+        Pinned because the other shape is a silent coverage loss: filing the six pages
+        into `website/tortoise/` would leave `glob("*.html")` guarding 8 of 14 pages with
+        no red anywhere (see `_pages`'s pin).
+        """
+        for name in self.MOVED:
+            assert (self.WEB / name).is_file(), (
+                f"{name} is no longer at website/{name} — the prefix is served by the "
+                "middleware rewrite, so moving the file changes which pages the marketing "
+                "guards can see")
