@@ -5070,9 +5070,13 @@ _EPIC_CITE_SOURCES = {
     # this file. Measured commit-by-commit across ALL of #12112's 36 commits (every
     # one of them carries the call; none predates it): it sat at `:631` on
     # `origin/main` (8 commits), then `:687` (22), then `:695` (4), then `:700` at
-    # the squash (2) — **four** numbers, not three, with the documents trailing one
-    # behind at each step. (`:687` is the move an earlier draft of this comment
-    # dropped, and dropping it is the same error the comment is about.) ⛔ Do not mix
+    # the squash (2) — **four** numbers, not three. ⛔ An earlier draft closed that
+    # sentence with "the documents trailing one behind at each step"; a review could
+    # not reproduce it (over the same 36 commits the citing document was current at
+    # some steps and two behind at another), so the count stands and the gloss is
+    # gone. A claim labelled Measured must reproduce. (`:687` is the move an earlier
+    # draft of this comment dropped, and dropping it is the same error the comment is
+    # about.) ⛔ Do not mix
     # denominators: restricted to the 30 SINGLE-PARENT commits the split is
     # 8 / 18 / 3 / 1, and an earlier draft took `:631` and `:687` from the 36-commit
     # population but `:695` and `:700` from the 30-commit one — the arithmetic closed
