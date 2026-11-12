@@ -1749,8 +1749,9 @@ def classify_queue(
         therefore neither necessary nor sufficient: a truncated
         feed whose queued PR wait WAS read returns `pr_wait_measured=True`
         (`test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence` pins that
-        half at `tests:1174-1183`; the `pending_truncated` tests next to it pin the OPPOSITE
-        half deliberately). In every `False` case this seam's `OK` is a statement about what
+        half at `tests:1174-1183`; the `pending_truncated` tests FURTHER DOWN pin the
+        OPPOSITE half deliberately). In every `False` case this seam's `OK` is a statement
+        about what
         was READ, and the destructive gate stays shut on it (`congests_pr is None`) because
         the `not wait_runs` clause and the constructor's derivation both emit
         `pr_wait_measured=False` — the field, not "the sentinel".

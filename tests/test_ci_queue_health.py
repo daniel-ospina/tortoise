@@ -1690,6 +1690,35 @@ def test_a_cut_PENDING_leg_refuses_OK_even_with_no_PR_run_in_ANY_leg():
                     truncated=True).verdict == Q.PR_UNWITNESSED
 
 
+def test_a_counters_met_queue_with_an_executing_PR_run_reaches_OK_with_no_PRWITNESS():
+    """⬛ ROUND-23 P2: this reading is provably NOT `FLOOD`, and it returns `OK`.
+
+    `healthy()`'s docstring names it as one of the ways to reach `OK` with
+    `pr_wait_measured=False`, and that "one of the ways" claim is FALSE-shaped if the
+    queue could be FLOOD: `pr_running != 0` is decided ABOVE the flood block, so a queue
+    with an executing PR run can never carry that verdict however many runs it has. Both
+    halves are asserted here, so neither the sentence nor its negation can drift.
+
+    Discriminating: forcing `pr_wait_measured` to carry `truncated` reds the second arm;
+    making the flood block reachable from `pr_running != 0` reds the first.
+    """
+    executing = run(1, "Python CI", event="pull_request", age_seconds=60,
+                    has_live_job=True)
+    measured = classify(flood_queued(6), in_progress=[executing])
+    assert measured.verdict == Q.OK, (
+        "a counters-met queue with an executing PR run and no PR wait is not FLOOD")
+    assert measured.pr_wait_measured is False, (
+        "there is no wait to measure, so the destructive gate must not read it as clear")
+    assert measured.congests_pr is None
+
+    # …and the truncated variant of the same shape takes the same route, which is why
+    # truncation is neither necessary nor sufficient for this `False`.
+    truncated = classify(flood_queued(6), in_progress=[executing], truncated=True)
+    assert truncated.verdict == Q.OK
+    assert truncated.pr_wait_measured is False
+    assert truncated.congests_pr is None
+
+
 def test_the_witness_ids_are_emitted_so_the_caller_does_not_re_derive_them():
     """One derivation, at the single constructor — the JSON carries it."""
     health = classify([], pending=[run(4247, "Python CI", event="pull_request",
@@ -2925,6 +2954,10 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # GREEN with the two-route gloss and again with the three-route gloss plus the wrong
         # conclusion, so the presence pin is what keeps the conclusion honest.
         ("module", "pr_running count in this state is an UPPER BOUND on executing work"),
+        # ⛔ THE TWO-ARM HEADLINE, pinned for the same reason (round 23): reverting it to
+        # the old universal "`OK` — but only when the PR wait was MEASURED …" measured
+        # GREEN, so the claim could come back silently.
+        ("module", "the PR wait was MEASURED and inside the budget, OR nothing was waiting"),
         # ⛔ AND THE GLOSSES THAT ONLY A MAINTAINER READS — pinned because the delta's own rule
         # is that a corrected claim needs a leg, and these had none (#12166 review round 16).
         # The `--help` one is EMITTED (argparse's description), i.e. operator-visible; the rest
