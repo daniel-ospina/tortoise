@@ -82,18 +82,19 @@ from tortoise.sdk import TortoiseSDK
 #: (`_update_entity`'s non-Point branch): identity as written, `state` = the
 #: write's own applied map — which since #12120 is BOTH keys the rename applies,
 #: the surface `name` and its fold (`normalize_entity_name`, the writer's key
-#: space). A rename record carrying only `name` is a shape this producer no
-#: longer emits.
+#: space). A rename record carrying only `name` is a shape this producer no longer
+#: emits for a NON-BLANK name; a blank one still journals `name` alone.
 def _producer_rename(oid: str, new_name: str, label: str = "Object") -> dict:
     # The producer's own guards, mirrored (`sdk._update_entity`, #12120): the fold
-    # is applied only to a NAME-BEARING write, and only when the fold is
-    # non-empty — a blank or whitespace name never yields
-    # `{"canonical_name": ""}` in a real record, so this helper must not either.
-    # A blank name is not a rename at all in the producer, so this helper — which
-    # builds a rename RECORD — refuses one rather than inventing the shape.
-    assert new_name.strip(), (
-        "a rename record is only produced for a non-blank name; a blank write "
-        "is not a rename (#12120)")
+    # is applied only to a NAME-BEARING write (`sdk.py:45317`) and only when the
+    # fold is non-empty (`sdk.py:45366-45370`), so no real record carries
+    # `{"canonical_name": ""}`.
+    #
+    # ⛔ A BLANK name is NOT refused here: it skips those write-path guards (no
+    # lock, no `_refuse_ambiguous_rename`, no fold) but is STILL journaled as
+    # `EntityMutated op=rename state={"name": …}` — measured — so a helper that
+    # refused it would reject an input the producer accepts, which is the drift
+    # this rewrite exists to remove.
     applied = {"name": new_name}
     folded = normalize_entity_name(new_name)
     if folded:
