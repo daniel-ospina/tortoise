@@ -549,8 +549,17 @@ def _step_defusers(lines: list[str], at: int) -> list[str]:
         stripped = line.strip()
         if stripped.startswith("#"):
             continue
-        if len(line) - len(line.lstrip()) > key_indent:
+        indent = len(line) - len(line.lstrip())
+        if indent > key_indent:
             continue  # a block scalar's body or a nested mapping: not this step's key
+        # ⛔ A DEDENTED KEY IS NOT THIS STEP'S KEY EITHER. `_step_bounds` ends at the next
+        # `      - ` marker OR AT THE END OF THE JOB, so a JOB-level key written AFTER
+        # `steps:` sits inside the window at a SHALLOWER indent and was read as the step's
+        # guard — a compliant job then got a violation whose demanded remedy cannot apply,
+        # which is the direction the file says gets a `|| true` bolted on. Only the step's own
+        # key indent (or the key sharing its `- ` line) counts (#12167 review, round 3).
+        if indent < key_indent and not _STEP_DASH.match(stripped):
+            continue
         key = _STEP_DASH.sub("", stripped).split(":")[0].strip().strip("'\"")
         if key in _STEP_DEFUSERS:
             out.append(key)
@@ -784,6 +793,26 @@ def test_a_guarded_contract_step_is_not_compliant():
             f"prose inside the step's own block scalar was read as a guard (`{prose}`)"
         )
         assert _live_contract_step(doc.splitlines()) is True
+
+    # ⛔ AND NOT OUTSIDE THE STEP EITHER, on the trailing side. `_step_bounds` ends at the
+    # next `      - ` marker or at the END OF THE JOB, so a JOB-level key written AFTER
+    # `steps:` sits inside the window at a shallower indent and was read as the step's guard
+    # — a fully compliant job reported as carrying `continue-on-error:`, with a remedy that
+    # cannot apply, and the coverage arm suppressing the job too. Zero live instances (no
+    # workflow in the tree writes a job-level guard after `steps:`), which is why only a
+    # synthetic block can pin it (#12167 review, round 3).
+    for trailing in ("continue-on-error: true", "if: needs.changes.outputs.python == 'true'"):
+        after_steps = (
+            "  job:\n    steps:\n      - name: contract\n"
+            "        run: bash .github/scripts/" + CONTRACT_STEP + f"\n    {trailing}\n"
+        )
+        assert _contract_violations(after_steps, scripts) == [], (
+            f"a JOB-level `{trailing.split(':')[0]}:` written after `steps:` was attributed "
+            "to the contract step — a compliant job reported as guarded"
+        )
+        assert _live_contract_step(after_steps.splitlines()) is True, (
+            "the coverage arm treated a job-level guard as the step's, so the job was suppressed"
+        )
 
     # …and the SAME scan must not reach OUTSIDE the step. A bare `-` marker (the step's first
     # key on the next line) did not match `^      - `, so `step_start` stayed 0 and the JOB's
