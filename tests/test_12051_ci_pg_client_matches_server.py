@@ -186,6 +186,24 @@ not a tenth spelling — it is the one a text guard cannot reach:
   guard grades the `bin/` directory because that is where `PATH` points.
   Widening the token to the literal `/usr/lib/postgresql/<token>` form is the
   follow-up if the base-swap shape is ever seen in the workflow.
+- **A RELATIVE directory replace is not caught either** (`#12173` review round 29) —
+  the sibling limit of the bullet above, and the same act: the arm needs a
+  `base/token/bin` triple, so eliding the base reaches the identical regression
+  and stays green.
+
+  ```
+  cd /usr/lib/postgresql && sudo rsync -a 17/bin/ 16/bin/
+  cd "$b" && sudo rsync -a 17/bin/ 16/bin/
+  ```
+
+  This is fail-OPEN, which is the direction that matters, and it is stated here
+  rather than left to be rediscovered. The guard's model is LINE-LOCAL: it cannot
+  know the cwd a `cd` earlier in the step established, so it cannot decide whether
+  a bare `17/bin` is under the pinned base. Widening the token to match a bare
+  `<digits>/bin` globally is refused deliberately — it reds every legitimate
+  relative `17/bin 16/bin` in an unrelated tree, which is the round-9 false-RED
+  defect this file exists to stop repeating. Closing it needs a `cd`-in-the-same-
+  step PRECONDITION, not a global token widening.
 - **The extraction's arithmetic** (`sed -E 's/.*/16/'`) cannot be proven; the
   in-job assertion is what makes a constant visible.
 - **A leg invoked only through a WRAPPER SCRIPT is not recognised.** `_leg_indexes`
@@ -1383,9 +1401,6 @@ _SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|&]")
 #: NOT an operand of the verb, so it must never decide the verb's direction.
 _REDIRECT_RE = re.compile(r"\d*>>?\s*\S+")
 
-#: A `$GITHUB_PATH`/`$GITHUB_ENV` mention, as a property of ITS OWN segment.
-COMMAND_FILE_MENTION_RE = re.compile(r"\b(?:GITHUB_PATH|GITHUB_ENV)\b")
-
 #: `cp -t DIR` / `--target-directory=DIR` NAMES the destination (#12069 review
 #: round 22, measured GREEN): with the operand order inverted, the trailing source
 #: had `-t`'s value looked like an option and the real target was skipped.
@@ -1532,6 +1547,30 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
             last = (token.start() + seg_start, token.end() + seg_start)
     if last is None:
         return True
+    # ⛔ AN OPERAND AFTER THE LAST PATH TOKEN MAKES IT A SOURCE, NOT THE TARGET
+    # (#12173 review round 29, measured FALSE RED — this arm shipped it). `last` is
+    # only ever a token containing a `/`, so a destination spelled WITHOUT one is
+    # invisible to the loop above and the reading falls back to the pinned dir —
+    # the SOURCE:
+    #
+    #     sudo rsync -a "$b/16/bin/" "$RUNNER_TEMP"     -- refused
+    #     sudo cp -a "$b/16/bin" snapshot               -- refused
+    #
+    # Both are plain READS (`origin/main` answers False for each), refused with the
+    # untrue message `REPLACES a client binary` — the same false-RED class the
+    # `_segment_bounds` note above records. A non-option operand FOLLOWING the last
+    # path token means something comes after it, so it cannot be the last operand.
+    # A `find … \;`/`xargs` terminator and the leading fragment the `2>&1` split
+    # leaves at `&` are not operands.
+    trailing = [
+        token
+        for token in _PATH_TOKEN_RE.finditer(segment, last[1] - seg_start)
+        if not token.group(0).startswith("-")
+        and token.group(0) not in {"+", "\\;", ";"}
+        and not re.match(r"^\d*[<>]", token.group(0))
+    ]
+    if trailing:
+        return False
     return start >= last[0] and end <= last[1]
 
 
@@ -5352,6 +5391,28 @@ BINARY_MUTATION_POLARITY = [
         'sudo bash -o pipefail -c "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"',
         True,
         "#12069 round-15: an option's VALUE may sit before `-c`",
+    ),
+    # ⛔ THE FALSE-RED DIRECTION (#12173 review round 29, measured). `last` is only
+    # ever a token containing a `/`, so a destination spelled WITHOUT one used to
+    # leave the reading on the pinned dir — the SOURCE — and refuse a plain READ.
+    # `origin/main` answers False for all three of these; the arm that closed the
+    # directory-replace hole refused them with the untrue `REPLACES a client
+    # binary`. Removing the trailing-operand check in `_is_last_path_token` reddens
+    # exactly these rows, which is what makes the repair attributable.
+    (
+        'sudo cp -a "$b/16/bin" snapshot',
+        False,
+        "#12173 round-29: a slash-less DESTINATION — this is a READ, not a replace",
+    ),
+    (
+        'sudo rsync -a "$b/16/bin/" "$RUNNER_TEMP"',
+        False,
+        "#12173 round-29: a variable destination with no `/` — the ordinary snapshot idiom",
+    ),
+    (
+        'sudo cp -a "$b/16/bin" backup',
+        False,
+        "#12173 round-29: a relative destination — copying OUT of the pinned dir",
     ),
 ]
 
