@@ -1583,10 +1583,10 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     # checked one (measured: editing this pin's own copy left all five tests green,
     # and a synthetic v3.35 release re-created the drift with the sibling
     # re-measured but this copy left at the old pair). EVERY bold pair is a claim,
-    # so every bold pair must equal the measured citing count — the historical
+    # and the rule below is the implemented one: a bold pair must be the measured
+    # citing count OR its complement, and any other pair is stale. The historical
     # `3 of 39` the sibling narrates passes only because it is NOT bold (measured:
-    # bolding it reds this pin, as does any other bold pair, so there is no
-    # tolerated exception to state).
+    # bolding it reds this pin, as does any third value).
     measured_pair = (len(citing), len(blocks))
     measured_none = len(blocks) - len(citing)
     # ⛔ BOTH measured values are accepted, because BOTH are TRUE statements about
@@ -1762,8 +1762,12 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     changes something else. (Re-measured at head
     ``7e6baffc5d`` with this module's own ``_block_bodies`` and ``_CITATION_RE``;
     the counts and versions stated here are that measurement, and they are stated
-    ONCE — the pin below refuses a duplicate, because a second copy is a copy
-    nothing checks. An earlier cut of this sentence said "3 of 39" and added that
+    ONCE — the pin below refuses a duplicate. (What that arm buys, precisely: a
+    second copy in BOLD is swept against the measurement and a second copy of a
+    PATTERNED sentence is refused by shape, while a PLAIN restatement — "Only 3 of
+    39 blocks cite a comment id." — is prose no pin reads, which is why the
+    patterned sentences are held to one copy each.) An earlier cut of this
+    sentence said "3 of 39" and added that
     v3.33 — the block that landed `D2 — A` for this very question — *cites none*:
     BOTH halves were wrong. That block is `docs/ONTOLOGY-CHANGELOG.md:148` (issue
     #11824) and it DOES cite, as the permalink ``#issuecomment-5619843002`` at
