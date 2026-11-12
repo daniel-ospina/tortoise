@@ -882,6 +882,141 @@ def test_a_neutral_operator_does_not_claim_lost_belief(sdk):
             f"{before[node_id]} -> {value}")
 
 
+def test_the_remaining_input_threshold_is_eps_one_not_two(sdk):
+    """EP skips the factor when FEWER THAN TWO inputs REMAIN — i.e. one left.
+
+    ``ep.py``: ``elif len(input_ids) < 2 <= len(full_inputs): degenerate``. The
+    detail said "two left is skipped as degenerate, more runs without it", which
+    reports the ordinary 3-input operator (1 stripped, 2 remaining) as skipped when
+    EP re-scores it on the survivors, and contradicts the sentence before it ("the
+    factor over its REMAINING inputs is then re-scored without it").
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    p2 = sdk.create_point("statement", "the gateway is audited")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"], p2["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    run = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert run.get("skipped_factors") in (None, []), (
+        "fixture drifted: two inputs still participate, so the factor RUNS — that "
+        f"is the fact the string must not contradict: {run.get('skipped_factors')}")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    detail = issues[0].detail
+    assert "ONE left is skipped as degenerate" in detail, detail
+    assert "two or more run without it" in detail, detail
+    assert "two left is skipped" not in detail, (
+        "two remaining inputs RUN — saying they are skipped sends the reader to a "
+        "degenerate record that does not exist: " + detail)
+
+
+def test_a_non_point_operator_is_not_an_operator_input(sdk):
+    """EP's operator arm requires the LABEL, so a flagged non-:Point builds nothing.
+
+    ``ep.py`` selects inputs through ``(o:Point)-[:IMPL|NAND]->(c)``, and the
+    direct-edge arm demands a non-operator on both endpoints — so a non-:Point node
+    carrying ``is_operator=true`` is in NEITHER arm and no factor exists. Reading the
+    flag alone took the operator arm, which told the reader to stamp an ``idx`` no
+    factor would ever read. Door-reachable: ``create_direct_edge`` then
+    ``update_entity(..., is_operator=True)``.
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    assert _q(sdk, "MATCH (a {id:$i}) RETURN labels(a), a.is_operator",
+              {"i": actor["id"]}) == [[["Subject"], True]], \
+        "fixture drifted: the subject is not operator-shaped"
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    assert sdk.compute_confidence(factors=[actor["id"]],
+                                 require_calibration=False)["confidences"] == {}, \
+        "fixture drifted: EP built a factor for a non-:Point operator"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    assert "EP builds NO factor" in issues[0].detail, issues[0].detail
+    assert "stamp one — idx 0 is the source slot" not in issues[0].fix, (
+        "no factor will read an idx here, and there is none to stamp: "
+        + issues[0].fix)
+
+
+def test_a_legacy_outdated_successor_is_terminal_too(sdk):
+    """EP's terminal test is the status vocab OR the legacy ``outdated`` flag.
+
+    ``update_entity(outdated=...)`` is refused on an Object (server-managed), so
+    only a raw/legacy write reaches the state — but ``is_terminal_status(status,
+    outdated)`` is True for it, so the ordinary "re-point and it works" arm left the
+    factor degenerate while a re-audit read CLEAN.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) SET o.outdated = true", {})
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) RETURN o.status, o.outdated",
+              {}) == [[None, True]], "fixture drifted"
+    from tortoise.live import is_terminal_status
+    assert is_terminal_status(None, True), "the shared predicate disagrees"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    assert "is ITSELF" in issues[0].detail, (
+        "an EP-dead successor took the ordinary arm: " + issues[0].detail)
+    assert "names NO successor, so there is no chain to follow" in issues[0].fix, \
+        issues[0].fix
+
+
+def test_an_idless_and_unnamed_object_says_unnamed(sdk):
+    """The id-less arm is about a node missing its key — it must not invent a name."""
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
+            "o.supersededBy = 'Gone' REMOVE o.id, o.name", {"i": v1["id"]})
+    assert _q(sdk, "MATCH (o:Object) WHERE o.status = 'superseded' "
+                   "RETURN o.id, o.name", {}) == [[None, None]], "fixture drifted"
+
+    issues = _issues(sdk, "superseded_object_active_edges")
+    assert issues
+    assert "'None'" not in issues[0].fix, issues[0].fix
+    assert "<unnamed>" in issues[0].fix, issues[0].fix
+
+
+def test_a_subject_only_next_hop_is_still_a_head(sdk):
+    """The next hop is probed as ``:Object`` only — a Subject there is a real node.
+
+    V1->V2->(Subject PolicyV3): the dangling arm concluded "the chain has no
+    resolvable head" and offered only "delete", for a state where a node EP accepts
+    as an input does carry that name.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_entity("subject", "PolicyV3")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) SET o.status = 'superseded', "
+            "o.supersededBy = 'PolicyV3'", {})
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV3'}) RETURN count(o)", {}) == [[0]]
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    fix = issues[0].fix
+    assert "if a Subject or Point carries that name" in fix, fix
+    assert "so the chain has no resolvable head" not in fix, (
+        "a Subject carries the name, so a head may well be resolvable: " + fix)
+
+
 def test_an_operator_shaped_successor_is_not_a_working_repair(sdk):
     """EP does not admit an ``is_operator=true`` node as a factor input (#9269).
 

@@ -730,6 +730,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "     head(collect(id(carrier))) AS carrier_id, "
         "     head(collect(carrier.status)) AS carrier_status, "
         "     head(collect(carrier.supersededBy)) AS carrier_sb, "
+        # EP's terminal test is ``status IN <vocab> OR outdated = true``
+        # (``live.is_terminal_status``), so a legacy-flagged successor is EP-dead
+        # with NO status at all — reading ``status`` alone put it on the ordinary
+        # arm, where the prescribed re-point leaves the factor degenerate and a
+        # re-audit reads CLEAN.
+        "     head(collect(coalesce(carrier.outdated, false))) AS carrier_outdated, "
         # ⛔ The carrier's OPERATOR-SHAPED flag, from the SAME group (no fourth
         # OPTIONAL MATCH, so ``count4b`` and SAMPLE_LIMIT are untouched). EP does
         # not admit an operator-shaped node as a factor input (#9269,
@@ -752,8 +758,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # live head.
         "AND id(nxt) <> id(sup) AND id(nxt) <> carrier_id\n"
         "WITH sup, r, active, carrier_count, carrier_id, carrier_status, "
-        "     carrier_sb, carrier_is_operator, count(nxt) AS next_count, "
-        "     head(collect(nxt.status)) AS next_status\n"
+        "     carrier_sb, carrier_is_operator, carrier_outdated, "
+        "     count(nxt) AS next_count, "
+        "     head(collect(nxt.status)) AS next_status, "
+        "     head(collect(coalesce(nxt.outdated, false))) AS next_outdated\n"
         # ``r.idx`` and the OPERATOR's ``direction`` are projected because the repair
         # differs in the idx-0 source slot (ep.py's ``source_stripped`` hazard),
         # ``op_type`` because EP's operator predicate is the flag OR ``op_type``
@@ -767,9 +775,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # (including none, where EP builds no factor at all).
         "RETURN DISTINCT sup.id, sup.name, sup.supersededBy, type(r), r.idx, "
         "coalesce(active.is_operator, false), active.op_type, active.direction, "
+        # ⛔ EP's operator arm ALSO requires the label (``(o:Point)-[:IMPL|NAND]->``),
+        # so a non-:Point node carrying ``is_operator=true`` is in NEITHER arm — the
+        # direct-edge arm demands a non-operator on both endpoints — and no factor
+        # exists for it. Without this column the row took the operator arm and
+        # prescribed an ``idx`` no factor would ever read (door-reachable:
+        # ``create_direct_edge('IMPL', actor, obj)`` then
+        # ``update_entity(actor, is_operator=True)``).
+        "labels(active), "
         f"{epistemic_identity('active')}, active.id, carrier_count, "
         "carrier_id, carrier_status, carrier_sb, carrier_is_operator, "
-        "next_count, next_status "
+        "carrier_outdated, next_count, next_status, next_outdated "
         f"LIMIT {SAMPLE_LIMIT}",
     )
 
@@ -786,18 +802,27 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         and a repair with no ``idx`` for an edge that is an operator input.
         """
         (sup_id, sup_name, sup_sb, edge_type, idx, is_op_flag, op_type,
-         direction, active_id, _active_nid, carrier_count, _carrier_id,
-         carrier_status, carrier_sb, carrier_is_operator, next_count,
-         next_status) = row
+         direction, active_labels, active_id, _active_nid, carrier_count,
+         _carrier_id, carrier_status, carrier_sb, carrier_is_operator,
+         carrier_outdated, next_count, next_status, next_outdated) = row
         return {
             "sup_id": sup_id, "sup_name": sup_name, "sup_sb": sup_sb,
             "edge_type": edge_type, "idx": idx,
-            "is_operator": bool(is_op_flag) or op_type is not None,
+            # ⛔ EP's predicate is the flag OR ``op_type`` AND the ``:Point`` label
+            # (its arms are ``(o:Point)-[:IMPL|NAND]->(c)`` and a non-operator check
+            # on both endpoints of a direct edge), so the label belongs here.
+            "is_operator": ("Point" in (active_labels or [])
+                            and (bool(is_op_flag) or op_type is not None)),
             "direction": direction, "active_id": active_id,
             "carrier_count": carrier_count, "carrier_status": carrier_status,
             "carrier_sb": carrier_sb,
-            "carrier_is_operator": bool(carrier_is_operator), "next_count": next_count,
-            "next_status": next_status,
+            "carrier_is_operator": bool(carrier_is_operator),
+            # ⛔ DERIVED through the shared predicate, not read off ``status``: EP's
+            # terminal test is the status vocabulary OR the legacy ``outdated`` flag.
+            "carrier_terminal": is_terminal_status(carrier_status,
+                                                   bool(carrier_outdated)),
+            "next_count": next_count, "next_status": next_status,
+            "next_terminal": is_terminal_status(next_status, bool(next_outdated)),
         }
 
     def _successor_note(s: dict) -> str:
@@ -843,7 +868,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             return (f"; the successor it names is '{DRAFT_STATUS}', which EP "
                     "strips like a terminal input (#780) — it needs promoting to "
                     "live as well, or the re-point leaves the factor degenerate")
-        if is_terminal_status(s["carrier_status"]):
+        if s["carrier_terminal"]:
             return ("; the successor it names is ITSELF "
                     f"{_quoted(s['carrier_status'])}, and it {_head_fact(s)}")
         return ""
@@ -870,14 +895,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "delete the edge")
         if not s["next_count"]:
             return (f"names, in its own supersededBy, {_quoted(s['carrier_sb'])} — "
-                    "which answers no OTHER Object either, so the chain has no "
-                    "resolvable head — re-point onto whatever now carries the claim, "
-                    "or delete the edge")
+                    "which answers no OTHER Object either; if a Subject or Point "
+                    "carries that name, re-point onto that node — otherwise the "
+                    "chain has no resolvable head, so re-point onto whatever now "
+                    "carries the claim or delete the edge")
         if s["next_count"] > 1:
             return (f"names {s['next_count']} Objects as its own successor — the "
                     "next hop is exactly the ambiguity this check refuses to "
                     "resolve, so name the LIVE head by ID")
-        if is_terminal_status(s["next_status"]):
+        if s["next_terminal"]:
             return (f"names the next link ({_quoted(s['carrier_sb'])}), which is "
                     f"{_quoted(s['next_status'])} too, so it is not a head either — "
                     "resolve that chain to a live Object before writing, and if it "
@@ -919,10 +945,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 detail += (
                     " — the Object lane moved no edges on supersession, so EP "
                     "strips that terminal input: the factor over its REMAINING "
-                    "inputs is then re-scored without it — two left is skipped as "
-                    "degenerate (#780/#2422), more runs without it, and an operator "
-                    "whose ONLY input this is has no factor to begin with, so "
-                    "nothing is lost. A DIRECTIONAL operator is skipped outright "
+                    "inputs is then re-scored without it — ONE left is skipped as "
+                    "degenerate (#780/#2422: ep.py's ``len(input_ids) < 2``), two "
+                    "or more run without it, and an operator whose ONLY input this "
+                    "is has no factor to begin with, so nothing is lost. A "
+                    "DIRECTIONAL operator is skipped outright "
                     "when the stripped input is its idx-0 source (source_stripped). "
                     "The successor inherits no belief from this edge unless it was "
                     "separately rewired into a slot EP reads (#11826)")
@@ -966,7 +993,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             return (f" ⛔ {succ} is '{DRAFT_STATUS}', which EP strips the same way "
                     "(#780): promote it to live as well, or the re-point leaves "
                     "the factor degenerate")
-        if not is_terminal_status(status):
+        if not s["carrier_terminal"]:
             return ""
         return (f" ⛔ {succ} is ITSELF {_quoted(status)} and it {_head_fact(s)}")
 
@@ -1002,7 +1029,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # disagree about it.
             return (
                 f"No id-keyed repair is possible for the superseded Object named "
-                f"{_quoted(s['sup_name'])} (it carries no id, so "
+                f"{_named(s['sup_name'])} (it carries no id, so "
                 "tortoise_update_entity cannot address it): give it one, then name "
                 f"the successor on it and re-point this {s['edge_type']} input onto "
                 "that successor, deleting the edge into the old endpoint. Archiving "
