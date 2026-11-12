@@ -514,14 +514,36 @@ class _Rows:
 
 
 class _FakeSeedHandle:
-    """Duck-typed seed handle: ``name`` -> the rows the graph would return."""
+    """Duck-typed seed handle: ``name`` -> the rows the graph would return.
+
+    #12120: the seed asks the FOLDED UNION (``name`` · ``canonical_name`` · the
+    folded spelling) through ``entity_identity._name_key_predicate``, so the
+    spelling arrives as ``n0``/``n1``… beside any ``name`` param. The fake
+    answers whichever spelling it actually holds rows for, and ``[]`` otherwise.
+
+    ⛔ It also ASSERTS the query is the union read (#12047 round-4 finding 4).
+    The earlier version of this docstring claimed that "``[]`` otherwise" proved
+    the probe had not fallen back to a raw read — it did not: the fake answered
+    ``merged["name"]`` too, so a hand-rolled ``MATCH (s:Subject {name: $name})``
+    was answered identically and every pin below passed under that revert
+    (measured). The assertion is the guard the comment claimed to be.
+    """
 
     def __init__(self, by_name):
         self._by_name = by_name
 
     def query(self, cypher, **params):
-        name = params.get("name") or (params.get("params") or {}).get("name")
-        return _Rows([[dict(p)] for p in self._by_name.get(name, [])])
+        # A raw keyed read must fail LOUDLY here: the union's first arm is always
+        # `$n0`, so its absence means this probe is not the writer's key space.
+        assert "$n0" in cypher, f"not the folded union read: {cypher}"
+        merged = dict(params.get("params") or {})
+        merged.update({k: v for k, v in params.items() if k != "params"})
+        candidates = [merged[f"n{i}"] for i in range(len(merged))
+                      if f"n{i}" in merged]
+        for cand in candidates:
+            if cand in self._by_name:
+                return _Rows([[dict(p)] for p in self._by_name[cand]])
+        return _Rows([])
 
 
 class TestFindSubjectByName:
@@ -900,41 +922,55 @@ _ALLOWED_KEYED = {
         'proj.g.query( "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) " "MERGE (p)-[:aboutObject]->(o)", params={"pid": pid, "name": name}, )': 1,
     },
     'tortoise/onboarding/state.py': {
-        # #10180's promote CARRY: does the TARGET graph already hold a Subject
-        # under this name (any id)? A COUNT-only existence probe guarding a
-        # name-keyed WRITE — `carry_onboards_edge` is about to MERGE a
-        # `(s:Subject {id:$sid})` that SETs `name`, so this must enumerate the
-        # key space the writer occupies (the same disposition, and the same
-        # reason, as `onboarding/seed.py`'s candidate enumeration below).
-        # ⛔ It cannot pick a carrier: it returns an aggregate COUNT, never a
-        # row, and the answer is used only to DECLINE the write
-        # (`not_in_target`) so a second same-name carrier is never minted —
-        # where `find_subject_by_name` would report two carriers as ambiguous
-        # and `_classify_anchor` would refuse. Routing it through
-        # `entity_identity.resolve_entity_id` would turn "decline" into a raise
-        # for the exact case this guard exists to handle. Owner: S3
-        # identity/resolver (a write key, migration-gated with the rest).
-        'res = _run(graph, "MATCH (s:Subject {name: $name}) RETURN count(s)", {"name": name})': 1,
+        # ⛔ NO ENTRY NEEDED (removed by #12120 finding 3). This used to be a
+        # raw `{name: $name}` probe — a keyed READ that enumerated a NARROWER key
+        # space than the write it guards, so a fold-colliding anchor name was
+        # classified "safe to create" and the write landed on the OTHER org's
+        # node (rewriting `org_id`). It now takes its arms from
+        # `entity_identity._name_key_predicate`, the one definition of the write's
+        # key space, so there is no narrower coordinate left to excuse.
     },
     'tortoise/onboarding/seed.py': {
-        # B: candidate enumeration that refuses — single holder or
-        # AmbiguousEntityName, and NO status filter ON PURPOSE: it guards a
-        # name-keyed WRITE, so it must enumerate the key space its writer
-        # MERGEs on (a terminal holder would otherwise be silently adopted).
-        'res = _run(handle, "MATCH (s:Subject {name: $name}) RETURN properties(s)", {"name": name})': 1,
+        # ⛔ NO ENTRY NEEDED (removed by #12120 finding 3). `find_subject_by_name`
+        # used to be a raw `{name: $name}` enumeration — a keyed READ over a
+        # narrower key space than `create_subject` merges on, which is exactly
+        # the class this sweep exists to find. It now takes its arms from
+        # `entity_identity._name_key_predicate` (the union: `name` ·
+        # `canonical_name` · `aliases`, raw and folded), so there is no narrower
+        # coordinate left to disposition. The refusal semantics are unchanged and
+        # still pinned: single holder -> its props, 2+ -> AmbiguousEntityName,
+        # NO status filter.
     },
     'tortoise/projection/edges.py': {
-        # #5509 A: `resolve_structural_target`'s name-keyed targets now read
-        # with `LIMIT 2` and refuse on >1 (`_refuse_ambiguous_target`), so the
+        # #5509 A: `resolve_structural_target`'s name-keyed targets read with
+        # `LIMIT 2` and refuse on >1 (`_refuse_ambiguous_target`), so the
         # remaining read is the holder probe itself, not a silent pick.
+        # #12120 finding 1: this is now the RESOLVE-ONLY arm and the refusal arm —
+        # when `mint` is requested, `_mint_subject_stub` answers with the node it
+        # ADDRESSED (over the folded union) and this read is not reached. It still
+        # refuses a spelling that its own key holds twice.
         'rows = g.query( "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 2", params={"name": key}).result_set': 1,
+        # #12120 finding 1: the READ-BACK of the stub `_mint_subject_stub` has just
+        # MERGE'd — it cannot name two carriers, because the mint is guarded by a
+        # folded-union holder probe that returns BEFORE this write when any live
+        # holder exists. It returns the identity of the node the call wrote (the
+        # caller wires by that internal id), and a 2-row answer here is REFUSED
+        # rather than picked. The minted stub is the last name-keyed WRITE in the
+        # tree, migration-gated (owner: S3 identity/resolver).
+        'rows = g.query( "MATCH (s:Subject {name:$name}) RETURN ID(s), s.id LIMIT 2", params={"name": name}).result_set': 1,
         # E: the cascade's Subject-stub FALLBACK anchor (#8398 P1-2). Reached
-        # only when no label matched by name — including no `:Subject` — so the
-        # mint above it creates the node this read then addresses. A write key,
+        # only when no label matched by name — including no `:Subject`, raw OR
+        # folded (`_resolve_subject_fold_target` runs first) — so the mint above
+        # it creates the node this read then addresses. A write key,
         # migration-gated (owner: S3 identity/resolver). Its predecessor, the
         # rel-ignoring `MERGE (n)-[:aboutSubject]->(s)` by name, is REMOVED with
         # `_try_about_edge`'s inline write, not left stale below.
-        'rows = self.g.query( "MATCH (s:Subject {name:$name}) RETURN ID(s) LIMIT 1", params={"name": link["resolve_key"]}).result_set': 1,
+        #
+        # ⛔ The `LIMIT 1` read that used to follow the mint at BOTH call sites is
+        # GONE (#12120 finding 1): `_mint_subject_stub` now returns the node it
+        # addressed, so no caller re-derives the target from the MENTION'S spelling
+        # (which a fold-only holder does not carry) and live no longer picks one of
+        # N carriers.
     },
     'tortoise/projection/entities.py': {
         # §B "Route" — lifecycle folds / participants fallback / edge anchors;
@@ -1032,20 +1068,11 @@ _ALLOWED_FSTRING = {
         # cascade label, and still owned by S3.
         'rows = self.g.query( f"MATCH (e:{label} {{name:$name}}) " "RETURN ID(e), coalesce(e.id, e.eventId, e.name)", params={"name": target_name}, ).result_set': 1,
     },
-    'tortoise/sdk.py': {
-        # #7925: `_entity_name_holders` — the bundle-local entity-ref probe the
-        # ingest endpoint guard runs to resolve the Subject/Object the writer
-        # will MERGE BY NAME (so the guard cannot fail open and leave a
-        # partially-mutated graph). READ-ONLY: it returns `n.id`, the shared
-        # `_terminal_expression` and `is_operator` — it mints, folds and
-        # re-keys nothing, so there is no fold to route through
-        # `entity_identity`; its whole purpose is to REFUSE an endpoint before
-        # any write. Enumerated here (not deleted) for the same #5509
-        # disposition sweep that owns the other name-keyed sites — #8866 landed
-        # the resolver routing for the rest, including `_create_entity`'s
-        # re-fetch (whose site is now id-keyed and no longer enumerated).
-        'rows = proj.g.query( f"MATCH (n:{label} {{name:$name}}) " f"RETURN n.id, {_terminal_expression(\'n\')} AS term, " f"coalesce(n.is_operator, false) AS op, n.status AS status", params={"name": name}, ).result_set': 1,
-    },
+    # `tortoise/sdk.py` no longer needs an entry here (#12047 review round 9):
+    # `_entity_name_holders`' raw-name f-string probe is GONE rather than
+    # excused — it now takes its holder set from the writer's own predicate
+    # (`entity_identity._live_holders_same_entity`), so the guard and the write
+    # cannot disagree about which entity a bundle-local ref will land on.
 }
 
 

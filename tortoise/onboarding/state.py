@@ -785,9 +785,26 @@ def _read_subject_anchor(graph: Any, subject_id: str) -> dict[str, Any] | None:
 
 
 def _subject_anchor_name_taken(graph: Any, name: str) -> bool:
-    """Does this graph already hold a Subject under ``name``? (Any id.)"""
-    res = _run(graph, "MATCH (s:Subject {name: $name}) RETURN count(s)",
-               {"name": name})
+    """Does this graph already hold a Subject under ``name``? (Any id, ANY status.)
+
+    ⛔ #12120 finding 3 (P2): this probe enumerated the raw ``name`` while
+    ``create_subject`` — the write the carry's identity guard fronts — resolves
+    the folded union. A fold-colliding anchor name was therefore classified
+    "safe to create", the write resolved onto the OTHER org's anchor, and the
+    ``refs`` rode the ON MATCH lane: ``org_id`` was rewritten in place (measured
+    ``org-1`` → ``org-2`` on a single node). A reader must enumerate the key
+    space its writer merges on, so the arms come from the ONE definition of
+    that space — ``onboarding.seed._name_key_space`` (itself over
+    ``entity_identity._name_key_predicate``), not a second copy of it.
+    """
+    from .seed import _name_key_space
+
+    where, params = _name_key_space(name)
+    if not where:
+        # A blank name holds nothing — and `WHERE ()` would raise, not answer.
+        return False
+    res = _run(graph, f"MATCH (s:Subject) WHERE {where} RETURN count(s)",
+               params)
     rows = res.result_set
     return bool(rows and rows[0] and rows[0][0])
 

@@ -1889,6 +1889,10 @@ class _EntityHandlers:
         # _persist_extra_props (it would then be read back by the
         # first-registration probe). Mirrors the Object set below.
         "_stub",
+        # #12047 review F-A: projection-owned, ON CREATE only (see the MERGE
+        # clause), exactly like `name` — this set is what keeps a caller prop off
+        # the `SET n += $extra` lane, which applies ON MATCH.
+        "canonical_name",
         "status",  # #1423: status is projection-owned — a SubjectAdded replay
         # must NOT rewrite it via _persist_extra_props (the clobber guard ported
         # from #1350's Object clause: a re-mention of a superseded team/role/
@@ -1900,6 +1904,7 @@ class _EntityHandlers:
         # of the extra-props persistence lane so a caller prop can never seed
         # the first-registration probe's exclusion.
         "_stub",
+        "canonical_name",  # #12047 review F-A: ON CREATE only (see _upsert_subject)
         "embedding", "status",  # #1350: status is projection-owned — an
         # ObjectRegistered replay must NOT rewrite it via _persist_extra_props
         # (the clobber guard: superseded stays superseded on re-mention).
@@ -4923,6 +4928,17 @@ class _EntityHandlers:
             # reads as LIVE by its documented legacy rule — so no read surface
             # changes meaning, and the fabricated claim is gone.
             "            s.status=$st, "
+            # #12047 review F-A: `canonical_name` is the FOLD of `name`, so it
+            # follows `name`'s discipline — written ON CREATE, never re-written
+            # by a later mention. It rode the extra-props lane (`SET s += $extra`,
+            # which applies ON MATCH), so a create that RESOLVED onto an existing
+            # entity — the merged-away spelling resolving to its survivor, the
+            # exact path `apply_entity_merge` promises — overwrote the survivor's
+            # own key with the alias's fold. The survivor was then unaddressable
+            # under its own name and the next create minted the duplicate this
+            # issue exists to remove. Only a RENAME moves it, explicitly, through
+            # `_update_entity` (which journals it).
+            "            s.canonical_name=$cn, "
             "            " + _set_emb + " "
             "ON MATCH SET s.id=coalesce($id, s.id), "
             # #7936: adoption CLEARS the event-stub discriminator the
@@ -4932,6 +4948,14 @@ class _EntityHandlers:
             # never writes `_stub`). A legacy random-ulid stub carries no
             # `_stub`, so this is a no-op there.
             "            s._stub=NULL, "
+            # #12047 round-4 finding 2: FILL an absent key on match, never
+            # overwrite one. ON CREATE alone left every pre-#12047 row without a
+            # fold forever — the rung stayed blind on exactly the population this
+            # issue measured, and the next variant spelling minted a twin. The
+            # `coalesce` shape is the one two lines below already uses for
+            # `title`/`createdAt`, and it cannot re-introduce F-A (whose defect was
+            # the UNCONDITIONAL overwrite).
+            "            s.canonical_name=coalesce(s.canonical_name, $cn), "
             "            s.subjectKind=coalesce($sk, s.subjectKind), "
             # #2295: ON MATCH createdAt ADOPTS only when absent
             # (coalesce(s.createdAt, $ca) — existing value wins): mirrors the
@@ -4950,6 +4974,7 @@ class _EntityHandlers:
                     # fabricated default here is the defect, not the fix.
                     "sk": ev.get("subject_kind"),
                     "ca": ev.get("createdAt"), "now": _now_iso(),
+                    "cn": ev.get("canonical_name"),  # #12047 F-A: ON CREATE only
                     "st": ev.get("status"),  # #1423: status ON CREATE only
                     "embedding": embedding},
         )
@@ -5046,17 +5071,24 @@ class _EntityHandlers:
             # the Subject clause above (``$st`` is the creation record's own
             # payload; NULL leaves the property absent, which reads LIVE).
             "            o.status=$st, "
+            # #12047 review F-A: the Object twin of the Subject clause above —
+            # ON CREATE only, so a re-mention cannot rewrite the key that
+            # resolved it.
+            "            o.canonical_name=$cn, "
             "            " + _set_emb + " "
             "ON MATCH SET o.id=coalesce($id, o.id), "
             # #7936: adoption CLEARS the event-stub discriminator the
             # first-registration probe excludes (see _upsert_subject).
             "            o._stub=NULL, "
+            # #12047 round-4 finding 2: the Object twin of the Subject fill.
+            "            o.canonical_name=coalesce(o.canonical_name, $cn), "
             "            o.objectKind=coalesce($ok, o.objectKind), "
             "            o.createdAt=coalesce(o.createdAt, $ca), "
             "            o.title=coalesce($title, o.title), "
             "            " + _set_emb,
             params={"key": merge_value, "id": oid, "name": name,
                     "ok": ok,
+                    "cn": ev.get("canonical_name"),  # #12047 F-A: ON CREATE only
                     "st": ev.get("status"),  # #1350: status ON CREATE only —
                     # ON MATCH never touches it (the clobber guard: a
                     # re-mention cannot reset superseded→live).
@@ -5992,11 +6024,35 @@ class _EntityHandlers:
             # `unregistered-reference` for a live-but-id-less carrier), which
             # fails the run.
             from tortoise.entity_identity import (
-                all_name_holder_ids,
-                live_name_holder_ids,
+                _live_holders_same_entity,
+                _name_holder_ids_same_entity,
             )
-            _held = all_name_holder_ids(self.g, "Object", name)
-            _live_holders = live_name_holder_ids(self.g, "Object", name)
+            # #12120 finding 1: the mention / non-exempt classification must be
+            # taken over the SAME key space `resolve_fold_name` resolves on (the
+            # writer's folded union) — otherwise a fold-only TERMINAL carrier
+            # read as "no holder at all", the miss was recorded NON-exempt, and
+            # `rebuild_all` failed a journal the union could have folded.
+            #
+            # ⛔ TWO reads, because they answer TWO different questions, and the
+            # pair must agree with the resolver `mention` describes:
+            #   * `_held` — "is this name REGISTERED at all" — UN-COLLAPSED and
+            #     ANY-status. Collapsing drops a terminal survivor reached
+            #     through a `resolved_from` hop, which would make a held name
+            #     read as unheld (#12120 V-GATE finding 1).
+            #   * `_live_holders` — "can this name resolve to a LIVE entity" —
+            #     COLLAPSED, because that is exactly what `resolve_fold_name`
+            #     does. Judging it on raw nodes contradicts the resolver: a
+            #     merged-away carrier stays live while its survivor is retired,
+            #     so the raw read said "a live holder exists, fail" for a name
+            #     the resolver could not resolve to any live entity — recording
+            #     a NON-exempt miss and making the SDK's own journal
+            #     un-rebuildable (#12120 review round 1, P2). `mention=True` is
+            #     the bounded no-op for "registered, but no live incarnation may
+            #     be resurrected" (R5), and this shape is that case.
+            _held = _name_holder_ids_same_entity(
+                self.g, "Object", name, any_status=True)
+            _live_holders = _live_holders_same_entity(
+                self.g, "Object", name)[0]
             object_id = resolve_fold_name(
                 self.g, "Object", name, context="status fold object",
                 mention=bool(_held) and not _live_holders)

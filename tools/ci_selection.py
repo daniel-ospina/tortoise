@@ -3183,6 +3183,30 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # Pinned by tests/test_ci_selection.py::
              # test_problem_map_guard_runs_on_the_diffs_it_guards.
              "tools/problem_map_check.py",
+             # #2852 review F1: the findings ledger's drift guard has the SAME two
+             # arms and the same hole as its #5086/#2820 siblings. The row that
+             # registers `tests/test_findings_ledger_2852.py` was `core` ONLY, and
+             # a `core` row is classification, not selection: `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry with no SOURCE_PATTERNS match, so a
+             # `tools/findings_ledger_check.py`-only diff came back `changed == []`
+             # and took the docs-only early return, which emits tier-1 only.
+             # MEASURED before this entry (`select()` in-process, at the PR head):
+             # `select(["tools/findings_ledger_check.py"])` -> surfaces=[], 87 test
+             # files, the guard's pin ABSENT — the shape this entry closed.
+             # ⚠️ RE-MEASURED after the `tier1` row this same PR adds, because the
+             # entry is no longer the LIVENESS mechanism and an earlier revision of
+             # this comment said it was: without the entry -> surfaces=[], 89 files,
+             # pin PRESENT (`tier1` selects it); with the entry -> surfaces=['core'],
+             # 819 files. Both counts move with `main`; re-derive them with the
+             # `select()` one-liner rather than carrying them. The entry's job is WIDTH — a `tools/`-only diff runs the
+             # core surface rather than tier-1 smoke. The DOC half
+             # (`docs/architecture/MEMORY-SUBSTRATE-FINDINGS-LEDGER.md`) stays
+             # unclaimed here for the sibling reason (a docs-only diff must stay on
+             # the tier-1 path, which is why the file is dual-registered in
+             # config/ci-surfaces.yml's `tier1` block).
+             # Pinned by tests/test_findings_ledger_2852.py::
+             # test_test_file_is_selected_on_the_diffs_it_guards.
+             "tools/findings_ledger_check.py",
              # #10131 review P1: tools/ci_catch_history.py owns
              # tests/test_ci_catch_history.py — registered `core` (the registration this
              # PR adds) — but `tools/` is a flat NON_PYTHON_PREFIXES entry and no
@@ -5960,7 +5984,7 @@ def fast_matrix_include(shards: list[dict], routing: str | None = None) -> dict:
         # runner classes, which is the failure measured 2026-10-27..30: run
         # `40986603502` (head `5a2ae6aa1`) had `test (i)`, the canary, taken by
         # `pi-runner-vm-5` (ARM64) and killed at 32m12s of a 30m budget
-        # (`docs/ops/ci-runner-x64.md:847`, `:888`).
+        # (`docs/ops/ci-runner-x64.md:857`, `:898`).
         # A fold gets priority on the nine legs that carry the wall (the fast
         # matrix's 10 shards minus the canary_producer row); the producer
         # stays where the streak expects it. `warn=(i == 0)` keeps ONE annotation for
