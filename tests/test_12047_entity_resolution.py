@@ -4252,3 +4252,195 @@ class TestThe12120ReviewRound15:
                 f"resolved (the carrier's), not a duplicate's: {row}")
         finally:
             sdk.close()
+
+
+class TestThe12120ReviewRound16:
+    """Round 16 (this lane): the duplicate-id guard must REFUSE, never disarm.
+
+    Round 14 added ``_id_claimant_count`` to ``_entity_key_of`` and answered the
+    corruption case with ``None``. But ``None`` is not a refusal at the two sites
+    that consume the key — it is a value that no candidate key can equal
+    (``all_candidates_are_target`` can never fire) and that every key differs
+    from (so the merged-carrier exclusion stops excluding and the target's own
+    entity group is offered as a successor). The two entity-level questions that
+    exist to REFUSE silently passed, and the fold — which addresses the id, not
+    the node — stamped every node claiming that id, including one that is not the
+    record's target at all.
+
+    ``TestThe12120ReviewRound15`` (above) is the peer lane's round at the same
+    head and owns that round number; this class is the delta that closed the P1.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r16",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_a_duplicate_id_target_refuses_instead_of_stamping_every_claimant(
+            self, sdk_factory):
+        """The P1: `None` disarmed the self-supersession guard.
+
+        `S` is the successor, `T`/`Target` is a merged carrier of `S`'s entity,
+        and `D`/`Other` is an UNRELATED node that merely claims the same id (raw
+        corruption). The ref `Target` resolves unambiguously by NAME to one node,
+        so the ref-side duplicate-id probes never fire — and the entity question
+        about its id cannot be answered. Measured pre-fix: `applied=1, skips=[]`
+        with BOTH claimants stamped `superseded → Survivor`; the same graph
+        refused at the previous head.
+        """
+        from tortoise.entity_identity import (
+            clear_non_folded_entries,
+            non_folded_entries,
+        )
+
+        order_survivor = (
+            "CREATE (s:Object {id:'ent-r16-s', name:'Survivor', "
+            "objectKind:'document', status:'live', canonical_name:'survivor'})")
+        order_target = (
+            "CREATE (t:Object {id:'ent-r16-t', name:'Target', "
+            "objectKind:'document', status:'live', canonical_name:'target', "
+            "resolved_from:'ent-r16-s'})")
+        order_other = (
+            "CREATE (d:Object {id:'ent-r16-t', name:'Other', "
+            "objectKind:'document', status:'live', canonical_name:'other'})")
+        for order in ((order_survivor, order_target, order_other),
+                      (order_survivor, order_other, order_target)):
+            sdk = sdk_factory()
+            try:
+                g = sdk._get_proj().g
+                for stmt in order:
+                    g.query(stmt)
+                clear_non_folded_entries()
+                applied, skips, msgs = self._apply(sdk, [
+                    {"superseded": "Target", "supersedes_by": "Survivor",
+                     "evidence": "test"}])
+                assert applied == 0, (
+                    "the fold stamped a duplicate-id target's every claimant "
+                    f"instead of refusing ({order[1][:48]!r}): {msgs}")
+                assert any("ambiguous object id" in str(s.get("reason") or "")
+                           for s in skips), skips
+                # The DURABLE record must name what the refusal COUNTED: both
+                # claimants, not one carrier for a two-claimant refusal.
+                entries = [e for e in non_folded_entries()
+                           if e.shape == "duplicate-id"]
+                assert entries, (
+                    "the refusal recorded no non-folded entry — the durable "
+                    "channel is the record (#9876), the warning is only "
+                    "operator visibility")
+                assert entries[0].candidate_ids == ("ent-r16-t", "ent-r16-t"), (
+                    "the entry understates the claimant set it counted: "
+                    f"{entries[0]!r}")
+                rows = g.query(
+                    "MATCH (o:Object) WHERE o.id = 'ent-r16-t' "
+                    "RETURN o.name, o.status, o.supersededBy").result_set
+                assert len(rows) == 2, rows
+                for name, status, sb in rows:
+                    assert (status or "") == "live", (
+                        f"{name!r} was stamped {status!r} by a fold that "
+                        f"should have refused: {rows}")
+                    assert not sb, (
+                        f"{name!r} was pointed at a successor it never had: "
+                        f"{rows}")
+                surv = g.query(
+                    "MATCH (o:Object {id:'ent-r16-s'}) RETURN o.status"
+                ).result_set
+                assert surv and surv[0][0] == "live", surv
+            finally:
+                sdk.close()
+
+    def test_an_idempotent_re_ingest_on_a_corrupt_graph_stays_silent(
+            self, sdk_factory):
+        """The refusal must not pre-empt keep-first (review round 16).
+
+        A target that is ALREADY folded is an idempotent dedup: no write is
+        being made, so the duplicate-id refusal has nothing to refuse. Placed
+        above the terminal arm it would turn every retry of an unchanged
+        conversation on a corrupt graph into a reported refusal (and burn the
+        caller's warning budget), while the Subject twin stayed silent for the
+        same shape — the two families disagreeing on a rule one of them states in
+        prose. Both lanes now answer: `applied=0, skips=[]`.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (s:Object {id:'ent-r16-s', name:'Survivor', "
+                "objectKind:'document', status:'live'}) "
+                "CREATE (t:Object {id:'ent-r16-t', name:'Target', "
+                "objectKind:'document', status:'live'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Target", "supersedes_by": "Survivor",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            # A second node now claims the FOLDED target's id — the corruption
+            # the round-15 refusal exists for, on a target that is already
+            # terminal.
+            g.query("CREATE (d:Object {id:'ent-r16-t', name:'Other', "
+                    "objectKind:'document', status:'live'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Target", "supersedes_by": "Survivor",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips == [], (
+                "an idempotent re-ingest of an already-folded target was "
+                f"reported as a refusal: {skips} (warnings: {msgs})")
+            assert msgs == [], (
+                f"the dedup emitted warnings: {msgs}")
+            folded = g.query(
+                "MATCH (o:Object {id:'ent-r16-t'}) "
+                "WHERE o.status = 'superseded' RETURN o.supersededBy"
+            ).result_set
+            assert folded and folded[0][0] == "Survivor", folded
+        finally:
+            sdk.close()
+
+    def test_a_duplicate_id_subject_target_refuses(self, sdk_factory):
+        """The Subject twin: same disarm, and the Subject write is not CAS-gated."""
+        from tortoise.entity_identity import (
+            clear_non_folded_entries,
+            non_folded_entries,
+        )
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (s:Subject {id:'ent-r16-ns', name:'Survivor Team', "
+                "subjectKind:'organization', status:'live'}) "
+                "CREATE (t:Subject {id:'ent-r16-nt', name:'Target Team', "
+                "subjectKind:'organization', status:'live', "
+                "resolved_from:'ent-r16-ns'}) "
+                "CREATE (d:Subject {id:'ent-r16-nt', name:'Other Team', "
+                "subjectKind:'organization', status:'live'})")
+            clear_non_folded_entries()
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Target Team", "supersedes_by": "Survivor Team",
+                 "evidence": "test"}])
+            assert applied == 0, (
+                "a duplicate-id Subject target was folded instead of refused: "
+                f"{msgs}")
+            assert any("ambiguous subject id" in str(s.get("reason") or "")
+                       for s in skips), skips
+            entries = [e for e in non_folded_entries()
+                       if e.shape == "duplicate-id"]
+            assert entries and entries[0].candidate_ids == (
+                "ent-r16-nt", "ent-r16-nt"), (
+                f"the durable entry does not name the two claimants: {entries}")
+            rows = g.query(
+                "MATCH (s:Subject) WHERE s.id = 'ent-r16-nt' "
+                "RETURN s.name, s.status, s.supersededBy").result_set
+            assert len(rows) == 2, rows
+            for name, status, sb in rows:
+                assert (status or "") == "live", (
+                    f"{name!r} was stamped {status!r} by a fold that should "
+                    f"have refused: {rows}")
+                assert not sb, f"{name!r} was pointed at a successor: {rows}"
+        finally:
+            sdk.close()

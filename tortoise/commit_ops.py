@@ -1131,25 +1131,47 @@ def _id_claimant_count(g, label: str, node_id: str) -> int:
         str(node_id), 0)
 
 
-def _entity_key_of(g, label: str, node_id) -> str | None:
-    """The ENTITY a node belongs to: its survivor's id, or its own.
+def _entity_key_of(g, label: str, node_id) -> tuple[str | None, str | None, tuple[str, ...]]:
+    """The ENTITY a node belongs to: its survivor's id, or its own — plus the
+    REFUSAL that makes the question unanswerable, and what the refusal counted.
 
     The same rule ``_entity_rows`` groups by, for the one node it does not hand
     back a group for — the supersession TARGET, which is resolved by its own
     probe and compared against successor candidates at entity level.
+
+    Returns ``(key, None, ())`` when the question is answerable, and
+    ``(None, reason, claimants)`` when it is NOT: the id has more than one
+    claimant, which is corruption, not two incarnations. The claimant guard is
+    the one `_entity_rows` applies (review round 14) — ``follow_resolved_from``
+    reads ONE node for an id, so a second claimant makes the target's ENTITY, and
+    every question compared against it, depend on which claimant the backend
+    happened to bind (#2164 P2-2).
+
+    ``claimants`` is what the refusal COUNTED, one entry per claiming NODE — the
+    same id repeated when the corruption is a duplicated id (the shape the
+    ref-side duplicate-id refusals record at ``len(by_id) > 1``), so the durable
+    ``record_non_folded`` entry names the evidence rather than a single carrier
+    for a two-claimant refusal (#9876/#12203 review round 16).
+
+    ⛔ The refusal is the SECOND RETURN VALUE, never a ``None`` key
+    (review round 15). ``None`` does not refuse anything at the two sites that
+    consume this: no candidate key can ever equal it, so the self-supersession
+    guard stops firing, and every candidate key differs from it, so the
+    merged-carrier exclusion stops excluding — the target's OWN entity group is
+    offered as a successor candidate — and the fold stamps EVERY node claiming
+    that id, including one that is not the record's target. Measured pre-fix:
+    ``applied=1, skipped=[]``, silently. A caller MUST refuse when the reason is
+    non-empty, before any key comparison.
+
+    ``(None, None, ())`` is the id-less case: no key and no refusal — both
+    callers refuse an id-less target earlier, and it is not an ambiguity.
     """
     if not node_id:
-        return None
-    # ⛔ The claimant guard `_entity_rows` applies (review round 14):
-    # `follow_resolved_from` reads ONE node for an id, so a second claimant makes
-    # the target's ENTITY — and every question compared against it
-    # (`all_candidates_are_target`, the `key != _target_key` exclusion) — depend
-    # on which of them the backend happened to bind (#2164 P2-2). The ref probes
-    # refuse a duplicated id before this point; this keeps the rule true even if
-    # one of them is ever reordered.
-    if _id_claimant_count(g, label, str(node_id)) > 1:
-        return None
-    return str(follow_resolved_from(g, label, str(node_id)) or node_id)
+        return None, None, ()
+    claimants = _id_claimant_count(g, label, str(node_id))
+    if claimants > 1:
+        return None, f"ambiguous {label.lower()} id", (str(node_id),) * claimants
+    return str(follow_resolved_from(g, label, str(node_id)) or node_id), None, ()
 
 
 _SUCCESSOR_PROJECTION = "n.id, n.name, n.status"
@@ -1222,7 +1244,11 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
       a re-fold (the Object lane's ``_RECALL_OBJECT_EXCLUDED_STATUS`` check).
     * **never-guess** — an id-form ref must match exactly one Subject; a
       name-form ref must match exactly one carrier. Two id-claimants or two
-      name-carriers are ambiguous and are refused with a warning.
+      name-carriers are ambiguous and are refused with a warning. The TARGET's
+      own id is asked the same question: a name-form ref that resolves to ONE
+      node whose ``id`` is claimed by two is corruption too, and it is refused
+      (``"ambiguous subject id"``) rather than compared against a key
+      ``_entity_key_of`` could not resolve.
     * **visible distinct successor** — the successor must carry an id, differ
       from the target, and not itself be terminal; otherwise folding would
       bury the target with no successor a recall surface can show.
@@ -1368,7 +1394,27 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
     # Object twin's split, and for the same reason (a retired survivor beside a
     # live carrier authorizes the fold, because that carrier is what
     # recall_state shows). The (id, name) pairs are the CARRIERS' spellings.
-    _target_key = _entity_key_of(proj.g, "Subject", target_id)
+    _target_key, _target_refusal, _target_claimants = _entity_key_of(
+        proj.g, "Subject", target_id)
+    if _target_refusal:
+        # ⛔ REFUSE, never compare against a key that was never resolved
+        # (review round 15): two nodes claiming one id is corruption, and the
+        # entity-level questions below answer "the successor is distinct" for
+        # every candidate when the key is ``None`` — the fold would then stamp
+        # both claimants, including one that is not this record's target.
+        # Ordering is deliberate: this sits where the key used to be computed,
+        # AFTER the keep-first arm above. Keep-first never WRITES (it dedups or
+        # refuses), so nothing corrupt can be folded before the refusal — and
+        # moving it above keep-first would turn every idempotent re-ingest on a
+        # corrupt graph into a new reported refusal (the Object twin's placement
+        # is the same, review round 16).
+        record_non_folded("Subject", ref, _target_claimants,
+                          shape="duplicate-id")
+        warn(f"subject supersession {ref!r} resolves to an id "
+             f"{target_id!r} claimed by more than one Subject — skipped "
+             f"(never-guess)")
+        _skip(ref, supersedes_by, _target_refusal)
+        return False
     _visible_successors = [
         (mid, mname)
         for _rep, key, members in sb_entities
@@ -2050,10 +2096,19 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # correctly forces all() to False.
         # The target's ENTITY, for the two entity-level questions below and the
         # node-level one in the visible-successor gate (#12120 review round 8).
-        _target_key = _entity_key_of(proj.g, "Object", real_obj_id)
-        all_candidates_are_target = bool(sb_entities) and all(
-            real_obj_id is not None and key == _target_key
-            for _rep, key, _members in sb_entities)
+        # ⛔ The refusal is NOT consumed here (review round 16): with a ``None``
+        # key the self-supersession scan below can never fire (`key == None` is
+        # never true), so the scan decides nothing about an unresolved key — and
+        # refusing HERE would pre-empt the terminal keep-first arm, turning every
+        # idempotent re-ingest on a corrupt graph into a new reported refusal
+        # (the Subject twin's placement, and its reasoning, are identical).
+        # `not _target_refusal` keeps that explicit rather than incidental.
+        _target_key, _target_refusal, _target_claimants = _entity_key_of(
+            proj.g, "Object", real_obj_id)
+        all_candidates_are_target = (
+            bool(sb_entities) and not _target_refusal
+            and all(real_obj_id is not None and key == _target_key
+                    for _rep, key, _members in sb_entities))
         if all_candidates_are_target:
             warn(f"supersession record skipped (self-supersession via "
                  f"id/name aliasing): {record!r} resolves both sides to "
@@ -2172,6 +2227,23 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # The collected (id, name) pairs stay the CARRIERS' own spellings — the
         # fold records one of them (`_one_successor_spelling`), and the survivor's
         # row is the MERGE's spelling, not necessarily a live successor's.
+        # ⛔ REFUSE an unresolvable target key HERE, before the comparison below
+        # (review rounds 15-16). With a ``None`` key every candidate passes
+        # `key != _target_key`, so the merged-carrier exclusion stops excluding —
+        # the target's own entity group is offered as a successor candidate — and
+        # the fold stamps EVERY node claiming that id, including one that is not
+        # the record's target. The placement is deliberate: after the terminal
+        # keep-first arm, which never writes (it dedups or refuses), so nothing
+        # corrupt can be folded before the refusal and an idempotent re-ingest on
+        # a corrupt graph stays the silent dedup it is (the Subject twin's rule).
+        if _target_refusal:
+            record_non_folded("Object", ref, _target_claimants,
+                              shape="duplicate-id")
+            warn(f"supersession ref {ref!r} resolves to an id "
+                 f"{real_obj_id!r} claimed by more than one Object — skipped "
+                 f"(never-guess)")
+            _skip(ref, supersedes_by, _target_refusal)
+            continue
         _visible_successors = [
             (mid, mname)
             for _rep, key, members in sb_entities
