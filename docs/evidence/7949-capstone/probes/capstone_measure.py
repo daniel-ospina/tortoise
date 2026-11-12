@@ -2978,47 +2978,228 @@ def _a3_chain_join(projection) -> dict:
     }
 
 
-def _a4_pointkind(projection) -> dict:
-    """`A4`'s `pointKind` histogram over CLAIMS, split typed / `statement` / `NULL`.
+#: A4's three layers, in the order the row reports them (#10988). The KIND PROPERTY is
+#: per-layer by design: `pointKind` / `objectKind` / `eventKind` are three vocabularies, and
+#: judging a `:Object` against the point set is how a layer gets reported as labelled by the
+#: wrong vocabulary (the legacies overlap — `plan`/`goal`/`strategy`/`target` sit in BOTH the
+#: point and object sets, ONTOLOGY §5 #7813; `meeting` is an Event kind the flat registry also
+#: accepts on the point bucket).
+A4_LAYERS: tuple[tuple[str, str, str], ...] = (
+    ("claims", "Point", "pointKind"),
+    ("things", "Object", "objectKind"),
+    ("events", "Event", "eventKind"),
+)
 
-    ⛔ `NULL` is a THIRD reported state, never folded into `statement`: 19% of the owner's
-    population carried no `pointKind` at all, and folding it in reports a typing win nobody made.
+#: The layer whose kinds are compared case-insensitively. ONTOLOGY §5's object vocabulary
+#: deliberately mixes cases (`Project`, `WorkItem`, `Problem`, `tag`) and the write path stores
+#: what the caller passed, so an exact-case compare would report the documented spelling in
+#: different capitalisation as UNDECLARED — a false failing run. Same rule as
+#: `tools/ax_write_eval.py::canonical_object_kinds`.
+_A4_CASEFOLDED_LAYERS = frozenset({"things"})
 
-    ⛔ Two further folds that would have manufactured that same win (#10982 review, finding 4):
-    a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
-    with no kind — `tortoise/projection/__init__.py:13804-13806`, `# Ensure pointKind is present
-    (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
-    `projection/entities.py:2945`, which leaves the property ABSENT instead) is ABSENT, not typed;
-    and **capture rows** are
-    not claims — turn rows carry `pointKind='event'`: the row dict is written with `"k": "event"`
-    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2553`)
-    inside `_write_capture_turns` — and 159 of
-    the committed run's 354 Points are turn rows (`capstone-measured-9152448d.log:73`), so counting
-    them read ~45% "typed" against the owner's 0.6% ceiling. The excluded populations are COUNTED
-    and reported, never silently dropped.
+
+def _a4_declared_kinds(kind_prop: str) -> frozenset[str]:
+    """The DECLARED vocabulary for one layer, imported from the product.
+
+    ⛔ Imported, never re-spelled: `domain_loader.known_kinds(bucket)` is §5's core set for that
+    bucket plus every LOADED pack's declarations for that bucket — and, for `pointKind` ONLY, the
+    product's legacy `register_kind` registry (minus the names an owner ruling moved); ⛔ the
+    legacy leg contributes NOTHING to the thing/event buckets. A hardcoded list would drift in one
+    direction (blessing kinds nothing declares) or the other (reporting a pack-following write as
+    an invention) — the same defect `tools/ax_write_eval.py` documents for its own vocabulary.
+    ⛔ It is NOT "the predicate the write validator runs" for every bucket: `hosted_api.py::valid_kind`
+    runs `known_kinds("pointKind")` only (a point request-model validator — ⛔ qualified by FILE,
+    because `selfhost_api.py::valid_kind` is a same-named validator over `known_kinds()` with no
+    bucket: the FLAT legacy registry, NOT the union of the buckets — measured, it refuses a
+    bucket-only kind such as `Project` or `AgentSession`), the event layer's write
+    gate is the commit door's `compile_vocab().event_kinds` (exact, per-graph —
+    `tortoise/commit_schema.py`), and `entities[].kind` has **no vocabulary membership test**
+    (#5202) — the door's `#5475` leg refuses only an unapproved pack NAMESPACE, pre-write, and
+    a family-fallback repair spelling is dropped rather than written (`writable_kind`). So
+    importing the catalog answers "what is declared", not by itself what every door would
+    refuse (#11837 P2), and the doc that cites this function (`A4-PER-LAYER.md` §2) draws the
+    same point/event split, so the two must not disagree.
     """
-    # ⛔ TRUTHINESS, not `IS NULL`: `create_point(is_episodic=False)` really writes the property
-    # (`projection/entities.py:3083`), so an explicit `false` is a CLAIM — `IS NULL` dropped it
-    # from the denominator while the capture count reported it as a turn row it is not. The same
-    # predicate the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1133`,
-    # which tests `is_episodic` ALONE and would count an operator Point as a claim (#10982 review
-    # round 2).
+    # ⛔ THE PRODUCT'S OWN REGISTRY IS BUILT AT IMPORT TIME, and importing only
+    # `domain_loader` misses half of it: `tortoise.sdk` itself calls
+    # `domain_loader.register_kind` for `option`/`evidence`/`criterion` (and the same
+    # family supplies `diary`), so a census that skipped the import reported THREE of
+    # the fleet's six declared typed kinds as inventions — measured on the live graph
+    # 2026-11-11: without the import `evidence` 121, `option` 2 and `diary` 2 read
+    # UNDECLARED, with it declared (`decision`/`jobToBeDone`/`useCase` are `_BASE_KINDS`,
+    # so they never moved). `finding`'s undeclared reading is a true gap, not this (#11837 P3-7).
+    import tortoise.sdk  # noqa: F401  — its module-level `register_kind` calls ARE the vocabulary
+    from tortoise.domain_loader import known_kinds
+
+    return frozenset(known_kinds(kind_prop))
+
+
+def _a4_counts(rows) -> dict[str, int]:
+    """Fold one `(kind, n)` histogram into `{kind_as_written_or_'NULL': n}`.
+
+    `NULL` (the Cypher null) and the EMPTY STRING are ONE state here — the ABSENT label. A blank
+    kind is what the #548 rebuild SNAPSHOT synthesis writes for an operator with no kind, and
+    counting it as typed is the fold `_a4_pointkind` was reviewed for. The fold ACCUMULATES instead
+    of assigning, so a real `NULL` row and a `''` row add up rather than overwrite each other.
+    """
+    counts: dict[str, int] = {}
+    for row in rows or ():
+        key = "" if row[0] is None else str(row[0])
+        key = "NULL" if key.strip() == "" or key == "NULL" else key
+        counts[key] = counts.get(key, 0) + int(row[1] or 0)
+    return counts
+
+
+def label_coverage(counts: dict[str, int], declared: frozenset[str],
+                   *, layer: str,
+                   expected: frozenset[str] | None = None) -> dict:
+    """One layer's label coverage from its kind histogram — PURE, offline, CI-testable.
+
+    This is the CI contract half of A4 (#10988): the Tier-E run cannot gate a merge, so the
+    SHAPE the tier-E consumer reads is pinned here, mechanically, on a histogram.
+
+    Four facts, and each answers a listed A4 failure mode (plan §2 W2c):
+
+    * `population` / `labelled` / `unlabelled` — a **thing or event left unlabelled** is the row's
+      concrete failing leg. `labelled` counts a kind that the DECLARED vocabulary for THIS layer
+      knows; an undeclared kind is a label the ontology does not declare for the layer, which is
+      why it is reported separately and NOT counted as coverage.
+    * `declared_present` / `declared_absent` — **a declared kind absent** is the other failing leg.
+      ⛔ The census reports the WHOLE absence list and does not decide which of them *should* have
+      appeared: that is a corpus fact, not a graph fact, and a census that assumed it would red every
+      graph for the ~30 kinds it never writes. `expected` is that corpus fact as an INPUT — the
+      caller's declared expectation set (a shape declaration, the `sh:targetClass` + `minCount`
+      analogue), and `expected_absent` carries the kinds it names that the graph does NOT show.
+      When `expected` is `None` the absence list is still reported and `expected_absent` is
+      `UNMEASURED(...)`, so a caller can tell "nothing was expected of this layer" from "everything
+      expected of it was present".
+    * `coverage` — **reported, never chased**. `None` at a ZERO POPULATION, because 100 % of 0 is
+      not coverage. ⛔ That is the POPULATION arm (`n > 0`), NOT A4's non-vacuity floor: the floor
+      is `a4_labelled_nodes: 1`, read off the THING/EVENT layers' `non_vacuity` — never `claims`.
+    * `undeclared` — kinds present that THIS layer's vocabulary does not declare (the `#9695`
+      distinction — "a kind nothing declares" vs "a kind this layer does not declare" — is the
+      vocabulary's own answer, and `declared_present`/`declared_absent` carry the other side of
+      it; there is deliberately NO third bucket here, because nothing consumes one).
+    """
+    folded = layer in _A4_CASEFOLDED_LAYERS
+    seen: dict[str, int] = {}
+    unlabelled = 0
+    for kind, n in counts.items():
+        # ⛔ `NULL` AND the blank string are the ONE absent state. `_a4_counts` already folds them,
+        # and the fold is repeated here because this function's contract is a HISTOGRAM — a caller
+        # handing it raw rows (a test, a future instrument) must not get a blank kind counted as a
+        # label, which is the fold the row was reviewed for.
+        if kind == "NULL" or not kind.strip():
+            unlabelled += int(n)
+            continue
+        seen[kind] = seen.get(kind, 0) + int(n)
+    declared_cmp = {k.casefold() for k in declared} if folded else set(declared)
+
+    def _cmp(kind: str) -> str:
+        return kind.casefold() if folded else kind
+
+    declared_present = sorted(k for k in seen if _cmp(k) in declared_cmp)
+    undeclared = sorted(k for k in seen if _cmp(k) not in declared_cmp)
+    population = sum(seen.values()) + unlabelled
+    labelled = sum(seen[k] for k in declared_present)
+    undeclared_total = sum(seen[k] for k in undeclared)
+    return {
+        "layer": layer,
+        "population": population,
+        "labelled": labelled,
+        # ⛔ Every present kind is counted somewhere: a kind the layer's vocabulary does not
+        # declare is CARRIED (`undeclared`), never dropped out of the denominator.
+        "unlabelled": unlabelled + undeclared_total,
+        # ⛔ The ABSENT share, reported as ITS OWN number (`unlabelled = unlabelled_null +
+        # unlabelled_undeclared`, exactly). A share quoted without its `NULL` denominator is not a
+        # measurement this epic accepts (plan §7 E2E-8), so the decomposition is emitted rather than
+        # left for a reader to derive — a derived denominator is one a reader can get wrong.
+        "unlabelled_null": unlabelled,
+        "unlabelled_undeclared": undeclared_total,
+        # ⛔ Both histograms are PINNED by INVARIANT, not by key-presence
+        # (`tests/test_10988_a4_label_coverage.py`): emptying either to `{}` left the whole pin set
+        # green, and `labelled_by_declared_kind={}` beside `labelled=3` on the rendered line is a
+        # self-contradicting artifact no test caught (#11837 review round 12, P2).
+        "labelled_by_declared_kind": {k: seen[k] for k in declared_present},
+        "undeclared": {k: seen[k] for k in undeclared},
+        "by_kind": dict(sorted(seen.items())),
+        "declared_present": declared_present,
+        "declared_absent": sorted(
+            k for k in declared if _cmp(k) not in {_cmp(x) for x in seen}),
+        # ⛔ `expected` is an INPUT (a corpus declaration): its ZERO-population kinds are the
+        # "a declared kind absent" leg — but THIS census passes none, so it reads UNMEASURED.
+        "expected_absent": (unmeasured(
+            "a declared expectation set for this layer — which declared kinds the corpus "
+            "REQUIRES. A census cannot derive it from the graph without reddening every layer for "
+            "the ~30 declared kinds no graph writes")
+            if expected is None else sorted(
+                k for k in expected if _cmp(k) not in {_cmp(x) for x in seen})),
+        # Reported, never chased: there is no `>= X %` bar on this row.
+        "coverage": (labelled / population) if population else None,
+        # Per-layer `labelled >= 1` ("0 of 0 labelled" is not coverage, so an EMPTY layer fails it).
+        # ⛔ The REGISTERED `a4_labelled_nodes: 1` floor is the THING/EVENT value — NOT `claims`'s.
+        "non_vacuity": labelled >= 1,
+    }
+
+
+def _a4_empty_coverage(layer: str) -> dict:
+    """The FAILURE skeleton for one layer block, with every field a real run emits.
+
+    ⛔ It is a SKELETON, not a zero measurement: `a_row_census`'s `row()` replaces each value with
+    its `UNMEASURED(...)` reason, so a broken query renders a NAMED gap rather than `population=0`
+    — a numeric zero under a key a real measurement also occupies reads as a MEASURED ABSENCE and
+    scores the row RED on an infrastructure failure (#10982 review cycle 2, finding 2).
+
+    ⛔ `non_vacuity` is the exception, and it is a BOOLEAN: `row()` substitutes `None` there rather
+    than the reason string, because a truthy placeholder would read as PASS to any consumer keying
+    on the field's own name (`if not non_vacuity: RED`) — the inverse of the rule above.
+    """
+    return {"layer": layer, "population": 0, "labelled": 0, "unlabelled": 0,
+            "unlabelled_null": 0, "unlabelled_undeclared": 0,
+            "labelled_by_declared_kind": {}, "undeclared": {}, "by_kind": {},
+            "declared_present": [], "declared_absent": [], "expected_absent": [],
+            "coverage": None, "non_vacuity": False}
+
+
+def _a4_layer_counts(projection, label: str, kind_prop: str) -> dict[str, int]:
+    """One layer's `(kind, n)` histogram over the graph.
+
+    ⛔ The CLAIM layer keeps the exclusion predicate `_a4_pointkind` was reviewed for: turn rows
+    (`is_episodic`) and operator Points (`is_operator`) are not claims, and counting them read
+    ~45 % "typed" against the owner's 0.6 % reading. Things and events carry no such exclusion —
+    an `:Object` is a thing and an `:Event` is an event, by label.
+
+    ⛔ TRUTHINESS, not `IS NULL`: `create_point(is_episodic=False)` really writes the property
+    (`projection/entities.py:3083`), so an explicit `false` is a CLAIM — `IS NULL` dropped it from
+    the denominator while the capture count reported it as a turn row it is not. The same predicate
+    the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1138`, which tests
+    `is_episodic` ALONE and would count an operator Point as a claim (#10982 review round 2).
+    """
+    where = ""
+    if label == "Point":
+        where = ("WHERE NOT coalesce(n.is_episodic, false) "
+                 "AND NOT coalesce(n.is_operator, false) ")
+    rows = projection.g.query(
+        f"MATCH (n:{label}) {where}RETURN coalesce(n.{kind_prop}, 'NULL') AS k, "
+        "count(*) AS n ORDER BY n DESC").result_set
+    return _a4_counts(rows)
+
+
+def _a4_claim_diagnostics(projection, counts: dict[str, int] | None = None) -> dict:
+    """`A4`'s DIAGNOSTIC block: the typed / `statement` / `NULL` shares over CLAIMS.
+
+    ⛔ Kept, and kept SEPARATE from the criterion. A4's metric is per-layer label coverage; these
+    three shares and the per-writer split are reported BESIDE it (plan §7 E2E-8, §4.1), because
+    "a share quoted without its `NULL` denominator is not a measurement this epic accepts".
+    The retired framing is what must not be built — not the diagnostic that was always honest.
+    """
+    counts = (_a4_layer_counts(projection, "Point", "pointKind")
+              if counts is None else counts)
     capture = projection.g.query(
         "MATCH (n:Point) WHERE coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false) "
         "RETURN count(n)").result_set
     capture = int(capture[0][0] or 0) if capture else 0
-    rows = projection.g.query(
-        "MATCH (n:Point) WHERE NOT coalesce(n.is_episodic, false) "
-        "AND NOT coalesce(n.is_operator, false) "
-        "RETURN coalesce(n.pointKind, 'NULL') AS k, count(*) AS n "
-        "ORDER BY n DESC").result_set
-    by_kind: dict[str, int] = {}
-    for row in rows:
-        key = str(row[0])
-        # a blank kind is the ABSENT state, not a typed one — ACCUMULATED into the NULL bucket,
-        # because assigning would overwrite the real NULL row's count instead of adding to it.
-        key = "NULL" if key in ("NULL", "") else key
-        by_kind[key] = by_kind.get(key, 0) + int(row[1] or 0)
+    by_kind = dict(counts)
     total = sum(by_kind.values())
     null_count = by_kind.pop("NULL", 0)
     statement = by_kind.pop("statement", 0)
@@ -3028,6 +3209,127 @@ def _a4_pointkind(projection) -> dict:
             "typed": typed, "typed_by_kind": dict(sorted(by_kind.items())),
             "typed_share": (typed / total) if total else unmeasured(
                 "a claim-point population (is_episodic and is_operator both absent)")}
+
+
+def _a4_writer_attribution(projection) -> dict:
+    """Attribute the TYPED claim population to the writer that could have produced it.
+
+    ⛔ The graph carries ONE writer stamp — `authoredBy`, which `_POINT_HANDLED` in
+    `projection/entities.py` does declare and the write path persists (`SET
+    n.authoredBy=coalesce($ab, n.authoredBy)`, from the payload's own value; `docs_miner` stamps
+    `docs-miner` for itself) — and this census deliberately does NOT read it, because it is the
+    CALLER's claim about itself rather than a measurement of which lane wrote the KIND. So this is
+    not a stored fact and the census must not pretend otherwise. What IS mechanical at this head:
+
+    * `extractor_v2` CANNOT be the source of a typed claim. Its write gate repairs every point kind
+      outside the master vocabulary to `statement` (`extractor_v2.py:10419-10422`; `:10413` is the
+      EMPTY-kind default only), so a claim carrying `decision`/`plan`/… did not come from that lane.
+    * `extractor.py::_classify_point_kind` is a PURE keyword classifier over the claim's own
+      content, so its answer is REPRODUCIBLE for any node: apply it and compare.
+
+    So the split is `classifier-reproduces` (the stored kind is exactly what the rule classifier
+    derives from that content — the rule lane explains it) versus `caller-supplied` (the kind is
+    NOT the derived one, so it was passed in by a caller — the SDK/MCP write path). That is a
+    CLASSIFICATION of what is observable, not a claim about which process ran: a caller that
+    hand-supplied the same kind the classifier would have derived lands in the first bucket, and
+    the block says so rather than over-claiming.
+    """
+    from tortoise.extractor import _classify_point_kind
+
+    rows = projection.g.query(
+        "MATCH (n:Point) WHERE NOT coalesce(n.is_episodic, false) "
+        "AND NOT coalesce(n.is_operator, false) "
+        "AND coalesce(n.pointKind, '') <> '' AND n.pointKind <> 'statement' "
+        "RETURN n.content, n.pointKind").result_set
+    split: dict[str, dict[str, int]] = {"classifier-reproduces": {},
+                                        "caller-supplied": {},
+                                        "unattributed": {}}
+    for row in rows or ():
+        content = "" if row[0] is None else str(row[0])
+        kind = "" if row[1] is None else str(row[1])
+        try:
+            derived = _classify_point_kind(content)
+        except Exception:  # the bucket is NAMED; the split still reports the rest
+            bucket = "unattributed"
+        else:
+            bucket = ("classifier-reproduces" if derived.casefold() == kind.casefold()
+                      else "caller-supplied")
+        split[bucket][kind] = split[bucket].get(kind, 0) + 1
+    total = sum(sum(kinds.values()) for kinds in split.values())
+    return {
+        "typed_claims": total,
+        "by_writer": {name: {"total": sum(kinds.values()),
+                             "by_kind": dict(sorted(kinds.items()))}
+                      for name, kinds in split.items()},
+        "attributed": total - sum(split["unattributed"].values()),
+        # ⛔ The v2 lane is excluded by CONSTRUCTION, not by measurement: state it beside the
+        # numbers so a reader cannot take `caller-supplied` for "some other lane".
+        "v2_lane_excluded_by_construction": (
+            "extractor_v2's write gate repairs every non-master point kind to 'statement', "
+            "so no typed claim can come from that lane IN A DECLARED KIND (the gate compares "
+            "case-insensitively and stores the kind verbatim, so a case-variant survives it)"),
+        "provenance": unmeasured(
+            "a WRITER STAMP on the node — ONE Point property does carry a writer (`authoredBy`, set in "
+            "projection/entities.py from the caller's own value and stamped `docs-miner` by the docs "
+            "miner), but it is the caller's claim about itself, not a measurement of which lane wrote "
+            "the kind, so attribution here is a reproduction test (the rule classifier re-derived "
+            "over each node's content), never a stored fact"),
+    }
+
+
+def _a4_label_coverage(projection) -> dict:
+    """`A4` — per-layer label coverage (things / events / claims), plus its diagnostics.
+
+    ⛔ The criterion is NOT a typed-share target. `A4` was re-authored at the epic's decompose
+    gate (2026-11-05, plan §4.1 + AM7): the CLAIM layer is deliberately uniform (`statement`,
+    ONTOLOGY §5 option B), so counting labels on it could not fail, and the owner's 2026-11-09
+    ruling (home: `#4432` comment `6751932659`) makes classification the default rather than a
+    bar. The bar is **appears + labelled**, per layer, with the percentage REPORTED and never
+    chased — a lane that turns this block into "raise the typed count" is building the retired
+    row, which is the one adoption this epic's contradiction rule forbids.
+    """
+    result: dict = {}
+    counts_by_layer: dict[str, dict[str, int]] = {}
+    for layer, label, kind_prop in A4_LAYERS:
+        declared = _a4_declared_kinds(kind_prop)
+        counts_by_layer[layer] = _a4_layer_counts(projection, label, kind_prop)
+        result[layer] = label_coverage(
+            counts_by_layer[layer], declared, layer=layer)
+    # ⛔ ONE read of the claims HISTOGRAM, SHARED with the criterion above. A second histogram
+    # query is a second population: on the LIVE fleet graph a write landing between the two reads
+    # would publish one layer's population twice — `a4 claims population=<X>` beside
+    # `a4 diagnostics claim_points=<Y>` — with every suite green (#11837 review). The attribution
+    # split below DOES issue its own `:Point` read (`n.content, n.pointKind`) — a separate read of
+    # the same population, whose divergence §3.3 reports as the one `unread` row.
+    result.update(_a4_claim_diagnostics(projection, counts=counts_by_layer["claims"]))
+    result["per_writer"] = _a4_writer_attribution(projection)
+    return result
+
+
+def _a4_pointkind(projection) -> dict:
+    """`A4`'s `pointKind` histogram over CLAIMS, split typed / `statement` / `NULL`.
+
+    ⛔ `NULL` is a THIRD reported state, never folded into `statement`: 19% of the owner's
+    population carried no `pointKind` at all, and folding it in reports a typing win nobody made.
+
+    ⛔ Two further folds that would have manufactured that same win (#10982 review, finding 4):
+    a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
+    with no kind — `tortoise/projection/__init__.py:14248-14250`, `# Ensure pointKind is present
+    (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
+    `projection/entities.py:2945`, which leaves the property ABSENT instead) is ABSENT, not typed;
+    and **capture rows** are
+    not claims — turn rows carry `pointKind='event'`: the row dict is written with `"k": "event"`
+    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2553`)
+    inside `_write_capture_turns` — and 159 of
+    the committed run's 354 Points are turn rows (`capstone-measured-9152448d.log:73`), so counting
+    them read ~45% "typed" against the owner's 0.6% ceiling. The excluded populations are COUNTED
+    and reported, never silently dropped.
+
+    ⛔ ONE definition, two callers: `_a4_claim_diagnostics` holds the queries and the fold, and
+    this function is the compatibility door the existing pins read. Sharing them is deliberate —
+    a second copy of the exclusion predicate is how a rewrite re-opens the fold (#10988).
+    """
+    return _a4_claim_diagnostics(projection)
 
 
 def _a5_subjects(projection) -> dict:
@@ -3119,10 +3421,36 @@ def a_row_census(uri: str) -> dict:
             # ⛔ NOT the zero skeleton: a numeric `0` under a key a real measurement also occupies
             # reads as a MEASURED ABSENCE and scores the row RED on an infrastructure failure —
             # the exact number this block exists to not print (#10982 review cycle 2, finding 2).
+            # ⛔ A BOOLEAN is NOT substituted, and the reason is narrower than "it would read as
+            # PASS": the reason string is TRUTHY, so `non_vacuity` — the row's only boolean — would
+            # answer `True` to ANY reader, including one that tests the field by its own name
+            # (`if non_vacuity: pass`) — the exact inverse of the numeric rule above (#11837 review
+            # round 12, P2). `None` answers neither reading, so a three-valued field must be read
+            # three-valued (`is True` / `is False` / `is None`), exactly as `coverage` must be read
+            # `is None`. ⛔ A naive `if not non_vacuity: RED` therefore fires RED on an infrastructure
+            # failure — a FALSE FAILING RUN, which is the other half of the rule this block exists
+            # for, not a correctness claim for that consumer shape (#11837 review round 13, P3).
+            # The reason is carried by `block["error"]` and rendered beside the field, so a reader
+            # is never asked to infer it from the boolean.
             block: dict = {"error": reason}
             for key, value in empty.items():
-                block[key] = ({name_: reason for name_ in value}
-                              if isinstance(value, dict) else reason)
+                if isinstance(value, bool):
+                    # ⛔ A BOOLEAN is `None`, never the reason string and never the skeleton's own
+                    # value: `True` scores an infrastructure failure as a PASS, and the skeleton's
+                    # `False` scores it as a MEASURED ABSENCE. `None` answers neither reading.
+                    block[key] = None
+                elif isinstance(value, dict) and value:
+                    block[key] = {name_: (None if isinstance(name_value, bool) else reason)
+                                  for name_, name_value in value.items()}
+                else:
+                    # ⛔ EVERYTHING ELSE IS THE REASON — numbers, `None`, and EMPTY containers.
+                    # An empty skeleton container (`typed_by_kind: {}`, `declared_absent: []`) used
+                    # to survive as itself, which is indistinguishable from a MEASURED empty
+                    # result: `typed_by_kind={}` beside `error=UNMEASURED(...)` reads as "no typed
+                    # kinds", and `coverage: None` reads as "zero population" — the one meaning
+                    # `None` already carries on this row (`:3076`). Both were measured green under
+                    # every arm before they were named (#11837 review round 14, P2/P3).
+                    block[key] = reason
             return block
 
     # A1 — the object→object graph, plus the rollup half.
@@ -3176,10 +3504,23 @@ def a_row_census(uri: str) -> dict:
                                               "cross_batch_joined": unmeasured("an eventId stamp"),
                                               "cross_batch_rate": unmeasured("an eventId stamp"),
                                               "relations": list(CHAIN_RELATIONS)})
-    result["A4"] = row("A4", _a4_pointkind,
-                       {"claim_points": 0, "excluded_capture_rows": 0, "statement": 0,
+    # ⛔ A4 is the PER-LAYER row (#10988): things / events / claims reported SEPARATELY on the
+    # **appears + labelled** bar, with the typed/`statement`/`NULL` shares and the per-writer split
+    # as DIAGNOSTICS. The `row()` failure path maps ONE level of the `empty` skeleton, so each
+    # layer block is a sibling key rather than a nested `layers` dict — a nesting level here would
+    # render a failed row as a named gap for the whole layer instead of for the one field that
+    # broke, and the per-field `UNMEASURED` this row's own pins assert (`a4 claims population=…`,
+    # `tests/test_10988_a4_label_coverage.py::test_a_broken_layer_query_renders_a_NAMED_GAP_and_never_a_zero`)
+    # would collapse into one opaque string for the whole layer. The renderer reads
+    # `a4.get(layer)` directly, so a nesting level would ALSO need a renderer change to buy nothing.
+    result["A4"] = row("A4", _a4_label_coverage,
+                       {**{layer: _a4_empty_coverage(layer) for layer, _l, _k in A4_LAYERS},
+                        "claim_points": 0, "excluded_capture_rows": 0, "statement": 0,
                         "null": 0, "typed": 0, "typed_by_kind": {},
-                        "typed_share": unmeasured("a claim-point population")})
+                        "typed_share": unmeasured("a claim-point population"),
+                        "per_writer": {"typed_claims": 0, "by_writer": {}, "attributed": 0,
+                                       "v2_lane_excluded_by_construction": "",
+                                       "provenance": unmeasured("a writer stamp")}})
     result["A5"] = row("A5", _a5_subjects,
                        {"subjects": 0, "named_actors": 0, "point_population": 0,
                         "families": {name: 0 for name in SUBJECT_EDGE_FAMILIES},
@@ -3248,14 +3589,43 @@ def a_row_census_lines(census_a: dict | None) -> list[str]:
         "definition requires a cross-batch link with an eventId on BOTH ends (§3.7)")
 
     a4 = census_a["A4"]
-    add(f"a4 claim_points={a4['claim_points']} "
+    # ⛔ PER LAYER, never one blended percentage: a failing thing/event layer must not be able to
+    # hide inside a green claim layer (plan §2 W2c's listed failure mode). The declared/absent
+    # lists are the "a declared kind absent" leg; `unlabelled` is the "a thing or event left
+    # unlabelled" leg; `coverage` is REPORTED and carries no bar. ⛔ The absent share is rendered
+    # BOTH as its total AND as its two halves (`unlabelled = unlabelled_null + unlabelled_undeclared`,
+    # exactly) — `label_coverage` computes the decomposition because a share quoted without its
+    # `NULL` denominator is not a measurement this epic accepts (plan §7 E2E-8), and a renderer that
+    # drops it hands that derivation back to the reader (PR #11837 round-7 P2).
+    for layer, _label, _prop in A4_LAYERS:
+        block = a4.get(layer) or {}
+        add(f"a4 {layer} population={block.get('population')} "
+            f"labelled={block.get('labelled')} unlabelled={block.get('unlabelled')} "
+            f"unlabelled_null={block.get('unlabelled_null')} "
+            f"unlabelled_undeclared={block.get('unlabelled_undeclared')} "
+            f"coverage={block.get('coverage')} non_vacuity={block.get('non_vacuity')} "
+            f"declared_present={block.get('declared_present') or '[]'} "
+            f"declared_absent={block.get('declared_absent') or '[]'} "
+            f"expected_absent={block.get('expected_absent')} "
+            f"undeclared={block.get('undeclared') or '{}'} "
+            f"labelled_by_declared_kind={block.get('labelled_by_declared_kind') or '{}'}")
+    add("a4 bar: appears + labelled, PER LAYER, percentage REPORTED not chased — there is no "
+        "`>= X %` bar on this row (owner ruling 2026-11-09, home #4432 comment 6751932659; "
+        "plan §4.1 AM7). `declared_absent` lists the whole absent set and decides nothing: which "
+        "of them SHOULD appear is a corpus expectation — the `expected` INPUT to "
+        "`label_coverage` — not a graph fact.")
+    writer = a4.get("per_writer") or {}
+    add(f"a4 diagnostics claim_points={a4['claim_points']} "
         f"excluded_capture_rows={a4['excluded_capture_rows']} "
         f"typed={a4['typed']} statement={a4['statement']} null={a4['null']} "
         f"typed_share={a4['typed_share']} typed_by_kind={a4['typed_by_kind'] or '{}'}"
         + (f" error={a4['error']}" if a4.get("error") else ""))
+    add(f"a4 per_writer typed_claims={writer.get('typed_claims')} "
+        f"attributed={writer.get('attributed')} by_writer={writer.get('by_writer') or '{}'}")
     add("a4 note: NULL (and a blank kind) is a THIRD state, never folded into statement; turn rows "
-        "and operator Points are EXCLUDED and counted, because they are capture rows and not "
-        "claims; the bar is UNMEASURED by registration (D3 fork, #10988/#1022)")
+        "and operator Points are EXCLUDED from the CLAIM layer and counted, because they are "
+        "capture rows and not claims. The typed/statement/NULL shares and the per-writer split "
+        "are DIAGNOSTICS — A4's criterion is per-layer label coverage, not a typed share.")
 
     a5 = census_a["A5"]
     add(f"a5 subjects={a5['subjects']} named_actors={a5['named_actors']} "

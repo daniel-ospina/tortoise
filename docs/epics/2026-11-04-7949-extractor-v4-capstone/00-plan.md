@@ -136,11 +136,11 @@ and `hierarchies: Theme→Epic / Epic→Issue (type: hasPart)` (`:193`). Also
 `hasPart` is on the structural write allowlist (`tortoise/projection/edges.py:621-630`) and
 `docs/ONTOLOGY.md` §3.7 types it **Object → Object**, N-ary, `dcterms:hasPart`, with inverse traversal
 covering "part of" (**no separate `partOf` edge**). The writer is `TortoiseSDK.create_edge` →
-`projection.edges.create_edge` (`edges.py:2899`).
+`projection.edges.create_edge` (`edges.py:2900`).
 ⚠️ **`decomposesInto` — the predicate the packs actually declare — is NOT in that set.** Its route to a
 write is its `semantics: hasPart`, and **nothing derives the writable predicate from the declaration on
 the extraction path**. That is the seam.
-⚠️ **`create_edge` takes no property parameter and no `**kwargs`** (`edges.py:2903-2908`): a derivation
+⚠️ **`create_edge` takes no property parameter and no `**kwargs`** (`edges.py:2904-2909`): a derivation
 edge minted there carries **no `sourceVersion` anchor and nothing can supply one**. That is §9.6's
 boundary, pinned by `tests/test_references_boundary_5213.py`, and `#5213`'s resolution was **option 3 —
 document, do not re-route**. See R11/E3 for why that constrains C3.
@@ -167,7 +167,7 @@ closed on a cycle or an `implemented` row on an unbuilt precondition. Four rows 
 (#5087). ⇒ **none of the owner's five assertions has a row.** That is the gap stated as an artifact.
 
 **R6 · The DOOR is the v2 lane, and that corrects the brief.** `hosted_api._capture_lane()`
-(`tortoise/hosted_api.py:17898`) returns `"v2"` **unless** `TORTOISE_SESSION_EXTRACTOR == "m2"`, so
+(`tortoise/hosted_api.py:17901`) returns `"v2"` **unless** `TORTOISE_SESSION_EXTRACTOR == "m2"`, so
 fleet captures land in `_extract_session_v2` → `extract_session_v2` (`tortoise/extractor_v2.py`) — the
 **LLM v2 lane**, not `extractor.py`'s rule extractor (that is the opt-in `m2` lane,
 `_extract_session_llm`). ⚠️ **The brief's premise — "today the fleet writes through the legacy rule
@@ -187,7 +187,7 @@ value (`tortoise/projection/edges.py`), and no extraction path sets one
 (`edges.py:1213`). Recorded with that annotation, never as a target.
 
 **R8 · Two owner assertions sit on a recorded decision or an open question — ROUTED, not decided
-(§6).** A4 vs **D3** (`docs/ONTOLOGY.md:969-978` *"extraction emits `statement` only"*, option B
+(§6).** A4 vs **D3** (`docs/ONTOLOGY.md:975-984` *"extraction emits `statement` only"*, option B
 2026-08-12, `#1022` MERGED). A3 vs **D6** — *"Two distinct connection sets — within-batch and to-graph,
 both **proposed by the model**"* (`EXTRACTOR-V4-ARCHITECTURE.md:1400` — the **D6** row; `:1095` — "D6 as ruled"),
 with §13.8 (`:2085`, under the heading at `:2057`) recording the to-graph LLM-vs-mechanical question as **OPEN** and `:2061` recording
@@ -373,7 +373,7 @@ a hand-labelled ground truth (an edge count alone is gameable); **E1's registere
 unaffected** (C8's arm).
 ⛔ **Anchor obligation, corrected.** The first version of this child demanded **100 % anchor coverage on
 the new edges** and told the implementer to use `create_edge`. Both are wrong: `create_edge` *cannot*
-carry a `sourceVersion` (`edges.py:2903-2908`, pinned by `tests/test_references_boundary_5213.py`), and
+carry a `sourceVersion` (`edges.py:2904-2909`, pinned by `tests/test_references_boundary_5213.py`), and
 `#5213`'s recorded resolution is **option 3 — document, do not re-route**. `:Object` mention links are
 unanchored **by design** (owner-approved option A, `#5199`). ⇒ **E3's obligation for these edges is
 ROUTED to `#9736`** (the metric's owner). The child must **state** which writer it uses and, if it wants
@@ -420,11 +420,11 @@ fan-out respected; C8 holds.
 **The contradiction to adjudicate:** `#4889` ("the Subject layer is unpopulated in production") is
 **CLOSED**, and the owner measured **26 Subjects against 19,300 points**. One of those is false.
 **Produces:** the binder's attach rate (`bind_point_subjects`, `tortoise/subject_binding.py:341`, called
-from `sdk.py`'s point-creation path at `:16892` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
+from `sdk.py`'s point-creation path at `:17621` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
-`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:4820` and
-consumed at `sdk.py:9315`/`:9368` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
+`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6607` and
+consumed at `sdk.py:9540`/`:9593` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
 this pair is keyed by **symbol**), the slots are absent in the
 corpus, or the graph served is not the graph measured — are decided by evidence.
 **Proof:** Subjects `26 → N` on a real corpus, four families non-zero, both customer readers non-empty —
@@ -513,7 +513,7 @@ behaviour.
 > `04-plan.md` §8.4 **AM7**, `05-verify.md` item 3. The fork below is kept verbatim as the history of the
 > question — **do not read it as open**, and do not set the percentage target fork (a) proposed.
 
-**REOPEN — D3 `statement`-only (`docs/ONTOLOGY.md:969-978`, option B 2026-08-12, `#1022` MERGED).**
+**REOPEN — D3 `statement`-only (`docs/ONTOLOGY.md:975-984`, option B 2026-08-12, `#1022` MERGED).**
 A4 ("0.6 % typed is the ceiling the capstone must beat") points **opposite** to D3. A later owner ruling
 may reverse an earlier one (§16.3/O4) — but the reversal must be recorded where the next lane reads it.
 **The fork:**

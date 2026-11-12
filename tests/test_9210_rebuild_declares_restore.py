@@ -6,10 +6,11 @@ for it. But the same engine also puts back, verbatim, state it CAPTURED FROM
 THE GRAPH THAT IS ABOUT TO BE DESTROYED: `:Batch` markers and
 `Point.batch_id`, `:Session` containers and their `CONTAINS` edges, the
 onboarding state machine (node, `onboards` anchor, `COMPLETED_STEP` links), the
-`:TeamMeta` first-org marker, the `#2814` config registry, the `#4305` derived
-Point properties, and the `:GraphEventMeta` watermark. **None of those writes
+`:TeamMeta` first-org marker, the `:PackSelection` pack-set marker (#9752), the
+`#2814` config registry, the `#4305` derived Point properties, and the
+`:GraphEventMeta` watermark. **None of those writes
 is a projection of a journal record** (`#990`, `#4641`, `#5353`, `#2814`,
-`#4653` each say so at their writer), so the replay lane's contract — "this
+`#4653`, `#9752` each say so at their writer), so the replay lane's contract — "this
 content came from the record" — is FALSE for them. Two legs are exceptions in
 MECHANISM only, and the `#3947` one is why it is NOT cited as a writer that
 says so: `#4305`'s journal owns `content_hash` and `embedding` when it wrote
@@ -91,10 +92,10 @@ covered by the properties above. TWO things, and the second is not bounded:
    again: its lane is now handed to the helper and opened inside it, which is
    what makes the leg truthful rather than deferred.)
 2. **the funnel is VOLUNTARY** — nothing makes `_rebuild_all_replay` route a
-   restore statement through `_restore_write`. A twelfth restore added as a
+   restore statement through `_restore_write`. A thirteenth restore added as a
    bare `self.g.query(...)` inherits the engine's method-wide `"replay"`, and
-   `_LEGS` cannot see it (a table of the eleven statements that exist says
-   nothing about a twelfth). What the pin DOES have, one pin below, is a
+   `_LEGS` cannot see it (a table of the twelve statements that exist says
+   nothing about a thirteenth). What the pin DOES have, one pin below, is a
    TABLE-INDEPENDENT half: a bare restore written in the whole-property-map
    shape every restore leg uses (`… SET <alias> += $props`) is caught by
    SHAPE, and `test_a_bare_restore_write_in_the_map_shape_is_caught` proves
@@ -133,6 +134,7 @@ from tortoise.pack_state import PACK_INSTALL_LABEL
 from tortoise.pipeline import PIPELINE_LABEL
 from tortoise.projection import (
     _CACHE_WRITE_AUTHORIZED,
+    _PACK_SELECTION_LABEL,
     _TEAM_META_LABEL,
     _replay_write_scope,
 )
@@ -233,6 +235,16 @@ _LEGS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "team-meta": (
         (f"{RESTORE}: :TeamMeta first-org marker (#5353)",),
         (f"MERGE (m:{_TEAM_META_LABEL}) ON CREATE SET m += $props",),
+    ),
+    "pack-selection": (
+        # #9752: the `:PackSelection` pack-set marker. At-most-one per graph and
+        # identity-free (the graph IS the isolation boundary), so it rides the
+        # whole-property-map shape like `:TeamMeta` rather than a registry row.
+        # Its loss is load-bearing: an absent marker makes the graph read as
+        # UNCONFIGURED, which re-arms the self-heal and the records/union arms
+        # and so re-admits a pack an admin REMOVED, with its `revision` reset.
+        (f"{RESTORE}: :PackSelection pack-set marker (#9752)",),
+        (f"MERGE (s:{_PACK_SELECTION_LABEL}) ON CREATE SET s += $props",),
     ),
     "watermark": (
         (f"{RESTORE}: :GraphEventMeta watermark (#4653)",),
@@ -369,7 +381,8 @@ def _leg_of(cypher: str) -> str | None:
 #: `MERGE (n:PackInstall {namespace:$identity}) SET n += $props`,
 #: `MERGE (m:TeamMeta) ON CREATE SET m += $props`). Matched WITHOUT the leg
 #: table on purpose: `#9210`'s residual is that the funnel is VOLUNTARY, so a
-#: pin that only knows the eleven classified statements cannot see a twelfth.
+#: pin that only knows the twelve classified statements cannot see a
+#: thirteenth.
 #: MEASURED over a full `rebuild_all` run on a graph whose config restore
 #: SUCCEEDS: this shape matches the restore statements and nothing else — the
 #: journal fold's own map writes bind `$attrs` (`projection/__init__.py`'s two
@@ -481,6 +494,13 @@ def _seed_prewipe_state(sdk, events):
         "{org_id:'org-1', step_id:'welcome'}) "
         f"MERGE (n)-[:{COMPLETED_STEP_EDGE}]->(s)")
     g.query(f"CREATE (m:{_TEAM_META_LABEL} {{name:'Acme', created:'2026-01-01'}})")
+    # #9752: the pack-set marker, restored from the `pack_selection` sidecar
+    # section. No journal record carries it and no replay pass recreates it, so
+    # it is a snapshot-restore leg like the two markers around it — and the leg
+    # table must be able to see it, or the pin's own vacuity guard would pass
+    # over an unclassified write.
+    g.query(f"MERGE (s:{_PACK_SELECTION_LABEL}) "
+            "SET s.revision = 1, s.configured_at = '2026-01-01'")
     g.query(
         f"MERGE (n:{PACK_INSTALL_LABEL} {{namespace:'ns-1'}}) SET n.version = 1")
     # A SECOND config class on purpose. The config restore is ONE statement
@@ -528,7 +548,7 @@ def _observed_restore_legs(seen):
 def _assert_every_leg_declares_itself(seen, *, context: str):
     observed = _observed_restore_legs(seen)
     # VACUITY GUARD: a leg that never ran cannot be evidence either way. The
-    # fixture seeds all eleven, so a missing one means the seed or the capture
+    # fixture seeds all twelve, so a missing one means the seed or the capture
     # changed, not that the declaration is fine.
     assert set(observed) == set(_LEGS), (
         f"{context}: these snapshot-restore legs did not reach the write "
@@ -570,7 +590,7 @@ def _assert_every_leg_declares_itself(seen, *, context: str):
         f"shared reason makes two legs interchangeable: {shared!r}")
     # The TABLE-INDEPENDENT half: a capture-restore statement is recognized by
     # its SHAPE, so a leg that is not in `_LEGS` — the residual `#9210` names,
-    # since the funnel is voluntary and a twelfth restore can be written as a
+    # since the funnel is voluntary and a thirteenth restore can be written as a
     # bare `self.g.query(...)` — is still judged instead of silently absent from
     # `observed`. Without this, `set(observed) == set(_LEGS)` above is satisfied
     # by every KNOWN leg running while an unknown one rides `"replay"`.
@@ -676,8 +696,8 @@ def test_a_bare_restore_write_in_the_map_shape_is_caught(tmp_path,
     This is the residual `#9210` discloses, made observable. The funnel is
     VOLUNTARY: nothing makes `_rebuild_all_replay` route a restore statement
     through `_restore_write`, so "the next restore has to declare itself" is a
-    convention while `_LEGS` — a table of the eleven statements that EXIST —
-    reads green on a twelfth that does not. The surviving half of the pin is
+    convention while `_LEGS` — a table of the twelve statements that EXIST —
+    reads green on a thirteenth that does not. The surviving half of the pin is
     the SHAPE rule in `_shape_violations`.
 
     What it does: runs the engine with the funnel BYPASSED — `_restore_write`
@@ -691,7 +711,7 @@ def test_a_bare_restore_write_in_the_map_shape_is_caught(tmp_path,
     (the ablation), so the test pins a property that holds before and after the
     fix. Its non-vacuity is the ablation assertion below, not a base-tree
     failure. Coverage is honestly partial — the map shape catches
-    `SET <alias> += $props`, i.e. the shape every one of the eleven restore legs
+    `SET <alias> += $props`, i.e. the shape every one of the twelve restore legs
     uses; a restore written as a `SET <alias>.<field> = $param` link or a bare
     edge `MERGE` is still caught only while it stays in `_LEGS`, until
     `#9124`'s handle guard is armed.
@@ -1050,3 +1070,20 @@ def test_the_lane_constants_match_the_pinned_literals():
 
     assert _PREWIPE_RESTORE_LANE == RESTORE
     assert _PREWIPE_SYNTHETIC_LANE == SYNTHETIC
+    # ⛔ THE TABLE'S COMPLETENESS, pinned here because the set-equality guard cannot
+    # see a deletion on its own: `_leg_of` classifies BY `_LEGS`, so deleting a row
+    # removes the leg from BOTH sides of `assert set(observed) == set(_LEGS)` in
+    # `test_every_snapshot_restore_leg_declares_itself` and that guard stays GREEN —
+    # as does the shape rule, which skips the `pre-wipe-restore:` reason prefix.
+    # Measured at 4f7279618d (#9752 review r12): deleting the `"pack-selection"` row
+    # left `test_every_snapshot_restore_leg_declares_itself` green but reddened the
+    # FILE through `test_the_restore_lane_does_not_claim_a_record_fold`, which named
+    # the now-unclaimed `MERGE (s:PackSelection) ON CREATE SET s += $props`. So the
+    # deletion WAS already caught — via that sibling row, by misattribution rather
+    # than by the guard it was deleted from. This set makes the deletion name its
+    # own cause directly instead of through that detector.
+    assert set(_LEGS) == {
+        "batch-marker", "batch-link", "session", "session-link",
+        "onboarding", "onboarding-onboards", "onboarding-step",
+        "team-meta", "pack-selection", "watermark", "config", "point-derived",
+    }, f"a snapshot-restore leg was added or removed without re-pinning: {sorted(_LEGS)}" 
