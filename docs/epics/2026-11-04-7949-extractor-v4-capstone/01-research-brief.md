@@ -218,7 +218,7 @@ fixture arm is the regression harness; the fleet capture is the claim. Scope mus
 whichever it picks and C2 proves the door.
 
 **2 · D3 / A4 — the contradiction the epic's own GREEN bar creates.** (`00-align` §4 records the REOPEN.) D3
-(`docs/ONTOLOGY.md:969-978`, *"extraction emits `statement` only"*, option B 2026-08-12, `#1022` MERGED) versus
+(`docs/ONTOLOGY.md:975-984`, *"extraction emits `statement` only"*, option B 2026-08-12, `#1022` MERGED) versus
 A4 (*"0.6 % typed claims is the ceiling the capstone must beat"*). What the research says that bears on it:
 
 **[⚠️ single-source]** The category's shape is *declared **classes** + properties, then hierarchy, then query* [4],
