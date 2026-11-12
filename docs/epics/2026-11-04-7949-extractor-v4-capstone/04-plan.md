@@ -646,7 +646,7 @@ wrong three ways.**
 1. **It is not the set the verdict reads.** `relation_write_paths` reads **`STRUCTURAL_WRITE_PREDICATES`** — the
    union — and its own comment says a predicate added or removed *"THERE moves this verdict with it"*. Deriving
    the literal instead leaves **writer accepts / verdict refuses**, silently (the verdict never raises).
-   ⚠️ This exact defect was already fixed once at another layer: the `#8285` review P1 at `pack_registry.py:695-697` / `:744-750` records that reading
+   ⚠️ This exact defect was already fixed once at another layer: the `#8285` review P1 at `pack_registry.py:696-698` / `:745-751` records that reading
    *"only `_VALID_EDGE_PREDICATES`"* under-reported `aboutPoint`/`extractedFrom` as unwritable — **#8285 review P1**.
 2. **A derived predicate must carry THREE facts, not one name**: (i) is it admitted by `core ∪ installed_packs`;
    (ii) **which verb** accepts it (`create_edge` / `create_about_edge` / `ingest`'s `extractedFrom` exemption);
