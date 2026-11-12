@@ -1787,6 +1787,25 @@ def test_the_envelope_collision_guard_keeps_add_documents_event_id_pin(tmp_path)
     assert [r["event_id"] for r in records] == ["evt-1", None], (
         "`add_document`'s event_id pin and its None default are #125/#167 "
         f"decisions, got {[r['event_id'] for r in records]!r}")
+    # ⛔ …AND THE EXCEPTION IS SCOPED TO THAT ONE PRODUCER (#11996 review round 21,
+    # measured). Excluding `event_id` from `_ENVELOPE_KEYS` applied to EVERY type
+    # on the funnel's keyword channel, so a caller could choose the identity of its
+    # own record:
+    #
+    #     api._emit("PointAdded", id="p1", content="c", event_id="forged-id")
+    #       -> JOURNALLED {"event_id": "forged-id", …, "type": "PointAdded"}
+    #
+    # `projection/__init__.py:8395` calls `event_id` "the only handle that locates
+    # the diverging journal line", and the record channel and all three splatting
+    # doors already refused it — this was the last open channel. Falsifier: drop
+    # the `type_ != "DocumentCreated"` clause and the two rows below land while the
+    # `add_document` assertions above still pass (measured).
+    before = len(journal.read_text(encoding="utf-8").splitlines())
+    for _type in ("PointAdded", "ConfidenceChanged"):
+        with pytest.raises(ValueError, match="ENVELOPE"):
+            api._emit(_type, id="p-event-id", content="c", event_id="forged-id")
+    assert len(journal.read_text(encoding="utf-8").splitlines()) == before, (
+        "a refused `event_id` must not leave a record behind")
 
 
 def test_the_funnel_itself_refuses_an_envelope_key_from_any_future_door(tmp_path):
@@ -2438,8 +2457,13 @@ def test_a_declared_width_the_seam_never_mints_is_refused_not_ignored(tmp_path):
     width/base64 migration trusts. The seam's mint enumeration is closed, so the
     declaration is refused; the production widths are untouched.
 
-    Falsifier: restore `if declared is None or declared != _F32: return` and
-    every row below reads `DID NOT RAISE`.
+    Falsifier: restore `if declared is None or declared != _F32: return` and every
+    DECLARATION row below (1–1d) reads `DID NOT RAISE`. ⛔ Row 5 does NOT — the
+    mutant disables the PRE-stamp arm only, so the post-stamp belt still refuses
+    the merged-view lie with the same message row 5 matches (measured, review
+    round 21). "Every row below" was an over-claim, and it mattered: row 5 is the
+    only row that pins the belt's independent reach, which the end of this test
+    asserts.
     """
     from tortoise.api import EventAPI, provenance
     from tortoise.log import EventLog
@@ -2574,7 +2598,14 @@ def test_a_declared_width_the_seam_never_mints_is_refused_not_ignored(tmp_path):
     #            embedding=[0.5, 0.25])   -> journalled `f32` over the OFF-GRID
     #                                        record vector the fold then reads
     #
-    #    Falsifier: restore `declared = record.get(KEY)` and this row lands.
+    #    Falsifier: restore the RECORD-ONLY read (`declared = record.get(KEY)`
+    #    plus `if declared is None: return`, which is how it was written) and this
+    #    row lands. ⛔ Restoring the ASSIGNMENT ALONE reds it on a different
+    #    message instead — "embedding_width=None is not a width this seam mints"
+    #    — because the run then reads `payload.get(KEY)` as `None` and the
+    #    enumeration arm fires first (measured, review round 21: the two-part
+    #    mutant is what the comment must name, or a maintainer runs half of it and
+    #    reads a refusal about `None` over a record that declared nothing).
     before = len([ln for ln in
                   journal.read_text(encoding="utf-8").splitlines() if ln.strip()])
     with pytest.raises(ValueError, match="is not what the values say"):

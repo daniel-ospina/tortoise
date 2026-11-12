@@ -943,8 +943,9 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "`NO_LIVE_VECTOR` is the shape. ⛔ BUT IT IS NOT WRITE-FREE, and the earlier wording "
             "(\"the matches are its PROSE … issues no write at all\") became FALSE in `#11996` "
             "review round 14: the one-shot-iterable materialisation WRITES BACK into the journal "
-            "payload dict (`payload[\"embedding\"] = seam_values`, `api.py:843`, gated on the "
-            "envelope being what carried it) — the CONTAINER-KEY shape `#11274` widened this "
+            "payload dict (`payload[\"embedding\"] = seam_values`, inside "
+            "`_verify_record_vector_width`, gated on the ENVELOPE being what carried it) — the "
+            "CONTAINER-KEY shape `#11274` widened this "
             "instrument for, not a Cypher property write. That write is why this row is honest "
             "to keep: a name-level census cannot tell a journal-payload write from a graph one, "
             "and the elements it write back are re-read by `stamp_journal_embedding` before the "
@@ -953,9 +954,10 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "recording later measured cases — because `_EMBED_WRITE` reads raw SOURCE, as it does "
             "for `tortoise.projection::_prewipe_synthetic_write_scope`",
             "#11835",
-            stores=NO_LIVE_VECTOR,  # DOCSTRING + body comments are prose, PLUS one journal-payload
-            # write (`payload["embedding"] = seam_values`, `api.py:843`) — the matches
-            # are NOT all prose, which is what this line said before #11996 round 18.
+            stores=NO_LIVE_VECTOR,  # DOCSTRING + body comments are prose, PLUS one real
+            # journal-payload write (`payload["embedding"] = seam_values`, inside
+            # `_verify_record_vector_width`) — the matches are NOT all prose, which is what
+            # this line claimed before `#11996` review round 20.
         ),
     ),
     (

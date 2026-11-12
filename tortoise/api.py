@@ -1748,6 +1748,30 @@ class EventAPI:
                 f"set via {type_}'s payload: the envelope is built here, so a "
                 f"colliding caller key re-types or re-attributes the record "
                 f"instead of adding a field")
+        # ⛔ `event_id` IS THE ONE ENVELOPE NAME `_ENVELOPE_KEYS` LEAVES OUT, and
+        # leaving it out here was a hole big enough to re-identify any record
+        # (#11996 review round 21, measured). The exclusion is justified by
+        # `add_document`'s recorded `#125` pin, which passes `event_id=` as ITS OWN
+        # named parameter — but this channel serves EVERY type, so the exclusion
+        # applied far wider than the reason for it:
+        #
+        #     api._emit("PointAdded", id="p1", content="c", event_id="forged-id")
+        #       -> JOURNALLED `{"event_id": "forged-id", …, "type": "PointAdded"}`
+        #
+        # `projection/__init__.py:8395` calls `event_id` "the only handle that
+        # locates the diverging journal line", so a caller could pick the identity
+        # of its own record — the same harm the record channel refuses it for
+        # (`_ENVELOPE_KEYS_AT_PASSTHROUGH`, which the three splatting doors use).
+        # ⛔ Scoped to the ONE producer that legitimately passes it: reversing
+        # `add_document`'s pin would be a reopen of #125/#167, not a fix, and
+        # `tests/test_11821_journal_vector_width.py::test_the_envelope_collision_
+        # guard_keeps_add_documents_event_id_pin` pins that it still lands.
+        if "event_id" in payload and type_ != "DocumentCreated":
+            raise ValueError(
+                f"['event_id'] are journal ENVELOPE fields and cannot be set via "
+                f"{type_}'s payload: the envelope id is minted here, and a "
+                f"caller-chosen one re-identifies the record (#11996). Only "
+                f"`add_document`'s own `#125` pin may pass it")
         _forged_markers = sorted(set(payload) & _SERVER_MANAGED_EMBEDDING_KEYS)
         if _forged_markers:
             raise ValueError(
