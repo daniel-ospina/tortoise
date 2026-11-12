@@ -698,16 +698,26 @@ git grep -n apply_hierarchy_edges -- tortoise/ tests/   # 12 lines on this merge
                                                           # command returns 22 across 8 files, including
                                                           # this record's own citations,
                                                           # its index row and tools/pack_relation_census.py
-git grep -n plan_hierarchy_edges -- tortoise/ tests/      # 29 lines at this head: 9 + 2 + 3 across three
-                                                          # test files, 7 in the PIN test itself (it
-                                                          # quotes the call — the self-match trap, one
-                                                          # layer up), `:59/:78/:365/:459` in
+git grep -n plan_hierarchy_edges -- tortoise/ tests/      # the ENUMERATION is the claim, not a total:
+                                                          # 9 + 2 + 3 across the other three test
+                                                          # files, `:59/:78/:365/:459` in
                                                           # pack_hierarchy.py, and — the part this line
                                                           # used to omit — 4 in relation_write.py
-                                                          # (`:53 :658 :700 :705`), `:700` being the CALL
-                                                          # ⚠️ unscoped this command returns 44: 29 here,
-                                                          # 13 docs lines (7 in THIS record), 2 in
-                                                          # config/v4-mechanisms.yml
+                                                          # (`:53 :658 :700 :705`), `:700` being the CALL.
+                                                          # The remaining hits are this PIN test itself,
+                                                          # which quotes the call AND these very anchors,
+                                                          # so its share grows every time a row is added —
+                                                          # the self-match trap, one layer up.
+                                                          # ⛔ NO TYPED TOTAL, on purpose: this record used
+                                                          # to state one and it went stale the moment this
+                                                          # record's own block rows landed (adding rows moved
+                                                          # both the scoped and the unscoped figure), which
+                                                          # is the lesson the pin itself records for
+                                                          # `RECONCILE`'s other citation lists — a typed
+                                                          # count is this bundle's recurring defect.
+                                                          # ⚠️ Unscoped, the same command also matches this
+                                                          # record's own citations and
+                                                          # `config/v4-mechanisms.yml`.
 git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[:space:]]*\(' \
   tortoise/extractor_v2.py                                 # no output, exit 1 — the class must NOT
                                                           # exclude `.`: a dot-EXCLUDING one exits 1 on

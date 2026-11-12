@@ -769,8 +769,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # measured: 2 confidences before the ARCHIVE, 0 after it and 0 after the
         # supersession, ``skipped: None``, i.e. the factor was already gone and
         # nothing was stripped at the supersession (#12111 round 21, P1). Every
-        # other call site passes the qualified form (``ep.py``, ``analyze.py``,
-        # ``sdk.py``).
+        # other call site passes the qualified form — measured across ``tortoise/``:
+        # 42 call sites in 7 modules (``sdk.py`` 13, ``ep.py`` 12, ``analyze.py`` 10,
+        # ``why.py`` 2, ``projection/__init__.py`` 2, ``weights.py`` 1, and this
+        # module's 2), every one an alias-qualified ``X.status``. A count of TODAY's
+        # package: it drifts, so re-measure rather than trust it.
         f"AND {_live_only('active.status')}\n"
         # ⚠️ Check 4 (the ``:Point`` orientation) keeps the older hand-spelled
         # filter; that divergence is a recorded follow-up rather than half-fixed
