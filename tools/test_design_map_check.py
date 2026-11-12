@@ -1353,7 +1353,30 @@ def self_test(text: str) -> int:
             file=sys.stderr,
         )
         return 1
+    # ⛔ `SELF_TEST_INDENT` has a FLOOR, not just a docstring (fresh review of PR
+    # #12016, P3): at `0` the second shape is a byte-identical copy of the shipped
+    # map, so `MIN_SELF_TEST_PASSES` still counts 2, the baseline comparison reads
+    # `[] == []`, and the whole #11415 arm — the one that makes a column-0-only rule
+    # or mutator visible — dies on a one-character edit that nothing reddens. Both
+    # the constant and the shape it produces are checked, because a future
+    # normaliser that collapses back to column 0 would fail the same way.
+    if SELF_TEST_INDENT < 1:
+        print(
+            f"self-test: SELF_TEST_INDENT is {SELF_TEST_INDENT} — the indented shape "
+            "would be the column-0 map again, so an arm or mutator that reaches only "
+            "column-0 rows stays invisible while both shapes 'pass'",
+            file=sys.stderr,
+        )
+        return 1
     passes = self_test_passes(text)
+    if len(passes) > 1 and passes[1][1] == text:
+        print(
+            "self-test: the second shape is byte-identical to the shipped map — it "
+            "measures nothing, so the indentation-blind class it exists for is "
+            "unstaked",
+            file=sys.stderr,
+        )
+        return 1
     if len(passes) < MIN_SELF_TEST_PASSES:
         print(
             f"self-test: {len(passes)} shape(s) exercised, at least "
