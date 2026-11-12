@@ -2761,8 +2761,11 @@ def test_the_two_one_shot_shapes_outside_the_write_back_keep_their_residual(tmp_
     the arm's comment and this docstring.
 
     FAILS IF: either shape starts LANDING on the record channel (the residual was
-    widened without the decision), or the envelope control stops landing (the
-    asymmetry claim itself is then false).
+    widened without the decision), the envelope control stops landing (the
+    asymmetry claim itself is then false), or a refusal's MESSAGE moves — both
+    `raises` carry `match=` on the width-specific text the arm's comment quotes,
+    at both widths, because a reworded belt would otherwise leave that prose stale
+    with the row still green (#11996 review round 25).
     """
     import numpy as np
 
@@ -2783,24 +2786,36 @@ def test_the_two_one_shot_shapes_outside_the_write_back_keep_their_residual(tmp_
     journal = events / "events.jsonl"
     api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
 
-    assert iter(Shared([0.1, 0.2])) is not api, "sanity: a fresh iterator is returned"
     shared = Shared([0.1, 0.2])
     assert iter(shared) is not shared, (
         "the premise of the gate: a cached-iterator CONTAINER is not its own "
         "iterator, so `iter(x) is x` cannot see it")
 
     # 1. The cached-iterator container is REFUSED on the record channel…
-    with pytest.raises(ValueError):
+    # ⛔ `match=` on BOTH widths, because the messages are the CLAIM this row's
+    # docstring makes (the seam does not DROP the vector; the refusal says it
+    # does). Without `match=` any `ValueError` satisfies it, so the belt could
+    # reword itself — or start refusing `f32` differently — and leave the prose
+    # stale, which is the exact failure this row exists to prevent
+    # (#11996 review round 25).
+    with pytest.raises(ValueError, match="declared over a value the seam can only DROP"):
         api._emit("PointAdded", {"id": "p-shared-rec", "content": "c",
                                  JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64,
                                  "embedding": Shared([0.1, 0.2])})
-    # …and LANDS on the envelope channel.
+    with pytest.raises(ValueError, match="declared over an EMPTY vector"):
+        api._emit("PointAdded", {"id": "p-shared-rec-f32", "content": "c",
+                                 JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32,
+                                 "embedding": Shared([0.5, 0.25])})
+    # …and LANDS on the envelope channel, at both widths.
     api._emit("PointAdded", {"id": "p-shared-env", "content": "c",
                              JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64},
               embedding=Shared([0.1, 0.2]))
+    api._emit("PointAdded", {"id": "p-shared-env-f32", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
+              embedding=Shared([0.5, 0.25]))
 
     # 2. The re-iterable non-container dies at the ENCODER on the record channel…
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="not JSON serializable"):
         api._emit("PointAdded", {"id": "p-nd-rec", "content": "c",
                                  JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64,
                                  "embedding": np.array([0.1, 0.2])})
@@ -2811,7 +2826,8 @@ def test_the_two_one_shot_shapes_outside_the_write_back_keep_their_residual(tmp_
 
     records = [json.loads(ln) for ln in
                journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    assert [r["point"]["id"] for r in records] == ["p-shared-env", "p-nd-env"], (
+    assert [r["point"]["id"] for r in records] == [
+        "p-shared-env", "p-shared-env-f32", "p-nd-env"], (
         "only the envelope-channel controls may land; a record-channel LANDING "
         "here means the residual was widened and this row must be re-decided, "
         f"got {[r['point']['id'] for r in records]}")
