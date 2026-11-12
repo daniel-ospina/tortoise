@@ -172,10 +172,11 @@ production reader touched):
   directly-built `RecordNode` is counted too;
 * the RUN — `rebuild_from_record` carries the plan's drop beside its write
   counts as TWO report keys of different shapes: `dropped_vectors`, an `int`
-  TOTAL, and `dropped_vector_labels`, the sorted label list (the projection
-  returns them at `tortoise/projection/__init__.py`'s report dict, and
-  `record_restore.RestoreOutcome` types them `int` / `tuple[str, …]`). It also
-  logs a warning **after the write**, and `RestoreOutcome` prints the pair on
+  TOTAL, and `dropped_vector_labels`, the sorted TARGET list — record labels, and
+  since `#12015` a `<relationship:TYPE>` entry for an edge, which is not a label at
+  all (the projection returns them at `tortoise/projection/__init__.py`'s report
+  dict, and `record_restore.RestoreOutcome` types them `int` / `tuple[str, …]`). It
+  also logs a warning **after the write**, and `RestoreOutcome` prints the pair on
   the operator's line and in `as_dict()`. A rebuild that DELETES vectors a
   previous cache held must not read the same as one that lost nothing, and no
   re-run can bring them back: the record row is the only carrier and it is what
@@ -239,8 +240,11 @@ rather than a constant for three narrower reasons: there is no arithmetic to com
 a constant would be a plain copy), both edge doors read ONE spelling of it, and the
 instrument's falsifier needs a name to replace. Which properties are vectors is still the
 ONE owner's answer — there is no second list. ⛔ It is NOT an index decision and NOT a
-claim that an edge could never be searched — if an edge vector index ever exists, this is
-the one declaration to change, and the reason it says *no query path* rather than *no
+claim that an edge could never be searched — if an edge vector index ever exists, this
+declaration **and** row 2's served-edge vocabulary
+(`tools/dod_5090_probe.score_path_bullet`) both change: emptying this one alone turns row
+2 `NOT MET` with every `<relationship:TYPE>` in `stored-without-a-query-path`, which is
+the falsifier this rule ships. And the reason it says *no query path* rather than *no
 label* is that the absence is in the READ leg, not in the storage.
 
 ⚠️ **The `embedding_verbatim` marker goes with the vector it described.** A relation

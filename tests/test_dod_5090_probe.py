@@ -7349,7 +7349,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # existed, but the note that enrols it did not until `#12000`'s F1b note),
     # and a provenance asserted here would be the false record this note exists
     # to prevent. ⛔ The count is SCOPED
-    # to that head rather than re-cut, because this file collects 171 now and no
+    # to that head rather than re-cut, because this file collects 173 now and no
     # run of it can report
     # 152; an unscoped figure here would be the stale-measurement defect §6 of the
     # census doc exists to forbid. What closed the gap is the AST guard below —
