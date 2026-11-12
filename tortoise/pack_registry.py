@@ -456,6 +456,18 @@ def canonical_kind_words() -> frozenset[str]:
 # (#4626 / #2766 / #5322)
 CORE_PREDICATES = frozenset({"IMPL", "NAND", "coherence"})
 
+#: The mechanisms a PACK DECLARATION can actually carry (#12067 review round 4,
+#: P2). A pack `relation`/`relationTemplate` mechanism becomes a BARE edge — an
+#: operator-less direct edge — and a bare edge carries its mechanism AS ITS EDGE
+#: TYPE, which is `IMPL`/`NAND` only (`relation_write._DIRECT_MECHANISMS`). So
+#: widening these validators to `CORE_PREDICATES` (which the third mechanism
+#: widened) accepted a declaration the write leg drops or overrides through
+#: `SEMANTICS_MECHANISMS` — a pack that LOADS carrying a value nothing writes,
+#: which reads exactly like shipped. Keep this at the carriable set until the
+#: carriage exists (the #12067 follow-up: a third edge type, or an ingest arm
+#: that mints an operator for a bare-edge mechanism).
+CARRIABLE_PACK_MECHANISMS = frozenset({"IMPL", "NAND"})
+
 # ── Layer 2 — the semantics vocabulary (ONTOLOGY §8, #7852) ──────────────
 # A relation has three layers: `mechanism` (how it acts — IMPL/NAND/coherence) +
 # `direction` (which way it runs), `semantics` (what it MEANS), and the
@@ -2132,11 +2144,14 @@ class PackRegistry:
                             f"relation '{pred}': both fromKind and toKind required"
                         )
                     mechanism = rel.get("mechanism", "")
-                    if mechanism not in CORE_PREDICATES:
+                    if mechanism not in CARRIABLE_PACK_MECHANISMS:
                         errors.append(
-                            f"relation '{pred}': mechanism must be IMPL, NAND "
-                            f"or coherence, got {mechanism!r} (#12067: the "
-                            f"mechanism set is closed at three)"
+                            f"relation '{pred}': mechanism must be IMPL or "
+                            f"NAND, got {mechanism!r} (a pack relation becomes "
+                            f"a BARE edge, and a bare edge carries its "
+                            f"mechanism as its edge TYPE — `coherence` is a "
+                            f"closed-set mechanism but has no bare-edge "
+                            f"carriage yet, #12067)"
                         )
                     # Referential integrity: fromKind/toKind must reference
                     # existing kinds (core CANONICAL or this pack's own kinds).
@@ -2680,10 +2695,14 @@ class PackRegistry:
                         f"and toKind are required when either is given "
                         f"(a half-declared shape cannot be matched)"
                     )
-                if mechanism is not None and mechanism not in CORE_PREDICATES:
+                if (mechanism is not None
+                        and mechanism not in CARRIABLE_PACK_MECHANISMS):
                     errors.append(
                         f"extraction.relationTemplates[{i}].mechanism must be "
-                        f"IMPL, NAND or coherence, got {mechanism!r} (#12067)"
+                        f"IMPL or NAND, got {mechanism!r} (a template writes a "
+                        f"BARE edge, which carries its mechanism as its edge "
+                        f"TYPE; `coherence` has no bare-edge carriage yet, "
+                        f"#12067)"
                     )
                 for side in ("fromKind", "toKind"):
                     ref = tpl.get(side)

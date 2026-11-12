@@ -181,6 +181,59 @@ def test_a_necessity_meaning_is_NOT_declared_as_a_mechanism_yet():
         assert SEMANTICS_MECHANISMS[meaning] == "NAND", meaning
 
 
+def test_the_pack_leg_refuses_coherence_until_the_carriage_exists():
+    """⛔ A pack DECLARATION is not a write path (#12067 review round 4, P2).
+
+    A pack `relation`/`relationTemplate` mechanism becomes a BARE edge, and a
+    bare edge carries its mechanism AS ITS EDGE TYPE — `IMPL`/`NAND` only. An
+    editor that accepted `coherence` here let a pack LOAD carrying a value
+    `relation_write` drops (or overrides through `SEMANTICS_MECHANISMS`), which
+    reads exactly like shipped. The validators therefore stay at the CARRIABLE
+    set, and the message says why — pinning the reason, not the spelling.
+
+    Flipping this test to pass without teaching the bare-edge leg to carry the
+    mechanism is the #12067 follow-up, not a fix.
+    """
+    from tortoise.pack_registry import CARRIABLE_PACK_MECHANISMS, PackRegistry
+
+    assert frozenset({"IMPL", "NAND"}) == CARRIABLE_PACK_MECHANISMS
+    errors = PackRegistry("/tmp/nonexistent")._validate({
+        "namespace": "dev", "name": "Dev",
+        "ontology": {
+            "extends": "core",
+            "objectKinds": ["issue", "code"],
+            "relations": [{
+                "predicate": "addresses",
+                "fromKind": "dev:issue",
+                "toKind": "dev:code",
+                "mechanism": "coherence",
+            }],
+        },
+    })
+    assert any("must be IMPL or NAND" in e and "coherence" in e
+               and "bare-edge" in e for e in errors), errors
+
+
+def test_the_extraction_contract_states_the_coherence_SLOT_ORDER():
+    """⛔ `phi_coherence` is ASYMMETRIC, so an emission contract that does not
+    say which endpoint is the condition lets the model invert the mechanism
+    silently (#12067 review round 4, P1).
+
+    `phi_coherence(ca, cb)` prices `cb` off `ca`: slot 0 is the NECESSARY
+    CONDITION, slot 1 the dependent. The extractor hard-codes
+    `direction: unidirectional` for every mechanism (it does not swap), so
+    nothing downstream can detect an inversion — an inverted pair looks like a
+    perfectly ordinary loss flowing the wrong way. The contract therefore has to
+    state the order, next to the op_type it governs.
+    """
+    from tortoise.extractor_v2 import OUTPUT_CONTRACT
+
+    head = OUTPUT_CONTRACT[:OUTPUT_CONTRACT.index('"relations":')]
+    op_block = head[head.index('"operators":'):]
+    assert "NECESSARY CONDITION" in op_block, op_block
+    assert "src" in op_block and "NECESSARY" in op_block.upper(), op_block
+
+
 def test_the_mechanism_never_reaches_the_cypher_rel_position(monkeypatch):
     """⛔ THE SLOT IS THE STORAGE EDGE, and this is the pin (#12067 review P0).
 
@@ -393,6 +446,18 @@ def _points(sdk, n=2):
     return [sdk.create_point("statement", f"claim {i}")["id"] for i in range(n)]
 
 
+def _contents(sdk, *ids):
+    """The stored ``content`` of each id — what a ref's point must repeat for the
+    writer to dedup onto it (#12067)."""
+    out = []
+    for pid in ids:
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.content",
+            params={"id": pid}).result_set
+        out.append(rows[0][0])
+    return out
+
+
 @pytest.mark.parametrize("first,second", [
     ("IMPL", "NAND"), ("NAND", "IMPL"),
     ("IMPL", "coherence"), ("coherence", "IMPL"),
@@ -474,9 +539,13 @@ def test_nary_pairwise_overlap_is_refused(sdk):
 
 
 def test_a_direct_edge_is_the_other_arm_of_the_same_invariant(sdk):
-    """An operator-less edge carries its mechanism as the REL itself. One pair
-    carrying both shares a single message slot, so the last writer silently
-    wins — refusing is strictly better than that."""
+    """An operator-less edge carries its mechanism as the REL itself, so one pair
+    would price BOTH functional forms against one belief — a confidence that
+    looks exactly like strong evidence. Refusing is strictly better than that.
+
+    (Not "they share one message slot": that is true only for coherence beside a
+    bare `:IMPL`, and it is the least general of the reasons — ONTOLOGY states
+    the slot geometry correctly, so the mechanism of harm is what this names.)"""
     a, b = _points(sdk)
     sdk.create_direct_edge("IMPL", a, b)
     with pytest.raises(ValueError):
@@ -632,6 +701,62 @@ def test_ingest_reports_the_conflict_as_a_VIOLATION_not_a_mid_bundle_abort(sdk):
         "MATCH (n:Point) WHERE n.content = $c RETURN n.id",
         params={"c": "a brand new claim, queued behind the conflict"}).result_set
     assert rows == [], rows
+
+
+def test_an_INTRA_BUNDLE_conflict_is_a_VIOLATION(sdk):
+    """⛔ Phase 1 reads the GRAPH, so a conflict created by the bundle ITSELF was
+    invisible (#12067 review round 4, P1 — measured on this head).
+
+    `{"connections": [{operator: IMPL, a→b}, {operator: coherence, a→b}]}`
+    passed validation, committed the points and the FIRST operator, then raised
+    from the door — a bare `ValueError` with no `violations` entry to skip and the
+    same failure on every retry. The pair map is now accumulated across the
+    bundle, so the second statement of one pair in a different mechanism is what
+    Phase 1 reports.
+    """
+    from tortoise.exceptions import BundleValidationError
+
+    a, b = _points(sdk)
+    with pytest.raises(BundleValidationError) as exc:
+        sdk.ingest({"connections": [
+            {"operator": "IMPL", "from": a, "to": b},
+            {"operator": "coherence", "from": a, "to": b},
+        ]})
+    violations = getattr(exc.value, "violations", []) or []
+    assert any("SECOND mechanism" in (v.get("message") or "")
+               and "THIS bundle" in (v.get("message") or "")
+               for v in violations), violations
+    # Nothing from the bundle committed — not the first operator either.
+    ops = sdk._get_proj().g.query(
+        "MATCH (o:Point) WHERE o.is_operator = true RETURN count(o)"
+    ).result_set
+    assert ops[0][0] == 0, ops
+
+
+def test_a_REF_endpoint_resolves_to_its_LANDING_node(sdk):
+    """⛔ A ref passed straight into the reader is a SILENT no-op, because the
+    reader seeks `p.id IN $ids` and a ref is not an id (#12067 review round 4,
+    P1 — measured).
+
+    The writer resolves a ref to the node its point DEDUPS onto, so when both refs
+    fold onto a pair that already carries a mechanism the door raised a bare
+    `ValueError` after the dedup write had landed. Phase 1 now resolves each ref
+    with the writer's own resolver (`_resolve_dedup_hit`) before judging the pair.
+    """
+    from tortoise.exceptions import BundleValidationError
+
+    a, b = _points(sdk)
+    sdk.create_operator("IMPL", a, [b])
+    ca, cb = _contents(sdk, a, b)
+    with pytest.raises(BundleValidationError) as exc:
+        sdk.ingest({
+            "points": [{"content": ca, "ref": "rA"},
+                       {"content": cb, "ref": "rB"}],
+            "connections": [{"operator": "coherence", "from": "rA", "to": "rB"}],
+        })
+    violations = getattr(exc.value, "violations", []) or []
+    assert any("SECOND mechanism" in (v.get("message") or "")
+               for v in violations), violations
 
 
 def test_an_absorbed_coherence_leg_lands_on_the_STORAGE_edge(sdk):

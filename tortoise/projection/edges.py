@@ -1514,9 +1514,15 @@ class _EdgeHandlers:
         # `:IMPL` for `coherence`). Omitting it here minted INPUT edges ONLY on
         # replay, so a rebuilt graph priced a coherence operator as inert while
         # the live graph priced it — live/replay divergence, silently.
-        rel_type = {"NAND": "NAND", "IMPL": "IMPL", "coherence": "IMPL",
-                     "composedOf": "hasPart", "decomposesInto": "hasPart",
-                     "contains": "hasPart", "wraps": "hasPart"}.get(op.get("op_type"))
+        # ⛔ READ the declaration, never restate it: this map and the writer
+        # drifted once already, and the drift is silent (live and replay priced
+        # the same operator differently). `ep.MECHANISM_REL_TYPES` is the single
+        # home for the mechanism half; the composition spellings are the fold's
+        # own.
+        from tortoise.ep import MECHANISM_REL_TYPES as _MECH
+        rel_type = ({**_MECH, "composedOf": "hasPart", "decomposesInto": "hasPart",
+                     "contains": "hasPart", "wraps": "hasPart"}
+                    .get(op.get("op_type")))
         import logging as _logging
         _log = _logging.getLogger(__name__)
         # #7902: the operator endpoint may carry any of :Point/:Subject/

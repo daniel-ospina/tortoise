@@ -55,21 +55,23 @@ _MECHANISM_POTENTIALS = {
 MECHANISM_VALUES = frozenset(_MECHANISM_POTENTIALS)
 
 #: Mechanism → the REL TYPE it is STORED as. Two of the three mechanisms reuse an
-#: existing edge type, and this map is the ONLY place that fact is stated: the
-#: message slots (`r.msg_alpha`/`r.msg_beta`) live on the EDGE, and the edge a
+#: existing edge type: the message slots (`r.msg_alpha`/`r.msg_beta`) live on the
+#: EDGE, and the edge a
 #: `coherence` operator writes is `:IMPL` (`sdk.create_operator` maps it, and
 #: `projection/edges.py`'s fold replays the same mapping). Passing the MECHANISM
 #: into a Cypher `[r:{rel}]` pattern — which is what this file did while
 #: `op_type` and rel type happened to be equal — matches nothing for the third
 #: mechanism: the message read back as (0, 0), the flush wrote 0 rows, and the
 #: mechanism priced a belief while never persisting the evidence for it (#12067
-#: review, P0). ⛔ THIS is the declaration; the write/replay sites must READ it
-#: rather than restate it — `projection/edges.py`, `record_projection`,
-#: `projection/__init__`'s graph-only snapshot, `sdk.create_operator`'s edge
-#: writer, `commit_ops`' idempotency probe, `ingest`'s dedupe probe and its
-#: partial-absorb leg all spell the mapping, and THREE of them were wrong for the
-#: third mechanism when they spelled it themselves (two P0s and a P1 that made an
-#: absorbed leg inert).
+#: review, P0). ⛔ THIS is the declaration; every write/replay site must READ it
+#: rather than restate it — `projection/edges.py`, `projection/__init__`'s
+#: graph-only snapshot, `sdk.create_operator`'s edge writer, `commit_ops`'
+#: idempotency probe, `record_projection`'s replay map and
+#: `tools/pack_relation_census.py` all read it today. A new site that spells the
+#: mapping by hand is a defect even when it happens to be right:
+#: ⛔ THREE sites were wrong for the third mechanism when they spelled it
+#: themselves (two P0s and a P1 that made an absorbed leg inert) — the reason the
+#: reads above exist.
 MECHANISM_REL_TYPES: dict[str, str] = {
     "IMPL": "IMPL",
     "NAND": "NAND",

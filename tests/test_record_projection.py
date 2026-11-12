@@ -4048,24 +4048,35 @@ def test_a_coherence_operator_replays_its_IMPL_edge():
 
 
 def test_the_operator_rel_type_map_is_the_folds_own():
-    """Parity pin: the mapping is restated, so pin it to `_create_edges`' source.
+    """Parity pin: the record's map, the fold and `ep` must agree per op_type.
 
-    The module is loaded STANDALONE by the PGlite harness, so the fold's literal
-    cannot be imported. Each spelling and each target predicate is asserted to
-    appear in the fold's own source: a predicate the fold adds without a row here
-    makes the record poorer than the graph on that op_type, and a row the fold
-    does not write makes it richer — both are rebuild-lane divergences.
+    ⛔ #12067: the pin used to require the mapping to be RESTATED in the fold's
+    source, which is exactly the drift it was meant to catch — the third
+    mechanism was added to two of the three copies and a rebuilt graph priced it
+    as inert. It now pins the stronger property: the fold READS
+    `ep.MECHANISM_REL_TYPES`, and the only rows it may spell itself are the four
+    composition spellings (a structural `hasPart`, not a mechanism).
+
+    A predicate the fold adds without a row here makes the record poorer than the
+    graph on that op_type; a row the fold does not write makes it richer — both
+    are rebuild-lane divergences.
     """
     import inspect
 
+    from tortoise.ep import MECHANISM_REL_TYPES
     from tortoise.projection.edges import _EdgeHandlers
 
     source = inspect.getsource(_EdgeHandlers._create_edges)
-    for op_type, rel_type in rp._OPERATOR_REL_TYPES.items():
+    assert "MECHANISM_REL_TYPES" in source, (
+        "the fold must READ the declaration, not restate it (#12067)")
+    composition = {"composedOf": "hasPart", "decomposesInto": "hasPart",
+                   "contains": "hasPart", "wraps": "hasPart"}
+    for op_type, rel_type in composition.items():
         assert f'"{op_type}": "{rel_type}"' in source, (op_type, rel_type)
+    # The record's map DERIVES the mechanism half, so the three can never drift.
+    for op_type, rel_type in MECHANISM_REL_TYPES.items():
+        assert rp._OPERATOR_REL_TYPES[op_type] == rel_type, op_type
     assert set(rp._OPERATOR_REL_TYPES.values()) == {"IMPL", "NAND", "hasPart"}
-    # Non-vacuity: the fold's map is a LITERAL in the source we just read.
-    assert '"NAND": "NAND"' in source and '"IMPL": "IMPL"' in source
 
 
 def test_a_mitigation_lands_the_canonical_mitigated_by_mirror():

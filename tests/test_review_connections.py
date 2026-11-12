@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests._legacy_mechanisms import legacy_nand_operator
 from tortoise.live import TERMINAL_EXCLUDED_STATUSES
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -803,36 +804,6 @@ def test_prune_scope_empty_pool_returns_empty(sdk_factory, tmp_path, monkeypatch
     assert result["prune"] == []
 
 
-def _legacy_nand_operator(sdk, src_id: str, tgt_id: str, *, label: str) -> str:
-    """Write a NAND operator over a pair that ALREADY carries IMPL, the way the
-    graph held it before #12067.
-
-    ⛔ This is a RAW write on purpose. #12067 closes the mechanism set and refuses
-    a second mechanism on one pair through BOTH SDK doors, so the shape this
-    feature detects (`contradictory` = the same pair IMPL- and NAND-linked) can no
-    longer be produced through the SDK — but it still EXISTS in every graph
-    written before the closure (`review_connections` does no backfill, by ruling).
-    A fixture that used the SDK would be asserting the detector can never fire.
-    The Cypher is exactly what `create_operator` writes: the operator Point, the
-    typed edge per target with its `idx`, and the reverse `INPUT` mirror.
-    """
-    pid = f"legacy-nand-{label}"
-    g = sdk._get_proj().g
-    g.query(
-        "CREATE (o:Point {id:$id, is_operator:true, op_type:'NAND', "
-        "status:'live', label:$label, direction:'unidirectional'})",
-        params={"id": pid, "label": label})
-    # BOTH slots, exactly as `create_operator` writes them: `idx:0` is the SOURCE
-    # slot `ep._update_factor` reads the forward message from, `idx:1` the target.
-    # A single-edge write is the LEGACY shape (`_epistemic_edges` degrades it to
-    # one entry per unordered pair) and would not reproduce the live topology.
-    for idx, node in ((0, src_id), (1, tgt_id)):
-        g.query(
-            "MATCH (o:Point {id:$oid}), (t) WHERE t.id = $node "
-            "MERGE (o)-[r:NAND]->(t) SET r.idx = $idx "
-            "MERGE (t)-[:INPUT {idx:$idx}]->(o)",
-            params={"oid": pid, "node": node, "idx": idx})
-    return pid
 
 
 def test_prune_flags_contradictory_impl_nand(sdk_factory, tmp_path):
@@ -841,7 +812,7 @@ def test_prune_flags_contradictory_impl_nand(sdk_factory, tmp_path):
     a = sdk.create_point("statement", "the deployment succeeded")
     b = sdk.create_point("statement", "the deployment failed")
     sdk.create_operator("IMPL", a["id"], [b["id"]], label="supports")
-    _legacy_nand_operator(sdk, a["id"], b["id"], label="opposes")
+    legacy_nand_operator(sdk, a["id"], b["id"], label="opposes")
     # Control pair: IMPL-only → NOT contradictory.
     c = sdk.create_point("statement", "calm claim")
     d = sdk.create_point("statement", "its supported claim")

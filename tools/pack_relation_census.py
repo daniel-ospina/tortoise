@@ -155,9 +155,11 @@ def _operator_edge_type(predicate: str, mechanism: str | None) -> str | None:
     None would say "no writer stamps an edge for this row", which is the exact
     opposite of what a coherence relation write does.
     """
-    if mechanism == "coherence":
-        return "IMPL"
-    return mechanism if mechanism in ("IMPL", "NAND") else None
+    from tortoise.ep import MECHANISM_REL_TYPES
+
+    if mechanism in MECHANISM_REL_TYPES:
+        return MECHANISM_REL_TYPES[mechanism]
+    return None
 
 
 def _relation_row(pack: str, rel: dict) -> dict:

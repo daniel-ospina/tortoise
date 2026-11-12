@@ -4975,19 +4975,24 @@ _EPISTEMIC_LABELS: tuple[str, ...] = ("Point", "Subject", "Object", "Event")
 #: own `{op_type, inputs}` descriptor (`projection/edges.py`). The mapping is the
 #: fold's literal, restated: an op_type the fold does not know mints no typed
 #: edge at all, only the reverse `INPUT`.
-_OPERATOR_REL_TYPES: dict[str, str] = {
-    "NAND": "NAND",
-    "IMPL": "IMPL",
-    # #12067: `coherence` is stored on the IMPL edge type — the mechanism of
-    # record is the node's `op_type`, and leaving the third mechanism out of
-    # this map made a REBUILT graph price it as inert (#12067 review, P0).
-    "coherence": "IMPL",
-    # The four composition spellings all land the ONE `hasPart` predicate.
-    "composedOf": "hasPart",
-    "decomposesInto": "hasPart",
-    "contains": "hasPart",
-    "wraps": "hasPart",
-}
+def _operator_rel_types() -> dict[str, str]:
+    """op_type → the edge rel type a REPLAY stamps, for every operator op_type.
+
+    ⛔ DERIVED from `ep.MECHANISM_REL_TYPES`, never restated (#12067): leaving the
+    third mechanism out of a hand-written copy made a REBUILT graph price it as
+    inert (a P0 — the replay map and the writer had drifted). The four
+    composition spellings are this map's ONLY own entries, and they all land the
+    one structural `hasPart` predicate.
+    """
+    from tortoise.ep import MECHANISM_REL_TYPES
+
+    out = dict(MECHANISM_REL_TYPES)
+    out.update({"composedOf": "hasPart", "decomposesInto": "hasPart",
+                "contains": "hasPart", "wraps": "hasPart"})
+    return out
+
+
+_OPERATOR_REL_TYPES: dict[str, str] = _operator_rel_types()
 
 #: How the operator descriptor is read from a record's snapshot. `nested` is
 #: `snapshot["operator"]`; `synthesized` additionally mirrors

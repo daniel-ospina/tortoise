@@ -172,7 +172,7 @@ class TestValidationEdgeCases:
                 }],
             },
         })
-        assert any("mechanism must be IMPL, NAND or coherence" in e for e in errors)
+        assert any("mechanism must be IMPL or NAND" in e for e in errors)
 
     def test_relation_missing_from_kind_when_to_kind_present(self):
         registry = PackRegistry("/tmp/nonexistent")

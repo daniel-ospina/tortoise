@@ -1758,6 +1758,13 @@ OUTPUT_CONTRACT = """{
               "supersedes": "existing-id|content|null",  # replaces a prior-session point found in search (CORRECTS fold; omit = none)
               "source_turn_id": int|null}],  # {index}: turn in the SOURCE TRANSCRIPT (E3)
   "operators": [
+    # ⛔ src/dst ORDER IS PART OF THE MEANING for all three mechanisms and is NOT
+    # interchangeable (#12067): IMPL = src SUPPORTS dst; NAND = src REFUTES dst;
+    # coherence = src is the NECESSARY CONDITION and dst the DEPENDENT — an unmet
+    # src drags dst DOWN, a met src never lifts it, so the loss flows src→dst
+    # ONLY. Emit the condition as `src`. Nothing downstream can detect an
+    # inversion (the direction is fixed `unidirectional`), and an inverted pair
+    # prices as an ordinary update in the wrong direction.
     {"src": str, "dst": str, "op_type": "IMPL|NAND|coherence"},
     {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
   ],

@@ -10865,36 +10865,44 @@ def _mechanism_population(alias: str) -> str:
     return _terminal_excluded(alias)
 
 
-def _mechanism_pair_conflicts(proj, endpoints, mechanism):
-    """Every existing mechanism a NEW ``mechanism`` write would DOUBLE-COUNT.
+def _mechanism_conflicts_for_pairs(proj, pairs):
+    """``{pair: mechanism}`` → ``{pair: [(kind, other, shared_ids, op_id)]}``.
 
-    Returns ``[(kind, other_mechanism, shared_ids, operator_id)]`` where ``kind``
-    is ``"operator"`` or ``"direct_edge"`` (#12067).
+    ONE reader for the whole closed-set invariant (#12067), BATCHED: ``pairs``
+    is every pair the caller is about to judge, and the population is read ONCE
+    for all of them.
 
-    ONE reader for THREE callers — ``create_operator``, ``create_direct_edge`` and
-    ``ingest``'s Phase-1 validation — because each re-derivation drifted: the
-    validation door did not exist at all (so a conflicting connection aborted the
-    bundle MID-WRITE, after earlier items committed, with no violation to skip),
-    and the two execution doors each spelled the bare-edge comparison differently.
+    ⛔ WHY BATCHED, and why one reader. The invariant has three call sites —
+    ``create_operator`` (its operator arm and its bare-edge arm),
+    ``create_direct_edge``, and ``ingest``'s Phase-1 validation — and each
+    re-derivation drifted: the validation door did not exist at all (a
+    conflicting connection aborted the bundle MID-WRITE, after earlier items
+    committed, with no violation to skip), and the two execution doors each
+    spelled the bare-edge comparison differently. Extracting a per-pair reader
+    fixed the DRIFT but not the COST: ``ingest`` validated one pair at a time, so
+    a few-hundred-connection extractor bundle issued 8 Cypher reads PER
+    (connection × target) — measured 0.53 s for 60 connections (8.8 ms each)
+    against 0.00 s for the same 60 on the relation route (#12067 review round 4,
+    P2). The pair-keyed form is what lets validation ask once.
+
     The bare-edge arm compares against the NEW MECHANISM, never its storage type:
     a bare edge's mechanism IS its rel type, so every bare type that is not the
     new mechanism conflicts.
     """
     from tortoise.pack_registry import CORE_PREDICATES
 
-    endpoints = set(endpoints)
-    conflicts: list[tuple[str, str, list[str], str | None]] = []
-    for _oid, (_otype, _eps) in _live_operator_mechanism_pairs(
-            proj, endpoints).items():
-        if _otype is None or _otype not in CORE_PREDICATES:
-            continue
-        if _otype == mechanism:
-            continue
-        _shared = _eps & endpoints
-        if len(_shared) < 2:
-            continue
-        conflicts.append(("operator", _otype, sorted(_shared), _oid))
-    if len(endpoints) >= 2:
+    ids: set[str] = set()
+    for _pair in pairs:
+        ids |= set(_pair)
+    if not ids:
+        return {}
+    population = _live_operator_mechanism_pairs(proj, ids)
+    operators = [
+        (oid, otype, eps) for oid, (otype, eps) in population.items()
+        if otype is not None and otype in CORE_PREDICATES
+    ]
+    bare: list[tuple[str, str, str]] = []
+    if len(ids) >= 2:
         for _q in epistemic_label_queries(
             "MATCH (a:{label})-[r:IMPL|NAND]->(b) "
             "WHERE a.id IN $ids AND b.id IN $ids "
@@ -10903,10 +10911,35 @@ def _mechanism_pair_conflicts(proj, endpoints, mechanism):
             "RETURN a.id, b.id, type(r)"
         ):
             for _a, _b, _t in proj.g.query(
-                    _q, params={"ids": sorted(endpoints)}).result_set:
-                if _t != mechanism:
-                    conflicts.append(("direct_edge", _t, [_a, _b], None))
-    return conflicts
+                    _q, params={"ids": sorted(ids)}).result_set:
+                bare.append((_a, _b, _t))
+    out: dict[frozenset, list[tuple[str, str, list[str], str | None]]] = {}
+    for pair, mechanism in pairs.items():
+        for oid, otype, eps in operators:
+            if otype == mechanism:
+                continue
+            shared = eps & pair
+            if len(shared) < 2:
+                continue
+            out.setdefault(pair, []).append(
+                ("operator", otype, sorted(shared), oid))
+        for _a, _b, _t in bare:
+            if _t != mechanism and {_a, _b} == set(pair):
+                out.setdefault(pair, []).append(
+                    ("direct_edge", _t, [_a, _b], None))
+    return out
+
+
+def _mechanism_pair_conflicts(proj, endpoints, mechanism):
+    """Every existing mechanism a NEW ``mechanism`` write on ONE pair would
+    DOUBLE-COUNT — ``[(kind, other, shared_ids, operator_id)]`` (#12067).
+
+    The single-pair entry point; the judgement itself lives in
+    :func:`_mechanism_conflicts_for_pairs` so a batch and a single pair can never
+    disagree about what conflicts.
+    """
+    pair = frozenset(endpoints)
+    return _mechanism_conflicts_for_pairs(proj, {pair: mechanism}).get(pair, [])
 
 
 def _live_operator_mechanism_pairs(proj, ids):
@@ -24500,10 +24533,12 @@ class TortoiseSDK:
                     f"{_other!r} mechanism as a direct edge, so it cannot also "
                     f"carry {op_type!r} (#12067 — the mechanism set is CLOSED "
                     f"and a pair carries at most one). A direct edge is an "
-                    f"operator-less mechanism edge; one pair carrying two of "
-                    f"them shares a single message slot, so the last writer "
-                    f"silently wins. Remove the direct edge first, or wire the "
-                    f"second intent against a different claim."
+                    f"operator-less mechanism edge and the mechanism of record "
+                    f"IS its edge type, so the pair would price two different "
+                    f"functional forms against one belief — a lifted or dropped "
+                    f"confidence that looks exactly like strong evidence. Remove "
+                    f"the direct edge first, or wire the second intent against a "
+                    f"different claim."
                 )
 
         # #2351: the override guard — a DERIVED claim may not IMPL-cascade above
@@ -24591,8 +24626,9 @@ class TortoiseSDK:
         # (158 sites across 22 modules — measured, #12067's inventory) until
         # each one learned it, i.e. INERT on those surfaces, which is exactly
         # the #8169 failure. Only a part/whole op_type is structural (`hasPart`).
-        edge_type = ("hasPart" if op_type not in ("IMPL", "NAND", "coherence")
-                     else ("IMPL" if op_type == "coherence" else op_type))
+        from tortoise.ep import mechanism_rel_type as _mechanism_rel_type
+        edge_type = ("hasPart" if op_type not in _MECHANISM_OP_TYPES
+                     else _mechanism_rel_type(op_type))
         for i, inp_id in enumerate(inputs):
             # #7405: the typed edge and its INPUT mirror are created by ONE
             # statement; the abort means NEITHER landed, and the endpoints/idx
@@ -28678,8 +28714,8 @@ class TortoiseSDK:
             for b in range(a + 1, len(ops)):
                 ia, ca = ops[a]
                 ib, cb = ops[b]
-                if ca["operator"] not in ("IMPL", "NAND") \
-                        or cb["operator"] not in ("IMPL", "NAND"):
+                if ca["operator"] not in _MECHANISM_OP_TYPES \
+                        or cb["operator"] not in _MECHANISM_OP_TYPES:
                     continue
                 if ca.get("from") == cb.get("to") and ca.get("to") == cb.get("from"):
                     da = self._canonical_direction(ca["operator"], ca.get("direction"))
@@ -28832,16 +28868,48 @@ class TortoiseSDK:
         partial-mutation class Phase 1 exists to prevent (#329/#4021) — the door
         refusal stays as the backstop for the non-ingest callers.
 
+        ⛔ THREE THINGS A PREDICTION MUST GET RIGHT, and the first cut got two
+        of them wrong (#12067 review round 4, P1 — each measured on this head):
+
+        1. **The landing node, not the spelling.** The first cut passed the raw
+           `from`/`to` STRINGS into the reader, which seeks `p.id IN $ids` — so
+           for refs (the idiomatic spelling) the check was a silent NO-OP, and a
+           pair that already carried a mechanism got a bare `ValueError` after
+           the dedup/absorb writes had landed. Endpoints are now resolved the way
+           the writer resolves them: a ref naming a `points` item is that item's
+           dedup LANDING id (`_resolve_dedup_hit`, the writer's own resolver), and
+           a ref that lands on nothing is a point this bundle MINTS — no id, and
+           therefore no existing mechanism to conflict with.
+        2. **The bundle's own writes.** Phase 1 reads the GRAPH, so a conflict
+           created by two connections OF THE SAME BUNDLE was invisible:
+           `{"points": […], "connections": [{operator: IMPL}, {operator:
+           coherence}]}` on one pair committed the point and the first operator,
+           then raised — the same mid-write abort, reached through the check
+           added to prevent it. Pairs are now accumulated across the bundle and
+           the second statement of a pair in a DIFFERENT mechanism is a
+           violation.
+        3. **The cost.** One pair at a time cost 8 Cypher reads per (connection ×
+           target) — 0.53 s of validation for a 60-connection bundle. The
+           population is now read ONCE for every pair in the bundle
+           (`_mechanism_conflicts_for_pairs`).
+
         Reported per SELF-CONTAINED pair: the violation names the connection
         index, the mechanism already on the pair, and where it came from, so a
         caller can drop or re-point that one connection.
+
+        ⛔ STATED RESIDUAL: a ref naming a NON-point item (``entities``/
+        ``sources``) is not resolved to its landing node here — `resolve_or_mint`
+        decides that at write time — so a mechanism connection addressing such a
+        ref is judged on its bundle-local pair identity only. It remains covered
+        by the execution door's `raise` (the backstop), not by Phase 1.
         """
         from tortoise.pack_registry import CORE_PREDICATES
 
-        proj = self._get_proj()
-        for i, conn in enumerate(bundle.get("connections") or []):
-            if not isinstance(conn, dict):
-                continue
+        conns = [c for c in (bundle.get("connections") or [])
+                 if isinstance(c, dict)]
+        shape: list[tuple[int, str, list[str]]] = []
+        endpoint_names: set[str] = set()
+        for i, conn in enumerate(conns):
             mechanism = conn.get("operator")
             if mechanism not in CORE_PREDICATES:
                 continue
@@ -28850,32 +28918,132 @@ class TortoiseSDK:
             if not isinstance(src, str):
                 continue
             targets = [dsts] if isinstance(dsts, str) else list(dsts or [])
-            reported: set[tuple] = set()
             for tgt in targets:
                 if not isinstance(tgt, str) or tgt == src:
                     continue
-                for kind, other, pair, oid in _mechanism_pair_conflicts(
-                        proj, {src, tgt}, mechanism):
-                    key = (kind, other, tuple(pair))
-                    if key in reported:
-                        continue
-                    reported.add(key)
+                shape.append((i, mechanism, [src, tgt]))
+                endpoint_names.update((src, tgt))
+        if not shape:
+            return
+        landing = self._bundle_point_ref_landings(bundle, endpoint_names)
+
+        def _node(name: str) -> tuple[str, str] | None:
+            """The pair KEY for one endpoint: its landing id when the bundle or
+            the graph will hold a node, else its bundle-local identity."""
+            if name in landing:
+                return ("id", landing[name]) if landing[name] else ("ref", name)
+            if name in self._bundle_local_refs(bundle):
+                return ("ref", name)
+            return ("id", name)
+
+        proj = self._get_proj()
+        seen: dict[frozenset, tuple[str, int]] = {}
+        graph_pairs: dict[frozenset, str] = {}
+        ids_pairs: dict[int, list[tuple[tuple, tuple]]] = {}
+        for i, mechanism, (src, tgt) in shape:
+            a, b = _node(src), _node(tgt)
+            key = frozenset((a, b))
+            prev = seen.get(key)
+            if prev is not None and prev[0] != mechanism:
+                pj, pm = prev
+                violations.append(self._mechanism_violation(
+                    i, mechanism,
+                    f"connections[{pj}] of THIS bundle already states the "
+                    f"{pm!r} mechanism on that pair (no node existed to read, "
+                    f"so this is an intra-bundle conflict)", None))
+                continue
+            seen.setdefault(key, (mechanism, i))
+            if (a[0] == "id" and b[0] == "id"):
+                id_key = frozenset((a[1], b[1]))
+                graph_pairs.setdefault(id_key, mechanism)
+                ids_pairs.setdefault(i, []).append((id_key, (a[1], b[1])))
+        for id_key, found in _mechanism_conflicts_for_pairs(
+                proj, graph_pairs).items():
+            for i, entries in ids_pairs.items():
+                if not any(k == id_key for k, _names in entries):
+                    continue
+                _names = next(n for k, n in entries if k == id_key)
+                for kind, other, _shared, oid in found:
                     where = (f"operator {oid!r}" if kind == "operator"
                              else "a direct edge")
-                    violations.append({
-                        "section": "connections", "index": i,
-                        "message": (
-                            f"ingest: connections[{i}] would put a SECOND "
-                            f"mechanism ({mechanism!r}) on the pair {pair} — it "
-                            f"already carries the {other!r} mechanism ({where}), "
-                            f"and the mechanism set is CLOSED: a pair carries at "
-                            f"most one (#12067). Pick the mechanism that fits, "
-                            f"state the other intent against a different claim, "
-                            f"or remove what the pair already carries. "
-                            f"NOTE: an operator has no retract path today, so "
-                            f"`delete_point` is the only route."
-                        ),
-                    })
+                    violations.append(self._mechanism_violation(
+                        i, graph_pairs[id_key],
+                        f"it already carries the {other!r} mechanism ({where})",
+                        sorted(_names)))
+
+    def _mechanism_violation(self, index: int, mechanism: str, because: str,
+                             pair: list[str] | None) -> dict:
+        """One closed-set violation, worded once (#12067)."""
+        where = f" on the pair {pair}" if pair else ""
+        return {
+            "section": "connections", "index": index,
+            "message": (
+                f"ingest: connections[{index}] would put a SECOND mechanism "
+                f"({mechanism!r}){where} — {because}, and the mechanism set is "
+                f"CLOSED: a pair carries at most one (#12067). Pick the "
+                f"mechanism that fits, state the other intent against a "
+                f"different claim, or remove what the pair already carries. "
+                f"NOTE: an operator has no retract path today, so `delete_point` "
+                f"is the only route."
+            ),
+        }
+
+    def _bundle_local_refs(self, bundle: dict) -> set[str]:
+        """Every ``ref`` the bundle declares, whatever section (#12067).
+
+        Used only to tell "a name this bundle will CREATE" from "a name that
+        must already be a node id" — the distinction that decides whether a
+        mechanism pair can be looked up in the graph at all.
+        """
+        out: set[str] = set()
+        for section in ("points", "entities", "sources"):
+            for item in bundle.get(section) or []:
+                if isinstance(item, dict):
+                    ref = item.get("ref")
+                    if isinstance(ref, str) and ref:
+                        out.add(ref)
+        return out
+
+    def _bundle_point_ref_landings(self, bundle: dict,
+                                   names: set[str]) -> dict[str, str | None]:
+        """``{ref: landing_id_or_None}`` for the ``points`` refs in ``names``.
+
+        The WRITER's own resolution (``_resolve_dedup_hit``, keyed by
+        ``_item_dedup_key``), so Phase 1 predicts the id step 2 will fold onto
+        instead of guessing from content: a ref whose point content/key dedups
+        onto an existing node has a landing id TODAY, and that id is what a
+        mechanism pair must be looked up by. ``None`` = the bundle mints a NEW
+        point, so no existing mechanism can sit on that endpoint.
+
+        Only the refs actually named by a mechanism connection are resolved — one
+        query each, and none for a bundle that names none.
+        """
+        out: dict[str, str | None] = {}
+        if not names:
+            return out
+        for item in bundle.get("points") or []:
+            if not isinstance(item, dict):
+                continue
+            ref = item.get("ref")
+            if not isinstance(ref, str) or not ref or ref not in names:
+                continue
+            content = item.get("content")
+            kind = item.get("kind") or item.get("pointKind") or "statement"
+            if not isinstance(content, str) or not content.strip():
+                out[ref] = None
+                continue
+            try:
+                hit, _key_hits = self._resolve_dedup_hit(
+                    content, pointKind=kind, key=_item_dedup_key(item))
+            except Exception:
+                # A PROBE, never a gate: an unreadable landing falls back to
+                # "this bundle mints it", which skips the GRAPH arm for that
+                # pair and leaves the execution door's `raise` as the
+                # backstop. Phase 1 must aggregate, never fail fast.
+                out[ref] = None
+                continue
+            out[ref] = hit
+        return out
 
     def ingest(self, bundle: dict, granularity: str = "bulk", *,
                promotion_policy: str = "gated") -> dict:
