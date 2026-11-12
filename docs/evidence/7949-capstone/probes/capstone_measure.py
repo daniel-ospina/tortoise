@@ -2889,7 +2889,7 @@ def _a1_object_edges(projection) -> dict:
          "edges": int(row[3] or 0)}
         for row in projection.g.query(
             # ⛔ `objectKind`, NOT `kind`: the writer stamps `o.objectKind=coalesce($ok,'other')`
-            # (tortoise/projection/entities.py:5023) and the pack declares `fromKind`/`toKind`
+            # (tortoise/projection/entities.py:5026) and the pack declares `fromKind`/`toKind`
             # (packs/dev/manifest.yaml:144-149). Reading `a.kind` returned NULL on every real graph
             # — the "by endpoint kind" half reported as measured while measuring nothing (#10982
             # review, finding 3).
