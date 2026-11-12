@@ -696,8 +696,11 @@ python3 -c 'import sys,pathlib; pathlib.Path(sys.argv[1]).write_text("\u2192\u21
 # different state than the branch actually reaches. ⚠️ This check is a DIAGNOSTIC, not the
 # non-vacuity anchor: it copies the expression, so if the script's capture shape changes it
 # can keep passing while describing a state the code no longer reaches. The POSITIVE body
-# rows below are the anchor — `yielded NOTHING either` is only emitted in the empty-fallback
-# arm, so a fixture that stopped reaching it reds those rows regardless of this check.
+# rows below are the anchor — `produced no excerpt either` is emitted ONLY in the
+# empty-fallback arm (the script's own wording, quoted exactly: an earlier draft of this
+# comment quoted a phrase — `yielded NOTHING either` — that no commit of this branch ever
+# emitted, which is this PR's own class one layer down), so a fixture that stopped reaching
+# that arm reds those rows regardless of this check.
 EX17I="$(LC_ALL=C tr -d '\200-\377' < "$FIX/drift-report-nonascii.txt")"
 if [ -z "$EX17I" ]; then
   ok "case 17i: the fixture captures as EMPTY under the ASCII fallback (so the case is not vacuous)"
