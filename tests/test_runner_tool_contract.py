@@ -1016,13 +1016,22 @@ def _jobs(path: Path) -> list[tuple[str, list[str]]]:
 
 
 def _mapping_entry(node: object, name: str) -> object | None:
-    """The value node for key `name` in a YAML mapping node, or None."""
+    """The value node for key `name` in a YAML mapping node, or None.
+
+    ⛔ LAST WINS, deliberately. A duplicate key (`steps:` twice, or `run:` twice in one step)
+    is a file YAML 1.1/1.2 call invalid, but a reader may still accept it — and PyYAML's own
+    `safe_load` keeps the LAST entry. First-wins here silently dropped a folded `run:` that
+    `safe_load` resolves and that bash really executes, while this file's sibling assertions use
+    `safe_load` as their oracle: two readers of the same file disagreeing about which duplicate
+    wins is a divergence the suite could never see (#12167 review, pass 6).
+    """
+    found = None
     if not isinstance(node, yaml.MappingNode):
         return None
     for key, value in node.value:
         if isinstance(key, yaml.ScalarNode) and key.value == name:
-            return value
-    return None
+            found = value
+    return found
 
 
 def _code_only(line: str) -> str:
@@ -2317,8 +2326,8 @@ def test_a_folded_block_scalar_is_one_command_not_two(tmp_path):
     no helper, so the scan answered `[]` with the helper running (measured, marker file).
     It is an INHERITED MISS on `origin/main` and a REGRESSION against pre-`#12106`.
 
-    It reds if `_yaml_run_scalars` stops being consulted, and it asserts the FOLDED RENDERING
-    is present in the job body — so it cannot pass by the physical lines happening to hit.
+    It reds if the composer stops being consulted, and it asserts the FOLDED RENDERING is
+    present in the job body — so it cannot pass by the physical lines happening to hit.
     """
     scripts = _gh_executing_scripts()
     helper = "install-ci-runner-x64.sh"
@@ -2446,7 +2455,20 @@ def test_a_folded_block_scalar_is_one_command_not_two(tmp_path):
         assert len(renamed_jobs) == 1, (
             f"{header!r} enumerated {len(renamed_jobs)} jobs: {renamed_jobs}"
         )
-        assert _gh_hazards(renamed_jobs[0][1], scripts), (
+        # ⛔ THE BODY MUST BE THE JOB'S OWN LINES, not just the appended fold. Measured: replacing
+        # the node slice with a lookup in the textual reader (`body = textual.get(name, [])`) left
+        # the whole suite GREEN while the body collapsed to the single folded line — and because
+        # `_poolable_label("")` is False, the COVERAGE arm then silently SKIPPED the job, which is
+        # the very R2/R3 fail-open this cut exists to close (#12167 review, pass 6).
+        renamed_body = renamed_jobs[0][1]
+        assert any("runs-on:" in line for line in renamed_body), (
+            f"the body for {header!r} lost the job's own lines: {renamed_body}"
+        )
+        assert _poolable_label("\n".join(renamed_body)), (
+            f"the body for {header!r} stopped reading as a poolable job, so the coverage arm "
+            f"would skip it: {renamed_body}"
+        )
+        assert _gh_hazards(renamed_body, scripts), (
             f"the fold did not reach the job spelled {header!r}: {renamed_jobs[0]}"
         )
 
@@ -2465,6 +2487,32 @@ def test_a_folded_block_scalar_is_one_command_not_two(tmp_path):
     plain_body = dict(_jobs(plain))["folded"]
     assert _gh_hazards(plain_body, scripts), (
         f"a plain multi-line scalar was not joined: {plain_body}"
+    )
+
+    # ⛔ AND A DUPLICATE KEY RESOLVES THE WAY `safe_load` RESOLVES IT — LAST wins. YAML 1.1/1.2
+    # call a duplicate key invalid, but a reader may accept it, and this module's own oracle is
+    # `safe_load`: a first-wins lookup here resolved a key `safe_load` never returns, so a folded
+    # `run:` that bash really executes was read as its innocent FIRST duplicate and reported
+    # nothing — two readers of one file disagreeing, a divergence no assertion could see
+    # (#12167 review, pass 6).
+    duplicate = tmp_path / "duplicate.yml"
+    duplicate.write_text(
+        "jobs:\n"
+        "  folded:\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    steps:\n"
+        "      - run: echo harmless\n"
+        "    steps:\n"
+        "      - run: >\n"
+        f"          echo 'bash tools/{helper}'\n"
+        "          | bash\n"
+    )
+    duplicate_body = dict(_jobs(duplicate))["folded"]
+    assert yaml.safe_load(duplicate.read_text())["jobs"]["folded"]["steps"][0]["run"].startswith(
+        "echo 'bash"
+    ), "this fixture no longer exercises last-wins"
+    assert _gh_hazards(duplicate_body, scripts), (
+        f"a duplicate `steps:` key resolved first-wins, against `safe_load`: {duplicate_body}"
     )
 
 
