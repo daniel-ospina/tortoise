@@ -22,11 +22,21 @@ whose host moved while its dead `#appeal` fragment did not (#11939).
 
 ⛔ #11767's items 4 and 5 are IN THIS FILE'S SURFACE but NOT re-aimed by the PR
 that added it: the dashboard landing pages (`invite-accept`, `welcome`, `signup`),
-the blog-origin pair, and the dashboard's docs links still spell the retired
-origin. Each is in `RETIRED_HOST_ALLOWLIST` with an EXACT occurrence count, the
-measured 301 that makes it a hop rather than a break, and the child that owns the
-re-aim — so this guard cannot report GREEN over a file it never opened, and a
-sweep that removes one of those literals must remove its recorded reason too.
+the blog origin, and the dashboard's docs links used to spell the retired origin.
+Each is in `RETIRED_HOST_ALLOWLIST` with an EXACT occurrence count, the measured
+301 that makes it a hop rather than a break, and the child that owns the re-aim —
+so this guard cannot report GREEN over a file it never opened, and a sweep that
+removes one of those literals must remove its recorded reason too.
+
+⛔ ONE ROW CHANGED UNDER THIS PR, AND THE CHANGE IS THE POINT OF THE EXACT COUNT.
+`website/functions/blog/_lib.ts` was 4 when this file was written; main's #11765
+(PR #11976, landed 2026-11-12 while this PR was open) flipped that file's
+`SITE_URL` to `premiselabs.co`, so the count is now 3 — the three `navHtml`
+product hrefs, which #11976's own `tests/test_blog_seo_meta.mjs` keeps on the
+retired host ON PURPOSE and assigns to #11764. This file was rebased onto that
+commit and the row follows it down; a count that had stayed at 4 would have gone
+RED on a file nobody broke, and a sweep that "fixed" it by deleting the row would
+have un-pinned the three hrefs that legitimately remain.
 """
 from __future__ import annotations
 
@@ -215,19 +225,28 @@ RETIRED_HOST_ALLOWLIST = {
         "#11767 item 4 — the admin client's blog origin; same deferral as the "
         "blog Function above (301 measured on the retired host)."),
     # ⛔ The blog origin's ACTUAL source, missed by the first pass at this map: it
-    # named the admin client and the dashboard Function but not `SITE_URL` in the
-    # blog Function's own `_lib.ts`, which is what its canonicals, OG tags,
-    # JSON-LD, sitemap and feed are built from. A sweep of item 4 that moved every
-    # file BELOW while missing this one would leave the blog emitting the retired
-    # origin everywhere it matters, with this guard green.
+    # named the admin client and the dashboard Function but not `_lib.ts`, which is
+    # what the blog's canonicals, OG tags, JSON-LD, sitemap and feed are built from.
+    # ⛔ THIS ROW WAS 4 AND IS NOW 3, because main landed half of it. #11765 (PR
+    # #11976) re-aimed `SITE_URL` to `premiselabs.co`; the three occurrences that
+    # remain are `navHtml`'s product hrefs, which that PR deliberately left absolute
+    # on the retired host (`/docs`, `/#pricing` and `/auth` did not exist on the
+    # company host when it shipped) and whose repoint `tests/test_blog_seo_meta.mjs`
+    # assigns to #11764. So the row is not a stale leftover: it pins the three
+    # hrefs the DESTINATION question owns, and the moment #11764 repoints them the
+    # count goes to 0 and this row must be deleted in that commit.
     "website/functions/blog/_lib.ts": (
-        4,
-        "#11767 item 4 — `SITE_URL`: the ONE constant the blog's canonical/OG/"
-        "JSON-LD/sitemap output and three nav links (`/docs`, `/#pricing`, `/auth`) "
-        "are built from; imported by `blog/[[path]].ts`, `blog/feed.xml.ts` and "
-        "`blog/sitemap.xml.ts`. `/blog` on the retired host 301s to "
-        "premiselabs.co/blog (measured 2026-11-12). Re-aiming item 4 is not "
-        "complete without this file."),
+        3,
+        "#11767 item 4, remaining half — `navHtml`'s three product hrefs: `/docs` "
+        "(301 -> premiselabs.co/tortoise/docs), `/#pricing` (301 -> "
+        "premiselabs.co/tortoise) and `/auth` (301 -> app.premiselabs.co/auth) "
+        "— map measured 2026-11-12 under #11763's inverted consolidation. The "
+        "FOURTH occurrence this row used to carry, `SITE_URL`, is GONE: #11765 "
+        "(PR #11976) flipped it to premiselabs.co, which is why the count is 3."
+        " ⛔ The hrefs are a DESTINATION deferral with an owner — #11764 creates "
+        "the product paths on the company host, and `tests/test_blog_seo_meta.mjs` "
+        "(#11976) records the same assignment — so this is NOT the same class as "
+        "the #12057 sweep and must not be folded into it."),
     "website/apps/dashboard/functions/admin/[[path]].ts": (
         1,
         "#11767 item 4 — blog-admin API origin; deferred with the blog sweep "
@@ -276,7 +295,7 @@ RETIRED_HOST_ALLOWLIST = {
 #: follow) — a PROSE comment that merely names the host is not counted, which is
 #: why `[[path]].ts` is 1 and not 2 (line 12 is a comment, line 49 emits):
 #:   website/apps/dashboard/functions/blog/api/[[path]].ts   1  DEFAULT_BLOG_ORIGIN
-#:   website/functions/blog/_lib.ts                          4  SITE_URL (canonical/OG/JSON-LD/feed + nav)
+#:   website/functions/blog/_lib.ts                          3  navHtml product hrefs (SITE_URL re-aimed by #11976)
 #:   website/apps/blog-admin/src/lib/blog-api.ts             1  author-image URL
 #:   website/apps/dashboard/functions/admin/[[path]].ts      1  blog-admin API origin
 #:   website/apps/blog-admin/src/App.tsx                     1  blog-admin UI origin
