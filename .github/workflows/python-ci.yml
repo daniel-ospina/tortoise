@@ -4728,7 +4728,7 @@ jobs:
           # `ubuntu-26.04`, whose archive carries the CURRENT distro major (18 in
           # that release) and NOT the 16 this job needs, so the first cut of this
           # step died before the leg ran —
-          # `E: Unable to locate package postgresql-client-16`, exit 100. The
+          # `E: Unable to locate package postgresql-client-<the major>`, exit 100. The
           # distro archive can never be relied on for an OLD major; the job would
           # red on a runner-image roll rather than on a diff, which is the class
           # #12051 exists to remove. apt.postgresql.org publishes EVERY supported
