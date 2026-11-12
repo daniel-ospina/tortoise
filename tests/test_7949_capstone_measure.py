@@ -5190,8 +5190,26 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # each is a RANGE, pinned at BOTH endpoints, because a range that moves by a
         # few lines still "contains" the number the document names.
         ("00-align.md", "the gap is the **declaration → consumer** seam", (
-            ("2439", "# Validate hierarchies"),
-            ("2453", 'errors.append("hierarchies: entry missing \'type\' field")'),
+            ("2473", "# Validate hierarchies"),
+            ("2487", 'errors.append("hierarchies: entry missing \'type\' field")'),
+        ), "pack_registry"),
+        # The SAME claim in the plan, which no row covered — and it is the proof of
+        # why an unpinned cite is not merely a cosmetic miss: `00-plan.md:158` kept
+        # the relation-semantics lines (2415-2429) through every
+        # merge that re-derived its `00-align.md` sibling, because nothing read it.
+        # Same anchors, same range, so the next insertion above the block reds here
+        # too instead of leaving one document true and the other stale.
+        ("00-plan.md", "**`hierarchies`** — validated only", (
+            ("2473", "# Validate hierarchies"),
+            ("2487", 'errors.append("hierarchies: entry missing \'type\' field")'),
+        ), "pack_registry"),
+        # ...and the THIRD copy of the same sentence, in the test-design table, where
+        # the range is a bare continuation (`:N-N`) and so is invisible to every
+        # sweep that reads a source-qualified cite. Unpinned, it outlived both of its
+        # siblings; the phrase is the document's own words, not a markdown line.
+        ("03-test-design.md", "`hierarchies` (validated only", (
+            ("2473", "# Validate hierarchies"),
+            ("2487", 'errors.append("hierarchies: entry missing \'type\' field")'),
         ), "pack_registry"),
         ("00-align.md", "`llm:deepseek-direct` is what", (
             ("16251", "The v2 path reports"),
