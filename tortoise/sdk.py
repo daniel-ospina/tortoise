@@ -17003,9 +17003,15 @@ class TortoiseSDK:
                                 + (links or "no attachments") 
                                 + (f", copied {', '.join(copied)}"
                                    if copied else "")
+                                # ⚠️ `residual` matters: a duplicate whose
+                                # evidence DIFFERS from the canonical's has
+                                # per-occurrence evidence, so the
+                                # "nothing to carry" clause would contradict
+                                # the clause that immediately follows it.
                                 + (", no per-occurrence evidence of its own "
                                    "to carry"
-                                   if not carried and not copied else ""))
+                                   if not carried and not copied and not residual
+                                   else ""))
                             if residual:
                                 said += (
                                     "; kept the canonical's own "

@@ -204,6 +204,11 @@ def test_a_conflicting_slot_keeps_the_canonicals_and_reports_the_difference(
     assert any("kept the canonical's own" in w for w in meta["warnings"]), meta["warnings"]
     for key in ("quote", "span_start", "span_end"):
         assert any(key in w for w in meta["warnings"]), (key, meta["warnings"])
+    # ⛔ …and the receipt must NOT also claim there was nothing to carry: a
+    # duplicate whose evidence DIFFERS has evidence. RED on the previous head,
+    # which printed both clauses in one sentence.
+    assert not any("no per-occurrence evidence of its own" in w
+                   for w in meta["warnings"]), meta["warnings"]
 
 
 # ── 3) evidence that cannot be carried REFUSES the fold ────────────────────
@@ -343,10 +348,10 @@ def test_the_occurrence_address_is_carried_whole_or_not_at_all(
 #: extractedFromAll, quote, span_start, span_end, source_turn_id, search_keys,
 #: when, validFrom, confidence, pointKind.
 _NO_EVIDENCE = ("session:s", [], None, None, None, None, None, None, None,
-                None, None)
+                None, None, None)
 _DUP_ROW = _NO_EVIDENCE
 _DUP_ROW_QUOTED = ("session:s", [], "q dup", None, None, None, None, None,
-                   None, None, None)
+                   None, None, None, None)
 _CANON_ROW = _NO_EVIDENCE
 
 
@@ -362,7 +367,7 @@ class _FakeGraph:
     #: can "write" a slot and have the read-back see it.
     _COLUMNS = ("extractedFrom", "extractedFromAll", "quote", "span_start",
                 "span_end", "source_turn_id", "search_keys", "when",
-                "validFrom", "confidence", "pointKind")
+                "validFrom", "eventId", "confidence", "pointKind")
 
     def __init__(self, *, dup_row=_DUP_ROW, edges=(), carried=(0, None),
                  canon_row=_CANON_ROW, raise_on=frozenset()):
@@ -386,7 +391,14 @@ class _FakeGraph:
         # ⚠️ Order matters: the EDGES read also starts `MATCH (d:Point`, so it
         # is keyed on its own shape and checked before the property read.
         if "-[r]->" in q:
-            return SimpleNamespace(result_set=self.edges)
+            # Honour the query's rel FILTER: a fake that returns every edge
+            # regardless makes `test_an_aboutEvent_link_is_carried` and the
+            # writer-less case green even with the widened read reverted
+            # (measured by mutation), so they would pin nothing.
+            wanted = {rel for rel in capture_fold._FOLD_ATTACHMENT_RELS
+                      if rel in q}
+            return SimpleNamespace(
+                result_set=[e for e in self.edges if e[0] in wanted])
         if "d.extractedFrom" in q:
             return SimpleNamespace(result_set=[self.dup_row])
         if "c.extractedFrom" in q:
@@ -566,7 +578,7 @@ def test_a_half_written_address_refuses_and_blames_the_duplicate():
     refused fold is a no-op.
     """
     dup_row = ("session:s", [], None, 30, None, None, None, None, None,
-               None, None)
+               None, None, None)
     sdk = _FakeSDK()
     proj = _FakeProj(_FakeGraph(dup_row=dup_row))
     out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon", sdk=sdk)
@@ -657,3 +669,40 @@ def test_a_late_refusal_discloses_the_slots_it_already_copied():
     assert out["ok"] is False and out["reason"] == "link_not_carried", out
     assert out["copied"] == ["quote"], out
     assert "ALREADY added copied quote" in out["blocked"], out["blocked"]
+
+
+def test_a_raise_from_the_post_write_read_is_a_disclosed_refusal():
+    """The post-write `_carried` read is INSIDE the link try on purpose: when it
+    escaped to the never-raise wrapper, the wrapper's FRESH dict discarded
+    `copied`/`created` and the receipt read as "nothing changed" over a canonical
+    holding the copied slot.
+
+    Pins the round-3 fix by MUTATION: deleting that inner `try` reds this test
+    (the previous pin exercised `present == 0`, not a raise, and stayed green).
+    """
+    graph = _FakeGraph(
+        dup_row=_DUP_ROW_QUOTED,
+        edges=[("aboutObject", "Object", "obj_1", None)],
+        raise_on={"head(collect(r.confidence))"})
+    sdk = _FakeSDK(on_update=graph.apply_slot)
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is False and out["reason"] == "link_not_carried", out
+    assert out["copied"] == ["quote"], out
+    assert "ALREADY added copied quote" in out["blocked"], out["blocked"]
+
+
+def test_an_undeclared_provenance_field_that_differs_is_reported(sdk, monkeypatch):
+    """`eventId` is the capture's own provenance surface and a Point payload is
+    OPEN-SET, so it is not in the passthrough tuple the vocabulary guard covers.
+    A duplicate holding a different one must be REPORTED, never crossed in
+    silence while the receipt says it had no evidence.
+
+    (The open-set bound is stated in the module docstring: a field outside
+    `_REPORTED_FIELDS` is neither carried nor reported — no list can cover a
+    payload's open set — and a reader must not read this guard as total.)
+    """
+    extracted, meta = _extract(
+        sdk, monkeypatch, evidence={"eventId": "ev_dup_turn2"})
+    assert [e["dedup"] for e in extracted] == ["new", "rephrase_linked"], extracted
+    assert any("eventId" in w for w in meta["warnings"]), meta["warnings"]

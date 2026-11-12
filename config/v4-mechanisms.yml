@@ -376,11 +376,15 @@ mechanisms:
       `rephrase_hit`, then writes. Attributing that write to the pure helper
       would point a lane at a module with no write in it. ✅ That write is
       EVIDENCE-PRESERVING since #9437: `tortoise/capture_fold.py` unions the
-      duplicate's `aboutObject`/`aboutSubject` links onto the canonical (through
-      `session_link.link_entity`, carrying the binder's `confidence`), fills its
-      free per-occurrence slots in one atomic write, keeps the canonical's own
-      where the slot is taken and REPORTS the difference, and REFUSES the fold —
-      keeping both claims — where the evidence cannot be moved. So "the capture
+      duplicate's `about*` links onto the canonical (the five permitted
+      Point-source triples, through `session_link.link_entity`, carrying the
+      binder's `confidence` where the link is new), fills its free
+      per-occurrence slots in one atomic write, keeps the canonical's own where
+      the slot is taken and REPORTS the difference (including `confidence`,
+      `pointKind` and `eventId`), and REFUSES the fold — keeping both claims —
+      where the evidence cannot be moved (`unaddressable`, `uncarriable_attachment`,
+      `inbound_attachment`, `uncarried_source_ref`, `malformed_address`,
+      `link_not_carried`, `slot_write_failed`, `unreadable`). So "the capture
       seam DELETEs the loser" is no longer the whole story, and a lane reading
       this row must not re-derive #9437 as open.
 
