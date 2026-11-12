@@ -2927,17 +2927,24 @@ class PackRegistry:
         the same place, because only one of them has an answer at install:
 
         * the target's **NAMESPACE** — here, below; and
-        * the target's **KIND** — for THIS pack's own namespace, here (it is the
-          one namespace whose kind list install has in hand); for ``core``, in
-          ``guard_table_problems()``, which reports “not routed to one layer by
-          kind_layers” in the SAME verdict (``ok: false``, exit 1 — measured).
-          That gate cannot answer for a PACK target: ``_layer_of_kind`` reads the
-          process's ambient catalog, so a pack kind invisible to it would
-          false-refuse every legitimate cross-pack guard (round-2 review P1), and
-          it abstains by design. So the own-namespace typo would otherwise be
-          nobody's question — measured, round-7 review: ``redirect:
-          acme:konpekt`` printed ``✓ Clean`` and exited 0, then every match
-          silently re-filed to the fallback instead of the intended kind.
+        * the target's **KIND** — here for THIS pack's own namespace, because it
+          is the one kind list a single manifest can answer for (and only its
+          ROUTING axes: ``objectKinds``/``documentKinds`` are the homes
+          ``entity_route`` maps, while ``eventKinds``/``pointKinds``/
+          ``actionKinds`` declare no layer at all);
+        * the ``core`` KIND and the ``depends_on`` KIND — in
+          ``guard_table_problems()``, which runs in the same install verdict on
+          BOTH routes (``tortoise pack validate`` and the hosted
+          ``validate_manifest``), where every pack is loaded so a dependency's
+          kinds are knowable. It abstains only for a pack target whose namespace
+          is NOT loaded (``_layer_of_kind`` reads the process's ambient catalog,
+          so a pack kind invisible to it would false-refuse every legitimate
+          cross-pack guard — round-2 review P1).
+
+        Both gaps were measured before they were closed (round-7 review), each as
+        "installs ``✓ Clean``, then degrades to ``fallback`` on every match":
+        ``redirect: acme:konpekt`` (nobody's question) and ``redirect:
+        core:WrokItem`` on the hosted route (the table had no caller there).
 
         * **R3b a core fallback** — every ``onConfusion`` entry must declare a
           ``fallback`` that is a CORE kind. The fallback is what the write-time
@@ -3168,6 +3175,22 @@ class PackRegistry:
                     _qualified, tns = _resolve_ref(target.strip())
                     _bare = _qualified.split(":", 1)[-1] if ":" in _qualified \
                         else _qualified
+                    # ⛔ ONLY TWO AXES ARE HOMES. `entity_route` maps
+                    # `objectKinds` and `documentKinds` into the entity layer;
+                    # an `eventKinds`/`pointKinds`/`actionKinds` declaration is
+                    # NOT a routable home (`actionKinds` contributes no spec entry
+                    # at all). Measured, round-7 review: `redirect: acme:activate`
+                    # with `actionKinds: [activate]` validated `✓ Clean` and then
+                    # resolved to `fallback` with `skipped.reason =
+                    # 'no-usable-home'` — the dead-guard shape this arm exists to
+                    # close, reachable through three of the five axes. The SCOPE
+                    # check (`fromKinds`, below) stays on `all_pack_kinds` on
+                    # purpose: a scope is matched by the declared STRING (open
+                    # vocabulary), a target needs a HOME.
+                    _routable_own = {
+                        k for axis in ("objectKinds", "documentKinds")
+                        for k in (ont.get(axis) or [])
+                        if isinstance(k, str) and k}
                     if tns is not None and tns not in allowed_ns:
                         errors.append(
                             f"{cw}.redirect: '{target}' targets namespace "
@@ -3175,23 +3198,34 @@ class PackRegistry:
                             f"in depends_on — either add the dependency or "
                             f"redirect to a core kind (R1/R3)")
                     elif tns is not None and tns == (ns or None) \
-                            and _bare not in all_pack_kinds:
-                        # ⛔ THIS PACK'S OWN NAMESPACE IS THE ONE KIND LIST
-                        # INSTALL ACTUALLY HAS — so a typo here is knowable, and
-                        # it must be refused: `guard_table_problems()` ABSTAINS
-                        # for a pack target by design (the ambient catalog cannot
-                        # see it), so nothing else asks. Left unchecked, the
-                        # guard installs `✓ Clean` and silently degrades to
-                        # `fallback` on every match (measured, round-7 review).
-                        # A `core` typo is NOT duplicated here: the table reports
-                        # it in the same verdict, and two gates for one defect is
-                        # how a message stops matching its mechanism.
-                        errors.append(
-                            f"{cw}.redirect: '{target}' is this pack's own "
-                            f"namespace but names no kind it declares — the "
-                            f"guard would degrade to its fallback on every "
-                            f"match, and a redirect that never happens is a "
-                            f"declaration that lies")
+                            and _bare not in _routable_own:
+                        # THIS PACK'S OWN NAMESPACE IS THE ONE KIND LIST INSTALL
+                        # HAS IN HAND, so a typo here is knowable and must be
+                        # refused — nothing else asks (the installed-set check is
+                        # write-time, and it silently degrades). Measured before
+                        # the arm: `redirect: acme:konpekt` printed `✓ Clean`,
+                        # exit 0. A `core` typo is the TABLE's question, and a
+                        # `depends_on` namespace belongs to the install route,
+                        # which has every pack loaded (`guard_table_problems(
+                        # pack_kinds=…)`) — so each defect has exactly ONE gate.
+                        _axis = next(
+                            (kf for kf in KIND_FIELDS
+                             if _bare in (ont.get(kf) or [])), None)
+                        if _axis and _axis not in ("objectKinds",
+                                                   "documentKinds"):
+                            errors.append(
+                                f"{cw}.redirect: '{target}' is declared under "
+                                f"ontology.{_axis}, which routes to no entity "
+                                f"layer — it cannot be a redirect home, so the "
+                                f"guard would degrade to its fallback on every "
+                                f"match")
+                        else:
+                            errors.append(
+                                f"{cw}.redirect: '{target}' is this pack's own "
+                                f"namespace but names no kind it declares — the "
+                                f"guard would degrade to its fallback on every "
+                                f"match, and a redirect that never happens is a "
+                                f"declaration that lies")
                 fb = c.get("fallback")
                 if not isinstance(fb, str) or not fb.strip():
                     errors.append(

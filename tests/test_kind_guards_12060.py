@@ -1902,18 +1902,26 @@ class TestReviewRound4Closed:
         """
         base = {"rule": "acme:red", "pattern": r"^r-[0-9]+$",
                 "fallback": "core:WorkItem", "reason": "x"}
+        own_kinds = {"objectKinds": ["concept", "widget"]}
         # the real spelling is silent, so the refusal discriminates
-        assert self._validate({**base, "redirect": "acme:brief"},
-                              all_pack_kinds={"concept", "brief"}) == []
+        assert self._validate({**base, "redirect": "acme:widget"},
+                              ont_extra=own_kinds) == []
         errs = self._validate({**base, "redirect": "acme:konpekt"},
-                              all_pack_kinds={"concept", "brief"})
+                              ont_extra=own_kinds)
         assert errs and "redirect" in " ".join(errs), errs
         # a depends_on target names a namespace this pack does not own: its kind
-        # list is not knowable here, so it must NOT be refused (else the arm is a
-        # false block on the cross-pack case it exists to allow)
+        # list is not this method's to enumerate (the install route does it, with
+        # every pack loaded), so it must NOT be refused here
         assert self._validate({**base, "redirect": "venture:investment"},
-                              depends_on=["venture"],
-                              all_pack_kinds={"concept"}) == []
+                              depends_on=["venture"]) == []
+        # ⛔ AND ONLY THE TWO ROUTING AXES ARE HOMES (round-7 review P2): an
+        # `actionKinds`/`eventKinds`/`pointKinds` declaration is not a layer, so
+        # the matching target installs clean and then skips `no-usable-home`.
+        for axis in ("actionKinds", "eventKinds", "pointKinds"):
+            axis_errs = self._validate(
+                {**base, "redirect": "acme:activate"},
+                ont_extra={axis: ["activate"]})
+            assert axis_errs and axis in " ".join(axis_errs), (axis, axis_errs)
 
         # ⛔ END-TO-END, on a real manifest — because the round's FIRST version of
         # this test hand-built a `Confusion` (declaring_pack=None) and therefore
@@ -1940,6 +1948,81 @@ class TestReviewRound4Closed:
         bad = _cli("acme:konpekt")
         assert bad.returncode == 1, bad.stdout + bad.stderr
         assert "redirect: 'acme:konpekt'" in bad.stdout, bad.stdout
+
+    def test_the_HOSTED_install_route_runs_the_guard_table(self):
+        """P1: the table ran only in `pack validate`, so SaaS installed dead guards.
+
+        Round-7 review: `guard_table_problems()` had exactly one non-test caller —
+        the CLI — while the tenant install route (`validate_manifest` →
+        `PackRegistry.load_all()` → `_validate_guards`) never ran it. Measured: a
+        manifest with `redirect: core:WrokItem` returned `ok=True, errors=[]` on
+        the hosted route, so the guard installed and then degraded to `fallback`
+        on every match — refused by the local CLI and accepted in production.
+
+        Both routes now ask the same table, and each defect still has ONE gate:
+        the own-namespace KIND here (this method), the `core` KIND and the
+        `depends_on` KIND there (the table, with every pack loaded).
+        """
+        from tortoise.pack_manifest_store import validate_manifest
+
+        def manifest(target, *, kinds="concept", dep="[]", extra=""):
+            return f"""namespace: acme
+name: Acme Test Pack
+version: "0.1.0"
+tier: free
+ontology:
+  extends: core
+  objectKinds: [{kinds}]
+  guards:
+  - kind: concept
+    layer: object
+    onConfusion:
+      - when: nameMatches
+        pattern: '^r-[0-9]+$'
+        redirect: {target}
+        fallback: core:WorkItem
+        reason: x
+{extra}depends_on: {dep}
+"""
+
+        assert validate_manifest(manifest("core:WorkItem")).ok is True
+        core_typo = validate_manifest(manifest("core:WrokItem"))
+        assert core_typo.ok is False, core_typo.errors
+        assert any("not routed to one layer" in e for e in core_typo.errors), (
+            core_typo.errors)
+        # a declared own kind is a home; a typo is refused by the method above
+        assert validate_manifest(
+            manifest("acme:widget", kinds="concept, widget")).ok is True
+        assert validate_manifest(manifest("acme:konpekt")).ok is False
+
+        # ── and the `depends_on` target, which ONLY this route can answer: with
+        # the dependency installed its kinds are known, so a typo is a dead guard
+        # (`resolve` skips `no-usable-home` on every match) — refused, while the
+        # real kind passes.
+        venture = """namespace: venture
+name: Venture Pack
+version: "0.1.0"
+tier: free
+ontology:
+  extends: core
+  objectKinds: [investment]
+depends_on: []
+"""
+        # ⛔ AND THERE IS NO "DEPENDENCY ABSENT" CASE ON THIS ROUTE: #2781 already
+        # refuses an install whose declared dependency is not loaded, so the kinds
+        # are always knowable here — which is exactly why this check belongs HERE
+        # and not in `_validate_guards` (where load ORDER would decide it).
+        missing = validate_manifest(manifest("venture:konpekt", dep="[venture]"))
+        assert missing.ok is False and any(
+            "is not loaded" in e for e in missing.errors), missing.errors
+        typo = manifest("venture:konpekt", dep="[venture]")
+        installed = validate_manifest(typo, installed_manifests={"venture": venture})
+        assert installed.ok is False, installed.errors
+        assert any("no kind pack 'venture' routes" in e
+                   for e in installed.errors), installed.errors
+        good = validate_manifest(manifest("venture:investment", dep="[venture]"),
+                                 installed_manifests={"venture": venture})
+        assert good.ok is True, good.errors
 
     def test_a_fromKinds_scope_naming_no_CORE_kind_is_refused(self):
         """`core:WrokItem` is a typo the own-namespace arm cannot see.

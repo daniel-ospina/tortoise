@@ -234,7 +234,7 @@ import logging
 import re
 import threading
 import weakref
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1438,7 +1438,9 @@ def guard_table(*, include_packs: bool = True) -> dict[str, dict]:
 
 
 def guard_table_problems(pack_confusions: Iterable[Confusion] | None = None, *,
-                         include_catalog: bool = True) -> list[str]:
+                         include_catalog: bool = True,
+                         pack_kinds: Mapping[str, Iterable[str]] | None = None,
+                         ) -> list[str]:
     """Construction errors in the guard table — empty when it is coherent.
 
     ``include_catalog`` reads every guard the loaded pack CATALOG declares (the
@@ -1446,6 +1448,19 @@ def guard_table_problems(pack_confusions: Iterable[Confusion] | None = None, *,
     table plus exactly the ``pack_confusions`` handed in, which is what
     ``tortoise pack validate`` needs: it must report on the packs it was asked
     about, not on whatever the ambient catalog holds.
+
+    ⛔ ``pack_kinds`` is the map that turns a PACK target into a checkable
+    question: ``{namespace: the kinds that namespace's pack ROUTES}``, supplied
+    by whoever has the packs LOADED (the CLI and the hosted install route).
+    Without it this function ABSTAINS on a pack target — deliberately, because
+    ``_layer_of_kind`` reads this process's ambient catalog, so a pack kind it
+    cannot see would false-refuse every legitimate cross-pack guard (round-2
+    review P1). With it, the abstention is no longer needed for a target whose
+    declaring pack IS loaded: a typo there installs `✓` Clean and then degrades
+    to `fallback` on every match, which is the "guarded but dead" shape this
+    whole module exists to refuse (measured, round-7 review: `redirect:
+    venture:konpekt` with `venture` loaded printed `✓ Clean`, then
+    `resolve(...)` skipped with `no-usable-home`).
 
     Three checks, each one a way a guard could quietly become a SECOND answer to
     a question another module owns:
@@ -1483,6 +1498,16 @@ def guard_table_problems(pack_confusions: Iterable[Confusion] | None = None, *,
                 problems.append(
                     f"{c.rule}: redirect {c.redirect!r} is not routed to one "
                     f"layer by kind_layers")
+            else:
+                _tns = kind_namespace(c.redirect)
+                _known = ((pack_kinds or {}).get(_tns) if _tns else None)
+                if _known is not None:
+                    _bare = str(c.redirect).split(":", 1)[-1]
+                    if _bare not in set(_known):
+                        problems.append(
+                            f"{c.rule}: redirect {c.redirect!r} names no kind "
+                            f"pack {_tns!r} routes — the guard would degrade to "
+                            f"its fallback on every match")
         else:
             # ⛔ `guarded_layer` describes `guarded_kind` — the kind the guard is
             # DECLARED ON — never the redirect target, which is on the other

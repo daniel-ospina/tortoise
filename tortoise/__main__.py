@@ -11995,8 +11995,18 @@ def _cmd_pack_validate(args) -> int:
         _declared = getattr(reg.packs[ns], "guards", None)
         if _declared:
             _guard_confusions.extend(pack_guards(ns, _declared))
-    guard_problems = guard_table_problems(_guard_confusions,
-                                          include_catalog=False)
+    # `pack_kinds` — the LOADED namespaces' routable kinds — turns the table's
+    # deliberate pack-target abstention into a real answer wherever the pack IS
+    # loaded (a `redirect: venture:konpekt` typo). The hosted install route runs
+    # the same check (`validate_manifest`), so `pack validate` and an install
+    # cannot disagree about whether a guard names a home.
+    guard_problems = guard_table_problems(
+        _guard_confusions, include_catalog=False,
+        pack_kinds={
+            _ns: list(getattr(reg.packs[_ns], "object_kinds", []) or [])
+            + list(getattr(reg.packs[_ns], "document_kinds", []) or [])
+            for _ns in reg.packs
+        })
     # An unresolved reference is NOT clean: the pack loaded, but what it
     # declares does not resolve, so `✓ Clean` over it is a claim the registry's
     # own data contradicts (#9663).
