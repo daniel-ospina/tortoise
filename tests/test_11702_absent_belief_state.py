@@ -5751,12 +5751,27 @@ _CRED_WORD_YIELDS_075 = re.compile(
 #: error, not a false pass: the failure text hands the next fixer a number, and
 #: that fixer will "correct" a sentence that is already right — the
 #: false-correction failure this file documents for the mirror guards.
-#: ⚠️ NAMED RESIDUAL, one direction: an attribution negated in an EARLIER
-#: clause ("nothing here is simple — the credibility word is 0.75") is still
-#: reported, because the scan is clause-scoped rather than a parser. That
-#: blocks a correct rewrite; it cannot pass a false claim the corpus holds.
+#:
+#: `is no` is admitted but a bare `no` is NOT, for the reason `_NEGATED` gives:
+#: bare `no` is a determiner, and "no mere flag" is not a negation. The copula
+#: form is: measured, "``credibility=`` is no 0.75 — it is 0.5238 alone" fired
+#: before this alternative existed, which is a false block on correct prose.
+#:
+#: ⚠️ NAMED RESIDUAL, and this one runs in BOTH directions, so it is stated
+#: rather than hidden. The exemption is read in the FINAL clause of the span
+#: (the clause that carries the number), which is what stops a negator
+#: belonging to a DIFFERENT predicate from exempting a real false claim —
+#: measured, "the credibility word is not just an added body: it reads 0.75"
+#: and "``credibility=`` is not dropped for an option: it reads 0.75" both
+#: passed silently when the whole span was read. What remains: (i) a false
+#: claim whose OWN final clause carries a negator or demoter — "the word is not
+#: 0.75, whatever the pair does" — reads as exempt; (ii) an attribution negated
+#: in an earlier clause and restated without one. Both are reported only when
+#: the final clause is bare, which is the direction this guard can defend; it is
+#: a tripwire on a class, never a parser. The two strings are pinned in the
+#: control test so a later tightening is MEASURED rather than guessed.
 _CRED_WORD_EXEMPT = re.compile(
-    r"\b(?:not|never|isn'?t|no\s+longer)\b|\bdropped\b|\bdrops\b"
+    r"\b(?:not|never|isn'?t|no\s+longer|is\s+no)\b|\bdropped\b|\bdrops\b"
     r"|\bloses\b|\blost\b",
     re.IGNORECASE)
 
@@ -5835,21 +5850,31 @@ def _ep_pass_claims(text: str) -> list[str]:
 def _cred_word_yields_075(text: str) -> list[str]:
     """Matches that ATTRIBUTE `0.75` to the `credibility` word.
 
-    Clause-scoped exemption: a negator or a demoting verb in the CLAUSE the
-    attribution sits in means the sentence says the right thing ("the word is
-    NOT 0.75", "the word is DROPPED against an explicit pair, which reads
-    0.75"). Scoping to the clause rather than the sentence is NOT cosmetic —
-    measured on the mutation control's own corpus: `volunteer.py`'s sentence
-    carries "NO LONGER true of every unmeasured point" in an earlier clause,
-    so a sentence-scoped exemption would have exempted the very mutation it
-    exists to catch.
+    The exemption is read in the FINAL clause of the match's span — the clause
+    that carries the NUMBER — not across the whole span. Two measurements set
+    that boundary, and they pull in opposite directions, which is why it is
+    spelled out:
+
+    • Clause-START matters: "it is NOT the credibility word that reads 0.75"
+      keeps its negator BEFORE the `credibility` token, so the span must reach
+      back to the clause start or the true sentence is reported.
+    • Clause-START alone is not enough: with the whole span read, a negator of
+      a DIFFERENT predicate exempted a real false claim — "the credibility
+      word is not just an added body: it reads 0.75" passed silently.
+    • Sentence scope is WRONG, and measurably so: `volunteer.py`'s sentence
+      holds "NO LONGER true of every unmeasured point" in an earlier clause,
+      so a sentence-scoped exemption would exempt the very mutation the
+      control test exists to catch.
     """
     hits = []
     for match in _CRED_WORD_YIELDS_075.finditer(text):
         cut = max((break_.end()
                    for break_ in _CLAUSE_BREAK.finditer(text[:match.start()])),
                   default=0)
-        if _CRED_WORD_EXEMPT.search(text[cut:match.end()]):
+        span = text[cut:match.end()]
+        inner = [break_.end() for break_ in _CLAUSE_BREAK.finditer(span)]
+        final_clause = span[inner[-1]:] if inner else span
+        if _CRED_WORD_EXEMPT.search(final_clause):
             continue
         hits.append(match.group(0))
     return hits
@@ -5966,7 +5991,12 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # …the same false claim at 3 and 4 dp, which the lookahead alone
             # let through until it was measured.
             "``credibility=`` reads 0.750",
-            "``credibility=`` reads 0.7500"):
+            "``credibility=`` reads 0.7500",
+            # …a negator belonging to a DIFFERENT predicate must not exempt a
+            # real false claim: read across the whole span, both of these
+            # passed silently (review cycle 2, P2).
+            "the credibility word is not just an added body: it reads 0.75",
+            "``credibility=`` is not dropped for an option: it reads 0.75"):
         assert _cred_word_yields_075(spelling), (
             f"the credibility guard misses a rewording: {spelling!r}")
     # …and it must NOT fire on TRUE prose — the failure text hands the next
@@ -5986,7 +6016,11 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             "reads 0.75",
             # …and this is what pins the `(?!\d)` / `0\.750*` tail: drop the
             # lookahead and `0.7561` matches as `0.75`, so this reds.
-            "``credibility=`` reads 0.7561 on top of the default"):
+            "``credibility=`` reads 0.7561 on top of the default",
+            # …the copula-negating `no`, which bare `no` must not be confused
+            # with (`_NEGATED`'s determiner rule): before this alternative
+            # existed, this correct sentence was a false block (cycle 2, P2).
+            "``credibility=`` is no 0.75 — it is 0.5238 alone"):
         assert not _cred_word_yields_075(true_sentence), (
             f"the credibility guard fires on TRUE prose: {true_sentence!r}")
     assert _cred_word_claims("tortoise/volunteer.py") == [], (
