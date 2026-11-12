@@ -6,7 +6,7 @@ HOW TO RUN THE TESTS THAT GUARD THIS DOCUMENT
 ``tests/test_candidate_recall_11901.py`` needs no graph, but every ``pytest`` run
 in this repo needs the lane's DB seam (epic #1647 P4), so a bare
 ``uv run pytest`` reports one ERROR per collected test from
-``tests/_embedded.py`` (28 at this head) — that is the
+``tests/_embedded.py`` (29 at this head) — that is the
 repo's gate, not these tests. Use either form:
 ::
 

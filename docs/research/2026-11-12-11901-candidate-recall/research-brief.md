@@ -424,7 +424,7 @@ from the evidence.
 
 ⚠️ **Run them the way the repo requires** — the module needs no *graph*, but every `pytest` run in this repo
 needs the lane's DB seam (epic #1647 P4), so a bare `uv run pytest tests/test_candidate_recall_11901.py` reports
-**errors** from `tests/_embedded.py` (one per collected test — 28 of them at this head), not a failure of these
+**errors** from `tests/_embedded.py` (one per collected test — 29 of them at this head), not a failure of these
 tests:
 
 ```bash
