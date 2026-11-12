@@ -1144,7 +1144,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # ("no confidence was ever carried through this edge"), and only this
             # helper failed to consult the flag every other consequence helper reads
             # (#12210 review, P2).
-            if s["sup_refused"] or s["sup_flag_shaped"]:
+            if s["sup_refused"]:
+                # ⛔ ``sup_flag_shaped`` implies this on BOTH lanes (``_4b_state``:
+                # the operator lane's ``sup_refused`` IS the flag test, and the direct
+                # lane's is the flag OR an ``op_type``), so naming it beside the flag
+                # is a conjunction that can never change the branch — and it read as
+                # if the lanes needed separate treatment (#12210 review, P3).
                 return ("EP's direct-edge arm refuses the superseded endpoint itself "
                         "(it is operator-shaped), so no confidence was EVER carried "
                         "through this edge — measured ``confidences {}`` and "
@@ -1645,10 +1650,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "a carry needs a successor EP actually reads, and this successor is "
                 "one EP REFUSES (operator-shaped on the operator lane, or "
                 "operator-shaped OR carrying an ``op_type`` on a direct edge) — so "
-                "the disposition for this edge is DROP, or `pend` (the non-voting "
-                "placeholder) if the claim may still be revisited, and no door "
-                "implements `pend` today. ⛔ A refutation that STILL APPLIES is "
-                "kept, not dropped: carry it where EP can read it (a :Point "
+                "the disposition for the edge AS NAMED is DROP, or `pend` (the "
+                "non-voting placeholder) if the claim may still be revisited, and "
+                "no door implements `pend` today. ⛔ A refutation that STILL APPLIES "
+                "is kept, not dropped: carry it where EP can read it (a :Point "
                 "operator the engine evaluates), never by re-attaching it to a "
                 "successor that cannot carry it")
         elif neither_drops or neutral:
@@ -1666,7 +1671,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "it to a successor that cannot carry it — only a refutation that "
                 "MOTIVATED the correction is dropped")
         elif (s["carrier_count"] == 1 and not unread
-              and (s["carrier_status"] or "") == DRAFT_STATUS and not neutral):
+              and (s["carrier_status"] or "") == DRAFT_STATUS):
+            # ⛔ Neutral rows never reach here: the ``neither_drops or neutral`` arm
+            # above consumes EVERY neutral row, which is where the DROP sentence for
+            # a neutral edge actually comes from — a ``not neutral`` conjunct here
+            # was dead and its comment credited a guard that cannot fire
+            # (#12210 review, P3).
             # ⛔ The DRAFT row contradicted itself: the destination withdrew the name
             # ("NOT the one it names … because it is 'draft'") while THIS disposition
             # said "an IMPL may CARRY to the successor" and ``_chain_tail`` said
@@ -1729,7 +1739,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "``status='live'`` first, then CARRY the IMPL (and any NAND that "
                 "STILL APPLIES) onto it — measured, " + _draft_mech + _shape_too
                 + ". Drop only a refutation that MOTIVATED the correction")
-        elif unread and not neutral:
+        elif unread:
+            # ⛔ Neutral rows never reach here either — the ``neutral`` arm above has
+            # already taken them (same note as the DRAFT arm). The conjunct that used
+            # to be here was dead (#12210 review, P3).
             # false (measured: carrying a neutral input onto a live node leaves both
             # posteriors at the bare prior, ``effective_n 2.0``) and it contradicted
             # the DROP the same string states (#12210 review, P2).
@@ -1755,7 +1768,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # the same sentence's "would establish one" (#12210 review, P2).
                 + (" (measured: the same posteriors as before the supersession once "
                    "the edge lands on the node that carries it)"
-                   if not (s["sup_refused"] or s["sup_flag_shaped"]) else
+                   if not s["sup_refused"] else
                    " (measured: the prescribed edge onto a live claim successor "
                    "restores two confidences, ``effective_n 2.5255``)")
                 )
@@ -2057,7 +2070,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # EP arm, so "write the equivalent edge" (the direct-edge sentence)
                 # changes nothing and a re-audit reads CLEAN over a claim whose
                 # support was never there.
-                fix += ("; and no edge rewrite repairs this — EP builds NO factor "
+                fix += ("; and no edge rewrite ALONE repairs this — EP builds NO factor "
                         "in EITHER arm (the operator arm needs the :Point LABEL and "
                         "(``is_operator = true`` or an ``op_type``), the "
                         "direct-edge arm refuses an operator-shaped endpoint). "

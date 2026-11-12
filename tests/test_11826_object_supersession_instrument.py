@@ -1394,7 +1394,7 @@ def test_a_shaped_endpoint_with_no_successor_gets_no_edge_rewrite(sdk):
     assert "write the equivalent edge" not in fix, (
         "the detail says no factor exists in either arm, so an edge rewrite cannot "
         "help: " + fix)
-    assert "no edge rewrite repairs this" in fix, fix
+    assert "no edge rewrite ALONE repairs this" in fix, fix
     # ⛔ The shape belongs to the ACTIVE endpoint, never to the superseded anchor: a
     # call on the anchor sets the flag on a node that never carried it, so APPLY the
     # emitted call and re-measure rather than string-matching it (#12111 review).
@@ -2172,7 +2172,7 @@ def test_a_refused_carry_is_not_offered_on_a_direct_edge(sdk):
                if i.node_id == o["id"]).fix
     assert "OPERATOR-SHAPED" in fix, fix
     assert "may CARRY" not in fix, fix
-    assert "the disposition for this edge is DROP" in fix, fix
+    assert "the disposition for the edge AS NAMED is DROP" in fix, fix
 
 
 def test_an_op_type_only_successor_is_READ_by_the_operator_input_arm(sdk):
@@ -2421,7 +2421,7 @@ def test_an_ambiguous_successor_name_is_not_called_refused(sdk):
         "fixture drifted: the name must be ambiguous: " + issue.fix)
     assert "NOT the one it names" not in issue.fix, (
         "the row cannot say WHICH of the two EP refuses: " + issue.fix)
-    assert "the disposition for this edge is DROP" not in issue.fix, (
+    assert "the disposition for the edge AS NAMED is DROP" not in issue.fix, (
         "an ambiguous name keeps the carry/drop triage: " + issue.fix)
 
 
@@ -2854,8 +2854,9 @@ def test_a_neutral_row_with_a_TERMINAL_successor_keeps_DROP(sdk):
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
     fix = issue.fix
-    assert "§3.1's disposition is DROP" in fix, fix
-    assert "CARRY the IMPL" not in fix, (
+    assert "the disposition here is DROP" in fix, (
+        "the triage's own sentence, not the fix's prefix clause: " + fix)
+    assert "may CARRY to the successor" not in fix, (
         "a neutral edge transfers nothing, so the carry disposition is false: " + fix)
 
 
@@ -2937,8 +2938,9 @@ def test_a_neutral_row_with_a_DRAFT_successor_keeps_DROP(sdk):
     issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
                  if i.node_id == v1["id"])
     fix = issue.fix
-    assert "§3.1's disposition is DROP" in fix, fix
-    assert "CARRY the IMPL" not in fix, (
+    assert "the disposition here is DROP" in fix, (
+        "the triage's own sentence, not the fix's prefix clause: " + fix)
+    assert "may CARRY to the successor" not in fix, (
         "promote-then-carry transfers nothing on a neutral edge: " + fix)
     assert "ONCE PROMOTED" not in fix, fix
 
