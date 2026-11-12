@@ -137,13 +137,163 @@ def _spawn(cmd: list[str], cwd: Path) -> subprocess.Popen:
                             stderr=subprocess.DEVNULL, start_new_session=True)
 
 
-def _wait_alive(pid: int, timeout: float = 5.0) -> None:
+# `/proc` is the Linux shape every CI leg has; a developer's macOS run has none, and
+# a host that cannot answer must DEGRADE THE READ, never fake a verdict (#5049).
+_HAVE_PROC = Path("/proc/self/stat").exists()
+
+
+def _proc_argv(pid: int) -> list[str]:
+    """The process's argv — and `[]` means "no argv I can read", which is ambiguous on purpose.
+
+    A ZOMBIE has released its mm, and a forked-but-not-yet-exec'd child still
+    carries its PARENT's argv (fork shares the argv pages, copy-on-write). So a
+    non-empty argv does NOT prove the child exec'd — only its `basename(argv[0])`
+    does, which is why every caller that cares names the binary it expects
+    (`argv0`). #12039: reading "non-empty" as "exec'd" is how a fixture declares a
+    child alive by grading the PYTEST WORKER's argv.
+    """
+    if _HAVE_PROC:
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except (FileNotFoundError, ProcessLookupError):
+            return []
+        except OSError:  # pragma: no cover — /proc unreadable, not ours
+            return []
+        return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+    out = subprocess.run(  # pragma: no cover — the macOS path, not the suite's
+        ["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
+    ).stdout.strip()
+    return out.split() if out else []
+
+
+def _await_running(pid: int, argv0: str, timeout: float) -> str | None:
+    """Poll until ``pid`` is RUNNING and its ``argv[0]`` has the basename ``argv0``.
+
+    ⛔ WHAT THIS PROVES, AND WHAT IT DOES NOT (measured — do not restate the wrong
+    version, it was in an earlier revision of this docstring and it cost a review
+    round):
+
+    * A forked-but-not-yet-exec'd child carries its PARENT's argv, exactly
+      (measured: `['bash', '-c', 'sleep 4; exec /bin/sleep 60']` at the pre-exec
+      sample), and a zombie's `/proc/<pid>/cmdline` is EMPTY. So the basename test
+      distinguishes "exec'd the binary this arm names" from "still the pytest
+      worker" — which is what arm (2), the `ps` census, actually needs: before the
+      `execve`, `ps` reports the parent's argv and `pi_processes()` answers "no
+      such lane" about a healthy spawn.
+    * It does NOT explain a `record` refusal. `pid_running` is `kill -0` plus
+      `pid_state != Z`, and `/proc/<pid>/stat` exists from FORK with state `R`/`S`
+      (measured: a pre-exec child reports `S`, and `record` on it returns **0** and
+      writes `app.start`). So `record` ACCEPTS a pre-exec child, and exit 4 means the
+      decoy was NOT RECORDABLE — never that it had not started. There are TWO such
+      causes, and the `.refused` witness (`.github/scripts/preview-server.sh:322-332`)
+      says which: `not-running` (it died) or `no-start-time` (a `/proc` READ failure,
+      which sends the reader somewhere else entirely). Pre-fix, this docstring
+      claimed an `execve` `EAGAIN` produced a silent `127` zombie; that is
+      impossible, because `Popen` pipes an exec failure back through its errpipe
+      and RAISES (measured: `FileNotFoundError` for a missing binary,
+      `PermissionError` for a non-executable).
+
+    So the exec proof buys identity (never grade the parent), and the RETRY in
+    `_spawn_decoy_workerd` is what covers the death that `record` observed.
+
+    Non-raising so a caller can RETRY establishing a precondition; `_wait_alive` is
+    the asserting form.
+    """
     deadline = time.time() + timeout
+    last = "never probed"
     while time.time() < deadline:
-        if _pid_alive(pid):
-            return
+        alive = _pid_alive(pid)
+        argv = _proc_argv(pid)
+        last = f"running={alive}, argv={argv!r}"
+        if alive and argv and Path(argv[0]).name == argv0:
+            return None
+        if _HAVE_PROC and not alive:
+            break  # gone or a zombie: more polling cannot change this answer
         time.sleep(0.05)
-    pytest.fail(f"decoy pid {pid} never came alive — the harness cannot measure")
+    return (
+        f"pid {pid} never became a RUNNING process with basename(argv[0]) == {argv0!r} "
+        f"— the harness cannot measure what it asserts (last sample: {last})"
+    )
+
+
+def _wait_alive(pid: int, *, argv0: str, timeout: float = 5.0) -> None:
+    """`_await_running` for fixtures whose precondition is not negotiable.
+
+    ⛔ ``argv0`` is REQUIRED, not defaulted: a default would let the next caller
+    write `_wait_alive(pid)` and silently restore the pre-#12039 behaviour, where
+    the fixture "proves" liveness by grading the TEST RUNNER's own argv and no
+    test would notice.
+    """
+    reason = _await_running(pid, argv0, timeout)
+    if reason is not None:
+        pytest.fail(reason)
+
+
+def _spawn_decoy_workerd(
+    tmp_path: Path, env: dict[str, str], attempts: int = 3,
+) -> tuple[subprocess.Popen, subprocess.CompletedProcess]:
+    """A PEER job's `workerd`-named decoy, ESTABLISHED **and RECORDED** — or a loud fail.
+
+    `record` is INSIDE the retry on purpose. The measured failure this arm reds with
+    (`assert 4 == 0` on `test (d)` for PRs #11968, #12007, #12014, #12106) is a decoy
+    that was alive and then DIED before `record` — see `_await_running` for why that
+    is the only reading of exit 4. Retrying only the spawn/exec step would leave the
+    failure in the interval it did not cover.
+
+    ⛔ THE FAILURE MESSAGE NAMES CANDIDATES, NOT A VERDICT. The fixture cannot
+    observe WHY a decoy died, and the temptation is to call it flake — but the one
+    mechanism that reliably selects a `workerd`-NAMED process is a peer job's
+    machine-global `pkill workerd`, the #10283 defect this arm exists to catch. So a
+    persistent failure here may be the TRUE POSITIVE, and it must not be closed as
+    "runner capacity".
+
+    Every failed attempt is SIGKILLed and then `wait()`-ed. A `wait` that times out is
+    suppressed rather than raised, because raising would MASK the attempt's own
+    diagnosis below — so "no zombie" is a claim about the normal path only.
+    """
+    peer_bin = tmp_path / "bin"
+    peer_bin.mkdir(exist_ok=True)
+    peer_workerd = peer_bin / "workerd"
+    if not (peer_workerd.exists() or peer_workerd.is_symlink()):
+        peer_workerd.symlink_to("/bin/sleep")
+    failures: list[str] = []
+    for n in range(1, attempts + 1):
+        try:
+            peer = _spawn([str(peer_workerd), "120"], tmp_path)
+        except OSError as exc:
+            # fork/exec EAGAIN, EMFILE, … — the LOUD capacity path, which must be
+            # retried too or it aborts the arm as a bare traceback.
+            failures.append(f"attempt {n}: spawn raised {exc!r}")
+            continue
+        reason = _await_running(peer.pid, "workerd", 5.0)
+        if reason is None:
+            recorded = _script("record", "--name", "app", "--pid", str(peer.pid), env=env)
+            if recorded.returncode == 0:
+                return peer, recorded
+            refused = Path(env["PREVIEW_STATE"]) / "app.refused"
+            reason = (
+                f"attempt {n}: `record` refused a decoy the fixture had just proven "
+                f"RUNNING and exec'd (pid {peer.pid}, argv={_proc_argv(peer.pid)!r}) — "
+                f"rc={recorded.returncode}, stderr={recorded.stderr.strip()!r}, "
+                f"refusal witness="
+                f"{refused.read_text().strip() if refused.exists() else '<none written>'}"
+            )
+        else:
+            reason = f"attempt {n}: {reason}"
+        failures.append(reason)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(peer.pid, 9)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            peer.wait(timeout=10)
+    pytest.fail(
+        f"could not establish AND record a live `workerd` decoy in {attempts} "
+        "attempt(s), so this arm cannot measure its pin:\n\n" + "\n".join(failures)
+        + "\n\n⚠️ This is NOT by itself a `stop-all` verdict — but it is not \"just "
+        "capacity\" either. A decoy that DIES is most selectively explained by a peer "
+        "job's machine-global `pkill workerd` (#10283), which would make this a TRUE "
+        "POSITIVE; check the runner for a concurrent job running a pre-#10283 "
+        "teardown before closing it as flake (#12039)."
+    )
 
 
 def _reap(*pids: int) -> None:
@@ -410,29 +560,30 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
     """
     assert SCRIPT.is_file(), f"missing {SCRIPT}"
 
-    # Job B: a `workerd`-named decoy, registered in ITS OWN state directory.
-    peer_bin = tmp_path / "bin"
-    peer_bin.mkdir()
-    peer_workerd = peer_bin / "workerd"
-    peer_workerd.symlink_to("/bin/sleep")
+    # Job B: a `workerd`-named decoy, registered in ITS OWN state directory. The
+    # helper also calls `record`, inside its retry: the measured false-red is a decoy
+    # that was alive and then DIED before `record` (#12039), so the retry has to
+    # cover that interval — a spawn-only retry would not.
     peer_state = dict(state, PREVIEW_STATE=str(tmp_path / "peer-preview"), GITHUB_JOB="dashboard-e2e")
-    peer = _spawn([str(peer_workerd), "120"], tmp_path)
-    _wait_alive(peer.pid)
-    assert (peer_bin / "workerd").exists()
-    assert _script("record", "--name", "app", "--pid", str(peer.pid), env=peer_state).returncode == 0
+    peer, _recorded = _spawn_decoy_workerd(tmp_path, peer_state)
 
-    # Job A: a real tree (a supervisor + two children, like wrangler + workerd).
-    own = _spawn(["bash", "-c", "sleep 120 & sleep 120"], tmp_path)
-    _wait_alive(own.pid)
-    deadline = time.time() + 5
-    while time.time() < deadline and len(_child_pids(own.pid)) < 2:
-        time.sleep(0.05)
-    children = _child_pids(own.pid)
-    assert len(children) == 2, f"the tree did not form (children={children})"
-
-    assert _script("record", "--name", "app", "--pid", str(own.pid), env=state).returncode == 0
-    result = _script("stop-all", env=state)
+    # Everything that spawns is inside the `try` from here, so NO failure path —
+    # including the tree assertion below — leaves a live decoy behind.
+    children: list[int] = []
+    own = None
     try:
+        # Job A: a real tree (a supervisor + two children, like wrangler + workerd).
+        own = _spawn(["bash", "-c", "sleep 120 & sleep 120"], tmp_path)
+        _wait_alive(own.pid, argv0="bash")
+        deadline = time.time() + 5
+        while time.time() < deadline and len(_child_pids(own.pid)) < 2:
+            time.sleep(0.05)
+        children = _child_pids(own.pid)
+        assert len(children) == 2, f"the tree did not form (children={children})"
+
+        own_recorded = _script("record", "--name", "app", "--pid", str(own.pid), env=state)
+        assert own_recorded.returncode == 0, own_recorded.stderr
+        result = _script("stop-all", env=state)
         assert result.returncode == 0, result.stderr
         deadline = time.time() + 10
         while time.time() < deadline and _pid_alive(own.pid):
@@ -449,16 +600,19 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
         assert _pid_alive(peer.pid), (
             "stop-all killed a process from ANOTHER job's state directory — this is "
             "the #10283 defect: a peer's preview dies mid-run and its spec fails with "
-            "ERR_CONNECTION_REFUSED"
+            "ERR_CONNECTION_REFUSED. ⚠️ NOT the only reading: a PEER job's machine-global "
+            "`pkill workerd` landing in this window produces the same red, so check the "
+            "runner for a concurrent job running a pre-#10283 teardown before concluding "
+            "`stop-all` did it (#12039)."
         )
     finally:
-        _reap(own.pid, *children, peer.pid)
+        _reap(*([own.pid] if own is not None else []), *children, peer.pid)
 
 
 def test_stop_refuses_a_pid_whose_start_time_changed(tmp_path: Path, state) -> None:
     """A recycled pid is not our server: refusing is fail-safe, signalling is not."""
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
-    _wait_alive(victim.pid)
+    _wait_alive(victim.pid, argv0="sleep")
     try:
         assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
         start_file = Path(state["PREVIEW_STATE"]) / "app.start"
@@ -615,12 +769,21 @@ def test_alive_calls_a_zombie_GONE_not_alive(tmp_path: Path, state) -> None:
     # pid until `wait()`/`poll()`, so the child stays a zombie. Deliberately not
     # `os.fork()` — forking a multi-threaded pytest process warns (and can
     # deadlock) for no benefit here.
-    child = _spawn(["/bin/sleep", "2"], tmp_path)
+    child = _spawn(["/bin/sleep", "120"], tmp_path)
     pid = child.pid
     try:
+        # ⛔ EXEC PROOF + A DETERMINISTIC ZOMBIE, instead of a 2-second race
+        # (#12039 review, F5). The pre-fix shape spawned `sleep 2` and called
+        # `record` immediately: under load the `record` round trip can outlast those
+        # 2 seconds, and then rc 4 → `assert 4 == 0` — the exact false-red signature
+        # this file's sibling arm was red with. SIGKILLing an explicitly long-lived
+        # child AFTER `record` produces the unreaped zombie this arm needs with no
+        # timing budget at all.
+        _wait_alive(pid, argv0="sleep")
         assert _script("record", "--name", "app", "--pid", str(pid), env=state).returncode == 0, (
             "the child must be recorded while it is still running, like a boot step does"
         )
+        os.kill(pid, 9)  # not reaped: Popen holds the pid, so the child stays a ZOMBIE
         deadline = time.time() + 15
         while time.time() < deadline and _pid_state_letter(pid) != "Z":
             time.sleep(0.05)
@@ -652,7 +815,7 @@ def test_alive_refuses_a_recycled_pid(tmp_path: Path, state) -> None:
     ALIVE preview.
     """
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
-    _wait_alive(victim.pid)
+    _wait_alive(victim.pid, argv0="sleep")
     try:
         assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
         (Path(state["PREVIEW_STATE"]) / "app.start").write_text("1\n")  # a different process
@@ -685,7 +848,7 @@ def test_the_recycled_sentence_is_WELL_FORMED_when_no_port_was_recorded(
     that WHERE it answers was not checked.
     """
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
-    _wait_alive(victim.pid)
+    _wait_alive(victim.pid, argv0="sleep")
     try:
         assert _script(
             "record", "--name", "app", "--pid", str(victim.pid), env=state
@@ -776,7 +939,7 @@ def test_a_refusal_is_superseded_by_a_later_successful_record(
     )
 
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
-    _wait_alive(victim.pid)
+    _wait_alive(victim.pid, argv0="sleep")
     try:
         assert _script(
             "record", "--name", "app", "--pid", str(victim.pid), env=state
@@ -814,7 +977,7 @@ def test_alive_tells_a_stopped_preview_from_one_that_never_started(
     assert "NEVER RECORDED" in never.stdout, never.stdout
 
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
-    _wait_alive(victim.pid)
+    _wait_alive(victim.pid, argv0="sleep")
     try:
         assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
         assert _script("stop", "--name", "app", env=state).returncode == 0
@@ -885,7 +1048,7 @@ def test_alive_does_not_claim_an_identity_it_could_not_check(tmp_path: Path, sta
     "not a dead server" from a probe that had not asked.
     """
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
-    _wait_alive(victim.pid)
+    _wait_alive(victim.pid, argv0="sleep")
     try:
         assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
         (Path(state["PREVIEW_STATE"]) / "app.start").unlink()
@@ -938,7 +1101,7 @@ def test_alive_does_not_claim_an_identity_it_could_not_READ(tmp_path: Path, stat
     port = _script("alloc", "--name", "app", "--base", "18789", env=state)
     assert port.returncode == 0, port.stderr
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
-    _wait_alive(victim.pid)
+    _wait_alive(victim.pid, argv0="sleep")
     try:
         assert _script(
             "record", "--name", "app", "--pid", str(victim.pid), env=state
@@ -1001,7 +1164,7 @@ def test_alive_does_not_borrow_an_unchecked_identity_for_a_serving_verdict(
     port = int(allocated.stdout.strip())
 
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
-    _wait_alive(victim.pid)
+    _wait_alive(victim.pid, argv0="sleep")
     server = _spawn_http(port, 200, tmp_path)
     try:
         assert _wait_port(port), f"the listener never bound :{port}"
@@ -1041,7 +1204,7 @@ def test_alive_refuses_to_call_an_unchecked_port_leg_a_serving_verdict(
     RED on the pre-fix code (measured): it returned 0 and called itself ALIVE.
     """
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
-    _wait_alive(victim.pid)
+    _wait_alive(victim.pid, argv0="sleep")
     try:
         assert _script(
             "record", "--name", "app", "--pid", str(victim.pid), env=state
@@ -1152,7 +1315,7 @@ def test_a_later_refusal_outranks_an_earlier_boot(tmp_path: Path, state) -> None
     RED on the pre-fix code (**verified by running it**): rc 5 for this sequence.
     """
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
-    _wait_alive(victim.pid)
+    _wait_alive(victim.pid, argv0="sleep")
     try:
         assert _script(
             "record", "--name", "app", "--pid", str(victim.pid), env=state
@@ -1199,7 +1362,7 @@ def test_an_unreadable_pid_file_is_not_the_gone_verdict(tmp_path: Path, state) -
     rc 1 with no output, and the empty shape gave rc 1 wearing the GONE code.
     """
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
-    _wait_alive(victim.pid)
+    _wait_alive(victim.pid, argv0="sleep")
     pfile = Path(state["PREVIEW_STATE"]) / "app.pid"
     try:
         assert _script(
@@ -1257,7 +1420,7 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
     for the pid file.
     """
     victim = _spawn(["/bin/sleep", "120"], tmp_path)
-    _wait_alive(victim.pid)
+    _wait_alive(victim.pid, argv0="sleep")
     state_dir = Path(state["PREVIEW_STATE"])
     try:
         assert _script(
