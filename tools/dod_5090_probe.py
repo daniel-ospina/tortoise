@@ -1132,13 +1132,41 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         CENSUS_EXEMPT,
         "`tortoise/api.py::_verify_record_vector_width` — a VERIFIER, not a producer: it reads "
         "the record's declared `embedding_width` and the width's own vector and asks the seam "
-        "whether the declaration is truthful (`#11835` review round 9, P1). The instrument's "
-        "matches are its PROSE — the DOCSTRING reproducing the measured `_emit(...)` calls, and "
-        "the TWO BODY COMMENTS that record the later measured cases (a non-numeric "
-        "`embedding` and the fold storing the raw text); a lane that reworded only the "
-        "docstring is still in the population (measured). `_EMBED_WRITE` reads raw source, so "
-        "prose QUOTING the shape matches, as `tortoise.projection::_prewipe_synthetic_write_scope`'s "
-        "does. It issues no write at all (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`)"),
+        "whether the declaration is truthful (`#11835` review round 9, P1). ⛔ IT DOES CONTAIN ONE "
+        "WRITE — the `#11996` round-14 materialisation writes an envelope-carried one-shot "
+        "iterable back into the journal payload (`payload[\"embedding\"] = seam_values`, "
+        "inside `_verify_record_vector_width` itself), which is the CONTAINER-KEY shape "
+        "`#11274` widened this instrument for. "
+        "That write lands in no graph and names no label, so `NO_LIVE_VECTOR` still holds; the "
+        "earlier wording (\"its matches are its PROSE … issues no write at all\") is now false "
+        "and is corrected here rather than left to mislead the next reader. The OTHER matches "
+        "are prose — the DOCSTRING reproducing the measured `_emit(...)` calls and the body "
+        "comments recording later measured cases — because `_EMBED_WRITE` reads raw source, as "
+        "it does for `tortoise.projection::_prewipe_synthetic_write_scope`'s"),
+    "tortoise.sdk::create_source": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::create_source` — the `#11858` guard's OWN message is the only "
+        "match: its `ValueError` text says \"pass `embedding=` and it declares the truth\", "
+        "and `_EMBED_WRITE` reads raw source, so prose quoting the key enrols the function. "
+        "This door writes no vector of its own — it refuses a caller-supplied MARKER before "
+        "the props write, and the vector it stores is the caller's `embedding`, carried by "
+        "the same `_emit_event` / `_create_entity` path every other `:Source` writer uses; "
+        "it names no label of its own (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`). "
+        "⛔ Arrived at `origin/main` in `18d43e0462` (`#12113`) WITHOUT a census entry, so the "
+        "probe was red on `main` before this branch touched it (measured: 5 failures whose "
+        "only unclassified name is this one)"),
+    "tortoise.api::_int_is_float_exact": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::_int_is_float_exact` — a pure PREDICATE (`float(value) == value`, "
+        "`#11996` review round 12), not a producer: it reads one `int` and returns a `bool`, "
+        "and issues no write of any kind (`NO_LIVE_VECTOR` in "
+        "`tortoise/embed_writer_register`). The instrument's only match is its DOCSTRING, "
+        "which QUOTES the measured refusal it exists to explain — `embedding=[2 ** 2000]` "
+        "under `f32` — and `_EMBED_WRITE` reads raw source, so prose reproducing the shape "
+        "matches, exactly as it does for `_verify_record_vector_width` above. ⛔ Not reworded "
+        "away: the instrument is deliberately over-inclusive (a bypass that reads as exempt "
+        "is the failure its population exists to prevent), so a prose match is READ and "
+        "CLASSIFIED here rather than silenced by editing the evidence out of the docstring"),
     "tortoise.consistency::_compare_views": (
         CENSUS_EXEMPT,
         "issues no write; the only WRITE-SHAPED text is a COMMENT in "
@@ -1300,6 +1328,24 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.api::add_point": (
         ("tortoise/api.py", "add_point",
          'p["embedding"] = fields["embedding"]'),),
+    "tortoise.sdk::create_source": (
+        # The quoted refusal sentence itself — the whole reason this name enrols.
+        ("tortoise/sdk.py", "create_source",
+         "pass `embedding=` and it declares the truth"),
+        # …and the guard that makes the class true (it refuses MARKERS; it writes none).
+        ("tortoise/sdk.py", "create_source", "_SERVER_MANAGED_EMBEDDING_MARKERS"),),
+    "tortoise.api::_int_is_float_exact": (
+        # ⛔ The DOCSTRING's quoted REFUSAL is the entire reason this name is in
+        # the population: `_EMBED_WRITE` reads raw SOURCE, so the measured example
+        # the predicate's docstring records is what enrolled it. The needle is the
+        # refusal's own sentence — reword the example away and the function drops
+        # out of the population, which is why this is re-derived rather than
+        # assumed (`#11996` review round 17).
+        ("tortoise/api.py", "_int_is_float_exact",
+         "embedding=[2 ** 2000]` under `f32`"),
+        # …and the TOTALITY the row's class rests on: `float()` is undefined above
+        # ~1.8e308, so the refusal is a `ValueError` verdict and not a crash.
+        ("tortoise/api.py", "_int_is_float_exact", "except OverflowError:"),),
     "tortoise.api::_emit": (
         ("tortoise/api.py", "_emit", 'embedding="abc"'),
         # ⛔ NOT `stamp_journal_embedding =` — that needle matches the import-failure
