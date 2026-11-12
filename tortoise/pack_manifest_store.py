@@ -335,7 +335,6 @@ def validate_manifest(
     # (round-9 review P2 measured the RAISE: `ontology:` null / `core` / `[1,2]`
     # became an unhandled `AttributeError` out of a bare `.get(...)`, i.e. a 500
     # on the REST pre-check, which `hosted_api` calls with no try.)
-    # (round-13 review P3 measured the DUPLICATION)
     # (round-13 review P3): this route refused those shapes with its own wording
     # while `PackRegistry._validate` — the shared validator both surfaces use —
     # still answered some of them with a raw `AttributeError` string, which is two
