@@ -321,13 +321,24 @@ _ENVELOPE_KEYS_AT_PASSTHROUGH = _ENVELOPE_KEYS | {
 #: context strip a v2 stop-write exists to perform (#11835 review round 9, P3).
 #: Kept OUT of `_ENVELOPE_KEYS` on purpose — the RECORD doors pass it as a
 #: keyword (`add_point` / `add_operator` both pass `projection_version=2`), so a
-#: shared presence refusal would refuse their own call. The RECORD channel refuses
-#: it (`_refuse_caller_named_funnel_keys` passes `record=True`), and so do the three
-#: passthrough doors, which pass this same set on their KEYWORD payload — so the
-#: earlier wording "only the RECORD channel refuses it" was false (#11996 review
-#: round 18, measured: `projection_version=1` is refused by `add_event`,
-#: `add_object` and `emit_belief`, journalled=0). ⛔ `_emit`'s OWN keyword channel
-#: cannot refuse PRESENCE for the reason above, so it refuses the TYPE instead (see
+#: shared presence refusal would refuse their own call. ⛔ TWO DIFFERENT GUARDS refuse
+#: it, and naming the wrong one costs a reader 1,200 lines (#11996 review round 20,
+#: measured): the RECORD channel's refusal is `_emit`'s OWN
+#: `_refuse_caller_named_envelope_keys(record[0], …, record=True)` — called in `_emit`
+#: itself, so this note cites the SYMBOL and not a line number, which rot: it said
+#: `~1545` while the call sat at `1553` in the same revision. NOT
+#: `_refuse_caller_named_funnel_keys` — that function has three call sites, all of
+#: them a PASSTHROUGH DOOR's keyword payload (`emit_belief` / `add_object` /
+#: `add_event`), and its own docstring says the fourth splatting door `add_point`
+#: never calls it. So: the RECORD channel refuses it, the three doors refuse it on
+#: their KEYWORD payload, and both were wrong in earlier wording — "only the RECORD
+#: channel refuses it" was false, and attributing the record half to the funnel was
+#: false too (#11996 review rounds 18 and 20, measured: `projection_version=1` is
+#: refused by `add_event`, `add_object` and `emit_belief`, journalled=0, and
+#: `_emit("PointAdded", {"id": "p", "content": "c", "projection_version": 0})` is
+#: refused by the `_envelope_keys(record=True)` call in `_emit`). ⛔ `_emit`'s OWN
+#: keyword channel cannot refuse PRESENCE for the reason above, so it refuses the
+#: TYPE instead (see
 #: the `projection_version` arm there): an exact `int` is the producers' own value,
 #: and the `int`-1-bypasses-the-context-strip case stays the stated trade-off.
 _RECORD_ENVELOPE_EXTRA = frozenset({"projection_version"})
