@@ -1584,8 +1584,9 @@ class LLMExtractor:
                     # original, and a fence line is rewritten: an OPENING one goes
                     # 3 chars -> 6 (`f"\n\n{text[i:i+3]}\n"`), a CLOSING one 3 -> 5
                     # (`f"{fence_char}\n\n"`) — so later text shifts by +5 per
-                    # complete block (+3 on an unterminated one), measured on a
-                    # two-fence body.
+                    # complete block (+3 on an unterminated one), PLUS +3 for each
+                    # `## ` line at line start INSIDE the block (mangled to
+                    # `#_# # `, 3 chars -> 6), measured on a two-fence body.
                     # The two fields of this one record therefore cannot be
                     # combined: do NOT compute
                     # the document index as `span[0] + phrase_offset`. The gap is

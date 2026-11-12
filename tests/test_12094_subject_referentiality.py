@@ -611,7 +611,11 @@ def test_an_unarmed_run_says_nothing_about_holds(capsys):
         DOC, "strategy.md", None, _ingest_args(), extractor=fake)
 
     out = capsys.readouterr().out
-    assert "held" not in out.lower(), (
+    # ⛔ Key on the LINE the code emits, not on a bare substring of all of stdout
+    # (#12102 review P3). `"held" not in out.lower()` passed for the wrong reason
+    # and would false-red on any future message containing ``held``/``withheld``
+    # (a lane name, a path), while never checking that THIS line is absent.
+    assert "warning: S7 held" not in out, (
         f"nothing was held, so nothing may be reported as held; stdout was {out!r}")
 
 
