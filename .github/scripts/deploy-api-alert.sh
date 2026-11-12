@@ -355,7 +355,7 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # `tr`), silently setting the size to 0 and reverting to the cut-undeclared sentence —
         # measured. Parameter expansion strips a right-padded `wc` count without a subprocess;
         # the guard maps "cannot read it" (a directory: `wc` fails) to 0.
-        report_bytes="$(wc -c < "$DRIFT_REPORT_FILE" 2>/dev/null)" || report_bytes=""
+        report_bytes="$(wc -c 2>/dev/null < "$DRIFT_REPORT_FILE")" || report_bytes=""
         report_bytes="${report_bytes//[[:space:]]/}"
         case "${report_bytes:-}" in '' | *[!0-9]*) report_bytes=0 ;; esac
         # `2>/dev/null`: a converter that is absent prints its own "command not found" or
@@ -429,13 +429,19 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # what was actually produced, is the shape that cannot diverge again. Pinned by
           # case 17i, whose not_contains row reds if this condition is removed.
           # ⛔ NAME THE STATE, NOT ONE CAUSE (review round 5, note 1). An EMPTY `iconv`
-          # output has three reachable causes: no `iconv` at all, one that refused/failed, and
-          # — measured — one that is perfectly healthy and emits NOTHING because every byte of
-          # the tail was undecodable while the ASCII fallback still recovered text. Naming only
-          # the first two told the on-call reader the converter was missing on a host where it
-          # had just worked, so both sentences below enumerate the state inclusively.
+          # output has THREE reachable causes — no `iconv` at all, one that refused/failed, and
+          # one that is perfectly healthy and emits NOTHING because it could decode nothing from
+          # the tail — but they do not all reach the same sentence (corrected, review round 7):
+          # a tail a HEALTHY converter emits nothing for holds no byte under 0x80 (every
+          # remaining byte is a complete valid sequence, which `-c` emits), so `tr -d '\200-\377'`
+          # keeps nothing either, and that cause lands in the SECOND sentence below, never this
+          # one. THIS arm is entered only when the fallback has just produced text, so the tail
+          # did hold an ASCII byte and a working converter would have emitted it — which leaves
+          # exactly the two broken-converter causes here, and `emitted nothing it could convert`
+          # is deliberately NOT in this sentence's parenthetical for that reason. Case 17l pins
+          # the third cause in the second sentence, where it is the operative one.
           if [ -n "$excerpt" ]; then
-            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable, refused to emit, or emitted nothing it could convert); it is pasted with its non-ASCII bytes dropped, so any non-ASCII character in it is LOST — the run link above holds the full text."
+            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit); it is pasted with its non-ASCII bytes dropped, so any non-ASCII character in it is LOST — the run link above holds the full text."
           else
             # ⛔ SAY ONLY WHAT IS TRUE IN THIS STATE, not what the BRANCH implies. `excerpt` is
             # empty here for TWO reasons and the body cannot tell them apart: the tail may be
