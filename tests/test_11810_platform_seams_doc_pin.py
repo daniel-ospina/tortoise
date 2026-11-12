@@ -248,9 +248,12 @@ _PY = sys.executable
 #: guidance that could not be followed — and FOUR of the seven named the WRONG item even
 #: where the numbering read plausibly (the "pull only" consequence sits in the
 #: `Hosted cloud agents get NEITHER hook` item, while the three sentences beside it sit
-#: in the `"IDE-only" is NOT the right absolute` item). Four, not two: r21 said "two" and
-#: r22 measured four, which is why the count is stated once here and never as a standing
-#: figure anywhere else. A heading-named site cannot be
+#: in the `"IDE-only" is NOT the right absolute` item). Four, not two: the r27 review
+#: that filed this said "two of the seven rows named the wrong item" while its OWN
+#: table marked rows 4/5/6 and 7 — four — and r45 counted the same four. (Do not
+#: confuse this with the r21/r22 hook-source count lower down; that is a DIFFERENT
+#: four, about which sentences restate the hook source, and it is stated there.)
+#: A heading-named site cannot be
 #: renumbered by a later edit, and `_RESTATEMENT_SITES` (index-aligned with the tuple
 #: below) makes it checkable — see
 #: `test_every_restatement_site_label_names_the_item_that_states_it` (review r27 P3 #1).
@@ -620,8 +623,8 @@ def _record_site_block(doc: str, site: str) -> str:
     Returns "" when the site cannot be located, so a re-worded heading REDs the
     label guard. Returning the whole document instead would make every label pass
     wherever its sentence had MOVED to, which is the false PASS this guard exists
-    to prevent (review r27 P3 #1: two rows named the wrong item, and nothing could
-    tell).
+    to prevent (review r27 P3 #1: that round reported two rows naming the wrong item,
+    and its own table listed four — see the legend's note above).
 
     ⚠️ Recorded bound: the site is matched against ONE LINE, not a reflowed block. An
     honest re-wrap that moves part of the heading's phrase onto the next line leaves
