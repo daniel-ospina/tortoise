@@ -3374,6 +3374,31 @@ def test_a_consent_token_only_diff_runs_the_bridge_guard():
     )
 
 
+def test_a_metering_only_diff_runs_the_storage_dimension_pins():
+    """#11968 review (P2): the arithmetic's own diff must select the guard that pins it.
+
+    `tests/test_pricing_storage_dimensions.py` pins
+    `metering.storage_overage_cost_usd` (21 call sites), and `tortoise/metering.py`
+    is an exact `SOURCE_PATTERNS["api"]` entry. A named-surface match REPLACES the
+    `core` fallback (#2938), so a `metering.py`-only diff resolves `['api']` and a
+    `core`-only registration leaves the overage arithmetic asleep on the very
+    change that moves it — the silent-drop class #1349/#2938 warn about. Asserts
+    the SELECTION, not the registration, so it reds if the `api` arm of the entry
+    is dropped or the `api` SOURCE_PATTERN stops claiming `metering.py`.
+    """
+    r = _sel(["tortoise/metering.py"])
+    assert r["full"] is False
+    assert "api" in r["surfaces"], (
+        f"a metering.py-only diff selects {r['surfaces']} — expected `api`, which "
+        "is where the storage-dimension pins are registered"
+    )
+    assert "test_pricing_storage_dimensions.py" in r["test_files"], (
+        "a metering.py-only diff does not run "
+        "tests/test_pricing_storage_dimensions.py, so its storage-overage pins "
+        "cannot fire on the change they pin (#11968)"
+    )
+
+
 def test_a_client_identity_only_diff_runs_the_consent_identity_guards():
     """#8218 review (finding 3): the identity RULE's own diff must select the
     guards that pin it.
