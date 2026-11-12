@@ -27,16 +27,16 @@ read as something else — and because this guard's verdict IS the check, each g
    sibling function (`COMMENT_START_RE`, `:2764`, `#12069 review 16`). A tombstone
    written `;#`, `&&#` or `|#` — all valid shell — survived into the scan.
 
-**Found in PLAN-VERIFY round 1 (both P1, both measured, both on the declared surface):**
-
-4. **`)$(` is not an operator boundary.** The first cut put `(`/`)` in a flat
+4. **`)$(` is not an operator boundary.** (Found in PLAN-VERIFY round 1 — P1, measured,
+   on the declared surface.) The first cut put `(`/`)` in a flat
    character class, so `echo $(date)#12051; <live replacement>` lost everything after
    the `#` and the replacement was GREEN. Bash ground truth:
    `echo $(date +%s)#note ; echo AFTER` prints `<epoch>#note` **and** `AFTER` — the
    `#` is part of the same word. A **group-closing** `)` *is* an operator
    (`(echo x)#note ; echo AFTER` prints only `x`). The two are indistinguishable in a
    flat class; closers are now tracked on a stack.
-5. **`find`'s expression tokens are not operands.** Skipping only the terminator
+5. **`find`'s expression tokens are not operands.** (Found in PLAN-VERIFY round 1 — P1,
+   measured, on the declared surface.) Skipping only the terminator
    itself left `\)`, `\(`, `!` and `-o` free to become "the last path", so
    `find … -exec cp {} "$b/16/bin/" ';' \)` went GREEN — on the **escaped** spelling
    too. Fixed by ending the operand scan at the terminator (nothing after it can be
@@ -107,8 +107,8 @@ on it too); reverting the per-primary model reds `mut-115/116`; reverting the qu
 3. `COMMENT_START_CHARS` shared by the comment rules; `_without_comment` delegates.
    **Test:** the same test's 7 operator-opener tombstone cases.
 4. A substitution closer is not a comment boundary; a group closer is.
-   **Test:** `test_a_substitution_closer_is_not_a_comment_boundary` (4 shapes refused
-   + a group-closer CONTROL that must strip).
+   **Test:** `test_a_substitution_closer_is_not_a_comment_boundary` (4 shapes refused,
+   plus a group-closer CONTROL that must strip).
 5. The operand scan ENDS at a `find`/`xargs` terminator. **Test:** `mut-111`, `mut-112`,
    `mut-113` + the grouped-READ control `mut-114`.
 6. Mutation proof: revert each fix alone and show exactly its own rows red.
@@ -133,6 +133,7 @@ on it too); reverting the per-primary model reds `mut-115/116`; reverting the qu
 - **R5c** applied to the REAL workflow: `_run_commands` now restores 18 of 85 `run:` step bodies (never truncates one). → caught by diffing `_run_commands` over every step of `python-ci.yml` on main vs this change; the full module re-asserts every row arm over the real job.
 
 **Threat classes** (gate-enforcement):
+
 - `T1` quoted `find`/`xargs` terminator (`';'`, `";"`) → must be REFUSED when the destination is the client dir.
 - `T2` quoted `#` (**either** quote style) introducing a live command on the same line → the command must be REFUSED.
 - `T3` comment after an operator (`;#`, `&&#`, `|#`) → the tombstone must NOT satisfy any rule.
