@@ -1265,10 +1265,18 @@ def test_the_declined_edge_property_set_is_DERIVED_not_a_second_list(monkeypatch
     assert "embedding_widened" in cp.relation_vector_declined_properties(), (
         "the edge rule is a SECOND list: it did not follow the store seam when the "
         f"seam widened — {sorted(cp.relation_vector_declined_properties())}")
-    # …and the doors actually use it, not just the seam.
+    # …and the doors actually read THAT callable, not `STORED_VECTOR_PROPS` directly.
+    # ⛔ Widening the set cannot show this (`#12015` review): both sources are widened,
+    # so a door rewritten to `sorted(STORED_VECTOR_PROPS)` stays green on the arm above.
+    # EMPTYING the callable is the discriminating arm — the door must follow it.
     rel = cp.relation_from_row(_relation_row(
         props={"embedding_widened": [0.5, 0.25]}))
     assert "embedding_widened" in rel.dropped_vectors, rel.dropped_vectors
+    monkeypatch.setattr(cp, "relation_vector_declined_properties", lambda: frozenset())
+    assert cp.relation_from_row(_relation_row(
+        props={"embedding": [0.5, 0.25]})).dropped_vectors == {}, (
+        "the row door bypasses `relation_vector_declined_properties` — it is reading "
+        "the property set directly, i.e. a SECOND declaration of the rule")
 
 
 def test_a_dropped_edge_vector_does_not_leave_the_verbatim_marker_behind():
@@ -1299,19 +1307,38 @@ def test_a_dropped_edge_vector_does_not_leave_the_verbatim_marker_behind():
     assert cp.VERBATIM_MARKER in clean.props, clean.props
 
 
-def test_the_relationship_target_format_has_ONE_owner():
-    """`#12015` review — the report key's format is decided in one place.
+def test_the_relationship_target_format_has_ONE_owner(monkeypatch):
+    """`#12015` review — the report key's format is decided in one place, by CONSUMERS.
 
     `record_restore` discriminates an edge entry from a record label with
     `is_relationship_target`, and a record label can never shadow it (the only node
     entries are `UNSERVED_VECTOR_LABELS` ⊆ `NODE_TABLES`). Spelling the format out at
     each site is how one of them drifts and silently classifies every entry as a node.
+
+    ⛔ OWNERSHIP IS MEASURED THROUGH A PRODUCER, not by comparing the owner with itself
+    (`#12015` review): asserting `relationship_target("IMPL") == "<relationship:IMPL>"`
+    and round-tripping it through `is_relationship_target` stays green even when a
+    consumer spells the literal out. So the owner is REBOUND and the consumer's output
+    must follow it.
     """
     assert cp.relationship_target("IMPL") == "<relationship:IMPL>"
     assert cp.is_relationship_target(cp.relationship_target("IMPL")) is True
     assert cp.is_relationship_target("Session") is False
     for label in cp.NODE_TABLES:
         assert not cp.is_relationship_target(label), label
+    # The PRODUCER: a rebound format must appear in the plan's report key.
+    monkeypatch.setattr(cp, "relationship_target", lambda rel_type: f"<rel:{rel_type}>")
+    edge = cp.relation_from_row(_relation_row(props={"embedding": [0.5, 0.25]}))
+    assert cp.record_plan([], [edge]).dropped_vectors() == {"<rel:IMPL>": 1}, (
+        "the plan's report key is composed by hand instead of by "
+        f"`relationship_target`: {cp.record_plan([], [edge]).dropped_vectors()}")
+    # …and the PROBE reads the owner too (it imports it lazily, so a rebind reaches it
+    # without an extra import step) — a hand-spelled literal there would ignore this.
+    from tools import dod_5090_probe as probe_mod
+
+    assert probe_mod._relationship_target("IMPL") == "<rel:IMPL>", (
+        "the probe composes the report key by hand instead of from "
+        "`cache_projection.relationship_target`")
 
 
 def test_is_verbatim_is_an_or_across_the_sides_it_is_given():
