@@ -606,3 +606,89 @@ def test_a_failed_surface_is_counted_in_minted_and_in_failed(monkeypatch):
         "the three-bucket sum OVERCOUNTS by exactly `failed`; the docstring says "
         "so and a caller must not add it")
     assert "it" in result["subject_names"], "fail-open means it was minted"
+
+
+# ── 13. a REPEATED HEADER is two sections, not one (round-2 review P2) ─────
+
+def test_two_sections_with_the_same_title_are_two_records(monkeypatch):
+    """The record unit is (surface, SECTION), and a section is not its title.
+
+    A repeated header (two `## Open Questions`) is ordinary markdown, and
+    ``_document_sections`` returns it as TWO sections with distinct spans —
+    measured at the #12102 round-2 review: ``[18, 80]`` and ``[98, 168]``.
+    Keying the dedupe on the title collapsed them and UNDERCOUNTED the very
+    occurrences this list exists to count, which is the direction that hides a
+    gate's work. The record already carries ``span``; that is the identity.
+    """
+    monkeypatch.setenv(FLAG, "1")
+    api, _proj, _log = _proj_api()
+    doc = (
+        "## Open Questions\n"
+        "It is still unclear whether the adoption holds at scale here.\n"
+        "## Open Questions\n"
+        "It remains unclear whether the rollout survives contact with reality.\n"
+    )
+    payload = {"subjects": [{"name": "it", "subjectKind": "other"}],
+               "objects": [], "aboutEntities": []}
+
+    monkeypatch.setattr(extractor_mod, "_SemanticStage", _FixedStage)
+    monkeypatch.setattr(_FixedStage, "payload", payload, raising=False)
+    ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
+    result = ext.extract_entities(doc, "strategy.md", api)
+
+    assert result["subjects_held"] == 1, "still ONE surface"
+    assert len(result["held_subjects"]) == 2, (
+        "two SECTIONS with the same title are two occurrences — keyed on span, "
+        f"never on the title (records: {result['held_subjects']})")
+    spans = [tuple(h["span"]) for h in result["held_subjects"]]
+    assert len(set(spans)) == 2, f"the two records must be distinguishable: {spans}"
+
+
+# ── 14. a FAIL-OPEN mint wins over an earlier hold (round-2 review P2) ─────
+
+def test_a_surface_held_then_minted_is_counted_once(monkeypatch):
+    """`minted + held == population` — the FINAL disposition, not first sighting.
+
+    A surface held in section A whose cue RAISES in section B is minted by
+    fail-open. Mint wins (a node reached the graph), so it must not still be
+    counted as held: counting it in both makes ``minted + held`` exceed the
+    population. Its section-A ``held_subjects`` record is KEPT — that occurrence
+    really was held, and deleting it would be the I2 silent drop.
+    """
+    monkeypatch.setenv(FLAG, "1")
+    api, _proj, _log = _proj_api()
+    doc = (
+        "## Product Strategy\n"
+        "The team met and it was decided to adopt FalkorDB as the backbone.\n"
+        "## Open Questions\n"
+        "It remains unclear whether the adoption survives at scale.\n"
+    )
+    payload = {"subjects": [{"name": "it", "subjectKind": "other"}],
+               "objects": [], "aboutEntities": []}
+
+    real_hold = extractor_mod._referentiality_hold
+    calls = {"n": 0}
+
+    def _flaky(surface):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return real_hold(surface)          # section A: genuinely held
+        raise RuntimeError("cue exploded")     # section B: fail-open mint
+
+    monkeypatch.setattr(extractor_mod, "_referentiality_hold", _flaky)
+    monkeypatch.setattr(extractor_mod, "_SemanticStage", _FixedStage)
+    monkeypatch.setattr(_FixedStage, "payload", payload, raising=False)
+    ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
+    result = ext.extract_entities(doc, "strategy.md", api)
+
+    assert result["subjects_minted"] == 1, "fail-open minted it in section B"
+    assert result["subjects_hold_failed"] == 1
+    assert result["subjects_held"] == 0, (
+        "a MINTED surface is not held — counting it in both overcounts the "
+        f"population (minted={result['subjects_minted']}, "
+        f"held={result['subjects_held']})")
+    assert result["subjects_minted"] + result["subjects_held"] == 1, "the population"
+    assert result["subjects_held_by_rule"] == {}, (
+        "the by-rule table is derived from the same final-disposition set")
+    assert [h["section"] for h in result["held_subjects"]] == ["Product Strategy"], (
+        "the section-A occurrence stays on the record — never a silent drop")

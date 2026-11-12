@@ -1421,7 +1421,7 @@ class LLMExtractor:
         # gave ``len(held_subjects)==2`` with ``[h["section"]] == ['A','A']`` while
         # ``subjects_held==1``. A census that overcounts occurrences is worse than
         # no census, because the measurement (#5087 R1) reads the records.
-        held_records_seen: set[tuple[str, str]] = set()  # (surface, section)
+        held_records_seen: set[tuple[str, int, int]] = set()  # (surface, *span)
         # #12094: a cue that RAISES is fail-open — the surface is minted, as it
         # would have been before this gate existed — and the failure is reported.
         # ⛔ ONE record per surface, not per occurrence: a failed surface mints, so
@@ -1478,9 +1478,15 @@ class LLMExtractor:
                     held_surfaces.setdefault(name, _verdict[0])
                     # ONE record per (surface, section), exactly as documented —
                     # a repeat inside the same section is the same disposition.
-                    if (name, title) in held_records_seen:
+                    # ⛔ KEYED ON THE SPAN, not the section TITLE: a repeated
+                    # header (two `## Open Questions`) is ordinary markdown and
+                    # `_document_sections` returns it as TWO sections with distinct
+                    # spans — measured at the #12102 round-2 review, title-keying
+                    # collapsed them into one record and UNDERCOUNTED the very
+                    # occurrences this list exists to count.
+                    if (name, span[0], span[1]) in held_records_seen:
                         continue
-                    held_records_seen.add((name, title))
+                    held_records_seen.add((name, span[0], span[1]))
                     # ⛔ A WORD-BOUNDARY match, not `body.find(name)`. A substring
                     # index is wrong for exactly the class this gate holds: the
                     # pronoun `it` is found INSIDE "with"/"within"/"itself", so the
@@ -1551,6 +1557,10 @@ class LLMExtractor:
                 if ename:
                     all_entity_names.add(ename)
 
+        # A surface whose cue raised is MINTED, so it is not held — see the
+        # final-disposition note in the return below.
+        _held_only = {n: r for n, r in held_surfaces.items() if n not in seen_subjects}
+
         return {
             "subjects": n_subjects,
             "objects": n_objects,
@@ -1565,16 +1575,26 @@ class LLMExtractor:
             # ``_DocumentPointStage`` runs in a separate pass. So a held
             # surface on this path is a HOLD with a section span, NOT a
             # mention.
+            #
+            # ⛔ FINAL DISPOSITION, not first observation (#12102 round-2 review
+            # P2): a surface HELD in an earlier section can still MINT later if the
+            # cue raises on it — fail-open mints it and puts it in
+            # `seen_subjects`. The mint wins (a node reached the graph), so the
+            # held counters exclude it below. That is what keeps
+            # `subjects_minted + subjects_held == population` true; without it the
+            # surface is counted in BOTH and the sum overcounts. Its earlier
+            # `held_subjects` record is KEPT — that occurrence really was held, and
+            # deleting it would be the I2 silent-drop this gate exists to refuse.
             "subjects_minted": n_subjects,
-            "subjects_held": len(held_surfaces),
+            "subjects_held": len(_held_only),
             "held_subjects": held_subjects,
             # ⛔ ``subjects_held`` counts SURFACES (distinct names), matching
             # ``subjects_minted``; ``held_subjects`` carries one record per
             # (surface, section). Both units are stated because a caller reading
             # "minted + held" must not be adding names to occurrences.
             "subjects_held_by_rule": {
-                rule: sum(1 for held_rule in held_surfaces.values() if held_rule == rule)
-                for rule in sorted(set(held_surfaces.values()))
+                rule: sum(1 for held_rule in _held_only.values() if held_rule == rule)
+                for rule in sorted(set(_held_only.values()))
             },
             # A cue that failed is NOT a hold: the surface minted. Reported so a
             # silently degraded gate is visible rather than inferred from a count.
