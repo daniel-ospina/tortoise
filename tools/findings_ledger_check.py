@@ -251,6 +251,33 @@ CITATION_UNCOLONED_SHAPE_RE = re.compile(
     r"(?:\s+|\s*\|\s*)(?P<num>\d{1,7})(?:\s*[-–]\s*\d{1,7})?(?![\w.>&|/]|-\w)"
 )
 
+def _uncoloned_is_exempt(body: str, u: re.Match) -> bool:
+    """Is THIS `CITATION_UNCOLONED_SHAPE_RE` match one of the declared carve-outs?
+
+    ⛔ PER MATCH, and module-scoped rather than a closure. Both halves are a fix for
+    a measured red→green: the exemptions were tested against `search()`'s FIRST match
+    only, so one exempt token certified every citation beside it in the same code
+    span — `docs/index.html 200 tortoise/no_such_module.py 16` left the page CLEAN at
+    every head before this one, while `tortoise/no_such_module.py 16` alone was
+    refused. The identical shape was fixed one arm above for `#L` permalinks.
+
+    It takes the span body as an argument instead of closing over the caller's loop
+    variable because such a nested `def` is a `B023` under this repo's own
+    `ruff select` — measured: `ruff check tools/` went from clean to 1 error.
+    """
+    # A number followed by a FLAG is an argument, not a line.
+    if re.match(r"\s+--", body[u.end("num") :]):
+        return True
+    # `index.html 200` — a 100-599 status beside a web-page name. The only HTTP
+    # shape that qualifies; `tortoise/pipeline.py 200` is still a line.
+    num = u.group("num")
+    return (
+        len(num) == 3
+        and 100 <= int(num) <= 599
+        and u.group("path").endswith((".html", ".htm"))
+    )
+
+
 #: `path#L16` — the **GitHub permalink** spelling, and the ONE delimiter the sweep
 #: above rejected for a reason that does not apply to it (#11952 P1). `#` alone is a
 #: carve-out because it parses `owner/repo#9363` issue refs — the form this repo
@@ -320,7 +347,7 @@ VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 35
+MIN_SELF_TEST_MUTATIONS = 36
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -927,8 +954,19 @@ def check_citation_shapes(text: str) -> list[str]:
                 "so an unreadable shape must be refused rather than skipped"
             )
             continue
-        uncoloned = CITATION_UNCOLONED_SHAPE_RE.search(body)
-        if uncoloned and (
+        # ⛔ EVERY match, and the exemptions are PER MATCH
+        # (`_uncoloned_is_exempt`). They used to be tested on `search()`'s first
+        # match only, so one exempt token certified the whole span: measured,
+        # `index.html <status>` or a numeric argument in front of `path|999999` (or
+        # of a citation to a file that does not exist) left the page CLEAN, where the
+        # same citation alone was REFUSED — the identical red→green the permalink arm
+        # was fixed for (found by review).
+        uncoloneds = [
+            u
+            for u in CITATION_UNCOLONED_SHAPE_RE.finditer(body)
+            if not _uncoloned_is_exempt(body, u)
+        ]
+        if uncoloneds and (
             not CITATION_RE.fullmatch(match.group(0))
             # A span that carries a REAL `path:line` is the resolver's business, and a
             # marker-less `word:digits` beside it (`a host:6379 note`) must not buy the
@@ -941,20 +979,10 @@ def check_citation_shapes(text: str) -> list[str]:
             # A backticked COMMAND is a legal §1 evidence form, and its trailing
             # number is an argument: `uv run python tools/collision_preflight.py 2852
             # --repo .`. Measured over `docs/**` — 7 legitimate spans, all commands.
+            # This one IS span-scoped: the PROGRAM decides what its arguments mean.
             and not COMMAND_RE.match(match.group(0))
-            # `path.py 2852 --repo .` — a number followed by a FLAG is an argument
-            # even without a recognised command prefix.
-            and not re.match(r"\s+--", body[uncoloned.end("num") :])
-            # `index.html 200` is an HTTP status beside a page name, not a citation:
-            # measured in this repo's own docs (`X /index.html 200`, `… 400`) and named
-            # as a carve-out in §8. A three-digit status after a web-page path is the
-            # only shape that qualifies, so `tortoise/pipeline.py 200` is still a line.
-            and not (
-                len(uncoloned.group("num")) == 3
-                and 100 <= int(uncoloned.group("num")) <= 599
-                and uncoloned.group("path").endswith((".html", ".htm"))
-            )
         ):
+            uncoloned = uncoloneds[0]
             problems.append(
                 f"`{match.group(0)[1:-1]}` is not a recognised citation — it carries "
                 f"{uncoloned.group(0)!r}, which uses a delimiter the resolver does not "
@@ -1924,6 +1952,20 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             1,
         ),
         "sentences saying 'no longer read as written'",
+    ),
+    (
+        # The FIRST-MATCH pin, one arm over from the permalink one: an exempt token (an
+        # HTTP status beside a page name) used to certify everything beside it in the
+        # same span, so a citation to a file that does not exist went CLEAN (measured,
+        # found by review). The exemptions are per MATCH now; this arm fails if they
+        # ever go back to `search()`'s first.
+        "an exempt HTTP status hiding a citation to a missing file in the same span",
+        lambda t: t.replace(
+            "`tortoise/pipeline.py:16`",
+            "`docs/index.html 200 tortoise/no_such_module.py 16`",
+            1,
+        ),
+        "not a recognised citation",
     ),
 )
 
