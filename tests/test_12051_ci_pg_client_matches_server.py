@@ -794,11 +794,6 @@ def _inert_shell_reason(job: dict | None, step: dict) -> str | None:
     if not shell.strip():
         return None
     before, marker, _after = shell.partition("{0}")
-    words = [
-        word
-        for word in SHELL_WORD_SPLIT_RE.split(before)
-        if word and not word.startswith("-")
-    ]
     match = TERMINATING_COMMAND_RE.search(before)
     if match:
         return (
@@ -807,12 +802,13 @@ def _inert_shell_reason(job: dict | None, step: dict) -> str | None:
             "step is inert (never installed, prepended, or asserted) while its "
             "text satisfies every row here (#12069 review round 17)"
         )
-    if marker and words and words[-1] not in SHELL_COMMANDS:
+    if marker and not _runs_the_script(before):
         return (
-            f"`shell:` hands the step's script to `{words[-1]}` "
-            f"({shell.strip()!r}), which does not run it AS a shell — mentioning "
-            "`{0}` is not executing it, so the `run:` block never runs while its "
-            "text satisfies every row here (#12069 review round 18)"
+            f"`shell:` does not hand the step's script to a shell "
+            f"({shell.strip()!r}) — the word in COMMAND position before `{{0}}` "
+            "is not an interpreter, so mentioning `{0}` is not executing it: the "
+            "`run:` block never runs while its text satisfies every row here "
+            "(#12069 reviews 18-19)"
         )
     return None
 
@@ -837,8 +833,59 @@ SHELL_COMMANDS = frozenset(
 )
 
 #: Words in a `shell:` string's argv, with every shell separator and quote treated
-#: as a boundary.
+#: as a boundary. (Local convention: `_runs_the_script` splits on its own, because
+#: it must cut at the LAST separator first.)
 SHELL_WORD_SPLIT_RE = re.compile(r"[\s;&|()'\"`]+")
+
+#: Where ONE command's text ends and the next begins, plus the boundary a `-c`
+#: inline script opens at. The LAST such boundary before `{0}` is where the command
+#: that would receive `{0}` starts (#12069 round 19).
+SHELL_STATEMENT_BOUNDARY_RE = re.compile(r"[;&|\n'\"`]")
+
+#: Commands that RUN the next command rather than consuming the rest of the line.
+SHELL_WRAPPERS = frozenset({"exec", "command", "env", "nohup", "sudo", "time", "builtin"})
+
+
+def _runs_the_script(before: str) -> bool:
+    """Is the word in COMMAND position before `{0}` an interpreter (#12069 r19)?
+
+    ⛔ `{0}` MUST BE AN ARGUMENT OF AN INTERPRETER, NOT OF WHATEVER PRECEDES IT
+    (#12069 review round 19, both directions measured). Two cuts of this rule got
+    it wrong in opposite ways:
+
+      · `words[-1] in SHELL_COMMANDS` false-RED `bash --noprofile --norc -eo
+        pipefail {0}` — `pipefail` is a FLAG'S VALUE, not the word that runs the
+        script — and `/bin/bash -e {0}`, whose argv[0] is a path. Both are correct
+        spellings this repo asserts elsewhere (measured `2 failed` on the real
+        pin step).
+      · `words[-1]` also ACCEPTED `bash -c 'echo bash {0}; exit 0'`, where the
+        word before `{0}` happens to be `bash` but the command that receives it
+        is `echo` — the step body never ran and the row stayed GREEN.
+
+    So grade the START of the statement `{0}` sits in: cut `before` at its LAST
+    separator (a `;`, `&`, `|`, newline, or the quote that opens a `-c` script),
+    skip variable-assignment prefixes and wrappers (`exec`, `command`, `env`, …),
+    and require the first remaining word — basenamed, so `/bin/bash` counts — to be
+    a shell. `bash -e {0}`, `bash --noprofile --norc -eo pipefail {0}`,
+    `/bin/bash -e {0}`, `bash -c 'exec bash {0}'` and `python {0}` all pass;
+    `cat {0}`, `echo bash {0}` and `printf %s bash {0}` do not.
+    """
+
+    cut = 0
+    for boundary in SHELL_STATEMENT_BOUNDARY_RE.finditer(before):
+        cut = boundary.end()
+    words = [
+        word
+        for word in re.split(r"[\s'\"`]+", before[cut:])
+        if word and not word.startswith("-")
+    ]
+    for index, word in enumerate(words):
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
+            continue  # a VAR=value prefix is not the command
+        if word.rsplit("/", 1)[-1] in SHELL_WRAPPERS and index < len(words) - 1:
+            continue  # `exec bash …` / `env … bash …`: keep walking right
+        return word.rsplit("/", 1)[-1] in SHELL_COMMANDS
+    return False
 
 #: A statement that LEAVES the current iteration from the loop body's TOP LEVEL.
 #: It runs before anything below it, so the body it precedes is text the shell
@@ -847,7 +894,7 @@ SHELL_WORD_SPLIT_RE = re.compile(r"[\s;&|()'\"`]+")
 #: crediting both tools while the one-line spelling of the same statement was
 #: refused — the two forms disagreed about one fact.
 LOOP_TRUNCATING_RE = re.compile(
-    r"^[ \t]*(?:break|continue)(?:[ \t]+[0-9]+)?[ \t]*(?:;.*)?$"
+    r"^[ \t]*(?:break|continue)(?:[ \t]+[0-9]+)?[ \t]*(?:[;#].*)?$"
 )
 
 
@@ -1060,19 +1107,32 @@ def _asserting_loop_line_spans(code: str) -> list[tuple[int, int]]:
 INLINE_LOOP_TRUNCATING_RE = re.compile(r"(?:^|[;&])[ \t]*(?:break|continue)\b")
 
 
-def _inline_truncates(rest: str) -> bool:
-    """Does a one-line loop body LEAVE the iteration with code after it?
+def _inline_truncates(rest: str, closes_here: bool = True) -> bool:
+    """Does the loop body on the `do` LINE leave the iteration with code after it?
 
     The `do` line's own body (`rest`), down to `done`, split into statements. The
     same rule as `_truncated_at_top_level`, including its round-18 correction: a
     terminator with NO statement after it skips nothing and is accepted.
+
+    ⛔ UNLESS THE BODY CONTINUES ON THE FOLLOWING LINES (#12069 review round 19,
+    measured GREEN). On a `do` line that does NOT close the loop, nothing CAN
+    follow the terminator on that line, so exempting it as "trailing" credited the
+    whole body beneath it:
+
+        for tool in pg_dump pg_restore; do break
+          version="$($tool --version)"
+        done                                            ->  164 passed, GREEN
+
+    The exemption is therefore conditional on the loop CLOSING on this line; when
+    it does not, a terminator here truncates the body below it by construction.
     """
 
     body = re.split(r"(?:^|[;&])[ \t]*done\b", rest, maxsplit=1)[0]
     statements = [part.strip() for part in body.split(";")]
     significant = [part for part in statements if part and not part.startswith("#")]
     return any(
-        INLINE_LOOP_TRUNCATING_RE.match(part) and index < len(significant) - 1
+        INLINE_LOOP_TRUNCATING_RE.match(part)
+        and (not closes_here or index < len(significant) - 1)
         for index, part in enumerate(significant)
     )
 
@@ -1104,11 +1164,19 @@ def _truncated_loop_bodies(code: str) -> list[str]:
     offenders: list[str] = []
     for start, end in _asserting_loop_line_spans(code):
         header = lines[start]
+        inline = LOOP_HEAD_INLINE_RE.match(header)
+        rest = (inline.groupdict().get("rest") or "") if inline else ""
         if start == end:
-            inline = LOOP_HEAD_INLINE_RE.match(header)
-            rest = (inline.groupdict().get("rest") or "") if inline else ""
             if _inline_truncates(rest):
                 offenders.append(header.strip())
+            continue
+        # ⛔ A TERMINATOR ON THE `do` LINE OF A MULTI-LINE LOOP TRUNCATES THE BODY
+        # BELOW IT (#12069 review round 19): `for tool in …; do break` credits
+        # nothing that follows, and the trailing-terminator exemption is for a loop
+        # that CLOSES on that line. Named here as well as in the credit rule, so
+        # the row that reports it can say why.
+        if rest.strip() and _inline_truncates(rest, closes_here=False):
+            offenders.append(header.strip())
             continue
         body = [line for line in lines[start + 1 : end] if not LOOP_DO_RE.match(line)]
         if _truncated_at_top_level(body):
@@ -1575,7 +1643,7 @@ def _version_checked_tools(code: str) -> set[str]:
         # --version; done` credits both names from a `--version` the shell never
         # reaches. A bare `break` names no loop variable, so the selection rule
         # above cannot see it.
-        inline_truncated = _inline_truncates(rest)
+        inline_truncated = _inline_truncates(rest, closes_here)
         if rest.strip() and closes_here:
             scan(
                 rest,
@@ -3356,6 +3424,29 @@ INERT_SHELL_POLARITY: list[tuple[str, bool, str]] = [
         False,
         "control: `python` is one of the runner's own shells, so it runs the script",
     ),
+    (
+        "bash --noprofile --norc -eo pipefail {0}",
+        False,
+        "#12069 round 19 control: `pipefail` is a flag's VALUE, not the word that "
+        "runs the script — the first cut red this documented spelling",
+    ),
+    (
+        "/bin/bash -e {0}",
+        False,
+        "#12069 round 19 control: argv[0] is a PATH, so it is basenamed before the "
+        "comparison",
+    ),
+    (
+        "bash -c 'echo bash {0}; exit 0'",
+        True,
+        "#12069 round 19: the word before `{0}` is `bash`, but the command that "
+        "receives it is `echo` — command position, not token position",
+    ),
+    (
+        "bash -c 'printf %s bash {0}'",
+        True,
+        "#12069 round 19: same root — `printf` is what would run, not bash",
+    ),
 ]
 
 
@@ -3451,6 +3542,18 @@ TRUNCATING_LOOP_POLARITY: list[tuple[str, bool, str]] = [
         'for tool in pg_dump pg_restore; do break; "$tool" --version; done',
         True,
         "the one-line spelling is the same statement",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do break\n  "$tool" --version\ndone',
+        True,
+        "#12069 round 19: a terminator on a `do` line that does NOT close the loop "
+        "truncates the body below it — the trailing exemption is for a loop that "
+        "closes on that line",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n  break  # bail\n  "$tool" --version\ndone',
+        True,
+        "#12069 round 19: a trailing COMMENT does not make the terminator inert",
     ),
     (
         'for tool in pg_dump pg_restore; do\n  "$tool" --version\n  break\ndone',
