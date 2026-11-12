@@ -299,8 +299,9 @@ def _assert_supersession_scope(
         )
     for key, want in (("goalId", goal_id), ("indicatorId", indicator_id),
                       ("targetId", target_id)):
-        # ⛔ Presence AND equality, in BOTH directions, with ONE named exception
-        # — an ABSENT `indicatorId`. `want is not None and have is not None and
+        # ⛔ Presence AND equality, in BOTH directions, with TWO named exceptions
+        # — an ABSENT `indicatorId` or `targetId` (see below; those two, and only
+        # those two). `want is not None and have is not None and
         # have != want` was an escape that let `indicator_id=None` skip the check
         # entirely (measured: a SECOND live claim and a doubled operator count),
         # so `have != want` is the rule.
@@ -308,8 +309,9 @@ def _assert_supersession_scope(
         # ⛔ BUT `have is None` on `indicatorId` is NOT "another chain": it is a
         # claim written by the module that shipped in #11942, where
         # `indicator_id` defaulted to `None` and the writer stored the prop only
-        # for a truthy id. Such a claim carries `judgementState`/`goalId`/
-        # `targetId` and no `indicatorId`, and the DERIVED lookup can never see
+        # for a truthy id. Such a claim carries `judgementState` and `goalId` —
+        # and it may have no `targetId` either (see the second exception below) —
+        # and the DERIVED lookup can never see
         # it — `latest_judgement` adds `p.indicatorId = $indicatorId` to its WHERE
         # clause only when the argument is not `None`, and `indicator_id` is now
         # REQUIRED, so the clause is always present and a Point carrying no
