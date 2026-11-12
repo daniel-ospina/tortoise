@@ -5067,12 +5067,19 @@ _EPIC_CITE_SOURCES = {
     "ci_surfaces": _REPO / "config/ci-surfaces.yml",
     # ⛔ `relation_write.py`'s `plan_hierarchy_edges` call is cited by two documents
     # (and by an artifact row that talks about the same seam) and by NOTHING else in
-    # this file. Measured commit-by-commit across #12112's own 36 commits (2 of them
-    # predate the call's existence): the call sat at `:631` on `origin/main` (8
-    # commits), then `:687` (22), then `:695` (3), then
-    # `:700` at the squash (1) — **four** numbers, not three, with the documents
-    # trailing one behind at each step. (`:687` is the move an earlier draft of this
-    # comment dropped, and dropping it is the same error the comment is about.)
+    # this file. Measured commit-by-commit across ALL 36 of #12112's commits — every
+    # object confirmed PRESENT (`git cat-file -e`) before it was read. That check is
+    # the whole lesson: `git show <sha>:<path>` exits **128** on an object the clone
+    # lacks, so `git show … 2>/dev/null | grep -c …` prints `0` and reports GREP's
+    # status — an unreadable tree reads exactly like an absent call. That pipeline,
+    # not `git show`, is what let a draft of this comment count unreadable commits as
+    # "pre-dating the call". Correct distribution: `:631` (8 commits), `:687` (22),
+    # `:695` (4), `:700` (2) = 36 — **four** VALUES and **three** moves. (`:687` is
+    # the move the first draft dropped, and dropping it was the same error the comment
+    # is about. `:631` is where `main` already had it, so it is the starting value,
+    # not a move.) The documents trailed by ONE step at two of the three moves and by
+    # TWO at the middle one — measured, not uniform, so "one behind at each step"
+    # would have been a second wrong number in the comment about wrong numbers.
     # ⛔ ONE TREE, ONE NUMBER: `:631` is the call at `aebf91352bfd` and is
     # `declared=None,` at the branch's forward merge `5b17de24de42` (that merge is what
     # made the number wrong). Quoting either tree's reading as if it described both is
@@ -5175,19 +5182,29 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         # and the section bounds
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # At this head (rebase onto main `63f725cca1`): entry 9933, `carve_out:`
-        # opens 9807, `uri_requiring:` 10138 — so 9933 is inside the section, and
-        # the identical text also sits at 6072 and 8449, which is what the 5th
-        # element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8215) of `surfaces:`, so the resolver's
-        # nearest-column-zero-key rule reports the PARENT: a cite onto 8449 refuses
+        # At `0e281a900b` (#12250): entry 9934, `carve_out:` opens 9808,
+        # `uri_requiring:` 10139 — so 9934 is inside the section, and the identical
+        # text also sits at 6073 and 8450, which is what the 5th element exists to
+        # refuse. Every one of those is +1 on the numbers this comment carried at
+        # `63f725cca1`, and the single cause is measured: `#12159` (`33781512b6`)
+        # registered `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`
+        # — ONE insertion above the entry. The file is tool-MAINTAINED, not generated
+        # from a source of truth: `tools/ci_selection.py::register_tests` reads the
+        # text, splices the new entry into the surface's block and writes every other
+        # line back verbatim, which is why it also carries hand-authored prose. Either
+        # way the property this row trips on holds: an insertion anywhere above the
+        # entry moves it. That is the class here — a line-number pin over a number
+        # another tool owns, not a citation anyone mis-copied.
+        # ⚠️ Both of the twins are INDENTED sub-keys
+        # (`core:` 2235, `sdk:` 8215 at `63f725cca1`) of `surfaces:`, so the
+        # resolver's nearest-column-zero-key rule reports the PARENT: a cite onto 8450 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
         # The `plan_hierarchy_edges` CALL, in the two documents that name it, keyed
-        # by the sentence rather than by the number: #12112 moved this line four
-        # times (`631` on main, `687`, `695`, `700`) and each move left a document
-        # behind.
+        # by the sentence rather than by the number: `:631` is where `main` had it,
+        # then #12112 moved it three times (`687`, `695`, `700`) and each move left a
+        # document behind — four VALUES, three moves.
         # ⛔ Three rows, not one, because a row scopes to ONE document + ONE source
         # and the 11083 record is a different file that no sweep reads at all.
         ("RECONCILE-A1-A2-A5.md", "one of them the **call**", (
@@ -5199,8 +5216,26 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         ("11083/README.md", "calls `pack_hierarchy.plan_hierarchy_edges`", (
             ("700", "planned = plan_hierarchy_edges("),
         ), "relation_write"),
+        # ⛔ The BLOCK that read `` (`:53 :653 :695 :700`), `:695` being the CALL ``
+        # while `:695` was `continue` is why this whole pin exists — printably
+        # self-contradictory. (It is named by its TEXT, not by its markdown line:
+        # its line number is exactly the kind of number these rows exist to stop
+        # trusting, and this commit moved it.) The first version of the table pinned
+        # only the two PROSE sentences and left the block unpinned, so mutating it
+        # back to its previous numbers ran 282 green (measured at `2931c9c59c`,
+        # review cycle 2). A repaired cite that nothing pins is a repair the next
+        # move of the symbol undoes silently.
+        ("RECONCILE-A1-A2-A5.md", "is the same module's own internal", (
+            ("700", "planned = plan_hierarchy_edges("),
+        ), "relation_write"),
+        ("RECONCILE-A1-A2-A5.md", "being the CALL", (
+            ("53", "``pack_hierarchy.plan_hierarchy_edges`` is the oracle"),
+            ("658", "plan_hierarchy_edges,"),
+            ("700", "planned = plan_hierarchy_edges("),
+            ("705", "`plan_hierarchy_edges` returns one"),
+        ), "relation_write"),
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            ("9933", "- test_pack_logic_writeprobe_11083.py"),
+            ("9934", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (

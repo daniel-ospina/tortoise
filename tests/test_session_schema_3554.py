@@ -1982,12 +1982,13 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     stale number in bold), every ``the N blocks that cite nothing``, every
     ``the first/second of the two v3.33 entries`` in a sentence that also names
     ``D2 — A``, and every ``#issuecomment-<id>`` in a DOCSTRING — one that SOME block
-    must carry in an accepted citation form, and, in the sibling docstring ALONE, one
-    the landing block itself must carry (the ``carrier`` arm). The earlier sentence
-    said "the landing block" for both, which no code performs: it read as a refusal
-    for another block's permalink that does not happen (measured — a docstring citing
-    the v3.32 block's id stays green), i.e. a scope sentence claiming more enforcement
-    than the code performs, which is finding 2's class.
+    must carry in an accepted citation form, and, in the sibling docstring AND this
+    pin's own, one the landing block itself must carry (the ``carrier`` arm). Two
+    earlier cuts of this sentence were wrong in opposite directions: the first said
+    "the landing block" for BOTH arms, which no code performs (measured — a docstring
+    citing the v3.32 block's id stays green); the second said the carrier arm covered
+    "the sibling docstring ALONE", which this pin's own arm made false. Both claimed
+    different enforcement than the code performs — finding 2's class.
 
     A count restated OUTSIDE those shapes is prose this pin does not read —
     measured, and green: *"Only 3 of 39 blocks cite a comment id."*, *"measured 3
@@ -2073,13 +2074,15 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     # arms live in `_assert_no_stale_citation_claim` (bold count, complement, ordinal),
     # and they are driven from synthetic text by
     # `test_every_declared_sweep_arm_refuses_a_stale_restatement`. ⛔ DRIVING THEM IS
-    # HALF: `test_the_citation_pin_calls_every_arm_it_declares` reads THIS function's
-    # source and requires the call, because a helper test says nothing about whether
-    # the pin still reaches it (measured: deleting three call sites left the file at
-    # 55 passed). So deleting an arm OR its call site reds, instead of silently
-    # narrowing this sweep while the paragraph above still promises it. Both measured values are accepted by the bold arm, because BOTH are
-    # TRUE statements about the file; a count matching neither is stale, and a bold
-    # count about something counted in OTHER units is not read at all.
+    # HALF: `test_the_citation_pin_calls_every_arm_it_declares` RECORDS the arguments
+    # this function actually passes (it monkeypatches the arms and calls the pin), so a
+    # helper test says nothing about whether the pin still reaches an arm — only that
+    # test does. (Measured on an earlier source-reading cut at ``b4de89b4e5``: deleting
+    # three call sites gave ``1 failed, 55 passed`` of 56 — one red, not a green suite,
+    # and the call-site deletions already redded. Only dropping the ``carrier=``
+    # keyword was silent.) Both measured values are accepted by the bold arm, because
+    # BOTH are TRUE statements about the file; a count matching neither is stale, and a
+    # bold count about something counted in OTHER units is not read at all.
 
     assert (int(stated.group(1)), int(stated.group(2))) == (len(citing), len(blocks)), (
         f"the docstring states {stated.group(1)} of {stated.group(2)} blocks citing a "
@@ -2122,9 +2125,17 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     assert lands_d2[0] == v333[0], (
         "the block that lands `D2 — A` is not the first of the two v3.33 entries, "
         "so the SCOPE paragraph points at the wrong block")
-    assert "#issuecomment-5619843002" in lands_d2[0], (
-        "the block that lands `D2 — A` no longer carries the permalink the SCOPE "
-        "paragraph cites as its evidence")
+    # ⛔ THE LANDER'S PERMALINK IS ENFORCED DYNAMICALLY, never as a literal. A
+    # hardcoded `assert "#issuecomment-5619843002" in lands_d2[0]` stood here and was
+    # WRONG IN BOTH DIRECTIONS (#12089 residual): it re-FROZE an id the changelog is
+    # free to move (a legitimate re-issued block reds it with a message blaming the
+    # prose), and it covered only the one copy someone remembered to write —
+    # measured: with it deleted, editing THIS pin's own docstring to cite another
+    # block's real permalink left the suite at 56 passed, because the module-wide
+    # arm only requires an id to resolve to SOME block. The contract the sentence
+    # actually makes is `cited ⊆ carried` over every docstring that makes it, which
+    # is the `carrier=` arm — applied below to the sibling docstring AND to this
+    # one. A literal cannot state that contract; the carrier arm is what does.
     # ⛔ AND THE PROSE CLAIMS ABOUT THAT BLOCK, not only the block's own facts: a
     # sentence that names the WRONG one of two same-version blocks, or cites an id
     # the block does not carry, is exactly what C5 found. Each claim is PARSED, so
@@ -2186,12 +2197,19 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
         assert f"issue #{named}" in lander_issue_line, (
             f"the SCOPE paragraph names issue #{named} beside the block's path, but "
             "the block it points at records " + repr(lander_issue_line[:100]))
-    # ⛔ EVERY PERMALINK IN THE MODULE'S PROSE must belong to the block the prose
-    # points at — scoped to DOCSTRINGS so the synthetic ids in code comments (the
-    # negative-test fixtures) do not join the sweep. The pin's own docstring cited
-    # the permalink a second time and nothing read that copy (measured: editing it
-    # to a nonexistent id left the suite green), which is the failure the paragraph
-    # above says it closes.
+    # ⛔ EVERY PERMALINK IN A DOCSTRING must RESOLVE to some block; in the sibling
+    # docstring AND this pin's own it must also BELONG to the block the prose points
+    # at (the `carrier=` arm). Scoped to DOCSTRINGS so the synthetic ids in code
+    # comments (the negative-test fixtures) do not join the sweep. ⛔ A universal
+    # "every permalink must belong to the block its prose points at" stood here and
+    # is FALSE of the code: attribution is carried for those two docstrings only, and
+    # measured, a third docstring pointing at v3.32 while citing the lander's
+    # permalink stays green. The pin's own docstring cited
+    # the permalink a second time and nothing tied that copy to the LANDER. ⛔ NOT
+    # "nothing read it" — this arm DOES read it, so an id no block carries was
+    # already refused here (measured: a nonexistent id reds the module-wide arm);
+    # what was unread was the ATTRIBUTION, and with another block's REAL id the suite
+    # stayed green. The `carrier=` arm is what closes that.
     tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
     prose = " ".join(
         filter(None, (ast.get_docstring(node) for node in ast.walk(tree)
@@ -2213,6 +2231,51 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     assert set(re.findall(r"#issuecomment-(\d{6,})", doc)), (
         "the sibling docstring must name the permalink it relies on")
     _refuse_unresolvable_evidence(doc, blocks, carrier=lands_d2[0])
+    # ⛔ AND THIS PIN'S OWN DOCSTRING MAKES THE SAME CLAIM, so it is scoped to the
+    # SAME arm the sibling's is.
+    # ⛔ WHAT WAS AND WAS NOT ENFORCED BEFORE THIS (measured; two earlier cuts of
+    # this comment got it wrong in opposite directions). RESOLVABILITY *was*
+    # enforced — `prose` includes this docstring, so an id no block carries reds at
+    # the module-wide arm. ATTRIBUTION was *not*: the hardcoded literal asserted a
+    # substring of a CHANGELOG BLOCK, never of a docstring, so with that literal still
+    # in place, editing THIS docstring's permalink to another block's REAL id left the
+    # suite at 56 passed. That gap — `cited ⊆ carried` for the block the paragraph
+    # points at — is what this arm closes.
+    # ⛔ BY IDENTITY, NOT BY A NAMED VARIABLE (review finding, measured, twice). The
+    # subject is spelled INLINE at the call below rather than bound to a local. A
+    # local was tried and could not be defended: naming it pinned the NAME, so
+    # `own_doc = doc` (a one-line "dedupe", and the shape of the sibling read above)
+    # silently pointed the arm at the SIBLING's docstring; checking the binding then
+    # needed `any` on assignments (a later re-assignment won at runtime), `all` on
+    # them (which false-reds `own_doc = re.sub(...)`, a normalisation this module
+    # already performs elsewhere), `ast.Assign` only (blind to `own_doc: str = doc`
+    # and to tuple targets), and a value-shape whitelist (`doc or pin.__doc__` merely
+    # MENTIONS the right attribute). Each spelling revealed the next. Inlining deletes
+    # the surface instead of enumerating it: no LOCAL binding can be wrong, and a lane
+    # that reintroduces one reds the wiring check visibly rather than silently.
+    # ⛔ WHAT REPLACED IT, and why the residual above is gone: the wiring test now
+    # RECORDS THE ARGUMENTS the pin actually passes (monkeypatched arms, the pin
+    # CALLED), so it asserts values, not spellings. That closes, by construction, the
+    # whole family the source checks kept re-opening: a call in a deferred `def`/
+    # `lambda` body runs nothing and records nothing (red); a call under a runtime-
+    # false guard likewise (red — the reachability hole is now fail-closed rather
+    # than undecidable); `prose = doc` changes the RECORDED subject; `carrier=doc`,
+    # `carrier=None` and `carrier=" ".join(blocks)` change the RECORDED carrier; and a
+    # rebinding of this pin's own NAME makes the recorded subject the sibling's
+    # docstring. Each of those was measured green under the source-shape checks that
+    # preceded this one, and each reds here.
+    # `prose` also keeps the enumeration that cannot lose a duplicate-named docstring:
+    # a `{name: docstring}` map would have dropped one of the EIGHT this module has
+    # sharing three names (`__init__`x3, `query`x3, `factory`x2) — measured, giving a
+    # duplicate-named `query` a docstring that cites an unresolvable permalink stayed
+    # green through the map and reds through the enumeration.
+    assert set(re.findall(
+        r"#issuecomment-(\d{6,})",
+        test_the_citation_scope_docstring_states_the_measured_count.__doc__ or "")), (
+        "this pin's own docstring must name the permalink it relies on")
+    _refuse_unresolvable_evidence(
+        test_the_citation_scope_docstring_states_the_measured_count.__doc__ or "",
+        blocks, carrier=lands_d2[0])
 
 
 
@@ -2360,41 +2423,240 @@ def test_every_declared_sweep_arm_refuses_a_stale_restatement() -> None:
 
 
 
-def test_the_citation_pin_calls_every_arm_it_declares() -> None:
-    """The pin's own source must CALL each arm — a helper test proves only the helper.
+def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
+    """Every arm the pin declares is REACHED, and with the RIGHT SUBJECT.
 
     ⛔ THE OTHER HALF OF THE PREVIOUS TEST, measured separately. Driving the helpers
     from synthetic text pins the ARM; it says nothing about whether the pin still
-    reaches it. Measured at ``6dca05bd`` on the helper-based cut: deleting the
-    `_refuse_unresolvable_evidence(prose, …)` call, the `carrier=` call, or the
-    uniqueness call left the file at 55 passed — three silent unwirings of checks the
-    comments above them still promised. This reads the pin's SOURCE and requires each
-    call, so an unwiring reds here with the arm's name.
+    reaches it. Measured at ``b4de89b4e5`` on the helper-based cut (56 tests there),
+    the source check of the day covered call-site DELETION: removing the
+    `_refuse_unresolvable_evidence(prose, …)` call or the uniqueness call redded
+    it. What stayed GREEN was the one thing a substring cannot see — dropping the
+    ``carrier=`` keyword from a call that still matched its marker (measured: 56
+    passed), which is a silent unwiring of the arm while the comment above it went
+    on promising the check.
 
-    ⛔ A WIRING check, not a behaviour check: it does not prove the arm refuses the
-    right input (the previous test does), only that it is reached — and it names the
-    ARGUMENTS too, because reverting the module-wide arm to the lander alone is
-    invisible to a helper-level test: measured, `_refuse_unresolvable_evidence(
-    prose, [lands_d2[0]])` left the file at 56 passed while the sweep's paragraph
-    above still said "SOME block". Both checks are needed, and neither substitutes
-    for the other.
+    ⛔ VALUES, NOT SOURCE SHAPES, and that is the whole design (it took four review
+    cycles to get here). The arms are monkeypatched to recorders and the pin is
+    CALLED, so what is asserted is the ARGUMENTS ACTUALLY PASSED. Every earlier
+    attempt read the pin's source instead, and every one leaked, each in a single
+    token:
+
+    * a source SUBSTRING was satisfied by the call's prefix, so dropping the
+      ``carrier=`` keyword that makes a call a carrier arm left this test green;
+    * matching the carrier arm by its first argument's NAME let ``own_doc = doc``
+      point the arm at the sibling's docstring while this test stayed green;
+    * policing that binding then needed ``any`` over assignments (a later
+      reassignment won at runtime), ``all`` over them (which false-red a legitimate
+      ``own_doc = re.sub(…)``), ``ast.Assign`` only (blind to ``own_doc: str = doc``
+      and to tuple targets), and a value-shape whitelist (``doc or pin.__doc__``
+      merely MENTIONS the right attribute);
+    * and pinning the module-wide arm by the NAME ``prose`` was still satisfied by
+      ``prose = doc``, while ``carrier=doc`` was accepted because only the keyword's
+      presence and non-nullness were checked — both measured green.
+
+    None of those spellings can survive here, because nothing is read as text: a call
+    that does not run records nothing, and a call that runs records the object it was
+    given. ``prose = doc`` changes the recorded SUBJECT; ``carrier=doc`` changes the
+    recorded CARRIER; an arm moved into a deferred ``def`` records nothing at all.
+
+    ⛔ WHAT THIS STILL CANNOT DECIDE, stated rather than implied: the expected
+    module-wide subject is REBUILT here from the same nodes the pin reads, so the two
+    can only disagree — which is what makes a narrowing alone red. An edit that
+    narrows BOTH the pin and this oracle in the same token (dropping a node class from
+    each) redefines "FULL" to whatever was just removed, and nothing in this test can
+    see that. It takes a deliberate two-place edit to do, which is why it is a stated
+    residual and not machinery: a value-recording check cannot supply the missing
+    oracle, only a second one.
+    And it records CALLS: an arm wrapped in ``try: … except AssertionError: pass`` is
+    still recorded and still neutralised (measured: 57 passed). Deciding that would
+    mean reading source again, which is the mechanism this test was rewritten to stop
+    relying on — so it is named here and left to review.
     """
-    source = inspect.getsource(
-        test_the_citation_scope_docstring_states_the_measured_count)
-    required = {
-        "the sweep arms (bold, complement, ordinal)":
-            "_assert_no_stale_citation_claim(",
-        "the uniqueness scan": "_refuse_a_duplicated_statement(",
-        "the module-wide permalink arm against EVERY block":
-            "_refuse_unresolvable_evidence(prose, blocks)",
-        "the carrier arm": "_refuse_unresolvable_evidence(doc, blocks, carrier=",
-    }
-    missing = sorted(name for name, marker in required.items()
-                     if marker not in source)
+    recorded: dict[str, list[tuple[tuple[object, ...], dict[str, object]]]] = {}
+
+    def recorder(name: str, real=None):
+        def record(*args: object, **kwargs: object):
+            recorded.setdefault(name, []).append((args, kwargs))
+            return real(*args, **kwargs) if real is not None else None
+        return record
+
+    pin = test_the_citation_scope_docstring_states_the_measured_count
+    module = sys.modules[__name__]
+    # ⛔ THE TWO ARMS THE PIN CONSUMES A RETURN VALUE FROM PASS THROUGH: the pin
+    # asserts on the ordinals `_assert_no_stale_citation_claim` returns, so a bare
+    # recorder would red a CORRECT pin for a reason that has nothing to do with
+    # wiring. `_refuse_unresolvable_evidence` is called only for its side effect
+    # (raising), so it is recorded without running — which is what lets this test
+    # reach the subject values even where the real arm would refuse them.
+    for arm in ("_assert_no_stale_citation_claim", "_refuse_a_duplicated_statement"):
+        monkeypatch.setattr(module, arm, recorder(arm, getattr(module, arm)))
+    monkeypatch.setattr(module, "_refuse_unresolvable_evidence",
+                        recorder("_refuse_unresolvable_evidence"))
+    pin()
+
+    missing: list[str] = []
+    # ⛔ REACHED IS NOT ENOUGH FOR THESE TWO — their SUBJECT and MULTIPLICITY are
+    # asserted too (review finding, measured). Checking only "was called ≥ once" left
+    # the same narrowing that `prose = doc` performs available one line away, on the
+    # arms that carry the pin's OTHER module-wide sweeps: `_assert_no_stale_citation_-
+    # claim(module_source, ...)` → `(doc, ...)`, or `_refuse_a_duplicated_statement(
+    # module_source, ...)` → `(flat_doc, ...)`, each stayed at 56 passed while a stale
+    # bold count planted in another docstring went unread; deleting two of the three
+    # uniqueness calls did too. The subject is the whole module text, and the three
+    # patterns are all required.
+    module_source = re.sub(r"\s+", " ", Path(__file__).read_text(encoding="utf-8"))
+    if not any(args and args[0] == module_source
+               for args, _ in recorded.get("_assert_no_stale_citation_claim", [])):
+        missing.append("the sweep arms over the FULL module text")
+    uniqueness = recorded.get("_refuse_a_duplicated_statement", [])
+    scanned = {args[1] for args, _ in uniqueness if len(args) > 1}
+    if scanned != {_CITATION_PAIR_PATTERN, _CITATION_VERSION_PATTERN,
+                   _CITATION_COMPLEMENT_PATTERN}:
+        missing.append(
+            f"the uniqueness scan over all three patterns (reached "
+            f"{len(scanned)} of 3: a patterned statement can be duplicated without "
+            "any scan reading it)")
+    if not all(args and args[0] == module_source for args, _ in uniqueness):
+        missing.append("the uniqueness scan over the FULL module text")
+
+    changelog = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")
+    blocks = _block_bodies(changelog)
+    lander = [block for block in blocks if "D2 — A" in block]
+    assert len(lander) == 1, f"{len(lander)} blocks record `D2 — A`"
+    # ⛔ THE MODULE-WIDE SUBJECT BY VALUE: the FULL enumeration, rebuilt here from the
+    # same nodes `prose` is built from. A pin that narrowed it would record a
+    # different string and red below — which is what ``prose = doc`` did, measured
+    # green under every source-shape check this test has had.
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    module_wide = " ".join(filter(None, (
+        ast.get_docstring(node) for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.FunctionDef,
+                             ast.AsyncFunctionDef, ast.ClassDef)))))
+    permalinks = recorded.get("_refuse_unresolvable_evidence", [])
+    # ⛔ THE STATED PAIR IS RE-ASSERTED HERE (review finding, measured). The bold arm
+    # in `_assert_no_stale_citation_claim` accepts BOTH true pairs — the citing count
+    # and its complement — so if the pin's own `stated` assertion were deleted, a
+    # docstring claiming 35 of 39 blocks cite a comment id (4 do) would pass it.
+    # Measured: deleting that assertion plus editing the sentence left 57 passed. The
+    # sibling's pair is read from its docstring and compared against the block counts
+    # the pin itself handed to the sweep arm.
+    # ⛔ THE RESOLVABLE SET IS AN ARGUMENT TOO (a finding on this file's own cut, and
+    # a gap in the first value-recording draft): `_refuse_unresolvable_evidence(
+    # prose, [lands_d2[0]])` keeps the SUBJECT right and narrows what it resolves
+    # AGAINST to one block, so the module-wide arm stops being module-wide while every
+    # source-shape check — including a substring matching `(prose, blocks)` — can stay
+    # green (measured on the substring cut: 56 passed). Every permalink call must
+    # therefore receive the FULL block list.
+    sweep = recorded.get("_assert_no_stale_citation_claim", [])
+    counted = next((args for args, _ in sweep if len(args) > 2), None)
+    if counted is None:
+        missing.append("the sweep arm's (text, blocks, citing) arguments")
+    else:
+        measured_pair = (len(counted[2]), len(counted[1]))
+        sibling = re.sub(r"\s+", " ",
+                         test_the_newest_block_recording_4_3_cites_a_comment_id.__doc__
+                         or "")
+        pair = re.search(_CITATION_PAIR_PATTERN, sibling)
+        if not pair or (int(pair.group(1)), int(pair.group(2))) != measured_pair:
+            missing.append(
+                f"the sibling docstring's stated pair (it must state "
+                f"{measured_pair[0]} of {measured_pair[1]} citing; the bold arm "
+                "accepts the complement too, so the pin's own assertion is what "
+                "refuses a stale pair)")
+        # ⛔ AND THIS PIN'S OWN DOCSTRING, WHICH THE BOLD ARM CANNOT REFUSE EITHER
+        # (review finding, measured). `allowed_bold` accepts the citing count AND its
+        # complement in ANY position, so changing this docstring's `count is **4 of
+        # 39**` to `**35 of 39**` — a false claim, since four blocks cite — left the
+        # whole suite at 57 passed. The sentence makes a CITING claim (`the count is
+        # <N of M>`), so the citing pair is what it must state.
+        # ⛔ AND THE TWO ADJACENT CLAIMS ON THE SAME SENTENCE (review finding,
+        # measured). Closing the `stated` pair only closed ONE of the four facts the
+        # sibling docstring enumerates as "derivable mechanically, so all four are
+        # checked": deleting the pin's complement assert and restating the complement
+        # as a claim that four cite nothing (4 do cite, so 35 cite none) left 57 passed, and
+        # the same held for deleting the version-list assert and substituting the
+        # non-citing v3.31. Both are re-derived from the block counts and citing
+        # blocks the pin itself handed to the sweep arm.
+        absent = len(counted[1]) - len(counted[2])
+        total = len(counted[1])
+        complement = re.search(_CITATION_COMPLEMENT_PATTERN, sibling)
+        if not complement or (int(complement.group(1)),
+                              int(complement.group(2))) != (absent, total):
+            missing.append(
+                f"the sibling docstring's stated complement (it must state {absent}"
+                f" of {total} citing nothing; the bold arm accepts either count in "
+                "any position, so nothing else refuses a false complement)")
+        versions = re.search(_CITATION_VERSION_PATTERN, sibling)
+        stated_versions = tuple(sorted(
+            part.strip() for part in (versions.group(1) if versions else "").split(",")
+            if part.strip()))
+        measured_versions = tuple(sorted(
+            "v" + _BLOCK_VERSION_RE.match(block).group(1) for block in counted[2]))
+        if stated_versions != measured_versions:
+            missing.append(
+                f"the sibling docstring's stated citing versions (it names "
+                f"{stated_versions}; the blocks measured {measured_versions} \u2014 a "
+                "version named here that cites nothing, or a citing one left out, is "
+                "finding 1's second half)")
+        own = re.sub(r"\s+", " ", pin.__doc__ or "")
+        own_pair = re.search(r"count is \*\*(\d+) of (\d+)\*\*", own)
+        if not own_pair or (int(own_pair.group(1)),
+                            int(own_pair.group(2))) != measured_pair:
+            missing.append(
+                f"this pin's own stated count (it says `count is ...`; it must "
+                f"state {measured_pair[0]} of {measured_pair[1]} citing — the "
+                "bold arm accepts the complement in any position, so nothing else "
+                "refuses a false citing count there)")
+    if not permalinks or not all(len(args) > 1 and args[1] == blocks
+                                 for args, _ in permalinks):
+        missing.append(
+            "the FULL block list as each permalink call's second argument (a "
+            "narrowed list makes the module-wide arm resolve against fewer blocks)")
+    # ⛔ AND IT MUST STAY CARRIER-FREE (review finding, measured). The mis-scoping check
+    # below compares carrier VALUES, so supplying the RIGHT value on the WRONG arm was
+    # invisible: adding ``carrier=lands_d2[0]`` to this call left 59 passed while a
+    # docstring citing another block's real id began to red \u2014 reinstating the false
+    # block this file records as previously fixed, and falsifying the three sentences
+    # that say attribution is carried for two docstrings only. Fail-closed rather than a
+    # false PASS, but the scope claims are load-bearing prose.
+    if not any(args and args[0] == module_wide and "carrier" not in kwargs
+               for args, kwargs in permalinks):
+        missing.append(
+            "the module-wide permalink arm over the FULL docstring sweep, WITHOUT a "
+            "`carrier=` (with one it becomes a third attribution arm, and the two "
+            "docstrings the prose names would no longer be the only ones)")
+    carried = [(args[0], kwargs.get("carrier"))
+               for args, kwargs in permalinks if "carrier" in kwargs]
+    subjects = {subject for subject, _ in carried}
+    for label, subject in (
+            ("the carrier arm over the sibling docstring",
+             test_the_newest_block_recording_4_3_cites_a_comment_id.__doc__),
+            ("the carrier arm over THIS pin's own docstring", pin.__doc__)):
+        if subject not in subjects:
+            missing.append(label)
+    # ⛔ EVERY carrier arm, not merely one of them (measured against this very test):
+    # `any(carrier == lander[0])` let a single correct carrier mask a vacuous sibling
+    # — `carrier=doc` (whose docstring carries the same id, so nothing changes
+    # behaviourally), `carrier=" ".join(blocks)`, or `carrier=None`, which
+    # `_refuse_unresolvable_evidence` treats as "no carrier arm at all". Each of those
+    # stayed at 56 passed under the `any` form.
+    mis_scoped = [carrier for _, carrier in carried if carrier != lander[0]]
+    if mis_scoped:
+        kind = type(mis_scoped[0]).__name__ if mis_scoped[0] is not None else "None"
+        missing.append(
+            f"a carrier arm scoped at something other than the block that lands "
+            f"`D2 — A` ({len(mis_scoped)} of {len(carried)} carrier call(s) passed "
+            f"{kind!r} — `None` disables the arm, a docstring or a block "
+            "collection scopes it to the wrong evidence)")
     assert not missing, (
         f"the pin no longer calls {missing} — the sweep's comment above it still "
-        "claims those checks run, and no other test reads the call sites (a "
-        "helper-level test says nothing about whether the pin reaches it)")
+        "claims those checks run. This test records the ARGUMENTS the pin actually "
+        "passes, so the failure means an arm was not reached (deleted, commented out, "
+        "or moved into a deferred `def`/`lambda` body) or was reached with the wrong "
+        "subject (a narrowed module-wide sweep, or a carrier pointing at a different "
+        "docstring or block).")
+
 
 
 def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:

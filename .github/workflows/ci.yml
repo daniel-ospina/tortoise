@@ -875,7 +875,9 @@ jobs:
         # or parity rule) reds it instead of passing silently, and an arm nothing
         # runs is not a guard. ⚠️ The word floor is NOT in that class: `MIN_FAILURE_WORDS`
         # 8 -> 7 (or 4) stays green on both arms, because the only floor case sits at
-        # 3 words (measured sweep, 21/21 through 8..4, exit 1 at 3). That lowering is
+        # 3 words (a green arm through 8..4; at 3 the one case fails in BOTH shapes, so
+        # the summary reads 2/44 — the denominator is the population times the shape
+        # count, and both are bound to the head you are reading). That lowering is
         # review-visible only — do not read a green arm as covering it.
         # A shrunk mutation POPULATION is caught by the tool's own floor, not by this arm.
         # Both lines sit INSIDE the exact list the two `docs`-job pins assert, so
@@ -2306,9 +2308,11 @@ jobs:
       # (`needs.changes.outputs.website == 'true'`) and is NOT a required context — so it re-runs on
       # a `website/` change and may not run at all on a PR that does not touch `website/`. Meanwhile
       # the Playwright half of this job stopped pinning the scheme, because `wrangler pages dev`
-      # rewrites a same-host absolute `Location` onto the request's scheme (measured, wrangler
-      # 4.127.0; #12052). Without this step the scheme would be graded by NO required check — a
-      # guard moved off the required surface rather than kept.
+      # rewrites a same-host absolute `Location` onto the request's scheme (measured at the version
+      # pinned in `config/wrangler-version`; #12052 — the number is deliberately NOT restated here,
+      # `tests/test_e2e_wrangler_prewarm.py` pins one home for it). Without this step the scheme
+      # would be graded by NO required check — a guard moved off the required surface rather than
+      # kept.
       # ⛔ FIRST, before any preview is booted: it needs only Node + the checkout, so a preview that
       # dies mid-run (#11785) can never mask it, and it costs ~1s with no network and no browser.
       - name: Run the host-consolidation routing harness (#11763) — required coverage
