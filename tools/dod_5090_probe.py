@@ -313,7 +313,19 @@ _EMBED_CONTAINER_KEY = "embedding"
 #: The clause BUILDERS whose name a writer can reach through an IMPORT ALIAS (`from
 #: tortoise.vector_write import set_embedding_clause as _set`). Named as data so `_import_aliases`
 #: can resolve an alias to the primitive it names — the same set `_EMBED_WRITE` matches by text plus
-#: `clear_then_set_prefix`, which renders the clear-then-SET pair and therefore stores too.
+#: `clear_then_set_prefix`.
+#: ⛔ CORRECTED (`#12020` review round 7): this used to say the clear guard "renders the clear-then-SET
+#: pair and therefore stores too". It does not — `tortoise/vector_write.py::clear_then_set_prefix`
+#: returns `FOREACH (… | REMOVE <alias>.embedding)` and emits no `SET`. It is kept in this tuple
+#: anyway, and the reason is deliberately the weaker one: an alias that resolves to the clear guard
+#: means the writer is operating on the vector property, and NOT resolving it would drop such a
+#: writer out of the population entirely (the fail-OPEN direction `#11274` exists to close). The cost
+#: is a declared RESIDUAL — a writer whose only vector-related call is the clear guard is reported as
+#: `unresolved_write` and therefore owes a declaration it cannot honestly write, since the truthful
+#: disposition (`no-live-vector`) is refused by the register's own `STORE_CLAUSE_MARKERS`. No such
+#: writer exists on this tree (population 32; every caller of the helper carries another signal),
+#: so the residual is recorded rather than repaired. Repairing it means dropping the name from this
+#: tuple AND from `STORE_CLAUSE_MARKERS` together, and re-measuring the population.
 #: ⛔ WHY AN ALIAS NEEDS THIS AT ALL (`#11274`): discovery decides a write from the writer's own
 #: SOURCE TEXT and its CALL NAMES. An aliased import renames BOTH, so the writer below was invisible
 #: to BOTH passes — not discovered, not reported, silently absent from the population the register

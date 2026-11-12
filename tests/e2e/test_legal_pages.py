@@ -1116,7 +1116,9 @@ def test_product_route_blocked_on_company_host(page: Page) -> None:
     driven through the real `onRequest` in-process — no dev proxy in the path —
     and pinned to the exact `https://premiselabs.co/tortoise` by
     `tests/test_oauth_stray_code_refusal.py::test_a_company_host_product_request_is_REFUSED_not_404d`
-    (:309), on every PR. This test keeps what only a served deploy can answer."""
+    (:309). That file sits on the `onboarding` surface (`config/ci-surfaces.yml`), so it runs for
+    every diff that can BREAK the redirect rather than literally on every PR — the unconditional
+    grading of this row on every PR is the `legal-e2e` step added for the offline harness. This test keeps what only a served deploy can answer."""
     b_host = urlsplit(BASE_URL).hostname or "premiselabs.co"
     b_spoof = b_host if b_host.endswith("premiselabs.co") else "premiselabs.co"
     prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"

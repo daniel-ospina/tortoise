@@ -2046,6 +2046,11 @@ def _constants_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:
 #: the paragraph above (`never the NULL wipe, which removes the property`) directly: `SET
 #: n.embedding = NULL` and `REMOVE n.embedding` are the same operation, and only one was excluded.
 #: The prefix is what clears the property BEFORE a real `SET` list; it is never the store itself.
+#: ⚠️ RECORDED RESIDUAL (`#12020` review round 7): in CYPHER `=` is EQUALITY, so the `.embedding =`
+#: alternative also matches a read filter (`WHERE n.embedding = $v`). `(?!=)` only excludes Python's
+#: `==`. No live instance (`grep -E 'WHERE \w*\.embedding *='` over `tortoise/ tests/ tools/` returns
+#: nothing), and closing it needs Cypher-aware parsing, which this arm deliberately does not do — the
+#: pin's name said "comparison" while it asserted only the Python spelling; it now says which one.
 #: Both narrowings are pinned in `test_the_store_carrier_does_not_credit_a_comparison_or_a_wipe`.
 #: ⚠️ Residual, stated: this reads the carrier's SOURCE SLICE, so a string literal inside the carrier
 #: that quotes a store counts as one. Closing that needs AST-level clause detection, the same class
@@ -2279,7 +2284,7 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str],
         # never calls — or one whose PARAMETER shadows the loop binding, or a class-body string —
         # satisfied the row while nothing stored per iteration (measured: all three GREEN).
         hits = [n for outer in body for n in _walk_own_scope(outer)
-                if isinstance(n, ast.stmt)
+                if isinstance(n, ast.stmt) and _executes_a_call(n)
                 and (_STORE_CARRIER.search(_slice_own_scope(lines, n))
                      or (merge_store
                          and _MERGE_STORE_CARRIER.search(_slice_own_scope(lines, n))))]
@@ -2326,6 +2331,28 @@ def _walk_own_scope(node: ast.AST):
                      if not isinstance(child, _SCOPE_LIKE))
 
 
+def _executes_a_call(statement: ast.AST) -> bool:
+    """Does this statement actually EXECUTE something (any call in its own scope)?
+
+    The gate every "this scope stores" arm needs, and the reason a bare-string predicate was not
+    enough (`#12020` review round 7). Two shapes passed the first attempt, both measured GREEN with
+    no vector written:
+
+      `_NOTE = "the vector half is set_embedding_clause(" + "n, r.v)"`   (an ASSIGNMENT of a string)
+      `f"MATCH (n:{label}) SET n += $p"`                                 (an f-string expression)
+
+    Neither is an `ast.Expr` wrapping an `ast.Constant`, so "docstring" was the wrong abstraction.
+    The property that matters is narrower and is true of every genuine store: a store is EXECUTED,
+    and execution is a call — `proj.g.query(...)`, `clear_embedding(...)`. A statement that only
+    HOLDS the text, as prose, a constant or an f-string does, stores nothing.
+
+    ⛔ Deliberately not applied in `_carrying_statements`: that arm asks whether a statement CARRIES
+    the claimed needle (a seam name, a label constant), which a definition or a constant legitimately
+    can without calling anything. It applies only where the question is "does this store".
+    """
+    return any(isinstance(sub, ast.Call) for sub in _walk_own_scope(statement))
+
+
 def _symbol_stores_in_own_scope(node: ast.AST, lines: list[str]) -> bool:
     """Does `node`'s OWN scope execute a store anywhere?
 
@@ -2337,10 +2364,17 @@ def _symbol_stores_in_own_scope(node: ast.AST, lines: list[str]) -> bool:
     Same own-scope rule as `_carrying_statements`/`_iterated_store_problem`: a store in a nested
     scope `node` never calls is not a store this symbol performs.
     """
+    # ⛔ `node` is ITSELF yielded by `_walk_own_scope(node)` and IS an `ast.stmt` (a `FunctionDef`
+    # subclasses `ast.stmt`), so without the scope-node skip this arm was VACUOUS: the symbol's own
+    # slice spans its entire body, it always "executes a call", and it matched any clause anywhere —
+    # including one quoted in prose. Measured: with the executed write deleted, adding a single
+    # `_NOTE = "… set_embedding_clause( … "` statement kept `bound_store` GREEN, but so did the
+    # function node alone. Same rule `_carrying_statements` has applied to its roots since round 1.
     return any(
         _STORE_CARRIER.search(_slice_own_scope(lines, sub))
         for sub in _walk_own_scope(node)
-        if isinstance(sub, ast.stmt)
+        if isinstance(sub, ast.stmt) and not isinstance(sub, _SCOPE_NODES)
+        and _executes_a_call(sub)
     )
 
 
@@ -2380,12 +2414,17 @@ def _evidence_violation(source: str, symbol: str, needle: str,
        statement's, not two facts in one body. ⛔ The substring form this replaces (`needle in
        body`) passed a source whose loop had been re-targeted with the needle preserved in an
        unrelated `if` (measured on the module at `#11954`'s head); this one does not.
-       `claim="bound"` is for the two rows whose needle is a SEAM THAT BOUNDS the label set rather
-       than a store clause (`restore_graph` interpolates its labels, `_event_raw_write_door`
-       executes its caller's statement): the store is deliberately un-nameable there, so the arm
-       asks only that the claim is carried by a real statement — and the COMPLETENESS of those two
-       rests on `LABEL_CONSTANTS`, which the pin below re-derives in both directions and which this
-       function therefore requires to exist for every bound row.
+       `claim="bound"` is for the rows whose needle is a SEAM THAT BOUNDS the label set and whose
+       store is genuinely un-nameable — today exactly one, `_event_raw_write_door`, which executes
+       its CALLER's statement. The arm asks only that the claim is carried by a real statement; the
+       COMPLETENESS rests on `LABEL_CONSTANTS`, which the pin below re-derives in both directions
+       and which this function therefore requires to exist for every bound row.
+       ⛔ `claim="bound_store"` (`BOUND_STORE_LABEL_EVIDENCE`) is `bound`'s bounded LABEL without
+       letting it excuse the STORE: `restore_graph`'s label is bounded but its store is the
+       perfectly nameable `set_embedding_clause("n", "r.v")`, so this arm requires BOTH the carried
+       statement AND an own-scope store. `bound` alone owed no store, which let a deleted vector
+       write leave that row green (measured, `#12020` review round 6). This docstring said `bound`
+       covered `restore_graph` until round 7 — the premise the round-6 fix removed.
        `claim="merge"` is for the ONE row whose store is a map merge (`MERGE_STORE_CLAIM`): its
        vector is merged in as data the probe itself calls undecidable
        (`UNDECIDABLE_WRITE_SHAPES`), so it is scored by the narrower rule plus that named kind —
@@ -2757,6 +2796,66 @@ def test_a_deleted_vector_clause_or_an_UNCALLED_store_reds_the_row() -> None:
     assert violation(cleared) is not None, (
         "a store row stays GREEN when its vector write is replaced by the REMOVE-only clear guard "
         "— the row then declares a store while the property is deleted")
+
+
+def test_a_store_has_to_be_EXECUTED_and_the_symbol_is_not_its_own_store() -> None:
+    """`#12020` review round 7: the two "does this scope store" arms must not credit PROSE, and the
+    cited symbol must not satisfy itself.
+
+    Both were measured GREEN with no vector written:
+
+    * `_symbol_stores_in_own_scope` iterated `_walk_own_scope(node)`, and `node` IS `ast.stmt`
+      (`FunctionDef` subclasses it) — its slice spans the WHOLE body, so the symbol always
+      "executed a call" and always matched its own body. The arm was vacuous: it answered True for
+      every symbol, which means `bound_store` never proved anything.
+    * With that skipped, a statement that merely HOLDS the text still counted — an ASSIGNMENT of a
+      string (`_NOTE = "… set_embedding_clause(" + "n, r.v)"`) and an f-string
+      (`f"MATCH (n:{label}) SET n += $p"`). Neither is an `ast.Expr` wrapping an `ast.Constant`, so
+      the "docstring" predicate the sibling arm uses did not see them. The rule that IS true of every
+      genuine store is that a store is EXECUTED, and execution is a call (`_executes_a_call`).
+
+    Not a synthetic worry on this tree: `_prewipe_synthetic_write_scope` exists whose only occurrence
+    of the shape is a docstring quoting `SET n.embedding = NULL`.
+    """
+    key = "tortoise.hosted_backup::restore_graph"
+    rel, symbol, needle, _labels = LABEL_EVIDENCE[key]
+    source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+    claim = _claim_for(key)
+
+    def violation(text: str) -> str | None:
+        return _evidence_violation(text, symbol, needle, claim=claim)
+
+    assert violation(source) is None, violation(source)
+
+    write = "+ \"SET \" + set_embedding_clause(\"n\", \"r.v\")"
+    assert write in source, "the vector write moved — re-derive this pin"
+    deleted = source.replace(write, "", 1)
+    assert violation(deleted) is not None, (
+        "the control for this pin is broken: deleting the write must already red before prose is added")
+
+    # Put ONE ordinary statement that only QUOTES the clause at the top of the symbol's own body.
+    tree = ast.parse(deleted)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == symbol)
+    lines = deleted.splitlines()
+    at = fn.body[0].lineno - 1
+    prose = '    _NOTE = "the vector half is set_embedding_clause(" + "n, r.v)"'
+    with_prose = "\n".join([*lines[:at], prose, *lines[at:]])
+    ast.parse(with_prose)  # the fixture itself must be valid, or the arm below proves nothing
+    assert violation(with_prose) is not None, (
+        "a statement that only QUOTES the clause satisfies the store half — prose is not execution")
+
+    # …and the iterated arm applies the same rule to its own store half.
+    def problem(body: str) -> str | None:
+        text = ('_KEYS = ("A", "B")\n\n\ndef w(proj):\n'
+                '    for label, _prop in _KEYS:\n' + body)
+        parsed = ast.parse(text)
+        w = next(n for n in ast.walk(parsed)
+                 if isinstance(n, ast.FunctionDef) and n.name == "w")
+        return _iterated_store_problem(w, "_KEYS", text.splitlines(), merge_store=True)
+
+    assert problem('        proj.g.query(f"MATCH (n:{label}) SET n += $p")\n') is None
+    assert problem('        f"MATCH (n:{label}) SET n += $p"\n') is not None, (
+        "a bare f-string holding the store shape satisfies the iterated arm — nothing is executed")
 
 
 def test_a_deleted_vector_write_reds_the_BOUND_STORE_row() -> None:
