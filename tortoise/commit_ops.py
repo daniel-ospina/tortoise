@@ -1084,7 +1084,7 @@ def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
 
 
 def _ref_candidates(entities, label: str, *, id_idx: int = 1,
-                    status_idx: int = 3) -> tuple[list, set]:
+                    status_idx: int = 3) -> tuple[list, dict]:
     """The candidate ROWS a REF probe may address, from grouped entities.
 
     Two rules meet here and must not be traded for each other:
@@ -1146,7 +1146,7 @@ def _ref_candidates(entities, label: str, *, id_idx: int = 1,
     return rows, widened
 
 
-def _ref_is_one_gone_entity(widened, rows, id_idx: int = 1) -> bool:
+def _ref_is_one_gone_entity(rows, widened: dict, *, id_idx: int = 1) -> bool:
     """Every refused REF candidate came from the SAME gone-survivor group.
 
     The never-guess refusal then means "one merged ENTITY whose survivor is gone",
@@ -1157,13 +1157,26 @@ def _ref_is_one_gone_entity(widened, rows, id_idx: int = 1) -> bool:
     `ambiguous-name` record rather than be reported as one repairable entity. False
     otherwise, so a genuine duplicate-name/duplicate-id refusal keeps its own arm
     and its own ``record_non_folded`` shape.
+
+    ⛔ The test is PER ROW, not on the surviving id set (review round 18): an
+    id-less holder of the same name is NOT in ``widened``, so dropping it from the
+    set makes two holders read as one gone entity — the same false report, reached
+    by a row the map cannot represent. A row with no id, or an id the map does not
+    carry, therefore makes this False and the ordinary never-guess arm reports.
+
+    ``rows`` first, matching :func:`_ref_candidates`' return order: the pair is
+    always unpacked together, and a transposed splat is a ``TypeError`` out of a
+    corruption path.
     """
     if not widened:
         return False
-    ids = [str(r[id_idx]) for r in rows if r[id_idx]]
-    if not ids or not set(ids) <= set(widened):
-        return False
-    return len({widened[i] for i in ids}) == 1
+    keys = set()
+    for r in rows:
+        rid = str(r[id_idx]) if r[id_idx] else ""
+        if not rid or rid not in widened:
+            return False
+        keys.add(widened[rid])
+    return len(keys) == 1
 
 
 def _id_claimant_count(g, label: str, node_id: str) -> int:
@@ -1433,7 +1446,7 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
             if _live_rows:
                 by_name = _live_rows
         if len(by_name) > 1:
-            if _ref_is_one_gone_entity(_ref_widened, by_name):
+            if _ref_is_one_gone_entity(by_name, _ref_widened):
                 # ⛔ One merged ENTITY, not two carriers claiming a name: every
                 # refused candidate came from a GONE-survivor group, so the true
                 # condition is the dangling `resolved_from`, and the durable
@@ -2094,7 +2107,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                 if _live_rows:
                     by_name = _live_rows
             if len(by_name) > 1:
-                if _ref_is_one_gone_entity(_name_widened, by_name, id_idx=0):
+                if _ref_is_one_gone_entity(by_name, _name_widened, id_idx=0):
                     # ⛔ One merged ENTITY, not two carriers claiming a name
                     # (review round 17): the refusal is the dangling
                     # `resolved_from`, and its durable shape must not claim the

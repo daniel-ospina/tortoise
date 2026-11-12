@@ -137,6 +137,14 @@ class NonFoldedEntry(NamedTuple):
     candidate_ids: tuple
     shape: str  # "ambiguous-name" | "unaddressable-name" | "duplicate-id"
     #            | "endpoint-collision" | "no-live-holder"
+    # ⛔ `"unaddressable-name"` has TWO producers in `commit_ops`, and a consumer that
+    # reads the shape must not assume the first: the never-guess arm (several holders
+    # of one name, none addressable) and the gone-survivor arm (every holder is a
+    # carrier of ONE merged entity whose survivor is deleted — `_ref_is_one_gone_entity`,
+    # `commit_ops` review round 17/18). They differ in cause, not in shape: in both the
+    # name cannot be addressed one-of-them, so neither may be silently picked.
+    # `candidate_ids` is what tells them apart at the call site — the carriers, or the
+    # id-less placeholder.
 
 
 _non_folded: list[NonFoldedEntry] = []

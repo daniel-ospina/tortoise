@@ -4687,3 +4687,84 @@ class TestThe12120ReviewRound17:
                 f"one repairable entity: {shapes} (skips: {skips!r})")
         finally:
             sdk.close()
+
+
+class TestThe12120ReviewRound18:
+    """Round 18: the gone-survivor report asks PER ROW, and the 3-column path.
+
+    `_ref_is_one_gone_entity` decided "one entity" from the IDs that survived its
+    own filter — so a holder the map cannot represent (no `id`, or an id no group
+    claims) was silently dropped and two holders read as one gone entity, which
+    downgrades `main`'s `ambiguous-name` record to `unaddressable-name` and hides
+    the duplicate name. Round 18 asks per row. The second pin covers the
+    `id_idx`/`status_idx` parameters of `_ref_candidates`, which exist for the
+    3-column `_SUCCESSOR_PROJECTION` and had no caller and no test.
+    """
+
+    def test_an_id_less_holder_is_not_a_gone_entity(self, sdk_factory):
+        """One gone-survivor carrier + one ID-LESS holder = two entities.
+
+        The carrier's survivor is deleted and the id-less holder is not in the
+        widened map, so a set-survivor test reports "one merged entity whose
+        survivor is gone" about a name that TWO entities hold. Measured pre-fix:
+        `unaddressable-name`; post-fix: `ambiguous-name` (the duplicate-name
+        record a merge pass can act on).
+        """
+        from tortoise.commit_ops import apply_supersessions
+        from tortoise.entity_identity import (
+            clear_non_folded_entries,
+            non_folded_entries,
+        )
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("New Widget", "document")
+            # The legacy id-less holder `_upsert_object` never mints, plus a
+            # carrier of an entity whose survivor is gone.
+            g.query(
+                "CREATE (o:Object {name:'Widget', canonical_name:'widget', "
+                "objectKind:'document', status:'live'}) "
+                "CREATE (c:Object {id:'r18-carrier', name:'Widget', "
+                "canonical_name:'widget', objectKind:'document', "
+                "status:'live', resolved_from:'r18-gone'})")
+            clear_non_folded_entries()
+            applied = apply_supersessions(
+                sdk._get_proj(), sdk,
+                [{"superseded": "Widget", "supersedes_by": "New Widget",
+                  "evidence": "test"}],
+                session_id="s-12120-r18", skipped=skips,
+                warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+            assert applied == 0, (applied, skips, msgs)
+            shapes = [e.shape for e in non_folded_entries()
+                      if e.name == "Widget"]
+            assert shapes == ["ambiguous-name"], (
+                "an id-less holder was dropped from the entity count, so two "
+                f"entities were reported as one dangling survivor: {shapes} "
+                f"(skips: {skips!r})")
+        finally:
+            sdk.close()
+
+    def test_a_three_column_group_is_read_not_indexed(self):
+        """`_ref_candidates` must READ a 3-column group, never index off its end.
+
+        The REF probes pass the 5-column shape, whose columns 1 and 3 are id and
+        status; the successor probe's `_SUCCESSOR_PROJECTION` is
+        `(id, name, status)`, and indexing THAT with the defaults raises
+        `IndexError` out of `apply_supersessions` — an exception where this module
+        twice states a REFUSAL is required. The parameters exist for that caller
+        (none in-tree yet), so they are pinned directly, both directions.
+        """
+        from tortoise.commit_ops import _ref_candidates
+
+        group = (None, "gone-r18", [("three-a", "Same", "live"),
+                                    ("three-b", "Same", "live")])
+        with pytest.raises(IndexError):
+            _ref_candidates([group], "Object")
+        rows, widened = _ref_candidates([group], "Object", id_idx=0,
+                                        status_idx=2)
+        assert [r[0] for r in rows] == ["three-a", "three-b"], rows
+        assert widened == {"three-a": "gone-r18",
+                           "three-b": "gone-r18"}, widened
