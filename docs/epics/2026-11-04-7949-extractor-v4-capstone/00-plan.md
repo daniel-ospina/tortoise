@@ -154,7 +154,7 @@ vocabulary are comments). A1 cannot be satisfied by "enabling something"; someth
 above (they declare `mechanism: IMPL`, so the `operator` path binds; the predicate is in the structural
 set). The **`mechanism`** leg *is* read at the write door by `declared_mechanisms`
 (`pack_registry.py:1035-1136`, the `CORE_PREDICATES` membership test at `:1136`), consumed by `create_operator`. Unread: (i) the
-**`semantics`** leg — surfaced at `:3736`, and nothing derives an op_type or direction from it; and (ii)
+**`semantics`** leg — surfaced at `:472-484`, and nothing derives an op_type or direction from it; and (ii)
 **`hierarchies`** — validated only (`pack_registry.py:2388-2402`). ⚠️ The operator writers (`commit_ops.py:426-429`,
 `sdk.create_operator`) are the **Point-layer** mechanism; they are not evidence about Object→Object.
 
