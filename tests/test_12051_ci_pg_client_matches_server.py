@@ -368,15 +368,36 @@ UNREADABLE_TARGET_RE = re.compile(r"[`$]")
 def _inside_quotes(text: str, position: int) -> bool:
     """Is `position` inside a single- or double-quoted span?
 
-    Escaped characters are removed first so a backslash-escaped quote does not
-    toggle the state. Both quote kinds are counted independently — the shell treats
-    them independently too — and a mismatch only ever makes this answer more
-    conservative, never less: it decides whether a `>` is a PRINTED character or an
-    OPERATOR, and the safe answer for an unreadable case is "inside".
+    ⛔ ONE LEFT-TO-RIGHT SHELL SCAN, NOT TWO INDEPENDENT COUNTS (#12069 review 13,
+    measured FAIL-OPEN). Counting `'` and `"` separately and OR-ing them modelled
+    something the shell does not do: a `'` inside `"…"` is a LITERAL, never a
+    delimiter. So a message containing an apostrophe flipped the single-quote count
+    and the answer became "inside", which SKIPS the operator — and skipping here
+    PERMITS a write, it does not merely mislabel one:
+
+        echo "it's done" > /usr/lib/postgresql/16/bin/pg_dump      EVERY ROW GREEN
+
+    while the same line without the apostrophe was refused. Both quotes are now
+    tracked by ONE state machine that skips backslash escapes (outside single
+    quotes, where a backslash is literal) and lets each quote kind nest as content
+    inside the other. The answer is EXACT, because the wrong answer here is a
+    permitted write, not a stricter one.
     """
 
-    prefix = re.sub(r"\\[\s\S]", "", text[:position])
-    return prefix.count('"') % 2 == 1 or prefix.count("'") % 2 == 1
+    quote: str | None = None
+    index = 0
+    while index < position:
+        char = text[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
+        if quote is None:
+            if char in "\"'":
+                quote = char
+        elif char == quote:
+            quote = None
+        index += 1
+    return quote is not None
 
 
 def _redirects_into_a_client_binary(line: str) -> bool:
@@ -405,6 +426,15 @@ def _redirects_into_a_client_binary(line: str) -> bool:
     Read from EVERY redirect on the line, not the first: `a > ok b > …/pg_dump`
     is one line.
     """
+    # ⛔ A QUOTED STRING HANDED TO A SHELL IS CODE, NOT A MESSAGE (#12069 review 13).
+    # The quoting rule below is what tells a PRINTED `>` from a real operator, and it
+    # is exact for a message — but `sh -c "cat … > …/pg_dump"` quotes the whole
+    # COMMAND, and that `>` still writes the binary. The row pinning it is this
+    # file's own (`BINARY_MUTATION_POLARITY`): `sudo sh -c "cat $b/17/bin/pg_dump >
+    # $b/16/bin/pg_dump"`, verbatim the shape the guard exists for.
+    quoted_is_code = bool(
+        re.search(r"\b(?:sh|bash|zsh|dash|ksh)\s+-c\b|\beval\b", line)
+    )
     for match in REDIRECT_TARGET_RE.finditer(line):
         # ⛔ IS THE `>` ITSELF INSIDE A QUOTED MESSAGE? (#12069 review 12, measured
         # FAIL-OPEN). The previous cut inferred that from the SHAPE of what followed
@@ -416,7 +446,7 @@ def _redirects_into_a_client_binary(line: str) -> bool:
         # message" branch and was never graded, while the same line without the `""`
         # was refused. Quoting is a property of the LINE BEFORE the operator, which
         # is cheap to read exactly, so it is read exactly.
-        if _inside_quotes(line, match.start()):
+        if not quoted_is_code and _inside_quotes(line, match.start()):
             continue
         target = match.group("target")
         # ⛔ THE TARGET WORD CAN CONTINUE PAST WHAT WAS CAPTURED (#12069 review
@@ -436,7 +466,12 @@ def _redirects_into_a_client_binary(line: str) -> bool:
             if continuation:
                 target += continuation.group(0)
                 tail = tail[continuation.end():]
-        if tail and tail[0] not in " \t;&|)":
+        # A QUOTE ends the word; it is not an unclassifiable continuation
+        # (#12069 review 13). With `quoted_is_code` in play the captured target is
+        # the LAST word of the quoted command, so its closing `"` follows it — and
+        # reading that as "the basename we graded is not the name being written"
+        # red `sudo sh -c "cat x > /tmp/f"`, which this file pins as a CONTROL.
+        if tail and tail[0] not in " \t;&|)\"'":
             return True
         if target.endswith("/"):
             return True
@@ -885,25 +920,50 @@ def _replaces_a_client_binary(line: str) -> bool:
     return False
 
 
+#: Wrappers: the word after one of these is EXECUTED, whatever options sit between.
+_WRAPPER_WORDS = frozenset({"sudo", "env", "command", "exec", "timeout", "nice", "xargs"})
+
+#: Words that WRITE or remove what they name. A client name after one of these is
+#: that verb's OPERAND — an offence — and the list is what stops a wrapper from
+#: laundering it (#12069 review 13: `sudo tee psql` was spared).
+_OPERAND_TAKING_WORDS = frozenset(
+    {
+        "tee", "rm", "rmdir", "mv", "cp", "ln", "install", "chmod", "chown",
+        "chgrp", "dd", "truncate", "rsync", "sed", "cat", "printf", "echo",
+        "shred", "unlink", "patch", "tar", "unzip",
+    }
+)
+
+
 def _is_command_position(line: str, start: int) -> bool:
     """Is the word at `start` the COMMAND of its list element, not an operand?
 
-    True at the start of the line, after any list separator, and after a wrapper
-    that takes its own operand (`sudo`/`env`/`command`/`exec`/`timeout`/`nice`/
-    `xargs`) — in every one of those the word is EXECUTED. Anywhere else it is what
-    a mutating verb is acting on.
+    Walk BACKWARDS over the tokens before it: a list separator ends the walk as a
+    COMMAND, a wrapper keyword ends it as a COMMAND, and a word that takes an
+    operand ends it as an OPERAND. Everything between (an option such as `-u`, its
+    value, a `VAR=value` assignment) is skipped, which is what makes
+    `sudo -u postgres psql` a RUN and `sudo tee psql` a WRITE.
+
+    ⛔ TOKEN WALK, NOT ONE REGEX (#12069 review 13, measured). The previous cut
+    required exactly `wrapper` + ONE token, and it matched a `rstrip()`ed prefix —
+    deleting the very whitespace its `\s+` needed — so it answered "operand" for
+    `sudo psql`, `nice -n 5 psql`, `env FOO=1 psql`, `xargs psql` and `exec psql`:
+    every one a step being REFUSED with the untrue message `REPLACES a client
+    binary`, while the same shape let `sudo tee psql` through.
     """
 
-    prefix = line[:start].rstrip()
-    if not prefix or prefix[-1] in ";&|({":
-        return True
-    return bool(
-        re.search(
-            r"(?:^|[;&|({])\s*(?:sudo|env|command|exec|timeout|nice|xargs)\s+"
-            r"[\w${}/.-]*\s*$",
-            prefix,
-        )
-    )
+    tokens = line[:start].split()
+    index = len(tokens) - 1
+    while index >= 0:
+        token = tokens[index]
+        if token.rstrip(";|&({") != token:
+            return True
+        if token in _WRAPPER_WORDS:
+            return True
+        if token in _OPERAND_TAKING_WORDS:
+            return False
+        index -= 1
+    return True
 
 
 #: A subshell opens here and is not closed on the same line — whatever runs inside
@@ -3619,6 +3679,41 @@ BINARY_MUTATION_POLARITY = [
         "chmod -x psql",
         True,
         "CONTROL: an operand in command-operand position IS a write",
+    ),
+    (
+        'echo "it\'s done" > /usr/lib/postgresql/16/bin/pg_dump',
+        True,
+        "#12069 round-13: an apostrophe inside a message must not hide the write",
+    ),
+    (
+        'echo \'a " > b\' > /usr/lib/postgresql/16/bin/pg_dump',
+        True,
+        "#12069 round-13: the mirror case \u2014 a `\"` inside `'\u2026'` is literal too",
+    ),
+    (
+        'rm -f /tmp/x; sudo -u postgres psql -f /tmp/x',
+        False,
+        "#12069 round-13: a wrapper with an OPERAND still RUNS the name",
+    ),
+    (
+        'rm -f /tmp/x; nice -n 5 psql -f /tmp/x',
+        False,
+        "#12069 round-13: `nice -n 5` is a wrapper with two tokens",
+    ),
+    (
+        'rm -f /tmp/x; sudo tee psql',
+        True,
+        "#12069 round-13: a wrapper must not launder the WRITE verb's operand",
+    ),
+    (
+        'sudo sh -c "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"',
+        True,
+        "#12069 round-13: a quoted string handed to a SHELL is code, not a message",
+    ),
+    (
+        'sudo sh -c "cat x > /tmp/f"',
+        False,
+        "CONTROL: the same `sh -c` shape aimed anywhere else is spared",
     ),
 ]
 
