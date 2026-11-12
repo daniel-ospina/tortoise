@@ -2934,10 +2934,12 @@ class PackRegistry:
           ``entity_route`` maps, while ``eventKinds``/``pointKinds``/
           ``actionKinds`` declare no layer at all);
         * the ``core`` KIND and the ``depends_on`` KIND — in
-          ``guard_table_problems()``, which runs in the same install verdict on
-          BOTH routes (``tortoise pack validate`` and the hosted
-          ``validate_manifest``), where every pack is loaded so a dependency's
-          kinds are knowable. It abstains only for a pack target whose namespace
+          ``guard_table_problems()``, which ``tortoise pack validate`` runs over
+          the whole validated directory and ``domain_loader`` reports as
+          ``guard_warnings`` after a catalog load. (The hosted
+          ``validate_manifest`` route does not ask: it refuses an
+          ``ontology.guards`` block outright, because a tenant manifest's guards
+          never reach the write-time table.) It abstains only for a pack target whose namespace
           is NOT loaded (``_layer_of_kind`` reads the process's ambient catalog,
           so a pack kind invisible to it would false-refuse every legitimate
           cross-pack guard — round-2 review P1).
@@ -3362,11 +3364,13 @@ class PackRegistry:
         """#12060 — the guard TABLE's coherence for the packs just loaded.
 
         ⛔ NOT inside :meth:`load_all`, and that is not style: the table's
-        ``_layer_of_kind`` compiles the kind-index spec, which reads the DEFAULT
-        registry (``domain_loader._get_registry()``), which loads packs again —
-        measured as a ``RecursionError`` that isolated two shipped packs and
+        ``_layer_of_kind`` compiles the kind-index spec, which builds its OWN
+        ``PackRegistry(...).load_all()`` (``value_extractor.compile_kind_index_spec``)
+        — measured as a ``RecursionError`` that isolated two shipped packs and
         timed out every test that touched the catalog. Call it AFTER the load,
         where every pack is present, which is what ``domain_loader`` does.
+        (That call site holds a NON-reentrant lock, so nothing on this path may
+        call back into ``_get_registry``: it would deadlock rather than raise.)
 
         Covers the two questions ONE manifest cannot answer: the ``core`` target
         kind and the ``depends_on`` target kind (both need the table and the

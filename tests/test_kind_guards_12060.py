@@ -1917,18 +1917,21 @@ class TestReviewRound4Closed:
         # ⛔ AND ONLY THE TWO ROUTING AXES ARE HOMES (round-7 review P2): an
         # `actionKinds`/`eventKinds`/`pointKinds` declaration is not a layer, so
         # the matching target installs clean and then skips `no-usable-home`.
-        # ⛔ AND THE UNION IS PASSED EXPLICITLY, or the loop proves nothing: the
-        # real call site hands the method the manifest's FIVE-axis union (the
-        # `_validate_guards(ont, ns, depends_on, all_pack_kinds)` call in
-        # `pack_registry._validate`), so with the helper's default `{"concept"}`
-        # the PREVIOUS arm (`_bare not in all_pack_kinds`) already refused these
-        # and only the message would differ (round-8 review P3, measured).
+        # ⛔ THE UNION IS PASSED SO THE NARROWING IS ACTUALLY TESTED, and the
+        # assertion is the ABSENCE of the other arm's wording: measured (round-9
+        # review P3), with `{"concept", "activate"}` and with the helper's default
+        # `{"concept"}` the message is byte-identical, so merely asserting that
+        # the axis is NAMED would pass on either arm. What discriminates is that
+        # the refusal is about the AXIS — not the `names no kind … declares`
+        # arm, which is what would fire if `all_pack_kinds` were still consulted.
         for axis in ("actionKinds", "eventKinds", "pointKinds"):
             axis_errs = self._validate(
                 {**base, "redirect": "acme:activate"},
                 ont_extra={axis: ["activate"]},
                 all_pack_kinds={"concept", "activate"})
-            assert axis_errs and axis in " ".join(axis_errs), (axis, axis_errs)
+            joined = " ".join(axis_errs)
+            assert axis_errs and axis in joined, (axis, axis_errs)
+            assert "names no kind it declares" not in joined, (axis, joined)
 
         # ⛔ END-TO-END, on a real manifest — because the round's FIRST version of
         # this test hand-built a `Confusion` (declaring_pack=None) and therefore
@@ -2037,6 +2040,77 @@ depends_on: []
         assert payload["ok"] is True, payload
         assert payload["guard_problems"] == [], payload["guard_problems"]
         assert one.returncode == 0, one.stdout
+
+    def test_a_depends_on_target_kind_is_checked_by_the_TABLE(self, tmp_path):
+        """The arm round-7 built, re-pinned after its only cover was withdrawn.
+
+        Round-9 review P3: withdrawing the install-route table gate took this
+        arm's only test with it, so nothing pinned the behaviour this gate exists
+        for. Measured through the CLI, on a directory holding BOTH packs: the
+        dependency's kinds are loaded, so a typo in the target is a guard that can
+        never fire (`resolve` skips `no-usable-home` on every match) — refused —
+        while the real kind passes.
+        """
+        root = tmp_path / "packs"
+        acme = root / "acme"
+        acme.mkdir(parents=True)
+        venture = _write_pack(root, "venture", object_kinds="investment",
+                              guards="")
+
+        def manifest(target):
+            return f"""namespace: acme
+name: Acme Test Pack
+version: "0.1.0"
+tier: free
+ontology:
+  extends: core
+  objectKinds: [concept]
+  guards:
+  - kind: concept
+    layer: object
+    onConfusion:
+      - when: nameMatches
+        pattern: '^r-[0-9]+$'
+        redirect: {target}
+        fallback: core:WorkItem
+        reason: x
+depends_on: [venture]
+"""
+
+        (acme / "manifest.yaml").write_text(manifest("venture:investment"))
+        good = _run_cli("pack", "validate", str(acme), "--json")
+        payload = json.loads(good.stdout)
+        assert payload["ok"] is True, payload
+        assert good.returncode == 0, good.stdout
+
+        (acme / "manifest.yaml").write_text(manifest("venture:konpekt"))
+        bad = _run_cli("pack", "validate", str(acme), "--json")
+        payload = json.loads(bad.stdout)
+        assert payload["ok"] is False, payload
+        assert any("no kind pack 'venture' routes" in p
+                   for p in payload["guard_problems"]), payload["guard_problems"]
+        assert bad.returncode == 1, bad.stdout
+        assert venture.exists()          # the dependency really was loaded
+
+    def test_a_malformed_ontology_gets_a_VERDICT_not_a_raise(self):
+        """Round-9 review P2, measured: `ontology:` / `ontology: core` /
+        `ontology: [1,2]` all RAISED `AttributeError` out of `validate_manifest`
+        once the guards gate read `.get` on it — an unhandled 500 on the REST
+        pre-check, where the registry-isolation path returned a clean `ok=False`.
+        An authoring mistake must be a message, never a stack trace."""
+        from tortoise.pack_manifest_store import validate_manifest
+
+        base = """namespace: acme
+name: Acme Test Pack
+version: "0.1.0"
+tier: free
+ontology{ont}
+depends_on: []
+"""
+        for ont in (":\n", ": core\n", ": [1, 2]\n"):
+            v = validate_manifest(base.format(ont=ont))
+            assert v.ok is False, (ont, v.ok)
+            assert v.errors, (ont, v.errors)
 
     def test_a_fromKinds_scope_naming_no_CORE_kind_is_refused(self):
         """`core:WrokItem` is a typo the own-namespace arm cannot see.

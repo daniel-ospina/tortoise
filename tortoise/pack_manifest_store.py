@@ -330,7 +330,17 @@ def validate_manifest(
     # `no-usable-home` because tenant kinds never enter `kind_index_sections()`.
     # Acceptance is the signal the declaration will work, so refuse it here and
     # name the limitation rather than ship a guard that cannot fire.
-    if raw.get("ontology", {}).get("guards"):
+    #
+    # ⛔ AND A NON-MAPPING `ontology` MUST STILL GET A VERDICT, NOT A RAISE
+    # (round-9 review P2, measured): `ontology:` (null) / `ontology: core` /
+    # `ontology: [1,2]` are plausible authoring mistakes, and a bare
+    # `raw.get("ontology", {}).get(...)` turns each into an `AttributeError` out
+    # of this function — an unhandled 500 on the REST pre-check
+    # (`hosted_api` calls `validate_manifest_for_tenant` with no try), where the
+    # registry-isolation path already returned a clean `ok=False`. The sibling
+    # `_tenant_fold_declarations` guards the same shape for the same reason.
+    _ont = raw.get("ontology")
+    if isinstance(_ont, dict) and _ont.get("guards"):
         return ManifestValidation(
             False, namespace=ns,
             errors=["ontology.guards is not supported on a hosted (graph-native) "

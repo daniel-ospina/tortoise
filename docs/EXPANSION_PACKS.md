@@ -134,6 +134,12 @@ error names every owner.
 
 ## Per-kind write guards — redirect a mis-filed write (#12060)
 
+> ⛔ **Self-hosted only, today.** A guard is compiled from the process
+> FILESYSTEM catalog, so a **hosted** (graph-native) tenant pack cannot use one:
+> `validate_manifest` refuses an `ontology.guards` block that it would install
+> and never read, with that limitation named. Everything below describes an
+> install under `TORTOISE_PACKS_DIR`, where `tortoise pack validate` is the gate.
+
 A **guard** is a deterministic, token-free redirect for a write that is filed on
 the wrong *kind*. Measured before it existed: the hosted graphs held 453 nodes
 named `issue:<repo>#<n>` stored as `:Subject` — GitHub issue identifiers filed as
@@ -878,11 +884,18 @@ A chain is an ordered kind path the extractor respects when connecting `about_en
 | Self-host | `TORTOISE_PACKS_DIR` (filesystem) | `tortoise pack new` / `pack validate` (CLI) |
 | Hosted | `POST /v1/packs/manifests` / `tortoise_pack_install` (MCP) | same manifest format; ontology-only v1 (no connectors/tools) |
 
-Both surfaces run the same shared validator. A pack that validates locally installs on either.
-**One declared exception:** `statuses`/`folds` (#2729) are a filesystem-catalog surface — the fold
-index is compiled from the process catalog, which a graph-native tenant manifest never enters — so
-the hosted install route **refuses** them with an error naming the limitation instead of accepting a
-declaration that would be inert.
+Both surfaces run the same shared validator. A pack that validates locally installs on either,
+except where a declaration is compiled from the **filesystem catalog** — a graph-native tenant
+manifest never enters it, so the hosted install route **refuses** such a declaration with an error
+naming the limitation instead of accepting one that would be inert. **Two declared exceptions:**
+
+| Declaration | Issue | Why it cannot work on hosted |
+|---|---|---|
+| `statuses`/`folds` | #2729 | the fold index is compiled from the process catalog |
+| `ontology.guards` | #12060 | the write-time guard table is compiled from the process catalog |
+
+Both are refused at **install**, not at write, because acceptance is the signal the declaration will
+work.
 
 ## Reserved namespaces
 
