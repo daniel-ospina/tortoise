@@ -4610,6 +4610,13 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
         doc_label, phrase, cites = row[0], row[1], row[2]
         # a row may name its SOURCE; `default_source` is the caller's default
         source_key = row[3] if len(row) > 3 else default_source
+        # ...and it may name the SECTION its cited line must fall INSIDE. Without
+        # this, a number re-derived onto a byte-identical entry in a DIFFERENT
+        # section stays GREEN while the document's claim goes false: measured on
+        # the `03-test-design.md` `carve_out:` row, whose anchor line also exists
+        # under `core:` and its mirror, so "the anchor is on this line" alone
+        # cannot tell the three apart (#11837 review, P3).
+        section = row[4] if len(row) > 4 else None
         source_label = f"{source_key}.py"
         lines = docs[doc_label].read_text(encoding="utf-8").splitlines()
         hits = [ln for ln in lines if phrase in ln]
@@ -4628,14 +4635,26 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
                     f"cite :{number} — a bare continuation is invisible to "
                     f"_BUNDLE_CITE, so this pin is the only thing reading it")
                 continue
-            got = sources[source_key]
-            if int(number) > len(got):
+            source_lines = sources[source_key]
+            if int(number) > len(source_lines):
                 failures.append(
                     f"{source_label}:{number} (cited by {doc_label}) is PAST THE END "
-                    f"of {source_label} ({len(got)} lines) — the cite names a line "
+                    f"of {source_label} ({len(source_lines)} lines) — the cite names a line "
                     f"the file does not have, or this row's SOURCE key is wrong")
                 continue
-            got = got[int(number) - 1]
+            got = source_lines[int(number) - 1]
+            if section is not None:
+                # the nearest preceding COLUMN-ZERO `key:` is the cited line's
+                # section; a row that names one is refused when they disagree.
+                nearest = next(
+                    (ln.strip() for ln in reversed(source_lines[:int(number) - 1])
+                     if re.fullmatch(r"[a-z_][a-z0-9_]*:", ln)), None)
+                if nearest != section:
+                    failures.append(
+                        f"{source_label}:{number} (cited by {doc_label}) sits in "
+                        f"section {nearest!r}, not {section!r} — an identical entry "
+                        f"in another section satisfies the anchor text alone")
+                    continue
             if isinstance(anchor, tuple):
                 if got.strip() != anchor[1]:
                     failures.append(
@@ -5103,9 +5122,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("17621", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
+        # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
+        # anchor text also sits under `core:` and its mirror, so without it a
+        # re-derivation onto either stays green while the document's `carve_out:`
+        # claim goes false (measured: 5854 and 8173 both drove this row GREEN).
         ("03-test-design.md", "`carve_out:` holds **one**", (
             ("9633", "- test_pack_logic_writeprobe_11083.py"),
-        ), "ci_surfaces"),
+        ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
         f"only {len(rows)} rows — an emptied table would pass vacuously, and these "
