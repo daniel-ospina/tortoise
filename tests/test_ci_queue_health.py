@@ -280,7 +280,8 @@ def test_an_unreadable_timestamp_does_not_satisfy_the_age_clause():
     assert health.verdict == Q.PR_UNWITNESSED
     assert health.verdict != Q.OK
     assert health.oldest_pr_queued_age_seconds is None
-    assert any("no readable timestamp" in reason for reason in health.reasons)
+    assert any("no measurable age for their CURRENT ATTEMPT" in reason
+               for reason in health.reasons)
     assert "1 of the 1" in " ".join(health.reasons), (
         "the reason names how many of the queued PR runs were unreadable, so a mixed "
         "reading is not described as an all-unreadable one")
@@ -1472,7 +1473,7 @@ def test_a_PENDING_ONLY_wait_with_an_unreadable_stamp_is_UNWITNESSED():
         "a wait nobody could measure is not a healthy queue")
     assert health.pr_wait_measured is False
     assert health.congests_pr is None, "the gate must REFUSE, not authorise"
-    assert any("no readable timestamp" in r for r in health.reasons)
+    assert any("no measurable age for their CURRENT ATTEMPT" in r for r in health.reasons)
     assert "1 of the 1" in " ".join(health.reasons), (
         "the reading says the population it counted — the WAIT population, not the "
         "queued leg")
@@ -2291,8 +2292,9 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     docs", while this change corrects FOUR field docs, and the miscount is how two of them
     came to be claimed without a needle (review P3). An inventory in a docstring is itself
     an unpinned claim; what is pinned is the NEEDLES, and every site a needle was written
-    for is listed in the list below rather than counted here. It has ALREADY happened four times: round 17
-    corrected one twin and left the other contradicting it in the same file; the workflow
+    for is listed in the list below rather than counted here. It has ALREADY happened four
+    times: round 17 corrected one twin and left the other contradicting it in the same file;
+    the workflow
     block claiming an all-completed run "can never make the census unmeasured" is FALSE for
     the population the gate creates; the first version of this guard missed
     `classify_queue`'s comment; and the second missed the two test headers that shipped the
@@ -2421,6 +2423,21 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
             f"SECOND_HALF token it can only suppress a hit, which turns this guard into a "
             f"false PASS: {SECOND_HALF!r}"
         )
+
+    #: ⛔ AND THE SET IS PINNED EXACTLY, NOT MERELY BOUNDED (review P1, round 13). A
+    #: blocklist cannot see an ADDITION, and measured: `at rest`, `not moving`,
+    #: `unchanged for`, `quiescent` and `has not moved` were each added in silence — a
+    #: five-token-wide false-PASS surface, and the one direction that matters, since every
+    #: token here can only SUPPRESS a hit. So adding stillness vocabulary requires editing
+    #: this line, which is a place a reviewer is forced to look. Add a token ONLY if the
+    #: module computes it as a stillness PREDICATE of ``run.updated_at``.
+    assert set(SECOND_HALF) == {
+        "still for", "motionless", "quiet for", "stopped moving", "has been still",
+    }, (
+        "SECOND_HALF gained or lost a token — every token in it can only SUPPRESS a hit, "
+        "so this set is pinned exactly and any change must be argued from `_settled_still`, "
+        f"never from the prose it admits: {SECOND_HALF!r}"
+    )
 
     def hits(hay: str, needle: str) -> bool:
         """Does ``needle`` occur where the second half is NOT also stated nearby?
@@ -2615,6 +2632,22 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # written and is FIVE now (the four vocabulary pins below joined it), which is why the
     # assertion pins a measured FLOOR instead of an exact count — `len({entry for entry, _ in
     # disarming}) >= 5` — so it catches a deletion without going stale when one is added.
+    #: ⛔ THE FOUR VOCABULARY PINS ARE SELECTED BY IDENTITY, NOT BY POSITION (review P2,
+    #: round 13). They were `correct[-4:]`, which silently stopped covering pin 1 the moment a
+    #: fifth two-half restatement was appended AND falsely redded that new entry as "disarmed
+    #: by 2 tokens … it pins nothing" — measured.
+    vocabulary_pins = [
+        "False is a PROOF (every job of the run is completed, so it is executing nothing) "
+        "because its stamp is motionless",
+        "now READ: every job is completed, so none of them is executing anything, and the run "
+        "has been quiet for 300 s",
+        "the runs read out because EVERY job of them was completed (a proof of "
+        "non-execution), and how many, now that its stamp has been still long enough",
+        "all-jobs-completed is the PROOF that EXCLUDES a run from pr_running (see the "
+        "excluded sentence), so it can never contribute to an unmeasured census once its "
+        "stamp has stopped moving",
+    ]
+
     correct = [
         "PR-event runs whose EVERY job had completed, and which are therefore NOT counted "
         "in `pr_running` (#12037) only once its `updated_at` has been still for "
@@ -2652,34 +2685,25 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # (review P2, round 12: the third one, written to replace the removed `settle
         # window` prose, said "has been still for 300 s" and so was disarmed by BOTH
         # `has been still` and `still for`, i.e. by nothing in particular). ⛔ THE RISK
-        # DIRECTION IS THE OTHER WAY FROM WHAT IT LOOKS, with TWO exceptions this comment
-        # shipped without
-        # (review P2, round 12; both measured). DELETING a token a pin actually relies on
-        # reds — but only for `motionless`, `quiet for` and `stopped moving`: deleting
-        # `still for` or `has been still` reds NOTHING, because the pins they carry are also
-        # carried by the other. And ADDING a STILLNESS token is visible (it disarms a
-        # `pre_fix` entry, tripping the exercise leg below); what no assertion can see is
-        # adding a token that is NOT a stillness predicate at all — a gate noun or a bare
-        # field name — which is why the tuple-length pin above is a closed blocklist rather
-        # than a proof of sufficiency.
-        # This leg keeps a pin from being dropped silently — it does not, and cannot, prove
-        # the vocabulary is not over-wide. That is why the `settle window` token was a P1, and
-        # why every future addition must be argued from `_settled_still`, never from the prose
-        # it is meant to admit.
-        "False is a PROOF (every job of the run is completed, so it is executing nothing) "
-        "because its stamp is motionless",
-        "now READ: every job is completed, so none of them is executing anything, and the run "
-        "has been quiet for 300 s",
-        "the runs read out because EVERY job of them was completed (a proof of "
-        "non-execution), and how many, now that its stamp has been still long enough",
-        "all-jobs-completed is the PROOF that EXCLUDES a run from pr_running (see the "
-        "excluded sentence), so it can never contribute to an unmeasured census once its "
-        "stamp has stopped moving",
+        # DIRECTION IS THE OTHER WAY FROM WHAT IT LOOKS, and this comment got it wrong twice
+        # (review P2/P1, rounds 12 and 13; all measured). DELETING a token reds for every
+        # token EXCEPT `still for` — deleting `still for` alone reds NOTHING, because the
+        # pins carrying it are also carried by `has been still`; `has been still` itself is
+        # load-bearing for the third pin, so deleting THAT reds. And an ADDITION is not
+        # visible from any leg below: `at rest`, `not moving`, `unchanged for`, `quiescent`
+        # and `has not moved` were each accepted in silence, and a one-half claim qualified
+        # with any of them then passes the guard — the same fail-open as `settle window`,
+        # reached from the other side. That is why the set is pinned EXACTLY above rather
+        # than bounded: an addition reds, and must be argued from `_settled_still` (a
+        # PREDICATE the code computes) and never from the prose it is meant to admit.
+        # This leg keeps a pin from being dropped silently; it is not what keeps the
+        # vocabulary narrow — the exact-set pin is.
     ]
+    correct += vocabulary_pins
     # ⛔ EACH VOCABULARY PIN MUST NAME EXACTLY ONE TOKEN (review P2, round 12). A token's
     # PRESENCE in the passage is what disarms it, so "exactly one token occurs" IS the
     # exclusivity claim the comment above makes — a pin carrying two is carried by neither.
-    for _pin in correct[-4:]:
+    for _pin in vocabulary_pins:
         _tokens = [token for token in SECOND_HALF if token in flat(_pin)]
         assert len(_tokens) == 1, (
             f"this vocabulary pin is disarmed by {len(_tokens)} tokens {_tokens!r}, so "
@@ -2832,8 +2856,10 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # ⛔ THE PROBE QUALIFIER, which is this PR's own correction to the ops doc: a frozen run
         # is excluded only once it has been PROBED. Reverting just that hunk restores the
         # "can never make the census unmeasured" claim this guard calls FALSE, and NO needle can
-        # catch it — the claim's own sentence carries `updated_at`, so `hits()` self-disarms it
-        # (measured: doc/h01 reverted -> GREEN before this entry existed).
+        # catch it — the claim's own sentence carries `motionless`, so `hits()` self-disarms
+        # it (measured: doc/h01 reverted -> GREEN before this entry existed). `updated_at`
+        # self-disarmed it too until round 12 removed that token as a gate noun; the
+        # mechanism is unchanged, only the token that carries it.
         ("doc", "once it has been PROBED and its jobs read back all-completed"),
     ]
     # ⛔ PER-FILE, NOT "SOMEWHERE" (review NIT, round 11). The comments above name a SITE, so

@@ -690,9 +690,12 @@ class QueueHealth:
     pr_running_excluded: tuple[int, ...] = ()
     #: PR-event runs that are still COUNTED as executing because their execution was not
     #: disproved. The causes come from three layers — the callee's read routes, the caller's
-    #: settle gate, and the caller's probe budget — and the ATTRIBUTION (which layer each
-    #: cause comes from) is owned by `pr_running_unmeasured_unprobed` below; the set itself is
-    #: deliberately not re-enumerated here. ⛔ NO COUNT OF THE WHOLE ROUTE SET IS GIVEN,
+    #: settle gate, and the caller's probe budget — and the ATTRIBUTION is a PAIR, not one
+    #: field: `pr_running_unmeasured_unprobed` (the budget never reached the run) and
+    #: `pr_running_unmeasured_unread` (the read was attempted and did not prove it idle) split
+    #: by BUDGET, not by layer — the callee's read routes and the caller's settle gate are
+    #: both inside `_unread` and are not distinguished there. The set itself is deliberately
+    #: not re-enumerated here. ⛔ NO COUNT OF THE WHOLE ROUTE SET IS GIVEN,
     #: deliberately: this comment has carried one (as "three causes" and then as "FOUR
     #: causes, ONE bucket", both shipped) and each was a route short. The one count KEPT is
     #: the completeness SUB-RULE in `read_run_live_job`'s Returns block — three routes: an int
@@ -838,7 +841,8 @@ class QueueHealth:
             # The one thing an UNWITNESSED wait must never print is a bare `OK`. The
             # counts stay the measured ones — including `pr_running`, which is NOT
             # always 0 here: the second cause of this state is a queue whose PR runs
-            # ARE executing but carry no readable timestamp, and a hardcoded
+            # ARE executing but have no measurable age for their current attempt, and a
+            # hardcoded
             # `pr_running=0` would be a falsehood in the line the fleet reads.
             # `oldest=unmeasured` is the dimension that was not witnessed.
             oldest = self.oldest_pr_queued_age_seconds
@@ -1707,9 +1711,9 @@ def classify_queue(
                         else "no PR-event run is executing and the "
                     )
                     + (f"{unreadable_pr_runs} of the {len(wait_runs)} waiting "
-                       "PR-event run(s) carry no readable timestamp, so the "
-                       "wait cannot be measured and the wait budget cannot be "
-                       "applied — not reported as OK")
+                       "PR-event run(s) have no measurable age for their CURRENT "
+                       "ATTEMPT, so the wait cannot be measured and the wait budget "
+                       "cannot be applied — not reported as OK")
                 )
                 return health(PR_UNWITNESSED)
             if pending_truncated:
@@ -1854,7 +1858,8 @@ def classify_queue(
                       pr_wait_measured=False)
     if oldest_pr_age is None:
         reasons.append(
-            "not a flood: the waiting PR-event run(s) carry no readable timestamp, so "
+            "not a flood: the waiting PR-event run(s) have no measurable age for their "
+            "CURRENT ATTEMPT, so "
             "the wait cannot be measured"
         )
         # Through the seam, not straight to `OK`: a wait nobody measured is not a

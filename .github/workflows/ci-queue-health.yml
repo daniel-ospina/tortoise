@@ -346,7 +346,8 @@ jobs:
             # `PR-UNWITNESSED` has three causes on different dimensions and they take
             # different levers. Round 4 keyed this on `pr_running == pr_running_unmeasured >
             # 0`, which is wrong on the OVERLAP: a reading whose WAIT was not witnessed (a
-            # queued PR run with no readable `created_at`) can ALSO have a fully unmeasured
+            # run with no measurable CURRENT-ATTEMPT age — not only one whose `created_at`
+            # is unreadable) can ALSO have a fully unmeasured
             # census, and the numbers cannot tell which cause produced the verdict — so the
             # annotation prescribed the census lever (frozen runs / --max-job-probes) for a
             # wait defect, dropping the lever that fixes it (#12037 review round 5). The
