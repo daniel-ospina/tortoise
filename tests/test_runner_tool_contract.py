@@ -127,21 +127,34 @@ KNOWN_UNCOVERED = {
     "ai-review-gate.yml": {
         "ai-review-gate": "no checkout in the job — the contract script is not in the workspace (#9942)"
     },
-    # `mergify_config_guard.py` executes `gh` only in `--live` mode, whose own docstring
-    # records that CI must never use it (a fail-closed admin read inside CI would
-    # deadlock every PR). The job runs `--static`, which reads committed files.
+    # TWO hazard sources in this job at least, so the reason names both. Measured, the
+    # job body hazards on `python3 tools/mergify_config_guard.py --static` AND
+    # `python3 .github/scripts/check-required-set.py`: `mergify_config_guard.py` executes
+    # `gh` only in `--live` mode (whose docstring records that CI must never use it — a
+    # fail-closed admin read inside CI would deadlock every PR), and
+    # `check-required-set.py` reaches `gh api …/branches/main/protection` only through
+    # `read_live_protection()`, whose only caller is behind `--live`. The job runs
+    # `--static` / no `--live`, so neither reaches `gh`.
     "python-ci.yml": {
-        "manifest-integrity": "mergify_config_guard.py touches gh only under --live, which CI never runs"
+        "manifest-integrity": (
+            "mergify_config_guard.py and check-required-set.py touch gh only under --live, "
+            "which CI never runs"
+        )
     },
     # These jobs run `*.test.sh` harnesses, which install a STUB `gh` on PATH
     # (`.github/scripts/ai-review-gate.test.sh:416` writes `$T/bin/gh`). A harness that
     # stubs its tool is not a hazard; giving it the real one would mask the stub.
     #
     # These two are also why the POOL-ONLY arm above is load-bearing rather than
-    # decorative: `repo-harnesses` pins `runs-on: [self-hosted, self-hosted-x64]`, so a
-    # predicate that answered only for hosted labels would skip it (and every future
-    # pool pin) before looking for a `gh` hazard at all — the silent-skip direction this
-    # file's docstring calls unsafe.
+    # decorative — as a UNIT property, not for these two jobs. Both are pool-only pins
+    # (`repo-harnesses` is `runs-on: [self-hosted, self-hosted-x64]`), so a predicate that
+    # answered only for hosted labels would skip them (and every future pool pin) before
+    # looking for a `gh` hazard at all — the silent-skip direction this file's docstring
+    # calls unsafe. ⛔ WHAT IS NOT TRUE: neither job produces a hazard TODAY (measured,
+    # both `_gh_hazards` -> []), so deleting the arm moves no live verdict here; the arm
+    # is kept because the shape is what a future pool-only `gh` user will take, and the
+    # pin that reds when it is deleted is
+    # `test_the_poolable_label_reader_sees_every_yaml_shape`, not this list.
     "ci.yml": {
         "ops-harnesses": "runs *.test.sh harnesses that stub `gh` on PATH",
         "repo-harnesses": "runs *.test.sh harnesses that stub `gh` on PATH",
@@ -449,6 +462,22 @@ def test_a_tool_that_cannot_be_provisioned_is_named_not_skipped(tmp_path):
 # ── the coverage: a new gh-using job must declare the contract ───────────────
 
 
+#: The CONTRACT STEP as a step's own `run:`, bound strictly so a line that merely PRINTS the
+#: remedy cannot stand in for it. `test_the_contract_step_reader_cannot_be_defused_by_prose`
+#: pins that, because the loose form (`CONTRACT_STEP in line`) silently disabled the whole
+#: ordering check for any job whose advice step printed the remedy first.
+#:
+#: ⛔ `.*<CONTRACT_STEP>` IS NOT STRICT ENOUGH EITHER, and that was measured rather than
+#: assumed: `run: echo "if this 404s, run runner-tools.sh ensure gh by hand"` satisfies it, so
+#: a decoy advice step still became `contract_at` and the ordering check still switched
+#: itself off. The step must be in COMMAND POSITION — the `run:` has to START with the
+#: script path (optionally behind `bash`) — which is also how all 20 live occurrences are
+#: written, so binding it this way moves no verdict.
+_CONTRACT_RUN_RE = re.compile(
+    r"^        run: (?:bash )?\.github/scripts/" + re.escape(CONTRACT_STEP)
+)
+
+
 def _job_block(path: Path, job: str) -> str:
     """The YAML slice for one job — from `  <job>:` to the next top-level job.
 
@@ -483,32 +512,35 @@ def test_every_gh_using_pool_job_carries_the_contract_step(workflow, job):
         "runner without it fails with exit 127, which reads as a test failure (#9018)"
     )
     lines = block.splitlines()
-    # The hazard, not the position: a `run:` step BEFORE the contract that calls
-    # `gh` (inline or through one of the scripts that shell out to it) is the
-    # thing that dies with 127. A benign earlier step is not a defect, and a pin
-    # that reds on one is a pin that gets a `|| true`.
-    hazard = re.compile(
-        r"(?<![\w-])gh\s+(api|run|pr|issue|search|workflow|label|release)"
-        r"|ci_check_repair\.py|ci_queue_health\.py|ci_timing\.py"
-        r"|availability-watchdog\.sh|availability-liveness\.sh"
+    # ⛔ THE CONTRACT STEP IS BOUND BY THE SAME STRICT PREDICATE AS THE FINAL ASSERT, and
+    # that is not tidiness. `contract_at = next(… if CONTRACT_STEP in line)` matched ANY
+    # line, including a `run:` that merely PRINTS the remedy — and this repo's step bodies
+    # deliberately print such remedies (the whole #12133/#12149 subject). A decoy advice
+    # line before the real step set `contract_at` there, the loop `break`s immediately, and
+    # the whole ORDERING check silently disabled itself while the final assert still matched
+    # because its own pattern is greedy (`^        run: .*<CONTRACT_STEP>`). Measured on a
+    # synthetic job (advice step, then a real `gh pr view`, then the contract step): the pin
+    # PASSED. There is exactly one matching line in every `GH_JOBS` entry today, so binding
+    # both ends is free.
+    contract_re = _CONTRACT_RUN_RE
+    contract_at = next(i for i, line in enumerate(lines) if contract_re.match(line))
+    # ⛔ THE HAZARD ARM IS DERIVED, NOT A TEXT LIST, and the text list was the file's own
+    # documented mistake one arm down ("A text list of script names was the first attempt
+    # and it under-counted", `_GH_EXEC`). Measured, the old list named 5 of the 49 derived
+    # helpers and 8 of `_GH_CMD`'s subcommands, so 44 helpers and `repo`/`auth`/`secret`/
+    # `variable` were invisible BEFORE the contract step: a synthetic job with
+    # `check-required-set.py` or `gh secret` ahead of the step PASSED this pin while
+    # `_gh_hazards` flagged the very same lines. No live leak (0 across the 18 entries), so
+    # this closes a hole without moving a verdict.
+    early = _gh_hazards(lines[:contract_at], _gh_executing_scripts())
+    assert not early, (
+        f"{workflow}::{job}: a step BEFORE the contract step uses `gh` — directly or "
+        f"through one of the derived helpers — so it can still die with 127: {early}. "
+        f"`{CONTRACT_STEP}` must come first (#9018)"
     )
-    contract_at = next(i for i, line in enumerate(lines) if CONTRACT_STEP in line)
-    for i, line in enumerate(lines):
-        if i >= contract_at:
-            break
-        stripped = line.strip()
-        # Comments are prose ABOUT the hazard, not the hazard. (`- name:` lines
-        # are prose too; a step name cannot execute anything.)
-        if stripped.startswith("#") or stripped.startswith("- name:"):
-            continue
-        code = _code_only(line)
-        assert not hazard.search(code), (
-            f"{workflow}::{job}: a step at line {i + 1} uses `gh` BEFORE the contract "
-            f"step — it can still die with 127. Offending line: {line.strip()!r}"
-        )
     # And the contract step must still exist and carry a `run:` (the step is the
     # shell invocation; a `name:` alone provisions nothing).
-    assert re.match(r"^        run: .*" + re.escape(CONTRACT_STEP), lines[contract_at]), (
+    assert contract_re.match(lines[contract_at]), (
         f"{workflow}::{job}: the contract step's `run:` is not `{CONTRACT_STEP}`"
     )
 
@@ -597,8 +629,11 @@ def _gh_executing_scripts() -> frozenset[str]:
     (a `subprocess.run(shlex.split($CMD))`, a shell `$GH` variable, a wrapper that
     takes the binary name as an argument). The direction of that miss is the RARE
     one — every script in this repo that execs `gh` does it through one of the four
-    idioms, which `test_the_gh_script_derivation_has_no_visible_blind_spot`
-    re-measures against the tree instead of trusting this sentence.
+    idioms (re-measured at this head by matching `_GH_EXEC` against every file in
+    `_SCRIPT_GLOBS`; ⛔ an earlier version of this sentence claimed
+    `test_the_gh_script_derivation_has_no_visible_blind_spot` re-measured it, and that
+    test does NOT — it asserts the membership of nine REMEMBERED names, so a new script
+    using an idiom outside the four keeps the suite green).
     """
     out = set()
     for pattern in _SCRIPT_GLOBS:
@@ -784,7 +819,7 @@ _MESSAGE_CMDS = ("echo", "printf")
 #: `echo "…helper…" >> "$GITHUB_STEP_SUMMARY"` blanks to `echo   >>  `. A target class of
 #: `[^\s;|&<>]+` then had nothing to consume, the anchored match failed, and the line fell
 #: through to the raw search — so the most idiomatic redirect in this tree (`>>` to the job
-#: summary, 10 live uses) turned PROSE into a HAZARD while its UNQUOTED twin
+#: summary, 14 live uses) turned PROSE into a HAZARD while its UNQUOTED twin
 #: (`> /dev/null`) stayed inert. A bare `>` with no target left is a bash SYNTAX ERROR, so
 #: treating it as a redirect that consumed nothing is the safe reading, not a hole.
 _INERT_MESSAGE = re.compile(
@@ -1033,16 +1068,39 @@ def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
         #     bash 'tools/ci_'timing.py    -> bash tools/ci_timing.py
         #     bash tools/ci_tim\ing.py     -> bash tools/ci_timing.py
         #
-        # The two views below are exactly bash's two joining rules applied to the same line,
-        # so a spliced name is visible without a parser: delete the quote characters (bash
+        # The two views below are bash's two joining rules applied to the same line, so a
+        # spliced name is visible without a parser: delete the quote characters (bash
         # deletes them and keeps the words adjacent), and unescape `\X` (bash does the same).
-        # Neither view can INVENT a name the line does not already spell out in order, so this
-        # adds no false-positive class beyond the raw arm's own.
+        # ⛔ WHAT THAT COSTS — stated rather than denied, because an earlier version of this
+        # comment claimed the views "add no false-positive class" and that is FALSE. They add
+        # ONE, in the fail-closed direction: a NON-inert message line that spell-splits a
+        # helper name as ordinary prose is now reported where `origin/main` read it as prose.
+        # Measured, all PROSE to bash and all HAZARD here / prose on `origin/main`:
         #
-        # STATED RESIDUAL — a name assembled through a VARIABLE is out of reach of any name
-        # matcher and stays out: `for f in ci_timing; do bash tools/$f.py; done`,
-        # `H=tools/ci_timing; bash $H.py`. Both RUN the helper and both return no hit. Closing
-        # that needs dataflow, not a regex; named here so nobody reads this arm as complete.
+        #     echo run tools/ci_"timing.py"
+        #     echo see: tools/ci_"timing.py" for details
+        #     printf %s tools/ci_tim\ing.py
+        #
+        # The class needs an UNQUOTED word plus a quote or an escape inside the name, and it
+        # has no live instance — but it is a real widening and is named here so nobody reads
+        # this arm as free.
+        #
+        # STATED RESIDUALS — shapes that really EXECUTE a helper and stay out of reach, each
+        # measured with a stub that ran under `bash -c`:
+        #
+        #   * a name assembled through a VARIABLE (needs dataflow, not a regex):
+        #         for f in ci_timing; do bash tools/$f.py; done
+        #         H=tools/ci_timing; bash $H.py
+        #   * BRACE EXPANSION — a third word-formation rule this arm does not model:
+        #         bash tools/ci_timing.p{y,}
+        #         bash tools/{ci_timing,other}.py
+        #   * a BACKSLASH-NEWLINE join ACROSS LINES, which `_gh_hazards` cannot see at all
+        #     because it reads one line at a time (`run: |` with a trailing `\`):
+        #         bash tools/ci_tim\
+        #         ing.py
+        #     The same-line `\X` case IS caught; only the join is out of reach. All three
+        #     classes are inherited from `origin/main`, and all are pinned as declared misses
+        #     in `test_the_unmodelled_word_formation_residuals_are_declared_misses`.
         if _message_line_is_inert(line):
             name_views: tuple[str, ...] = (code,)
         else:
@@ -1369,7 +1427,7 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     assert _gh_hazards([f'            echo "run tools/{helper}" > /dev/null'], scripts) == []
     assert _gh_hazards([f'            echo "run tools/{helper}" 2>&1'], scripts) == []
     # …and so is a QUOTED target, which `_blank_quoted` erases to a space — the shape that made
-    # `>> "$GITHUB_STEP_SUMMARY"` (10 live uses in this tree) read as a hazard while its
+    # `>> "$GITHUB_STEP_SUMMARY"` (14 live uses in this tree) read as a hazard while its
     # unquoted twin stayed inert. And a trailing COMMENT is not code.
     assert (
         _gh_hazards([f'            echo "run tools/{helper}" >> "$GITHUB_STEP_SUMMARY"'], scripts)
@@ -1510,7 +1568,7 @@ def test_the_nested_substitution_residual_is_over_report_not_a_miss():
     contract step, which is visibly repairable; under-reporting leaves an undeclared `gh`
     helper invisible, which is the defect the gate exists for. MEASURED, so neither the
     cost nor the benefit is hypothetical: across all 41 workflows / 92 jobs this arm
-    and #12149's landed walker produce ZERO differing verdicts (23 jobs hit under both),
+    and #12149's landed walker produce ZERO differing verdicts (22 jobs hit under both),
     so there is no live instance of this residual in the tree today — it costs nothing
     here and buys the closed classes above.
 
@@ -1545,6 +1603,38 @@ def test_the_nested_substitution_residual_is_over_report_not_a_miss():
         )
         == []
     )
+
+
+def test_the_unmodelled_word_formation_residuals_are_declared_misses():
+    r"""Three shapes that really EXECUTE a helper and are declared, not closed.
+
+    ⛔ PINNED AS MISSES, NOT AS PASSES — if this test ever reds, someone closed one of them
+    (good) or broke the same-line case (bad); either way update the STATED RESIDUALS block in
+    `_gh_hazards` rather than delete this pin. Each was measured with a stub
+    `tools/ci_timing.py` that `touch`es a marker file, executed by `bash -c` in that cwd.
+
+    All three are INHERITED from `origin/main` — none is introduced by this change — and none
+    has a live instance in the 41 workflows. They are separate from the same-line `\X`
+    escape, which IS caught: only the CROSS-LINE join is out of reach, because
+    `_gh_hazards` reads one line at a time.
+    """
+    scripts = _gh_executing_scripts()
+    assert "ci_timing.py" in scripts, "the derivation no longer sees the helper used below"
+    # BRACE EXPANSION — a third word-formation rule the two spliced views do not model.
+    # (bash expands it before exec, so `tools/ci_timing.p{y,}` names `tools/ci_timing.py`.)
+    assert _gh_hazards(["        run: bash tools/ci_timing.p{y,}"], scripts) == []
+    assert _gh_hazards(["        run: bash tools/{ci_timing,other}.py"], scripts) == []
+    # A BACKSLASH-NEWLINE JOIN ACROSS LINES (`run: |`), which a per-line reader cannot see.
+    assert (
+        _gh_hazards(
+            ["          run: |", "            bash tools/ci_tim\\", "ing.py --refresh"],
+            scripts,
+        )
+        == []
+    )
+    # …and the SAME-LINE escape IS caught, so the pin above is about the join and not about
+    # escapes in general — this row is what would red if the spliced views were removed.
+    assert _gh_hazards(["        run: bash tools/ci_tim\\ing.py"], scripts)
 
 
 def test_the_cross_line_redirect_residual_is_a_declared_miss():
@@ -1654,6 +1744,48 @@ def test_a_script_named_only_in_an_operator_message_is_not_a_gh_hazard():
     )
     # …and an unquoted name after a bare `echo` still counts (conservative residual).
     assert _gh_hazards(["        run: echo run tools/install-ci-runner-x64.sh"], scripts)
+
+
+def test_the_contract_step_reader_cannot_be_defused_by_prose():
+    """The ordering pin's step-reader must find the REAL step, not a line that names it.
+
+    ⛔ THE LOOSE FORM WAS A SILENT OFF SWITCH. `contract_at = next(… if CONTRACT_STEP in line)`
+    accepted ANY line — including a `run:` that merely PRINTS the remedy — and this repo's
+    step bodies deliberately print such remedies (the whole #12133/#12149 subject). With a
+    decoy advice line first, `contract_at` pointed at it, the pre-contract loop `break`s
+    immediately, and the ordering check disabled itself while the final assert still matched
+    because its pattern was greedy (`^        run: .*<CONTRACT_STEP>`).
+
+    Measured on the shape below before the fix: `contract_at` -> the advice line, `gh` calls
+    the loop would have seen -> `[]`, and the pin PASSED although a real `gh pr view` sat
+    between the decoy and the real contract step. No live `GH_JOBS` entry has more than one
+    occurrence of the string, which is exactly why nothing red when it was wrong.
+    """
+    lines = [
+        "      - name: advise",
+        '        run: echo "if this 404s, run runner-tools.sh ensure gh by hand"',
+        "      - name: peek",
+        "        run: gh pr view 1 --json number",
+        "      - name: contract",
+        f"        run: bash .github/scripts/{CONTRACT_STEP}",
+    ]
+    at = next(i for i, line in enumerate(lines) if _CONTRACT_RUN_RE.match(line))
+    assert at == 5, f"the step-reader bound the wrong line: {at} -> {lines[at]!r}"
+    # …and the derived hazard arm sees the real `gh` call that the decoy was hiding.
+    assert _gh_hazards(lines[:at], _gh_executing_scripts()), (
+        "the pre-contract arm no longer sees a plain `gh pr view` — the ordering check is "
+        "vacuous even when the step-reader is right"
+    )
+    # ⛔ AND IT IS DERIVED, not a text list. The old list named 5 of the 49 derived helpers and
+    # 8 of `_GH_CMD`'s subcommands, so a job could put `check-required-set.py` or `gh secret`
+    # ahead of the contract step and this pin stayed green. Both are pre-contract hazards now.
+    for shape in (
+        "        run: python3 .github/scripts/check-required-set.py",
+        "        run: gh secret list",
+        "        run: gh repo view --json name",
+        "        run: python3 tools/ci_timing.py --refresh-durations",
+    ):
+        assert _gh_hazards([shape], _gh_executing_scripts()), shape
 
 
 def test_the_poolable_label_reader_sees_every_yaml_shape():
