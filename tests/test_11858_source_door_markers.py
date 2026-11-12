@@ -207,16 +207,34 @@ def test_a_caller_vector_still_gets_a_truthfully_minted_marker(tmp_path):
         "the population #11821 P0 closed")
 
 
-@pytest.mark.parametrize("door", ["create_point", "create_entity",
-                                  "update_point", "create_document"])
+@pytest.mark.parametrize("door", ["create_point", "create_entity", "create_document",
+                                  "update_point", "update", "update_entity"])
 def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
     """The census: the leak population is this one door, and starts that way.
 
     Each call passes `embedding_width="f16"` and no vector. A door that stops
     refusing is a new member of #11858's population.
+
+    ⛔ The list is the PUBLIC props doors, and the earlier four-row version did
+    not drive it — `update` and `update_entity` were missing while this file's
+    docstring claimed the WHOLE population (#11858 review cycle 2, P3). A census
+    that enumerates four of six is the same defect class in miniature.
     """
     sdk, journal = _journal(tmp_path)
     try:
+        # ⛔ The two `update*` doors must act on a node that EXISTS first: on an
+        # unknown id they are a no-op, so the prop path never runs and the row
+        # would assert about a call that did nothing (measured twice — the first
+        # version failed with DID NOT RAISE for exactly that reason, and the
+        # second still did because `create_point` MINTS its id, so the hardcoded
+        # "p-census" named nothing).
+        target = "p-census"
+        if door == "update":
+            created = sdk.create_point("statement", "a census claim",
+                                       source_id="s", span="1-2", quote="q")
+            target = created["id"] if isinstance(created, dict) else created
+        elif door == "update_entity":
+            sdk.create_entity("object", "e-census")
         with pytest.raises((ValueError, TypeError)):
             # ⛔ The positionals matter: `create_entity(type, name)` and
             # `create_document(title, documentKind)` are NOT interchangeable with
@@ -233,6 +251,10 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
                 sdk.create_entity("object", "e-census", embedding_width="f16")
             elif door == "update_point":
                 sdk.update_point("p-census", embedding_width="f16")
+            elif door == "update":
+                sdk.update(target, embedding_width="f16")
+            elif door == "update_entity":
+                sdk.update_entity("e-census", embedding_width="f16")
             else:
                 sdk.create_document("a census title", "document",
                                     embedding_width="f16")

@@ -5079,17 +5079,23 @@ _RESERVED_ENVELOPE_PROPS = (
 #:   builds its payload itself and passes `_skip_sanitize=True` — the intake
 #:   strip cannot cover it, and the write happens before `_emit_event` runs.
 #:
-#: ⛔ THE ENUMERATION IS SCOPED TO WHAT THE FUNNEL MINTS. `embedding_width` /
-#: `embedding_verbatim` / `embedding_preserved` / `embedding_model` /
-#: `embedding_revision` / `embedding_text_hash` / `embeddingText` are all
-#: written by `stamp_journal_embedding` from the values that ride with the
-#: record, so a caller value can only ever be a duplicate or a LIE, and the
-#: measured harm is the lie: a declared width over NO vector is trusted by the
-#: next width/base64 migration (#5004 round-7, the shape #12059/#12065 closed
-#: on the API funnel), `embedding_verbatim`/`embedding_preserved` flip the
-#: replay's storage form and silence the R1 model-change attestation, and the
-#: identity keys let a node claim a vector describes text it was never computed
-#: from (#4194/#8488).
+#: ⛔ WHAT THE WRITER ACTUALLY DOES, per key — the enumeration above is a
+#: REFUSAL set, not a claim that one function mints all seven (#11858 review
+#: cycle 2, P2 — measured). `stamp_journal_embedding` WRITES `embedding_width`
+#: for every vector it stamps, and writes `embedding_model` /
+#: `embedding_revision` / `embedding_text_hash` only on `creating=True` records
+#: (`tortoise/embeddings.py:539-562`) — which a `SourceCreated` never is. It only
+#: READS `embedding_verbatim` / `embedding_preserved` / `embeddingText`
+#: (`:539`, `:550`, `:692`): those three are INPUTS the writer consults, so a
+#: caller value does not "duplicate a derivation" — it FORGES the reading (a
+#: truthy `embedding_preserved` silences the R1 model-change attestation; a
+#: supplied `embeddingText` rewrites the text the #4194 comparison trusts).
+#:
+#: The measured route the refusal names is therefore the WIDTH one: hand over the
+#: vector with `embedding=` and the writer declares `f32`/`f64` from the values
+#: it just stored. The other six have no route on this door by design — they are
+#: not the caller's to set, and the message says so instead of promising a mint
+#: that does not happen.
 #:
 #: ⚠️ What this set is NOT: a claim about every caller-visible journal field.
 #: `update_point` legitimately rides `embedding_verbatim` INTO a `PointRevised`
@@ -48628,12 +48634,13 @@ class TortoiseSDK:
         if _caller_markers:
             raise ValueError(
                 f"{_caller_markers} are server-managed embedding journal "
-                "fields and cannot be set by hand. They are minted from the "
-                "vector they describe (`stamp_journal_embedding`), so a "
-                "hand-set value can only duplicate that derivation or LIE about "
-                "it — including declaring a width over no values at all. Pass "
-                "`embedding=` instead and let the writer declare the truth "
-                "(#11858)."
+                "fields and cannot be set by hand. On this door the writer "
+                "declares only the WIDTH, derived from the vector it stores — "
+                "pass `embedding=` and it declares the truth; the rest are "
+                "either inputs the writer READS (a supplied value forges that "
+                "reading) or identity stamps it never mints on a `:Source`. A "
+                "marker written here describes no values at all, which is "
+                "exactly what a later width/base64 migration trusts (#11858)."
             )
         # #2782 (review Finding 3): the same reason, one field family over — and
         # the same placement discipline, over the ASSEMBLED ``ev`` so a later
