@@ -82,12 +82,31 @@ def _run_text(step: dict) -> str:
     return str(step.get("run") or "")
 
 
+def _run_code(step: dict) -> str:
+    """The step's shell with COMMENT LINES removed (#12051 review P2).
+
+    Every assertion in this guard is a search over the step's TEXT, and a
+    commented-out line is inert shell that reads identically to the live one.
+    Measured: `# echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"` (with the
+    in-step `export` kept) and a commented-out `if [ "$major" != "16" ] … fi`
+    block each left all four tests GREEN while the leg went back to resolving
+    the runner image's client — i.e. the guard could not distinguish the fix
+    from its tombstone. Assertions therefore read this, never the raw body.
+    """
+
+    return "\n".join(
+        line
+        for line in _run_text(step).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+
 def _pin_step(steps: list[dict]) -> tuple[int, dict]:
     """The one step that installs a PostgreSQL client package."""
     hits = [
         (index, step)
         for index, step in enumerate(steps)
-        if CLIENT_PKG_RE.search(_run_text(step))
+        if CLIENT_PKG_RE.search(_run_code(step))
     ]
     assert len(hits) == 1, (
         "expected exactly ONE PostgreSQL-client pin step in "
@@ -155,7 +174,7 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     server_major = image_majors[0]
 
     _, pin = _pin_step(steps)
-    text = _run_text(pin)
+    text = _run_code(pin)
 
     pkg = CLIENT_PKG_RE.search(text)
     assert pkg, f"the pin step does not install `postgresql-client-<major>`: {text!r}"
@@ -204,7 +223,7 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     constant extraction visible in the log instead.
     """
     _, pin = _pin_step(_steps(job))
-    text = _run_text(pin)
+    text = _run_code(pin)
     server_major = _postgres_image_majors(job)[0]
 
     assert "::error::" in text and "exit 1" in text, (
