@@ -800,26 +800,10 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
                 f"by this guard and by the journal's encoder, and a sequence "
                 f"SUBCLASS can change what it yields between the two reads "
                 f"(#5004 round-7). Pass an exact `list`.")
-        # ⛔ AND AN `int` MUST BE EXACTLY REPRESENTABLE AS A FLOAT (#11996 review
-        # round 8, measured): the seam reads elements as `float(x)` and the
-        # encoder writes the integer exactly, so above 2**53 the two disagree —
-        # `_emit(… "embedding": [2**53 + 1], KEY: "f32")` LANDED with the width
-        # describing a value the guard had rounded.
-        #
-        # ⛔ AND THE TEST MUST BE TOTAL (#11996 review round 12, measured):
-        # `float(x)` is not defined for every `int` — above ~1.8e308 it raises
-        # `OverflowError`, so the inline `float(x) != x` left THIS arm the only
-        # one in the guard raising a `TypeError`'s cousin instead of the
-        # documented `ValueError`:
-        #
-        #     _emit("PointAdded", {"id": "p", "content": "c",
-        #                          "embedding": [2 ** 2000], KEY: "f32"})
-        #       -> OverflowError: int too large to convert to float
-        #
-        # Nothing is journalled either way, so the harm was a caller (and every
-        # `except ValueError` around a door) reading an unhandled type as a
-        # crash rather than a refusal. A value the float conversion cannot even
-        # represent is not exactly representable, which is the same verdict.
+        # ⛔ THE TYPE ARM: an element that is not an exact `int` / `float` is
+        # refused rather than verified. The MAGNITUDE arm — an `int` the float
+        # conversion cannot reproduce, and the totality of that comparison — is
+        # directly below, because it has its own reason and its own message.
         bad = [x for x in values if type(x) not in (int, float)]
         if bad:
             raise ValueError(
@@ -830,21 +814,35 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
                 f"as it is, so the two readers can disagree and the declared "
                 f"width would describe a value the guard never saw (#5004 "
                 f"round-7). Pass exact `int` / `float` elements.")
-        # ⛔ THE `int`-INEXACT CASE HAS ITS OWN MESSAGE, because the element IS an
-        # `int` (#11996 review round 13, measured). Folding both reasons into one
-        # `bad` list made the refusal for `2**53 + 1` say "an element that is not
-        # an exact `int` / `float` (int)" — contradicting the clause it was
-        # appended to — and told the caller to "Pass exact `int` / `float`
-        # elements", i.e. to resend the same value and be refused identically:
+        # ⛔ AND AN `int` MUST BE EXACTLY REPRESENTABLE AS A FLOAT (#11996 review
+        # round 8, measured): the seam reads elements as `float(x)` and the
+        # encoder writes the integer exactly, so above 2**53 the two disagree —
+        # `_emit(… "embedding": [2**53 + 1], KEY: "f32")` LANDED with the width
+        # describing a value the guard had rounded.
         #
-        #     _emit(… "embedding": [2**53 + 1], KEY: "f32")   -> float() ROUNDS it
-        #     _emit(… "embedding": [2**2000],   KEY: "f32")   -> no finite float
+        # ⛔ AND THE TEST MUST BE TOTAL (#11996 review round 12, measured):
+        # `float(x)` is not defined for every `int` — above ~1.8e308 it raises
+        # `OverflowError`, so an inline `float(x) != x` would leave THIS arm the
+        # only one in the guard raising a `TypeError`'s cousin instead of the
+        # documented `ValueError`:
         #
-        # Both are exact `int`s. The reason is the MAGNITUDE, not the type:
-        # `float()` rounds above 2**53 and has no value at all above ~1.8e308,
-        # while the encoder writes the integer verbatim. That is also the arm
-        # `_int_is_float_exact` makes TOTAL — a bare `float(x) != x` RAISED
-        # `OverflowError` on the second, this guard's only non-`ValueError` exit.
+        #     _emit("PointAdded", {"id": "p", "content": "c",
+        #                          "embedding": [2 ** 2000], KEY: "f32"})
+        #       -> OverflowError: int too large to convert to float
+        #
+        # Nothing is journalled either way, so the harm was a caller (and every
+        # `except ValueError` around a door) reading an unhandled type as a
+        # crash rather than a refusal. A value the float conversion cannot even
+        # represent is not exactly representable, which is the same verdict.
+        #
+        # ⛔ AND IT HAS ITS OWN MESSAGE, because the element IS an `int` (#11996
+        # review round 13, measured). Folding both reasons into one `bad` list
+        # made the refusal for `2**53 + 1` say "an element that is not an exact
+        # `int` / `float` (int)" — contradicting the clause it was appended to —
+        # and told the caller to "Pass exact `int` / `float` elements", i.e. to
+        # resend the same value and be refused identically. The reason here is
+        # the MAGNITUDE: `float()` ROUNDS above 2**53 and has no value at all
+        # above ~1.8e308, while the encoder writes the integer verbatim.
         inexact = [x for x in values
                    if type(x) is int and not _int_is_float_exact(x)]
         if inexact:
