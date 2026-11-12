@@ -1078,9 +1078,12 @@ def test_product_route_blocked_on_company_host(page: Page) -> None:
     scheme fine on the same server. So this test grades what a live server can prove
     — the 301, its HOST and its PATH — and the scheme is graded where no proxy sits
     between the middleware and the assertion: offline in
-    `tests/test_middleware_host_consolidation.mjs` (wired into `ci.yml`, so it runs
-    on every PR), and against the deployed origin by this same test on a production
-    run (`ALLOW_PROD=1 BASE_URL=https://premiselabs.co`, `verify-legal`).
+    `tests/test_middleware_host_consolidation.mjs` — wired into `ci.yml`'s
+    `welcome-e2e`, a `website`-GATED job, so it runs whenever that gate trips; the
+    gate names the harness file itself (`#12031` review, P2: without that entry an
+    edit to the harness alone ran no job that executes it) — and against the
+    deployed origin by this same test on a production run
+    (`ALLOW_PROD=1 BASE_URL=https://premiselabs.co`, `verify-legal`).
     """
     prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
     b_host = urlsplit(BASE_URL).hostname or "premiselabs.co"

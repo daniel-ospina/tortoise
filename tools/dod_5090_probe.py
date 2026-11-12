@@ -369,36 +369,46 @@ _NEW_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lam
 
 
 def _walk_own_scope(root: ast.AST):
-    """`ast.walk(root)`, never crossing into a nested `def`/`class`/`lambda`.
+    """`root`'s OWN scope: `ast.walk(root)`, stopping AT every nested `def`/`class`/`lambda`.
 
     ⛔ Round 3 fixed the fail-open where an aliased import was credited to a call it does not bind;
     round 4 measured the same leak one axis over — `_import_aliases(tree)` walked the WHOLE module,
     so an `ImportFrom` inside any function or class body became a module-level alias for EVERY
     writer (a SIBLING's import classed another writer `gated`, i.e. outside `NEEDS_A_DECLARATION`).
     Module-level `if`/`try`/`with` bodies are NOT scopes, so conditional imports still resolve.
+
+    ⛔ A nested scope's NODE is yielded but its BODY is not, and that distinction is a binding fact
+    rather than pedantry (`#12020` round 5): `def w(): def _set(): …` binds `_set` in `w`'s scope,
+    while a PARAMETER of a nested function (`def helper(_set)`) binds only inside `helper` and must
+    NOT shadow the writer's module alias — recording it deleted a real clause-builder writer from
+    the population (see `_locally_bound` for the measured A/B).
     """
     stack: list[ast.AST] = [root]
     while stack:
         current = stack.pop()
         yield current
-        stack.extend(child for child in ast.iter_child_nodes(current)
-                     if not isinstance(child, _NEW_SCOPE_NODES))
+        for child in ast.iter_child_nodes(current):
+            if isinstance(child, _NEW_SCOPE_NODES):
+                yield child  # the NAME binds in this scope; the body is another scope
+                continue
+            stack.append(child)
 
 
 def _scope_bound_names(root: ast.AST) -> set[str]:
     """Names bound in `root`'s OWN scope (nested scopes excluded) — what shadows an import alias.
 
     The rule `_locally_bound` applies to a writer, at module scope: `import … as _enc` followed by a
-    module-level `_enc = lambda …` means `_enc` no longer names the imported object (measured at
-    round 4 on the reviewed head: still `gated` — the round-3 fix could not see it, because it only
-    inspected the writer's subtree).
+    module-level `_enc = lambda …` (or a module-level `def _enc(…)`) means `_enc` no longer names the
+    imported object. ⚠️ The `def` form was NOT seen at round 4 — `_walk_own_scope` skipped nested
+    scope NODES entirely, so a module-level `def` rebound a seam alias invisibly and the writer
+    stayed `gated` (`#12020` round 5).
     """
     bound: set[str] = set()
     for sub in _walk_own_scope(root):
         if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
             bound.add(sub.id)
         elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bound.add(sub.name)
+            bound.add(sub.name)  # a def/class NAME binds here, even a nested one's
         elif isinstance(sub, ast.arg):
             bound.add(sub.arg)
         elif isinstance(sub, ast.ExceptHandler) and sub.name:
@@ -444,22 +454,38 @@ def _import_aliases(*roots: ast.AST, own_scope_only: bool = False) -> dict[str, 
 
 
 def _locally_bound(node) -> set[str]:
-    """Names ``node`` (a writer definition) binds ITSELF, so a same-named import alias is shadowed.
+    """Names ``node`` (a writer definition) binds in ITS OWN SCOPE — shadowed import aliases.
 
-    Any binding counts — assignment, annotated/augmented assignment, `for`/`with`/`except` target,
-    a nested `def`/`class` name, a parameter, a walrus. The question is only "does this name, inside
-    this writer, still mean the imported object?", and the conservative answer is the safe one:
+    Any binding in the writer's own scope counts — assignment, annotated/augmented assignment,
+    `for`/`with`/`except` target, a nested `def`/`class` NAME (the name binds here; its body is a
+    different scope), a parameter, a walrus. The question is only "does this name, inside this
+    writer, still mean the imported object?", and the conservative answer is the safe one:
     dropping an alias leaves the writer `unresolved_write`, which OWES a declaration, while keeping
-    a shadowed one can class it `gated` and make it owe nothing (#12020 round 3).
+    a shadowed one can class it `gated` and make it owe nothing (`#12020` round 3).
+
+    ⛔ OWN SCOPE ONLY, and that is not symmetry with the module pass — it is a measured fail-open
+    (`#12020` round 5). `ast.walk(node)` descends into a NESTED `def`, so a nested function's
+    PARAMETER dropped the writer's module alias. For a `SEAM_CALL`/`UNGATED_CALLS` alias that only
+    demotes the writer; for a CLAUSE-BUILDER alias the alias IS the only discovery signal
+    (`_EMBED_WRITE` cannot see `SET n += $p`), so the writer vanished from the population entirely:
+
+        from tortoise.vector_write import set_embedding_clause as _set
+        def outer(proj):
+            def helper(_set):            # binds only inside `helper`
+                return _set
+            return proj.g.query("MATCH (y) SET y += $p", {"p": _set("y")})
+            → discovered NOTHING before this fix; `unresolved_write` without the nested def.
+
+    Pinned by `ALIASED_IMPORT_SHAPES`' `nested_scope_parameter_does_not_shadow` arm.
     """
     import ast
 
     bound: set[str] = set()
-    for sub in ast.walk(node):
+    for sub in _walk_own_scope(node):
         if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
             bound.add(sub.id)
         elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bound.add(sub.name)  # a nested def/class name, and the writer's own (harmless)
+            bound.add(sub.name)  # the NAME binds here; the body/arguments are another scope
         elif isinstance(sub, ast.arg):
             bound.add(sub.arg)
         elif isinstance(sub, ast.ExceptHandler) and sub.name:
@@ -505,8 +531,13 @@ def _writes_an_embedding(node, source: str, aliases: dict[str, str] | None = Non
             if not isinstance(sub, ast.Call):
                 continue
             func = sub.func
-            name = getattr(func, "id", None) or getattr(func, "attr", None)
-            if name in aliased_builders:
+            # ⛔ A BARE `Name` ONLY — `reader._set("n")` is a foreign object's method that merely
+            # shares the alias's spelling, and crediting it reports a writer that owes a
+            # declaration and asserts nothing (`#12020` round 5, measured). This is the same rule
+            # `_named_callees` applies to the gate class, in the same file.
+            if not isinstance(func, ast.Name):
+                continue
+            if func.id in aliased_builders:
                 return True
     for sub in ast.walk(node):
         if isinstance(sub, ast.Assign):
@@ -594,13 +625,14 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "CLASSIFIED and never silenced"),
     "tortoise.api::_verify_record_vector_width": (
         CENSUS_EXEMPT,
-        "`tortoise/api.py::_verify_record_vector_width` — the match is its own "
-        "DOCSTRING: the measured transcript that explains the guard shows the "
-        "forbidden input (`embedding=[0.1234567890123, 1/3])`). The body VERIFIES "
-        "and returns: it re-derives the declared width through "
-        "`shortest_float32_vector` and raises on a disagreement, so a truthful "
-        "declaration lands and a lie is refused. Nothing is stored here — the "
-        "writer it verifies for is `_emit` above, and the store is the fold's"),
+        "`tortoise/api.py::_verify_record_vector_width` — ALL THREE matches are PROSE, and the site "
+        "is not uniform (measured): one in its DOCSTRING, the transcript that explains the guard "
+        "(`embedding=[0.1234567890123, 1/3])`), and two in IN-BODY COMMENTS — `api.py:330` "
+        "(`measured with embedding=\"abc\"`) and `api.py:352` (`point.embedding = '123'`, the "
+        "fold's stored value quoted back). The body VERIFIES and returns: it re-derives the "
+        "declared width through `shortest_float32_vector` and raises on a disagreement, so a "
+        "truthful declaration lands and a lie is refused. Nothing is stored here — the writer it "
+        "verifies for is `_emit` above, and the store is the fold's"),
     "tortoise.api::add_point": (
         CENSUS_EXEMPT,
         "`tortoise/api.py::add_point` — discovered by the CONTAINER-KEY shape "

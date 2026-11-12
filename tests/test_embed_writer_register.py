@@ -478,11 +478,16 @@ def test_NEEDS_A_DECLARATION_is_the_scope_the_guard_is_scored_on(tmp_path):
                 owed.add(key)
     assert owed, "no kind reached the guard's population — the pin proves nothing"
 
-    # …and the population the guard DERIVES on the real tree is the one it scores, not a subset of
-    # its own kinds: every declared writer outside the gate is IN it, and no `gated` writer is.
+    # …the population the guard DERIVES on the real tree is NON-EMPTY and every member is declared.
+    # ⛔ The pin that used to sit here — `outside == {k for k, e in probe.embedding_writers()
+    # .items() if e["kind"] in NEEDS_A_DECLARATION}` — was a TAUTOLOGY: `_writers_outside_the_gate()`
+    # is that same comprehension over the same pure function, so it could not fail for any value of
+    # `NEEDS_A_DECLARATION` or any discovery output, while its docstring claimed it caught a dead
+    # kind or a hole (`#12020` review, P3). The two directions it claimed are the literal
+    # `set(NEEDS_A_DECLARATION) == {…}` pin and the `DECLARATION_OWED_BY_KIND` loop above; what is
+    # left here is the part that is not self-referential — the population is real, and every member
+    # of it reaches the register's refusal.
     outside = _writers_outside_the_gate()
-    assert outside == {k for k, e in probe.embedding_writers().items()
-                       if e["kind"] in NEEDS_A_DECLARATION}, sorted(outside)
     assert outside, "the outside-gate population is empty — re-measure the guard, do not pass it"
     undeclared = sorted(k for k in outside if not register.is_declared(k))
     assert not undeclared, (
@@ -2931,6 +2936,45 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         "an ATTRIBUTE call: only a bare `Name` call can bind an import alias, and `client._enc` is "
         "that object's method — resolving it through the module's import map credited a reach the "
         "writer does not have",
+    ),
+    # ⛔ `#12020` round 5 — the SCOPE axis again, one level in. `_locally_bound` used `ast.walk`,
+    # so a NESTED function's parameter dropped the writer's alias; for a clause-builder alias that
+    # deleted a real writer from the population (the `#11274` fail-open, re-created).
+    "nested_scope_parameter_does_not_shadow": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj):\n"
+        "    def helper(_set):\n"
+        "        return _set\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": _set("y")})\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "a nested function's PARAMETER binds only inside that function, so it cannot shadow the "
+        "writer's module alias — `ast.walk` collected it anyway and the writer vanished entirely",
+    ),
+    "attribute_clause_builder_call_is_not_an_alias": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(reader):\n"
+        '    return reader._set("n")\n',
+        {},
+        "`reader._set(…)` is a foreign object's method that shares the alias's spelling: crediting "
+        "it reports a writer that owes a declaration and asserts nothing (`_named_callees`' rule, "
+        "applied to the write predicate as well)",
+    ),
+    "alias_rebound_by_a_module_level_DEF": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def _enc(text):\n"
+        "    return text\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    _enc(text)\n"
+        '    return proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n',
+        {"tortoise.m::w": "unresolved_write"},
+        "a module-level `def _enc` rebinds the alias exactly as `_enc = lambda …` does, so the gate "
+        "is not reached through it — the own-scope walk skipped nested scope NODES, so this "
+        "rebinding was invisible and the writer stayed `gated`",
     ),
 }
 

@@ -284,6 +284,17 @@ jobs:
                          # needs a path entry or a test-only PR would not run it.
                          "tests/test_blog_markdown.mjs",
                          "docs/blog-authoring.md",
+                         # #12031 review (P2): the host-consolidation harness. Its
+                         # subject (`website/functions/_middleware.ts`) matches the
+                         # `website/` prefix, but the harness ITSELF needs a path
+                         # entry — without it a PR that only edits the harness runs
+                         # no job that executes it, and the middleware's SCHEME
+                         # assertions live there (`legal-e2e` grades the scheme
+                         # against a real origin only, because a same-host Location
+                         # is rewritten by the dev preview). Same class as #4481
+                         # above, measured: the gate said `website=false` on the PR
+                         # whose whole point was that file.
+                         "tests/test_middleware_host_consolidation.mjs",
                          # #8293: the SEO keyword + agent-limiter harness.
                          "tests/test_blog_seo_meta.mjs", "tests/test_deck_view.mjs",
                          # #8816: the wrangler pin is an INPUT to this job — the

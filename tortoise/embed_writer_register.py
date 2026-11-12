@@ -837,12 +837,12 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
         "tortoise.api::_verify_record_vector_width",
         WriterClass(
             EXEMPT,
-            "`tortoise/api.py::_verify_record_vector_width` — the match is its own "
-            "DOCSTRING (the measured transcript showing the forbidden input). The body "
-            "verifies and returns: it re-derives the declared width through "
-            "`shortest_float32_vector` and raises on a disagreement. It stores nothing — "
-            "the writer it verifies for is `tortoise.api::_emit`, and the store is the "
-            "fold's",
+            "`tortoise/api.py::_verify_record_vector_width` — all three needle matches are PROSE "
+            "(the docstring's measured transcript plus two in-body comments that quote the "
+            "forbidden and the folded shape). The body verifies and returns: it re-derives the "
+            "declared width through `shortest_float32_vector` and raises on a disagreement. It "
+            "stores nothing — the writer it verifies for is `tortoise.api::_emit`, and the store "
+            "is the fold's",
             "#10541",
             stores=NO_LIVE_VECTOR,  # a verification helper; no store of any kind
         ),
