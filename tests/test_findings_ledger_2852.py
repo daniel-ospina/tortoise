@@ -199,7 +199,14 @@ def test_mutation_population_is_pinned():
     digit), a §1 row that is not a `**VERDICT**` row (a claim class with no handling
     rule, invisible to the vocabulary comparison), and a second tally sentence in the
     same paragraph (a decoy supplying the letters while the real one went stale).
-    35 is the population at this head.
+
+    The 36th is this lane's: the *uncoloned* arm's carve-outs were tested against
+    `CITATION_UNCOLONED_SHAPE_RE.search()`'s FIRST match only, so one exempt token
+    certified every citation beside it in the same code span — an HTTP status beside a
+    page name hid an out-of-range line, or a citation of a file that does not exist
+    (measured at `6413d5e8`). The 32nd–35th fixed the permalink arm for the same shape
+    one branch above; this is the arm that was left behind.
+    36 is the population at this head.
     """
     # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
     # at this head two merges of two 25-arm populations produced 26 arms while the
