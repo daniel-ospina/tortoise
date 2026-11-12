@@ -112,8 +112,8 @@ _BLOG_HOSTS_DIFFER = COMPANY != TORTISE
 #
 # Nothing else belongs here: `app.premiselabs.co` is also in robots.txt but only for
 # its own sitemap, which the `/blog/sitemap.xml` filter drops. Keying the mode on
-# `ALLOW_PROD` or on the scheme was wrong three times over — that flag says "https
-# targets are permitted", not "this target is production", and a preview is https too.
+# `ALLOW_PROD` or on the scheme was wrong twice over — that flag says "https targets
+# are permitted", not "this target is production", and a preview is https too.
 # Membership is tested against `.hostname` (lower-case, port-stripped), not `.netloc`.
 # Keep in step with #11766's repoint.
 _PRODUCTION_ORIGIN_HOSTS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
@@ -140,11 +140,11 @@ def test_blog_index_ssr() -> None:
     the redirect rather than the SSR, and would stop being a test of the host the
     epic declares. Repointed when #12031's inversion landed (review P2).
 
-    Until #12031's Pages DEPLOY completes, `{COMPANY}/blog` still answers 301 and
-    this request follows one hop onto the same document; that is left to resolve on
-    its own rather than asserted here, because the destination contract is owned in
-    ONE place — `test_host_isolation_blog`, which asserts it strictly and is the
-    reason a half-applied move cannot pass silently. This test grades the DOCUMENT.
+    #12031's Pages deploy has since completed, so `{COMPANY}/blog` now answers 200
+    directly and the single hop this request used to follow is gone. The DESTINATION
+    contract is deliberately not asserted here even so: it is owned in ONE place —
+    `test_host_isolation_blog`, which asserts it strictly and is the reason a
+    half-applied move cannot pass silently. This test grades the DOCUMENT.
     """
     r = SESSION.get(f"{COMPANY}/blog", timeout=20)
     assert r.status_code == 200
@@ -349,13 +349,19 @@ def test_robots_txt_lists_blog_sitemap() -> None:
         # serve it made the run call live production and assert on the deployed
         # document, around the `ALLOW_PROD` contract above — so against any
         # non-production target the parsed path is rebased onto `COMPANY`, the server
-        # under test. Against a production origin the URL is fetched AS WRITTEN, which
-        # is the only run where "the host robots.txt names is the host that answers" is
-        # assertable at all. The predicate is the TARGET's identity
-        # (`_PRODUCTION_ORIGIN_HOSTS`), never `ALLOW_PROD` (which says "https targets
-        # are permitted") and never the scheme (a preview is https too).
+        # under test. Against a production origin the URL is fetched AS WRITTEN: that
+        # is the only run where the URL robots.txt names is the URL actually
+        # REQUESTED, so a host that does not resolve reds as a transport error. It is
+        # NOT a claim that the named host serves the document itself — redirects are
+        # followed on that arm by design (the retired host legitimately 301s to the
+        # canonical one, and a robots.txt entry is correct as long as the document
+        # answers), so a 301 onto a sitemap document is accepted. The predicate is the
+        # TARGET's identity (`_PRODUCTION_ORIGIN_HOSTS`), never `ALLOW_PROD` (which
+        # says "https targets are permitted") and never the scheme (a preview is https
+        # too).
+        as_written = urlparse(COMPANY).hostname in _PRODUCTION_ORIGIN_HOSTS
         target = sitemap_url
-        if urlparse(COMPANY).hostname not in _PRODUCTION_ORIGIN_HOSTS:
+        if not as_written:
             parsed = urlparse(sitemap_url)
             target = urljoin(f"{COMPANY}/", parsed.path.lstrip("/"))
             if parsed.query:
@@ -372,6 +378,21 @@ def test_robots_txt_lists_blog_sitemap() -> None:
         assert "<urlset" in got.text or "<sitemapindex" in got.text, (
             f"{sitemap_url} answered {got.status_code} but is not a sitemap document"
         )
+        if not as_written:
+            # ⛔ THE REBASE ARM MUST STAY ON THE SERVER UNDER TEST. `requests`
+            # follows redirects by default and the as-written arm WANTS that, so
+            # the containment has to be asserted here rather than globally: a
+            # target that 301s this path to the live origin (a staging domain
+            # that redirects to prod is a common setup) would otherwise read and
+            # assert on the DEPLOYED document while PASSING — the exact false
+            # green the rebase exists to prevent, reached through a redirect
+            # instead of a URL that was written out. Compares `.hostname`
+            # (lower-cased, port-stripped) on both sides, like the predicate.
+            assert urlparse(got.url).hostname == urlparse(COMPANY).hostname, (
+                f"{target} left the server under test: {COMPANY} redirected to "
+                f"{got.url!r}, so this run graded the deployed document instead of "
+                f"the host it was pointed at"
+            )
 
 
 @pytest.mark.skipif(
