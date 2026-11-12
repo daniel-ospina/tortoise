@@ -687,15 +687,12 @@ class QueueHealth:
     #: These are the runs that produced that.
     pr_running_excluded: tuple[int, ...] = ()
     #: PR-event runs that are still COUNTED as executing because their execution was not
-    #: disproved — FOUR causes, one bucket: the probe BUDGET never reached the run; the jobs
-    #: could NOT be read; every job `completed` but the run had not been still for
-    #: `JOB_SETTLE_SECONDS`; or the read returned nothing usable
-    #: (empty/partial/malformed/other-attempt). The budget cause is counted here too — the
-    #: split is in `pr_running_unmeasured_unprobed` / `_unread`, and the emitted sentence
-    #: names both — so "three" would contradict this module's own output. Abstaining toward
-    #: executing is what keeps an unread jobs surface from manufacturing `PR-STARVED` — a
-    #: `STARVING_VERDICT` that authorises a destructive cancel-then-rerun. Reported so the
-    #: abstention is visible.
+    #: disproved. FOUR causes, ONE bucket — and the causes span three layers, so the
+    #: enumeration and its attribution live once, on `pr_running_unmeasured_unprobed` below,
+    #: and are deliberately not restated here (a second copy is what drifted before).
+    #: Abstaining toward executing is what keeps an unread jobs surface from manufacturing
+    #: `PR-STARVED` — a `STARVING_VERDICT` that authorises a destructive cancel-then-rerun.
+    #: Reported so the abstention is visible.
     pr_running_unmeasured: int = 0
     #: DID `pr_running` DEGRADE TO `PR-UNWITNESSED` FOR LACK OF MEASUREMENT? (#12037
     #: review round 5) `PR-UNWITNESSED` has three causes on three different dimensions —
@@ -713,12 +710,14 @@ class QueueHealth:
     #: `None` in every abstention case by design.
     #: ⛔ THE SECOND BUCKET CARRIES EVERY ABSTENTION AN **ATTEMPTED** RUN CAN PRODUCE, and
     #: they all share ONE remedy — RETRY once the run has settled — which is why they share a
-    #: bucket. The CANONICAL list lives in `read_run_live_job`'s Returns block; it is NOT
-    #: re-enumerated here on purpose. Three earlier revisions each restated it and each
-    #: restatement was incomplete (failed read only; then + settle gate; then + unusable
-    #: list), because the set is the CALLEE's and drifts every time the callee learns a new
-    #: abstention. If you are about to write the list here, add it to that block instead —
-    #: one list, one owner.
+    #: bucket. No single list owns the set: the CALLEE'S ROUTES (failed read, empty, partial,
+    #: malformed, other-attempt, not-provably-complete) are in `read_run_live_job`'s Returns
+    #: block and are the thing to edit when the callee learns a new abstention; the settle
+    #: gate is the CALLER'S (`read_health` applies `_settled_still` to a `False` the callee
+    #: could not corroborate); the budget cause is neither, and is the split's `_unprobed`.
+    #: Three earlier revisions each restated the whole set HERE and each was incomplete,
+    #: because a list written in any one of those places omits the other two — re-derive it
+    #: from the three call sites rather than trusting one list.
     #: These are `None` when the caller did not probe (nothing to distinguish), and the two
     #: ints otherwise; they always sum to `pr_running_unmeasured`.
     pr_running_unmeasured_unprobed: int | None = None
