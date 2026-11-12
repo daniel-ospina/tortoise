@@ -1222,22 +1222,75 @@ def self_test_passes(text: str) -> tuple[tuple[str, str, bool], ...]:
     R5 presence arm to `line.startswith("|")` left `--self-test` green on both
     shapes while `check()` red `R5 <seam>: missing from the §5/§6 crosswalk` on an
     indented map — a guard that cannot see the class it was added for.
+
+    ⛔ The width is DERIVED from the document (`_second_shape_indent`), never a
+    constant: a map whose rows all sit at the constant's width would make the copy
+    byte-identical and the harness would report a correct document as unstaked
+    (fresh review of PR #12016, P2 — measured: every row at 2 spaces graded
+    `CLEAN`, exit 0, from `check()` and `--self-test` exited 1).
     """
+    width = _second_shape_indent(text)
     return (
         ("shipped map", text, True),
-        (f"rows indented {SELF_TEST_INDENT} spaces", _indented_tables(text), False),
+        (_indented_shape_label(width), _indented_tables(text, width), False),
     )
 
 
-#: The indentation the SECOND self-test pass applies to every table row. Within
+#: The PREFERRED indentation for the SECOND self-test pass. Within
 #: `MAX_TABLE_INDENT`, so the copy is the same map a reader sees (#11415 measured
 #: that it is not the same map to a column-0 parser) — and non-zero, so a mutator
 #: or an arm that only reaches column-0 rows is visible.
+#: ⛔ It is a PREFERENCE, not the applied width: `_second_shape_indent` moves off it
+#: when the document's own rows already sit there.
 SELF_TEST_INDENT = 2
+
+#: The widths the second shape may use, in preference order: the shipped constant
+#: first (so the map §8 transcript stays byte-stable on the shipped map), then the
+#: remaining widths that are still markdown table rows.
+_SELF_TEST_WIDTHS = (SELF_TEST_INDENT,) + tuple(
+    width for width in range(1, MAX_TABLE_INDENT + 1) if width != SELF_TEST_INDENT
+)
+
+
+def _indented_shape_label(width: int) -> str:
+    """Name the second shape by the width ACTUALLY applied to it."""
+    return f"rows indented {width} space" + ("" if width == 1 else "s")
+
+
+def _second_shape_indent(text: str) -> int:
+    """The row width to apply to the second shape: one that can DIFFERENTIATE.
+
+    ⛔ Normalising every row to the same width is what makes the copy safe on an
+    already-indented document (`_indented_tables`), and it is also what makes a
+    FIXED width collide: on a map whose rows ALL sit at that exact width the copy is
+    byte-identical to the document, so the shape measures nothing and `self_test`
+    must not blame the document for the harness's own choice (fresh review of PR
+    #12016, P2). Measured at the colliding width on the shipped map reflowed to 2
+    spaces: `check()` printed `CLEAN — every rule holds` and returned 0, while
+    `--self-test` returned 1 with "the second shape is byte-identical to the shipped
+    map — it measures nothing". At 1 space and at 3 spaces the same document passed
+    both arms, which is why the answer is to MOVE the width rather than to reword
+    the diagnosis.
+
+    The preference order keeps the shipped map on `SELF_TEST_INDENT` (so its §8
+    transcript stays the line the tool prints), and every candidate is still a row a
+    reader sees (`1..MAX_TABLE_INDENT`). The fallback is only reached when NO width
+    moves the document — i.e. it carries no table row at all — which `self_test`
+    reports on its own (`_baseline` refuses such a map, and the byte-identity arm
+    names the cause).
+    """
+    for width in _SELF_TEST_WIDTHS:
+        if _indented_tables(text, width) != text:
+            return width
+    return SELF_TEST_INDENT
 
 
 def _indented_tables(text: str, spaces: int = SELF_TEST_INDENT) -> str:
     """The same map with every table row at EXACTLY ``spaces`` leading spaces.
+
+    ⛔ ``spaces`` comes from `_second_shape_indent`, NOT from the constant: a width
+    the document already sits at produces a byte-identical copy, i.e. a pass that
+    measures nothing (fresh review of PR #12016, P2).
 
     ⛔ NORMALISE, then indent — do not simply prepend. Prepending to a document that
     already has rows at 1-3 spaces (the population `#11415` extends grading to) put
@@ -1325,7 +1378,8 @@ def self_test(text: str) -> int:
     Output shape: the SHIPPED-MAP shape prints one line per mutation; the second
     shape runs quietly and prints only its summary line (failures go to stderr in
     both). TWO shapes (#11415): the shipped map, and the same map with every table
-    row at `SELF_TEST_INDENT` spaces (`_indented_tables`). The second is what
+    row at one width (`_indented_tables`, the width chosen by
+    `_second_shape_indent` so the copy can always differentiate). The second is what
     catches a harness that can only express column-0 rows — the reason all 21
     pre-fix mutations missed an indentation-blind parser — and a checker that
     grades an indented row differently from a flush one.
@@ -1343,8 +1397,9 @@ def self_test(text: str) -> int:
     # so the second shape silently lost its surface table and reported a wall of
     # UNTESTABLE against a document `check()` grades CLEAN. Idempotence is exactly
     # the property that failure breaks, and it costs one comparison.
-    once = _indented_tables(text)
-    if _indented_tables(once) != once:
+    width = _second_shape_indent(text)
+    once = _indented_tables(text, width)
+    if _indented_tables(once, width) != once:
         print(
             "self-test: the indented shape is NOT idempotent — applying it twice "
             "changes the document, so a map that is already indented would lose "
@@ -1360,20 +1415,23 @@ def self_test(text: str) -> int:
     # or mutator visible — dies on a one-character edit that nothing reddens. Both
     # the constant and the shape it produces are checked, because a future
     # normaliser that collapses back to column 0 would fail the same way.
-    if SELF_TEST_INDENT < 1:
+    if not 1 <= SELF_TEST_INDENT <= MAX_TABLE_INDENT:
         print(
-            f"self-test: SELF_TEST_INDENT is {SELF_TEST_INDENT} — the indented shape "
-            "would be the column-0 map again, so an arm or mutator that reaches only "
-            "column-0 rows stays invisible while both shapes 'pass'",
+            f"self-test: SELF_TEST_INDENT is {SELF_TEST_INDENT} — it must be within "
+            f"1..{MAX_TABLE_INDENT}, the widths markdown still renders as table rows; "
+            "at 0 the indented shape is the column-0 map again (an arm or mutator "
+            "that reaches only column-0 rows stays invisible while both shapes "
+            "'pass'), and above the bound the copy's rows are not rows at all",
             file=sys.stderr,
         )
         return 1
     passes = self_test_passes(text)
     if len(passes) > 1 and passes[1][1] == text:
         print(
-            "self-test: the second shape is byte-identical to the shipped map — it "
-            "measures nothing, so the indentation-blind class it exists for is "
-            "unstaked",
+            f"self-test: no width in 1..{MAX_TABLE_INDENT} differentiates the second "
+            "shape from the shipped map — the copy measures nothing, so the "
+            "indentation-blind class it exists for is unstaked (the document carries "
+            "no table row the copy could move)",
             file=sys.stderr,
         )
         return 1
@@ -1397,6 +1455,40 @@ def self_test(text: str) -> int:
     # mutator): such a rule adds violations to the indented copy's baseline, where
     # every "violation"-expected mutation would otherwise be satisfied by them.
     shipped_baseline = _baseline(text)
+    # ⛔ THE COLLISION ARM (fresh review of PR #12016, P2): the chooser must MOVE off
+    # `SELF_TEST_INDENT` for a document whose rows all sit there, and that document
+    # must still grade exactly what the shipped map grades. Both halves are checked
+    # on a document DERIVED from this one, so the arm is live on every run rather
+    # than on a fixture: normalise every row to `SELF_TEST_INDENT` (the collision a
+    # reflow produces), then require the chosen width to differ and the verdict to be
+    # identical. A `_second_shape_indent` that simply returned the constant reds here
+    # with the width named, instead of red-ing the required `docs` job with a
+    # diagnosis that points at the arms and mutators (which are correct).
+    collision = _indented_tables(text, SELF_TEST_INDENT)
+    if collision != text:
+        collided_width = _second_shape_indent(collision)
+        if collided_width == SELF_TEST_INDENT or (
+            _indented_tables(collision, collided_width) == collision
+        ):
+            print(
+                f"self-test: a document whose rows already sit at "
+                f"{SELF_TEST_INDENT} space(s) gets a second shape at the SAME width — "
+                "the copy is byte-identical, so the indentation-blind class is "
+                "unstaked for exactly the reflow this arm exists to survive (the "
+                "width must move, not the document)",
+                file=sys.stderr,
+            )
+            return 1
+        if _baseline(collision) != shipped_baseline:
+            print(
+                f"self-test: a document whose rows already sit at "
+                f"{SELF_TEST_INDENT} space(s) grades "
+                f"{len(_baseline(collision) or [])} violation(s) where the shipped "
+                f"map grades {len(shipped_baseline or [])} — same document, so the "
+                "width chosen for the second shape is not neutral",
+                file=sys.stderr,
+            )
+            return 1
     total = len(SELF_TEST_MUTATIONS)
     failures = 0
     untestable = 0
