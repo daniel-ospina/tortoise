@@ -2438,25 +2438,63 @@ _STILL_SENTENCE = (
 
 
 def test_english_prose_cannot_supply_a_missing_member(tmp_path, monkeypatch):
-    """FAILS if a COMMA-introduced bare letter is read without a list-member ending.
+    """FAILS if ordinary English supplies a row letter to either tally list.
 
-    The separator branch (`, ` / `and `) read the English article and the pronoun as row
-    letters, so a phantom member satisfied the complement arm's only comparison and a
-    STALE list passed: measured, the shipped still-list with `(a)` removed and
-    `, a claim §1 supports.` appended read CLEAN, and `, I think.` did the same for `i`
-    (the match is case-insensitive), `, e.g. today.` for `e`. A comma is not evidence that
-    a member follows; a connector (`and`, `or`, `also`, `plus`) is, which is why
-    `… **(j)**, also c still read as written.` must keep working.
+    A STALE complement list — one that omits a row the table calls STILL-TRUE — is the
+    one thing the complement arm exists to catch, and short prose was enough to close
+    the gap: `, i.e. today.` supplied `i`, `, and I think so.` supplied `i`, `, or i
+    think.` supplied `i`, `, and a claim §1 supports.` supplied `a` (`i` and `a` are both
+    STILL-TRUE in the shipped table), and `, e.g. today.` supplied `e`. Every one of them
+    read CLEAN over a page whose complement list contradicts its own table, and the
+    no-tail control REDs — so the tail was the cause, not a coincidence.
 
-    ⛔ The HONEST spellings are asserted beside the offending one: a guard that refuses
-    correct prose to catch this would be the false-accusation class it exists to prevent.
+    ⛔ EACH SHAPE IS ITS OWN SUB-CASE, WITH ITS OWN REMOVAL. The previous version asserted
+    three tails against ONE removal, so only the first could discriminate: the removal
+    was `(a)` and every tail supplied `i`/`e`, which never closes a set that is already
+    short by `a` (#11902 review P2, measured). A case that is RED in both worlds pins
+    nothing.
     """
-    stale = (
-        "Only **(f)**,\n**(h)**, **(i)** and **(j)** still read as written, {tail}"
+    #: (label, replacement sentence) — the REMOVAL matches the phantom each tail supplies,
+    #: so a fix that stops reading that phantom REDs and a regression CLEANs.
+    cases = (
+        (
+            ", i.e. today.",
+            "Only **(a)**, **(f)**,\n**(h)** and **(j)** still read as written, i.e. today.",
+        ),
+        (
+            ", and I think so.",
+            "Only **(a)**, **(f)**,\n**(h)** and **(j)** still read as written, and I think so.",
+        ),
+        (
+            ", or i think.",
+            "Only **(a)**, **(f)**,\n**(h)** and **(j)** still read as written, or i think.",
+        ),
+        (
+            ", and a claim §1 supports.",
+            "Only **(f)**,\n**(h)**, **(i)** and **(j)** still read as written"
+            ", and a claim §1 supports.",
+        ),
+        # ⛔ AND THE PHANTOM THAT *IS* CONNECTED TO THE RUN. The four shapes above supply
+        # their letter across a sentence's worth of words, so the run rule alone refuses
+        # them, and the ENDING rule (`a`/`i` at the end of a run must be followed by list
+        # punctuation, the sentence end, or the list's own predicate) was left with no
+        # case at all — measured: disabling it outright kept the suite green. These two
+        # insert the prose INSIDE the list, so the phantom is a run member and only the
+        # ending rule can refuse it (`i.e.` is refused because a full stop followed by a
+        # letter does not end a member; `and I` because `think` is not a predicate).
+        (
+            ", and I think so, inside the run",
+            "Only **(a)**, **(f)**,\n**(h)** and **(j)**, and I think so, "
+            "still read as written.",
+        ),
+        (
+            ", i.e. today, inside the run",
+            "Only **(a)**, **(f)**,\n**(h)** and **(j)**, i.e. today, "
+            "still read as written.",
+        ),
     )
-    for tail in ("a claim §1 supports.", "I think.", "e.g. today."):
+    for shape, replacement in cases:
         with monkeypatch.context() as patch:
-            replacement = stale.format(tail=tail)
             _mutated(
                 tmp_path,
                 patch,
@@ -2465,7 +2503,79 @@ def test_english_prose_cannot_supply_a_missing_member(tmp_path, monkeypatch):
             problems = _doc_problems()
             assert any(
                 "STILL-TRUE list names" in p for p in problems
-            ), f"English prose must not supply a member: {tail!r} -> {problems}"
+            ), f"English prose must not supply a member: {shape!r} -> {problems}"
+
+    #: ⛔ AND THE SHAPES THE SET COMPARISON CANNOT DISCRIMINATE. `e.g.` supplies `e`, and
+    #: `e` is ADOPTED rather than STILL-TRUE, so the still arm REDs either way and a
+    #: document-level assertion pins nothing. `e` becomes a live phantom the moment a row
+    #: moves to STILL-TRUE — this page's normal fate — so the extractor is asserted
+    #: directly: prose contributes NO letter at all.
+    for prose in (
+        "i.e. today",
+        "e.g. today",
+        "and I think so",
+        "and a claim §1 supports",
+        "or i think",
+        "and as a rule the row moved",
+    ):
+        assert flc._named_letters(
+            f"Only **(a)** still read as written, {prose}."
+        ) == {"a"}, f"prose must contribute no row letter: {prose!r}"
+
+
+def test_a_written_bare_member_is_still_read(tmp_path, monkeypatch):
+    """FAILS if the guard refuses a spelling §8 declares accepted.
+
+    The ending rule that stopped prose supplying a phantom member was also too tight in
+    the other direction at `e5a7ba2f4` (#12028):
+
+    * `Only a, f, h, i, j still read as written.` — the comma-joined BARE spelling —
+      yielded `['a','f','h','i']` and RED, because the trailing `j` is followed by ` still`
+      and not by list punctuation. It was CLEAN one commit earlier: the fix introduced the
+      false accusation.
+    * `Only **(a)**, **(f)**, **(h)**, **(i)**, c and **(j)** still read as written.` read
+      CLEAN while claiming a SUPERSEDED-BY-FIX row as still: the bare `c` before ` and`
+      was dropped, so the compared set silently EQUALLED the table's.
+
+    So one rule was too loose and too tight at once. Membership is now decided by the list
+    RUN (items joined by separators only), which reads the trailing member and the bare
+    member inside a mixed run, and refuses a single item that follows prose.
+    """
+    accepted = (
+        "Only a, f, h, i, j still read as written.",
+        "Only a, f, h, i and j still read as written.",
+        "Only **(a)**, **(f)**, **(h)**, **(i)**, also j still read as written.",
+        "Only **(a)**, **(f)**, **(h)**, **(i)** and **(j)** still read as written.",
+    )
+    for replacement in accepted:
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, r=replacement: t.replace(_STILL_SENTENCE, r, 1),
+            )
+            problems = _doc_problems()
+            assert not any(
+                "STILL-TRUE list names" in p for p in problems
+            ), f"a documented spelling must read: {replacement!r} -> {problems}"
+
+    refused = (
+        # the member the run MUST read: `c` is SUPERSEDED-BY-FIX, so naming it as still
+        # is a contradiction, and dropping it was the fail-open
+        "Only **(a)**, **(f)**, **(h)**, **(i)**, c and **(j)** still read as written.",
+        "Only **(a)**, **(f)**, **(h)**, **(i)**, c, **(j)** still read as written.",
+    )
+    for replacement in refused:
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, r=replacement: t.replace(_STILL_SENTENCE, r, 1),
+            )
+            problems = _doc_problems()
+            assert any(
+                "STILL-TRUE list names" in p for p in problems
+            ), f"a bare member inside a run must be read: {replacement!r} -> {problems}"
 
 
 def test_a_quoted_figure_is_not_a_second_assertion(tmp_path, monkeypatch):
@@ -2500,12 +2610,36 @@ def test_a_quoted_figure_is_not_a_second_assertion(tmp_path, monkeypatch):
             'It is wrong." verbatim. ',
             "rows no longer read as written",
         ),
+        # ⛔ AND THE OVERTAKEN ARM'S OWN COPY OF BOTH DECOYS (#12029). The quote mask was
+        # applied to one of two structural twins: the `overtaken` arm re-split the RAW
+        # paragraph, so `"four of the seven were overtaken. It is wrong."` counted as a
+        # second statement and red the page with *"2 sentence(s) state a 'N of the M
+        # were' overtaken figure"* while the no-full-stop decoy stayed CLEAN — the exact
+        # failing value this case exists for.
+        (
+            'They wrote "four of the seven were overtaken. It is wrong." verbatim. ',
+            "overtaken figure",
+        ),
     ):
         with monkeypatch.context() as patch:
             _mutated(tmp_path, patch, lambda t, d=decoy: t.replace(anchor, f"{anchor}{d}", 1))
             problems = _doc_problems()
             assert not any(marker in p and "sentence(s)" in p for p in problems), (
                 f"a QUOTED figure asserts nothing and must not count: {problems}"
+            )
+
+    # ⛔ AND THE ARM MUST STAY LIVE. Stripping quotes from both legs would satisfy every
+    # case above while making each arm blind to a genuine second statement, so a decoy that
+    # is NOT quoted still has to red with the "2 sentence(s)" message.
+    for decoy in (
+        "Note that four of the seven were overtaken. ",
+        "Note that seven of the twelve rows no longer read as written. ",
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(tmp_path, patch, lambda t, d=decoy: t.replace(anchor, f"{anchor}{d}", 1))
+            problems = _doc_problems()
+            assert any("2 sentence(s)" in p for p in problems), (
+                f"an UNQUOTED second figure must still count: {decoy!r} -> {problems}"
             )
 
 

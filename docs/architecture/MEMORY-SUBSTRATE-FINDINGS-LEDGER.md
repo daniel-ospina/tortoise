@@ -385,15 +385,22 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). Both arms count only a
   sentence that carries a **letter LIST** of two or more single letters — comma-joined
   (`b, c, d`) or a pair (`b and c`), each letter written bare, bold, code or italic, every form
-  bounded to the twelve letters §3's table can name. A bare member introduced by a CONNECTOR
-  (`and`, `or`, `also`, `plus`, `as well as`) is read as written; one introduced only by a comma
-  or `&` must also end like a list member (list punctuation or the end of the sentence), because
-  a comma alone reads English prose as a member — measured, a stale complement list with `(a)`
-  removed passed while `, a claim §1 supports.` supplied a phantom `a` (and `, I think.` an `i`).
-  Markup around a member never decides candidacy (`**(c)**` and `(c)` are the same item), which is
+  bounded to the twelve letters §3's table can name. ⛔ WHAT MAKES A BARE MEMBER A MEMBER IS THE
+  LIST RUN, NOT THE CHARACTER AFTER IT: a list is a run of two or more items joined by separators
+  (`,`, `;`, `&`, `and`, `or`, `also`, `plus`, `as well as`, followed by, namely) with nothing else
+  between them — a word of any other kind ends the run, so prose appended after the phrase is a run
+  of its own and never a member. The ending-rule shape this replaced was wrong in BOTH directions,
+  measured: too loose, `, i.e. today.` supplied `i` and closed a stale complement list, and a
+  connector branch with no ending rule at all let `, and I think so.` supply `i` and
+  `, and a claim §1 supports.` supply `a`; too tight, it DROPPED a member a sentence writes —
+  `Only a, f, h, i, j still read as written.` lost its trailing `j`, and a bare `c` inside
+  `, c and **(j)**` vanished so the compared set silently equalled the table's. `a` and `i` are the
+  only single letters that are also English words, so at the END of a run they are read only when
+  list punctuation, the sentence end, or one of the list's own predicates follows. Markup around a
+  member never decides candidacy (`**(c)**` and `(c)` are the same item), which is
   what stops a `**` from being the difference between a red and a green; code, italic and
-  uppercase spellings are read too, and the letter EXTRACTOR reads the same spellings, so what
-  makes a sentence a candidate and what its list is compared against cannot diverge.
+  uppercase spellings are read too, and the letter EXTRACTOR reads every spelling the candidate
+  test accepts, so a sentence cannot qualify on its markup and then contribute no letters.
   A single parenthetical letter in prose is **not** a list — `row (c) still read as written` is a
   sentence, not a tally — and a
   sentence that merely QUOTES the phrase has no list to disagree with the table, so counting it reded
