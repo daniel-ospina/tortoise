@@ -6001,11 +6001,12 @@ _MIRROR_SOURCE_BROKEN_BY_DENIAL = re.compile(
 #: `\bmirror\b` matched no `mirrors`, so a denial written against `the
 #: n.confidence mirrors` was never scanned while an unrelated singular
 #: possessive certified the sentence; `\bmirrors?\b` left `mirrored` /
-#: `mirroring` equally invisible, and the corpus writes those on 39 sentences,
-#: so the wording is IN-TREE for the next claim sentence (measured: widening
-#: changes 0 corpus verdicts — every corpus claim sentence uses the singular
-#: possessive). A plural POSSESSIVE (`mirrors' value`) still matches no source
-#: shape; that false block is residual 1 and is deliberate.
+#: `mirroring` equally invisible to the scan, and the corpus writes those 39
+#: times across 38 sentences, so the wording is IN-TREE for the next claim
+#: sentence (measured: widening changes 0 corpus verdicts — every corpus claim
+#: sentence uses the singular possessive). A plural POSSESSIVE (`mirrors'
+#: value`) still matches no source shape; that false block is residual 1 and is
+#: deliberate.
 _MIRROR_MENTION = re.compile(r"\bmirror(?:s|ed|ing)?\b", re.IGNORECASE)
 
 
@@ -6663,11 +6664,11 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             "documented for another column.",
             # …and the VERB forms of the mention, `mirrored` / `mirroring`, one
             # morphology over from the plural. `\bmirrors?\b` left them equally
-            # invisible to the scan, and the corpus writes them on 39 sentences,
-            # so the wording is in-tree for the next claim sentence (measured).
-            # Widening the class to `mirror(?:s|ed|ing)?` changes 0 corpus
-            # verdicts — every corpus claim sentence uses the singular
-            # possessive.
+            # invisible to the scan, and the corpus writes them 39 times across
+            # 38 sentences, so the wording is in-tree for the next claim
+            # sentence (measured). Widening the class to `mirror(?:s|ed|ing)?`
+            # changes 0 corpus verdicts — every corpus claim sentence uses the
+            # singular possessive.
             "Its confidence_mean IS the declared PRIOR mean — the field never "
             "serves what n.confidence mirrored; the mirror's value is "
             "documented for another column.",
@@ -6803,42 +6804,63 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             f"shape: {contraction!r}")
     assert "NEGATED clause" in _mirror_refusal_reason(
         "Its confidence_mean IS the PRIOR mean — not the mirror's value.")
-    # …and a MISSING SOURCE SHAPE is not a denial, even when the mirror's clause
-    # happens to carry a negation of some other word: both fail-closed rows
-    # below are refused for the shape, so telling the fixer to delete the `not`
-    # would be advice that does not clear the red (review, measured).
-    for missing_shape in (
+    # …and a clause that legitimately negates something else must NOT be told to
+    # delete that word — the denial half's remedy is a REWORD (move the negator
+    # out of the mention's clause), which stays truthful when the word belongs.
+    # The two rows below BOTH carry such a negation (`not null`, `not
+    # unreadable`) AND lack a source construct, so they are refused by both legs
+    # and are told both causes: adding a construct alone does NOT clear them
+    # (`the mirror's value, when it is not null, LEADS it` is still refused by
+    # the denial leg). Asserted PER ROW — the old form checked only for the
+    # missing-shape substring, which every one of these strings contains, so it
+    # passed whether the denial leg was named or not and pinned nothing about it
+    # (review, measured).
+    for both_causes in (
             "its confidence_mean IS the declared PRIOR mean — the mirror, when "
             "it is not null, LEADS it.",
             "its confidence_mean IS the declared PRIOR mean — the mirror, "
-            "which is not unreadable, leads the mean.",
-            # …and the BROKEN-ADJACENCY probe must not fire here either: this
-            # sentence has `supply` within the window but NO negator, so the
-            # probe's own `_MIRROR_NEGATED` leg is what keeps the verdict at
-            # "missing shape". Without that leg pinned, the mutant `if broken:`
-            # reports a denial the sentence does not contain (review, measured).
-            "its confidence_mean IS the declared PRIOR mean — the mirror can "
-            "supply the value."):
-        assert "NOT as the value's source" in _mirror_refusal_reason(
-            missing_shape), (
-            "a missing source SHAPE must not be diagnosed as a denial: "
-            f"{missing_shape!r}")
-    # ⛔ BUT a sentence refused by BOTH legs — a denial in a mention's clause AND
+            "which is not unreadable, leads the mean."):
+        _r = _mirror_refusal_reason(both_causes)
+        assert "NEGATED clause" in _r, f"the denial leg must be named: {both_causes!r}"
+        assert "NOT as the value's source" in _r, (
+            f"the missing-shape leg must be named too: {both_causes!r}")
+    # …while a sentence with NO negator at all is missing the shape and nothing
+    # else — the denial leg must stay silent, or every missing-shape red tells
+    # the fixer to hunt a denial that is not there. The BROKEN-ADJACENCY probe
+    # is what could over-fire here: this row has `supply` within the window but
+    # no negator, so the probe's own `_MIRROR_NEGATED` leg keeps the verdict at
+    # "missing shape". Without that leg pinned, the mutant `if broken:` reports
+    # a denial the sentence does not contain (review, measured).
+    assert "NEGATED clause" not in _mirror_refusal_reason(
+        "its confidence_mean IS the declared PRIOR mean — the mirror can "
+        "supply the value."), \
+        "a sentence with no negator at all must not be diagnosed as a denial"
+    assert "NOT as the value's source" in _mirror_refusal_reason(
+        "its confidence_mean IS the declared PRIOR mean — the mirror loses "
+        "to the pair."), "a shape-only refusal must name the missing shape"
+    # ⛔ …and a sentence refused by BOTH legs — a denial in a mention's clause AND
     # no source construct — must be told BOTH, in that order. This is the
     # #11993 headline shape, and it used to be told only "no source construct":
     # applying that advice (adding one) left the sentence REFUSED, because the
     # denial was still in the clause — advice that cannot clear the red (review,
-    # measured). A control row per cause, because either half can be dropped
-    # with the rest of the file green.
+    # measured). A row per cause, because either half can be dropped with the
+    # rest of the file green.
     _headline = ("A prior-only claim's confidence_mean IS the declared PRIOR "
                  "mean; the mirror never leads it.")
     assert "NEGATED clause" in _mirror_refusal_reason(_headline), (
         "the denial leg must be named for the headline shape")
     assert "NOT as the value's source" in _mirror_refusal_reason(_headline), (
         "the missing-source leg must be named too — both remedies are needed")
+    # …and the DIAGNOSIS must scan the WIDENED mention class, not only
+    # `mirror`/`mirrors`. This row carries NO source construct, so it cannot
+    # return at the construct branch: the only reason it is a denial at all is
+    # that `_denied_mirror_mention` sees the VERB form `mirrored`. Driven with a
+    # construct-free sentence on purpose — the same assertion driven by a
+    # sentence carrying `mirror's value` passes for the construct branch and
+    # pins nothing (review, measured).
     assert "NEGATED clause" in _mirror_refusal_reason(
-        "Its confidence_mean IS the PRIOR mean — the field never serves what "
-        "n.confidence mirrored; the mirror's value is documented elsewhere."), (
+        "A prior-only claim's confidence_mean IS the declared PRIOR mean; the "
+        "field never serves what n.confidence mirrored."), (
         "the diagnosis must scan the WIDENED mention class too, not just "
         "`mirror`/`mirrors`")
     # The sentence→cause WIRING is a leg of its own: the allow-list trade-off
