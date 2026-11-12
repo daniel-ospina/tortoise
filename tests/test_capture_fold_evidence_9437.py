@@ -500,17 +500,44 @@ def test_an_attachment_already_on_the_canonical_reports_the_grading():
 
 def test_a_slot_write_that_raises_or_has_no_door_refuses():
     """Both arms of `slot_write_failed`: the write door raising, and no door
-    at all. Token: `slot_write_failed`."""
-    proj = _FakeProj(_FakeGraph(dup_row=_DUP_ROW_QUOTED))
+    at all. Token: `slot_write_failed`.
+
+    The RAISE arm must also disclose the residuals it already computed: nothing
+    landed, but a differing `pointKind` was FOUND, and the same rule that governs
+    the two later refusal arms governs this one — a difference is never crossed in
+    silence. RED when that arm returned without `_already_written`.
+    """
+    dup_row = list(_DUP_ROW_QUOTED)
+    dup_row[_FakeGraph._COLUMNS.index("pointKind")] = "observation"
+    proj = _FakeProj(_FakeGraph(dup_row=tuple(dup_row)))
     out = capture_fold.carry_fold_evidence(
         proj, "pt_dup", "pt_canon",
         sdk=_FakeSDK(raises=RuntimeError("no such point")))
     assert out["ok"] is False and out["reason"] == "slot_write_failed", out
     assert "no such point" in out["blocked"], out
+    assert "kept the canonical's own pointKind" in out["blocked"], out["blocked"]
+    assert "ALREADY added" not in out["blocked"], (
+        f"nothing landed, so nothing was added: {out['blocked']}")
 
     out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon", sdk=None)
     assert out["ok"] is False and out["reason"] == "slot_write_failed", out
     assert "no SDK write door" in out["blocked"], out
+
+
+def test_a_duplicate_with_nothing_to_carry_issues_no_writes():
+    """The cost the module declares: no attachments, no free slot ⇒ ZERO writes.
+
+    Pinned at the WRITE DOOR (`sdk.calls`), not at the receipt — the claim is
+    about what the fold does to the graph, and a receipt can describe writes that
+    never happened (the shape `slot_write_failed`'s read-back exists for).
+    """
+    sdk = _FakeSDK()
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph()), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is True, out
+    assert (out["carried"], out["created"], out["copied"], out["residual"]) == \
+        (0, 0, [], []), out
+    assert sdk.calls == [], f"nothing to carry, so nothing may be written: {sdk.calls}"
 
 
 def test_a_silent_slot_write_is_detected_by_the_read_back():
@@ -643,8 +670,83 @@ def test_a_half_written_address_refuses_and_blames_the_duplicate():
     proj = _FakeProj(_FakeGraph(dup_row=dup_row))
     out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon", sdk=sdk)
     assert out["ok"] is False and out["reason"] == "malformed_address", out
-    assert "half an address" in out["blocked"], out
+    assert "half span is not an address" in out["blocked"], out
     assert sdk.calls == [], f"a refused fold must not write: {sdk.calls}"
+
+
+@pytest.mark.parametrize("spans, reason", [
+    # the duplicate holds BOTH ends — the half-pair check above cannot see it
+    ({"span_start": 50, "span_end": 10}, "must be greater than"),
+    # both ends, both wrong type (`validate_span` refuses `->` offsets)
+    ({"span_start": "30", "span_end": "62"}, "integer character offset"),
+])
+def test_an_invalid_span_is_named_as_the_duplicates_own_evidence(
+        sdk, monkeypatch, spans, reason):
+    """`malformed_address` is the DUPLICATE's token, and "half a pair" is only
+    one of the shapes that need it: an INVERTED or stringly-typed pair is just
+    as unwritable, and the EventAPI→projection passthrough stores both verbatim
+    (it does not run `validate_span` — the SDK's write doors do).
+
+    RED before this: `validate_span` raised INSIDE `update_point`, so the
+    refusal came back `slot_write_failed` / "its span_start, span_end evidence
+    could not be written onto the canonical (ValueError: …)" — the receipt
+    blaming the CANONICAL for evidence the DUPLICATE malformed, forever.
+    """
+    extracted, meta = _extract(sdk, monkeypatch, evidence=spans)
+    assert meta["errors"] == [], meta["errors"]
+    assert [e["dedup"] for e in extracted] == ["new", "new"], extracted
+    assert len(_claim_rows(sdk._get_proj())) == 2, _claim_rows(sdk._get_proj())
+    assert any("kept distinct" in w for w in meta["warnings"]), meta["warnings"]
+    assert any("span evidence is not a valid address" in w
+               for w in meta["warnings"]), meta["warnings"]
+    assert any(reason in w for w in meta["warnings"]), (reason, meta["warnings"])
+    assert not any("could not be written onto the canonical" in w
+                   for w in meta["warnings"]), meta["warnings"]
+
+
+def test_an_inbound_link_refuses_the_fold(sdk):
+    """An `about*` edge pointing AT the duplicate cannot be moved (the carry
+    writes FROM the canonical), so the delete would orphan it.
+
+    This is the one refusal token no fake-based test could reach: `_FakeGraph`
+    keys its outbound arm on `-[r]->`, and the inbound query is a typed pattern.
+    Measured here on a real graph — RED without the guard: the fold proceeds and
+    the `Event -[:aboutPoint]-> Point` edge dies with the duplicate.
+    """
+    proj = sdk._get_proj()
+    for pid, content in (("pt_in_dup", "the duplicate claim"),
+                         ("pt_in_canon", "the canonical claim")):
+        sdk.create_point("statement", content, id=pid, dedup=False)
+    proj.g.query(
+        "MATCH (p:Point {id:'pt_in_dup'}) "
+        "CREATE (e:Event {id:'ev_inbound_9437', name:'Release'}) "
+        "-[:aboutPoint]->(p)")
+    out = capture_fold.carry_fold_evidence(proj, "pt_in_dup", "pt_in_canon",
+                                          sdk=sdk)
+    assert out["ok"] is False and out["reason"] == "inbound_attachment", out
+    assert "points AT it" in out["blocked"], out
+    assert out["carried"] == 0 and out["copied"] == [], out
+
+
+def test_a_duplicate_id_on_two_nodes_refuses_the_fold(sdk):
+    """`DETACH DELETE n` by id takes EVERY row with that id, while the evidence
+    read answers for ONE — so a fan-out duplicate would have a copy's evidence
+    destroyed unread. Refuse rather than trust the read.
+
+    `sdk`'s capture ids are ULIDs, but a point id is not unique in general
+    (`_refuse_inverted_point_window` records the fan-out as a tested shape), so
+    the carry must not assume it. RED without the guard: `ok=True, carried=1`
+    over a delete that removes both rows.
+    """
+    proj = sdk._get_proj()
+    sdk.create_point("statement", "canon", id="pt_fan_canon", dedup=False)
+    proj.g.query(
+        "CREATE (:Point {id:'pt_fan_dup', content:'copy one'}), "
+        "(:Point {id:'pt_fan_dup', content:'copy two'})")
+    out = capture_fold.carry_fold_evidence(proj, "pt_fan_dup", "pt_fan_canon",
+                                          sdk=sdk)
+    assert out["ok"] is False and out["reason"] == "ambiguous_duplicate", out
+    assert "more than one node carries its id" in out["blocked"], out
 
 
 def test_a_new_graded_link_carries_its_grading(sdk):
@@ -675,17 +777,29 @@ def test_a_new_graded_link_carries_its_grading(sdk):
 # ── 9) the evidence vocabulary cannot drift from the capture contract ──────
 
 
-def test_the_fold_reads_every_field_the_capture_contract_declares():
+def test_the_fold_reads_every_field_the_capture_contract_declares(monkeypatch):
     """The slot list is a hand-copy of `sdk._CAPTURE_PASSTHROUGH_ORDER`. A copy
     with no guard drifts, and a drifted field is DESTROYED by the delete — the
     exact failure this module exists to stop. The guard is an assertion, not an
-    import, because importing `sdk` here would be a cycle."""
+    import, because importing `sdk` here would be a cycle.
+
+    The RAISE is pinned too: a guard whose failure arm has never been shown to
+    fail is an inert enforcer. RED without the refusal branch (mutation: `if
+    missing:` → `if False:`): the drift below would pass silently.
+    """
     capture_fold.assert_evidence_vocabulary()      # raises on drift
     from tortoise.sdk import _CAPTURE_PASSTHROUGH_ORDER
 
     declared = (set(capture_fold._OCCURRENCE_ADDRESS)
                 | {k for k, _ in capture_fold._SINGLE_SLOTS})
     assert set(_CAPTURE_PASSTHROUGH_ORDER) <= declared
+
+    # …and the guard FIRES: drop one declared field and the read must refuse.
+    monkeypatch.setattr(capture_fold, "_OCCURRENCE_ADDRESS",
+                        tuple(k for k in capture_fold._OCCURRENCE_ADDRESS
+                              if k != "quote"))
+    with pytest.raises(AssertionError, match="#9437"):
+        capture_fold.assert_evidence_vocabulary()
 
 
 # ── 10) the disclosure pins (the shape two rounds of review found unpinned) ──

@@ -75,10 +75,12 @@ lost and cannot be re-created:
 * evidence that cannot be READ at all (`unreadable`). Fail-closed: this
   module is about to authorise a delete, and "could not tell" is not "nothing
   there" (the distinction `extractor_v2._attachment_ids` draws with `None`);
-* an address the duplicate itself only HALF holds (`malformed_address`) — a
-  capture Point can carry `span_start` without `span_end` (the span validator
-  guards the SDK doors, not this seam), and writing it would raise on the
-  canonical and blame the wrong node forever;
+* an address the duplicate itself does not hold VALIDLY (`malformed_address`) —
+  a capture Point can carry `span_start` without `span_end`, an INVERTED pair, a
+  stringly-typed offset or an out-of-range one (the span validator guards the SDK
+  doors, not this seam). Writing it would raise on the canonical and blame the
+  wrong node forever, so the duplicate's own `validate_span` refusal is named for
+  what it is;
 * an INBOUND `about*` edge — another node pointing AT the duplicate
   (`inbound_attachment`): the carry writes FROM the canonical, so such a link
   cannot be moved and the delete would orphan it;
@@ -89,6 +91,10 @@ lost and cannot be re-created:
 * a scalar slot write that did not LAND (`slot_write_failed`) — read back,
   because `update_point` on an absent id SUCCEEDS silently, and reporting the
   attempt there would delete a duplicate whose evidence never arrived;
+* more than one node carrying the duplicate's id (`ambiguous_duplicate`):
+  `read_fold_evidence` reads `rows[0]` while the caller's `DETACH DELETE`
+  removes EVERY row with that id, so a second copy's evidence would die without
+  ever having been read — "could not tell" is not "nothing there";
 * anything else that raised (`internal_error`). The public entry point never
   raises: its caller sits inside the capture's single per-loop `try`, so a
   propagated error would abandon every remaining statement's resolution, and a
@@ -132,8 +138,9 @@ WHAT THE CARRY COSTS, DECLARED (measured on this worktree)
 ONE `link_entity` per attachment (2 graph statements, journaled as
 `EntityLinked` when the SDK has a journal), plus — only when a free slot is
 actually filled — ONE `update_point`. So a fold writes N+1 times where N is the
-duplicate's attachment count, and a duplicate with no evidence issues ZERO
-writes (`test_a_plain_duplicate_with_no_evidence_still_folds` pins that).
+duplicate's attachment count, and a duplicate with nothing to carry issues ZERO
+writes (`test_a_duplicate_with_nothing_to_carry_issues_no_writes` pins that at
+the write door, not at the receipt).
 
 Reads per fold: three unconditional (the duplicate's props, its outbound edges,
 its inbound edges) plus one per canonical view and one read-back per
@@ -165,15 +172,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-#: The about* predicates the capture's own attachment pass can put on a Point.
+#: The about* predicates a Point can carry, as ONE tuple the reads derive from.
 #:
-#: ⚠️ FIVE, not two. `projection._create_about_edges` is the rel-IGNORING
+#: ⚠️ SEVEN — five the capture cascade can mint plus two only the shared writer
+#: can. `projection._create_about_edges` is the rel-IGNORING
 #: Subject→Object→Event→Source→Point cascade (`_ABOUT_NAME_CASCADE`,
 #: `projection/edges.py`), so an `aboutEntities` entry resolves to whichever
 #: label owns that name — a release day named as an `:Event` mints `aboutEvent`,
-#: a document name mints `aboutDocument`. Reading only two of the five left the
-#: other three to be destroyed by the delete while the receipt said the
-#: duplicate had "no evidence of its own" (measured).
+#: a document name mints `aboutDocument`. Reading only two of them left the
+#: others to be destroyed by the delete while the receipt said the duplicate had
+#: "no evidence of its own" (measured). `aboutSource`/`aboutAction` are not in
+#: that cascade at all — `session_link.link_entity` is their writer.
+#: The outbound, inbound and carriable reads are all pinned against this tuple,
+#: so adding an eighth predicate here cannot silently skip a read.
 _FOLD_ATTACHMENT_RELS = ("aboutObject", "aboutSubject", "aboutEvent",
                          "aboutSource", "aboutAction",
                          "aboutDocument", "aboutPoint")
@@ -264,13 +275,13 @@ class FoldEvidence:
     unaddressable: tuple[tuple[str, str], ...] = ()
     source_refs: frozenset[str] = frozenset()
     scalar: dict[str, Any] = field(default_factory=dict)
-    #: ``span_start`` and ``span_end`` are an address PAIR; a duplicate holding
-    #: one without the other has an address that is already half-written
-    #: (a capture Point can hold it — `validate_span` guards the SDK write
-    #: doors, not the EventAPI seam). Writing it would raise on the canonical
-    #: and refuse the fold forever under a misleading token, so it is detected
-    #: here and named for what it is.
-    malformed_address: bool = False
+    #: The duplicate's own span evidence is NOT a valid address — the reason is
+    #: `commit_schema.validate_span`'s, verbatim (a half pair, an inverted pair,
+    #: a non-integer offset, out of range). A capture Point can hold any of them:
+    #: `validate_span` guards the SDK write doors, not the EventAPI seam. Writing
+    #: one would raise on the canonical and refuse the fold forever under a
+    #: misleading token, so it is detected here and named for what it is.
+    malformed_address: str | None = None
     #: ``(rel, source_label)`` pairs for `about*` edges pointing AT the
     #: duplicate. `link_entity` writes FROM the canonical, so an inbound edge
     #: cannot be carried — the delete would orphan it.
@@ -281,6 +292,13 @@ class FoldEvidence:
     #: receipt came to say "no evidence of its own" over a duplicate whose
     #: `confidence`/`pointKind` disagreed (measured).
     support: dict[str, Any] = field(default_factory=dict)
+    #: More than one node carries the duplicate's id. The reads below answer for
+    #: `rows[0]`, while the caller's `DETACH DELETE` removes EVERY row with that
+    #: id — so a second copy's evidence would be destroyed without being read.
+    #: `sdk`'s capture ids are ULIDs (unique), but a point id is not unique in
+    #: general (`_refuse_inverted_point_window` records the fan-out as a tested
+    #: shape), so the carry refuses rather than trusting the read.
+    ambiguous: bool = False
 
 
 #: The evidence columns, in ONE place: the duplicate's read and the canonical's
@@ -334,6 +352,10 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         return None
     if not rows:
         return None
+    if len(rows) > 1:
+        # `DETACH DELETE n` by id takes EVERY row with that id; this read answers
+        # for one. Refuse rather than authorise a delete over rows it never saw.
+        return FoldEvidence(ambiguous=True)
     (scalar_ref, all_refs, quote, span_start, span_end, source_turn_id,
      search_keys, when, validfrom, _event_id, _confidence,
      _point_kind) = rows[0]
@@ -350,6 +372,22 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         # string is a value the producer wrote, not an absence to fill.
         if value is not None:
             scalar[key] = value
+
+    # The span is an ADDRESS, and "half an address" is only ONE of the ways a
+    # duplicate's own evidence can be unwritable. `validate_span` is the ONE home
+    # of the rule the SDK's write doors already apply (E4 / #5007), and the
+    # EventAPI→projection passthrough does NOT run it — so an inverted pair, a
+    # stringly-typed offset or an out-of-range one are all shapes a capture Point
+    # can hold. Calling it here names them as the DUPLICATE's malformed evidence;
+    # without it they surface as `slot_write_failed` and the refusal blames the
+    # CANONICAL — the mis-attribution `malformed_address` exists to prevent.
+    from .commit_schema import validate_span
+
+    try:
+        validate_span(span_start, span_end)
+        malformed_address = None
+    except ValueError as exc:
+        malformed_address = str(exc)
 
     try:
         edges = proj.g.query(
@@ -378,8 +416,8 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
             unaddressable.append((rel, label))
     try:
         inbound_rows = proj.g.query(
-            "MATCH (s)-[r:aboutObject|aboutSubject|aboutEvent|aboutSource|"
-            "aboutAction|aboutDocument|aboutPoint]->(d:Point {id:$id}) "
+            "MATCH (s)-[r:" + "|".join(_FOLD_ATTACHMENT_RELS) + "]->"
+            "(d:Point {id:$id}) "
             "RETURN type(r), head(labels(s))",
             params={"id": dup_id}).result_set
     except Exception:
@@ -397,7 +435,7 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         unaddressable=tuple(unaddressable),
         source_refs=frozenset(refs),
         scalar=scalar,
-        malformed_address=((span_start is None) != (span_end is None)),
+        malformed_address=malformed_address,
         inbound=tuple(inbound),
         support={k: v for k, v in support.items() if v is not None},
     )
@@ -532,9 +570,11 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
          "residual": [keys]}     # slots/fields the canonical already filled
 
     ⚠️ BOTH the success and the never-raise refusal return this EXACT key set:
-    the caller reads ``created`` unconditionally, so a refusal missing it would
-    raise inside the capture loop — the very failure the wrapper exists to
-    prevent.
+    the capture seam indexes `blocked` on every refusal and `carried`/`created`/
+    `copied`/`residual` on every success, and the module's own guards index
+    `created` while a link is still in flight — so a refusal missing a key would
+    raise `KeyError` inside the capture loop, the very failure the wrapper exists
+    to prevent.
 
     ``residual`` is a REPORT, never a refusal: two occurrences of one claim
     legitimately carry different quotes, and a Point holds one value per
@@ -547,6 +587,12 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
         out["reason"] = "unreadable"
         out["blocked"] = ("the duplicate's evidence could not be read, so a "
                           "fold cannot be shown to lose nothing")
+        return out
+    if evidence.ambiguous:
+        out["reason"] = "ambiguous_duplicate"
+        out["blocked"] = ("more than one node carries its id, and the fold's "
+                          "delete would take the evidence of the copies this "
+                          "carry never read")
         return out
     canonical = _canonical_view(proj, canonical_id)
     if canonical is None:
@@ -579,16 +625,18 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                           "committed row by a fold")
         return out
 
-    # 3) The duplicate's own address may be HALF-written (a capture Point can
-    #    hold `span_start` without `span_end`: the span validator guards the SDK
-    #    write doors, not the EventAPI seam). That is the duplicate's own
-    #    malformed evidence, not a write failure on the canonical — named here
-    #    so the receipt does not blame the wrong node, and refused before any
-    #    write so a refused fold stays a no-op.
+    # 3) The duplicate's own span evidence may be an address `validate_span`
+    #    refuses — a HALF pair, an INVERTED pair, a non-integer offset, or one
+    #    out of range (a capture Point can hold any of them: the span validator
+    #    guards the SDK write doors, not the EventAPI seam). That is the
+    #    duplicate's own malformed evidence, not a write failure on the canonical
+    #    — named here, with the validator's own reason, so the receipt does not
+    #    blame the wrong node, and refused before any write so a refused fold
+    #    stays a no-op.
     if evidence.malformed_address:
         out["reason"] = "malformed_address"
-        out["blocked"] = ("its span evidence is half an address (one of "
-                          "`span_start`/`span_end` is missing), so it is not a "
+        out["blocked"] = ("its span evidence is not a valid address "
+                          f"({evidence.malformed_address}), so it is not a "
                           "value the fold can carry and not one it may drop")
         return out
 
@@ -678,6 +726,11 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                 "its " + ", ".join(sorted(to_write))
                 + " evidence could not be written onto the canonical "
                 f"({type(e).__name__}: {e})")
+            # Nothing landed (the write raised), but the RESIDUALS were already
+            # computed — disclose them here too, or a raise after a differing
+            # `pointKind` crosses that difference in silence, the class round 5
+            # fixed on the other two arms.
+            out["blocked"] += _already_written(out)
             return out
         # COUNT what landed, do not report the attempt: `update_point` on an
         # absent id is a SILENT success (it returns {} and raises nothing), so
