@@ -172,12 +172,12 @@ def test_the_taxonomy_counts_are_what_the_summary_declares():
 def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     """Fails when two rows SWAP statuses — a compensating edit no count can see.
 
-    Reachable, and measured at the head that added this arm: no comparison in
-    this file read a row's status BY ISSUE — the arms that read the page compare
-    COUNTS (§2's tally, the abstract, the WS-C cell) or check a row's presence,
-    its pin, its status vocabulary and its anchors, and none tied a status to a
-    specific issue — so an edit that holds the tally and moves the claim was
-    invisible to all of them. Reverting §2's `#2782` to `OPEN`
+    Reachable, and measured at the head that added this arm: BEFORE THIS ARM no
+    comparison in this file read a row's status BY ISSUE — the arms that read the
+    page compare COUNTS (§2's tally, the abstract, the WS-C cell) or check a row's
+    presence, its pin, its status vocabulary and its anchors, and none tied a
+    status to a specific issue — so an edit that held the tally and moved the
+    claim was invisible to all of them. Reverting §2's `#2782` to `OPEN`
     **and** promoting `#2684` to `VERIFIED-FIXED` (one row each way, so §2 stays
     22/4/0, the total 26, WS-C 4 of 6, and both headlines intact) left
     `tools/problem_map_check.py --check` **CLEAN** and this suite **58 passed** —
@@ -197,7 +197,10 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     defect is fixed (the page's §1 records four rows where the two disagree), and
     `tools/problem_map_check.py` deliberately refuses to read GitHub, so
     re-derive these from the tree on every re-cut; a re-cut that only makes this
-    file green has proven nothing about the statuses.
+    file green has proven nothing about the statuses. The two halves are not
+    equally dark: a moved STATUS is uncaught, while a moved COUNT reds six arms
+    whose FIXTURES encode the shipped numbers ("fixture no longer finds §2's OPEN
+    row") — detected as breakage, never confirmed.
     """
     rows, _ = pmc.parse_rows(DOC.read_text(encoding="utf-8"))
     status = {r.issue: r.status for r in rows}
