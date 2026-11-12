@@ -1467,6 +1467,28 @@ assert (
 )
 
 
+def _fold_residual_clause(fold_report: dict) -> str:
+    """The refusal's residual clause, minus anything `blocked` already said.
+
+    ⚠️ `capture_fold._already_written` prints the residual INTO `blocked` on the
+    post-write refusal arm, and this seam appends the residual too (a refusal can
+    be reached before any write, when that line is not printed at all) — so
+    echoing the whole list printed ONE fact twice under two lead-ins ("did not
+    carry X; it also holds X"), which reads as two facts on the arm whose whole
+    purpose is telling an operator what changed.
+
+    ⚠️ `str(blocked)` — NOT ``" ".join(str(blocked))``: joining a STRING iterates
+    it character-wise (``" ".join("abc") == "a b c"``), so every item got a space
+    between its letters and no item was ever found in `_said`. The de-duplication
+    was inert for exactly one commit, and the pin that was supposed to catch it
+    inspected `capture_fold`'s own `blocked` instead of this seam. It returns a
+    string so this line is testable on its own.
+    """
+    said = str(fold_report.get("blocked") or "")
+    fresh = [r for r in fold_report.get("residual") or () if r not in said]
+    return ("; it also holds " + "; ".join(fresh)) if fresh else ""
+
+
 def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     """Build the LLM-extraction transcript + pre-write estimate for a
     conversation (#822). One ``Speaker: text`` line per turn (the
@@ -16990,16 +17012,7 @@ class TortoiseSDK:
                             # fold needs — and this branch printed `blocked` and
                             # `undeclared` only, so the module's "set here so a
                             # refusal discloses them too" was half-delivered.
-                            # ⚠️ Only the items `blocked` does not already carry:
-                            # `_already_written` prints the residual into
-                            # `blocked` on the post-write refusal arm, so echoing
-                            # the whole list here printed ONE fact twice with two
-                            # lead-ins ("did not carry X; it also holds X").
-                            _said = " ".join(str(fold_report.get("blocked") or ""))
-                            _fresh = [r for r in fold_report["residual"]
-                                      if r not in _said]
-                            if _fresh:
-                                kept += ("; it also holds " + "; ".join(_fresh))
+                            kept += _fold_residual_clause(fold_report)
                             warnings.append(
                                 f"repeated claim '{content[:60]}' kept "
                                 f"distinct — {fold_report['blocked']}{kept}")

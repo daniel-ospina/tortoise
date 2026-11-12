@@ -50,6 +50,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise import capture_fold  # noqa: E402, RUF100
+from tortoise import sdk as sdk_mod  # noqa: E402, RUF100
 from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 #: The paraphrase pair the committed band already treats as one claim
@@ -1588,3 +1589,76 @@ def test_the_guard_reports_an_UNMEASURABLE_read_not_only_a_short_one():
                 "MATCH (d:Point {id:$dup})-[r]->(t) RETURN type(r)")
     finally:
         monkeypatch.undo()
+
+
+# ── 16) round 13: a malformed REF element, a malformed GRADING, the clause ──
+
+
+def test_a_non_string_ref_ELEMENT_refuses_rather_than_vanish():
+    """`_refs_from` skipped any element that was not a `str`. The value is a
+    DECLARED prop, so it never reached `undeclared`; it never entered the ref
+    set, so it never reached a residual — and the duplicate was deleted with it.
+    The CONTAINER malformation already refused; the element case is the same
+    class with the opposite outcome."""
+    row = ("session:s", [42], None, None, None, None, None, None,
+           None, None, None, None)          # position 1 = extractedFromAll
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph(dup_row=row)), "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "unreadable", out
+
+
+def test_a_non_numeric_grading_is_disclosed_not_converted_to_ungraded():
+    """`conf = confidence if isinstance(confidence, (int, float)) else None`
+    erased the value, so `_carried`'s comparison was skipped and the duplicate's
+    grading died on an `ok=True` fold with no clause naming it."""
+    graph = _FakeGraph(edges=[("aboutObject", "Object", "obj_1", "high")],
+                       carried={"obj_1": (1, None)})
+    sdk = _FakeSDK()
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is True, out
+    assert any("not a number: 'high'" in r for r in out["residual"]), out
+    # …and the write door was never handed a string.
+    assert sdk.calls == [], sdk.calls
+
+
+def test_the_slot_conflict_does_not_claim_the_field_was_not_carried(sdk,
+                                                                   monkeypatch):
+    """The sinks prefix every residual with "did not carry ", so a residual whose
+    SUBJECT is the field it just copied printed the contradiction one level up:
+    "copied validFrom; did not carry validFrom (as when)"."""
+    _extracted, meta = _extract(
+        sdk, monkeypatch,
+        evidence={"when": "2026-08-01", "validFrom": "2026-08-02"})
+    said = next(w for w in meta["warnings"] if "folded into canonical" in w)
+    assert "copied validFrom" in said, said
+    assert "did not carry validFrom" not in said, said
+    assert "did not carry the duplicate's second validFrom" in said, said
+
+
+def test_the_vocabulary_guard_also_checks_the_READ_selects_the_declaration(
+        monkeypatch):
+    """`declared` keeps a field out of `undeclared`; only the SELECT puts it in
+    front of the module. A field declared and never selected was neither carried
+    nor reported — the drift the guard's docstring claims to stop."""
+    import pytest as _pytest
+    stripped = capture_fold._EVIDENCE_SELECT.replace(
+        "{alias}.search_keys, ", "", 1)
+    assert stripped != capture_fold._EVIDENCE_SELECT       # the strip LANDED
+    monkeypatch.setattr(capture_fold, "_EVIDENCE_SELECT", stripped)
+    with _pytest.raises(AssertionError, match="does not SELECT"):
+        capture_fold.assert_evidence_vocabulary()
+
+
+def test_the_seam_never_repeats_a_residual_the_module_already_printed():
+    """The de-duplicator joined the blocked STRING character-wise
+    (`" ".join("abc") == "a b c"`), so no item was ever found and one fact went
+    out twice under two lead-ins. Pinned on the seam's own clause, not on
+    `capture_fold`'s `blocked` (which is why the first pin stayed green)."""
+    item = "pointKind (duplicate 'observation', canonical None)"
+    assert sdk_mod._fold_residual_clause(
+        {"blocked": f"…; did not carry {item}", "residual": [item]}) == ""
+    assert sdk_mod._fold_residual_clause(
+        {"blocked": "…", "residual": [item]}) == f"; it also holds {item}"
+    assert sdk_mod._fold_residual_clause(
+        {"blocked": None, "residual": []}) == ""

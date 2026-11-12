@@ -68,8 +68,11 @@ lost and cannot be re-created:
 
 * an attachment link whose target cannot be addressed by id (`unaddressable`);
 * a source reference the canonical does not already carry
-  (`uncarried_source_ref`) — `extractedFrom` is a node FIELD, and §4.3
-  forecloses a field write on a committed row outside a lifecycle event;
+  (`uncarried_source_ref`) — NOT because §4.3 forecloses a field write on a
+  committed row (the free-slot carry below writes fields on this very row,
+  through `update_point`, which IS a lifecycle door), but because the ref lives
+  in ONE slot: writing the duplicate's source over a canonical that already has
+  one would CLOBBER the canonical's provenance to save the duplicate's;
 * a link that does not LAND when re-written (`link_not_carried`) — counted,
   never assumed, the same rule `apply_merge_union` follows;
 * evidence that cannot be READ at all (`unreadable`). Fail-closed: this
@@ -414,7 +417,7 @@ class FoldEvidence:
     `link_entity` MERGEs on ``{id:$id}`` and would mint a different node.
     """
 
-    attachments: tuple[tuple[str, str, str, float | None], ...] = ()
+    attachments: tuple[tuple[str, str, str, Any], ...] = ()
     unaddressable: tuple[tuple[str, str], ...] = ()
     source_refs: frozenset[str] = frozenset()
     scalar: dict[str, Any] = field(default_factory=dict)
@@ -488,7 +491,17 @@ def _refs_from(scalar_ref: Any, all_refs: Any,
         return None
     refs: set[str] = set()
     for ref in (scalar_ref, prov_source, *(all_refs or ())):
-        if isinstance(ref, str) and ref.strip():
+        if ref is None:
+            continue
+        # ⚠️ A non-string ELEMENT is the same malformed-evidence class as a
+        # non-list container, and it used to be dropped in silence: the value is
+        # in `_DECLARED_PROPS` (so it never reaches `undeclared`), it is not a
+        # ref this set holds (so it never reaches a residual), and the duplicate
+        # was deleted with it. Refuse instead — "could not read" is not "nothing
+        # there".
+        if not isinstance(ref, str):
+            return None
+        if ref.strip():
             refs.add(ref.strip())
     return refs
 
@@ -559,6 +572,20 @@ def assert_evidence_vocabulary() -> None:
             f"does not read (so a fold would DESTROY them): {missing}. Add "
             "them to `_OCCURRENCE_ADDRESS`/`_SINGLE_SLOTS` (and to the "
             "`_EVIDENCE_SELECT` list).")
+    # ⚠️ DECLARED is not SELECTED. Declaring a field is what keeps it out of
+    # `undeclared`; only the SELECT puts it in front of this module. A field
+    # added to both `_CAPTURE_PASSTHROUGH_ORDER` and `_OCCURRENCE_ADDRESS` but not
+    # to `_EVIDENCE_SELECT` therefore passed the check above, was never read, was
+    # never carried and never reported — and the read itself would fail to unpack
+    # a 13-column row. This half is the one that makes "reads every field the
+    # contract declares" true.
+    declared |= {write_key for _, write_key in _SINGLE_SLOTS}
+    unselected = sorted(k for k in declared if f".{k}" not in _EVIDENCE_SELECT)
+    if unselected:
+        raise AssertionError(
+            "#9437: this fold DECLARES evidence fields its read does not "
+            f"SELECT, so they are neither carried nor reported: {unselected}. "
+            "Add them to `_EVIDENCE_SELECT` (both reads share it).")
 
 
 def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
@@ -625,10 +652,16 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         # collapse drops. Naming them the other way round is the same lie in
         # reverse — the first draft of this clause named `validFrom` as the
         # traveller and a test asserting the WRITTEN value caught it.
+        # ⚠️ The SUBJECT is the SECOND SPELLING, not the field: the sinks prefix
+        # every residual with "did not carry ", and a subject of `validFrom`
+        # produced "copied validFrom; did not carry validFrom (as when)" — the
+        # contradiction this clause exists to remove, one level up. `validFrom`
+        # WAS carried (as `when`); what did not survive is the duplicate's second
+        # spelling.
         slot_conflicts.append(
-            f"validFrom (as when) — the duplicate held both ({when!r} and "
-            f"{validfrom!r}) for one slot, so only {when!r} travelled; "
-            f"{validfrom!r} went with the node")
+            f"the duplicate's second validFrom (as when) spelling — it held "
+            f"both ({when!r} and {validfrom!r}) for one slot, so only "
+            f"{when!r} travelled; {validfrom!r} went with the node")
 
     # The span is an ADDRESS, and "half an address" is only ONE of the ways a
     # duplicate's own evidence can be unwritable. `validate_span` is the ONE home
@@ -651,7 +684,7 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
                              params={"dup": dup_id}).result_set
     except Exception:
         return None
-    attachments: list[tuple[str, str, str, float | None]] = []
+    attachments: list[tuple[str, str, str, Any]] = []
     unaddressable: list[tuple[str, str]] = []
     unexpected: list[tuple[str, str]] = []
     provenance_targets: list[str] = []
@@ -677,8 +710,13 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         # message names what it found.
         label = _CARRIABLE_ATTACHMENT_LABELS.get(rel) or label
         if isinstance(target_id, str) and target_id.strip():
-            conf = confidence if isinstance(confidence, (int, float)) else None
-            attachments.append((rel, label, target_id.strip(), conf))
+            # ⚠️ The RAW value: converting a non-numeric grading to `None` made
+            # `_carried`'s comparison (`grading != confidence`) skip it, so the
+            # duplicate's grading died on an `ok=True` fold with no clause. It is
+            # reported as a residual instead, and the WRITE door still receives a
+            # number (a string passed there would be a type error deep in a
+            # writer).
+            attachments.append((rel, label, target_id.strip(), confidence))
         else:
             unaddressable.append((rel, label))
     try:
@@ -1155,9 +1193,13 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
     failures: list[str] = []
     for rel, label, target_id, confidence in evidence.attachments:
         try:
-            created = link_entity(proj, "Point", canonical_id, target_id,
-                                  edge_type=rel, target_label=label, sdk=sdk,
-                                  confidence=confidence)
+            created = link_entity(
+                proj, "Point", canonical_id, target_id,
+                edge_type=rel, target_label=label, sdk=sdk,
+                # ⚠️ A malformed grading is DISCLOSED above and never handed to
+                # the writer, whose parameter is typed as a number.
+                confidence=(confidence
+                            if isinstance(confidence, (int, float)) else None))
             # ⚠️ COUNTED HERE, before the read-back: `created` is what the WRITER
             # reported, and the read-back below can RAISE. Counting after it left
             # `created: 0` on a refusal that had already added the link, so the
@@ -1187,8 +1229,15 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
         # so when the canonical already held this link the duplicate's
         # `confidence` is still on the duplicate — about to be deleted. That
         # is reported, never claimed as carried.
-        if confidence is not None and grading != confidence:
-            out["residual"].append(f"confidence of {rel}→{label}")
+        if confidence is not None:
+            if not isinstance(confidence, (int, float)):
+                # Named with the VALUE: "confidence of X→Y" over a string says
+                # nothing an operator can act on.
+                out["residual"].append(
+                    f"confidence of {rel}→{label} (not a number: "
+                    f"{confidence!r})")
+            elif grading != confidence:
+                out["residual"].append(f"confidence of {rel}→{label}")
     if failures:
         out["reason"] = "link_not_carried"
         # The COUNT first: naming three of seven is a partial fact, and the rest
