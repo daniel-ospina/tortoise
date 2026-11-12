@@ -925,41 +925,97 @@ COMPARISON_RE = re.compile(r"==|!=|=~|(?<![-\w])=|-eq|-ne|-gt|-lt")
 #: tools with `pg_restore` never checked (measured, round-15 review 2).
 PATTERN_MATCHER_RE = re.compile(r"\bcase\b|\b(?:(?:e|f)?grep|awk|expr)\b")
 
-#: A copy of the loop variable into another name (`t=$tool`), which the guard
-#: cannot follow: the line that COMPARES `$t` mentions neither the loop variable
-#: nor a selection. Measured GREEN (round-15 review 2) with both tools credited:
-#:     t=$tool; if [ "$t" = pg_dump ]; then version="$("$tool" --version)"; fi
-#: Only an assignment whose WHOLE VALUE is the variable counts — the pin's own
-#: `version="$("$tool" --version)"` assigns a command's OUTPUT, not the name.
-def _copies_loop_var(line: str, var: str) -> bool:
-    """Does this line assign the loop variable ITSELF to another name?"""
+#: A copy of the loop variable into another name (`t=$tool`, `log="$tool"`).
+#: ⛔ A COPY IS NOT A SELECTION ON ITS OWN (#12069 review 3). The previous cut
+#: returned True on the copy LINE, so a body that used the variable as a FILE NAME
+#: — `log="$tool"` then `>> "$blah/$log.txt"` — lost its coverage and the row red
+#: a body that checks every tool unconditionally (measured false RED). What the
+#: copy does is make the loop variable reachable under ANOTHER NAME, which the
+#: line that actually COMPARES mentions (`[ "$t" = pg_dump ]`). So the copy is
+#: resolved by substitution, one level (`_selects_on_var`), not refused.
+#: Only an assignment whose WHOLE VALUE is the variable records a copy — the pin's
+#: own `version="$("$tool" --version)"` assigns a command's OUTPUT, not the name.
+def _copied_to(line: str, var: str) -> str | None:
+    """The alias this line copies the loop variable into, or None."""
 
-    ref = r"\$\{" + re.escape(var) + r"\}|\$" + re.escape(var) + r"(?!\w)"
-    return bool(
-        re.search(
-            r"(?:^|[;&|]|\b(?:local|export|declare|readonly|typeset)\b)\s*"
-            r"[A-Za-z_]\w*=\s*[\"']?(?:" + ref + r")[\"']?\s*(?:$|[;&|])",
+    ref = r"(?:\$\{" + re.escape(var) + r"\}|\$" + re.escape(var) + r"(?!\w))"
+    match = re.search(
+        r"(?:^|[;&|]|\b(?:local|export|declare|readonly|typeset)\b)\s*"
+        r"(?P<alias>[A-Za-z_]\w*)=\s*[\"']?" + ref + r"[\"']?\s*(?:$|[;&|])",
+        line,
+    )
+    return match.group("alias") if match else None
+
+
+def _with_aliases(line: str, aliases: list[str], var: str) -> str:
+    """Rewrite `$alias` / `${alias}` back to the loop variable, ONE level deep."""
+
+    for alias in aliases:
+        line = re.sub(
+            r"\$\{" + re.escape(alias) + r"\}|\$" + re.escape(alias) + r"(?!\w)",
+            "$" + var,
             line,
         )
-    )
+    return line
 
 
-#: The CONDITION itself: a `[ … ]` / `[[ … ]]` group. A line that COMPARES one
-#: variable may well MENTION the loop variable in its message branch —
+def _with_aliases_each(body: list[str], var: str) -> list[str]:
+    """The body with every loop-variable alias rewritten back to the variable."""
+
+    aliases = [alias for alias in (_copied_to(line, var) for line in body) if alias]
+    return [_with_aliases(line, aliases, var) for line in body]
+
+
+#: The CONDITION itself: the `[ … ]` / `[[ … ]]` groups on a line. A line that
+#: COMPARES one variable may well MENTION the loop variable in its message branch —
 #: `if [ "$major" != "16" ]; then echo "::error::$tool"; exit 1; fi` — and a
 #: line-level test read that as a selection on `$tool` and refused a body that
 #: checks both tools unconditionally (measured false RED, round-15 review 2).
-#: Only the SPAN of the condition is searched for the loop variable.
+#: Only the SPANS of the conditions are searched for the loop variable.
+#: ⛔ EVERY SPAN, NOT THE FIRST (#12069 review 3). `search()` graded only the
+#: leading group, so a selection in a SECOND one was invisible and both tools were
+#: credited with `pg_restore` never checked:
+#:     if [ -n "$PG" ] && [ "$tool" = pg_dump ]; then … fi
+#: — the #12051 fail-open, and a REGRESSION from the line-level test it replaced
+#: (that one refused it). `finditer` grades each group on its own.
 BRACKET_SPAN_RE = re.compile(r"\[\[?[^\]]*\]\]?")
 
 
-def _condition_text(line: str) -> str:
-    """The `[ … ]` / `[[ … ]]` group on this line, or the whole line for `test`."""
+def _condition_spans(line: str) -> list[str]:
+    """Every `[ … ]` / `[[ … ]]` group on this line, or the whole line for `test`.
 
-    span = BRACKET_SPAN_RE.search(line)
-    if span:
-        return span.group(0)
-    return line if re.search(r"\btest\b", line) else ""
+    `") ]"`, an unbalanced bracket and a `]` inside a quoted string are read as
+    span boundaries this guard cannot see through — the safe direction, because a
+    span it mis-splits is one it will not credit.
+    """
+
+    spans = [match.group(0) for match in BRACKET_SPAN_RE.finditer(line)]
+    if spans:
+        return spans
+    return [line] if re.search(r"\btest\b", line) else []
+
+
+def _matches_on(text: str, matcher: re.Match[str], ref: re.Pattern[str]) -> bool:
+    """Does this PATTERN MATCHER operate on the loop variable or a client name?
+
+    ⛔ A MATCHER ANYWHERE ON THE LINE IS NOT A SELECTION (#12069 review 3). The
+    previous cut read `PATTERN_MATCHER_RE.search(line)` line-wide, so a body that
+    merely PIPES THROUGH a tool —
+
+        v="$("$tool" --version | awk '{print $3}')"     # a version extractor
+        echo "::error::$tool is major $major - grep the log"
+
+    — was read as selecting, both tools were discredited, and the row red a body
+    that checks every tool unconditionally (measured). Only the matcher's OWN
+    operand counts: from the matcher onward the line must name the loop variable
+    or one of the client names. `grep -qx pg_dump` and `awk '$0=="pg_dump"'`
+    still select; `awk '{print $3}'` and `grep -q "16"` do not.
+    """
+
+    tail = text[matcher.start() :]
+    if ref.search(tail):
+        return True
+    return any(re.search(r"\b" + re.escape(tool) + r"\b", tail) for tool in TOOLS)
 
 
 def _selects_on_var(body: list[str], var: str) -> bool:
@@ -979,50 +1035,55 @@ def _selects_on_var(body: list[str], var: str) -> bool:
     still reported BOTH, with `pg_restore` never checked (measured), which is the
     same defect the loop body was introduced to fix (round 11), one level down.
 
-    THREE CUTS OF THIS RULE EACH MISSED A SPELLING, and the misses were all
+    THREE CUTS OF THIS RULE EACH MISSED A SPELLING, and every miss was either
     fail-open (both tools credited, `pg_restore` unchecked) or a false RED on a
     body that DID check both:
 
-        if [ "${tool%_restore}" = pg_dump ]; then … fi   # 1st cut: a TRANSFORM of $tool
-        if printf '%s' "$tool" | grep -qx pg_dump; …     # 1st cut: no operator at all
-        if printf '%s' "$tool" | fgrep -qx pg_dump; …    # 2nd cut: `\bgrep\b` misses fgrep
-        t=$tool; if [ "$t" = pg_dump ]; then …          # 2nd cut: the copy is invisible
-        [ -n "$version" ] || { echo "::error::$tool…"; exit 1; }   # 2nd cut: FALSE RED
+        if [ "${tool%_restore}" = pg_dump ]; then … fi   # cut 1: a TRANSFORM of $tool
+        if printf '%s' "$tool" | grep -qx pg_dump; …     # cut 1: no operator at all
+        if printf '%s' "$tool" | fgrep -qx pg_dump; …    # cut 2: `\bgrep\b` misses fgrep
+        t=$tool; if [ "$t" = pg_dump ]; then …          # cut 2: the copy is invisible
+        [ -n "$version" ] || { echo "::error::$tool…"; exit 1; }   # cut 2: FALSE RED
+        if [ -n "$PG" ] && [ "$tool" = pg_dump ]; …      # cut 3: only the FIRST span
+        v="$("$tool" --version | awk '{print $3}')"     # cut 3: any mention of awk
+        log="$tool"   # … then used as a filename       # cut 3: the copy itself
 
-    So the rule is now: a CONDITION marker (`[`, `[[`, `test`) selects only with a
-    comparison OPERATOR on the same line; a PATTERN MATCHER (`case`, `grep`,
-    `egrep`, `fgrep`, `awk`, `expr`) selects on its own; a brace expansion that
-    TRANSFORMS the value (`${tool%…}`, `${tool#…}`, `${tool/…}`) selects; and a
-    COPY of the loop variable into another name (`t=$tool`) selects, because the
-    guard cannot follow the copy and must not claim coverage it cannot prove.
+    The rule is therefore, per line — with loop-variable ALIASES substituted back
+    in, one level (`_copied_to` / `_with_aliases`), so a copy used only as a file
+    name costs nothing:
+      * a brace expansion that TRANSFORMS the value (`${tool%…}`, `${tool#…}`,
+        `${tool/…}`) selects — every name takes it differently;
+      * a PATTERN MATCHER (`case`, `grep`/`egrep`/`fgrep`, `awk`, `expr`) selects
+        when ITS OWN operand names the loop variable or a client (`grep -qx
+        pg_dump`), NOT merely because the word appears somewhere on the line;
+      * a CONDITION (`[`, `[[`, `test`) selects when ANY of its groups contains
+        both a comparison OPERATOR and the loop variable, so a selection in a
+        second `&&`-joined group is not invisible.
 
     Only a SELECTION on the LOOP VARIABLE counts: a condition on anything else
     (`if [ "$major" != "16" ]`, which is what this job actually writes) does not
     narrow the coverage, and reading it as one would red the correct tree. The
-    brace arm is name-bounded (`${tool` followed by a non-name character), so
-    `${tools_dir}` — a DIFFERENT
-    variable that merely shares a prefix — is not read as a transform of `$tool`
-    (measured false RED, round-15 review 2).
+    brace arm is name-bounded, so `${tools_dir}` — a DIFFERENT variable sharing a
+    prefix — is not read as a transform of `$tool` (measured false RED).
     """
 
     ref = re.compile(
         r"(?P<brace>\$\{" + re.escape(var) + r"(?![A-Za-z0-9_])[^}]*\})"
         r"|\$" + re.escape(var) + r"(?!\w)"
     )
-    for line in body:
-        if _copies_loop_var(line, var):
-            return True
+    for line in _with_aliases_each(body, var):
         match = ref.search(line)
         if not match:
             continue
         brace = match.group("brace")
         if brace is not None and brace != "${" + var + "}":
             return True
-        if PATTERN_MATCHER_RE.search(line):
+        matcher = PATTERN_MATCHER_RE.search(line)
+        if matcher and _matches_on(line, matcher, ref):
             return True
-        condition = _condition_text(line)
-        if condition and COMPARISON_RE.search(condition) and ref.search(condition):
-            return True
+        for span in _condition_spans(line):
+            if COMPARISON_RE.search(span) and ref.search(span):
+                return True
     return False
 
 
@@ -1102,17 +1163,26 @@ def _version_checked_tools(code: str) -> set[str]:
         var = head.group("var")
         body: list[str] = []
         rest = head.groupdict().get("rest") or ""
-        if rest.strip():
-            # The one-line form: the body starts on the header line.
-            scan(rest, var, names)
-            if re.search(r"(?:^|[;&])[ \t]*done\b", rest):
-                continue  # closed on its own line: no body to follow
+        # ⛔ THE ONE-LINE FORM'S BODY IS `rest` (#12069 review 3): the text after
+        # `do` on the header line. It was scanned with `names` regardless, while
+        # `_selects_on_var` only ever saw the lines BELOW — so a selection written
+        # on the `do` line was invisible and both tools were credited although one
+        # is skipped:
+        #     for tool in pg_dump pg_restore; do [ "$tool" = pg_restore ] && continue
+        # `rest` is part of the body for the selection question too.
+        closes_here = bool(re.search(r"(?:^|[;&])[ \t]*done\b", rest))
+        if rest.strip() and closes_here:
+            scan(rest, var, set() if _selects_on_var([rest], var) else names)
+            continue  # closed on its own line: no body to follow
         for body_line in lines[body_start:]:
             if LOOP_END_RE.match(body_line):
                 break
             body.append(body_line)
         # ⛔ A SELECTING BODY COVERS NONE OF THE HEADER'S NAMES (#12069 review P2).
-        credited = set() if _selects_on_var(body, var) else names
+        graded = ([rest] if rest.strip() else []) + body
+        credited = set() if _selects_on_var(graded, var) else names
+        if rest.strip():
+            scan(rest, var, credited)
         for body_line in body:
             scan(body_line, var, credited)
     return checked
@@ -2125,6 +2195,37 @@ VERSION_CHECK_POLARITY = [
         'done',
         {"pg_dump", "pg_restore"},
         "#12069 round-15(2): `$tool` MENTIONED in the branch is not an operand of the condition",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  if [ -n "$PG" ] && [ "$tool" = pg_dump ]; then\n'
+        '    version="$("$tool" --version)"\n'
+        '  fi\ndone',
+        set(),
+        "#12069 round-15(3): a selection in a SECOND `&&`-joined group is not invisible",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do [ "$tool" = pg_restore ] && continue\n'
+        '  version="$("$tool" --version)"\n'
+        'done',
+        set(),
+        "#12069 round-15(3): a selection on the ONE-LINE `do` is part of the body",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  v="$("$tool" --version | awk \'{print $3}\')"\n'
+        'done',
+        {"pg_dump", "pg_restore"},
+        "#12069 round-15(3): a PIPE THROUGH awk is not a selection — the operand decides",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  log="$tool"\n'
+        '  version="$("$tool" --version)"\n'
+        '  printf \'%s\\n\' "$version" >> "$RUNNER_TEMP/$log.txt"\n'
+        'done',
+        {"pg_dump", "pg_restore"},
+        "#12069 round-15(3): a copy used as a FILE NAME selects nothing",
     ),
 ]
 
