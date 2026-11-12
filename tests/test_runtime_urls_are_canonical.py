@@ -397,8 +397,10 @@ RETIRED_HOST_ALLOWLIST = {
 #:       while `DEFAULT_BLOG_ORIGIN`'s `/blog/api/*` calls are EXCLUDED from the
 #:       blog 301 by `_middleware.ts` :334-336 (a redirect would turn a POST into a
 #:       GET), so no branch rewrites them and they answer the ROUTE's own status —
-#:       404, no `Location`, for the paths probed. Re-aiming either changes WHICH
-#:       host answers; it saves no hop, so it is not the same sweep as (a).
+#:       404 for a GET/HEAD probe, and 401 `{"error":"unauthorized"}` with no
+#:       `Location` for the POST the console actually sends. Re-aiming either
+#:       changes WHICH host answers; it saves no hop, so it is not the same sweep
+#:       as (a).
 #: Either way they are a SCOPE deferral, and all ten files they name ARE
 #: in `RETIRED_HOST_ALLOWLIST` with the same kind of reason — recording a count is
 #: not blessing the literal, it is what makes the deferral visible and what forces
@@ -449,7 +451,8 @@ RUNTIME_FILES = (
     # NOT redirected is named as such rather than by a status: `harnesses.js`'s
     # `/skills/<name>.skill` answers 200 on both hosts (identical bytes), while
     # `/blog/api/*` is excluded from the 301 (`:334-336`) and answers the route's
-    # OWN status (404, no `Location`, for the paths probed) — so "a 200" is the
+    # OWN status (404 for a GET/HEAD probe; 401 `{"error":"unauthorized"}`, no
+    # `Location`, for the POST the console sends) — so "a 200" is the
     # `/skills` row's measurement, not a property of the class.
     # The four non-website KEEP rows — `hosted_api.py`'s live CORS allowlist, the
     # two Supabase edge-function public allowlists, and `supabase/config.toml`'s
