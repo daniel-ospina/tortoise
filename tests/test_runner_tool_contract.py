@@ -752,7 +752,7 @@ _SHELL_SEP = re.compile(r"&&|\|\||;&|;|&|\|")
 #: Skipping a keyword can only change the answer when the command AFTER it is a message command,
 #: and a substitution inside that message is still read positionally — so this cannot hide a real
 #: call site, which is the direction that would matter.
-_SEGMENT_KEYWORDS = "then|else|do|elif|if|while|until"
+_SEGMENT_KEYWORDS = "then|else|do|elif|if"
 _SEGMENT_CMD = re.compile(
     r"^(?:-\s+)?(?:run:\s*)?(?:\{\s*|(?:" + _SEGMENT_KEYWORDS + r")\s+)?([A-Za-z_][\w.-]*)"
 )
@@ -810,6 +810,19 @@ def _command_haystacks(line: str) -> list[str]:
     substitution at its own `)`, so the tail of that command is read as raw text; an
     UNBALANCED quote inside a substitution keeps the substitution open to end of line,
     so the tail is read as executable text rather than prose.
+
+    ⛔ AND A MESSAGE IN COMMAND POSITION BEHIND AN UN-SKIPPED PREFIX IS STILL A FALSE
+    POSITIVE (#12088, measured at `600a73193b`): `_SEGMENT_CMD` skips the statement
+    keywords (`then|else|do|elif|if`) and a leading `{`, which is what the loop/branch/
+    `if …; then` shapes need. A message behind any OTHER command-position prefix still
+    reads as a command named by that prefix, so the helper name inside it becomes a
+    HAZARD — `( echo "run tools/<h> by hand" )`, `case x in a) echo … ;; esac`,
+    `! echo …`, `time echo …`, `command echo …`, `function f { echo …; }`. ⛔ PRE-EXISTING
+    on `main`, latent (no such shape in `.github/workflows`), and listed rather than
+    fixed on purpose: the `case` arm needs its trailing `)` handled, which is not a
+    one-line widening, and a widening that gets command position WRONG buys a FALSE
+    NEGATIVE — the fail-open direction this whole gate exists to refuse. Extend the skip
+    with the shape and a pin that measures both directions; never widen it blind.
     """
     haystacks: list[str] = []
     raw: list[str] = []  # the command as written
