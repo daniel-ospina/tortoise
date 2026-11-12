@@ -1505,16 +1505,18 @@ CONDITION_LEAD_RE = re.compile(
 #:         [ -n "$LOG" ] && \
 #:           echo "::notice::$tool = $version"      # a message, not a condition
 #:     — graded as a condition, so a body that checks every tool was REFUSED.
-#: What actually continues a CONDITION is an unclosed test construct. `[[` and `((`
-#: are counted (bare `[` is NOT: it appears inside `${T[0]}`, which is what made the
-#: bracket-matching span rule wrong), quotes are stripped first so a message that
-#: PRINTS `[[` opens nothing, and the depth carries across body lines.
+#: What actually continues a CONDITION is an unclosed test construct. `[[` is counted
+#: (bare `[` is NOT: it appears inside `${T[0]}`, which is what made the
+#: bracket-matching span rule wrong, and `((` is not either — see `_test_depth`),
+#: quoted spans are masked first so a message that PRINTS `[[` opens nothing, and the
+#: depth carries across body lines.
 #: \u26d4 AND THE ESCAPE IS ONE BACKSLASH, NOT TWO (#12069 review 9). Written as
 #: `[^\"\\\\]|\\\\.` the pattern matched TWO literal backslashes then any char, so
 #: `\\\"` was not an escape: a message printing `\\\"[[` left the quote unterminated,
-#: the `[[` was counted and a phantom depth was deposited. `[^\"\\\\]|\\\\.` is
-#: the double-quoted shell string: a run of non-quote-non-backslash, or a backslash
-#: and whatever it escapes.
+#: the `[[` was counted and a phantom depth was deposited. `[^\"\\]|\\.` is the
+#: double-quoted shell string: a run of non-quote-non-backslash, or a backslash and
+#: whatever it escapes. (The two literals differ by exactly the doubled backslashes —
+#: copied wrong, this paragraph reintroduces the bug it documents.)
 _QUOTED_RE = re.compile(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"")
 
 
@@ -1538,6 +1540,32 @@ def _test_depth(text: str) -> int:
     return bare.count("[[") - bare.count("]]")
 
 
+def _mask_quotes(text: str) -> str:
+    """`text` with every quoted span's CONTENT blanked, LENGTH PRESERVED.
+
+    ⛔ MASK BEFORE SPLITTING, SLICE THE ORIGINAL (#12069 review 10). Splitting first
+    cut a quoted message at its own separators, so the fragment carried an
+    unterminated quote that `_QUOTED_RE` could not strip, a `[[` PRINTED inside the
+    message counted as an opener, and the next line was graded as a condition:
+
+        echo "note (see [[ docs)"        # the `(` split inside the message
+        echo "::notice::$tool = $version"   # graded as a selection -> refused
+
+    Blanking the content (keeping the quotes, so the length is unchanged) means a
+    separator or a bracket inside a message is invisible to the split, while the
+    offsets still index the ORIGINAL line — which is what gets graded, because
+    `$tool` is very often inside quotes and blanking it would hide the operand.
+    """
+
+    def blank(span: re.Match[str]) -> str:
+        text_span = span.group(0)
+        if len(text_span) <= 2:
+            return text_span
+        return text_span[0] + " " * (len(text_span) - 2) + text_span[-1]
+
+    return _QUOTED_RE.sub(blank, text)
+
+
 def _comparison_clauses(line: str, *, depth: int = 0) -> tuple[list[str], int]:
     """The clauses of `line` that OPEN a comparison, and the test depth after it.
 
@@ -1549,11 +1577,20 @@ def _comparison_clauses(line: str, *, depth: int = 0) -> tuple[list[str], int]:
     """
 
     graded: list[str] = []
-    for clause in CLAUSE_SPLIT_RE.split(line):
+    masked = _mask_quotes(line)
+
+    def grade(clause: str) -> None:
+        nonlocal depth
         opened = CONDITION_LEAD_RE.match(clause) is not None
         if (opened or depth > 0) and COMPARISON_RE.search(clause):
             graded.append(clause)
         depth = max(0, depth + _test_depth(clause))
+
+    start = 0
+    for separator in CLAUSE_SPLIT_RE.finditer(masked):
+        grade(line[start : separator.start()])
+        start = separator.end()
+    grade(line[start:])
     return graded, depth
 
 
@@ -2996,6 +3033,7 @@ VERSION_CHECK_POLARITY = [
         'for tool in pg_dump pg_restore; do\n'
         '  version="$("$tool" --version)"\n'
         '  echo "a \\"[[ b\\" $tool = $version"\n'
+        '  echo "::notice::$tool = $version"\n'
         'done',
         {"pg_dump", "pg_restore"},
         "#12069 round-9: an ESCAPED quote ends nothing — a `[[` inside it opens no test",
@@ -3023,6 +3061,15 @@ VERSION_CHECK_POLARITY = [
         '  if [ "$rc" != 0 ]; then exit 1; fi\ndone',
         {"pg_dump", "pg_restore"},
         "CONTROL: a comparison on an unrelated variable narrows nothing",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  echo "note (see [[ docs)"\n'
+        '  echo "::notice::$tool = $version"\n'
+        'done',
+        {"pg_dump", "pg_restore"},
+        "#12069 round-10: a `(` or `[[` PRINTED in a message must not split or open a test",
     ),
 ]
 
