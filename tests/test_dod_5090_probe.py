@@ -7167,10 +7167,14 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # was also the ONE fix in this PR with no distinguishing mutant: at the head
     # that was measured — this branch BEFORE the rebase, when the file collected
     # 152 — deleting that line left `3 failed, 148 passed, 1 skipped` in a scratch
-    # copy, byte-identical to the UNMUTATED copy's three failures at that head
-    # (they were **#12045**'s shard-(d) reds, not repo context — see the note
-    # below), i.e. the removal redded NOTHING. ⛔ The count is SCOPED to that head rather
-    # than re-cut, because this file collects 171 now and no run of it can report
+    # copy, byte-identical to the UNMUTATED copy's three failures at that head,
+    # i.e. the removal redded NOTHING. ⛔ That head's three are left
+    # cause-agnostic on purpose: they are NOT #12045's (whose two writers did not
+    # exist until `#11835` landed three days later — attributed below, at the
+    # head where they were actually measured), and a provenance asserted here
+    # would be the false record this note exists to prevent. ⛔ The count is SCOPED
+    # to that head rather than re-cut, because this file collects 171 now and no
+    # run of it can report
     # 152; an unscoped figure here would be the stale-measurement defect §6 of the
     # census doc exists to forbid. What closed the gap is the AST guard below —
     # measured at this tree, deleting the same line ADDS exactly one failure over
