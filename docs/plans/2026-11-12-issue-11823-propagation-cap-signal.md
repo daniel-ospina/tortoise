@@ -301,9 +301,11 @@ unreadable test goes red; drop the closure term from `_reachable_claim_count` wh
   direction-specific, and this bullet named only ONE of the two directions while reading as a general
   control. A NARROWER denominator (or a label-blind numerator, measured -8.0) pushes `no_belief`
   negative or the ratio above 1.0 → the ranges catch it. A WIDER denominator with `belief_present`
-  fixed LOWERS the ratio and RAISES `no_belief` (measured 0.2 / +4) — both in range, invisible to the
-  ranges. That direction is pinned by `test_counts_match_an_independent_query`, which counts the
-  denominator itself; the ranges are the clamp's replacement, not a general mixed-population control.
+  fixed LOWERS the ratio and RAISES `no_belief` — both in range, invisible to the ranges (measured on
+  the §2 fixture: `belief_present=1`, denominator 4→5 gives `pct` 0.25→0.2 and `no_belief` 3→4;
+  #12138 round-4 note — the earlier `0.2 / +4` shorthand read as a delta and is not one). That
+  direction is pinned by `test_counts_match_an_independent_query`, which counts the denominator
+  itself; the ranges are the clamp's replacement, not a general mixed-population control.
 - R7 the new reads make a polled endpoint expensive (`GET /v1/dream/health` is per-request; the
   census traverses every live `:Point` and its `IMPL|NAND` edges) → **two** controls, because the
   first one alone was inadequate:

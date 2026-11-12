@@ -146,8 +146,11 @@ def test_no_belief_stays_inside_its_invariants(sdk):
     * a NARROWER denominator (or a label-blind numerator, measured -8.0) can push
       `no_belief` negative or the ratio above 1.0 — the ranges CATCH it;
     * a WIDER denominator with `belief_present` fixed lowers the ratio and raises
-      `no_belief` (measured 0.2 / +4) — both stay in range, so the ranges CANNOT
-      see it. That direction is pinned by
+      `no_belief` — both stay in range, so the ranges CANNOT see it. Measured on
+      the §2 fixture: `belief_present=1`, denominator 4→5 gives `pct` 0.25→0.2
+      and `no_belief` 3→4. (No `+N` shorthand here: the absolute value is what
+      the assertion sees, and a `+4` reads as a delta that this fixture does not
+      produce.) That direction is pinned by
       `test_counts_match_an_independent_query`, which counts the denominator
       itself.
     """
