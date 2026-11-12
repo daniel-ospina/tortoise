@@ -650,9 +650,17 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # SECOND, broader entry for the same file here ("the #9197 site (`b9d99c5e5`),
     # declared late: it redded the required `test (e)` on `main` while the suite
     # itself passed"), and a duplicated dict-literal key is a hard `ruff` error
-    # (F601) that also means the FIRST key wins silently — so the reviewed narrow
-    # pin below was never in force, and every PR inherited a red
-    # `agent-infra-ci / lint` (#9259). The #9219 rationale it carried is preserved
+    # (F601). ⛔ This comment used to say the FIRST key wins and that the reviewed
+    # narrow pin was "never in force"; a fresh review of `#12265` measured the
+    # opposite, and a dict literal is LAST-wins. At `03cefdbf92` the effective entry
+    # was the NARROW continuation pin (`:582`) and the entry that was silently dead
+    # was the BROAD one (`:490`) — so no reviewed pin was bypassed and the harm was
+    # the red `agent-infra-ci / lint` every PR inherited (#9259), plus a rationale
+    # attached to the entry no reader was using. (`ruff`'s `F601` points at the
+    # SURVIVOR — the repeated key — so following "which one did ruff flag" finds the
+    # row that won; the loser has to be read out of the dict by hand, which is what
+    # `tests/test_dod_5090_probe.py`'s duplicate-key scan now does repo-wide.) The
+    # #9219 rationale it carried is preserved
     # verbatim at that entry, which is the one that matches this file's single
     # mutation site (the `_run_indexer` restoration record).
     # #7017: the engine-probe suite is hermetic — every probe is injected, so

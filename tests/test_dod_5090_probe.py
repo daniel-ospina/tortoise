@@ -8272,7 +8272,8 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
 _DUP_KEY_ROOTS = ("tortoise", "tools", "tests")
 
 
-def _duplicate_constant_key_sites(source: str) -> list[tuple[int, int, str]]:
+def _duplicate_constant_key_sites(
+        source: str, filename: str = "<string>") -> list[tuple[int, int, str]]:
     """`(first_lineno, duplicate_lineno, key)` for every duplicated dict-literal key.
 
     The `seen` map is keyed on the VALUE, not on a type-prefixed spelling of it, so
@@ -8287,9 +8288,16 @@ def _duplicate_constant_key_sites(source: str) -> list[tuple[int, int, str]]:
     duplicate that is not one. `**splat` in a literal parses as a `None` entry in
     `node.keys`, not a Constant, so it is skipped rather than mistaken for the key
     `None`.
+
+    ⚠️ Scope, stated so this is not mistaken for a total: a SIGNED literal key
+    (`{-1: 'a', -1: 'b'}`) parses as `UnaryOp(USub, Constant)`, not a Constant, so
+    it sits outside this population (measured: zero such dict keys under the three
+    scanned roots today). `filename` is threaded into `ast.parse` so an
+    unparseable module names ITSELF instead of `<unknown>` — the same "a hole is a
+    hole, not a zero" rule this file's predicate-count test states.
     """
     sites: list[tuple[int, int, str]] = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(ast.parse(source, filename=filename)):
         if not isinstance(node, ast.Dict):
             continue
         seen: dict[object, int] = {}
@@ -8346,14 +8354,20 @@ def test_no_module_declares_the_same_dict_key_twice():
     """
     violations: list[str] = []
     scanned = 0
-    for root in _DUP_KEY_ROOTS:
-        for path in sorted(Path(root).rglob("*.py")):
-            if ".worktrees" in path.parts:
+    # ⛔ THE REPO ROOT COMES FROM THE FILE, NOT THE CWD (#12265 review):
+    # `Path(root).rglob` resolves against the invocation directory, so a run from
+    # `tests/` scanned 0 modules and red this guard on a CORRECT tree. Every other
+    # repo-root read in this module uses `probe.REPO_ROOT` for the same reason.
+    root = Path(probe.__file__).resolve().parent.parent
+    for name in _DUP_KEY_ROOTS:
+        for path in sorted((root / name).rglob("*.py")):
+            rel = path.relative_to(root)
+            if ".worktrees" in rel.parts:
                 continue
             scanned += 1
             for first, duplicate, key in _duplicate_constant_key_sites(
-                    path.read_text(encoding="utf-8")):
-                violations.append(f"{path}:{duplicate} re-declares key {key} (first at :{first})")
+                    path.read_text(encoding="utf-8"), str(rel)):
+                violations.append(f"{rel}:{duplicate} re-declares key {key} (first at :{first})")
     # A scan that read nothing would satisfy the assertion below vacuously.
     assert scanned > 1000, f"the duplicate-key scan covered only {scanned} module(s)"
     assert not violations, (
