@@ -181,7 +181,15 @@ def test_a_goal_belief_really_moved_so_the_explanation_is_about_a_move(sdk):
     # neither in the chain nor in the assessment (the assessment query filters
     # on liveness, not on "the newest row").
     blocks = assemble_why_blocks(sdk._get_proj(), [goal["id"]])
-    assessment = blocks[goal["id"]]["assessment"][0]
+    assessments = blocks[goal["id"]]["assessment"]
+    # ⛔ THE COUNT IS THE LIVENESS PIN, not the identity: a mutant that drops
+    # `_live_only('j.status')` from the assessment read leaves TWO candidates,
+    # and the identity assertions below still pass because the newest sorts
+    # first — measured (mutation pass F1). Only the count moves.
+    assert len(assessments) == 1, (
+        "a SUPERSEDED judgement is being reported as a live verdict: "
+        + repr([a["judgement_id"] for a in assessments]))
+    assessment = assessments[0]
     assert assessment["judgement_id"] == unmet["point_id"]
     assert assessment["state"] == "unmet"
     assert assessment["judgement_id"] != met["point_id"]
@@ -191,6 +199,27 @@ def test_a_goal_belief_really_moved_so_the_explanation_is_about_a_move(sdk):
     assert ep["has_ep"] is True, (
         "the goal's belief is EP's, but the ep read reported it unmeasured: "
         + repr(ep))
+
+
+def test_a_retired_judgement_is_not_reported_as_a_live_verdict(sdk):
+    """The assessment read's LIVENESS filter, pinged where it is load-bearing.
+
+    The flip test above cannot reach it: `supersede_point` TRANSFERS the
+    predecessor's operator edge (#6180), so a superseded judgement stops matching
+    the wiring read at all and the filter is never exercised. This fixture
+    retires the judgement WITHOUT a transfer (a hand `update_entity(status=…)`,
+    and the shape an Object supersession leaves before #11826) — the arrow still
+    points at the goal, so only `_live_only('j.status')` can drop it.
+    """
+    _indicator, _target, goal = _world(sdk, tag="retired")
+    recorded = _judge(sdk, _indicator, _target, goal, 12.0,
+                      at="2026-11-11T10:00:00Z")
+    sdk.update_entity(recorded["point_id"], status="superseded")
+
+    block = assemble_why_blocks(sdk._get_proj(), [goal["id"]])[goal["id"]]
+    assert not block.get("assessment"), (
+        "a RETIRED judgement is being reported as the goal's live verdict: "
+        + repr(block.get("assessment")))
 
 
 # ── 2. a READING (an :Event) is explainable ───────────────────────────────
@@ -403,6 +432,12 @@ def test_an_eventId_only_event_is_not_explainable_and_that_is_recorded(sdk):
     Pinned so a future widening is a DECISION: if the anchor starts resolving a
     coalesced key, this test reds and its docstring says what that costs
     (``eventId`` is not unique — #8879).
+
+    ⚠️ The flip needs BOTH halves of the anchor — ``WHERE n.id IN $ids`` AND
+    ``RETURN n.id`` — because the returned value is the block's key: widening
+    only the WHERE leaves ``n.id`` null, so no block is emitted and this row
+    stays green (measured, mutation pass F6). That is correct: a half-widening is
+    not user-visible, so it must not be pinnable as if it were.
     """
     claim = sdk.create_point("statement", "a claim with a keyless counter-claim")
     sdk._get_proj().g.query(
@@ -419,6 +454,65 @@ def test_an_eventId_only_event_is_not_explainable_and_that_is_recorded(sdk):
              .get("conflicts") or {}).get("nands") or []
     assert [n["content_snippet"] for n in nands] == ["a keyless reading"], (
         "the keyless Event must still surface as a TRAVERSAL position: " + repr(nands))
+
+
+def test_the_fusion_order_is_total_so_row_order_cannot_decide(sdk):
+    """ROUND-2 FIX, PINNED (#11928 mutation pass F2).
+
+    Each assembler sorts on ``(weight is None, -weight, point_id, FUSION KEY)``.
+    The last component is the INTERNAL node id — the same key the fusion dedupes
+    on — because ``point_id`` alone is NOT unique (two distinct ``:Event``s can
+    emit the same ``coalesce(id, eventId)``). Dropping it makes the order depend
+    on Cypher row order, and NOTHING caught that: the mutation left 105 tests
+    green across the three changed test files.
+
+    Two assertions, and they are different instruments on purpose:
+      * BEHAVIOUR — two supporters whose display ids collide come out in
+        ascending internal-node-id order (the fused order, not the arrival one);
+      * SOURCE — every selection sort in this module actually ends on the fusion
+        key. A behavioural row alone cannot be made to discriminate reliably,
+        because whether the engine's raw row order happens to match the internal
+        id order is not something a fixture can control; the source pin is what
+        makes deleting the term red.
+    """
+    import inspect
+
+    import tortoise.why as why_mod
+
+    # SOURCE: all three selection sorts end on the fusion key.
+    src = inspect.getsource(why_mod)
+    for fn in ("_assemble_supports", "_assemble_conflicts", "_assemble_tradeoffs"):
+        body = inspect.getsource(getattr(why_mod, fn))
+        assert "kv[1][\"point_id\"], kv[0])" in body, (
+            f"{fn}'s sort no longer ends on the fusion key (the internal node "
+            "id) — the order becomes row-order dependent (see this test)")
+    total_sorts = src.count("kv[1][\"point_id\"], kv[0])")
+    assert total_sorts == 3, (
+        f"expected exactly three total selection sorts in why.py, found {total_sorts}")
+
+    # BEHAVIOUR: colliding display identities, fused order by internal id.
+    claim = sdk.create_point("statement", "the fused-order claim")
+    g = sdk._get_proj().g
+    g.query("CREATE (e:Event {id:'DUP', name:'dup A', eventKind:'note', "
+            "status:'live'})")
+    g.query("CREATE (e:Event {eventId:'DUP', name:'dup B', eventKind:'note'})")
+    for pattern in ("{id:'DUP'}", "{eventId:'DUP'}"):
+        g.query(
+            f"MATCH (a:Event {pattern}), (t) WHERE t.id = $t "
+            "CREATE (a)-[:NAND]->(t)", params={"t": claim["id"]})
+    internal = {
+        row[0]: row[1] for row in g.query(
+            "MATCH (a:Event), (t) WHERE t.id = $t "
+            "MATCH (a)-[:NAND]->(t) "
+            "RETURN a.name, id(a)", params={"t": claim["id"]}).result_set
+    }
+    block = assemble_why_blocks(sdk._get_proj(), [claim["id"]])[claim["id"]]
+    order = [n["content_snippet"] for n in
+             (block.get("conflicts") or {}).get("nands") or []]
+    assert len(order) == 2, f"both counter-claims must fuse: {order}"
+    assert order == sorted(order, key=lambda name: internal[name]), (
+        "the chain order is not the fused (internal-id) order: "
+        f"{order} vs {sorted(order, key=lambda n: internal[n])}")
 
 
 # ── 5. bounded: budget + a fixed read count ───────────────────────────────
@@ -509,3 +603,13 @@ def test_the_enriched_item_and_ask_entry_carry_the_assessment(sdk, monkeypatch):
         "an item enriched ONLY with an assessment must still project to a why "
         "entry — the gate checks every dimension it can emit")
     assert entry["assessment"] == items[0]["assessment"]
+    # ⛔ THE GATE CLAUSE, DIRECTLY. The fixture above also carries why/conflicts,
+    # so deleting `"assessment" not in item` from `item_to_why_entry`'s gate left
+    # that row GREEN (measured, mutation pass F4). This row is the one that
+    # isolates the clause: an item whose ONLY enrichment is an assessment.
+    only_assessment = {"id": goal["id"],
+                       "assessment": [{"judgement_id": recorded["point_id"]}]}
+    isolated = item_to_why_entry(only_assessment)
+    assert isolated is not None and isolated["assessment"] == [
+        {"judgement_id": recorded["point_id"]}], (
+        "an assessment-only item was dropped by the projection gate: " + repr(isolated))

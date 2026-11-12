@@ -1440,24 +1440,33 @@ def test_ontology_vocabulary_registered():
     # conflicts / supersession / tradeoffs / dig_deeper / warnings) must be
     # registered as response-contract vocabulary — drift between the code's
     # enriched-item keys and the ontology row would otherwise pass silently.
-    # Pinned as ONE row literal (three of the six keys also appear elsewhere
-    # in ONTOLOGY.md, so per-key presence-anywhere scans would pass a row
-    # that silently dropped them).
-    assert "why-block sections" in text
-    sections_row = "why · conflicts · supersession · tradeoffs · dig_deeper · warnings"
-    assert sections_row in text, \
-        "ontology §5 why-block sections row drifted from the W4_KEYS vocabulary"
+    #
+    # ⛔ THE ROW IS PARSED OUT OF THE DOC, not compared to a literal this test
+    # holds (#11928 review, mutation pass F3). The earlier form asserted the
+    # literal `"why · conflicts · …"` was a SUBSTRING of the doc and then
+    # compared `W4_KEYS` against that literal — so the only thing it could catch
+    # was a doc row that stopped containing the old substring, and it could never
+    # see the doc CATCH UP. Now `row_keys` comes from the document's own line, so
+    # both directions are live: a key the code stopped emitting, and a row that
+    # registered one early.
+    row_line = next(
+        (line for line in text.splitlines() if line.startswith("why-block sections")),
+        None)
+    assert row_line is not None, "ontology §5 has no why-block sections row"
+    row_keys = {k.strip() for k in row_line.split(maxsplit=2)[2].split("#")[0]
+                .split("·") if k.strip()}
     # ⛔ #11928 — `assessment` is a NEW emitted key and is NOT yet in the §5 row:
     # registering it is an ONTOLOGY.md edit, which #11928's brief puts out of
     # scope (the owner approves ONTOLOGY content). Leaving the row alone while
     # W4_KEYS grew is EXACTLY the drift this test exists to catch, so the delta
-    # is asserted explicitly instead of being allowed to pass silently — and it
-    # fails the day a key is added or the row catches up, which is the point.
-    row_keys = {k.strip() for k in sections_row.split("·")}
-    assert set(W4_KEYS) == row_keys | {"assessment"}, (
-        "enriched-item keys and the ONTOLOGY §5 why-block sections row have "
-        "drifted by something other than #11928's unregistered `assessment`: "
-        f"keys={sorted(set(W4_KEYS))} row={sorted(row_keys)}")
+    # is named explicitly instead of being allowed to pass silently — and it
+    # FAILS WHEN THE ROW CATCHES UP, which is when this exemption must be deleted.
+    assert row_keys == set(W4_KEYS) - {"assessment"}, (
+        "the ONTOLOGY §5 why-block sections row is not exactly the enriched-item "
+        "key set minus #11928's unregistered `assessment` "
+        f"(keys={sorted(set(W4_KEYS))} row={sorted(row_keys)}). If the row now "
+        "lists `assessment`, drop the exemption here and let the equality be "
+        "exact; if a key was RENAMED, fix the row.")
 
 
 def test_bare_point_empty_conventions(w4_flag):

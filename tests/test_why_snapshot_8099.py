@@ -387,6 +387,33 @@ def test_deleted_point_snapshot_is_dropped_so_a_retraction_carries_no_why():
         assert "why" not in body, body
 
 
+def test_a_non_point_id_is_never_written_so_the_pass_pays_no_churn():
+    """#11928 — the id set is intersected with what this cache can SERVE, before
+    the assembly.
+
+    ``why.assemble_why_blocks`` now returns a block for every epistemic label (a
+    goal ``:Object`` is explainable), but this cache's READ half
+    (``read_blocks``) joins ``:Point``, so a non-Point snapshot could never be
+    served — and ``_vanished`` would delete it on the next pass. Without the
+    pre-assembly filter this pass writes TWO snapshots for one servable id
+    (measured: ``written == 2``), i.e. a write-then-reap cycle on every dream for
+    every non-Point id the EP pass moved.
+    """
+    sdk = _fresh_sdk()
+    planted = _plant_claim(sdk, "Rollout gating decided by the CI reading")
+    proj = sdk._get_proj()
+    _subscribe(sdk)
+    goal = sdk.create_object("CI is fast", objectKind="goal", goalState="active")
+
+    summary = ws.precompute(proj, [planted["claim"], goal["id"]])
+    assert summary["written"] == 1, (
+        "a non-Point id was WRITTEN into a cache that can never serve it: "
+        + repr(summary))
+    rows = proj.g.query(
+        "MATCH (w:WhySnapshot) RETURN w.point_id").result_set
+    assert [r[0] for r in rows] == [planted["claim"]], rows
+
+
 def test_dream_pass_precomputes_and_the_push_carries_post_dream_numbers():
     """Indicators 2+3. FAILING VALUE: a snapshot assembled BEFORE the EP pass
     (so the push serves the pre-dream belief), or a precompute that never runs
