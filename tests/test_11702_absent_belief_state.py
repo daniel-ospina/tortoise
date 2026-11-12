@@ -6014,9 +6014,11 @@ _MIRROR_NEGATED = re.compile(
 #: n.confidence mirrors` was never scanned while an unrelated singular
 #: possessive certified the sentence; `\bmirrors?\b` left `mirrored` /
 #: `mirroring` equally invisible to the scan, and the corpus writes those 39
-#: times across 38 (module, sentence) pairs — 37 distinct sentence STRINGS, one
-#: of which appears in two modules (measured; both figures are right under their
-#: own convention, so the unit is stated rather than a figure "corrected") — so
+#: OCCURRENCES across 38 sentence instances (one instance carries two of them),
+#: 37 distinct (module, sentence) pairs and 37 distinct sentence strings — the
+#: duplicate is the SAME string in two comment blocks of `search_engine.py`, not
+#: in two modules (measured; the units are stated because "38 sentences" and
+#: "37 distinct sentences" are both true under their own convention) — so
 #: the wording is IN-TREE for the next claim
 #: sentence (measured: widening changes 0 corpus verdicts — every corpus claim
 #: sentence uses the singular possessive). A plural POSSESSIVE (`mirrors'
@@ -6095,7 +6097,8 @@ def _mirror_refusal_reason(sentence: str) -> str:
     _denial = ("names the mirror in a NEGATED clause — a clause carrying a "
                "mirror mention must not hold any negator from "
                "`_MIRROR_NEGATED` (`not` / `never` / `neither` / `nor` / "
-               "`no longer` / `cannot` / any `-n't` contraction); if that "
+               "`no longer` / `cannot` / any `-n't` contraction / the "
+               "negative prepositions `instead of` and `without`); if that "
                "word negates something else, reword so it is not in the same "
                "clause as a mirror mention")
     _missing = ("names a mirror but NOT as the value's source — it uses no "
@@ -6230,15 +6233,22 @@ def _mirror_sources_the_value(sentence: str) -> bool:
          The mirror's possessive construct is present and un-denied, so the
          positive leg is satisfied, while the relation is INVERTED by the
          connective: `…the pair leads rather than the mirror's value`,
-         `…instead of the mirror's value`, `…unlike the mirror's value, the pair
-         leads`, `…whereas the mirror's value is consulted`. All are CERTIFIED
-         (measured) and all are pinned in the `known_false_pass` loop.
+         `…unlike the mirror's value, the pair leads`, `…whereas the mirror's
+         value is consulted`. All three are CERTIFIED (measured) and each is
+         pinned by a `known_false_pass` row labelled residual 4.
+         ⛔ `…instead of the mirror's value` is NOT in this list: it is REFUSED,
+         because `instead of` / `without` are carried by `_MIRROR_NEGATED`
+         (measured). An earlier revision listed it here as certified AND as
+         pinned in the loop, while the code refused it and the loop held no such
+         row — the ledger disagreeing with the code it describes, which is what
+         this whole change exists to stop.
          Same class as residual 3 — the offending word is a connective whose
-         inventory is open-ended ("unlike", "whereas", "instead of", "rather
-         than", "as opposed to", …), so closing one only names the next. It is
-         disclosed separately from 3 because the positive leg MATCHES here: a
-         reader checking only `_MIRROR_SOURCE` would conclude these sentences
-         are covered.
+         inventory is open-ended ("unlike", "whereas", "rather than", "as
+         opposed to", …), so closing one only names the next; the two
+         prepositions are the ones a LIST can own, and it does. It is disclosed
+         separately from 3 because the positive leg MATCHES here: a reader
+         checking only `_MIRROR_SOURCE` would conclude these sentences are
+         covered.
 
     A green run therefore means "every shipped claim names the mirror as the
     value's source, un-denied IN THE CONSTRUCT'S OWN CLAUSE", never "no
@@ -6552,6 +6562,13 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
     assert _SENTENCE_END.split("A claim, e.g. a prior. A second one.") == [
         "A claim, e.g. a prior.", "A second one."], \
         "the splitter tears `e.g.`"
+    # …and `cf.`, the THIRD abbreviation in the shared list. Without this row the
+    # constant's comment claimed a property nothing pinned: dropping `cf.` from
+    # `_SENTENCE_END` alone (a copy-pasted second list, the exact failure the
+    # comment describes) left the whole control test GREEN (review, measured).
+    assert _SENTENCE_END.split("A claim, cf. a prior. A second one.") == [
+        "A claim, cf. a prior.", "A second one."], \
+        "the splitter tears `cf.`"
     assert len(_sentences("tortoise/search_engine.py")) > 100, \
         "the splitter has stopped splitting — the mirror-guards are vacuous"
     # …and the mirror-guards must FIRE end-to-end on an unqualified sentence,
@@ -6999,68 +7016,71 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
     assert "which leads" not in _mirror_refusal_reason(
         "Its confidence_mean IS the PRIOR mean; the mirror loses to the pair."), \
         "the diagnosis names a relative-clause shape the guard REFUSES"
-    # ⛔ PINNED ONLY AS A DISCLOSURE — a KNOWN false PASS, residual 2 of
-    # `_mirror_sources_the_value`: a denial in a LATER clause of the same
-    # sentence is beyond the scanned span, because a `_CLAUSE_BREAK` ends it.
-    # Closable only at the cost of refusing the shipped `why.py` row, whose
-    # trailing `— never a measured one` denies `measured`, not the mirror.
-    # If this starts being REFUSED, delete this row AND the residual it names.
-    for known_false_pass in (
-            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
-            "value is real but it is never the served one.",
-            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
-            "value — is not the value the field reads.",
+    # ⛔ PINNED ONLY AS A DISCLOSURE — the KNOWN false PASSes of
+    # `_mirror_sources_the_value`. Each row carries the residual it pins, and the
+    # failure message names THAT one: an earlier version said "the residual-2
+    # disclosure is stale" for all of them, so following it on a red row would
+    # have deleted residual 2 while leaving the residual the row actually pins
+    # unedited — advice that corrupts the ledger it is trying to keep honest
+    # (review, measured).
+    # If one of these starts being REFUSED, delete that row AND its residual.
+    for _residual, known_false_pass in (
+            ("2", "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+                  "value is real but it is never the served one."),
+            ("2", "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+                  "value — is not the value the field reads."),
             # residual 3's own two examples, pinned so the disclosure cannot go
             # stale: adding `irrelevant|ignored` to `_MIRROR_NEGATED` would
             # close them, and that must red here first (review, measured).
-            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
-            "value is irrelevant.",
-            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
-            "value, which is ignored, applies to a different column.",
+            ("3a", "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+                   "value is irrelevant."),
+            ("3a", "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+                   "value, which is ignored, applies to a different column."),
             # residual 3c: an allow-listed NOUN in ANOTHER SENSE (`number` here
             # counts reads, not the served value). `mirror's number` cannot be
             # dropped from `_MIRROR_SOURCE` — the shipped corpus uses it in the
             # correct sense (`tortoise/sdk.py`) — so this is disclosed and
             # pinned, not narrowed away.
-            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
-            "number of reads is zero.",
+            ("3c", "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+                   "number of reads is zero."),
             # residual 3a, in ITS OWN SENSE — the possesssive construct is
             # PRESENT here and the relation is denied by a predicate verb, which
             # is what 3a actually discloses. The `…; the mirror loses to the
             # pair.` rows elsewhere assert REFUSED, but only because that form
             # has no source construct — a different leg, pinning the OPPOSITE
             # direction from the class 3a names (review, measured).
-            "Its confidence_mean IS the declared PRIOR mean — the mirror's "
-            "value loses to the pair.",
+            ("3a", "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+                   "value loses to the pair."),
             # residual 3b: a bare determiner `no`. The sibling row that reds
             # when `\bno\b` is added to `_MIRROR_NEGATED` pins the TRADE (the
             # correct `no readable mirror supplying one` would be refused);
             # this row pins the residual the trade buys, so it cannot go stale
             # silently if some other edit closes it (review, measured).
-            "Its confidence_mean IS the declared PRIOR mean — no reading of "
-            "the field comes from the mirror's value.",
+            ("3b", "Its confidence_mean IS the declared PRIOR mean — no reading of "
+                   "the field comes from the mirror's value."),
             # residual 4: a CONTRASTIVE CONNECTIVE that inverts the relation
             # while SATISFYING the positive leg (the possessive is present and
             # un-denied), which is why it needs its own disclosure — checking
             # `_MIRROR_SOURCE` alone would read these as covered. One row per
             # connective WORD, since the inventory is open-ended and a single
             # row would pin only itself.
-            "Its confidence_mean IS the declared PRIOR mean — the pair leads "
-            "rather than the mirror's value.",
+            ("4", "Its confidence_mean IS the declared PRIOR mean — the pair leads "
+                  "rather than the mirror's value."),
             # ⛔ `instead of` was a row HERE until it was closed: it is now
             # carried by `_MIRROR_NEGATED` and asserted REFUSED in the inversion
             # block above. This disclosure says so rather than dropping the word
             # silently, so a later narrowing of the denial list has to come back
             # here deliberately. `unlike` / `whereas` stay: they are neither
             # negators nor prepositions a list can own.
-            "Its confidence_mean IS the declared PRIOR mean — unlike the "
-            "mirror's value, the pair leads.",
-            "Its confidence_mean IS the declared PRIOR mean — the pair leads "
-            "whereas the mirror's value is only a fallback."):
+            ("4", "Its confidence_mean IS the declared PRIOR mean — unlike the "
+                  "mirror's value, the pair leads."),
+            ("4", "Its confidence_mean IS the declared PRIOR mean — the pair leads "
+                  "whereas the mirror's value is only a fallback.")):
         assert not _unqualified_claims_on(
             known_false_pass, _PRIOR_MEAN_CLAIM_PATTERNS), (
-            "if this is now REFUSED the residual-2 disclosure is stale — "
-            f"delete this row and the residual: {known_false_pass!r}")
+            f"if this is now REFUSED the residual-{_residual} disclosure is "
+            f"stale — delete this row and residual {_residual}: "
+            f"{known_false_pass!r}")
     # The SIBLING class-2 guard shares this predicate, so it inherited the
     # STRUCTURAL hole: an inversion would have cleared it exactly as it cleared
     # the class-1 guard. MEASURED at `e4703a286a`, `(_ABSENT_CLAIM,)` matches
