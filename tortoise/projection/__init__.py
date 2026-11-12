@@ -1386,7 +1386,7 @@ def _is_bulk_wipe(cypher: str) -> bool:
 # re-point discriminator on the very run that needs them. Re-prepending from
 # the sidecar keeps replay order byte-identical to the uninterrupted case.
 _PREWIPE_SNAPSHOT_FILENAME = ".tortoise-prewipe-snapshot.json"
-_PREWIPE_SNAPSHOT_VERSION = 6
+_PREWIPE_SNAPSHOT_VERSION = 7
 # #2814: v2 adds the `config_snapshot` section. Reading v1 is required
 # (backward compatibility): a rescue file written before this change carries
 # no config record, and the union treats that exactly as the loader does —
@@ -1458,7 +1458,19 @@ _PREWIPE_SNAPSHOT_VERSION = 6
 # makes that build REFUSE the rebuild instead. v1-v5 stay readable (`v5` was
 # written by the #4653 build, and `_SNAPSHOT_ENTRY_CHECK` still refuses a
 # foreign-section file whatever its version says).
-_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3, 4, 5, 6)
+#
+# #9752: v7 adds the `pack_selection` section (the `:PackSelection` per-graph
+# pack-set marker, the class #2728/#8648 declared and #9752 filed rather than
+# absorbing). It takes the next FREE number after v6 (#5353's `team_meta`), by
+# exactly the argument #5353 used to take 6: a v6-aware build reading this file
+# would ignore the section it does not know and let its unconditional wipe land
+# on `:PackSelection` — the fail-open in the direction that DESTROYS an approval
+# decision, and one whose consequence is not cosmetic: the marker's absence
+# makes `resolved_pack_set` fall back to the records/union arms, so a pack an
+# admin REMOVED is re-admitted into the graph's approved set and its `revision`
+# resets. So the version gate is what makes that build REFUSE the rebuild
+# instead. v1-v6 stay readable (`v6` was written by the #5353 build).
+_PREWIPE_SNAPSHOT_READABLE_VERSIONS = (1, 2, 3, 4, 5, 6, 7)
 # Top-level keys that are METADATA, never a preserved class. The
 # unknown-section refusal below subtracts these so it cannot mistake the
 # envelope for a section.
@@ -1475,7 +1487,11 @@ _PREWIPE_SNAPSHOT_META_KEYS = frozenset(
      # written before the class had a vehicle cannot say whether the wipe it
      # followed destroyed one, so the UNKNOWN rides the payload forward rather
      # than being re-derived (and lost) on a second interruption.
-     "team_meta_unknown"})
+     "team_meta_unknown",
+     # #9752: the same carry for the pack-selection marker. A pre-v7 rescue
+     # file cannot say whether the wipe it followed destroyed the marker, so
+     # "absent section" must not be read as "the graph was never configured".
+     "pack_selection_unknown"})
 # #3947 × #3010: `session_snapshot` / `session_point_links` join the durable
 # sidecar for the same reason the #990 `:Batch` marker did — a `:Session`
 # container and its CONTAINS edges are RAW graph writes on the capture path
@@ -1539,7 +1555,32 @@ _SNAPSHOT_SECTIONS = ("synthetic_events", "batch_snapshot",
                       # `_capture_team_meta` for the entry shape and
                       # `_union_prewipe_snapshot` for the at-most-one merge
                       # rule this class needs.
-                      "team_meta")
+                      "team_meta",
+                      # #9752: the `:PackSelection` per-graph pack-set marker.
+                      # Its PRESENCE is the state: it is what makes an
+                      # intentional EMPTY set expressible and what suppresses
+                      # `get_tenant_packs`' self-heal (#2728/#8648). It is
+                      # written with a bare `MERGE (s:PackSelection)` and NO
+                      # identity property — one node per graph, because the
+                      # graph is the isolation boundary — so, exactly like
+                      # `:TeamMeta`, it fits neither the config registry (keyed
+                      # on ONE string identity property; `_capture_config_snapshot`
+                      # silently `continue`s past an instance whose identity is
+                      # not a string) nor a container section. Enrolled as a
+                      # SECTION for that reason — the #9752 decision relay
+                      # records that a registry row would capture NOTHING and
+                      # pass a green sweep while leaving the defect in place.
+                      # Without a vehicle the unconditional wipe drops the
+                      # marker, `resolved_pack_set` falls back to the
+                      # records/union arms, and a pack an admin REMOVED is
+                      # silently re-admitted with `revision` reset — plus the
+                      # Settings copy then claims the catalog union over a set
+                      # that holds that removed namespace (#9691's over-claim,
+                      # reached through a path that has nothing to do with the
+                      # copy). See `_capture_pack_selection` for the entry
+                      # shape and `_pack_selection_marker` for the at-most-one
+                      # merge rule this class needs.
+                      "pack_selection")
 # The sidecar is read whole into memory before the wipe, so an unbounded file
 # (a planted one especially — the log dir is caller-supplied) would exhaust
 # memory on the recovery path. The cap is now WRITER-ENFORCED
@@ -1675,6 +1716,17 @@ def _assert_config_registry_safe() -> None:
             "first-org marker would neither be validated nor written, so a "
             "rebuild would silently destroy the class the `#2789` guard "
             "reads, and a later provisioning call would re-mint it (#5353)"
+        )
+
+
+    if "pack_selection" not in _SNAPSHOT_SECTIONS:
+        raise RuntimeError(
+            "`pack_selection` is not in _SNAPSHOT_SECTIONS — the `:PackSelection` "
+            "marker (the node whose PRESENCE pins a graph's pack set, #2728) "
+            "would neither be validated nor written, so a rebuild would "
+            "silently drop the marker, `resolved_pack_set` would fall back to "
+            "the records/union arms, and a pack an admin REMOVED would be "
+            "re-admitted with its `revision` reset (#9752)"
         )
 
 
@@ -2196,6 +2248,140 @@ def _team_meta_marker(entries) -> dict | None:
     return min(candidates, key=_team_meta_order)
 
 
+# #9752: the one place THIS module names the pack-selection marker. `pack_state`
+# owns the writer and declares the label (`PACK_SELECTION_LABEL`), but importing
+# it here would be the module cycle `_config_classes` documents (projection →
+# pack_state → sdk → projection), so the literal is repeated and pinned by
+# `test_pack_selection_section_and_validator_are_wired` instead.
+_PACK_SELECTION_LABEL = "PackSelection"
+
+
+def pack_selection_shape(counts: dict) -> tuple[str, str]:
+    """Name WHICH `:PackSelection` gap shape this is, and what it means.
+
+    A non-zero `pack_selection_gap` is reported for four different states and
+    only ONE of them is an observed loss. Every consumer that printed the count
+    used to hardcode the absence consequence ("reads as UNCONFIGURED, its
+    `revision` is 0, a pack the admin REMOVED is back", plus a "re-pin"
+    remedy), which is a FALSE report on the other three — and on the CONFLICT
+    shape the remedy would overwrite a live marker that may be NEWER than the
+    one captured (review rounds 2-5 found this same collapse at seven different
+    sites). Three of the four reporters now call this function — the two
+    recovery callers and `migrate_db`; the `rebuild` CLI keeps its own pinned
+    chain, stated in `migrate_db._pack_selection_shape`'s docstring.
+
+    Order matters: CONFLICT first (a live marker is an OBSERVATION, so it
+    outranks a dearth of information — the two can be true at once), then
+    UNKNOWN (a sidecar that cannot say), then UNVERIFIED (the read never
+    produced a result), then the true restore gap.
+
+    Returns ``(label, consequence)`` for the caller's message.
+    """
+    counts = counts or {}
+    # ⛔ CONFLICT is tested BEFORE UNKNOWN: a live marker is an OBSERVATION,
+    # while UNKNOWN is a dearth of information. Both can be true at once (a v6
+    # leftover — `state_unknown` — merged with a live capture, then a concurrent
+    # `set_graph_packs` landing between the wipe and the restore), and reporting
+    # UNKNOWN there would claim "the graph may read as UNCONFIGURED" over a graph
+    # observed to still hold a marker (#9752 review round 5).
+    if counts.get("pack_selection_conflict"):
+        return ("reported CONFLICT, not a loss",
+                "a DIFFERENT marker is present, so the graph IS configured and "
+                "may hold a NEWER pack set — do not re-pin over it without "
+                "checking which is intended")
+    if counts.get("pack_selection_state_unknown"):
+        return ("pre-preservation/UNKNOWN",
+                "the pre-wipe sidecar cannot say whether the marker existed, so "
+                "the graph may read as UNCONFIGURED — this is not an observed "
+                "loss")
+    if counts.get("pack_selection_verified") is False:
+        return ("UNVERIFIED — the post-restore verification COULD NOT RUN",
+                "the marker is not confirmed intact and NOT observed gone, so "
+                "the graph is not reported as having lost it")
+    return ("restore gap",
+            "the graph reads as UNCONFIGURED, so a pack an admin REMOVED can be "
+            "re-admitted with its revision reset")
+
+
+def _capture_pack_selection(proj) -> list[dict]:
+    """Read every `:PackSelection` property map into the `pack_selection` section.
+
+    #9752: the marker is written by `pack_state.set_graph_packs` as
+    ``MERGE (s:PackSelection)`` with NO identity property — one node per graph,
+    because the graph is the isolation boundary — so it rides no journal record
+    and no replay pass recreates it. `rg -n "PackSelection"
+    tortoise/projection/` was ZERO hits before this change, which is why the
+    unconditional wipe destroyed it: `rebuild_all` preserved the `:PackInstall`
+    rows (a config-registry class) and dropped the marker that says the set was
+    DELIBERATELY configured. The measured consequence is not bookkeeping —
+    before, ``configured=True revision=1 namespaces=frozenset()``; after,
+    ``configured=False revision=0 namespaces={'venture'}`` — i.e. a pack an
+    admin REMOVED comes back into the approved set, the revision a client holds
+    resets. (`get_tenant_packs`' self-heal also re-arms, but only on a graph
+    holding no `:PackInstall` row — a removal leaves one, so not here.)
+
+    The capture is FAITHFUL — every node's property map, in whatever order the
+    graph answers — because a capture that silently picked one would hide a
+    pre-existing multi-marker violation from the collapse report in
+    `rebuild_all`. No identity property is required or invented: the class has
+    none, and inventing one (`revision`) is the silent no-op the #9752 decision
+    relay records.
+
+    A read failure propagates to the caller's `capture_failed` gate — the #2943
+    discipline (a corrupt/heavy read failing while the light DELETE succeeds
+    would otherwise destroy the class with no durable record).
+    """
+    rows = proj.g.query(
+        f"MATCH (s:{_PACK_SELECTION_LABEL}) RETURN properties(s)").result_set
+    return [r[0] for r in rows] if rows else []
+
+
+def _pack_selection_order(entry: dict) -> tuple:
+    """Sort key choosing WHICH captured marker the section carries.
+
+    ``(0, -revision, props)`` for a marker carrying an integer `revision` — the
+    shape `set_graph_packs` produces — and ``(1, 0, props)`` for a degenerate
+    one, so a real marker always beats a property-less hand-plant. The HIGHEST
+    revision wins, and that is a deliberate choice: `revision` is the optimistic
+    token a client holds, so the HIGHEST published token wins — NOT that the
+    newest DECISION wins (a re-pin restarts it; collapse reported). ``props``
+    (the full property map, repr'd) only breaks a revision tie, so the
+    outcome is REPRODUCIBLE even though the capture answers in whatever
+    order the graph returns — the same reason
+    `_team_meta_order` carries a secondary key.
+    """
+    revision = entry.get("revision")
+    props = tuple(sorted((k, repr(v)) for k, v in entry.items()))
+    if isinstance(revision, int) and not isinstance(revision, bool):
+        return (0, -revision, props)
+    return (1, 0, props)
+
+
+def _pack_selection_marker(entries) -> dict | None:
+    """The single `:PackSelection` marker a (unioned) section carries.
+
+    #9752: the class is AT-MOST-ONE BY CONSTRUCTION — `pack_state._read_selection`
+    matches the label with no key ("At most one node exists per graph (the graph
+    is the isolation boundary, so no id property is needed)"), and its writers
+    `MERGE (s:PackSelection)` rather than CREATE. The section therefore carries
+    0 or 1 marker however many the capture saw.
+
+    Why collapse rather than carry every entry: a union that concatenated both
+    legs would MANUFACTURE a second marker on the sidecar-recovery path — and
+    two markers make `_read_selection`'s single-row read ambiguous, i.e. the
+    pack set a graph enforces would depend on row order. Collapsing is faithful
+    to the class rather than a loss of it: a graph holding several markers is
+    already in violation of its own invariant, and the rebuild's job is not to
+    replicate corruption.
+
+    A discard is REPORTED (`rebuild_all` warns with both counts), never silent.
+    """
+    candidates = [e for e in entries or [] if isinstance(e, dict)]
+    if not candidates:
+        return None
+    return min(candidates, key=_pack_selection_order)
+
+
 def _validate_point_entry(entry) -> str | None:
     """Return a complaint about a ``synthetic_events`` entry, else None.
 
@@ -2400,6 +2586,36 @@ def _validate_team_meta_entry(entry) -> str | None:
     return None
 
 
+def _validate_pack_selection_entry(entry) -> str | None:
+    """Return a complaint about a `pack_selection` entry, else None.
+
+    #9752: the entry is the `:PackSelection` PROPERTY MAP itself (the
+    `team_meta` shape), and there is deliberately NO required key: the class
+    has no identity property, and demanding one here would re-type the very
+    fact this section exists to accommodate (a registry row's requirement).
+    Requiring `revision` would also REFUSE a marker a live graph legitimately
+    holds — `pack_state._read_selection` already tolerates a malformed/absent
+    one by reading it as 0 — which would turn an odd-but-present marker into a
+    pre-wipe abort and a blocker on the rebuild lane.
+
+    What IS enforced is storability, for the same reason as the sibling
+    validators: a nested object passes a shape check and then dies inside the
+    driver AFTER the `DETACH DELETE`, which is the post-wipe failure this
+    validator exists to prevent. The section is accepted with SEVERAL entries
+    (the `team_meta`/`event_meta` precedent): a hand-planted file may carry
+    more than one, each is validated here, and `_pack_selection_marker`
+    collapses them — the pre-wipe gate must not reject a file the writer can
+    never produce on the strength of a count it does not itself trust.
+    """
+    if not isinstance(entry, dict):
+        return f"not an object ({type(entry).__name__})"
+    for key, value in entry.items():
+        if not _is_snapshot_primitive(value):
+            return (f"property {key!r} value {value!r} is not a primitive "
+                    f"or an array of primitives")
+    return None
+
+
 _SNAPSHOT_ENTRY_CHECK = {
     "synthetic_events": _validate_point_entry,
     "batch_snapshot": _validate_batch_entry,
@@ -2412,6 +2628,9 @@ _SNAPSHOT_ENTRY_CHECK = {
     "event_meta": _validate_event_meta_entry,
     # #5353: the `:TeamMeta` first-org marker (see `_capture_team_meta`).
     "team_meta": _validate_team_meta_entry,
+    # #9752: the `:PackSelection` per-graph pack-set marker (see
+    # `_capture_pack_selection`).
+    "pack_selection": _validate_pack_selection_entry,
 }
 # Node properties a snapshot Point carries that the replay does not fully
 # reconstruct, restored by the pass-1b tail.
@@ -3019,6 +3238,24 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
         list(leftover.get("team_meta") or [])
         + list(fresh.get("team_meta") or []))
     team_meta = [team_marker] if team_marker is not None else []
+    # #9752: the `:PackSelection` pack-set marker. AT MOST ONE entry, and the
+    # merge rule is HIGHEST-`revision`-WINS across both legs (see
+    # `_pack_selection_order`) — not `_merge_entry` (the marker is one property
+    # map written as a unit by `set_graph_packs`, so there is no per-field split
+    # to make) and not concatenation (two markers make `_read_selection`'s
+    # single-row read ambiguous, so the enforced pack set would depend on row
+    # order). Highest-revision is the SAFE direction rather than an arbitrary
+    # preference: `revision` is the optimistic token a client holds, so the
+    # HIGHEST published token wins — the strongest guarantee against a
+    # concurrent writer. It is NOT "the newest decision wins": a re-pin on a
+    # wiped graph restarts `revision` at 1, so a pre-crash leftover outranks
+    # it — and that case is REPORTED (the collapse warning), never silent. On
+    # the ordinary path both legs carry the SAME marker, or fresh is empty.
+    pack_selection_marker = _pack_selection_marker(
+        list(leftover.get("pack_selection") or [])
+        + list(fresh.get("pack_selection") or []))
+    pack_selection = ([pack_selection_marker]
+                      if pack_selection_marker is not None else [])
     return {"synthetic_events": events, "batch_snapshot": batches,
             "batch_point_links": links,
             "session_snapshot": session_containers,
@@ -3027,7 +3264,8 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
             "onboarding_step_links": onboarding_links,
             "config_snapshot": config_entries,
             "event_meta": event_meta,
-            "team_meta": team_meta}
+            "team_meta": team_meta,
+            "pack_selection": pack_selection}
 # ── Destructive-op guard: TWO independent layers (#99 P0, hardened #2944) ──
 #
 # The unconditional graph wipe (``MATCH (n) DETACH DELETE n``) is the most
@@ -3706,7 +3944,8 @@ def _journal_safe_params(params, cypher=None):
 #     writes that put back, verbatim, state CAPTURED FROM THIS GRAPH
 #     immediately before its wipe (`:Batch` + `batch_id`, `:Session` +
 #     `CONTAINS`, the onboarding state machine — node, `onboards` anchor and
-#     `COMPLETED_STEP` links, `:TeamMeta`, the config registry, the `#4305`
+#     `COMPLETED_STEP` links, `:TeamMeta`, the `:PackSelection` pack-set
+#     marker, the config registry, the `#4305`
 #     derived Point properties, the `:GraphEventMeta` watermark). Every one of
 #     these classes rides NO journal record — which is exactly why the replay
 #     lane's contract ("this content came FROM the record") is FALSE for them,
@@ -4643,13 +4882,14 @@ def _prewipe_restore_write_scope(reason: str):
     snapshot, and its durable `#2943` sidecar): `:Batch` markers and
     `Point.batch_id`, `:Session` containers and their `CONTAINS` edges, the
     `:OnboardingState` machine (node, `onboards` anchor, `COMPLETED_STEP`
-    links), the `:TeamMeta` first-org marker, the `#2814` config registry, the
-    `#4305` derived Point properties, and the `:GraphEventMeta` watermark.
+    links), the `:TeamMeta` first-org marker, the `:PackSelection` pack-set
+    marker, the `#2814` config registry, the `#4305` derived Point properties,
+    and the `:GraphEventMeta` watermark.
 
     **None of those writes is a projection of a journal record** — the classes
-    ride no record at all (`#5353`, `#4641`, `#990`, `#2814`, `#4653` each say
-    so at their writer), and the restore re-establishes them from the pre-wipe
-    capture instead. ⚠️ **TWO legs are exceptions in MECHANISM, not in
+    ride no record at all (`#5353`, `#4641`, `#990`, `#2814`, `#4653`, `#9752`
+    each say so at their writer), and the restore re-establishes them from the
+    pre-wipe capture instead. ⚠️ **TWO legs are exceptions in MECHANISM, not in
     lane.**
 
     * `#4305`: the journal owns `content_hash` and `embedding` when it wrote
@@ -4721,11 +4961,11 @@ def _prewipe_restore_write_scope(reason: str):
     * **it is VOLUNTARY, so "a future addition has to choose a lane" is a
       convention, not a gate.** `_rebuild_all_replay` is under a method-wide
       `_replay_write_scope()` (`#9213`), and nothing forces it to route a
-      restore statement through `_restore_write`. A twelfth restore added as a
+      restore statement through `_restore_write`. A thirteenth restore added as a
       bare `self.g.query(...)` tomorrow is authorized as `"replay"` — exactly
       the false contract this lane removes — and `_LEGS` cannot see it, because
-      a table of the eleven statements that exist says nothing about a
-      twelfth. Enforced only as far as the pin reaches: the whole-property-map
+      a table of the twelve statements that exist says nothing about a
+      thirteenth. Enforced only as far as the pin reaches: the whole-property-map
       shape every restore leg uses (`… SET <alias> += $props`) is matched by
       SHAPE, table-independently, and reds on its reason; every other restore
       shape (a `SET <alias>.<field> = $param` link, a bare edge `MERGE`) is
@@ -10545,8 +10785,9 @@ class WipePreconditionRefused(RuntimeError):
     It exists because ``rebuild_all``'s wipe is unconditional over EVERY label
     while its pre-wipe snapshot covers only the sections ``_SNAPSHOT_SECTIONS``
     names (graph-only ``:Point``, ``:Batch``, ``:Session``, the onboarding
-    pair, the config registry, the ``:GraphEventMeta`` high-water mark and
-    ``:TeamMeta``; the journal-replayable labels are re-created by the replay
+    pair, ``:PackSelection``, the config registry, the ``:GraphEventMeta``
+    high-water mark and ``:TeamMeta``; the journal-replayable labels are
+    re-created by the replay
     itself). The residual is therefore ``:GraphEvent`` rows — the raw event
     log, which no replay pass recreates (#4664) — plus any label outside that
     tuple. A node from either group that appears between the emptiness probe
@@ -12069,6 +12310,21 @@ class FalkorProjection(
                     # partial loss, so name it on the same line the operator
                     # reads. Which of the three it is lives in `reason` and in
                     # the rebuild ERROR log; the aggregate gap is the trigger.
+                    #
+                    # ⛔ ADDITIVE, NOT A CHAIN (#4641 round-7, restated in
+                    # `tortoise/consistency.py` — "a confirmed loss and a
+                    # pre-preservation UNKNOWN can coexist, and one must not
+                    # suppress the other"). These legs were an `elif` chain,
+                    # so a co-occurring gap was MASKED: a v5 rescue file sets
+                    # `team_meta_state_unknown` AND `pack_selection_state_unknown`
+                    # together, and the operator then got only the TeamMeta
+                    # remedy — never "check the approved pack set before
+                    # trusting it", the one consequence that prevents a
+                    # removed pack being re-admitted. `_recover_or_raise`
+                    # (below) and the CLI (`tortoise/__main__.py`) already
+                    # emit one line per class with independent `if`s; this was
+                    # the last of the four reporters still shaped as a chain
+                    # (review round 6, P2).
                     if result.get("onboarding_gap"):
                         logger.warning(
                             "auto-recovered empty embedded DB from %s "
@@ -12078,7 +12334,19 @@ class FalkorProjection(
                             "(#4641). Recovery reason: %s",
                             events_dir, result.get("log_points"),
                             result.get("reason"))
-                    elif result.get("team_meta_gap"):
+                    # ⛔ The legs below are INDEPENDENT `if`s, not an `elif`
+                    # chain — the shape `_recover_or_raise` (below) and the CLI
+                    # (`tortoise/__main__.py`) already use, and the rule the
+                    # producer states in `tortoise/consistency.py` (quoted
+                    # above). The chain's head was `onboarding_gap`, so a
+                    # pre-v6 rescue file — which carries NEITHER the onboarding
+                    # sections NOR the `team_meta` key — reported only the
+                    # onboarding remedy and never "the #2789 first-org guard may
+                    # read 0 and a later provisioning call can re-mint it with
+                    # the control plane's name". Round 6 made the pack-set and
+                    # corrupt-line legs independent and left this one chained;
+                    # this is the last `elif` in the block (review round 7).
+                    if result.get("team_meta_gap"):
                         # #5353: the sibling of the onboarding leg above. A
                         # `:TeamMeta` marker that did not come back makes the
                         # `#2789` first-org guard read 0, so a later
@@ -12097,7 +12365,34 @@ class FalkorProjection(
                             "reason: %s",
                             events_dir, result.get("log_points"),
                             result.get("reason"))
-                    elif result.get("corrupt_lines"):
+                    if result.get("pack_selection_gap"):
+                        # #9752: the sibling of the team_meta leg above. A
+                        # `:PackSelection` marker that did not come back makes
+                        # the graph read as UNCONFIGURED, so the records/union
+                        # fallback arms become live again and a pack an admin
+                        # had REMOVED is back in the approved set with its
+                        # `revision` reset. The clean
+                        # "auto-recovered" line drops `reason`, so without this
+                        # leg the operator sees a success shape over the signal
+                        # the graph's pack set exists to carry.
+                        #
+                        # The consequence comes from `pack_selection_shape`:
+                        # the absence wording above is true for exactly ONE of
+                        # the four shapes, and asserting it on a CONFLICT (a
+                        # different, possibly NEWER live marker) or an
+                        # UNVERIFIED read is a loss nobody observed (review
+                        # round 4 — rounds 2-3 fixed the producer and three
+                        # consumers, and left this one and `_recover_or_raise`).
+                        _shape, _consequence = pack_selection_shape(result)
+                        logger.warning(
+                            "auto-recovered empty embedded DB from %s "
+                            "(%s events) BUT its :PackSelection pack-set "
+                            "marker is NOT confirmed intact (%s) — %s; see the "
+                            "rebuild ERROR log (#9752). "
+                            "Recovery reason: %s",
+                            events_dir, result.get("log_points"),
+                            _shape, _consequence, result.get("reason"))
+                    if result.get("corrupt_lines"):
                         # #5612: the third producer-signal leg on this surface,
                         # for the same reason as the two above — the clean
                         # "auto-recovered" line drops `reason`, and a replay
@@ -12113,7 +12408,12 @@ class FalkorProjection(
                             "(#5612). Recovery reason: %s",
                             events_dir, result.get("log_points"),
                             result["corrupt_lines"], result.get("reason"))
-                    else:
+                    # The clean line is a POSITIVE assertion — "nothing was
+                    # lost" — so it may only fire when no leg above did.
+                    if not (result.get("onboarding_gap")
+                            or result.get("team_meta_gap")
+                            or result.get("pack_selection_gap")
+                            or result.get("corrupt_lines")):
                         logger.warning(
                             "auto-recovered empty embedded DB from %s "
                             "(%s events)",
@@ -12164,11 +12464,11 @@ class FalkorProjection(
         """Run recover_from_log, fail loud if it did not recover.
 
         A completed recovery with an onboarding gap — or a `:TeamMeta`
-        first-org marker gap (#5353), the same producer-signal shape — is NOT a
-        reason to refuse to open the store (it is usable, and refusing would be
-        strictly worse) — but neither must pass unmentioned, since this is the
-        caller for the unresponsive-graph path where no other surface reports
-        it (#4641/#5353).
+        first-org marker gap (#5353) or a `:PackSelection` pack-set marker gap
+        (#9752), the same producer-signal shape — is NOT a reason to refuse to
+        open the store (it is usable; refusing would be worse) — but neither
+        must pass unmentioned: this is the caller for the unresponsive-graph
+        path, where no other surface reports it (#4641/#5353/#9752).
 
         #7929: a DECLINED recovery that had already replayed is rolled back to
         the empty state this call found (see `recover_from_log`'s ATOMICITY
@@ -12203,6 +12503,23 @@ class FalkorProjection(
                 "can re-mint it with the control plane's name; see the "
                 "rebuild ERROR log (#5353). Recovery reason: %s",
                 result.get("reason"))
+        if result.get("pack_selection_gap"):
+            # #9752: the marker's own consumer on this caller, the sibling of
+            # the team_meta leg above. Its absence is the same log-only defect:
+            # the marker is what makes a graph's pack set DELIBERATE, so a gap
+            # here reads as unconfigured, re-enables the records/union arms, and can
+            # re-admit a pack the admin removed.
+            #
+            # As on the sibling caller above, the CONSEQUENCE is shape-derived:
+            # "reads as UNCONFIGURED / a removed pack is back" is the true-absence
+            # reading only, and printing it over a CONFLICT or an UNVERIFIED read
+            # asserts a loss nobody observed (review round 4).
+            _shape, _consequence = pack_selection_shape(result)
+            logger.warning(
+                "recovery completed but the rebuilt graph's :PackSelection "
+                "pack-set marker is NOT confirmed intact (%s) — %s; see the "
+                "rebuild ERROR log (#9752). Recovery reason: %s",
+                _shape, _consequence, result.get("reason"))
         if result.get("corrupt_lines"):
             # #5612: this caller returns silently on success (its own caller
             # logs only "auto-recovered embedded DB from ..."), so the salvage
@@ -13178,6 +13495,12 @@ class FalkorProjection(
         # collapse — the in-memory analogue of `rebuild_all`'s report.
         captured_markers = _capture_team_meta(self)
         team_marker = _team_meta_marker(captured_markers)
+        # #9752: the `:PackSelection` pack-set marker, held in memory for the
+        # same reason (this engine has no `log_dir`, so no durable sidecar).
+        # Strictly better than the silent loss it replaces, and identical in
+        # effect on the normal path; `rebuild_all` carries it durably.
+        captured_selections = _capture_pack_selection(self)
+        selection_marker = _pack_selection_marker(captured_selections)
         self._wipe_all_nodes(confirm_destructive=confirm_destructive,
                              operation="rebuild")
         # #3664: this engine feeds ``apply()`` ONE record at a time, so an
@@ -13407,6 +13730,126 @@ class FalkorProjection(
                     "(#5353)",
                     type(e).__name__, e,
                 )
+        # #9752: restore the pack-set marker captured above. DEGRADES, never
+        # raises — this runs after the wipe (#2943) — and the consequence is
+        # named: without it the graph reads as UNCONFIGURED, so the
+        # records/union fallback arms become live again and a pack an admin had
+        # REMOVED is back in the approved set with its `revision` reset.
+        if len(captured_selections) > 1:
+            logger.warning(
+                "rebuild: %d :PackSelection marker(s) were captured, but the "
+                "class is one-per-graph by construction — a graph holding "
+                "several is already in violation of that invariant and its "
+                "enforced pack set is order-dependent. The HIGHEST `revision` "
+                "is restored; the other(s) are NOT recreated (#9752).",
+                len(captured_selections),
+            )
+        if selection_marker is not None:
+            restored = True
+            try:
+                self.g.query(
+                    f"MERGE (s:{_PACK_SELECTION_LABEL}) "
+                    "ON CREATE SET s += $props",
+                    params={"props": selection_marker},
+                )
+            except Exception as e:  # noqa: BLE001, RUF100
+                restored = False
+                # ⛔ NOT "reads as UNCONFIGURED": a raised write is UNVERIFIED,
+                # and the same `MERGE … ON CREATE SET` would have SKIPPED its
+                # props had a concurrent marker already existed — so asserting an
+                # absence here, and advising a re-pin, claims a state this code
+                # never observed (and the re-pin would overwrite a possibly
+                # NEWER live decision). `rebuild_all` reports this shape as a
+                # conflict; this path only has the log (#9752 review round 6).
+                logger.error(
+                    "rebuild: could not restore the :PackSelection pack-set "
+                    "marker (%s: %s) — it is UNVERIFIED: not confirmed intact, "
+                    "and NOT observed gone. The `MERGE` may have matched a "
+                    "marker written after the wipe, in which case this graph's "
+                    "pack set is that one (possibly NEWER) and re-pinning "
+                    "would overwrite it. The graph itself is rebuilt; check the "
+                    "graph's approved pack set before re-pinning, or run "
+                    "`rebuild_all(log_dir)`, which carries the marker durably "
+                    "and reports which shape it found (#9752)",
+                    type(e).__name__, e,
+                )
+            if restored:
+                # ⛔ Read it BACK. A bare `MERGE … ON CREATE SET` skips its props
+                # when a marker already exists, so a concurrent
+                # `set_graph_packs` in the wipe→write window leaves a DIFFERENT
+                # marker. Claiming "the approved pack set and `revision` survive"
+                # without comparing is exactly the unobserved assertion the rest
+                # of this change removed (review round 6) — `rebuild_all`
+                # reconciles immediately after its own write for this reason.
+                try:
+                    live_markers = [
+                        row[0] for row in self.g.query(
+                            f"MATCH (s:{_PACK_SELECTION_LABEL}) "
+                            "RETURN properties(s)").result_set
+                        if row and isinstance(row[0], dict)]
+                except Exception as e:  # noqa: BLE001, RUF100
+                    logger.warning(
+                        "rebuild: the :PackSelection marker restore wrote "
+                        "without raising, but the read-back FAILED (%s: %s) — "
+                        "the marker is UNVERIFIED: not confirmed intact, and "
+                        "NOT observed gone. Check the graph's approved pack "
+                        "set (#9752)",
+                        type(e).__name__, e,
+                    )
+                else:
+                    if any(live == selection_marker for live in live_markers):
+                        # ⛔ The MARKER is what this engine restores, so the claim
+                        # is bounded to the fields the marker carries.
+                        # This path captures `capture_watermark`, `_capture_team_meta`
+                        # and `_capture_pack_selection` — never `_capture_config_snapshot`:
+                        # the `:PackInstall` registry a resolved pack set draws from
+                        # is `rebuild_all`'s (its `_rebuild_all_replay` leg), never
+                        # this path's. Names, not line numbers, on purpose: this
+                        # block sits BELOW the constructs it names, so an edit
+                        # here moves the cites below it, not theirs.
+                        # With the marker present, `resolved_pack_set_for_graph`
+                        # still unions unconditionally (`frozenset(recorded) |
+                        # graph_kind_namespaces(g)`), so the approved set is the
+                        # DATA leg — the registry empty, the graph's data
+                        # deciding — and reads empty only when the data names
+                        # nothing, until the packs are re-pinned. Saying "the set
+                        # survived" would assert the rows came back (#9752).
+                        logger.warning(
+                            "rebuild: restored the :PackSelection pack-set "
+                            "marker (`configured_at`, `revision`) but NOT the "
+                            "`:PackInstall` rows — only `rebuild_all` restores "
+                            "those — so the approved set resolves over an empty "
+                            "registry (data leg only): a write of a previously-"
+                            "approved kind can refuse until the packs are "
+                            "re-pinned deliberately (#9752)")
+                    elif live_markers:
+                        logger.warning(
+                            "rebuild: a DIFFERENT :PackSelection marker is "
+                            "present in the rebuilt graph (live revision %r, "
+                            "captured revision %r) — the captured marker was "
+                            "NOT applied, because a concurrent pack-set write "
+                            "landed between the wipe and this restore. This is "
+                            "a reported CONFLICT, not a loss: the graph IS "
+                            "configured and may hold a NEWER pack set — do not "
+                            "re-pin over it without checking which is intended "
+                            "(#9752)",
+                            live_markers[0].get("revision"),
+                            (selection_marker or {}).get("revision"),
+                        )
+                    else:
+                        # Observed absent AFTER a successful write and read: a
+                        # TRUE absence, so the loss wording is honest here.
+                        logger.error(
+                            "rebuild: the captured :PackSelection marker is "
+                            "ABSENT from the rebuilt graph after a restore "
+                            "that did not raise — so the graph now reads as "
+                            "UNCONFIGURED: its packs are whatever the "
+                            "records/union fallback arms say and a pack an "
+                            "admin had REMOVED can be re-admitted with its "
+                            "`revision` reset. The graph itself is rebuilt; "
+                            "re-pin the pack set deliberately, or run "
+                            "`rebuild_all(log_dir)` which carries the marker "
+                            "durably (#9752)")
 
     def _prewipe_graph_identity(self) -> dict:
         """The graph a pre-wipe sidecar describes, stamped into its payload.
@@ -13504,12 +13947,12 @@ class FalkorProjection(
            watermark's `MERGE` by its own fragment and
            `tests/test_9124_declared_live_doors.py` pins the module's opener.
         2. **NOTHING makes `_rebuild_all_replay` call this method.** It is a
-           helper the eleven known restore statements happen to use, not a
+           helper the twelve known restore statements happen to use, not a
            gate they must pass: a restore statement added tomorrow as a bare
            `self.g.query(...)` compiles, runs, and is authorized by the
            enclosing method-wide `_replay_write_scope()` — i.e. it inherits
-           the very false contract this lane removes. `_LEGS` pins the eleven
-           statements that exist, so it cannot see a twelfth. What DOES bite
+           the very false contract this lane removes. `_LEGS` pins the twelve
+           statements that exist, so it cannot see a thirteenth. What DOES bite
            today is the table-independent half of the pin: a bare restore
            written in the whole-property-map shape every restore leg uses
            (`… SET <alias> += $props`) is caught by SHAPE, with no table
@@ -13540,12 +13983,13 @@ class FalkorProjection(
         #9210. The whole-graph wipe and the per-record folds are the cache being
         reconstructed FROM the journal — that is the lane ``_replay_write_scope``
         names (#7951), and it is the declaration §17.1's THIRD door requires
-        before it will let a mutating statement reach ``proj.g``. The eleven
+        before it will let a mutating statement reach ``proj.g``. The twelve
         SNAPSHOT-RESTORE statements in the body are NOT, and they do not ride
         it: they put back state captured from this graph immediately before the
         wipe (``:Batch`` markers, the onboarding machine, ``:TeamMeta``, the
-        ``#2814`` config registry, the derived ``#4305`` properties, the
-        ``:GraphEventMeta`` watermark), so each one shadows this permit with its
+        ``:PackSelection`` pack-set marker, the ``#2814`` config registry, the
+        derived ``#4305`` properties, the ``:GraphEventMeta`` watermark), so each
+        one shadows this permit with its
         own named leg through ``_restore_write`` / ``_prewipe_restore_write_scope``.
         The replay lane's contract ("this content came FROM the record") is
         false for them, and #9210 is what stopped them from claiming it.
@@ -13561,7 +14005,7 @@ class FalkorProjection(
         pass 2's ``_upsert_point_edges``). Journal records keep this permit.
 
         DISCLOSED RESIDUAL of that split, so this docstring does not read as a
-        claim it cannot keep: a twelfth restore written as a bare
+        claim it cannot keep: a thirteenth restore written as a bare
         ``self.g.query(...)`` tomorrow still inherits ``"replay"`` — the
         restore funnel is voluntary until #9124's handle guard is armed. The
         synthetic half selects its lane automatically from the fold's own
@@ -13951,6 +14395,28 @@ class FalkorProjection(
             capture_failed.append(
                 f"TeamMeta snapshot/#5353 ({type(e).__name__}: {e})")
 
+        # ── :PackSelection pack-set marker snapshot (#9752) ─────────────
+        # The wipe destroys the marker and NOTHING restores it: it is written by
+        # `pack_state.set_graph_packs` with a bare `MERGE (s:PackSelection)` and
+        # rides no journal record, so no replay pass recreates the node. Before
+        # this change `rg -n "PackSelection" tortoise/projection/` was ZERO
+        # hits — the marker that says a graph's pack set was DELIBERATELY
+        # configured was invisible to the whole rebuild lane, so a rebuild
+        # dropped it and `resolved_pack_set` fell back to the records/union
+        # arms: a pack an admin REMOVED came back into the approved set and the
+        # `revision` a client holds reset (measured: `configured=True rev=1
+        # namespaces=frozenset()` → `configured=False rev=0
+        # namespaces={'venture'}`).
+        #
+        # Best-effort read funneled into the SAME `capture_failed` gate: a
+        # failed read must not fall through to the wipe (I3, the #2943 rule).
+        pack_selection_snapshot: list[dict] = []
+        try:
+            pack_selection_snapshot = _capture_pack_selection(self)
+        except Exception as e:
+            capture_failed.append(
+                f"PackSelection snapshot/#9752 ({type(e).__name__}: {e})")
+
         # ── #2943: a FAILED capture must not fall through to the wipe ───
         # Both capture blocks above are best-effort by design (the graph may
         # be corrupt), but proceeding after a failed capture would wipe the
@@ -14110,7 +14576,7 @@ class FalkorProjection(
                 "%d session container(s), %d session link(s), "
                 "%d onboarding state(s), %d onboarding step link(s), "
                 "%d config entry(ies), event-log watermark %s, "
-                "%d TeamMeta marker(s)) "
+                "%d TeamMeta marker(s), %d PackSelection marker(s)) "
                 "from an interrupted rebuild — merging it before this "
                 "wipe+replay",
                 snapshot_path,
@@ -14123,7 +14589,13 @@ class FalkorProjection(
                 len(leftover.get("onboarding_step_links") or []),
                 len(leftover.get("config_snapshot") or []),
                 _event_meta_last_seq(leftover.get("event_meta")),
-                len(leftover.get("team_meta") or []))
+                len(leftover.get("team_meta") or []),
+                # #9752: the pack-set marker is the eleventh section the union
+                # re-merges, and it was the only one the summary omitted — a
+                # rescue file carrying a marker then read as an interrupted
+                # rebuild with nothing to say about the class this change adds
+                # (review round 5).
+                len(leftover.get("pack_selection") or []))
         # #5353: the marker count the union is about to collapse. Both legs are
         # read HERE, before `team_meta_snapshot` is rebound from `merged` below
         # (the same reason the onboarding reassignment is ordered after this
@@ -14141,6 +14613,18 @@ class FalkorProjection(
                 + list(team_meta_snapshot)
             )
         })
+        # #9752: the same count for the pack-selection marker, read before the
+        # reassignment below for the same reason — the collapse must be
+        # REPORTED, and `team_meta`'s exact shape applies (a marker held in both
+        # legs is ONE marker, not a collision).
+        pack_selection_entries_merged = len({
+            tuple(sorted((k, repr(v)) for k, v in e.items()))
+            if isinstance(e, dict) else repr(e)
+            for e in (
+                list((leftover or {}).get("pack_selection") or [])
+                + list(pack_selection_snapshot)
+            )
+        })
         merged = _union_prewipe_snapshot(leftover, {
             "synthetic_events": synthetic_events,
             "batch_snapshot": batch_snapshot,
@@ -14152,6 +14636,7 @@ class FalkorProjection(
             "config_snapshot": config_snapshot,
             "event_meta": event_meta_snapshot,
             "team_meta": team_meta_snapshot,
+            "pack_selection": pack_selection_snapshot,
         })
         synthetic_events = merged["synthetic_events"]
         batch_snapshot = merged["batch_snapshot"]
@@ -14210,6 +14695,14 @@ class FalkorProjection(
         # so a crash between the sidecar write and the replay keeps the
         # recovered marker in the retry's rescue file.
         team_meta_snapshot = merged["team_meta"]
+        # #9752: the marker needs the same reassignment for the same reason —
+        # on the sidecar-recovery path the live capture is EMPTY (the wipe
+        # already landed), so restoring from the pre-union local would restore
+        # nothing and the marker would be lost on exactly the path the sidecar
+        # exists to cover. The write payload below is derived from `merged` too,
+        # so a crash between the sidecar write and the replay keeps the
+        # recovered marker in the retry's rescue file.
+        pack_selection_snapshot = merged["pack_selection"]
         # #5353: the class is at-most-one, so the union COLLAPSES — and a
         # collapse is reported here rather than left to be inferred from a
         # count of 1. A graph holding several markers is already in violation
@@ -14228,6 +14721,23 @@ class FalkorProjection(
                 "restoring them would manufacture the second marker #2789 "
                 "exists to prevent (#5353).",
                 team_meta_entries_merged, len(team_meta_snapshot))
+        # #9752: the same report for the pack-selection marker. The consequence
+        # is different and worth naming in the operator's terms: with more than
+        # one marker on the graph, `pack_state._read_selection`'s single-row
+        # read is order-dependent, so the graph's enforced pack set is already
+        # ambiguous — and what gets restored is the HIGHEST revision, not a
+        # concatenation that would preserve the ambiguity.
+        if len(pack_selection_snapshot) < pack_selection_entries_merged:
+            logger.warning(
+                "rebuild: %d :PackSelection marker(s) were captured but the "
+                "`pack_selection` section carries exactly %d — the class is "
+                "one-per-graph by construction (`pack_state` writes it with "
+                "`MERGE (s:PackSelection)` and its single-row read assumes "
+                "one), so a graph holding several is already in violation of "
+                "that invariant and its enforced pack set is "
+                "order-dependent. The HIGHEST `revision` is kept and "
+                "restored; the other(s) are NOT recreated (#9752).",
+                pack_selection_entries_merged, len(pack_selection_snapshot))
         # #5353: the pre-preservation window, the `onboarding_unknown` pattern
         # one class out. A rescue file written by a build that did not capture
         # the class cannot say whether the wipe it followed destroyed a marker
@@ -14253,6 +14763,23 @@ class FalkorProjection(
             and (not isinstance(leftover_version, int)
                  or leftover_version < 6
                  or "team_meta" not in leftover))
+        # #9752: the same pre-preservation window for the pack-selection marker,
+        # with the same TWO gates and the same reason: the VERSION (a file below
+        # v7 predates the section by construction) and the KEY (a hand-edited or
+        # truncated CURRENT-version file, which the writer can never emit — it
+        # derives every key from `_SNAPSHOT_SECTIONS`). Without this a retry
+        # reading an older rescue file would read its absent section as
+        # "captured and empty", i.e. would conclude the graph was never
+        # configured and silently fall back to the union — the very fallback
+        # that re-admits a removed pack. The version literal is 7 — the version
+        # at which the section LANDED — not "the current version", so a later
+        # bump does not re-flag a v7 file.
+        pack_selection_unknown = bool(
+            (leftover or {}).get("pack_selection_unknown")) or (
+            leftover is not None
+            and (not isinstance(leftover_version, int)
+                 or leftover_version < 7
+                 or "pack_selection" not in leftover))
         # ── #2814 T2: a pre-preservation rescue file cannot record config ──
         # A sidecar written by a build that predates this change has no
         # `config_snapshot` section at all — so on the sidecar-RECOVERY path
@@ -14439,6 +14966,13 @@ class FalkorProjection(
                 # "captured and empty" from "the class was never captured".
                 if team_meta_unknown:
                     payload["team_meta_unknown"] = True
+                # #9752: the same carry for the pack-selection UNKNOWN — a
+                # retry reading a sidecar whose `pack_selection` section is
+                # present-but-empty cannot tell "captured and empty" (the
+                # graph was never configured) from "the class was never
+                # captured" (it may have been configured and lost).
+                if pack_selection_unknown:
+                    payload["pack_selection_unknown"] = True
                 _write_prewipe_snapshot(snapshot_path, payload)
             except (OSError, TypeError, ValueError) as e:
                 # #4653: the `event_meta` section is named as well. It is the one
@@ -14460,6 +14994,16 @@ class FalkorProjection(
                     "marker this snapshot carries (#5353) — no other record "
                     "holds it, and the `#2789` guard reads exactly that node."
                     if team_meta_snapshot else "")
+                # #9752: and the pack-selection marker — the node whose
+                # PRESENCE pins the graph's approved pack set. Losing it does
+                # not merely lose a flag: the fallback arms re-admit a removed
+                # pack.
+                pack_selection_note = (
+                    " The wipe would also destroy the :PackSelection pack-set "
+                    "marker this snapshot carries (#9752) — no other record "
+                    "holds it, and without it a pack the admin REMOVED is "
+                    "re-admitted with its `revision` reset."
+                    if pack_selection_snapshot else "")
                 raise RuntimeError(
                     f"rebuild aborted BEFORE the graph wipe: could not persist "
                     f"the pre-wipe snapshot to {snapshot_path} ({e}). Wiping "
@@ -14474,7 +15018,7 @@ class FalkorProjection(
                     f"journal record at all (#4641) — and the "
                     f"{len(config_snapshot)} captured authoritative config "
                     f"entr(y/ies) with them (#2814).{watermark_note}"
-                    f"{team_meta_note} Fix the "
+                    f"{team_meta_note}{pack_selection_note} Fix the "
                     f"cause — write permissions/space on the event-log "
                     f"directory, or a non-serializable Point property — and "
                     f"re-run."
@@ -16927,6 +17471,190 @@ class FalkorProjection(
         team_meta_gap = 1 if (team_meta_missing or not team_meta_verified
                               or team_meta_unknown) else 0
 
+        # ── #9752: restore the :PackSelection pack-set marker ────────────
+        # The wipe destroys it and no replay pass recreates it, so this is the
+        # ONLY write that puts a deliberately-configured graph's pack set back.
+        # It runs here (after the replay, next to the config restore below)
+        # because the two halves of the same state must come back together: the
+        # `:PackInstall` rows are the config registry's, the marker that says
+        # "this set was CHOSEN" is this section's, and `resolved_pack_set`
+        # changes its answer based on the marker's presence.
+        #
+        # `MERGE` (not `CREATE`) with `ON CREATE SET`, exactly as the team_meta
+        # restore is shaped: the class is one-per-graph by construction, the
+        # graph was just wiped so the pattern matches nothing on the ordinary
+        # path, and an idempotent write means a partially-restored graph cannot
+        # accumulate a SECOND marker on the retry. `ON CREATE SET` (rather than
+        # an unconditional `SET s += $props`) is the fail-safe choice against a
+        # concurrent POST-wipe configuration: an admin's newer decision is kept
+        # rather than overwritten by the recovered one, and because the
+        # post-restore check below compares EXACTLY, that conflict surfaces as
+        # a reported gap instead of a quiet success.
+        #
+        # A failure here runs AFTER the wipe, so — like the `:Session`,
+        # onboarding, config and team-meta restores — it must DEGRADE rather
+        # than raise (#2943: a post-wipe raise leaves the store empty). Every
+        # failure is counted and reported, and the post-restore verification
+        # turns a resulting gap into a gap count.
+        pack_selection_restore_failures = 0
+        pack_selection_verified = True
+        pack_selection_missing = False
+        # The post-restore read, hoisted so the report below can tell TWO
+        # different failures apart: NO marker at all (a loss) versus a
+        # DIFFERENT marker (a conflict). Both set `pack_selection_missing`, but
+        # asserting the absence consequence for the second is a claim about a
+        # graph that is configured and holds a perhaps-NEWER `revision`.
+        live_markers: list[dict] = []
+        for props in pack_selection_snapshot:
+            try:
+                self._restore_write(
+                    f"MERGE (s:{_PACK_SELECTION_LABEL}) "
+                    "ON CREATE SET s += $props",
+                    params={"props": props},
+                    reason=":PackSelection pack-set marker (#9752)",
+                )
+            except Exception as e:
+                pack_selection_restore_failures += 1
+                # ⛔ This is an ATTEMPT report, so it states only what the attempt
+                # observed: the write raised. It must NOT assert the absence
+                # consequence here — a raise can happen AFTER the write landed
+                # (that shape is handled below as "treated as transient, not as
+                # loss"), and two contradictory claims on one run is exactly the
+                # class the `_replay_log` leg above was corrected for. The
+                # CONSIDERED verdict belongs to the post-restore verification,
+                # which reads the marker back; the absence branch there states the
+                # consequence, and only when it observed the absence.
+                logger.warning(
+                    "rebuild: :PackSelection marker restore attempt raised "
+                    "(%s: %s) — the write RAISED, so the pre-wipe "
+                    "marker is not confirmed restored. The post-restore "
+                    "verification below decides the outcome: if its read finds "
+                    "NO marker at all, the graph reads as UNCONFIGURED (the "
+                    "records/union arms become live again) "
+                    "and a pack an admin had REMOVED can be re-admitted with "
+                    "its `revision` reset; if it finds a DIFFERENT marker that "
+                    "is a CONFLICT, not a loss (#9752)",
+                    type(e).__name__, e,
+                )
+        # Post-restore verification: the node must be PRESENT — that presence is
+        # what makes `resolved_pack_set` report `configured: true`, which is a
+        # field of the resolved dataclass derived by `pack_state._read_selection`
+        # and NOT a property on `:PackSelection` (the writer stamps only
+        # `revision`, `configured_at`, `updated_at`, `updated_by`,
+        # `write_token`; review P3 on #11839) — and it must carry the captured
+        # property map EXACTLY, `revision` included. That is the check #9752's
+        # acceptance restates ("not merely that the run succeeded"). Read back through the same query shape the capture
+        # used, so the comparison cannot drift from it. A failed read is treated
+        # as a MISMATCH — "could not confirm" must not read as "confirmed" —
+        # and neither branch raises (this runs after the wipe).
+        #
+        # The comparison is EXACT rather than presence-only on purpose: a
+        # concurrent `set_graph_packs` between the wipe and this line would make
+        # the `MERGE` match ITS node and skip our `$props`, so the graph would
+        # keep a marker that is not the recovered one. Exactness turns that into
+        # a reported gap instead of a quiet success (the team_meta precedent).
+        pack_selection_marker = (pack_selection_snapshot[0]
+                                 if pack_selection_snapshot else None)
+        if pack_selection_marker is not None:
+            try:
+                live_markers = [
+                    row[0] for row in self.g.query(
+                        f"MATCH (s:{_PACK_SELECTION_LABEL}) "
+                        "RETURN properties(s)"
+                    ).result_set
+                    if row and isinstance(row[0], dict)]
+                pack_selection_missing = not any(
+                    live == pack_selection_marker for live in live_markers)
+            except Exception as e:
+                pack_selection_verified = False
+                logger.error(
+                    "rebuild: could not VERIFY the restored :PackSelection "
+                    "marker (%s: %s) — the graph's pack-set marker is "
+                    "UNVERIFIED: not confirmed intact, and NOT observed gone. "
+                    "Re-check it before trusting the graph's approved pack "
+                    "set (#9752)",
+                    type(e).__name__, e,
+                )
+        if not pack_selection_verified:
+            # "Could not confirm" must not be printed as "gone" — the missing
+            # flag is still False here, so the branch below would assert a loss
+            # it did not observe (the same rule as the team_meta/onboarding
+            # blocks).
+            logger.error(
+                "rebuild: :PackSelection post-restore verification COULD NOT "
+                "RUN (%d restore attempt(s) raised) — the rebuilt graph's "
+                "pack-set marker is UNVERIFIED: not confirmed intact, and NOT "
+                "observed gone. Check it before trusting the graph's approved "
+                "pack set (#9752).",
+                pack_selection_restore_failures,
+            )
+        elif pack_selection_missing and live_markers:
+            # The marker EXISTS but is not the captured one: a concurrent
+            # `set_graph_packs` between the wipe and the restore made the
+            # `MERGE` match ITS node and skip our `$props` (the shape the
+            # comment above names). Reporting this with the absence wording
+            # below would assert a loss nobody observed — the graph IS
+            # configured — and its re-pin remedy would overwrite a decision that
+            # may be NEWER than the one in our sidecar.
+            logger.error(
+                "rebuild: a DIFFERENT :PackSelection marker is present in the "
+                "rebuilt graph (live revision %r, captured revision %r) after "
+                "%d restore attempt(s), %d of which raised — the captured "
+                "marker was NOT applied, because a concurrent pack-set write "
+                "landed between the wipe and the restore. This is a reported "
+                "CONFLICT, not a loss: the graph IS configured (do NOT assume "
+                "it reads as UNCONFIGURED, and do NOT re-pin over the live "
+                "decision without checking which set is the intended one) "
+                "(#9752)",
+                live_markers[0].get("revision"),
+                (pack_selection_marker or {}).get("revision"),
+                len(pack_selection_snapshot), pack_selection_restore_failures,
+            )
+        elif pack_selection_missing:
+            logger.error(
+                "rebuild: the captured :PackSelection marker is ABSENT from "
+                "the rebuilt graph (or no longer carries the captured "
+                "revision) after %d restore attempt(s), %d of which raised. "
+                "This is a TRUE POSITIVE, not a silent success: the wipe is "
+                "unconditional, only the journal is replayed, and no replay "
+                "pass recreates this node — so the graph now reads as "
+                "UNCONFIGURED, its `revision` is 0, and a pack the admin had "
+                "REMOVED is back in the approved set. Re-pin the pack set "
+                "deliberately (`PUT /v1/graphs/{graph_id}/packs`) rather than "
+                "letting the self-heal decide it (#9752)",
+                len(pack_selection_snapshot), pack_selection_restore_failures,
+            )
+        elif pack_selection_restore_failures:
+            logger.warning(
+                "rebuild: %d :PackSelection restore attempt(s) raised, but the "
+                "post-restore verification confirms the expected marker is "
+                "PRESENT — treated as transient (an error after the write "
+                "landed), not as loss (#9752).",
+                pack_selection_restore_failures,
+            )
+        if pack_selection_unknown:
+            logger.error(
+                "rebuild: the leftover pre-wipe snapshot at %s does not carry "
+                "a `pack_selection` record — it either predates the marker's "
+                "preservation or carries a state-UNKNOWN marker from an "
+                "earlier interrupted rebuild — so whether the wipe it followed "
+                "destroyed a :PackSelection marker CANNOT be determined. This "
+                "is a state-UNKNOWN signal, not proof the class was absent: an "
+                "absent marker makes the graph read as unconfigured, so its "
+                "pack set is whatever the records/union arms say — check it "
+                "before treating the graph's approved packs as intended "
+                "(#9752).",
+                snapshot_path,
+            )
+        # The single canonical gap this change reports, mirroring the
+        # onboarding/team_meta shape: non-zero for a confirmed loss, an
+        # unverified read and a pre-preservation UNKNOWN alike, with the
+        # granular key below (`pack_selection_state_unknown`) telling the caller
+        # which it is.
+        pack_selection_gap = 1 if (pack_selection_missing
+                                   or not pack_selection_verified
+                                   or pack_selection_unknown) else 0
+
         # ── #2814: restore the authoritative configuration ──────────────
         # After pass-1a (so a `:PackInstall` is not clobbered by a later replay
         # write) and before pass 2, alongside the other sidecar-borne graph
@@ -18399,7 +19127,39 @@ class FalkorProjection(
                 "team_meta_verified": team_meta_verified,
                 "team_meta_restore_failures": team_meta_restore_failures,
                 "team_meta_gap": team_meta_gap,
-                "team_meta_state_unknown": team_meta_unknown}
+                "team_meta_state_unknown": team_meta_unknown,
+                # #9752: the `:PackSelection` pack-set marker, additive and the
+                # same shape as the team_meta pair above. `pack_selection_expected`
+                # is 0 or 1 (one marker per graph); `pack_selection_restored` is
+                # 1 only when the post-restore verification CONFIRMED the
+                # captured property map (including `revision`) is back, so a
+                # caller cannot read a rebuilt-but-markerless graph as a clean
+                # success — that is the state in which a REMOVED pack is back in
+                # the approved set. `pack_selection_state_unknown` is the
+                # pre-preservation signal: a rescue file with no
+                # `pack_selection` key cannot say whether the earlier wipe
+                # destroyed the marker.
+                "pack_selection_expected": len(pack_selection_snapshot),
+                "pack_selection_restored": (
+                    0 if (pack_selection_missing
+                          or not pack_selection_verified)
+                    else len(pack_selection_snapshot)),
+                "pack_selection_verified": pack_selection_verified,
+                "pack_selection_restore_failures":
+                    pack_selection_restore_failures,
+                "pack_selection_gap": pack_selection_gap,
+                # The shape discriminator (review round 3): `pack_selection_gap`
+                # is non-zero for a true absence, a DIFFERENT live marker and an
+                # unverified read alike. A consumer that asserts the absence
+                # consequence (`reads as UNCONFIGURED`, `revision is 0`, `a
+                # removed pack is back`) on the CONFLICT shape is claiming a
+                # loss nobody observed over a graph that IS configured and may
+                # hold a NEWER decision — so the conflict is reported as its own
+                # flag rather than being inferred from `expected and not
+                # restored` downstream.
+                "pack_selection_conflict": bool(
+                    pack_selection_missing and live_markers),
+                "pack_selection_state_unknown": pack_selection_unknown}
 
     def rebuild_from_record(self, view, *, confirm_destructive: bool = False,
                             declare: bool = True, scope: str = "",
@@ -18420,7 +19180,7 @@ class FalkorProjection(
           the projection cannot place raises BEFORE the wipe — a half-applied
           projection is not reachable.
         * **One-way.** Nothing here reads the cache to decide what to project
-          (``rebuild_all``'s pre-wipe snapshot does exactly that, for six
+          (``rebuild_all``'s pre-wipe snapshot does exactly that, for eight
           graph-only classes; this path deliberately does not — see
           ``tortoise/cache_projection.py``).
         * **The declaration follows the writes.** ``coverage`` is `complete`
