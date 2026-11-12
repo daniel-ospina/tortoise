@@ -953,6 +953,131 @@ def _extra_operators(
     return ids
 
 
+_READ_FAILED = object()
+# ⛔ ABSENT is NOT unreadable (review P1 on #11953): a predecessor whose id does
+# not exist cannot have been retired by this call, so its absence is evidence
+# that NOTHING landed; a failed read is evidence of nothing at all. Conflating
+# them kept the successor over a pure guard refusal, and because the goal's older
+# claim is still live and wired, the leak became DURABLE (the next normal pass
+# takes the unchanged arm on the leftover) — the over-count this module exists to
+# remove.
+_ABSENT = object()
+
+
+def _point_status(sdk: Any, point_id: str) -> Any:
+    """The point's stored ``status``; ``_ABSENT`` if there is no such point;
+    ``_READ_FAILED`` if the read itself failed."""
+    try:
+        node = sdk.get_entity(point_id) or {}
+    except Exception:
+        return _READ_FAILED
+    if not node:
+        return _ABSENT
+    return node.get("status")
+
+
+def _supersession_evidence(
+    sdk: Any,
+    previous_point_id: str,
+    successor_id: str,
+    status_before: Any,
+    *,
+    guard_class: bool,
+) -> str | None:
+    """Why ``supersede_point(previous, successor)`` cannot be undone, or ``None``.
+
+    Read from the GRAPH, never from the exception class (#11953). The class is
+    not a reliable witness: the lifecycle / claim-class guards (#2498, #2351)
+    are documented to raise BEFORE any mutation, but ``supersede_point`` appends
+    its ``PointSuperseded`` journal event FIRST and then runs ~15 mutating
+    statements, so a driver/infra failure inside that window raises through the
+    SAME ``except Exception`` as a guard refusal — and the two demand opposite
+    compensation.
+
+    ⛔ THE PREDECESSOR'S `status` IS NOT A WITNESS FOR THAT WINDOW ON ITS OWN.
+    `sdk.py` writes it LAST (`SET n.status = 'superseded'`, ~22712) — *after*
+    every transfer leg, including the 2a-INPUT mirror migration at ~22235-22252.
+    A mid-transfer failure therefore leaves the predecessor reading `live` while
+    the successor already owns the migrated mirror, and a status-only test would
+    delete exactly the state #11953 is about.
+
+    So the witness is, first, the SUCCESSOR's own edges. This point was created
+    by the caller moments earlier and carries none, so ANY incident edge — the
+    2a operator re-point (~22136), the 2a-INPUT mirror (~22218), or the
+    2a-DIRECT re-point (~22251) — can only have come from the transfer.
+
+    Second, and only against the PRE-CALL baseline: a CHANGE in the
+    predecessor's status. Comparing the status against `live` instead would be
+    wrong, and wrong in the destructive-to-the-fix direction: a predecessor that
+    was ALREADY `draft` or `retracted` reads as "non-live" on a pure guard
+    refusal where nothing mutated, so the compensation would be skipped and the
+    goal would be left with TWO current claims (`draft` is a CURRENT status —
+    `live.CURRENT_POINT_STATUS_VALUES` — so `latest_judgement` can select it).
+    `status_before` is the pre-call read; only a transition away from it is
+    evidence that this call landed.
+
+    A read we cannot complete is INCONCLUSIVE, and the tie-break is the failure
+    class: the lifecycle / claim-class guards (#2498, #2351) are documented to
+    raise BEFORE any mutation, so a `ValueError` over an unreadable graph still
+    means nothing landed and the compensation is safe. Any OTHER failure may sit
+    after the journal append, so it keeps the successor. This matters more than
+    it looks: keeping the successor leaves a CURRENT `derived` claim, and the
+    module's own next pass would then take the unchanged arm on it — making a
+    transition the hard guard refused the goal's recorded state, durably.
+
+    On the arms that do keep it, the trade is taken on irreversibility alone: a
+    destroyed mirror cannot be re-read, while a leftover claim can be seen in the
+    graph and repaired. Honest statement of the price: the successor is a current
+    claim the next pass can adopt, and the extra operator it can leave behind is
+    NOT reliably reported — ``_extra_operators`` is INPUT-scoped to ONE point, so
+    the never-retired predecessor's operator falls outside it.
+
+    Returns WHY the successor cannot be safely removed (``None`` when nothing
+    landed), so the caller's note can state what was actually observed instead of
+    asserting a mutation it never saw.
+    """
+
+    def _cannot_tell(reason: str) -> str | None:
+        # An inconclusive read falls back to the guard invariant: a `ValueError`
+        # is the pre-mutation class, so there is nothing to protect.
+        return None if guard_class else reason
+
+    try:
+        edges = sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$i})-[r]-() RETURN type(r) LIMIT 1",
+            params={"i": successor_id},
+        ).result_set
+    except Exception:
+        return _cannot_tell(
+            "the graph could not be read after the failure, so it cannot be "
+            "told whether the supersession had begun")
+    if edges:
+        return ("the successor already carries an edge, so the supersession "
+                "had begun wiring it")
+    if status_before is _READ_FAILED:
+        return _cannot_tell(
+            "the predecessor's status could not be read before the call, and "
+            "the failure is not one of the pre-mutation guards")
+    if status_before is _ABSENT:
+        # It did not exist before the call, so this call cannot have retired it:
+        # `supersede_point` refuses a missing point before any mutation. Nothing
+        # landed — the compensation is safe.
+        return None
+    status_now = _point_status(sdk, previous_point_id)
+    if status_now is _READ_FAILED:
+        return _cannot_tell(
+            "the predecessor's status could not be read after the call, and the "
+            "failure is not one of the pre-mutation guards")
+    if status_now is _ABSENT:
+        return _cannot_tell(
+            "the predecessor no longer exists after the call — something else "
+            "deleted it — so whether this call retired it cannot be ruled out")
+    if status_now != status_before:
+        return (f"the predecessor's status moved {status_before!r} -> "
+                f"{status_now!r}")
+    return None
+
+
 def record_judgement(
     sdk: Any,
     *,
@@ -1220,6 +1345,7 @@ def record_judgement(
         # fallback is kept and pinned rather than deleted as unreachable.
         reading_at = (judgement.reading.started_at
                       if judgement.reading is not None else None)
+        status_before = _point_status(sdk, previous_point_id)
         try:
             if reading_at:
                 try:
@@ -1240,9 +1366,39 @@ def record_judgement(
             # double-count this module exists to remove), and the next pass would
             # take the unchanged arm on the NEWEST live claim and wire the orphan
             # while the predecessor was never superseded.
+            #
+            # ⛔ BUT THAT COMPENSATION IS ONLY SAFE WHILE NOTHING MUTATED (#11953).
+            # `supersede_point` is NOT atomic: it emits `PointSuperseded` first,
+            # then runs ~15 mutating statements — including the 2a-INPUT leg that
+            # MERGEs `(new)-[:INPUT {idx}]->(op)` and DELETEs `(old)-[:INPUT]->(op)`
+            # per row. A failure inside that window reaches THIS handler, where
+            # deleting `point_id` restores nothing: it removes the already-
+            # migrated mirror and leaves `op` holding `-[:IMPL]->(goal)` with no
+            # source — an operator nothing prunes, because the next pass finds no
+            # `(p)-[:INPUT]->(op)-[:IMPL]->(g)` match and mints a SECOND operator
+            # (the exact double-count this module exists to remove). So the
+            # decision is taken from the graph, not from the exception class.
+            evidence = _supersession_evidence(
+                sdk, previous_point_id, point_id, status_before,
+                guard_class=isinstance(exc, ValueError),
+            )
+            if evidence is not None:
+                # The supersession may already hold state this call cannot undo,
+                # so the successor is left standing and the ORIGINAL reason is
+                # re-raised unchanged (non-masking), carrying what was actually
+                # observed — an arm that only saw a failed READ must not claim a
+                # mutation happened.
+                exc.add_note(
+                    f"#11953: the supersession of {previous_point_id!r} could "
+                    f"not be undone safely — {evidence}. The successor "
+                    f"{point_id!r} was LEFT LIVE rather than deleted. Treat it "
+                    "as the live judgement, check the graph, and complete or "
+                    "retry the supersession by hand."
+                )
+                raise
             try:
                 sdk.delete_point(point_id)
-            except Exception as cleanup_exc:  # pragma: no cover - infra failure
+            except Exception as cleanup_exc:
                 raise exc from cleanup_exc
             raise
 
