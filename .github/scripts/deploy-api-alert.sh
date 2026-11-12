@@ -272,8 +272,19 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
     if [ "$sid" = "$DRIFT_STEP_ID" ]; then
       echo "### Migration-drift gate report"
       echo
-      echo "The gate's own report (\`check-migration-drift\`) for this run follows verbatim — it"
-      echo "names the blocking versions and the ordered remediation. **No production action is"
+      # ⛔ NOT "follows verbatim" (#12200). This intro is emitted for EVERY drift-step body,
+      # before the report is even READ, so an unconditional claim about what follows is false
+      # in every state that carries no report (not readable, 0-byte, blank, fallback-empty)
+      # and in the states that carry one but not verbatim (the ASCII fallback drops bytes,
+      # the 6000-byte excerpt is a TAIL, the squeeze drops a split character). It was the
+      # louder sibling of the arm sentence fixed further down: same class, same cause — a
+      # sentence authored at the BRANCH site describing an ARTIFACT decided later. Write the
+      # claim about the artifact, never about the code path that produced it. Pinned by
+      # case 17i, which requires this phrase to be ABSENT from an empty-state body.
+      echo "The gate's own report (\`check-migration-drift\`), which names the blocking versions"
+      echo "and the ordered remediation, is reproduced below when it can be carried — the"
+      echo "6000-byte cut, a character dropped by the squeeze, and the bytes dropped by the ASCII"
+      echo "fallback are each declared beside it. **No production action is"
       echo "taken by this alert, and none should be taken without the owner** (#2240 ruling: a lane"
       echo "must never run DDL or \`migration repair\` against production; a blanket repair hides"
       echo "real drift, #1001)."
@@ -297,10 +308,10 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # the SQUEEZE below drops the split sequence, so the pasted excerpt is valid
         # UTF-8; the FALLBACK (further down, when the squeeze yields NOTHING) drops
         # every non-ASCII byte, so its output is ASCII and therefore valid UTF-8 too.
-        # Both paths DECLARE what they dropped, so the body never reads as a verbatim
-        # report it does not carry. The fence is then made longer than any backtick
-        # run in the excerpt: the report carries repo-controlled text (migration
-        # filenames, version names), and a report containing ``` would close the
+        # Both paths DECLARE what they dropped, and the state that carries NOTHING says so
+        # (#12200), so the body never reads as a report it does not carry. The fence is then
+        # made longer than any backtick run in the excerpt: the report carries repo-controlled
+        # text (migration filenames, version names), and a report containing ``` would close the
         # block early and render the rest as live markdown. (Round-5 review, P3-2.)
         #
         # ⛔ #12077 — the SQUEEZE'S EXIT STATUS IS NOT THE ALERT'S, and it is not
@@ -333,7 +344,12 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         raw_tail="$(tail -c 6000 "$DRIFT_REPORT_FILE" 2>/dev/null)" || raw_tail=""
         excerpt=""
         squeeze_incomplete=0
-        if ! excerpt="$(printf '%s' "$raw_tail" | iconv -f UTF-8 -t UTF-8 -c)"; then
+        # `2>/dev/null`: a converter that is absent prints its own "command not found" or
+        # refusal on stderr, which lands in the job log beside an alert that went out
+        # perfectly well. Main already suppressed it here (#12077); the merge that brought
+        # this branch up to main dropped the suppression, leaving one spurious diagnostic
+        # per alert on a runner without `iconv` (recorded on #12200, restored here).
+        if ! excerpt="$(printf '%s' "$raw_tail" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null)"; then
           : # status only — the bytes `iconv` could convert have already been emitted
         fi
         if [ -z "$raw_tail" ]; then
@@ -366,7 +382,29 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # exists to remove. The merge that brought this branch up to main dropped
           # main's own `|| true` here (review P2, PR #12110); case 17h pins it.
           excerpt="$(printf '%s' "$raw_tail" | LC_ALL=C tr -d '\200-\377' || true)"
-          echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit); it is pasted with its non-ASCII bytes dropped, so any non-ASCII character in it is LOST — the run link above holds the full text."
+          # ⛔ The fallback has a SECOND empty state, and the sentence below is a claim
+          # about an artifact: a report whose excerpt-able text is entirely non-ASCII
+          # (e.g. `→→→`) squeezes to NOTHING, so the fenced block further down is skipped
+          # — and an unconditional "it is pasted with its non-ASCII bytes dropped" then
+          # promises an excerpt the body does not carry (#12200, P3-1 of PR #12110's
+          # review: the on-call reader is told the degraded report is here when the whole
+          # report is only at the run link). One sentence per state, each conditioned on
+          # what was actually produced, is the shape that cannot diverge again. Pinned by
+          # case 17i, whose not_contains row reds if this condition is removed.
+          if [ -n "$excerpt" ]; then
+            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit); it is pasted with its non-ASCII bytes dropped, so any non-ASCII character in it is LOST — the run link above holds the full text."
+          else
+            # ⛔ SAY ONLY WHAT IS TRUE IN THIS STATE, not what the BRANCH implies. `excerpt` is
+            # empty here for TWO reasons and the body cannot tell them apart: the tail may be
+            # entirely non-ASCII, OR the `tr` fallback itself may have failed (it is guarded by
+            # `|| true` precisely so a failing tr cannot go deaf — case 17h). An earlier version
+            # of this sentence asserted the first cause ("every byte … is non-ASCII"), which is
+            # FALSE in the second state: measured in case 17h's own state (broken iconv + broken
+            # tr, an ASCII report), the body claimed every byte of an ASCII report was non-ASCII
+            # — the exact class this whole change exists to remove, reintroduced one branch down.
+            # The reader's action is the same in both states, so name the state, not the cause.
+            echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit), and the ASCII fallback produced no excerpt either — so NOTHING is pasted below; the full report is at the run link above."
+          fi
           echo
         elif [ "$(printf '%s' "$excerpt" | wc -c)" -lt "$(printf '%s' "$raw_tail" | wc -c)" ]; then
           squeeze_incomplete=1
