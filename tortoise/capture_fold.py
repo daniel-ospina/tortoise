@@ -68,11 +68,15 @@ lost and cannot be re-created:
 
 * an attachment link whose target cannot be addressed by id (`unaddressable`);
 * a source reference the canonical does not already carry
-  (`uncarried_source_ref`) — NOT because §4.3 forecloses a field write on a
-  committed row (the free-slot carry below writes fields on this very row,
-  through `update_point`, which IS a lifecycle door), but because the ref lives
-  in ONE slot: writing the duplicate's source over a canonical that already has
-  one would CLOBBER the canonical's provenance to save the duplicate's;
+  (`uncarried_source_ref`) — a Point holds ONE scalar `extractedFrom`, so a
+  difference there is refused rather than overwritten (writing the duplicate's
+  source over the canonical's would clobber provenance to save provenance).
+  §4.3 does NOT foreclose the write: `update_point` is a lifecycle door, and the
+  free-slot carry below uses it on this very row. ⚠️ This refuses the
+  DIFFERENCE, not the possibility: an additive home exists (`extractedFromAll`,
+  a LIST on the same Point), and carrying the difference there is the upgrade
+  path that would retire this token. Until that union lands, refusing is the
+  fail-closed answer — the fold loses a merge, not an edge;
 * a link that does not LAND when re-written (`link_not_carried`) — counted,
   never assumed, the same rule `apply_merge_union` follows;
 * evidence that cannot be READ at all (`unreadable`). Fail-closed: this
@@ -428,6 +432,10 @@ class FoldEvidence:
 
     attachments: tuple[tuple[str, str, str, Any], ...] = ()
     unaddressable: tuple[tuple[str, str], ...] = ()
+    #: The duplicate's own labels. `DETACH DELETE` removes the NODE, so a second
+    #: label (`:Point:Object`) goes with it — and a label is not a property, so
+    #: `undeclared` could never see it. Read, and REPORTED as a residual.
+    labels: frozenset[str] = frozenset()
     source_refs: frozenset[str] = frozenset()
     scalar: dict[str, Any] = field(default_factory=dict)
     #: The duplicate's own span evidence is NOT a valid address — the reason is
@@ -609,7 +617,7 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
     try:
         rows = proj.g.query(
             _EVIDENCE_SELECT.format(alias="d")
-            + ", d.confidence, d.pointKind, properties(d)",
+            + ", d.confidence, d.pointKind, properties(d), labels(d)",
             params={"id": dup_id}).result_set
     except Exception:
         return None
@@ -621,7 +629,7 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         return FoldEvidence(ambiguous=True)
     (scalar_ref, all_refs, quote, span_start, span_end, source_turn_id,
      search_keys, when, validfrom, _event_id, _status, _is_operator,
-     prov_source, _confidence, _point_kind, _props) = rows[0]
+     prov_source, _confidence, _point_kind, _props, _labels) = rows[0]
     refs = _refs_from(scalar_ref, all_refs, prov_source)
     if refs is None:
         return None
@@ -632,6 +640,9 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
     # field, and inventing one would put a phantom loss on every receipt.
     undeclared_props = tuple(sorted(
         str(key) for key in (_props or ()) if str(key) not in _DECLARED_PROPS))
+    #: ⚠️ A label is neither a prop nor an edge: it is part of the NODE the delete
+    #: removes, and `properties(d)` cannot see it. A map-less read is `()`.
+    labels = frozenset(str(lab) for lab in (_labels or ()))
     scalar: dict[str, Any] = {}
     for key, value in (("quote", quote), ("span_start", span_start),
                        ("span_end", span_end), ("source_turn_id", source_turn_id),
@@ -769,6 +780,7 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         attachments=tuple(attachments),
         unaddressable=tuple(unaddressable),
         source_refs=frozenset(refs),
+        labels=labels,
         scalar=scalar,
         malformed_address=malformed_address,
         inbound=tuple(inbound),
@@ -917,7 +929,12 @@ def carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
     """
     try:
         assert_evidence_vocabulary()
-        return _carry_fold_evidence(proj, dup_id, canonical_id, sdk=sdk)
+        out = _carry_fold_evidence(proj, dup_id, canonical_id, sdk=sdk)
+        # ⚠️ ONE place, so every arm is de-duplicated: two links of the same
+        # predicate to different targets (or one residual reached by two paths)
+        # must not print the same sentence twice on the receipt.
+        out["residual"] = list(dict.fromkeys(out["residual"]))
+        return out
     except Exception as e:
         # ⚠️ The SAME key set as every other arm — the docstring's invariant is
         # executable, not aspirational: the capture seam indexes these keys, so a
@@ -976,6 +993,12 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
     # The duplicate's OWN one-slot-two-values conflicts: reported, never carried,
     # and set here so a refusal discloses them too.
     out["residual"].extend(evidence.slot_conflicts)
+    # A second LABEL on the duplicate dies with the node and nothing carried it:
+    # `update_point` writes properties, never labels. Reported, so the receipt
+    # names what went with it.
+    extra_labels = sorted(evidence.labels - {"Point"})
+    if extra_labels:
+        out["residual"].append("label(s) " + ", ".join(extra_labels))
     # 0) An edge class this module does not know. The delete takes EVERY edge, so
     #    an unfiltered read is the only way to know none was orphaned; the
     #    refusal is the same posture as a writer-less `about*` predicate.
@@ -1001,8 +1024,11 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                           "could not be checked")
         return out
 
-    # 1) A link whose target has no id cannot be re-pointed: `link_entity`
-    #    MERGEs on `{id:$id}`, so it would mint a DIFFERENT node.
+    # 1) A link whose target has neither an id nor a url cannot be re-pointed:
+    #    the writer addresses its target by `{id:$id}` only, and `link_entity`
+    #    MATCHes both endpoints (it MINTS nothing — an earlier version of this
+    #    comment said it would create a different node, which the
+    #    `FoldEvidence.attachments` docstring already corrects).
     if evidence.unaddressable:
         rels = ", ".join(sorted({rel for rel, _ in evidence.unaddressable}))
         out["reason"] = "unaddressable"
@@ -1123,8 +1149,10 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                 # so a canonical holding only `quote` reports the duplicate's
                 # `span_start` as dropped while its own `span_start` does not
                 # exist. The occupancy is part of the fact.
-                reason = ("the canonical's value differs" if held_value is not None
-                          else "the canonical holds no part of the address")
+                reason = ("the canonical's value differs"
+                          if held_value is not None else
+                          "the canonical holds no value for this part of the "
+                          "address")
                 out["residual"].append(f"{key} — {reason}")
         else:
             to_write[key] = evidence.scalar[key]
@@ -1249,10 +1277,13 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                 # Named with the VALUE: "confidence of X→Y" over a string says
                 # nothing an operator can act on.
                 out["residual"].append(
-                    f"confidence of {rel}→{label} (not a number: "
+                    f"confidence of {rel}→{target_id} (not a number: "
                     f"{confidence!r})")
             elif grading != confidence:
-                out["residual"].append(f"confidence of {rel}→{label}")
+                # ⚠️ Names the TARGET, not just the label: two graded links to
+                # different targets emitted the identical residual, so the
+                # receipt could not say which link's grading died.
+                out["residual"].append(f"confidence of {rel}→{target_id}")
     if failures:
         out["reason"] = "link_not_carried"
         # The COUNT first: naming three of seven is a partial fact, and the rest

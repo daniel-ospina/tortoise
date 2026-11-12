@@ -409,7 +409,7 @@ class _FakeGraph:
     def __init__(self, *, dup_row=_DUP_ROW, edges=(), carried=(0, None),
                  canon_row=_CANON_ROW, raise_on=frozenset(),
                  dup_props=None, inbound=(), canon_rows=None,
-                 dup_status=None, dup_is_operator=None):
+                 dup_status=None, dup_is_operator=None, dup_labels=("Point",)):
         self.dup_row = dup_row
         self.edges = list(edges)
         self.carried = carried
@@ -424,6 +424,8 @@ class _FakeGraph:
         #: gained when they stopped being silently structural.
         self.dup_status = dup_status
         self.dup_is_operator = dup_is_operator
+        #: The duplicate's own LABELS — the one class `properties(d)` cannot see.
+        self.dup_labels = tuple(dup_labels)
         #: The canonical's own `extractedFrom` targets — a provenance edge on the
         #: duplicate may only die when the canonical holds the same one.
         self.canon_prov_targets = []
@@ -489,7 +491,7 @@ class _FakeGraph:
             return SimpleNamespace(
                 result_set=[(*self._to_query_row(
                     self.dup_row, self.dup_status, self.dup_is_operator),
-                    self.dup_props)])
+                    self.dup_props, list(self.dup_labels))])
         if "c.extractedFrom" in q:
             # `canon_row=None` is the "canonical cannot be read" arm;
             # `canon_rows` covers the id-carried-by-two-nodes arm.
@@ -1502,8 +1504,8 @@ def test_an_address_part_the_canonical_does_not_hold_says_so():
     out = capture_fold.carry_fold_evidence(
         _FakeProj(graph), "pt_dup", "pt_canon")
     assert out["ok"] is True, out
-    assert any("span_start — the canonical holds no part of the address" in r
-               for r in out["residual"]), out["residual"]
+    assert any("span_start — the canonical holds no value for this part of the "
+               "address" in r for r in out["residual"]), out["residual"]
     assert not any("span_start — the canonical's value differs" in r
                    for r in out["residual"]), out["residual"]
 
@@ -1539,8 +1541,10 @@ def test_the_slot_conflict_names_the_value_that_travelled():
     item = next(r for r in out["residual"] if "held both" in r)
     assert "'2026-08-01' travelled" in item, item
     assert "'2026-08-02' went with the node" in item, item
-    # And the clause names what was ACTUALLY written — not a guess: `scalar`
-    # builds `when if when is not None else validFrom`, so `when` travels.
+    # And the clause names what was ACTUALLY written — not a guess: the evidence
+    # read builds `scalar["when"] = when if when is not None else validFrom`, so
+    # on a row holding BOTH the traveller is `when` (there is no per-spelling
+    # ordering in the write loop, which is what an earlier comment claimed).
     assert "validFrom" in out["copied"], out
     assert sdk.calls and sdk.calls[0]["validFrom"] == "2026-08-01", sdk.calls
 
@@ -1714,3 +1718,59 @@ def test_an_unreadable_canonical_AFTER_the_write_says_unproven():
     assert out["ok"] is False and out["reason"] == "slot_write_failed", out
     assert "unproven" in out["blocked"], out["blocked"]
     assert out["copied"] == [], out
+
+
+# ── 18) round 15: the class nothing read (LABELS), the wording that inverted
+#         its own state, and the seam-level de-dup ──
+
+
+def test_a_second_LABEL_on_the_duplicate_is_reported_not_lost():
+    """A label is neither a prop nor an edge: `properties(d)` cannot see it, so
+    `:Point:Object` was the ONE class carried by nothing, reported by nothing and
+    refused by nothing — while `DETACH DELETE` removed the node and the label
+    with it."""
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph(dup_labels=("Point", "Object"))),
+        "pt_dup", "pt_canon")
+    assert any("label(s) Object" in r for r in out["residual"]), out
+    # …and a plain `:Point` puts nothing on the receipt.
+    plain = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph()), "pt_dup", "pt_canon")
+    assert not any("label(s)" in r for r in plain["residual"]), plain
+
+
+def test_the_grading_residual_names_the_TARGET_and_never_repeats():
+    """`confidence of aboutObject→Object` was emitted twice for two links to
+    DIFFERENT targets, so the receipt could not say which grading died."""
+    edges = [("aboutObject", "Object", "obj_1", 0.4),
+             ("aboutObject", "Object", "obj_2", 0.4)]
+    graph = _FakeGraph(edges=edges,
+                       carried={"obj_1": (1, 0.9), "obj_2": (1, 0.9)})
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is True, out
+    graded = [r for r in out["residual"] if r.startswith("confidence of ")]
+    assert len(graded) == 2, out["residual"]
+    assert "obj_1" in graded[0] and "obj_2" in graded[1], graded
+    assert len(set(out["residual"])) == len(out["residual"]), out["residual"]
+
+
+def test_the_seam_prints_a_late_refusal_residual_ONCE(sdk, monkeypatch):
+    """The fact-once rule pinned at the SEAM, not only in the helper's body: a
+    post-write refusal whose `blocked` already carries the residual must reach
+    the receipt once. (Mutating `_fold_residual_clause` back to the naive join
+    used to leave every capture-level arm green — the helper's own unit test was
+    the only red, which is the "body pinned, CALL not" shape.)"""
+    item = "pointKind (duplicate 'observation', canonical None)"
+    canned = {"ok": False, "reason": "link_not_carried",
+              "blocked": ("its 1 attachment link(s) could not be carried onto "
+                          f"the canonical: aboutObject→obj_1 (did not land); "
+                          f"did not carry {item}"),
+              "carried": 0, "created": 0, "copied": [], "residual": [item],
+              "undeclared": []}
+    monkeypatch.setattr(capture_fold, "carry_fold_evidence",
+                        lambda *a, **k: dict(canned))
+    _extracted, meta = _extract(sdk, monkeypatch)
+    said = [w for w in meta["warnings"] if "kept distinct" in w]
+    assert said, meta["warnings"]
+    assert said[0].count(item) == 1, said[0]
