@@ -5494,6 +5494,14 @@ def _flag_comes_from_a_positive_probe(code: str, path: str, flag: str) -> bool:
         rf"(?:\[\[\s*-e\s+{p}\s*\]\]|\[\s*-e\s+{p}\s*\]|test\s+-e\s+{p})",
         code,
     ):
+        # ⛔ A NEGATION OUTSIDE THE BRACKETS IS NOT A POSITIVE PROBE. `if ! [ -e P ];
+        # then F=1; fi` and `! [ -e P ] && F=1` set the flag exactly when the path was
+        # ABSENT, so the trap deletes the operator's file — MEASURED GREEN (review cycle
+        # 19), and REFUSED by the pre-diff substring check. The `!` is tested on the
+        # text BEFORE the probe; `[ ! -e P ]` and `[[ ! -e P ]]` already miss the
+        # alternation above, so this covers the form they cannot.
+        if re.search(r"!\s*$", code[: test.start()]):
+            continue
         window = code[test.end():]
         # ⛔ THE ARM, NOT A LINE COUNT. The earlier cut bounded the body with a
         # newline-`fi` search plus a two-line fallback, which (a) let an assignment in
@@ -5509,7 +5517,9 @@ def _flag_comes_from_a_positive_probe(code: str, path: str, flag: str) -> bool:
             else:
                 arm = arm.splitlines()[0] if arm.splitlines() else ""
         else:
-            and_gate = re.match(r"\s*&&", window)
+            # ⛔ A LINE CONTINUATION IS NOT A DIFFERENT PROBE. `[ -e P ] \` newline
+            # `&& F=1` is the same gate, refused before this bound (review cycle 19).
+            and_gate = re.match(r"\s*(?:\\\s*\n\s*)?&&", window)
             if and_gate is None:
                 continue
             arm = window[and_gate.end():]
@@ -5558,7 +5568,13 @@ def _guard_owns_path(trap: str, flag: str, path: str) -> bool:
         # ⛔ THE WHOLE `rm` SPELLING, NOT ONE FLAG CLUSTER. `-rf`, `-f --` and a
         # `sudo` prefix are the same removal; pinning `-f ` alone refused them with a
         # message false about what the file said (MEASURED, review cycle 18).
-        if re.search(rf"rm\s+(?:-[a-zA-Z]+\s+)*(?:--\s+)?\S*{p}", clause[test.end():]) is not None:
+        # ⛔ AND A REMOVAL THAT CANNOT RUN IS NOT A REMOVAL: `false && rm -f P` inside
+        # the right clause leaves the step's own file on a pool box once its keyring is
+        # gone (MEASURED, review cycle 19). The real shape's `|| true` sits AFTER the
+        # `rm`, so only the PREFIX is tested.
+        tail = clause[test.end():]
+        removal = re.search(rf"rm\s+(?:-[a-zA-Z]+\s+)*(?:--\s+)?\S*{p}", tail)
+        if removal is not None and not re.search(r"&&|\|\|", tail[: removal.start()]):
             return True
     return False
 
