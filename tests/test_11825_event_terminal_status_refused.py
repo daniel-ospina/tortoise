@@ -345,14 +345,50 @@ class TestTheEventApiDoor:
                           event={"id": "ev-api-nested-flag", "outdated": True})
         assert _journal_lines(sdk._test_log) == []
 
-    @pytest.mark.parametrize("value", [123, ["a"], {"a": 1}])
+    @pytest.mark.parametrize("value", [123, ["a"]])
     def test_a_non_string_status_is_a_named_refusal_not_a_type_error(self, sdk, value):
         """Review cycle 2, P2 — an unhashable status raised a bare `TypeError`
-        (no door name, no remedy) and a hashable one stored an unnameable value."""
+        (no door name, no remedy) and a hashable one stored an unnameable value.
+
+        ⛔ Scoped to values the writer would PERSIST: `123` (a scalar) and
+        `["a"]` (FalkorDB stores arrays) both land on the node. A
+        NON-persistable value is the neighbouring test's case, and it is
+        ACCEPTED — see `test_a_non_persistable_status_is_dropped_not_refused`.
+        """
         api = self._api(sdk)
         with pytest.raises(ValueError, match="not a legal value on an :Event"):
             api.add_event("ev-api-typed", "deployment", status=value)
         assert _journal_lines(sdk._test_log) == []
+
+    @pytest.mark.parametrize("value", [{"a": 1}, {"a": {"b": []}}])
+    def test_a_non_persistable_status_is_dropped_not_refused(self, sdk, value):
+        """#7925 (recorded decision) — a value the WRITER DROPS is not refused.
+
+        `tests/test_ingest_event_endpoint.py::
+        test_direct_route_object_and_event_status_values_not_over_rejected` pins
+        this for the direct route: a map/set/bytes `status` is filtered out
+        before the `SET`, so the node never carries it and no predicate can read
+        it as terminal. Refusing it rejects a write the writers accept — the
+        over-rejection class #7925 round 4 already fixed once, which the first
+        revision of this guard re-introduced by asking only
+        `isinstance(status, str)` (measured RED there, and it is why this arm
+        asks `live._event_state_would_be_stored` instead).
+
+        Pinned as a REGRESSION guard, not a new-guard assertion: it passes on
+        the pre-fix code too, by design.
+
+        ⛔ SCOPE: a MAP, and only a map. `bytes`/`set` are non-persistable too,
+        but at THIS door they die earlier — `add_event` journals `**extra` and
+        the value is not JSON-serializable, which is the pre-existing
+        `EventAPI` defect filed as #12114, not this guard's question. Widening
+        this param list to them would pin THAT bug as if it were intended.
+        """
+        api = self._api(sdk)
+        api.add_event("ev-api-dropped", "deployment", status=value)
+        # Accepted, and the value is genuinely DROPPED rather than stored: the
+        # node carries no `status` at all, which is what makes the terminal
+        # predicates unable to see it.
+        assert "status" not in _props(sdk, "ev-api-dropped")
 
 
 class TestTheBeliefSeam:

@@ -562,6 +562,24 @@ _EVENT_TERMINAL_STATE_REFUSAL = (
 )
 
 
+def _event_state_would_be_stored(value) -> bool:
+    """True when the writer would STORE this `:Event` state value as a prop.
+
+    The predicate the type arms of :func:`refuse_terminal_event_state` are
+    scoped by, and it is NOT a second declaration: the answer belongs to the
+    projection's persistable-value filter (``_is_persistable_prop_value``,
+    #2894/#2795), which is what drops a value FalkorDB refuses before the
+    ``SET``. Imported at CALL time because ``projection`` imports this module.
+
+    A ``False`` answer means the node can never carry the value, so it cannot
+    be read as terminal by either predicate — which is why refusal there would
+    be the over-rejection #7925 pins.
+    """
+    from .projection.entities import _is_persistable_prop_value
+
+    return _is_persistable_prop_value(value)
+
+
 def refuse_terminal_event_state(props, *, door: str) -> None:
     """Refuse the TERMINAL half of the status vocabulary on an `:Event`.
 
@@ -629,29 +647,48 @@ def refuse_terminal_event_state(props, *, door: str) -> None:
     outdated = props.get("outdated")
     # Both keys are typed here, because this is the ONE `:Event` writer with no
     # ``_sanitize_props`` intake to do it. A non-STRING status is not merely
-    # undeclared: an unhashable one (a list, a dict) reached the membership test
-    # below and raised a bare ``TypeError: unhashable type`` — a 500-class with
-    # no door name and no remedy, measured at this door (review cycle 2, P2) —
-    # while a hashable non-string (an int) glided through and stored a status no
-    # vocabulary can name. Refused symmetrically with ``outdated`` below.
+    # undeclared: an unhashable PERSISTABLE one (an array — FalkorDB stores
+    # arrays) reached the membership test below and raised a bare
+    # ``TypeError: unhashable type`` — a 500-class with no door name and no
+    # remedy, measured at this door (review cycle 2, P2) — while a hashable one
+    # (an int) glided through and stored a status no vocabulary can name.
+    # Refused symmetrically with ``outdated`` below.
+    #
+    # ⛔ But ONLY when the value would be STORED. A NON-PERSISTABLE value (a map,
+    # a set, bytes) is dropped by the projection's persistable-value filter
+    # before the ``SET``, so the node never carries it and no predicate can read
+    # it as terminal — refusing it would reject a write the writers accept, which
+    # is the #7925 over-rejection class (`tests/test_ingest_event_endpoint.py::
+    # test_direct_route_object_and_event_status_values_not_over_rejected`, the
+    # direct route's own pin: measured RED against the first revision of this
+    # guard, which asked only ``isinstance(status, str)``). The distinction is
+    # the SDK's own, already recorded at ``sdk._status_is_stored_unhashable``:
+    # non-persistable → accepted-and-dropped, persistable non-string → refused.
     if status is not None and not isinstance(status, str):
-        raise ValueError(
-            f"Refused: `status={status!r}` is not a legal value on an :Event "
-            f"({door}). `status` is a STRING drawn from the vocabulary, or "
-            f"`None` to clear it. WHAT TO DO: pass a string (to record a "
-            f"correction, write a NEW :Event; for ingest state use "
-            f"`eventStatus`)."
-        )
+        if _event_state_would_be_stored(status):
+            raise ValueError(
+                f"Refused: `status={status!r}` is not a legal value on an :Event "
+                f"({door}). `status` is a STRING drawn from the vocabulary, or "
+                f"`None` to clear it. WHAT TO DO: pass a string (to record a "
+                f"correction, write a NEW :Event; for ingest state use "
+                f"`eventStatus`)."
+            )
+        # The writer drops it, so nothing lands that a reader could call
+        # terminal. Treated as ABSENT rather than refused (#7925).
+        status = None
     if outdated is not None and not isinstance(outdated, bool):
-        raise ValueError(
-            f"Refused: `outdated={outdated!r}` is not a legal value on an "
-            f":Event ({door}). `outdated` is contractually a BOOLEAN and it is "
-            f"server-managed; a non-boolean is read as TERMINAL by the Cypher "
-            f"predicate and as LIVE by the Python mirror, which is the "
-            f"half-state #11825 records, reached through the one door that "
-            f"writes props without `_sanitize_props`. WHAT TO DO: pass `True`, "
-            f"`False`, or omit the key."
-        )
+        if not _event_state_would_be_stored(outdated):
+            outdated = None
+        else:
+            raise ValueError(
+                f"Refused: `outdated={outdated!r}` is not a legal value on an "
+                f":Event ({door}). `outdated` is contractually a BOOLEAN and it is "
+                f"server-managed; a non-boolean is read as TERMINAL by the Cypher "
+                f"predicate and as LIVE by the Python mirror, which is the "
+                f"half-state #11825 records, reached through the one door that "
+                f"writes props without `_sanitize_props`. WHAT TO DO: pass `True`, "
+                f"`False`, or omit the key."
+            )
     if not is_terminal_status(status, outdated):
         return
     # Terminal — name the key that made it so. `is_terminal_status` is
