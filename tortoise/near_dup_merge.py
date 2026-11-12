@@ -320,41 +320,49 @@ def apply_merge_union(proj: Any, record: dict, *, session_id: str,
     lowering written into THIS query would be a second key space beside the
     writer's, and would equate spellings the fold does not.
 
-    #12120 merge-attachment site: the pre-fix lookup was NARROWER than the write it mirrors.
-    `_entity_names` carries the union of names the CLAIMS mention, while the
-    writer resolves them on the FOLDED union (`name` · `canonical_name` ·
+    #12120 merge-attachment site: the pre-fix lookup was NARROWER than the write it
+    mirrors. `_entity_names` carries the union of names the CLAIMS mention, while
+    the writer resolves them on the FOLDED union (`name` · `canonical_name` ·
     `aliases`, over the raw and the folded spelling), so a claim naming
     `"the widget"` for an Object stored as `"Widget"` matched nothing here and
     the attachment was reported `unresolved` instead of being linked — a
     measurement that said "no node has that name" about a node the write door
-    reaches. The space comes from `entity_identity.name_key_space_same_entity`
-    (the ONE definition of who holds a name), so the lookup asks exactly the
-    question the create door answers.
+    reaches. ⛔ The space that comes from
+    `entity_identity.name_key_space_same_entity` is the **SPELLING** space only:
+    unlike `resolve_or_mint`, this site is status-blind and does not collapse
+    merged carriers (capture's recorded attach-to-every-carrier disposition), so a
+    terminal-only holder IS linked and `unresolved` is about spelling, not about
+    the writer's whole resolution (the collapse half is #12244).
 
     `unresolved` therefore means what it says: *no Object holds that name in the
     key space the write resolves on* (raw, folded, `canonical_name`, or a merge's
     `aliases`) — never "the raw spelling missed".
 
-    ⚠️ **THE SUBJECT CHANNEL IS SKIPPED, not mis-bound — and the skip is what
-    makes the coincidence case safe.** `about_entities` is not object-only: the
-    SUBJECT channel (team/role/person, the gated `aboutSubject` edge) also
+    ⚠️ **THE SUBJECT CHANNEL IS SKIPPED when the spelling is EXACT — and a
+    FOLD-ONLY one is narrowed, not skipped.** `about_entities` is not object-only:
+    the SUBJECT channel (team/role/person, the gated `aboutSubject` edge) also
     contributes names to it. `subject_names` carries the payload's subject-kind
-    names, and a union name in that set — compared in the writer's key space, raw
-    or FOLDED, because the lookup below is fold-wide — is reported in
-    `skipped_subject` and
-    **never written**.
+    names, and the comparison is made in the writer's key space (raw or FOLDED,
+    because the lookup below is fold-wide):
 
-    Why the skip is by NAME and not by "resolution failed": an `:Object` may
-    legitimately share a subject's EXACT name — that is why capture's own pass
-    skips on the name (`sdk.py:17939`) — and the shared spelling is what makes the
-    case ambiguous. So the lookup below RESOLVES in that case, and a write without
-    this skip would attach the claim to an Object under a subject's name — the
-    un-gated `aboutObject` edge capture deliberately refuses to write there
-    (`#1370` / the `#4934` label leak). Bounding the consequence to "lands in
-    `unresolved`" was therefore FALSE for exactly that case. The skip is compared
-    in the writer's key space (raw or folded) because the lookup is fold-wide:
-    an exact-only comparison would leave the fold-equivalent spelling of a
-    subject-kind name to attach that edge (#12120 review round 3).
+    * a name whose EXACT spelling is in that set is reported in `skipped_subject`
+      and **never written** (F6's rule: capture's own pass skips on the exact name,
+      `sdk.py:17939`, and a write there would attach an Object under a subject's
+      name — the un-gated `#4934` edge);
+    * a name that only FOLD-equals one is NOT dropped: the lookup is narrowed to
+      `AND o.name = $exact`, so an Object whose OWN name is the reference keeps its
+      edge (F6's legitimately-cased carrier) and a FOLD-ONLY carrier does not get
+      one. It is reported in `skipped_subject` only when no exact carrier exists
+      (review round 16: the paragraph this replaces said such a name was "never
+      written", which is the opposite of what the narrowing does, and the sibling
+      sites all state the narrowed rule).
+
+    Why the comparison is by NAME and not by "resolution failed": an `:Object` may
+    legitimately share a subject's name, and the shared spelling is what makes the
+    case ambiguous — so the lookup below RESOLVES there, and a write without this
+    skip would attach the claim to an Object under a subject's name. Bounding the
+    consequence to "lands in `unresolved`" was therefore FALSE for exactly that
+    case (#12120 review round 3).
 
     ⚠️ **The pre-existing gap this makes VISIBLE instead of silent.** A merge
     emits no payload point, so `bind_point_subjects` never runs for the

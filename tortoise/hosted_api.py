@@ -21828,8 +21828,13 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # registers their targets, so resolving there found no holder for a name
     # this very payload introduces and dropped the edge, which is exactly the
     # #1272 P2-4 case the retired `MERGE (o:Object {name:$name})` existed to
-    # cover. A name that still resolves to nothing is left UNWIRED (and recorded
-    # by `resolve_fold_name`) rather than fabricated.
+    # cover. A name that still resolves to nothing is left UNWIRED rather than
+    # fabricated — the folded arm below records it through `resolve_fold_name`
+    # (`mention=True`). ⛔ The exact-only arm below neither resolves nor records,
+    # and that is deliberate (review round 16): it is reached only for a reference
+    # DECLARED in the payload's `entities`, which STEP 6 creates, so an empty
+    # `_targets` there is a NARROWED miss rather than a resolution failure — see
+    # the note at the arm for the shapes that produce it.
     # ⛔ `mention=True` is the ATTRIBUTION classification (#9876 review). This is
     # an about-edge NAME — one of the uses D1's `unfolded-mention` row enumerates
     # verbatim (`identity-decision.md`: "an `EventRecorded`'s `subject` / `object`
@@ -21891,6 +21896,19 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             _targets = [str(_tid) for _tid in _collapse_resolved_holders(
                 proj.g, "Object", [r[0] for r in _exact_rows if r and r[0]])
                 if _tid]
+            # ⛔ No `record_non_folded` here, and that is a property of the SHAPE,
+            # not an omission (review round 16, corrected in the same round). A
+            # reference reaches this arm only because it is declared in the
+            # payload's `entities`, and a declared entity is CREATED by step 6
+            # (measured: it exists even with `passes_frequency_gate: False`; a kind
+            # that is exclusively a subject layer goes to `:Subject` instead). So an
+            # empty `_targets` here means every holder was NARROWED OUT — by this
+            # arm's exact spelling, by its live-only probe, or by the merge
+            # collapse — or lives in the Subject family. It never means "this name
+            # resolves to nothing", which is what an exempt `SHAPE_UNFOLDED_MENTION`
+            # record would assert; that disposition is `resolve_fold_name`'s, and
+            # replay's un-narrowed fold finds the same holder this arm narrowed
+            # away.
         else:
             _one = resolve_fold_name(proj.g, "Object", _name,
                                      context="session-commit aboutObject",

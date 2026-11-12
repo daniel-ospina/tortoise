@@ -1087,9 +1087,14 @@ def _id_claimant_count(g, label: str, node_id: str) -> int:
     """How many NODES claim one logical id — the single-id form of
     :func:`_id_claimant_counts`.
 
-    #12120 (review round 14): :func:`_entity_key_of` asks the same question
-    ``_entity_rows`` asks, so it must use the same primitive — a second, narrower
-    count is how the target's entity became backend-order dependent.
+    #12120 (review round 14, re-anchored in round 16): the supersession lanes ask
+    the TARGET the same question ``_entity_rows`` asks of its rows, so they must use
+    the same primitive — a second, narrower count is how the target's entity became
+    backend-order dependent. Callers: the two duplicated-target refusals
+    (``_apply_subject_supersession`` and ``apply_supersessions``). Round 14's version
+    of this guard sat in :func:`_entity_key_of` and RETURNED ``None`` there, which
+    disarmed both comparisons instead of refusing; the question now belongs to the
+    callers, because refusing is what a corrupt id requires.
     """
     if not node_id:
         return 0
@@ -1105,15 +1110,6 @@ def _entity_key_of(g, label: str, node_id) -> str | None:
     probe and compared against successor candidates at entity level.
     """
     if not node_id:
-        return None
-    # ⛔ The claimant guard `_entity_rows` applies (review round 14):
-    # `follow_resolved_from` reads ONE node for an id, so a second claimant makes
-    # the target's ENTITY — and every question compared against it
-    # (`all_candidates_are_target`, the `key != _target_key` exclusion) — depend
-    # on which of them the backend happened to bind (#2164 P2-2). The ref probes
-    # refuse a duplicated id before this point; this keeps the rule true even if
-    # one of them is ever reordered.
-    if _id_claimant_count(g, label, str(node_id)) > 1:
         return None
     return str(follow_resolved_from(g, label, str(node_id)) or node_id)
 
@@ -1152,6 +1148,28 @@ def _exact_subject_ref_ids(proj, ref: str) -> list:
     return proj.g.query(
         f"MATCH (s:Subject) WHERE {space} AND s.name = $ref RETURN s.id",
         params={**params, "ref": ref}).result_set
+
+
+def _subject_family_holds_ref(proj, ref: str) -> bool:
+    """Does the SUBJECT family hold ``ref`` AT ALL — its own widened key space?
+
+    The guard that reports ``"ref carrier's survivor is gone"`` may only fire when
+    the Subject lane cannot take the record either. :func:`_exact_subject_ref_ids`
+    answers the DEFER's narrower question (a Subject holding the ref by its EXACT
+    spelling, which outranks a fold-only Object); this asks the FAMILY's question,
+    over ``name_key_space_same_entity`` — the same space
+    ``_apply_subject_supersession`` resolves the ref in — so a Subject that holds
+    the ref only by fold is visible and the record falls through to the #1423
+    Subject lane instead of being dropped with a false "no :Subject holds the ref"
+    (review round 16; measured: applied=0 with the fold-only holder live, applied=1
+    once the guard asks this question).
+    """
+    space, params = name_key_space_same_entity("s", ref)
+    if not space:
+        return False
+    return bool(proj.g.query(
+        f"MATCH (s:Subject) WHERE {space} RETURN s.id LIMIT 1",
+        params=params).result_set)
 
 
 def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
@@ -1329,6 +1347,24 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
         _skip(ref, supersedes_by, "id-less subject target")
         return False
     # ── successor must be a VISIBLE, DISTINCT Subject ────────────────────
+    # ⛔ A duplicated TARGET id is corruption, and it must REFUSE here (review
+    # round 16): an entity key computed over an id two nodes claim would come from
+    # whichever claimant `follow_resolved_from` happened to bind, and the Subject
+    # lane's ONE comparison against it — the `key != _target_key` exclusion below,
+    # which decides whether a candidate group is the target's own entity — would
+    # then decide on a key the graph does not determine. Refusing is what the
+    # sibling ref/name probes already do (`ambiguous subject id`), and it is the
+    # only answer that is not inert. (The Object lane, which also compares the key
+    # in `all_candidates_are_target`, refuses for the same reason at its own site.)
+    if _id_claimant_count(proj.g, "Subject", str(target_id)) > 1:
+        record_non_folded("Subject", ref,
+                          display_holder_ids([target_id]),
+                          shape="duplicate-id")
+        warn(f"subject supersession {ref!r} resolved to a target whose id "
+             f"{target_id!r} is claimed by more than one Subject — skipped "
+             f"(never-guess)")
+        _skip(ref, supersedes_by, "ambiguous subject id")
+        return False
     # #12120 review round 8: entity-level identity, node-level visibility — the
     # Object twin's split, and for the same reason (a retired survivor beside a
     # live carrier authorizes the fold, because that carrier is what
@@ -1759,7 +1795,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             proj.g, "Object",
             [_row for _row in _name_rows if _row[0] not in _id_node_keys])
         if (not rows and _name_rows and not _name_arm_rows
-                and not _exact_subject_ref_ids(proj, ref)):
+                and not _subject_family_holds_ref(proj, ref)):
             # #12120 review: the name arm DID match carriers and every one of
             # them collapsed away (its `resolved_from` survivor is gone), so the
             # Object lane has nothing to fold. Reporting the WRONG reason is the
@@ -1767,9 +1803,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # cannot take the record either: a ref that is a live `:Subject`
             # whose successor is carried by both families still folds below
             # (`#1423`), and skipping it here would DROP a fold that applies.
-            # So ask the same exactness question the family defer asks, and
-            # report only when the Subject family does not hold the ref (that
-            # test is part of the guard above, so reaching here IS the report).
+            # So ask the FAMILY's question — its own widened key space, the one
+            # `_apply_subject_supersession` resolves the ref in — not the defer's
+            # EXACTNESS test: a Subject that holds the ref only by fold is
+            # invisible to that narrower test, so asking it dropped a fold the
+            # Subject lane applies and reported "no :Subject holds the ref" about
+            # a live one (review round 16, measured).
             warn(f"supersession ref {ref!r} matched {len(_name_rows)} "
                  f"Object(s) whose merged survivor is gone, and no :Subject "
                  f"holds the ref — skipped (no addressable carrier)")
@@ -2010,6 +2049,25 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # correctly forces all() to False.
         # The target's ENTITY, for the two entity-level questions below and the
         # node-level one in the visible-successor gate (#12120 review round 8).
+        # ⛔ A duplicated TARGET id is corruption and REFUSES here (review round
+        # 16): an entity key over an id two nodes claim comes from whichever
+        # claimant `follow_resolved_from` binds, and both questions below then
+        # decide on a key the graph does not determine. The sibling ref/name
+        # probes refuse the same shape (`ambiguous object id`); refusing here is
+        # the only non-inert answer — an `_entity_key_of` that returned `None`
+        # instead made `key == _target_key` never true (the self-supersession
+        # refusal could not fire) and `key != _target_key` always true (the
+        # merged-carrier exclusion stopped excluding), and the fold then stamped
+        # a node the record never named.
+        if _id_claimant_count(proj.g, "Object", str(real_obj_id)) > 1:
+            record_non_folded("Object", ref,
+                              display_holder_ids([real_obj_id]),
+                              shape="duplicate-id")
+            warn(f"supersession ref {ref!r} resolved to a target whose id "
+                 f"{real_obj_id!r} is claimed by more than one Object — "
+                 f"skipped (never-guess)")
+            _skip(ref, supersedes_by, "ambiguous object id")
+            continue
         _target_key = _entity_key_of(proj.g, "Object", real_obj_id)
         all_candidates_are_target = bool(sb_entities) and all(
             real_obj_id is not None and key == _target_key

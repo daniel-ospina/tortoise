@@ -4149,3 +4149,102 @@ class TestThe12120ReviewRound15:
                 f"resolved (the carrier's), not a duplicate's: {row}")
         finally:
             sdk.close()
+
+
+class TestThe12120ReviewRound16:
+    """Two guards that were INERT or asked the wrong question at the head round 15 left.
+
+    Round 16 found that the round-14 target-claimant guard returned `None` from
+    `_entity_key_of` — which both comparisons treat as an ordinary key, so the
+    self-supersession refusal could never fire and the merged-carrier exclusion
+    stopped excluding — and that `capstone`'s gone-survivor guard asked the DEFER's
+    EXACTNESS question where the Subject lane's own widened key space was needed.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r16",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_a_duplicated_target_id_refuses_and_stamps_nobody(self, sdk_factory):
+        """The guard must refuse; `None` disarmed the two gates instead.
+
+        Round 14 added a claimant check to `_entity_key_of` that RETURNED `None`.
+        Both consumers treat the key as a string, so `key == _target_key` was never
+        true (the self-supersession refusal could not fire) and `key != _target_key`
+        was always true (a merged carrier was no longer excluded). Measured at the
+        round-15 head: `applied=1`, and a node that merely SHARED the target's id was
+        stamped superseded by a record that never named it. `main` writes the same
+        wrong write, so this is an inert guard rather than a regression — which is
+        exactly why it has to refuse like its three sibling probes.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query("CREATE (:Object {id:'r16-surv', name:'Survivor', "
+                    "objectKind:'document', status:'live'})")
+            g.query("CREATE (:Object {id:'r16-target', name:'Target', "
+                    "objectKind:'document', status:'live', "
+                    "resolved_from:'r16-surv'})")
+            # a DIFFERENT node that merely claims the target's id
+            g.query("CREATE (:Object {id:'r16-target', name:'Other', "
+                    "objectKind:'document', status:'live'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Target", "supersedes_by": "Survivor",
+                 "evidence": "test"}])
+            assert applied == 0, (
+                f"a duplicated target id was folded instead of refused: {msgs}")
+            assert any("ambiguous object id" in str(s.get("reason") or "")
+                       for s in skips), skips
+            rows = g.query(
+                "MATCH (o:Object {id:'r16-target'}) "
+                "RETURN o.name, o.status, o.supersededBy").result_set
+            assert all(r[1] != "superseded" and not r[2] for r in rows), (
+                "a node the record never named was stamped by the corrupt-id "
+                f"fold: {rows}")
+        finally:
+            sdk.close()
+
+    def test_a_fold_only_subject_ref_is_not_dropped_as_a_gone_survivor(
+            self, sdk_factory):
+        """The gone-survivor guard must ask the FAMILY's key space, not exactness.
+
+        Shape: every Object carrier of the ref collapsed onto a survivor that is
+        gone, the successor is carried by BOTH families (so the Object-first
+        successor probe routes the record into the Object lane), and the ref is
+        held by a Subject only by FOLD. Capstone's guard asked
+        `_exact_subject_ref_ids`, which cannot see a fold-only holder — so it
+        dropped the record as "ref carrier's survivor is gone" and warned that no
+        `:Subject` held the ref, about a live one, leaving the target live and
+        search-visible (measured: applied=0; applied=1 once the guard asks the
+        family's space).
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (o:Object {id:'r16-old', name:'Old Team', "
+                "objectKind:'organization', status:'live', "
+                "canonical_name:'old team', resolved_from:'r16-deleted'})")
+            sdk.create_subject("The Old Team", "organization")
+            sdk.create_object("New Widget", "document")
+            sdk.create_subject("New Widget", "organization")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Team", "supersedes_by": "New Widget",
+                 "evidence": "test"}])
+            assert applied == 1, (
+                "a fold-only Subject ref was dropped as a gone survivor: "
+                f"{skips!r} {msgs!r}")
+            row = g.query(
+                "MATCH (s:Subject {name:'The Old Team'}) "
+                "RETURN s.status, s.supersededBy").result_set
+            assert row and tuple(row[0]) == ("superseded", "New Widget"), row
+        finally:
+            sdk.close()
