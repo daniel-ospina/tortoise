@@ -1444,6 +1444,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # a direct row: 2 confidences live, 0 after the supersession, ``skipped:
             # None``; so "EP strips the same way (#780)" was false there (round 19,
             # #12111).
+            # ⛔ …and on a row whose OWN endpoint is in neither EP arm, the promotion
+            # is NOT the repair: the support never counted, so promoting the successor
+            # leaves the belief exactly where it was (measured: promoting a draft
+            # successor on a shaped-endpoint row and writing the equivalent edge →
+            # ``confidences {}``; only clearing the SOURCE shape restores it)
+            # (#12210 review, P2).
+            if s["shape"] and not s["is_operator"]:
+                return (f" ⛔ {succ} is '{DRAFT_STATUS}', and promoting it does NOT "
+                        "repair this: " + _dropped_input(s))
             return (f" ⛔ {succ} is '{DRAFT_STATUS}', which EP "
                     + ("strips the same way (#780): promote it to live as well — "
                        if s["is_operator"] else
@@ -1461,7 +1470,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         """Is the named successor one EP cannot read as an input?
 
         ⛔ ONE source for the two emitted strings that must agree about it: the
-        repair's DESTINATION and §3.1's CARRY/DROP disposition. A SHAPE refusal
+        repair's DESTINATION and §3.1's CARRY/DROP disposition BOTH call this
+        function (the destination directly, ``_triage`` through its own ``unread``
+        local) — so the two cannot disagree. A SHAPE refusal
         (``_succ_refused``) and a TERMINAL successor are both unreadable, so a
         "carry to the successor" in the same string as "NOT the one it names … which
         EP refuses" is one false claim beside one true one — measured: the carry onto
@@ -1520,6 +1531,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         fwd, bwd = direction_flows(s["direction"])
         neither_arm = s["shape"] and not s["is_operator"]
         neutral = not (fwd or bwd)
+        # ⛔ ONE derivation of "the successor is one EP cannot read", and the SAME
+        # predicate the destination consults (``carrier_unread`` → ``_succ_unread``).
+        # Re-deriving it here in two places is how the DRAFT branch ended up
+        # contradicting the destination on a draft that also carries the legacy
+        # ``outdated`` flag (#12210 review, P2).
+        unread = s["carrier_count"] == 1 and _succ_unread(s)
         if s["carrier_count"] == 1 and _succ_refused(s):
             # ⛔ A CARRY needs a successor EP actually reads — and the check may only
             # say so when the name resolves to ONE carrier (an ambiguous name is the
@@ -1538,7 +1555,21 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "kept, not dropped: carry it where EP can read it (a :Point "
                 "operator the engine evaluates), never by re-attaching it to a "
                 "successor that cannot carry it")
-        elif (s["carrier_count"] == 1
+        elif neither_arm or neutral:
+            why = ("EP assembles no factor for this endpoint in either arm, so the "
+                   "support never counted"
+                   if neither_arm else
+                   f"this edge is {_quoted(s['direction'])} (neutral), so no "
+                   "confidence transfers through it by design")
+            disposal = (
+                f"{why} — the disposition here is DROP, or `pend` (the non-voting "
+                "placeholder) if the claim may still be revisited, and no door "
+                "implements `pend` today. ⛔ A refutation that STILL APPLIES is "
+                "kept, not dropped: carry it where EP can actually read it (a "
+                ":Point operator the engine evaluates), and never by re-attaching "
+                "it to a successor that cannot carry it — only a refutation that "
+                "MOTIVATED the correction is dropped")
+        elif (s["carrier_count"] == 1 and not unread
               and (s["carrier_status"] or "") == DRAFT_STATUS and not neutral):
             # ⛔ The DRAFT row contradicted itself: the destination withdrew the name
             # ("NOT the one it names … because it is 'draft'") while THIS disposition
@@ -1558,7 +1589,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "STILL APPLIES) onto it — measured, the same edge write builds the "
                 "factor after the promotion (``effective_n 2.263``) and builds none "
                 "before it. Drop only a refutation that MOTIVATED the correction")
-        elif s["carrier_count"] == 1 and s["carrier_terminal"] and not neutral:
+        elif unread and not neutral:
             # ⛔ …and NOT on a NEUTRAL row, which transfers nothing: a CARRY there is
             # false (measured: carrying a neutral input onto a live node leaves both
             # posteriors at the bare prior, ``effective_n 2.0``) and it contradicted
@@ -1579,20 +1610,6 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "the correction. A carry onto the dead name itself builds no factor "
                 "(measured: same posteriors as before the supersession once the edge "
                 "lands on the node that carries it)")
-        elif neither_arm or neutral:
-            why = ("EP assembles no factor for this endpoint in either arm, so the "
-                   "support never counted"
-                   if neither_arm else
-                   f"this edge is {_quoted(s['direction'])} (neutral), so no "
-                   "confidence transfers through it by design")
-            disposal = (
-                f"{why} — the disposition here is DROP, or `pend` (the non-voting "
-                "placeholder) if the claim may still be revisited, and no door "
-                "implements `pend` today. ⛔ A refutation that STILL APPLIES is "
-                "kept, not dropped: carry it where EP can actually read it (a "
-                ":Point operator the engine evaluates), and never by re-attaching "
-                "it to a successor that cannot carry it — only a refutation that "
-                "MOTIVATED the correction is dropped")
         else:
             disposal = (
                 "an IMPL may CARRY to the successor, and so may a NAND that STILL "
@@ -1763,7 +1780,6 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         successor = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "its successor"
         tail = _chain_tail(s)
         neutral = s["neutral_row"]
-        _status = s["carrier_status"] or ""
         # ⛔ A DRAFT is deliberately NOT folded in here, for the same reason
         # ``_succ_unread`` excludes it: promoting it measurably repairs (measured
         # ``effective_n 2.263`` after the promotion, ``confidences {}`` without it),

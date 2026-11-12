@@ -2956,3 +2956,60 @@ def test_an_id_less_row_with_an_ambiguous_successor_asks_which_one(sdk):
     assert "onto the intended one by ID" in fix, fix
     assert "onto the successor ('PolicyV2')" not in fix, (
         "the repair cannot pick one, so it must not name one: " + fix)
+
+
+def test_a_neither_arm_row_with_a_DRAFT_successor_keeps_DROP(sdk):
+    """On a "neither arm" row the support NEVER counted — promoting the draft is not the repair.
+
+    The DRAFT disposition ran before the neither-arm DROP arm, so it asserted
+    "the same edge write builds the factor after the promotion (``effective_n
+    2.263``)" on a row where that measurement is false: measured — promote the draft
+    and write the equivalent edge onto it → ``confidences {}``, and only clearing the
+    SOURCE shape as well restores 2 confidences, while the disposition never mentions
+    the source. Following it exactly leaves `rows []` over an absent belief — the
+    false CLEAN this routing exists to prevent (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "EP builds NO factor in either arm" in fix, fix
+    assert "the disposition here is DROP" in fix, fix
+    assert "ONCE PROMOTED" not in fix, (
+        "the source is in neither EP arm, so promotion restores nothing: " + fix)
+    assert "CARRY the IMPL" not in fix, fix
+    assert "promoting it to live is the repair" not in fix, (
+        "the source is in neither arm, so the promotion repairs nothing: " + fix)
+
+
+def test_a_draft_successor_carrying_the_legacy_outdated_flag_is_not_promoted(sdk):
+    """`status='draft'` + `outdated=true` is TERMINAL — a promotion does not clear it.
+
+    The draft branch fired on the status alone, so one string both withdrew the name
+    ("because it is 'draft(outdated)') and told the reader to promote it. Measured:
+    after `status='live'` the node still reads `('live', True)`, the factor holds only
+    the surviving input (`effective_n 2.0` — the bare prior) and the belief returns
+    only once `outdated` is cleared too (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.outdated = true", {"i": v2["id"]})
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.outdated", {"i": v2["id"]}) == [[True]]
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "NOT the one it names ('PolicyV2')" in fix, fix
+    assert "ONCE PROMOTED" not in fix, (
+        "a promotion does not clear the legacy terminal flag: " + fix)
