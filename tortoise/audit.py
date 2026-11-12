@@ -263,6 +263,16 @@ def _node_pattern(alias: str, keys: dict[str, object]) -> str | None:
     return f"({alias} {{{rendered}}})"
 
 
+def _named(value: object) -> str:
+    """A node NAME for display — a missing one is ``<unnamed>``, never ``None``.
+
+    ``update_entity(obj, name=None)`` is accepted (``o.name = NULL``), and an
+    f-string then interpolated Python's ``None`` into a finding, naming a node that
+    exists nowhere in the graph (measured: "Superseded Object 'None' ...").
+    """
+    return _quoted(value) if value else "<unnamed>"
+
+
 def _quoted(value: object) -> str:
     """Render ``value`` as a single-quoted literal safe to EMBED in a ``fix``.
 
@@ -719,7 +729,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "WITH sup, r, active, count(carrier) AS carrier_count, "
         "     head(collect(id(carrier))) AS carrier_id, "
         "     head(collect(carrier.status)) AS carrier_status, "
-        "     head(collect(carrier.supersededBy)) AS carrier_sb\n"
+        "     head(collect(carrier.supersededBy)) AS carrier_sb, "
+        # ⛔ The carrier's OPERATOR-SHAPED flag, from the SAME group (no fourth
+        # OPTIONAL MATCH, so ``count4b`` and SAMPLE_LIMIT are untouched). EP does
+        # not admit an operator-shaped node as a factor input (#9269,
+        # ``_non_operator``) — the same strip a draft gets — so re-pointing onto one
+        # leaves the factor degenerate and a re-audit would read CLEAN (measured).
+        # It keys on the RAW FLAG, not the flag-OR-``op_type`` predicate ``active``
+        # uses: an ``op_type``-only Object IS admitted (measured, ``skipped: []``).
+        "     head(collect(coalesce(carrier.is_operator, false))) "
+        "AS carrier_is_operator\n"
         # ⛔ ONE HOP OF LOOKAHEAD, because "the successor is itself terminal" is NOT
         # the same fact as "there is a live head to re-point onto": the Object lane can
         # terminalize without a supersession (so the successor names no successor at
@@ -733,7 +752,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # live head.
         "AND id(nxt) <> id(sup) AND id(nxt) <> carrier_id\n"
         "WITH sup, r, active, carrier_count, carrier_id, carrier_status, "
-        "     carrier_sb, count(nxt) AS next_count, "
+        "     carrier_sb, carrier_is_operator, count(nxt) AS next_count, "
         "     head(collect(nxt.status)) AS next_status\n"
         # ``r.idx`` and the OPERATOR's ``direction`` are projected because the repair
         # differs in the idx-0 source slot (ep.py's ``source_stripped`` hazard),
@@ -749,7 +768,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "RETURN DISTINCT sup.id, sup.name, sup.supersededBy, type(r), r.idx, "
         "coalesce(active.is_operator, false), active.op_type, active.direction, "
         f"{epistemic_identity('active')}, active.id, carrier_count, "
-        "carrier_id, carrier_status, carrier_sb, next_count, next_status "
+        "carrier_id, carrier_status, carrier_sb, carrier_is_operator, "
+        "next_count, next_status "
         f"LIMIT {SAMPLE_LIMIT}",
     )
 
@@ -767,14 +787,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         """
         (sup_id, sup_name, sup_sb, edge_type, idx, is_op_flag, op_type,
          direction, active_id, _active_nid, carrier_count, _carrier_id,
-         carrier_status, carrier_sb, next_count, next_status) = row
+         carrier_status, carrier_sb, carrier_is_operator, next_count,
+         next_status) = row
         return {
             "sup_id": sup_id, "sup_name": sup_name, "sup_sb": sup_sb,
             "edge_type": edge_type, "idx": idx,
             "is_operator": bool(is_op_flag) or op_type is not None,
             "direction": direction, "active_id": active_id,
             "carrier_count": carrier_count, "carrier_status": carrier_status,
-            "carrier_sb": carrier_sb, "next_count": next_count,
+            "carrier_sb": carrier_sb,
+            "carrier_is_operator": bool(carrier_is_operator), "next_count": next_count,
             "next_status": next_status,
         }
 
@@ -797,6 +819,19 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             return (f"; and its supersededBy ({_quoted(s['sup_sb'])}) is AMBIGUOUS "
                     f"({s['carrier_count']} Objects carry it, #3573), so the repair "
                     "must name the Object meant as the successor")
+        if s["carrier_is_operator"]:
+            # ⛔ EP does not admit an OPERATOR-SHAPED node as a factor input (#9269,
+            # ``_non_operator``) — the same strip a draft gets — so re-pointing onto
+            # one leaves the factor degenerate while a re-audit reads CLEAN. Measured:
+            # ``create_entity("object", n, is_operator=True)`` is door-permitted, the
+            # prescribed re-point leaves ``skipped_factors: [degenerate]`` and 4b
+            # reports 0 issues afterwards.
+            return ("; the successor it names is itself OPERATOR-SHAPED "
+                    "(is_operator=true), which EP excludes from a factor's inputs "
+                    "(#9269) — so re-pointing onto it drops that input entirely and "
+                    "the operator is left with NO factor (measured: confidences "
+                    "empty, successor absent), the claim's support silently gone "
+                    "while a re-audit reads CLEAN. Target a CLAIM successor")
         if (s["carrier_status"] or "") == DRAFT_STATUS:
             # ⛔ A DRAFT successor is not terminal, so without this arm it takes the
             # ordinary one — but EP strips a draft input exactly as it strips a
@@ -863,8 +898,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         """
         source = (s["active_id"] if s["active_id"] is not None
                   else "<no id or eventId>")
-        detail = (f"Superseded Object '{s['sup_name']}' still carries an active "
-                  f"{s['edge_type']} edge from {source}")
+        detail = (f"Superseded Object {_named(s['sup_name'])} still carries an "
+                  f"active {s['edge_type']} edge from {source}")
         if s["is_operator"]:
             fwd, bwd = direction_flows(s["direction"])
             if not (fwd or bwd):
@@ -921,6 +956,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             return ""
         status = s["carrier_status"]
         succ = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "the successor"
+        if s["carrier_is_operator"]:
+            return (f" ⛔ {succ} is OPERATOR-SHAPED (is_operator=true), which EP "
+                    "excludes from a factor's inputs (#9269): re-pointing onto it "
+                    "drops the input entirely and leaves the operator with NO factor "
+                    "(measured: confidences empty, successor absent) — target a CLAIM "
+                    "successor")
         if (status or "") == DRAFT_STATUS:
             return (f" ⛔ {succ} is '{DRAFT_STATUS}', which EP strips the same way "
                     "(#780): promote it to live as well, or the re-point leaves "
@@ -1129,27 +1170,40 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # would then be false ("NO Object carries that name" is untrue: the node
             # carries it by definition; what is missing is a DIFFERENT node). Measured:
             # `update_entity(obj, supersededBy='<its own name>')` is accepted.
-            detail=((f"Superseded Object '{sup_name}' names ITSELF as its successor "
+            detail=((f"Superseded Object {_named(sup_name)} names ITSELF as its "
+                     "successor "
                      "(supersededBy is its own name, which no OTHER Object answers), "
                      "so the name-keyed pointer names no successor at all — name the "
                      "real successor (#3590/#11826)")
                     if (bool(sb_name) and sb_name == sup_name) else
-                    (f"Superseded Object '{sup_name}' names successor "
-                     f"'{sb_name}', but NO Object carries that name "
-                     "(a renamed successor, or one that was deleted or never "
-                     "created — the name-keyed pointer dangles, #3590/#11826)")),
+                    (f"Superseded Object {_named(sup_name)} names successor "
+                     f"{_named(sb_name)}, but NO Object carries that name "
+                     "(a renamed successor, one that was deleted or never "
+                     "created, or a Subject/Point that this :Object anchor does "
+                     "not resolve — the name-keyed pointer dangles, "
+                     "#3590/#11826)")),
             # ⛔ The PROPS form is the door's own signature — ``tortoise_update_entity(
             # id, props)`` (``mcp_server.py``) takes the properties as ONE dict, so a
             # keyword spelling (``status='superseded'``) is a ``TypeError`` at the
             # caller: a repair that always raises is worse than no repair, which is
             # the rule the #7819 note in this module already records. Same shape as
             # the other `fix` strings here (``tortoise_update_point(id, {...})``).
-            fix=((f"Re-point the successor link: tortoise_update_entity({_quoted(sup_id)}, "
+            # ⛔ A Subject/Point carrier makes the pointer NOT dangling and the
+            # repair below a no-op, so the string names that state rather than
+            # sending the reader to re-write the name it already holds (4b says the
+            # same thing about the same row in the same run).
+            fix=((f"Re-point the successor link — UNLESS a Subject or Point carries "
+                  "that name, in which case the pointer is NOT dangling and the "
+                  "input should be re-pointed onto that node instead. Otherwise: "
+                  f"tortoise_update_entity({_quoted(sup_id)}, "
                   "{'status': 'superseded', 'supersededBy': "
                   "'<the successor CURRENT name>'})")
                  if sup_id is not None else
-                 (f"Set the successor name on the Object named {_quoted(sup_name)} "
-                  f"to the CURRENT name of {_quoted(sb_name)}")),
+                 (f"Set the successor name on the Object named {_named(sup_name)} "
+                  f"to the CURRENT name of {_named(sb_name)} — UNLESS a Subject or "
+                  "Point carries that name, in which case the pointer is NOT "
+                  "dangling and the input should be re-pointed onto that node "
+                  "instead")),
         )
         for sup_id, sup_name, sb_name in rows4c
     ], count4c)

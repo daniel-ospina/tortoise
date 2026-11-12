@@ -81,6 +81,11 @@ def _q(sdk, query: str, params: dict | None = None) -> list:
     return r.result_set if r else []
 
 
+def _call(fix: str) -> str:
+    """The door CALL a ``fix`` hands the caller (the last one it spells out)."""
+    return fix[fix.rindex("tortoise_update_entity("):]
+
+
 def _issues(sdk, issue_type: str) -> list:
     return [i for i in audit_graph(sdk._get_proj()).issues
             if i.issue_type == issue_type]
@@ -524,14 +529,13 @@ def test_a_renamed_successor_dangles_the_pointer_and_is_reported(sdk):
     # The repair must be CALLABLE: ``tortoise_update_entity`` takes its properties as
     # ONE dict (``mcp_server.py``), so a keyword spelling raises TypeError at the
     # caller — a repair that always raises is worse than no repair (#7819's rule).
-    assert issues[0].fix.startswith(
-        f"Re-point the successor link: tortoise_update_entity('{v1['id']}', {{"), \
+    assert f"tortoise_update_entity('{v1['id']}', {{" in issues[0].fix, \
         issues[0].fix
     assert "''" not in issues[0].fix, "a doubled apostrophe is not a usable literal"
     # ⛔ A single stray quote is the same defect and a prefix match cannot see it:
     # parse the CALL the string hands the caller (see
     # ``test_the_unresolvable_repair_is_a_parsable_call``).
-    ast.parse(issues[0].fix.split(": ", 1)[1])
+    ast.parse(_call(issues[0].fix))
 
 
 def test_an_ambiguous_name_is_not_reported_as_a_dead_one(sdk):
@@ -804,7 +808,7 @@ def test_the_unresolvable_repair_is_a_parsable_call(sdk):
     issues = [i for i in _issues(sdk, "superseded_by_unresolvable")
               if i.node_id == v1["id"]]
     assert issues
-    call = issues[0].fix.split(": ", 1)[1]
+    call = _call(issues[0].fix)
     ast.parse(call)  # raises SyntaxError on a stray quote
     assert call.endswith("})"), call
 
@@ -876,6 +880,95 @@ def test_a_neutral_operator_does_not_claim_lost_belief(sdk):
         assert value == before[node_id], (
             f"a neutral operator moved the posterior of {node_id}: "
             f"{before[node_id]} -> {value}")
+
+
+def test_an_operator_shaped_successor_is_not_a_working_repair(sdk):
+    """EP does not admit an ``is_operator=true`` node as a factor input (#9269).
+
+    ``create_entity("object", n, is_operator=True)`` is door-permitted, and
+    ``_non_operator`` strips such an input exactly as it strips a draft — so the
+    ordinary re-point arm prescribed a repair that leaves the factor degenerate
+    while a re-audit reads CLEAN. ⛔ The arm keys on the RAW FLAG: an
+    ``op_type``-only Object IS admitted (measured, ``skipped: []``), so reusing
+    ``_4b_state``'s flag-OR-``op_type`` predicate here would be wrong.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyA")
+    _obj(sdk, "PolicyB", is_operator=True)
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyA", "PolicyB")
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyB'}) RETURN o.status, o.is_operator",
+              {}) == [[None, True]], "fixture drifted: not operator-shaped"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    assert "OPERATOR-SHAPED" in issues[0].detail, issues[0].detail
+    assert "excludes from a factor's inputs" in issues[0].detail, issues[0].detail
+    assert "OPERATOR-SHAPED" in issues[0].fix, issues[0].fix
+
+    # The clause is load-bearing, and the measured consequence is STRONGER than
+    # "still degenerate": EP excludes the operator-shaped node from the input
+    # selection, so the operator is left with no factor at all — no confidences, no
+    # skipped-factor record — and 4b then reads CLEAN.
+    _q(sdk, "MATCH (o {id:$i})-[r:IMPL]->() MATCH (s:Object {name:$s}) "
+            "MERGE (o)-[nr:IMPL]->(s) SET nr.idx = 0 DELETE r",
+       {"i": op["id"], "s": "PolicyB"})
+    run = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert run["confidences"] == {}, (
+        "the operator-shaped input was admitted after all, so this arm is wrong: "
+        f"{run['confidences']}")
+    assert "PolicyB" not in str(run.get("skipped_factors")), run.get("skipped_factors")
+    assert [i for i in _issues(sdk, "superseded_object_active_edges")] == [], (
+        "the prescribed repair must leave the check reading CLEAN — that is exactly "
+        "why the string has to refuse it")
+
+
+def test_an_unnamed_object_is_not_reported_as_the_string_none(sdk):
+    """``update_entity(obj, name=None)`` is accepted, so a name can be absent.
+
+    An f-string then interpolated Python's ``None`` into the finding, naming a node
+    that exists nowhere in the graph.
+    """
+    v1 = _obj(sdk, "PolicyA")
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    sdk.update_entity(v1["id"], name=None, status="superseded",
+                      **{"supersededBy": "Gone"})
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.name", {"i": v1["id"]}) == [[None]]
+
+    edges = [i for i in _issues(sdk, "superseded_object_active_edges")
+             if i.node_id == v1["id"]]
+    assert edges
+    assert "'None'" not in edges[0].detail and "None" not in edges[0].detail, \
+        edges[0].detail
+    assert "<unnamed>" in edges[0].detail, edges[0].detail
+    dangling = [i for i in _issues(sdk, "superseded_by_unresolvable")
+                if i.node_id == v1["id"]]
+    assert dangling
+    assert "None" not in dangling[0].detail, dangling[0].detail
+    assert "<unnamed>" in dangling[0].detail, dangling[0].detail
+
+
+def test_a_subject_carrier_makes_the_pointer_not_dangling(sdk):
+    """A ``:Subject`` carrying the name is a node EP accepts as an input.
+
+    Both checks describe the same row in one run, and 4b said "if a Subject or
+    Point carries that name..." while 4c enumerated only rename/delete/never-created
+    causes and prescribed re-writing the name it already holds — a repair that
+    cannot clear its own finding.
+    """
+    v1 = _obj(sdk, "PolicyA")
+    sdk.create_entity("subject", "AcmeCorp")
+    sdk.update_entity(v1["id"], status="superseded", **{"supersededBy": "AcmeCorp"})
+
+    dangling = [i for i in _issues(sdk, "superseded_by_unresolvable")
+                if i.node_id == v1["id"]]
+    assert dangling, "the :Object anchor still cannot resolve it — report it"
+    assert "Subject/Point" in dangling[0].detail, dangling[0].detail
+    assert "Subject or Point" in dangling[0].fix, dangling[0].fix
+    # The call it hands the caller must still be callable.
+    ast.parse(_call(dangling[0].fix))
 
 
 def test_an_idless_subject_still_resolves_its_successor(sdk):
