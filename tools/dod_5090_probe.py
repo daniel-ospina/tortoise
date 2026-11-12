@@ -310,6 +310,115 @@ _EMBED_WRITE = re.compile(
 #: `#4094` exemption rather than being read as "no write".
 _EMBED_CONTAINER_KEY = "embedding"
 
+#: The clause BUILDERS whose name a writer can reach through an IMPORT ALIAS (`from
+#: tortoise.vector_write import set_embedding_clause as _set`). Named as data so `_import_aliases`
+#: can resolve an alias to the primitive it names — the same set `_EMBED_WRITE` matches by text plus
+#: `clear_then_set_prefix`.
+#: ⛔ CORRECTED (`#12020` review round 7): this used to say the clear guard "renders the clear-then-SET
+#: pair and therefore stores too". It does not — `tortoise/vector_write.py::clear_then_set_prefix`
+#: returns `FOREACH (… | REMOVE <alias>.embedding)` and emits no `SET`. It is kept in this tuple
+#: anyway, and the reason is deliberately the weaker one: an alias that resolves to the clear guard
+#: means the writer is operating on the vector property, and NOT resolving it would drop such a
+#: writer out of the population entirely (the fail-OPEN direction `#11274` exists to close). The cost
+#: is a declared RESIDUAL — a writer whose only vector-related call is the clear guard is reported as
+#: `unresolved_write` and therefore owes a declaration it cannot honestly write, since the truthful
+#: disposition (`no-live-vector`) is refused by the guard's own `STORE_CLAUSE_MARKERS` (⚠️ that
+#: constant lives in `tests/test_embed_writer_register.py`, NOT in the register — `tests/` is not
+#: shipped in the wheel, so a lane sent to `tortoise/embed_writer_register.py` will not find it; the
+#: register states the rule it enforces, the suite holds the table). No such
+#: writer exists on this tree (population 32; every caller of the helper carries another signal),
+#: so the residual is recorded rather than repaired. Repairing it means dropping the name from this
+#: tuple AND from `STORE_CLAUSE_MARKERS` together, and re-measuring the population.
+#: ⛔ WHY AN ALIAS NEEDS THIS AT ALL (`#11274`): discovery decides a write from the writer's own
+#: SOURCE TEXT and its CALL NAMES. An aliased import renames BOTH, so the writer below was invisible
+#: to BOTH passes — not discovered, not reported, silently absent from the population the register
+#: is scored against:
+#:
+#:     from tortoise.vector_write import set_embedding_clause as _set
+#:     def _w(proj):
+#:         return proj.g.query("MATCH (n:Point) SET n += $p", {"p": _set("n")})
+#:
+#: It is decidable (`ast` sees the `ImportFrom` binding), so it is DECIDED rather than declared
+#: blind — the fail-open direction is the one the register's claim cannot survive.
+WRITE_CLAUSE_BUILDERS: tuple[str, ...] = ("set_embedding_clause", "clear_then_set_prefix")
+
+#: The names an import can alias to something this instrument must still resolve — the clause
+#: builders above plus the gate seams. Built once, not per call.
+_ALIASABLE_CALL_NAMES: frozenset[str] = (
+    frozenset(WRITE_CLAUSE_BUILDERS) | {SEAM_CALL} | frozenset(UNGATED_CALLS))
+
+#: The module each aliasable name actually LIVES in. ⛔ An `ImportFrom` from anywhere else binds a
+#: different function that merely shares the name, and crediting it as the seam flips a writer that
+#: never reaches the gate from `unresolved_write` (a declaration is owed) to `gated` (none is) — a
+#: false PASS in the population rows 1-2 are scored on, i.e. `#11274`'s failure class re-created in
+#: the opposite direction (#12020 review round 3). Both the package-absolute and the bare spelling
+#: are accepted so a RELATIVE import (`from .embeddings import …`, `level > 0`) still resolves.
+#: ⛔ THIS MAP GUARDS THE ALIAS PATH ONLY, and it is not a guard on the literal spelling (measured,
+#: `#12020`): `_callees` credits a call by its NAME with no home check and no shadow check, so
+#: `from thirdparty.lib import encode_for_row` then `encode_for_row(text)` is `gated` — the flip this
+#: rationale describes is still one UN-ALIASED import away. Named in `UNDECIDABLE_WRITE_SHAPES`
+#: ("literal seam spelling …") rather than papered over.
+#: ⛔ AND THE TWO SPELLINGS ARE NOT SYMMETRIC ACROSS NAMES (`#12020`, measured). The names in this
+#: map split by what CREDIT does to the writer:
+#:   • `SEAM_CALL` — credit makes the writer `gated`, which is OUTSIDE `NEEDS_A_DECLARATION`. So an
+#:     over-credit HIDES it: dropping a doubtful alias is the safe direction.
+#:   • a clause builder / `UNGATED_CALLS` — the alias is the ONLY discovery signal (the text pass
+#:     cannot see an aliased call), so dropping a doubtful alias makes the writer INVISIBLE
+#:     (measured `{}`), which is the empty-map fail-open this module exists to close. There,
+#:     over-credit is the safe direction.
+#: ⛔ `_accepted_homes` is the one place that encodes the LEVEL split, and both its readers call it —
+#: but it is NOT the only place this module encodes a credit direction. `_keep_shadowed_aliases`
+#: answers a different question (does a REBINDING of the alias name remove the reach?) on a
+#: different partition (`SEAM_CALL` dropped; `UNGATED_CALLS` dropped, where the writer falls to
+#: `unresolved_write` if it has its own write clause and to `{}` — losing a `producer`, which owes
+#: nothing — if it has none; `WRITE_CLAUSE_BUILDERS` kept). The two must not be "unified": a reader
+#: who folds this bucket into `_accepted_homes`' would either hide writers or invent declarations
+#: (`#12020` round 7 review P3).
+_ALIAS_HOMES: dict[str, frozenset[str]] = {
+    "set_embedding_clause": frozenset({"tortoise.vector_write", "vector_write"}),
+    "clear_then_set_prefix": frozenset({"tortoise.vector_write", "vector_write"}),
+    SEAM_CALL: frozenset({"tortoise.embeddings", "embeddings"}),
+    "encode_for_store": frozenset({"tortoise.embeddings", "embeddings"}),
+    "compute_session_embedding": frozenset({"tortoise.session_indexer", "session_indexer"}),
+}
+
+
+def _accepted_homes(alias_name: str, level: int) -> frozenset[str]:
+    """The `_ALIAS_HOMES` spellings a given import's `level` can legitimately name.
+
+    ⛔ ONE definition, TWO readers: `_import_aliases` (does this import RESOLVE to the seam?) and
+    `_imports_that_REBIND` (does it SHADOW the seam?). They were two copies of the same predicate
+    once, and the `level` rule landed in only the first: measured, a writer-scope
+    `from embeddings import encode_for_row as _enc` — a FOREIGN absolute module — was still read as
+    "resolves to the seam" by the shadow reader, so it was not counted as a rebinding at all, the
+    honest module alias it shadows survived, and the writer measured `gated` while reaching a
+    different function (`unresolved_write` on `main`). That is the same two-copies leak this file
+    already records for `_own_scope_bindings` (rounds 4/5), so the predicate is shared rather than
+    restated.
+
+    ⛔ THE LEVEL RULE BELONGS TO `SEAM_CALL` ONLY (`#12020`, measured — and applying it to every name
+    was a REGRESSION that deleted writers). The names in `_ALIAS_HOMES` split by what CREDIT does:
+
+      • `SEAM_CALL` — credit makes the writer `gated`, which is OUTSIDE `NEEDS_A_DECLARATION`, so an
+        over-credit HIDES it. Dropping a doubtful alias is the safe direction, so the bare spelling
+        is accepted only for a RELATIVE import (`level > 0`) and an absolute one must name the
+        package.
+      • a clause builder / `UNGATED_CALLS` — the alias is the ONLY discovery signal (the text pass
+        cannot see an aliased call), so dropping a doubtful one makes the writer INVISIBLE. Measured
+        `{}` for `from vector_write import set_embedding_clause as _set` where the level rule was
+        applied uniformly and `unresolved_write` without it. There, over-credit is the safe
+        direction and BOTH spellings are accepted, exactly as before.
+
+    ⚠️ And it does NOT resolve package DEPTH: a subpackage's `from .embeddings import …` lands in
+    `<pkg>.embeddings`, not `tortoise.embeddings`, and this predicate cannot tell — the walker is
+    handed a root, not the importing module's package. Latent (measured `gated`; no
+    `tortoise/**/embeddings.py` exists) and filed rather than guessed at here.
+    """
+    homes = _ALIAS_HOMES.get(alias_name, frozenset())
+    if alias_name != SEAM_CALL:
+        return homes
+    return frozenset(home for home in homes if ("." not in home) == bool(level))
+
 #: Write shapes discovery CANNOT decide, with the reason — named so the
 #: register's claim can be scoped to the mechanism rather than wider than it
 #: (`tests/test_embed_writer_register.py::test_the_register_names_the_shapes_its_discovery_cannot_see`).
@@ -318,13 +427,547 @@ UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
         "whether the merged map carries an `embedding` is DATA FLOW, not syntax: "
         "60 functions in `tortoise/` merge a props map and almost none can carry a "
         "vector, so a syntactic rule would force dozens of declarations that assert "
-        "nothing. The live instance is `sdk._update_entity`, which is DECLARED as an "
-        "exempt writer under the NAMED `#4094` exemption instead"
+        "nothing. There are TWO live instances, and they are dispositioned differently: "
+        "`sdk._update_entity` carries the NAMED `#4094` exemption in the register, and "
+        "`sdk.update_point` merges through `n += $props` in its promote arm while ALSO "
+        "calling `encode_for_row` — so discovery classes it `gated` before any write "
+        "predicate runs and it owes (and carries) no declaration (#11398)"
+    ),
+    # ── The SHALLOW-BINDING forms of an alias that the `ImportFrom` resolver does NOT reach ──
+    # ⛔ `#12020` round 6. The alias bullet above closes `from … import X as Y`. These four are
+    # the same decision expressed other ways, they are BLIND today, and each is MEASURED (`{}` =
+    # absent from the population, `gated` = owes nothing) rather than inferred — the register's
+    # claim must not be read as "every aliasing spelling is resolved". Pinned by
+    # `tests/test_embed_writer_register.py::test_the_alias_forms_discovery_still_cannot_see_are_named`,
+    # which reds BOTH when the naming is deleted and when one of them stops being blind.
+    "assignment alias (`_set = set_embedding_clause`) ": (
+        "a bare `Name` bound from an imported name is the same DECLARED symbol as the `as` form, "
+        "but `_import_aliases` reads only `ast.ImportFrom`, so the writer below is ABSENT from the "
+        "population (measured `{}`) and no register row can ever be owed for it:"
+        "\n\n    from tortoise.vector_write import set_embedding_clause"
+        "\n    _set = set_embedding_clause"
+        "\n    def w(proj):"
+        "\n        return proj.g.query(\"MATCH (y) SET y += $p\", {\"p\": _set(\"y\")})"
+    ),
+    "assignment alias for the GATE (`_enc = encode_for_row`)": (
+        "the same shape reached at the seam instead of a clause builder: measured `{}` — the "
+        "writer is absent, so the row that says no write path embeds outside the gate cannot see "
+        "this one at all. Named rather than assumed absent."
+    ),
+    "module-qualified builder (`vw.clear_then_set_prefix`) ": (
+        "`import tortoise.vector_write as vw` then `vw.clear_then_set_prefix(\"n\")`: measured "
+        "`{}`. The TEXT pass knows only the literal spelling `set_embedding_clause(`, which is why "
+        "the SECOND clause builder is invisible in this form even unaliased."
+    ),
+    "`global` rebinding of an alias inside a nested scope": (
+        "`global _enc` + `_enc = lambda …` inside a nested `def` rebinds the module alias for the "
+        "whole writer, and the own-scope rule cannot see it: measured `gated` — the DANGEROUS "
+        "direction, because `gated` is outside the guard's population, so the writer owes no "
+        "declaration while never reaching the gate. ⛔ The KEYWORD is not the mechanism: "
+        "`globals()[\"_enc\"] = lambda …` from the nested scope rebinds the module binding by the "
+        "other route and measures the SAME `gated`, so this entry is about writing the module "
+        "binding from a nested scope by ANY route, not about the statement."
+    ),
+    # ⛔ `#12020` round 6 review (P3) — the ENCLOSING-scope axis, fifth blind spelling. Not a
+    # regression (`main` missed the nested writer too), but the register's alias bullet reads
+    # unqualified, so the residual is NAMED here rather than left to be inferred from it.
+    "closure-scoped alias (`def factory(): from … import encode_for_row as _enc; def w(): …`)": (
+        "the alias is imported in the ENCLOSING function and called in a NESTED one: "
+        "`_import_aliases` reads the MODULE and the WRITER's own scope only, so the nested writer "
+        "is never resolved and never discovered — measured `{}` for it — while the call walk "
+        "descends into the nested body and classes the ENCLOSING function `gated` (measured "
+        "`{'tortoise.m::factory': 'gated'}`). A writer that stores nothing therefore stands in the "
+        "population in place of the one that does. Naming the form is the honest statement: "
+        "closing it means threading the ENCLOSING chain through both the alias map and the "
+        "discovery walk — a widening of the model, not a spelling. Pinned by "
+        "`tests/test_embed_writer_register.py::test_the_alias_forms_discovery_still_cannot_see_are_named`."
+    ),
+    # ⛔ `#12020` — the REACHABILITY axis, which NONE of the entries above covers (they are scope,
+    # spelling and data-flow residuals between them, so naming this one "the" other axis would
+    # mis-taxonomise the rest). Found by re-measuring the round-7 fix at `b9a92e901a` rather than by
+    # reading it: the scope threading is correct and the shape below is what it does not cover.
+    "never-run call (`def`, `lambda`, class-body method, or an unreachable own-scope statement)": (
+        "a seam call the writer never RUNS — in a nested scope that is never entered, or behind an "
+        "`if False` / `while False` / a statement after `return` in the writer's OWN scope: the "
+        "call never executes, so `w` reaches no gate and `unresolved_write` is what the rule wants — "
+        "measured `gated`, i.e. outside `NEEDS_A_DECLARATION`, the DANGEROUS direction (the writer "
+        "owes nothing while it reaches nothing). ⛔ AND THE HARM IS WIDER THAN A PHANTOM CREDIT: the "
+        "`SEAM_CALL` branch is taken BEFORE the write predicate (`if SEAM_CALL in called: kind = "
+        "\"gated\"`, then `elif set(UNGATED_CALLS) & called`), so a never-run seam call MASKS a LIVE "
+        "ungated reach: a writer whose real `encode_for_store` write is fully ungated, plus one "
+        "`if False: _enc(text, 384)`, leaves `NEEDS_A_DECLARATION` entirely (measured `ungated` → "
+        "`gated`; the same composition with the dead call in a never-called nested `def` → `w` "
+        "`gated`). For that composition the repaired verdict is therefore `ungated`, NOT "
+        "`unresolved_write`, and this residual must not be described as only ever over-crediting a "
+        "phantom. ⛔ THE AXIS IS REACH, NOT SCOPE, and this must not "
+        "be read as \"own-scope reach is trustworthy\": an UNREACHABLE statement in the writer's "
+        "own scope over-credits identically (measured, one shape per process: `if False:` → `w` "
+        "`gated`, `while False:` → `w` `gated`, after `return` → `w` `gated`). All spellings "
+        "measured the same way, one shape per process: a never-called nested `def` (`w` `gated`), "
+        "a never-called `lambda` body (`w` `gated`), and a method of a class the writer defines "
+        "and never instantiates (`w` `gated`) — which is why the entry names the CLASS of shape "
+        "rather than one spelling. "
+        "Distinct from `closure-scoped alias` above, which is about where the ALIAS binds; here "
+        "the alias resolves correctly and only the REACH is wrong. Recorded rather than repaired "
+        "for the AMBIGUOUS subset only: the three nested rows are decidable WITHOUT a call graph "
+        "(their nested binding is never referenced in the writer's own scope, so a conservative "
+        "\"do not descend into an unreferenced nested scope\" filter would close them), while "
+        "the returned / passed-by-reference / called-only-from-another-nested-body subset needs "
+        "one — `getattr` among the ways in — which is why the sibling `#11337` arm DECLARED its "
+        "bound at name-resolved calls only (that arm's own `DECLARED BOUND (#11337)` note) rather "
+        "than guessing past it; its recorded failure was a resolved call READ AS a by-reference "
+        "reach, i.e. an over-claim in the report, not a closure broken by guessing. The "
+        "conservative filter is "
+        "therefore the recorded repair path, not a claim. The two bounding controls hold and are "
+        "pinned in `ALIASED_IMPORT_SHAPES` (`honest_closure_still_credits_the_gate`, "
+        "`plain_control`): a writer with NO seam reach is `unresolved_write`, and the honest "
+        "CLOSURE the writer does call keeps its `gated`."
+    ),
+    # ⛔ `#12020` — the SPELLING axis, and the widest one: on the literal path the gate credit is
+    # NAME-BASED, so neither the shadow model nor `_ALIAS_HOMES` is ever consulted.
+    "literal seam spelling (`encode_for_row`) bypasses the shadow model and `_ALIAS_HOMES`": (
+        "the caller builds its reach set as `_callees(node) | {aliases[name] for name in "
+        "_named_callees(node)}`, and `_callees` returns a call's `id`/`attr` with NO home check "
+        "and NO shadow check. Both guards therefore constrain the ALIASED spelling only, so the "
+        "same three shapes measure OPPOSITELY depending on a cosmetic `as`: a writer-local "
+        "`encode_for_row = lambda` REBINDING OF THE LITERAL NAME, a nested `def helper(…)` "
+        "parameter, and `from thirdparty.lib import encode_for_row` all measure `gated` — owed "
+        "nothing — while their aliased equivalents (the same three written `… as _enc`) measure "
+        "`unresolved_write`, so the `as` is the only difference between the two columns. Measured, "
+        "one shape per process. Pre-existing "
+        "(`_callees` is byte-identical on `main`) and with NO live-tree instance: a latent "
+        "spelling, not a landed bypass. Named rather than repaired because closing it means "
+        "deciding, for a bare name, \"which binding does this call reach\" — the same call-graph "
+        "question as the entry above, on the same walk — and getting that wrong manufactures "
+        "declarations across the whole population (the cry-wolf direction). ⛔ An ATTRIBUTE call "
+        "`other.encode_for_row(…)` reaches `gated` here too, which is why the register no longer "
+        "says \"a bare call\"."
+    ),
+    "a builder alias ESCAPES as an argument or a default (the builder arm keys on the NAME "
+    "being a call)": (
+        "the aliased-CLAUSE-BUILDER credit in `_writes_an_embedding` asks whether the alias NAME "
+        "appears as a bare `ast.Name` CALL, so a writer that PASSES the builder into a helper is "
+        "discovered only when that helper's parameter happens to be spelled like the module alias. "
+        "Measured on one fixture, only the callee parameter renamed — "
+        "`def render(b, name): return b(name)` then "
+        "`query(\"MATCH (y) SET y += $p\", {\"p\": render(_set, \"y\")})` — the writer is "
+        "`unresolved_write` with the parameter spelled `_set` and ABSENT from the population with "
+        "it spelled `builder`, `b` or `fn`; the same silence swallows "
+        "`functools.partial(_set, \"y\")` then `f()` and `{\"b\": _set}[\"b\"](\"y\")`. "
+        "`_EMBED_WRITE` cannot rescue any of them (`SET y += $p` is not in its pattern), so the "
+        "aliased call really is the only signal — a writer ABSENT from the census owes no "
+        "declaration at all, the fail-open direction `#11274` exists to close. Pre-existing "
+        "(identical on `origin/main`) and with NO live-tree instance (population 32, unchanged). "
+        "⛔ Named rather than repaired because the repair is a credit RULE, not a bug fix: crediting "
+        "an escaped alias is measured population-neutral on `tortoise/` but it is over-credit by "
+        "construction (any module that merely passes the builder around starts owing a "
+        "declaration), and it must not be bolted on in the same change that REVERTED a "
+        "shadow-aware arm for deleting writers — one identifier separates a correct credit from "
+        "silence here (`builder_alias_PASSED_INTO_a_shadowing_nested_scope` pins the correct "
+        "spelling), which is exactly why the blindness had to be named instead of assumed."
     ),
 }
 
 
-def _writes_an_embedding(node, source: str) -> bool:
+#: The comprehension forms, each of which introduces its OWN scope (#11389
+#: review, P2). Named once so the walks that must agree about them cannot drift
+#: apart — this definition lives HERE, ahead of its first reader, because the
+#: own-scope walk below needs it (`#12020` round 6, measured: a comprehension
+#: TARGET enrolled as a writer-scope binding deleted a real clause-builder
+#: writer from the population, the exact fail-open `_locally_bound` exists to
+#: avoid, one scope axis over).
+_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp,
+                        ast.GeneratorExp)
+
+
+#: Node types that OPEN A SCOPE. An import or a binding inside one is a fact about THAT scope, not
+#: about the module or the enclosing writer — the axis along which the alias map leaked (#12020 r4).
+#: ⛔ THE COMPREHENSIONS ARE SCOPES TOO (`#11389`'s finding, applied to this walk in `#12020` round
+#: 6): `[_set for _set in rows]` binds `_set` for the element only, so counting it as a writer-scope
+#: binding dropped the writer's module alias and — for a clause-builder alias — the writer itself:
+#: measured `{}` for a body whose control is `unresolved_write`, and `_shadowed_names` already
+#: skipped comprehension subtrees for exactly this reason. One tuple, so the two walks cannot drift.
+_NEW_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
+                    *_COMPREHENSION_NODES)
+
+
+def _walk_own_scope(root: ast.AST):
+    """`root`'s OWN scope: `ast.walk(root)`, stopping AT every nested `def`/`class`/`lambda`.
+
+    ⛔ Round 3 fixed the fail-open where an aliased import was credited to a call it does not bind;
+    round 4 measured the same leak one axis over — `_import_aliases(tree)` walked the WHOLE module,
+    so an `ImportFrom` inside any function or class body became a module-level alias for EVERY
+    writer (a SIBLING's import classed another writer `gated`, i.e. outside `NEEDS_A_DECLARATION`).
+    Module-level `if`/`try`/`with` bodies are NOT scopes, so conditional imports still resolve.
+
+    ⛔ A nested scope's NODE is yielded but its BODY is not, and that distinction is a binding fact
+    rather than pedantry (`#12020` round 5): `def w(): def _set(): …` binds `_set` in `w`'s scope,
+    while a PARAMETER of a nested function (`def helper(_set)`) binds only inside `helper` and must
+    NOT shadow the writer's module alias — recording it deleted a real clause-builder writer from
+    the population (see `_locally_bound` for the measured A/B).
+    """
+    stack: list[ast.AST] = [root]
+    while stack:
+        current = stack.pop()
+        yield current
+        for child in ast.iter_child_nodes(current):
+            if isinstance(child, _NEW_SCOPE_NODES):
+                yield child  # the NAME binds in this scope; the body is another scope
+                continue
+            stack.append(child)
+
+
+def _imports_that_REBIND(root_children) -> set[str]:
+    """Local names an `import` statement binds to something that is NOT the seam it names.
+
+    ⛔ `ast.alias` is excluded from the shadow set because the import is what CREATES the alias
+    (`#12020` round 3) — right for the import that RESOLVES to the seam, wrong for one that
+    REBINDS the same local name to another object (`#12020` round 6 review, P2, measured):
+
+        from tortoise.embeddings import encode_for_row as _enc   # the seam alias
+        def w(proj, text):
+            import json as _enc          # rebinds `_enc` to the MODULE
+            proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": "x"})
+            return _enc(text)
+
+    Here `_enc(text)` reaches `json`, not the gate, but the module alias survived and the writer
+    classed `gated` — OUTSIDE `NEEDS_A_DECLARATION`, so it stopped owing a declaration while never
+    reaching the gate. `main` (no alias resolution at all) had it `unresolved_write`, so this is a
+    REGRESSION the alias resolver introduced, and the safe direction is the one that owes.
+
+    Only a binding that does not resolve is counted, so the honest `function_level_alias` shape —
+    the import in the writer's own scope whose whole point is that it binds the call — is left
+    alone. `import … as Y` always binds a MODULE (never the seam function), so every one of its
+    aliases counts.
+    """
+    rebound: set[str] = set()
+    for sub in root_children:
+        if isinstance(sub, ast.Import):
+            for alias in sub.names:
+                if alias.name != "*":
+                    rebound.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(sub, ast.ImportFrom):
+            module = sub.module or ""
+            for alias in sub.names:
+                if alias.name == "*":
+                    continue
+                resolves = (alias.name in _ALIASABLE_CALL_NAMES
+                            and module in _accepted_homes(alias.name, sub.level))
+                if not resolves:
+                    rebound.add(alias.asname or alias.name)
+    return rebound
+
+
+def _comprehension_walrus_targets(comp: ast.AST) -> set[str]:
+    """`Name`s a WALRUS binds inside a comprehension — in the ENCLOSING FUNCTION (PEP 572).
+
+    ⛔ The comprehension's own `for` TARGET is the other direction entirely, and the distinction is
+    the round-6 lesson this file already carries: `[_set for _set in rows]` binds `_set` for the
+    element only, so enrolling it as a writer-scope binding DELETED a real writer. A walrus inside
+    the same comprehension is the opposite fact — PEP 572 puts its target in the containing scope —
+    and the own-scope walk skips the comprehension BODY, so `[_enc := r for r in rows]` rebound the
+    alias invisibly (measured `gated` where `main` had `unresolved_write`).
+
+    A nested `def`/`class`/`lambda` inside the comprehension opens its own scope, so its walrus
+    binds there and is not collected here; a NESTED COMPREHENSION is still the same containing
+    scope, so it is descended into.
+    """
+    found: set[str] = set()
+    stack: list[ast.AST] = [comp]
+    while stack:
+        node = stack.pop()
+        if (node is not comp and isinstance(node, _NEW_SCOPE_NODES)
+                and not isinstance(node, _COMPREHENSION_NODES)):
+            continue
+        if isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+            found.add(node.target.id)
+        stack.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _own_scope_bindings(root: ast.AST) -> set[str]:
+    """Every name `root`'s OWN scope binds — ONE implementation for both shadow walks.
+
+    The module pass (`_scope_bound_names`) and the writer pass (`_locally_bound`) ask the same
+    question at two heights, and they were two copies of the same twelve lines. That is exactly how
+    the round-4/round-5 leak survived in one copy while the other was fixed, so they share this
+    body: a case added here is added to BOTH, and a case that should differ cannot silently differ.
+    """
+    bound: set[str] = set()
+    for sub in _walk_own_scope(root):
+        if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+            bound.add(sub.id)
+        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(sub.name)  # the NAME binds here; the body/arguments are another scope
+        elif isinstance(sub, ast.arg):
+            bound.add(sub.arg)
+        elif isinstance(sub, ast.ExceptHandler) and sub.name:
+            bound.add(sub.name)
+        # ⛔ `#12020` round 6 review (P2): the three binding forms the walk did not know about, each
+        # measured `gated` at that head where `main` had `unresolved_write`.
+        elif isinstance(sub, (ast.MatchAs, ast.MatchStar)) and sub.name:
+            # `case {"k": _enc}:` / `case [*_enc]:` — a capture binds HERE, in the function scope.
+            bound.add(sub.name)
+        elif isinstance(sub, ast.MatchMapping) and sub.rest:
+            bound.add(sub.rest)  # `case {**_enc}:`
+        elif isinstance(sub, _COMPREHENSION_NODES):
+            bound |= _comprehension_walrus_targets(sub)
+        elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+            bound |= _imports_that_REBIND([sub])
+    return bound
+
+
+def _scope_bound_names(root: ast.AST) -> set[str]:
+    """Names bound in `root`'s OWN scope (nested scopes excluded) — what shadows an import alias.
+
+    The rule `_locally_bound` applies to a writer, at module scope: `import … as _enc` followed by a
+    module-level `_enc = lambda …` (or a module-level `def _enc(…)`) means `_enc` no longer names the
+    imported object. ⚠️ The `def` form was NOT seen at round 4 — `_walk_own_scope` skipped nested
+    scope NODES entirely, so a module-level `def` rebound a seam alias invisibly and the writer
+    stayed `gated` (`#12020` round 5).
+
+    ⛔ `ast.alias` is not counted as a shadow BY DEFAULT — the import is what CREATES the alias —
+    but an import that binds the local name to something OTHER than the seam it names IS a shadow
+    (`_imports_that_REBIND`, `#12020` round 6 review P2).
+    """
+    return _own_scope_bindings(root)
+
+
+def _import_aliases(*roots: ast.AST) -> dict[str, str]:
+    """Local name -> the name it was IMPORTED AS, for the seams and clause builders (`#11274`).
+
+    Both scopes a writer can import in: the MODULE (`from … import X as Y` at module level) and the
+    WRITER'S OWN SCOPE (a function-level import). ⛔ OWN-SCOPE ONLY is what keeps those two apart
+    from every OTHER scope in the file: an import in a SIBLING function is not this writer's reach,
+    and crediting it classed a writer `gated` while it never reached the gate (#12020 round 4).
+    ⛔ There is deliberately NO parameter that can widen this to the whole module: `own_scope_only`
+    carried a `= False` default for one round, and a caller that forgot the argument silently
+    re-created that whole-module walk (measured — the shape round 4 removed); it then survived as a
+    `if own_scope_only else ast.walk(root)` arm no caller passed `False` to, which one keyword would
+    have re-opened. A mandatory kwarg is a guard, an unreachable branch is a footgun (`#12020`
+    round 7 review P3), so the branch is gone rather than documented.
+
+    Only names in `WRITE_CLAUSE_BUILDERS`, `SEAM_CALL` and `UNGATED_CALLS` are resolved, and ONLY
+    when the import's module is that name's real home (`_ALIAS_HOMES`): an alias of anything else
+    says nothing about a vector write, and `from thirdparty.lib import encode_for_row as _enc`
+    binds a different function that happens to share the name. ⛔ The first version of this docstring
+    argued the widening could "only credit a reach, which is the fail-closed direction". That was
+    wrong, and `#12020` round 3 measured it: crediting `SEAM_CALL` sets `kind="gated"`, and `gated`
+    is OUTSIDE `NEEDS_A_DECLARATION` — so an over-credit HIDES the writer instead of exposing it.
+    ⛔ For a GATE spelling, under-crediting is the safe direction (the writer stays
+    `unresolved_write`, which owes a declaration) and over-crediting is the dangerous one — but that
+    sentence is NOT general: for a CLAUSE BUILDER the alias is the only discovery signal, so
+    dropping it DELETES the writer instead of demoting it (`_keep_shadowed_aliases` carries the
+    split and the measurements).
+    """
+    found: dict[str, str] = {}
+    for root in roots:
+        for sub in _walk_own_scope(root):
+            if not isinstance(sub, ast.ImportFrom):
+                continue
+            module = sub.module or ""
+            for alias in sub.names:
+                if alias.name not in _ALIASABLE_CALL_NAMES:
+                    continue
+                # ⛔ `level` decides WHICH spelling of the home can match (`#12020`). The BARE
+                # spelling exists so a RELATIVE import (`from .embeddings import … as _enc`,
+                # `level > 0`) still resolves, and only then is it this seam's home. An ABSOLUTE
+                # import (`level == 0`) must spell the package: read level-blind, a foreign
+                # top-level module merely named `embeddings` resolved to the seam and the writer
+                # measured `gated` — owing nothing while reaching a different function (measured;
+                # `unresolved_write` on `main`), the exact false PASS `_ALIAS_HOMES` exists to
+                # prevent. Dropping a relative import is the safe direction; crediting a foreign
+                # absolute one is the dangerous one. `_accepted_homes` is the ONE implementation
+                # of that rule — `_imports_that_REBIND` asks the same question from the other side.
+                accepted = _accepted_homes(alias.name, sub.level)
+                if module not in accepted:
+                    continue  # a same-named function from somewhere else is not this seam
+                local = alias.asname or alias.name
+                previous = found.get(local)
+                # ⛔ ONE local name bound by TWO aliasable imports (`#12020` round 8 review P3). The
+                # walk yields siblings LIFO, so a plain assignment kept the LEXICALLY FIRST binding
+                # — and if that one was a GATE spelling that never runs (`if TYPE_CHECKING:`), the
+                # live CLAUSE BUILDER it shares a name with was replaced by a gate reach and the
+                # writer measured `gated` (outside `NEEDS_A_DECLARATION`, i.e. it stopped owing a
+                # declaration; measured). Neither binding is a "rebinding" (`_imports_that_REBIND`
+                # skips every import that RESOLVES), so no other rule sees the collision.
+                # ⛔ Prefer the BUILDER in every collision, which is fail-closed in BOTH orders:
+                # the builder outcome is `unresolved_write`/`ungated`, both inside
+                # `NEEDS_A_DECLARATION`, while a source-order-dependent answer is right in one order
+                # and a silent hide in the other.
+                if previous is None or (
+                    previous not in WRITE_CLAUSE_BUILDERS
+                    and alias.name in WRITE_CLAUSE_BUILDERS
+                ):
+                    found[local] = alias.name
+    return found
+
+
+def _keep_shadowed_aliases(aliases: dict[str, str], shadowed: set[str]) -> dict[str, str]:
+    """Drop the aliases `shadowed` rebinds — EXCEPT the clause builders (`#12020` round 7).
+
+    ⛔ ⛔ THIS IS NOT `_accepted_homes`' PARTITION, and saying it was cost a review round (round 7
+    P3). `_accepted_homes` splits on the LEVEL axis (`SEAM_CALL` vs "bare home is enough", which
+    admits both builders AND `UNGATED_CALLS`); this splits on the CREDIT axis, and the two groupings
+    are different. There are THREE buckets here, not two:
+
+    * `SEAM_CALL` — DROP. Dropping leaves the writer a function that reaches nothing, so it cannot be
+      `gated`; keeping a shadowed one can make it `gated`, which is OUTSIDE `NEEDS_A_DECLARATION` —
+      an over-credit that HIDES it (`#12020` round 3, measured: a writer-local `_enc = lambda p: p`
+      still credited `encode_for_row`).
+    * `UNGATED_CALLS` (`encode_for_store`, `compute_session_embedding`) — DROP, but not for the
+      reason `SEAM_CALL` is dropped, and the outcome is not always `unresolved_write` (round 7 P3,
+      measured): a shadowed ungated alias leaves the writer `unresolved_write` when it has its OWN
+      write clause (it owes a declaration) and leaves it `{}` — ABSENT — when it has none, where
+      keeping the alias yields `producer`. The entry lost in that second case is a `producer`, which
+      owes no declaration, so the drop is still the safe side; `_ALIAS_HOMES`' "dropping a doubtful
+      alias makes the writer INVISIBLE (measured `{}`) … over-credit is the safe direction" note
+      speaks about the LEVEL rule, not about this one, and the two are not interchangeable.
+    * `WRITE_CLAUSE_BUILDERS` — KEEP. Dropping is the DANGEROUS direction: `_EMBED_WRITE` cannot see
+      `SET y += $p`, so the alias is the ONLY discovery signal, and dropping it does not demote the
+      writer, it DELETES it (measured `{}` for three idiomatic module-level rebindings that still
+      reach the builder: a `try/except ImportError` fallback, a `functools.partial` wrapper, and an
+      `if False:` assignment).
+
+    ⛔ What builder over-credit COSTS, stated as measured rather than as a bound (`#12020` round 7 P3):
+    it either ADDS a writer that owes a declaration, or — when the kept alias was genuinely rebound
+    to a non-builder — RECLASSIFIES an existing `producer` as `ungated`, imposing a declaration on a
+    writer that stores nothing (`_writes_an_embedding` is satisfied by the kept `_set(…)` call;
+    measured `ungated` where the blanket drop yields `producer`). Both outcomes stay INSIDE
+    `NEEDS_A_DECLARATION`, so the arm is fail-closed; the second is the "false declaration" direction
+    — the cost `WRITE_CLAUSE_BUILDERS`' own residual already names — and it has no live instance
+    (measured: the 32-entry population and its kinds are identical under this helper and the blanket
+    drop).
+
+    ⛔ The shadow set is scope-wide ON PURPOSE (a rebinding anywhere in the module makes a bare
+    name ambiguous for a GATE spelling); the builder arm is the one place where that ambiguity costs
+    more than it buys.
+    """
+    return {k: v for k, v in aliases.items()
+            if v in WRITE_CLAUSE_BUILDERS or k not in shadowed}
+
+
+def _locally_bound(node) -> set[str]:
+    """Names ``node`` (a writer definition) binds in ITS OWN SCOPE — shadowed import aliases.
+
+    Any binding in the writer's own scope counts — assignment, annotated/augmented assignment,
+    `for`/`with`/`except` target, a nested `def`/`class` NAME (the name binds here; its body is a
+    different scope), a parameter, a walrus. The question is only "does this name, inside this
+    writer, still mean the imported object?", and there is NO single safe answer. `_keep_shadowed_aliases`
+    holds it, and that split is NOT `_accepted_homes`' (round 7 review P3 retracted exactly that
+    equation; round 8 P3 found it still here — `_accepted_homes` groups the builders WITH
+    `UNGATED_CALLS`, while this groups them apart):
+
+    * `SEAM_CALL` — dropping is right: keeping a shadowed one can class the writer `gated`, which is
+      outside `NEEDS_A_DECLARATION` (`#12020` round 3, measured: a writer-local `_enc = lambda p: p`
+      still credited `encode_for_row`).
+    * `UNGATED_CALLS` — dropping is right, and the outcome is NOT always `unresolved_write`: with an
+      own write clause the writer lands there and owes a declaration; WITHOUT one it is absent (`{}`),
+      where keeping the alias yields `producer` — an entry that owes nothing (round 7 P3, measured).
+    * `WRITE_CLAUSE_BUILDERS` — KEEPING is right: the alias is the only discovery signal, so dropping
+      it does not demote the writer, it deletes it.
+
+    This function only answers "which names does this scope bind"; the builder arm skips the DELETION,
+    never the question.
+
+    ⛔ OWN SCOPE ONLY, and that is not symmetry with the module pass — it is a measured fail-open
+    (`#12020` round 5). `ast.walk(node)` descends into a NESTED `def`, so a nested function's
+    PARAMETER dropped the writer's module alias. For a `SEAM_CALL`/`UNGATED_CALLS` alias that only
+    demotes the writer; for a CLAUSE-BUILDER alias the alias IS the only discovery signal
+    (`_EMBED_WRITE` cannot see `SET n += $p`), so the writer vanished from the population entirely:
+
+        from tortoise.vector_write import set_embedding_clause as _set
+        def outer(proj):
+            def helper(_set):            # binds only inside `helper`
+                return _set
+            return proj.g.query("MATCH (y) SET y += $p", {"p": _set("y")})
+            → discovered NOTHING before this fix; `unresolved_write` without the nested def.
+
+    Pinned by `ALIASED_IMPORT_SHAPES`' `nested_scope_parameter_does_not_shadow` arm.
+
+    ⛔ `ast.alias` is NOT counted as a shadow by itself: the import is what CREATES the alias, and
+    counting every one would drop the honest `function_level_alias` shape, whose whole point is that
+    the writer's own scope binds it. An import that binds the name to something ELSE is a different
+    fact and IS counted (`_imports_that_REBIND`, `#12020` round 6 review P2). `MatchAs` /
+    `MatchStar` / `MatchMapping.rest` and a WALRUS inside a comprehension bind in THIS scope too,
+    and each of them was measured `gated` (owed nothing) before `_own_scope_bindings` knew them.
+    """
+    return _own_scope_bindings(node)
+
+
+def _named_callees(node) -> set[str]:
+    """Calls whose func is a BARE `Name` — the only shape an import alias can bind.
+
+    ⛔ `_callees` also answers a `func.attr`, which is right for matching a literal spelling but
+    wrong for resolving an alias: `client._enc(x)` is a different function on a foreign object, and
+    resolving it through the import map credited it as the gate seam (#12020 round 3, measured:
+    `unresolved_write` -> `gated`, i.e. the writer stopped owing a declaration).
+
+    ⛔ A bare `Name` is not enough on its own (`#12020` round 7 review, P2 — measured): the shadow
+    set (`_locally_bound`) is deliberately OWN-SCOPE-ONLY, while this walk descends the WHOLE
+    subtree, so a nested scope's PARAMETER was attributed to the writer:
+
+        from tortoise.embeddings import encode_for_row as _enc
+        def w(proj, text):
+            def helper(_enc):          # binds in `helper` only — the writer keeps the module alias
+                return _enc(text)
+            proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": "x"})
+            return helper(str.upper)
+
+    measured `gated` here and `unresolved_write` on `main` — the same fail-open direction rounds
+    3/4/6 closed, one scope down. The lambda spelling `(lambda _enc: _enc(text))(…)` does it too.
+
+    ⛔ The fix is NOT "own scope only": that would drop the legitimate closure
+    (`def helper(): return _enc(text)`, where `_enc` really is the module alias, so the writer
+    genuinely reaches the gate and `gated` is the right answer). The shadow is threaded DOWNWARD
+    per scope instead — a name is dropped only inside the subtree that rebinds it.
+
+    ⛔ THIS SHADOW MODEL GOVERNS THE ALIAS PATH ONLY (measured, `#12020`): the caller credits the
+    LITERAL spelling from `_callees`, which this walk does not filter, so a writer that rebinds
+    `encode_for_row` in its own scope — or imports that name from a FOREIGN module — still reads
+    `gated`. The same two shapes spelled through an alias are `unresolved_write`, which is why the
+    asymmetry is not visible from reading this function alone. Named in
+    `UNDECIDABLE_WRITE_SHAPES` ("literal seam spelling …"), not resolved here.
+
+    ⚠️ This walk answers SCOPE, and one neighbour of this bug is a REACH question it does not
+    answer: a seam call the writer never RUNS — a never-called nested `def`, a never-called
+    `lambda` body, a method of a class the writer never instantiates, or a call behind an
+    `if False` / after `return` in the writer's OWN scope — is still credited to the writer, so
+    it reads `gated`. ⛔ `gated` does NOT imply it reached nothing: the seam branch pre-empts the
+    write predicate, so a writer that ALSO reaches an ungated primitive is masked out of
+    `NEEDS_A_DECLARATION` (measured `ungated` → `gated`), and the wanted verdict there is
+    `ungated`, not `unresolved_write`. That is NAMED rather than fixed — see
+    `UNDECIDABLE_WRITE_SHAPES` ("never-run call"), which the suite pins in both directions.
+    """
+    import ast
+
+    found: set[str] = set()
+
+    def visit(current: ast.AST, shadowed: frozenset[str]) -> None:
+        for child in ast.iter_child_nodes(current):
+            if isinstance(child, _NEW_SCOPE_NODES):
+                # This subtree's OWN bindings — its parameters, locals, captures, walrus targets
+                # and rebinding imports, plus a nested `def`/`class` NAME. ⛔ Threaded DOWNWARD
+                # only: the shadow applies INSIDE this subtree, so a legitimate closure that calls
+                # the module alias from a nested body keeps its `gated` (see the arm below), while
+                # the nested body's own `enc`-named parameter stops crediting the writer.
+                # ⛔ What this does NOT fix, and must not be read as fixing: a `global` rebinding
+                # inside the nested scope changes the MODULE binding, and this walk is scoped, so
+                # the writer's later call is still credited — measured `gated`, and named in
+                # `UNDECIDABLE_WRITE_SHAPES` ("`global` rebinding …"). A `nonlocal` against a
+                # module-level alias does not even compile, so it is not a shape to claim.
+                visit(child, shadowed | frozenset(_own_scope_bindings(child)))
+                continue
+            if (isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                    and child.func.id not in shadowed):
+                found.add(child.func.id)
+            visit(child, shadowed)
+
+    visit(node, frozenset())
+    return found
+
+
+def _writes_an_embedding(node, source: str, aliases: dict[str, str] | None = None) -> bool:
     """Whether ``node`` writes a vector — by clause, by clause helper, or into a
     CONTAINER KEY (:data:`_EMBED_CONTAINER_KEY`).
 
@@ -333,6 +976,49 @@ def _writes_an_embedding(node, source: str) -> bool:
     """
     if _EMBED_WRITE.search(source):
         return True
+    # ⛔ `#11274`: a clause builder reached through an IMPORT ALIAS is the same write, and BOTH the
+    # text pass above and the container-key pass below are blind to it (the alias renames the call
+    # and the clause text lives in the builder).
+    aliased_builders = {
+        local for local, canonical in (aliases or {}).items()
+        if canonical in WRITE_CLAUSE_BUILDERS
+    }
+    if aliased_builders:
+        for sub in ast.walk(node):
+            if not isinstance(sub, ast.Call):
+                continue
+            func = sub.func
+            # ⛔ A BARE `Name` ONLY — `reader._set("n")` is a foreign object's method that merely
+            # shares the alias's spelling, and crediting it reports a writer that owes a
+            # declaration and asserts nothing (`#12020` round 5, measured).
+            # ⛔ THIS IS ONLY HALF OF `_named_callees`' RULE, and the asymmetry is DELIBERATE
+            # (`#12020` round 9 review, measured — the earlier comment here claimed the two rules
+            # were the same, which was a claim wider than the code and is corrected rather than
+            # implemented). `_named_callees` also threads a per-scope SHADOW downward; doing that
+            # here was tried and it is the DANGEROUS direction for a clause builder:
+            #
+            #     from tortoise.vector_write import set_embedding_clause as _set
+            #     def w(proj):
+            #         def apply(_set, name):     # binds the name, but the CALLER passes the alias
+            #             return _set(name)
+            #         return proj.g.query("MATCH (y) SET y += $p", {"p": apply(_set, "y")})
+            #
+            # `_EMBED_WRITE` cannot see `SET y += $p`, so this call is the writer's ONLY discovery
+            # signal. Measured: the shadow-threaded arm DELETES `w` from the population (`apply` is
+            # credited, `w` is absent) where the arm below credits it — and a deleted writer owes no
+            # declaration at all, which is the direction `#11274` exists to close and the one
+            # `_keep_shadowed_aliases` states as "does not demote the writer, it DELETES it".
+            # ⛔ So the residual is the MIRROR one and it is NAMED, not hidden: a builder-named call
+            # inside a nested scope that binds the name is credited to the ENCLOSING writer even when
+            # the nested body never receives the alias (`def helper(_set): return _set("y")`). That
+            # over-credits a declaration nobody can write — cry-wolf — and is the lesser of the two.
+            # Pinned both ways in `ALIASED_IMPORT_SHAPES`:
+            # `builder_alias_inside_a_SHADOWING_nested_scope` and — the row that reds if this arm is
+            # ever made shadow-aware — `builder_alias_PASSED_INTO_a_shadowing_nested_scope`.
+            if not isinstance(func, ast.Name):
+                continue
+            if func.id in aliased_builders:
+                return True
     for sub in ast.walk(node):
         if isinstance(sub, ast.Assign):
             targets = sub.targets
@@ -917,12 +1603,41 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             })
             continue
         module_labels = {lab for _v, lab in _NODE_LABEL.findall(_strings(tree))}
+        # The MODULE's import aliases, computed once per FILE: an alias map rebuilt inside the
+        # per-function loop below would walk the whole tree once per writer (`#11274`).
+        # ⛔ OWN-SCOPE ONLY, and filtered by module-scope bindings (#12020 round 4): the previous
+        # `_import_aliases(tree)` descended into every function body, so a SIBLING's import became
+        # this writer's alias and a sibling's `encode_for_row` classed it `gated` — outside
+        # `NEEDS_A_DECLARATION`, i.e. the writer stopped owing a declaration.
+        module_aliases = _import_aliases(tree)
+        # ⛔ `#12020` round 7: the module-scope shadow filter is `_keep_shadowed_aliases`', NOT a
+        # blanket drop — a blanket drop deleted a real clause-builder writer from the population
+        # (the `#11274` fail-open) for three idiomatic rebindings that still reach the builder.
+        module_aliases = _keep_shadowed_aliases(module_aliases, _scope_bound_names(tree))
         file_src = path.read_text(encoding="utf-8")
         lines = file_src.splitlines()
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            called = _callees(node)
+            # ⛔ `#11274`: the writer's import ALIASES, so an aliased call is the reach it really is —
+            # both for the gate class below and for the write predicate above. Without this an
+            # aliased `encode_for_row` reds the population as an unresolved producer (a false
+            # declaration owed) and an aliased clause builder is a SILENT MISS (a false `bypass`
+            # answer, the direction that matters).
+            aliases = {**module_aliases, **_import_aliases(node)}
+            # ⛔ `#12020` round 3: an alias the writer REBINDS is not that reach. Measured —
+            # `from … import encode_for_row as _enc` followed by a writer-local `_enc = lambda p: p`
+            # still credited `encode_for_row`, classing a writer that never reaches the gate as
+            # `gated` (a declaration owed by nobody) where it had been `unresolved_write`. Dropping
+            # a shadowed alias is the under-credit direction, which is the safe one for a GATE
+            # spelling — and the wrong one for a clause builder, which is why the same split lives
+            # in `_keep_shadowed_aliases` (`#12020` round 7).
+            shadowed = _locally_bound(node)
+            if shadowed:
+                aliases = _keep_shadowed_aliases(aliases, shadowed)
+            # …and only a BARE-`Name` call can bind an import alias (`client._enc(x)` cannot).
+            called = _callees(node) | {aliases[name] for name in _named_callees(node)
+                                       if name in aliases}
             # The function's own text by LINE RANGE — `ast.get_source_segment`
             # re-splits the whole file per call, which cost 90 s on this tree.
             source = "\n".join(lines[node.lineno - 1:node.end_lineno])
@@ -938,7 +1653,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # measured: reading only literals classed
                 # `session_indexer.main` (which does write) as a producer and
                 # hid a real ungated write path.
-                if not _writes_an_embedding(node, source):
+                if not _writes_an_embedding(node, source, aliases):
                     kind = "producer"  # computes it; another function writes it
             else:
                 # No recognised producer call: if it still WRITES an embedding,
@@ -946,7 +1661,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
                 # otherwise report `OUTSIDE the gate: 1` for a tree with three
                 # (review round 5, P2 — measured: 17 functions carry an
                 # embedding-write clause, 9 of them were absent from this map).
-                if kind is None and _writes_an_embedding(node, source):
+                if kind is None and _writes_an_embedding(node, source, aliases):
                     _put(f"{module}::{node.name}", {
                         "callee": "unrecognised",
                         "at": f"{rel}:{node.lineno}",
@@ -3457,13 +4172,6 @@ def vector_leg_surface() -> list[dict]:
     return out
 
 
-#: The comprehension forms, each of which introduces its OWN scope (#11389
-#: review, P2). Named once so the two walks that must agree about them cannot
-#: drift apart.
-_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp,
-                        ast.GeneratorExp)
-
-
 def _comprehension_targets(node: ast.AST) -> frozenset[str]:
     """The names a comprehension binds in its OWN scope.
 
@@ -3545,8 +4253,46 @@ def _sdk_methods_on_vector_leg(
                              else f"UNKNOWN({ast.unparse(kw.value)[:40]})")
         return found or [default_entity_type]
 
+    def _in_module_receiver(expr: ast.AST, receivers: frozenset[str]) -> bool:
+        """Whether `expr` stands for the enclosing CLASS — i.e. an in-module method reference.
+
+        ⛔ `self` is not the only one (#11397, the UNDER-report half). A `classmethod` reaches its
+        own method as `cls.<name>` (and as `<ClassName>.<name>` from anywhere in the class body), and
+        `self.__class__.<name>` is the same receiver written the long way; `super()` and `type(self)`
+        are the same family and were already accepted. Every one of them was a real reach DROPPED
+        with no entry — the silent-short-list direction this channel exists to narrow.
+
+        ⛔ …and every one of them is a claim about the BASE, not about the spelling (#12020 round 6
+        review, P3): `type(<anything>)` was accepted as a receiver while its twin
+        `other.__class__._helper` is refused two lines below, so the file stated a receiver rule it
+        enforced on one spelling and not the other. `type(self)` is an in-module receiver;
+        `type(other)` is a FOREIGN class's helper.
+        """
+        if isinstance(expr, ast.Name):
+            return expr.id in receivers
+        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name):
+            if expr.func.id == "super":
+                return True
+            # ⛔ `type(self)` is the receiver spelled through the type — but ONLY when its ARGUMENT
+            # is one (#12020 round 6 review, P3). Accepting ANY `type(…)` call made
+            # `type(other)._helper` an in-module reach, which is the FOREIGN object's class — the
+            # exact shape the `__class__` arm two lines below refuses for the same reason. The
+            # asymmetry published a spurious `declared bound` entry on a complete caller table, on
+            # the channel whose over-reports the comment above calls out as making a real
+            # declaration ignorable.
+            if expr.func.id == "type" and len(expr.args) == 1 and not expr.keywords:
+                return _in_module_receiver(expr.args[0], receivers)
+            return False
+        # `self.__class__` — the same receiver, spelled through the type. ⛔ The BASE must itself be
+        # an in-module receiver (`#11397` review): `other.__class__._pool` is a FOREIGN object's
+        # class, and accepting any `*. __class__` published a spurious `declared bound` entry on a
+        # complete caller table — the cry-wolf direction, the same failure `_pattern_names` closes.
+        return (isinstance(expr, ast.Attribute) and expr.attr == "__class__"
+                and _in_module_receiver(expr.value, receivers))
+
     def _reachable_by_name(node: ast.AST, entrant: dict[str, set[str]],
-                           shadowed: set[str] | None = None) -> str | None:
+                           shadowed: set[str] | None = None,
+                           receivers: frozenset[str] = frozenset({"self"})) -> str | None:
         """The leg-reaching function this expression names, if any.
 
         Used ONLY to declare a reach this scan cannot resolve — never to add an
@@ -3582,16 +4328,11 @@ def _sdk_methods_on_vector_leg(
             # above matches `func.attr` with no receiver check, so it still names
             # such a caller (pre-existing behaviour, unchanged by #11337). This
             # channel's job is to add the caveat, not to correct the closure.
-            if isinstance(receiver, ast.Name) and receiver.id == "self":
-                return node.attr
-            if (isinstance(receiver, ast.Call)
-                    and isinstance(receiver.func, ast.Name)
-                    and receiver.func.id in ("super", "type")):
+            if _in_module_receiver(receiver, receivers):
                 return node.attr
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == "getattr" and len(node.args) in (2, 3)
-                and isinstance(node.args[0], ast.Name)
-                and node.args[0].id == "self"):
+                and _in_module_receiver(node.args[0], receivers)):
             name = node.args[1]
             if (isinstance(name, ast.Constant) and isinstance(name.value, str)
                     and name.value in entrant):
@@ -3700,10 +4441,21 @@ def _sdk_methods_on_vector_leg(
     # IS walked and IS reported — EXCEPT a `Load` that reuses THAT comprehension's
     # own target name: the target binds in the comprehension's own scope, so such
     # a `Load` is the comprehension's binding, not the enclosing method's
-    # (#11389 review, P3).) Also NOT
-    # modelled in `shadowed`: `*args`/`**kwargs` names, lambda parameters, `match`
-    # patterns and `global`/`nonlocal` — those produce a spurious entry rather
-    # than a missed one, and are owned by `#11397`. Under-
+    # (#11389 review, P3).)
+    # ⛔ `#11397` CLOSED the scope model in `_shadowed_names`: `*args`/`**kwargs`, a nested
+    # `def`/`class` NAME, `match` patterns and `del` all bind a name in this scope, so a later
+    # mention of it is not a reach. ⛔ NOT a lambda parameter — it binds inside the lambda only,
+    # and `_shadowed_names` deliberately refuses it (its own docstring carries the reason and the
+    # measurement: seeded here, a genuine mention of the same name ELSEWHERE in the method is
+    # suppressed — the silent-short-list direction). A lambda parameter is modelled where it
+    # belongs, in the mention walk (`lam_bound`), and `lambda_param_does_not_shade_the_body` pins
+    # the difference — this sentence said "lambda parameters" and asserted the suppression the
+    # code refuses (`#12020` round 7 review P3). What is STILL not modelled, and named rather than
+    # implied: `global`/`nonlocal` (they rebind a name whose scope this walk does not track) — those
+    # produce a spurious entry rather than a missed one. The UNDER-report half was closed in
+    # `_in_module_receiver`: `cls.<name>`, `<Class>.<name>`, `self.__class__.<name>`
+    # and `getattr(self.__class__, '<name>')` are in-module receivers, alongside the
+    # `self` / `super()` / `type(self)` forms. Under-
     # reporting is the dangerous direction for a surface an owner approves, so
     # the shape is REPORTED through the same `UNMEASURED` channel the handler
     # scan uses for its own bound (see `by_reference` below) instead of being
@@ -3777,6 +4529,105 @@ def _sdk_methods_on_vector_leg(
     #: was neither traversed (not a `Call.func`) NOR declared, and three artifacts
     #: asserted no such shape existed. A name-resolved CALL of the leg is still
     #: excluded, by `call_funcs` above — that is the closure's.
+    def _pattern_names(pattern: ast.AST) -> set[str]:
+        """The names a `match` PATTERN binds (`case _pool:` / `case [_pool, *rest]:`).
+
+        ⛔ A pattern is a BINDING, not a mention (#11397, the OVER-report half): reading
+        `case _pool: return _safe(_pool)` as a reference to the method published a spurious
+        `declared bound` entry on a COMPLETE caller table — the cry-wolf failure that makes a real
+        declaration ignorable. Collected off `MatchAs.name` / `MatchStar.name` / `MatchMapping.rest`,
+        which is where Python binds; a dotted `MatchValue` binds nothing.
+        """
+        names: set[str] = set()
+        for sub in ast.walk(pattern):
+            for attr in ("name", "rest"):
+                value = getattr(sub, attr, None)
+                if isinstance(value, str):
+                    names.add(value)
+        return names
+
+    def _parameter_names(args: ast.arguments) -> set[str]:
+        """Every name a parameter list binds — including `*args` / `**kwargs`.
+
+        ⛔ The star names are carried on the NODE (`args.vararg` / `args.kwarg`), never as a
+        `Name(Store)`, which is why a syntactic `Store` walk alone missed them (`#11397`).
+        """
+        names = {a.arg for a in args.posonlyargs + args.args + args.kwonlyargs}
+        for star in (args.vararg, args.kwarg):
+            if star is not None:
+                names.add(star.arg)
+        return names
+
+    def _shadowed_names(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+        """Every name `fn`'s OWN scope binds — and therefore every mention that is not a reach.
+
+        ⛔ The scope model `#11397` found incomplete, closed here in the OVER-report direction: each
+        of these shapes bound a name the walk did not know about, so a LATER mention of the same
+        name inside the method was published as a by-reference reach on a caller table that was
+        already complete:
+
+        * `*args` / `**kwargs` (the node carries them in `fn.args.vararg` / `kwarg`, never as a
+          `Name(Store)`);
+        * a nested `def`'s / `class`'s NAME (it binds here; its BODY is its own scope, so it is not
+          descended into — the reason `mentions_past_a_NESTED_shadow` must stay declared);
+        * a `match` pattern — a capture name binds in the FUNCTION's scope, so it belongs here;
+        * `del <name>` — `Name(ctx=Del)` binds the name as a local exactly as a `Store` does.
+
+        ⛔ A `lambda`'s parameters are NOT here, and the exclusion is the same rule the comprehension
+        scopes above already follow: a lambda parameter binds in the LAMBDA's scope only, so adding it
+        to this set suppressed a genuine mention of the same name ELSEWHERE in the method — the
+        silent-short-list direction, reproduced by an anti-cry-wolf fix. It is tracked as a SCOPE in
+        the mention walk below (`#11397` review), which kills the spurious reach inside the lambda
+        without shading the enclosing body.
+
+        Not modelled, and named rather than implied: `global` / `nonlocal` (they rebind a name whose
+        scope this walk does not track). Both are OVER-reports at worst, and a foreign receiver that
+        happens to be named exactly like the enclosing class is the same direction.
+        """
+        shadowed: set[str] = set(_parameter_names(fn.args))
+        for sub in list(fn.body):
+            stack_s = [sub]
+            while stack_s:
+                n = stack_s.pop()
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                    # The NAME binds here (#11397); the body does not.
+                    shadowed.add(n.name)
+                    continue
+                # ⛔ NOT a comprehension target: `[x for _pool in …]` binds in the
+                # comprehension's OWN scope, so treating it as a function local
+                # suppresses a genuine mention elsewhere in the body — the
+                # under-report direction this guard exists to narrow, not create
+                # (#11389 review). Comprehension scopes are skipped entirely.
+                if isinstance(n, _COMPREHENSION_NODES):
+                    continue
+                if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                    shadowed.add(n.id)
+                # ⛔ These bind a name on the NODE, not as `Name(Store)`
+                # (#11389 review, P3): `except X as _pool` keeps the name in
+                # `ExceptHandler.name`, and `import _pool` in the alias. A local
+                # that reuses an entrant's name is not a reach either way.
+                elif isinstance(n, ast.ExceptHandler) and n.name:
+                    shadowed.add(n.name)
+                elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                    for alias in n.names:
+                        bound = alias.asname or alias.name.split(".")[0]
+                        shadowed.add(bound)
+                elif getattr(ast, "match_case", None) and isinstance(
+                        n, ast.match_case) and n.pattern is not None:
+                    shadowed |= _pattern_names(n.pattern)
+                stack_s.extend(ast.iter_child_nodes(n))
+        return shadowed
+
+    #: Which class a method is defined in — the receiver the `cls.` / `<Class>.` shapes name
+    #: (#11397). Direct methods only: a nested `def` is its own scope, and no shape here reaches it.
+    enclosing_class: dict[int, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    enclosing_class[id(sub)] = node.name
+
     mentionable: dict[str, set[str]] = {**direct, VECTOR_LEG_SDK_METHOD: set()}
     by_reference: dict[str, set[str]] = {}
     for fn in functions:
@@ -3802,38 +4653,26 @@ def _sdk_methods_on_vector_leg(
         # namespace is not FUNCTION scope, so a class-body binding must not
         # suppress an enclosing mention — while the mention walk descends into a
         # class body, because a mention there IS a real reach. The two disagree
-        # about `class` on purpose; the residual that follows (a class-body
-        # binding reusing an entrant's name is an OVER-report) is on `#11397`.
-        shadowed: set[str] = set()
-        for sub in fn.args.args + fn.args.kwonlyargs + fn.args.posonlyargs:
-            shadowed.add(sub.arg)
-        for sub in list(fn.body):
-            stack_s = [sub]
-            while stack_s:
-                n = stack_s.pop()
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                  ast.ClassDef)):
-                    continue
-                # ⛔ NOT a comprehension target: `[x for _pool in …]` binds in the
-                # comprehension's OWN scope, so treating it as a function local
-                # suppresses a genuine mention elsewhere in the body — the
-                # under-report direction this guard exists to narrow, not create
-                # (#11389 review). Comprehension scopes are skipped entirely.
-                if isinstance(n, _COMPREHENSION_NODES):
-                    continue
-                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
-                    shadowed.add(n.id)
-                # ⛔ These two bind a name on the NODE, not as `Name(Store)`
-                # (#11389 review, P3): `except X as _pool` keeps the name in
-                # `ExceptHandler.name`, and `import _pool` in the alias. A local
-                # that reuses an entrant's name is not a reach either way.
-                elif isinstance(n, ast.ExceptHandler) and n.name:
-                    shadowed.add(n.name)
-                elif isinstance(n, (ast.Import, ast.ImportFrom)):
-                    for alias in n.names:
-                        bound = alias.asname or alias.name.split(".")[0]
-                        shadowed.add(bound)
-                stack_s.extend(ast.iter_child_nodes(n))
+        # about `class` on purpose, and that disagreement is now the DECLARED
+        # residual rather than a `#11397` placeholder: a class-body binding
+        # reusing an entrant's name is still an OVER-report (`#11397` closed the
+        # function-scope names, not this one), as is a `global`/`nonlocal`
+        # rebinding. Both are over-reports, the safe direction. `#11397` DID
+        # close `*args`/`**kwargs`, nested `def`/`class` NAMES, `match` patterns
+        # and `del` (`_shadowed_names`), the lambda's OWN parameter scope (as a
+        # scope here in the mention walk, not as a function-wide name — a lambda
+        # parameter must not shade the enclosing body), and the
+        # receiver set (`_in_module_receiver`).
+        shadowed: set[str] = _shadowed_names(fn)
+        # The in-module receivers for THIS method (#11397): `self`, `cls` (a classmethod's own
+        # first parameter), `super()`, `type(self)` and `<EnclosingClass>`.
+        receivers = {"self"}
+        positional = fn.args.posonlyargs + fn.args.args
+        if positional and positional[0].arg == "cls":
+            receivers.add("cls")
+        if id(fn) in enclosing_class:
+            receivers.add(enclosing_class[id(fn)])
+        receivers_frozen = frozenset(receivers)
         # ⛔ A COMPREHENSION'S OWN BINDINGS SHADOW WITHIN IT (#11389 review,
         # P2). `shadowed` above skips comprehension subtrees ON PURPOSE — a
         # comprehension target binds in its own scope, so it must not suppress a
@@ -3854,7 +4693,7 @@ def _sdk_methods_on_vector_leg(
                 continue
             if id(node) not in call_funcs:
                 reached = _reachable_by_name(node, mentionable,
-                                             shadowed | comp_bound)
+                                             shadowed | comp_bound, receivers_frozen)
                 if reached:
                     by_reference.setdefault(fn.name, set()).add(reached)
             if isinstance(node, _COMPREHENSION_NODES):
@@ -3874,6 +4713,21 @@ def _sdk_methods_on_vector_leg(
                     stack.append((gen.target, here))
                     for cond in getattr(gen, "ifs", ()):
                         stack.append((cond, here))
+                continue
+            # ⛔ A LAMBDA's PARAMETERS SHADOW WITHIN THE LAMBDA ONLY (#11397 review). The same
+            # rule the comprehension above follows, for the same reason: a parameter binds in the
+            # LAMBDA's scope, so treating it as a function-wide local suppressed a genuine mention
+            # of the same name elsewhere in the method — the silent-short-list direction. Its
+            # DEFAULTS are evaluated in the ENCLOSING scope (like the outer `for` iterable), so
+            # they are walked unwidened.
+            if isinstance(node, ast.Lambda):
+                lam_bound = comp_bound | _parameter_names(node.args)
+                for default in node.args.defaults:
+                    stack.append((default, comp_bound))
+                for default in node.args.kw_defaults:
+                    if default is not None:
+                        stack.append((default, comp_bound))
+                stack.append((node.body, lam_bound))
                 continue
             for child in ast.iter_child_nodes(node):
                 stack.append((child, comp_bound))

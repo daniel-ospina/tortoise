@@ -76,8 +76,9 @@
 
 # /sitemap_index.xml is the OTHER convention a tool probes (Yoast and most site
 # auditors) — same document, so it lands on the canonical index rather than the
-# 404 page. `/sitemap.xml` itself is a real static file (#11615); robots.txt
-# still lists the four CHILD sitemaps, which is what the index expands to.
+# 404 page. `/sitemap.xml` itself is a real static file (#11615), and since #11766
+# it is the ONLY sitemap robots.txt names: the index expands to the three same-host
+# children, so a crawler that reads robots.txt reaches all of them in one hop.
 /sitemap_index.xml  /sitemap.xml  301
 
 # .html extension duplicates (non-auth only)

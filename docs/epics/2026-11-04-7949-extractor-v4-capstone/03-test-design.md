@@ -32,7 +32,7 @@ map explicitly forbids as a layout input.
 | capstone-adjacent files | **16 files, 155.5 s total — 1.093 % of the suite** (Σ over the `durations:` rows matching `*capstone*` / `*7949*` / `*v4_declared*` / `*graph_census*`; the sixteen are named below, so the number is reproducible) |
 | heaviest three | `test_9664_capstone_verdict_ledger.py` **39.0 s** · `test_graph_census_7949.py` **21.5 s** · `test_capstone_preregistration_9075.py` **20.9 s** (all sixteen are ranked in the table below) |
 | the eval lane already exists and is dispatch-only | `eval-suite-manual.yml` and `evals-on-demand.yml` — **both `workflow_dispatch` ONLY**, no `push`, no `pull_request`, no `schedule`; `on_demand:` in `ci-surfaces.yml` excludes `eval/**` + `longmem_eval/**` from merge gating (#10194, owner decision A 2026-10-27). ⚠️ **Dispatch-only is not the same as able to run this epic's measurements** — neither workflow can execute an A-row (§5.2a of `04-plan.md`, restated in conclusion 2 below) |
-| capstone files in `carve_out:` / `uri_requiring:` / `slow_files:` | `carve_out:` holds **one**: `test_pack_logic_writeprobe_11083.py` (`config/ci-surfaces.yml:9821`) — the **E6** lane this artifact maps at §2 row `10a`, which builds a `TortoiseSDK(<tmpfile>)` and is carve-out for exactly that reason. `uri_requiring:` and `slow_files:` hold none |
+| capstone files in `carve_out:` / `uri_requiring:` / `slow_files:` | `carve_out:` holds **one**: `test_pack_logic_writeprobe_11083.py` (`config/ci-surfaces.yml:9917`) — the **E6** lane this artifact maps at §2 row `10a`, which builds a `TortoiseSDK(<tmpfile>)` and is carve-out for exactly that reason. `uri_requiring:` and `slow_files:` hold none |
 
 ⛔ **The family row is re-derived here, and the sixteen files are named so the next reader can check it.**
 Rounds 4–5 re-derived every other figure in this table and left this one at a **stale 64.3 s** — which the rest
@@ -139,7 +139,7 @@ the owner already ruled on (#10194).
 
 | flag | where | required verification |
 |---|---|---|
-| **Silent function skips** | `subject_binding_available` is a **fail-OPEN** probe (`search_engine.py:6607`, consumed `sdk.py:9540`/`:9593` — a symbol-keyed pair, so a later insertion above either one moves the helper, not the claim); a fail-open probe makes "no subjects" indistinguishable from "never ran" | A5's case must report *which* state occurred — **Tier E**, asserted on the run record, not on a mock |
+| **Silent function skips** | `subject_binding_available` is a **fail-OPEN** probe (`search_engine.py:6607`, consumed `sdk.py:9612`/`:9665` — a symbol-keyed pair, so a later insertion above either one moves the helper, not the claim); a fail-open probe makes "no subjects" indistinguishable from "never ran" | A5's case must report *which* state occurred — **Tier E**, asserted on the run record, not on a mock |
 | **Conditional guards** | `_capture_lane()` returns `"v2"` unless `TORTOISE_SESSION_EXTRACTOR=m2`; the whole door claim hangs on a conditional | a CI-level pin on the selector itself (cheap, file-level) + Tier E evidence that the named lane ran |
 | **Stale measurement artifact** | the shipped verdict table carries `E4 2/15` while `E1-E5-PROOFS.md` corrects to `5/15` | CI pin that **both** figures are named and the stale one is not used as a bar |
 | **N+1 / cost blowup** | `capstone_measure.py` re-derives over 397 nodes; the E4 leg pays 7-session LLM cost | Tier E only; a CI pin on the *declared* point budget would be theatre |
