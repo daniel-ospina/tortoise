@@ -127,7 +127,7 @@ both; two edges aggregate; empty plan reports nothing.
 
 ## Verification
 
-```
+```text
 uv run python tools/test_lane.py run -- tests/test_cache_projection.py \
     tests/test_dod_5090_probe.py tests/test_9556_record_restore_verb.py -q
 → 315 passed, 1 skipped
