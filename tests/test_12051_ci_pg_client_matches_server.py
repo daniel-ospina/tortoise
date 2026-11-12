@@ -139,7 +139,11 @@ JOB = "test-record-postgres"
 #: extension (#11642), so a plain `postgres:NN` pin cannot substitute for one of
 #: these — but reading BOTH forms keeps this guard's message about the major
 #: rather than about the spelling.
-IMAGE_RE = re.compile(r":(?:pg)?(\d+)(?:[-_][A-Za-z0-9._-]*)?$")
+#: Prefer a `pg<NN>` group anywhere in the tag, fall back to the leading digits —
+#: `16`, `16.4`, `16.4-bookworm`, `pg16`, `pg16-trixie`, `0.8.0-pg16` all read 16.
+#: The `$`-anchored original refused `postgres:16.4` and `0.8.0-pg16` with a
+#: message saying they do not name a major, which they do (#12051 round 13).
+IMAGE_RE = re.compile(r":(?:[A-Za-z0-9._-]*[-_.])?pg(\d+)(?:$|[-_.])|:(\d+)")
 
 #: The CLIENT package as INSTALLED, not merely NAMED (#12051 review round 8):
 #: the name alone is matched by a read-only diagnostic (`dpkg -l
@@ -433,7 +437,7 @@ def _run_commands(step: dict) -> str:
     )
 
 
-def _github_path_writes(steps: list[dict]) -> list[tuple[int, str, int | None]]:
+def _github_path_writes(steps: list[dict], job: dict | None = None) -> list[tuple[int, str, int | None]]:
     """Every `$GITHUB_PATH` MENTION in the job, as `(step, line, major | None)`.
 
     `major` is `None` when the guard cannot CLASSIFY the mention — a producer it
@@ -449,9 +453,25 @@ def _github_path_writes(steps: list[dict]) -> list[tuple[int, str, int | None]]:
     return [
         (index, line.strip(), _classify_path_write(line))
         for index, step in enumerate(steps)
-        for line in _run_commands(step).splitlines()
+        for line in (_effective_shell(job, step) + "\n" + _run_commands(step)).splitlines()
         if GITHUB_PATH_MENTION_RE.search(line)
     ]
+
+
+def _effective_shell(job: dict | None, step: dict) -> str:
+    """The `shell:` a step's `run:` is EXECUTED through — job default, then step.
+
+    Executed, not decoration: the runner splits it (`ParseShellOptionString`, on
+    the first space only) and substitutes `{0}`, so
+    `shell: env PATH=/usr/bin:/bin bash` or
+    `shell: bash -c "export PATH=/usr/bin:/bin; exec bash {0}"` moves the leg's
+    PATH. `_client_dir_mentions` has always scanned it; the PATH-assignment rule
+    and the `$GITHUB_PATH` mention scan did NOT, so those two spellings left every
+    row green (#12051 review round 13, measured).
+    """
+
+    default_shell = str(((job or {}).get("defaults") or {}).get("run", {}).get("shell") or "")
+    return "\n".join([default_shell, str(step.get("shell") or "")])
 
 
 def _client_dir_mentions(steps: list[dict], job: dict | None = None) -> list[tuple[int, str, int | None]]:
@@ -472,11 +492,9 @@ def _client_dir_mentions(steps: list[dict], job: dict | None = None) -> list[tup
     step AND at `defaults.run.shell`; both are scanned here.
     """
 
-    default_shell = str(((job or {}).get("defaults") or {}).get("run", {}).get("shell") or "")
     found: list[tuple[int, str, int | None]] = []
     for index, step in enumerate(steps):
-        shell = "\n".join([default_shell, str(step.get("shell") or "")])
-        for line in (shell + "\n" + _run_commands(step)).splitlines():
+        for line in (_effective_shell(job, step) + "\n" + _run_commands(step)).splitlines():
             for match in CLIENT_DIR_RE.finditer(line):
                 token = match.group("token")
                 found.append((index, line.strip(), int(token) if token.isdigit() else None))
@@ -664,7 +682,7 @@ def _version_checked_tools(code: str) -> set[str]:
 
 
 def _path_assignments_that_drop_the_pin(
-    steps: list[dict], start: int, server_major: int
+    steps: list[dict], start: int, server_major: int, job: dict | None = None
 ) -> list[str]:
     """PATH assignments at or after the pin that can no longer see the pinned dir.
 
@@ -678,7 +696,9 @@ def _path_assignments_that_drop_the_pin(
     pinned = f"/usr/lib/postgresql/{server_major}/bin"
     offenders: set[str] = set()
     for index in range(start, len(steps)):
-        for line in _run_commands(steps[index]).splitlines():
+        for line in (
+            _effective_shell(job, steps[index]) + "\n" + _run_commands(steps[index])
+        ).splitlines():
             for match in PATH_ASSIGN_RE.finditer(line):
                 value = match.group("value")
                 if pinned in value or "$PATH" in value or "${PATH}" in value:
@@ -713,6 +733,20 @@ def _pin_step(steps: list[dict]) -> tuple[int, dict]:
         for index, step in enumerate(steps)
         if CLIENT_PKG_RE.search(_run_commands(step))
     ]
+    # ⛔ EVERY installer, not the first (#12051 review round 13): `search()` graded
+    # the FIRST mention, so a step that installs 16 and then falls back
+    # (`… postgresql-client-16 || … postgresql-client-17`) read as a clean pin —
+    # the view depended on LINE ORDER (17 first red, 17 second green, measured).
+    for _, step in hits:
+        majors = [
+            int(match.group(1)) for match in CLIENT_PKG_RE.finditer(_run_commands(step))
+        ]
+        assert set(majors) == {majors[0]}, (
+            f"the pin installs MORE THAN ONE client major ({sorted(set(majors))}) — "
+            "a `||` fallback moves the client off the servers' major exactly when "
+            "the pinned one is unavailable, which is #12051 with an alibi (#12051 "
+            "review round 13, measured)"
+        )
     assert len(hits) == 1, (
         "expected exactly ONE PostgreSQL-client pin step in "
         f"`{JOB}`; found {len(hits)} — a second installer makes the client "
@@ -738,7 +772,7 @@ def _postgres_image_majors(job: dict) -> list[int]:
             "(`:pg<major>` or `:<major>`); an unpinned major cannot be matched "
             "by the client pin, which is how #12051 shipped"
         )
-        majors.append(int(match.group(1)))
+        majors.append(int(match.group(1) or match.group(2)))
     return majors
 
 
@@ -829,7 +863,7 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # WRITTEN TO `$GITHUB_PATH`. A bare `CLIENT_PATH_RE`/`"GITHUB_PATH" in text`
     # pair is satisfiable by two different lines and by an inert `export`.
     pin_mentions = [
-        write for write in _github_path_writes(steps) if pin_index <= write[0] < leg_start
+        write for write in _github_path_writes(steps, job) if pin_index <= write[0] < leg_start
     ]
     assert pin_mentions, (
         "no step between the client install and the record leg writes a "
@@ -915,7 +949,7 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     server_major = _postgres_image_majors(job)[0]
     pin_index, _ = _pin_step(steps)
 
-    mentions = _github_path_writes(steps)
+    mentions = _github_path_writes(steps, job)
     assert mentions, (
         "no step in this job writes a `/usr/lib/postgresql/<major>/bin` entry to "
         "`$GITHUB_PATH` — see the pin-step assertion above"
@@ -950,7 +984,7 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
         }
     )
     replacements = sorted(
-        set(_path_assignments_that_drop_the_pin(steps, pin_index, server_major))
+        set(_path_assignments_that_drop_the_pin(steps, pin_index, server_major, job))
         | {
             f"step {index} REPLACES a client binary: {line!r}"
             for index, step in enumerate(steps)
@@ -1071,7 +1105,7 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     hits = [
         (index, level)
         for index, level in (
-            (index, FAIL_CLOSED_BRANCH_RE.search(_run_code(step)))
+            (index, FAIL_CLOSED_BRANCH_RE.search(_run_commands(step)))
             for index, step in enumerate(steps)
             if pin_index <= index < leg_start
         )
@@ -1082,7 +1116,7 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
         for index in sorted(
             {
                 index
-                for index, _, _ in _github_path_writes(steps)
+                for index, _, _ in _github_path_writes(steps, job)
                 # ⛔ WINDOWED like `hits` (#12069 review). A PRE-PIN write of an
                 # unrelated directory cannot outrank the pin (later wins), and a
                 # post-leg write cannot reach the leg — so a best-effort prepend
@@ -1348,6 +1382,81 @@ def test_an_install_verb_reads_through_its_flags(command: str, major: int | None
 
     match = CLIENT_PKG_RE.search(command)
     assert (int(match.group(1)) if match else None) == major, f"{why} (measured, round 12)"
+
+
+#: (image reference, the major it names, why) — the pin for `IMAGE_RE`. A stricter
+#: reading is not a better reading: `16.4` and `0.8.0-pg16` name their major as
+#: plainly as `pg16`, and refusing them told the author they did not (#12051
+#: review round 13, four rows red on a correct pin).
+IMAGE_TAG_POLARITY = [
+    ("pgvector/pgvector:pg16", 16, "the pin this job uses"),
+    ("postgres:16", 16, "a plain tag"),
+    ("postgres:16.4", 16, "a PATCH tag still names its major"),
+    ("postgres:16.4-bookworm", 16, "tag + suite"),
+    ("pgvector/pgvector:0.8.0-pg16", 16, "a version-first extension tag"),
+    ("pgvector/pgvector:pg16-trixie", 16, "tag + suite, extension image"),
+    ("pgvector/pgvector:0.8.0-pg17", 17, "a wrong major is still read"),
+    ("postgres:17", 17, "a wrong major is still read, plain tag"),
+]
+
+
+@pytest.mark.parametrize(
+    ("image", "major", "why"),
+    IMAGE_TAG_POLARITY,
+    ids=[c.replace("/", "-").replace(":", "-")[:30] for c, _, _ in IMAGE_TAG_POLARITY],
+)
+def test_an_image_tag_names_its_major_however_it_is_spelled(
+    image: str, major: int, why: str
+) -> None:
+    """`16`, `16.4`, `pg16`, `0.8.0-pg16` all read 16 — anything else REDs."""
+
+    read = _postgres_image_majors({"steps": [{"with": {"image": image}}]})
+    assert read == [major], f"{why} (measured, round 13): {image!r} read {read}"
+
+
+def test_a_fallback_installer_is_refused() -> None:
+    """`install 16 || install 17` moves the client exactly when 16 is missing.
+
+    `CLIENT_PKG_RE.search()` graded only the FIRST match, so the verdict depended
+    on line order: 17 first red, 17 second green (measured, #12051 review round
+    13). Every installer in the step is now graded.
+    """
+
+    clean = [{"run": "sudo apt-get install postgresql-client-16"}]
+    assert _pin_step(clean)[0] == 0, "one installer of the servers' major is the pin"
+
+    fallback = [
+        {
+            "run": "sudo apt-get install postgresql-client-16 "
+            "|| sudo apt-get install postgresql-client-17"
+        }
+    ]
+    with pytest.raises(AssertionError, match="MORE THAN ONE client major"):
+        _pin_step(fallback)
+
+
+def test_the_shell_a_step_executes_through_is_scanned() -> None:
+    """`shell:` is executed argv, so a PATH reset spelled there moves the leg.
+
+    The client-dir rule has always read it; the PATH-assignment rule and the
+    `$GITHUB_PATH` mention scan did not, so `shell: env PATH=/usr/bin:/bin bash`
+    left every row green with the leg on `pg_wrapper` → pg17 (measured, round 13).
+    """
+
+    step = {"shell": "env PATH=/usr/bin:/bin bash"}
+    assert _path_assignments_that_drop_the_pin([step], 0, 16), (
+        "a PATH reset in the step's `shell:` drops the pinned dir"
+    )
+    assert not _path_assignments_that_drop_the_pin(
+        [{"shell": "env PATH=/usr/lib/postgresql/16/bin:$PATH bash"}], 0, 16
+    ), "a `shell:` that keeps the pinned dir is not an offender"
+
+    pin = {"name": "pin", "shell": 'bash -c "echo /usr/bin >> $GITHUB_PATH; exec bash {0}"'}
+    writes = _github_path_writes([pin])
+    assert writes and writes[0][2] is None, (
+        "a `$GITHUB_PATH` write spelled in `shell:` is an unclassifiable mention, "
+        "which is an offender at or after the pin"
+    )
 
 
 def test_an_image_digest_does_not_hide_its_major() -> None:
