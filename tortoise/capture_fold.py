@@ -78,6 +78,9 @@ lost and cannot be re-created:
   capture Point can carry `span_start` without `span_end` (the span validator
   guards the SDK doors, not this seam), and writing it would raise on the
   canonical and blame the wrong node forever;
+* an INBOUND `about*` edge — another node pointing AT the duplicate
+  (`inbound_attachment`): the carry writes FROM the canonical, so such a link
+  cannot be moved and the delete would orphan it;
 * a link whose PREDICATE has no permitted writer for a Point
   (`uncarriable_attachment`) — the cascade can mint `aboutDocument`/
   `aboutPoint` on a Point, and neither is a §3.2 triple `link_entity` may
@@ -125,21 +128,30 @@ point a lane at a module with no write in it."* — and this change extends
 that note with what the carry does now.
 WHAT THE CARRY COSTS, DECLARED (measured on this worktree)
 ----------------------------------------------------------
-Two writes per folded duplicate, never more: `link_entity` per attachment
-(a MERGE plus one pre-check read, journaled as `EntityLinked` when the SDK has
-a journal) and — only when a free slot is actually filled — ONE `update_point`.
+ONE `link_entity` per attachment (2 graph statements, journaled as
+`EntityLinked` when the SDK has a journal), plus — only when a free slot is
+actually filled — ONE `update_point`. So a fold writes N+1 times where N is the
+duplicate's attachment count, and a duplicate with no evidence issues ZERO
+writes (`test_a_plain_duplicate_with_no_evidence_still_folds` pins that).
+
+Reads per fold: three unconditional (the duplicate's props, its outbound edges,
+its inbound edges) plus one per canonical view and one read-back per
+`link_entity`/`_carried` pair. The widened rel set costs NO extra read — one
+query covers them all.
 
 ⚠️ `update_point` is the SDK's lifecycle door, and it is used deliberately:
 §4.3 forbids writing a committed row's field outside an appended lifecycle
 Event, and this door appends `PointRevised`. Two consequences a later reader
 must know rather than discover:
 
-* on a journal-armed SDK the record is appended, and the capture's own Points
-  live in `_InMemoryEventLog` (`durable = False`, `sdk.py`) — so the journal
-  holds a `PointRevised` for an id whose `PointAdded` it never had. It is inert
-  on the graph fold (the revision matches no row) and no replay can reach it;
-  the seam is journal-free by design for these points, and this is the one
-  record that steps outside that. Tracked as a declared residual, not fixed
+* on a journal-armed SDK TWO records are appended per fold — a `PointRevised`
+  (from `update_point`, and only when a free slot was filled) and one
+  `EntityLinked` per link this fold CREATED — and the capture's own Points live
+  in `_InMemoryEventLog` (`durable = False`, `sdk.py`), so the journal holds
+  records for ids whose `PointAdded` it never had. They are inert
+  on the graph fold (the revision matches no row, the link descriptor's
+  endpoint is absent) and no replay can reach them; the seam is journal-free by
+  design for these points, and these are the records that step outside that. Tracked as a declared residual, not fixed
   here: routing the carry through the capture's own event stream would need a
   prop-carrying revision door `EventAPI` does not have;
 * it marks the canonical as an EP-dirty root, so the fold can schedule one
@@ -162,14 +174,33 @@ from typing import Any
 #: other three to be destroyed by the delete while the receipt said the
 #: duplicate had "no evidence of its own" (measured).
 _FOLD_ATTACHMENT_RELS = ("aboutObject", "aboutSubject", "aboutEvent",
+                         "aboutSource", "aboutAction",
                          "aboutDocument", "aboutPoint")
 
-#: Which of them a fold can actually RE-WRITE. The permitted ONTOLOGY §3.2
-#: triples for a Point source are `aboutSubject`/`aboutObject`/`aboutEvent`
-#: (`session_link.ENTITY_LINKED_TRIPLES`); `aboutDocument` (Point→Source) and
-#: `aboutPoint` (only Event→Point) are not among them, so there is no legal
-#: writer for the duplicate's copy — the fold REFUSES rather than dropping it.
-_CARRIABLE_ATTACHMENT_RELS = ("aboutSubject", "aboutObject", "aboutEvent")
+#: Which of them a fold can actually RE-WRITE. `session_link.ENTITY_LINKED_TRIPLES`
+#: permits FIVE Point-source triples — `aboutSubject` (→Subject), `aboutObject`
+#: (→Object), `aboutEvent` (→Event), `aboutSource` (→Source) and `aboutAction`
+#: (→Point) — and every one is carried. `aboutDocument` (Point→Source) and
+#: `aboutPoint` (whose only permitted direction is Event→Point) are NOT among
+#: them: there is no legal writer for the duplicate's copy of those, so the fold
+#: REFUSES rather than dropping it.
+_CARRIABLE_ATTACHMENT_RELS = ("aboutSubject", "aboutObject", "aboutEvent",
+                              "aboutSource", "aboutAction")
+
+#: The label each carriable rel must target (the §3.2 triple's third member).
+_CARRIABLE_ATTACHMENT_LABELS = {
+    "aboutSubject": "Subject",
+    "aboutObject": "Object",
+    "aboutEvent": "Event",
+    "aboutSource": "Source",
+    "aboutAction": "Point",
+}
+
+#: Outbound `about*` edges whose predicate has NO permitted Point-source triple.
+#: Only a rel-ignoring writer can have made one (the capture cascade mints
+#: `aboutDocument` for a Point when the name resolves to a `:Source`), and a
+#: fold cannot re-create it — so its presence REFUSES the fold.
+_WRITERLESS_ATTACHMENT_RELS = ("aboutDocument", "aboutPoint")
 
 #: ONE OCCURRENCE'S ADDRESS — an all-or-nothing group.
 #:
@@ -226,6 +257,10 @@ class FoldEvidence:
     #: and refuse the fold forever under a misleading token, so it is detected
     #: here and named for what it is.
     malformed_address: bool = False
+    #: ``(rel, source_label)`` pairs for `about*` edges pointing AT the
+    #: duplicate. `link_entity` writes FROM the canonical, so an inbound edge
+    #: cannot be carried — the delete would orphan it.
+    inbound: tuple[tuple[str, str], ...] = ()
     #: `_REPORTED_FIELDS` the duplicate holds (``{field: value}``). The fold
     #: never writes these onto the canonical — they are its own state — but a
     #: difference is REPORTED, because crossing one in silence is how the
@@ -318,6 +353,19 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
             attachments.append((rel, label, target_id.strip(), conf))
         else:
             unaddressable.append((rel, label))
+    try:
+        inbound_rows = proj.g.query(
+            "MATCH (s)-[r:aboutObject|aboutSubject|aboutEvent|aboutSource|"
+            "aboutAction|aboutDocument|aboutPoint]->(d:Point {id:$id}) "
+            "RETURN type(r), head(labels(s))",
+            params={"id": dup_id}).result_set
+    except Exception:
+        return None
+    inbound: list[tuple[str, str]] = []
+    for rel, source_label in inbound_rows:
+        if isinstance(rel, str) and isinstance(source_label, str):
+            inbound.append((rel, source_label))
+
     support = {"confidence": _confidence, "pointKind": _point_kind}
     return FoldEvidence(
         attachments=tuple(attachments),
@@ -325,6 +373,7 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         source_refs=frozenset(refs),
         scalar=scalar,
         malformed_address=((span_start is None) != (span_end is None)),
+        inbound=tuple(inbound),
         support={k: v for k, v in support.items() if v is not None},
     )
 
@@ -366,8 +415,11 @@ def _already_written(out: dict) -> str:
     added = []
     if out.get("copied"):
         added.append("copied " + ", ".join(out["copied"]))
-    if out.get("carried"):
-        added.append(f"{out['carried']} attachment link(s)")
+    # ⚠️ `created`, NOT `carried`: `carried` counts links PRESENT (which includes
+    # ones the canonical already held — `link_entity` short-circuits those), and
+    # reporting them as "added" would assert a change this fold did not make.
+    if out.get("created"):
+        added.append(f"{out['created']} attachment link(s)")
     if not added:
         return ""
     return ("; it had ALREADY added " + " and ".join(added)
@@ -386,8 +438,7 @@ def _carried(proj: Any, canonical_id: str, rel: str, label: str,
     `confidence` is NOT carried onto an edge the canonical already holds. That
     is a fact the caller must report rather than assume.
     """
-    if rel not in _CARRIABLE_ATTACHMENT_RELS or label not in (
-            "Object", "Subject", "Event"):
+    if _CARRIABLE_ATTACHMENT_LABELS.get(rel) != label:
         # Both halves are read from the graph itself; the allowlist is a
         # fail-closed backstop against interpolating an unvetted label into a
         # pattern (the same posture `session_link.link_entity` takes).
@@ -505,6 +556,19 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                           "a Point has no permitted writer for, so they cannot "
                           "be put on the canonical")
         return out
+    # 4b) An INBOUND about* edge (another node pointing at the duplicate) is not
+    #     carriable at all: `link_entity` writes FROM the canonical, so the
+    #     delete would orphan a relation the duplicate is the TARGET of. Only a
+    #     non-Point source can hold one (`aboutPoint` is Event→Point), so this is
+    #     the shape `Event -[:aboutPoint]-> Point`.
+    if evidence.inbound:
+        rel, label = evidence.inbound[0]
+        out["reason"] = "inbound_attachment"
+        out["blocked"] = (f"a {label} points AT it with {rel!r}, and a fold can "
+                          "only carry links the canonical is the SOURCE of, so "
+                          f"that link would be orphaned ({len(evidence.inbound)} "
+                          "inbound link(s))")
+        return out
 
     # 5) Evidence of SUPPORT the fold must not write but must not cross in
     #    silence: the canonical's own value stands (first-writer; `confidence`
@@ -519,8 +583,9 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
     #    ATOMIC: `update_point` refuses a half span, so per-slot writes left a
     #    partially copied node behind on a refused fold (measured: `quote`
     #    landed and the span did not). One `SET n += $props` either lands whole
-    #    or not at all — and it runs BEFORE the links, so its failure leaves the
-    #    graph untouched and a refused fold stays a no-op.
+    #    or not at all. It runs before the links so that ITS failure leaves the
+    #    graph untouched; a LATE failure (a link that will not land) can still
+    #    leave this write behind, which is why the refusal discloses it.
     to_write: dict[str, Any] = {}
     # 6a) the occurrence ADDRESS — all or nothing (see `_OCCURRENCE_ADDRESS`).
     address_held = any(canonical.get(k) is not None for k in _OCCURRENCE_ADDRESS)
@@ -591,10 +656,15 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             created = link_entity(proj, "Point", canonical_id, target_id,
                                   edge_type=rel, target_label=label, sdk=sdk,
                                   confidence=confidence)
+            present, grading = _carried(proj, canonical_id, rel, label,
+                                        target_id)
         except Exception as e:
+            # ⚠️ The read-back is INSIDE the try on purpose: a raise here used to
+            # escape to the never-raise wrapper, which builds a FRESH dict — so
+            # the partial report (slots already copied, links already written)
+            # was discarded and the receipt read as "nothing changed".
             failures.append(f"{rel}→{target_id} ({type(e).__name__}: {e})")
             continue
-        present, grading = _carried(proj, canonical_id, rel, label, target_id)
         if not present:
             failures.append(f"{rel}→{target_id} (did not land)")
             continue

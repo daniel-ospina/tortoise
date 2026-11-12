@@ -358,6 +358,12 @@ class _FakeGraph:
     refuse. A stub that always succeeds would pin nothing.
     """
 
+    #: Column order of `_EVIDENCE_SELECT` + the two reported fields, so a test
+    #: can "write" a slot and have the read-back see it.
+    _COLUMNS = ("extractedFrom", "extractedFromAll", "quote", "span_start",
+                "span_end", "source_turn_id", "search_keys", "when",
+                "validFrom", "confidence", "pointKind")
+
     def __init__(self, *, dup_row=_DUP_ROW, edges=(), carried=(0, None),
                  canon_row=_CANON_ROW, raise_on=frozenset()):
         self.dup_row = dup_row
@@ -365,6 +371,14 @@ class _FakeGraph:
         self.carried = carried
         self.canon_row = canon_row
         self.raise_on = set(raise_on)
+
+    def apply_slot(self, props: dict) -> None:
+        """Simulate `update_point` landing: the read-back must SEE it."""
+        row = list(self.canon_row)
+        for key, value in props.items():
+            if key in self._COLUMNS:
+                row[self._COLUMNS.index(key)] = value
+        self.canon_row = tuple(row)
 
     def query(self, q, **kw):
         if any(marker in q for marker in self.raise_on):
@@ -378,6 +392,10 @@ class _FakeGraph:
         if "c.extractedFrom" in q:
             return SimpleNamespace(result_set=[self.canon_row])
         if "head(collect(r.confidence))" in q:
+            target = (kw.get("params") or {}).get("target")
+            if isinstance(self.carried, dict):
+                return SimpleNamespace(
+                    result_set=[list(self.carried.get(target, (0, None)))])
             return SimpleNamespace(result_set=[list(self.carried)])
         return SimpleNamespace(result_set=[])
 
@@ -391,14 +409,17 @@ class _FakeSDK:
     """A write door that records the call and does NOT write the graph —
     exactly the silent-success `update_point` gives for an absent id."""
 
-    def __init__(self, *, raises: Exception | None = None):
+    def __init__(self, *, raises: Exception | None = None, on_update=None):
         self.raises = raises
+        self.on_update = on_update
         self.calls: list[dict] = []
 
     def update_point(self, point_id, **props):
         self.calls.append({"id": point_id, **props})
         if self.raises:
             raise self.raises
+        if self.on_update is not None:
+            self.on_update(props)
         return {}
 
 
@@ -461,17 +482,24 @@ def test_a_silent_slot_write_is_detected_by_the_read_back():
     assert "did not land" in out["blocked"], out
 
 
-def test_an_internal_error_is_a_refusal_never_an_exception():
+def test_an_internal_error_is_a_refusal_never_an_exception(monkeypatch):
     """The caller sits inside the capture's single per-loop `try`, so a
     propagated error would abandon every remaining statement's resolution.
-    A raise anywhere inside the carry becomes `internal_error` — a refused
-    fold, the safe answer in front of a destructive act."""
-    proj = _FakeProj(_FakeGraph(
-        edges=[("aboutObject", "Object", "obj_1", None)],
-        raise_on={"head(collect(r.confidence))"}))
+    A raise the inner guards do not own becomes `internal_error` — a refused
+    fold, the safe answer in front of a destructive act.
+
+    ⚠️ The inner reads each have their OWN failure answer (`unreadable`,
+    `link_not_carried`), so the wrapper is pinned by a raise from outside them
+    (the vocabulary assertion) rather than by a graph read."""
+    def boom():
+        raise RuntimeError("vocabulary drifted")
+
+    monkeypatch.setattr(capture_fold, "assert_evidence_vocabulary", boom)
+    proj = _FakeProj(_FakeGraph())
     out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
     assert out["ok"] is False and out["reason"] == "internal_error", out
-    assert "graph refused the read" in out["blocked"], out
+    assert "vocabulary drifted" in out["blocked"], out
+    assert out["carried"] == 0 and out["copied"] == [], out
 
 
 # ── 8) the five-rel attachment cascade, and its two writer-less predicates ──
@@ -497,10 +525,10 @@ def test_every_attachment_predicate_the_capture_cascade_mints_is_READ():
     # …and the ones it CAN carry are the permitted Point-source triples.
     from tortoise.session_link import ENTITY_LINKED_TRIPLES
 
-    for rel in capture_fold._CARRIABLE_ATTACHMENT_RELS:
-        assert (rel, "Point", {"aboutSubject": "Subject",
-                               "aboutObject": "Object",
-                               "aboutEvent": "Event"}[rel]) in ENTITY_LINKED_TRIPLES
+    for rel, label in capture_fold._CARRIABLE_ATTACHMENT_LABELS.items():
+        assert (rel, "Point", label) in ENTITY_LINKED_TRIPLES, (
+            f"the fold carries {rel} but the ontology permits no Point-source "
+            f"triple for it, so `link_entity` would refuse at runtime")
 
 
 def test_an_aboutEvent_link_is_carried():
@@ -586,3 +614,46 @@ def test_the_fold_reads_every_field_the_capture_contract_declares():
     declared = (set(capture_fold._OCCURRENCE_ADDRESS)
                 | {k for k, _ in capture_fold._SINGLE_SLOTS})
     assert set(_CAPTURE_PASSTHROUGH_ORDER) <= declared
+
+
+# ── 10) the disclosure pins (the shape two rounds of review found unpinned) ──
+
+
+def test_a_pre_existing_link_is_not_reported_as_added_by_the_fold():
+    """`carried` counts links PRESENT; only `created` were written by this fold.
+    A late refusal must claim exactly what it added — and when every link it
+    touched was already there, that is NOTHING.
+
+    RED on the previous head: `_already_written` read `carried`, so it reported
+    "it had ALREADY added 1 attachment link(s)" over a fold that wrote nothing.
+    """
+    proj = _FakeProj(_FakeGraph(
+        edges=[("aboutObject", "Object", "obj_pre", None),
+               ("aboutObject", "Object", "obj_missing", None)],
+        carried={"obj_pre": (1, None), "obj_missing": (0, None)}))
+    out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
+    assert out["ok"] is False and out["reason"] == "link_not_carried", out
+    assert out["carried"] == 1 and out["created"] == 0, out
+    assert "ALREADY added" not in out["blocked"], (
+        f"the refusal claims an addition this fold did not make: {out['blocked']}"
+    )
+
+
+def test_a_late_refusal_discloses_the_slots_it_already_copied():
+    """The scalar write lands, then a link cannot be carried: the refusal must
+    say the canonical already gained the copied slots, or a reader treats
+    "kept distinct" as "nothing changed" — the reading this module forbids.
+
+    RED on the previous head: the raise from the post-write read escaped to the
+    never-raise wrapper, whose fresh dict discarded `copied` entirely.
+    """
+    graph = _FakeGraph(
+        dup_row=_DUP_ROW_QUOTED,
+        edges=[("aboutObject", "Object", "obj_missing", None)],
+        carried={"obj_missing": (0, None)})
+    sdk = _FakeSDK(on_update=graph.apply_slot)
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is False and out["reason"] == "link_not_carried", out
+    assert out["copied"] == ["quote"], out
+    assert "ALREADY added copied quote" in out["blocked"], out["blocked"]
