@@ -78,6 +78,30 @@ def test_the_dense_leg_moves_the_classes_in_opposite_directions(report, control)
             assert hyb["in_window"] > fts["in_window"], f"{cls} did not improve under hybrid"
 
 
+def test_the_mode_note_is_derived_from_the_legs_not_from_availability():
+    """A loaded model whose vector leg never ran must NOT be labelled hybrid.
+
+    `retrieval_preflight` exists because a keyword-only run was published as a
+    product measurement; deriving the label from `has_embedder` reproduces that
+    class whenever the leg fails to answer (encode failure, breaker open, empty
+    trace). The note must come from the trace.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "candidate_recall_11901",
+        Path(__file__).resolve().parent.parent / "tools" / "candidate_recall_11901.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod._mode_note(True, {"fts": True, "vector": True}) == "hybrid"
+    assert "KEYWORD-ONLY" in mod._mode_note(False, {"fts": True})
+    misleading = mod._mode_note(True, {"fts": True, "vector": False})
+    assert "DESPITE AN EMBEDDER" in misleading, (
+        "an available embedder with no vector leg still reads as hybrid")
+    assert misleading != "hybrid"
+
+
 def test_the_pooled_set_is_measured_at_every_width(report):
     """§1/§7 quote a pooled figure at `limit=15`, not an extrapolation."""
     pooled = report["arms"]["pooled"]
@@ -251,28 +275,47 @@ def _table_rows(text: str) -> list[list[str]]:
     return rows
 
 
-def test_the_brief_quotes_the_recall_the_artifact_holds(report):
-    """The §3 table's recall column is recomputed from the evidence."""
-    text = BRIEF.read_text()
-    n = report["corpus"]["sample"]
-    for k in ("3", "5", "10", "15"):
-        row = report["arms"]["exact"][k]
-        assert f"{row['in_window']}/{n} = {100 * row['in_window'] / n:.1f} %" in text, (
-            f"k={k}: the brief does not state {row['in_window']}/{n} — "
-            "the table and the artifact have diverged")
-        assert row["miss_absent_at_max_k"] == report["arms"]["exact"]["15"]["miss_absent_at_max_k"]
+def test_the_brief_quotes_the_recall_the_artifact_holds(report, control):
+    """§3's two tables, cell by cell, against BOTH artifacts.
+
+    ⛔ Position-blind substring checks are not a guard: a row carrying ANOTHER
+    row's number still matches. Each assertion pins the k LABEL and the figure
+    together, and the control's table is checked too — the first version of this
+    test read only the hybrid artifact and would have passed over a wrong
+    control (review round 2, F4).
+    """
+    text = _squash(BRIEF.read_text())
+    for art, label in ((report, "hybrid"), (control, "keyword-only")):
+        n = art["corpus"]["sample"]
+        for k in ("3", "5", "10", "15"):
+            row = art["arms"]["exact"][k]
+            pct = 100 * row["in_window"] / n
+            assert f"| {k} | {row['in_window']}/{n} = {pct:.1f} %" in text, (
+                f"{label} k={k}: the brief does not carry "
+                f"`| {k} | {row['in_window']}/{n} = {pct:.1f} %`")
+        assert row["miss_absent_at_max_k"] == art["arms"]["exact"]["15"]["miss_absent_at_max_k"]
 
 
-def test_the_brief_quotes_the_variant_rates_the_artifact_holds(report):
-    text = BRIEF.read_text()
-    variant = report["arms"]["variant"]
-    squashed = _squash(text)
-    for k in ("3", "15"):
-        row = variant[k]
-        pct = 100 * row["in_window"] / row["pairs"]
-        assert f"{row['in_window']} = {pct:.1f} %" in squashed, (
-            f"k={k}: the brief does not state {row['in_window']} = {pct:.1f}% in-window")
-        assert row["attached"] == 0 and "0 = 0.0 %" in squashed
+def test_the_brief_quotes_the_class_rates_and_the_mean_rank(report, control):
+    """§3's mean-rank figure and §3.1's nine class cells — recomputed, not trusted.
+
+    Both are DERIVED. The first draft of the brief quoted the k=5 mean rank as
+    the k=3 one and a class section the artifact did not hold; a guard that only
+    checks a direction cannot catch either.
+    """
+    text = _squash(BRIEF.read_text())
+    hyb3 = report["arms"]["exact"]["3"]
+    mean_rank = hyb3["rank_sum"] / hyb3["in_window"]
+    assert f"{mean_rank:.1f} at k=3" in text, (
+        f"the brief does not state the k=3 mean rank ({mean_rank:.1f})")
+    for cls in ("definite", "ident", "path"):
+        fts = control["arms"]["exact_by_class"][cls]["3"]
+        hyb = report["arms"]["exact_by_class"][cls]["3"]
+        for art, row in (("keyword-only", fts), ("hybrid", hyb)):
+            pct = 100 * row["in_window"] / row["n"]
+            assert f"{row['in_window']} = {pct:.1f} %" in text, (
+                f"§3.1 {art}/{cls}: the brief does not state "
+                f"{row['in_window']} = {pct:.1f} %")
 
 
 def _squash(text: str) -> str:

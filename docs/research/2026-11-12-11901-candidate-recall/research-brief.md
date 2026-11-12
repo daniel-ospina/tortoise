@@ -76,7 +76,8 @@ production's own query sanitisation.
 
 **Harvest rules** (declared, deterministic, in the tool): `the <1-4 tokens>` — the class **62.3 %** of `:Object`
 names belong to (research-brief §3.2) — plus the three identifier shapes the same audit enumerated: `#<n>`,
-repo-relative paths, `snake_case`. Frequency-ranked by *turn* count.
+repo-relative paths, `snake_case`. Frequency-ranked by **session-record** count — the number of distinct capture records a name appears in, not its
+turns and not its raw occurrences (a session repeating a phrase 40 times in one turn is one mention).
 
 **Population 1,000, stratified sample 300.** ⛔ **The class quotas are a deliberate OVERSAMPLE of the minority
 shapes, not the audit's shares.** The audit measured identifiers at ≈2.2 % of real `:Object` names (0.5 % bare
@@ -85,10 +86,14 @@ shapes, not the audit's shares.** The audit measured identifiers at ≈2.2 % of 
 never class-share weighted** — it is not an estimate of the production mix, and the per-class table is the number
 to quote for any one class.
 
-⚠️ **The corpus is LIVE.** `~/.tortoise/session-events` is written by the fleet's own capture hook, so a re-run on
-a later day harvests a slightly different corpus (measured: 102,593 → 102,639 distinct definite descriptions
-between two runs on the same day) and the counts move by a few names. The artifacts record `corpus.*` so the drift
-is visible rather than silent.
+⚠️ **The corpus is LIVE, and the two runs therefore did NOT sample the identical population.** `~/.tortoise/session-events`
+is written by the fleet's own capture hook, so each run harvests whatever landed since: the two committed
+artifacts harvested **102,898** (hybrid) and **103,087** (control) distinct definite descriptions, a 0.18 % drift
+between two runs ~60 s apart. The artifacts carry their own `corpus.harvested_distinct`, so the drift is visible
+rather than silent — and it is why **§3.1's class deltas are BETWEEN-RUN, not paired**: they are two samples of
+the same live corpus, not one population measured twice. A paired version needs the population written out
+(`--population-file`), which this harness does not yet do; treat §3.1's deltas as directional evidence, not a
+controlled effect size.
 
 ⛔ **Declared gap, stated where it cannot be skimmed away:** this is a sample of the strings real captures
 contain, **not a census of production `:Object` rows**. No lane can reach that population (no live `:Object` graph
@@ -101,8 +106,11 @@ real name distribution**, never production.
 The capture prior is the **fused** read. A venv without the `embeddings` extra has
 `EmbeddingModel.get() → None` and the fused read degrades to **keyword-only** — the class
 `battery/runner/retrieval_preflight.py` names (*"the numbers were published as product measurements"*). So both
-modes were measured on the same population and both artifacts are committed; each records which mode ran in its
-`retrieval` block (`has_embedder`, `legs_seen`).
+modes were measured and both artifacts are committed; each records which mode ran in its `retrieval` block
+(`has_embedder`, `legs_seen`), and the note there is derived from the **legs that actually ran**, not from the
+embedder being available — a model that loads and whose leg then fails to answer is labelled
+`KEYWORD-ONLY DESPITE AN EMBEDDER`, because that is a different measurement again. The two runs sampled the same
+live corpus but not the identical population (§2).
 
 ---
 
@@ -125,9 +133,15 @@ the two states with different fixes.
 | k | recall@k | past THIS k | absent even at k=15 | leg returned 0 rows |
 |---|---|---|---|---|
 | **3** | **166/300 = 55.3 %** | 28 | 106 | 11 |
+| 5 | 178/300 = 59.3 % | 16 | 106 | 11 |
+| 10 | 189/300 = 63.0 % | 5 | 106 | 11 |
 | 15 | 194/300 = 64.7 % | 0 | 106 | 11 |
 
 ### 3.1 The finding that matters most: the dense leg moves the classes in OPPOSITE directions
+
+⚠️ **Between-run, not paired** (§2): the two artifacts sampled the same live corpus ~60 s apart, not the identical
+population. The direction of every delta below is large relative to that drift, but the magnitudes are not a
+controlled effect size.
 
 | class | n | keyword-only @3 | **hybrid @3** | change | hybrid @15 |
 |---|---|---|---|---|---|
@@ -143,8 +157,8 @@ other out. ⚠️ **This is also why no single `limit` fixes the prior** — the
 a width chosen for one is wrong for the other.
 
 **What the width does.** Hybrid: 3 → 15 recovers **35 of 116 misses (30.2 %)**; **81 misses (27.0 % of the sample)
-are absent from even a 15-window.** Keyword-only: 28 of 134, with 106 absent at 15. Mean rank when found is 1.4
-(hybrid, k=3). The 116 recorded hybrid k=3 misses share a mean of **4.0 population names with ≥2 tokens in common**
+are absent from even a 15-window.** Keyword-only: 28 of 134, with 106 absent at 15. Mean rank when found is **1.2 at k=3** and 1.4 at k=5 (hybrid) — the leg is not scattering good answers, it is
+ranking them out or not producing them. The 116 recorded hybrid k=3 misses share a mean of **4.0 population names with ≥2 tokens in common**
 (median 2) — crowding is real but it is *not* predominantly a token-overlap effect: 48 of the 116 misses are in the
 identifier class, where the loss is not near-synonym competition.
 

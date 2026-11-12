@@ -121,10 +121,13 @@ these those it its they them their we our you your he she his her
 def harvest(sessions_dir: Path) -> dict[str, collections.Counter]:
     """Real capture text -> candidate entity names, by the three declared rules.
 
-    Returns ``{class: Counter(name -> turn-frequency)}``. Frequency counts the
-    number of *turns* a name appears in, not raw occurrences: recurrence across
-    turns is what makes a mention a candidate for re-identification, and one
-    turn repeating a phrase 40 times is one mention.
+    Returns ``{class: Counter(name -> record-frequency)}``. Frequency counts the
+    number of **session records** a name appears in — NOT its turns and NOT its
+    raw occurrences. Recurrence across sessions is what makes a mention a
+    candidate for re-identification, and a session that repeats a phrase 40
+    times in one turn is one mention. (Stated this narrowly because the first
+    draft called it "turn-frequency" while the ``seen`` set was created per
+    record, which is a different population — review round 2, F5.)
     """
     out: dict[str, collections.Counter] = {c: collections.Counter()
                                            for c in ("definite", "ident", "path")}
@@ -172,7 +175,7 @@ def harvest(sessions_dir: Path) -> dict[str, collections.Counter]:
 
 
 def build_population(harvested: dict[str, collections.Counter], n: int) -> list[dict]:
-    """Top-``n`` names by turn-frequency, class-balanced, deterministically ordered.
+    """Top-``n`` names by record-frequency, class-balanced, deterministically ordered.
 
     ⛔ The quotas are a DELIBERATE OVERSAMPLE of the minority shapes, not the
     audit's class shares: the audit measured identifiers at ~2.2% of real
@@ -222,6 +225,20 @@ def _has_embedder() -> bool:
         return EmbeddingModel.get() is not None
     except Exception:
         return False
+
+
+def _mode_note(has_embedder: bool, legs_seen: dict[str, bool]) -> str:
+    """What the fused read ACTUALLY submitted — from the traces, not a guess."""
+    vector = bool(legs_seen.get("vector"))
+    if vector:
+        return "hybrid"
+    if not has_embedder:
+        return ("⚠️ KEYWORD-ONLY: no embedder on this box, so the dense leg was "
+                "never submitted — the numbers describe the lexical leg only, "
+                "not the fused production read")
+    return ("⚠️ KEYWORD-ONLY DESPITE AN EMBEDDER: the model loaded but the vector "
+            "leg never ran (encode failure, breaker open, or an empty trace) — "
+            "read `legs_seen`, not `has_embedder`")
 
 
 def _fold_punct(text: str) -> str:
@@ -296,10 +313,16 @@ def run(args: argparse.Namespace) -> int:
                 _sanitise_query_text(query), entity_type="object", limit=k,
                 include_terminal=True, _record_reads=False,
                 _valid_time_rerank=False, leg_trace=trace)
+            # ``_trace_entry`` emits {leg, ran, degraded, reason, count} — there
+            # is no ``ok`` key, so reading one would make this predicate
+            # ``count > 0`` ("returned a row somewhere") while the comment
+            # claimed "was submitted". Read ``ran`` and nothing else: a leg that
+            # was submitted and degraded still ran, and a leg that failed to
+            # encode did not.
             for entry in trace or []:
-                name = entry.get("strategy") or entry.get("leg") or "?"
+                name = entry.get("leg") or entry.get("strategy") or "?"
                 legs_seen[str(name)] = legs_seen.get(str(name), False) or bool(
-                    entry.get("ok", True) and entry.get("count", 1))
+                    entry.get("ran"))
             return [{"id": r.get("id", ""), "name": r.get("content", ""),
                      "kind": r.get("point_kind", "")} for r in (rows or [])]
 
@@ -455,10 +478,13 @@ def run(args: argparse.Namespace) -> int:
             "retrieval": {
                 "has_embedder": _has_embedder(),
                 "legs_seen": dict(sorted(legs_seen.items())),
-                "note": ("hybrid" if _has_embedder() else
-                         "⚠️ KEYWORD-ONLY: no embedder on this box, so the dense "
-                         "leg was never submitted — the numbers describe the "
-                         "lexical leg only, not the fused production read"),
+                # ⛔ The note is derived from the LEGS, never from embedder
+                # availability: a model that loads but whose leg never answers
+                # (`ran=False, reason="encode_failed"`, or a breaker-open empty
+                # trace) would otherwise be labelled "hybrid" — the exact false
+                # label `retrieval_preflight` exists to prevent, in the first
+                # field a reader checks.
+                "note": _mode_note(_has_embedder(), legs_seen),
             },
             "pooled_budget_note": ("a pooled group is `max_queries` (15) names, "
                                    "which is the production BUDGET CAP, not the "
