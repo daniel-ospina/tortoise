@@ -489,13 +489,23 @@ def test_mcp_cors_allowlist_records_why_the_retired_origin_stays():
     # same block already uses — would satisfy a bare token pin while INVERTING the
     # fact. A fixed list of phrasings was not enough: the block BACKTICKS its own
     # identifiers, so `no \`<script>\`` and `\`<script>\`-free` walked straight
-    # through it (measured). Normalise the line (drop backticks, fold whitespace,
-    # lowercase) and refuse ANY negation token in it, so a paraphrase cannot
-    # reintroduce the premise by re-spelling it.
+    # through it (measured). So normalise the line (drop backticks, fold
+    # whitespace, lowercase) and refuse any negation token.
+    #
+    # ⛔ SCOPED TO THE MEASUREMENT, and the scope is the whole point: a first cut
+    # refused a negation token ANYWHERE on a `/contact` line and false-redded an
+    # honest sentence in this very block — `_middleware.ts`'s product-host `block
+    # does not intercept /contact` (measured: 1 failed, its own author's line).
+    # A pin that reds true prose gets deleted or weakened by whoever meets it
+    # next, which is a worse outcome than the paraphrase it was guarding against.
+    # So the refusal is bound to the claim under attack: a line that mentions the
+    # `<script` AND carries a negation is refused, in any spelling.
     negations = ("no ", "not ", "never", "without", "absent", "-free",
                  "scriptless", "none")
     for ln in contact_lines:
         flat = " ".join(ln.replace("`", "").lower().split())
+        if "script" not in flat:
+            continue
         hit = next((n for n in negations if n in flat), None)
         assert hit is None, (
             f"the `/contact` line negates its own measurement ({hit!r} in "
