@@ -3086,6 +3086,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_product_root_marker_guard_runs_on_a_legal_pages_only_diff.
              "tests/e2e/test_legal_pages.py",
+             # #11767 review (P2): the SAME rule, applied to the row added above.
+             # `tests/e2e/test_dashboard_identity.py` is now a CONCRETE
+             # `onboarding` SOURCE_PATTERN so the price-of-record guard in
+             # `tests/test_website_static.py` fires on the spec-only diff whose
+             # restatement it fails — but a named-surface match REPLACES the
+             # `tests/` -> `core` fallback, so without THIS entry the same diff
+             # would silently drop every `core`-registered test (measured: 823 ->
+             # 171 files in the pool) and trade one silent drop for another.
+             "tests/e2e/test_dashboard_identity.py",
              # CLI-extraction lane (#9915): the flat `integrations/` prefix in
              # NON_PYTHON_PREFIXES swallows the extractor, so an
              # extractor-only diff comes back `changed=[]`, select() takes the

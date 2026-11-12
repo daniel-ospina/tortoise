@@ -3637,6 +3637,14 @@ def test_the_dashboard_price_guard_runs_on_a_spec_only_diff():
     assert "onboarding" in r["surfaces"], (
         f"{changed} selects {r['surfaces']} — the price-of-record guard's surface "
         "is not reached by the spec whose restatement it fails")
+    # ⛔ AND the `core` half: a named-surface match REPLACES the `tests/` -> `core`
+    # fallback, so without the paired `CORE_ALSO` entry this diff would silently
+    # drop every core-registered test (measured: the pool falls from 823 files to
+    # 171) and trade one silent drop for another — the rule
+    # `tests/e2e/test_legal_pages.py` states one row away.
+    assert "core" in r["surfaces"], (
+        f"{changed} lost the `tests/` -> `core` fallback: {r['surfaces']} — the "
+        "named-surface match must be paired with a CORE_ALSO entry (#7947)")
     assert "test_website_static.py" in r["test_files"], (
         f"a spec-only edit to {changed} does not run tests/test_website_static.py, "
         "so the static price check cannot fire on the drift it names (#11767)")

@@ -487,14 +487,21 @@ def test_mcp_cors_allowlist_records_why_the_retired_origin_stays():
     # `"script" in "no script"` is True, so a NEGATED line — the shape of the
     # retracted premise itself, and the shape `/404 -> 200 (no script)` in the
     # same block already uses — would satisfy a bare token pin while INVERTING the
-    # fact. (Measured: replacing the `/contact` line's wording with "no script"
-    # left the pin green.) So the negation is refused explicitly.
-    for negated in ("no script", "no <script>", "scriptless", "without a script"):
-        assert not any("/contact" in ln and negated in ln.lower()
-                       for ln in contact_lines), (
-            f"the `/contact` line negates its own measurement ({negated!r}) — it "
-            "answers 200 and serves a page WITH a <script>, so the negated line is "
-            "the retracted argument wearing the tokens the pin looks for")
+    # fact. A fixed list of phrasings was not enough: the block BACKTICKS its own
+    # identifiers, so `no \`<script>\`` and `\`<script>\`-free` walked straight
+    # through it (measured). Normalise the line (drop backticks, fold whitespace,
+    # lowercase) and refuse ANY negation token in it, so a paraphrase cannot
+    # reintroduce the premise by re-spelling it.
+    negations = ("no ", "not ", "never", "without", "absent", "-free",
+                 "scriptless", "none")
+    for ln in contact_lines:
+        flat = " ".join(ln.replace("`", "").lower().split())
+        hit = next((n for n in negations if n in flat), None)
+        assert hit is None, (
+            f"the `/contact` line negates its own measurement ({hit!r} in "
+            f"{flat!r}) — it answers 200 and serves a page WITH a <script>, so a "
+            "negated line is the retracted argument wearing the tokens this pin "
+            "looks for")
     for retracted in ("only remaining document", "only non-redirect HTML"):
         assert retracted not in block, (
             f"the retracted premise is back ({retracted!r}): the host serves more "

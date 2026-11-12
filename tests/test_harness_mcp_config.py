@@ -1606,8 +1606,17 @@ class TestDocsPageAndSkillConfig:
         # was red on a required lane (`onboarding`) — the pin chain is split across
         # two files and only one half was updated.
         carrier = "https://premiselabs.co/docs#chatgpt"
-        assert carrier in note, (
-            "§2's note must name the live ChatGPT carrier (the public docs page)")
+        # ⛔ BOTH spellings, matching `tests/test_onboarding_variants.py` — this is
+        # the second half of the same split pin chain, and see above for what it
+        # cost when only one half moved. `/docs` is a permanent same-host 301 onto
+        # `/tortoise/docs` (measured 2026-11-12), so pinning one spelling would
+        # red the 0-hop re-point #12049 owns on a REQUIRED lane instead of
+        # guarding the thing that matters: that the note names the reference copy
+        # on the CANONICAL origin at all.
+        assert (carrier in note
+                or "https://premiselabs.co/tortoise/docs#chatgpt" in note), (
+            "§2's note must name the live ChatGPT carrier (the public docs page) "
+            "on the canonical origin, at either accepted spelling")
         # Reachability: the note SENDS a user to that URL, so pin that the path
         # still resolves to the docs page and that the fragment it names exists
         # there. Either half being renamed leaves the note pointing at nothing
