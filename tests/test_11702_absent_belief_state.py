@@ -5649,7 +5649,7 @@ _BELIEF_PROSE = (
 #: second list would let an addition re-open the aperture closed by
 #: `_MIRROR_CLAUSE_BREAK` with no control row to red for it (review, measured).
 #: `e.g.` / `i.e.` are what the five `_BELIEF_PROSE` modules actually write
-#: (measured: 137 `e.g.`, 101 `i.e.` lines); `cf.` occurs ZERO times there and
+#: (measured: 77 `e.g.`, 101 `i.e.` lines); `cf.` occurs ZERO times there and
 #: is carried DEFENSIVELY (it lives elsewhere in the tree, e.g.
 #: `tortoise/projection/edges.py`) — its control row is what pins the
 #: shared-list property, not a corpus measurement.
@@ -6130,7 +6130,20 @@ def _mirror_sources_the_value(sentence: str) -> bool:
     # ANY denied mention is the fail-closed direction, and it also subsumes the
     # construct's own text — the span after the noun runs to the next break, so
     # it covers `'s value, never the prior's`.
-    for mention in re.finditer(r"\bmirror\b", sentence, re.IGNORECASE):
+    #
+    # The mention is `mirrors?` — the PLURAL counts. With the bare `\bmirror\b`
+    # a plural mention was invisible to this loop, so a denial written against
+    # `the n.confidence mirrors` was never scanned while an unrelated singular
+    # possessive elsewhere in the sentence satisfied `_MIRROR_SOURCE`: the
+    # inversion of the exact class this guard exists for, CERTIFIED and NOT
+    # covered by residual 2 (whose scope is a clause carrying NO mention — this
+    # one carries a plural one). Measured on the shipped code: "…the n.confidence
+    # mirrors are never what the field serves; the mirror's value is documented
+    # for another column." qualified the claim. `mirrors?` changes NO corpus
+    # verdict (measured: 92 of the corpus's sentences carry a plural-only
+    # mention, 0 change verdict) — every corpus claim sentence uses the
+    # singular possessive.
+    for mention in re.finditer(r"\bmirrors?\b", sentence, re.IGNORECASE):
         before = _MIRROR_CLAUSE_BREAK.split(sentence[:mention.start()])[-1]
         after = _MIRROR_CLAUSE_BREAK.split(sentence[mention.end():])[0]
         if _MIRROR_NEGATED.search(f"{before} {mention.group(0)} {after}"):
@@ -6602,6 +6615,15 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             "Its confidence_mean IS the declared PRIOR mean — the pair wins, "
             "not the mirror — the mirror's value only applies when no pair "
             "exists.",
+            # the mention written in the PLURAL, denied, with a clean singular
+            # possessive elsewhere in the sentence. The scan used `\bmirror\b`,
+            # which matches no form of `mirrors`, so the denied mention was
+            # never scanned and the clean one certified the sentence (measured).
+            # This row is what pins the `mirrors?` arm: narrowing it back to
+            # `\bmirror\b` reds here.
+            "Its confidence_mean IS the declared PRIOR mean — the n.confidence "
+            "mirrors are never what the field serves; the mirror's value is "
+            "documented for another column.",
             # the denial BEFORE the construct, in its own clause: this row's
             # ONLY defence is the prefix leg of the scan, so dropping that leg
             # reds here instead of shipping silently.
