@@ -164,6 +164,19 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     resolves through `pg_wrapper` to the image's newest client (17), while the
     in-step check still prints 16 because it runs under the export. The write
     line is therefore matched as a unit below.
+
+    ⛔ THE PIN'S DISPOSITION IS PART OF THE FACT (review of `a2be9709d3`).
+    Everything below reads the step's TEXT, so a `continue-on-error: true` makes
+    the step's `exit 1` unable to red the job and a step-level `if: false` stops
+    it running at all — both measured `6 passed` before this assertion existed.
+    Read from the parsed YAML, not the text, and test the KEY's presence rather
+    than its truthiness: `if: false` parses to `False`.
+
+    ⚠️ STATED LIMIT: the prepend is a text fact, not an executed one. A write
+    wrapped in an unreachable branch (`if false; then echo … >> "$GITHUB_PATH";
+    fi`) stays green here (MEASURED, review of `a2be9709d3`) — the same limit the
+    version branch declares, for the same reason: nothing in this file executes
+    the committed step except the precondition prefix.
     """
     steps = _steps(job)
     image_majors = _postgres_image_majors(job)
@@ -172,6 +185,21 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
 
     _, pin = _pin_step(steps)
     text = _run_text(pin)
+
+    assert "if" not in pin, (
+        f"the pin step is CONDITIONAL (`if: {pin.get('if')!r}`): the client may "
+        "never be pinned, and every assertion below would still be green over a "
+        "step that never ran"
+    )
+    assert pin.get("continue-on-error") is not True, (
+        "the pin step sets `continue-on-error`, so its `exit 1` cannot red the "
+        "job — the mismatch would carry on into the record leg, which is the "
+        "silent unrestorable artifact #12051 is"
+    )
+    assert job.get("continue-on-error") is not True, (
+        "the job sets `continue-on-error`, so no step in it can red the job — "
+        "the whole drill, including this pin, is advisory"
+    )
 
     pkg = CLIENT_INSTALL_RE.search(_code_only(text))
     assert pkg, f"the pin step does not install `postgresql-client-<major>`: {text!r}"
