@@ -1066,7 +1066,23 @@ def test_product_route_blocked_on_company_host(page: Page) -> None:
     rather than render a second copy at a second URL — the property the old 404
     protected, expressed as a 301 now that the page is served here.
 
-    UNCONDITIONAL: the target is a constant, so this is safe on stale-DNS runs."""
+    UNCONDITIONAL: the target is a constant, so this is safe on stale-DNS runs.
+
+    ⛔ BUT THE *SCHEME* IS NOT, ON A LOCAL PREVIEW. `wrangler pages dev` rewrites an
+    absolute `Location` whose host equals the REQUEST's host to the request's own
+    scheme — measured 2026-11-12 on the version `config/wrangler-version` pins
+    (4.127.0): an http preview answers `Location: http://premiselabs.co/tortoise`
+    for a middleware that emits `https://premiselabs.co/tortoise`, and the same
+    preview started `--local-protocol https` answers the https value verbatim. A
+    CROSS-host target is left alone, which is why the tortoise-host rows grade their
+    scheme fine on the same server. So this test grades what a live server can prove
+    — the 301, its HOST and its PATH — and the scheme is graded where no proxy sits
+    between the middleware and the assertion: offline in
+    `tests/test_middleware_host_consolidation.mjs` (wired into `ci.yml`, so it runs
+    on every PR), and against the deployed origin by this same test on a production
+    run (`ALLOW_PROD=1 BASE_URL=https://premiselabs.co`, `verify-legal`).
+    """
+    prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
     b_host = urlsplit(BASE_URL).hostname or "premiselabs.co"
     b_spoof = b_host if b_host.endswith("premiselabs.co") else "premiselabs.co"
     for path in ("/product", "/product.html"):
@@ -1076,8 +1092,21 @@ def test_product_route_blocked_on_company_host(page: Page) -> None:
             f"{path} on premiselabs.co → {r.status} (expected a 301 to /tortoise — a "
             "200 here means the product page is reachable at two URLs again)"
         )
-        assert r.headers.get("location") == "https://premiselabs.co/tortoise", (
-            f"{path} redirects to {r.headers.get('location')!r}"
+        location = r.headers.get("location") or ""
+        if prod_company:
+            assert location == "https://premiselabs.co/tortoise", (
+                f"{path} redirects to {location!r}"
+            )
+            continue
+        # Local preview: the scheme above is the SERVER's, not the middleware's
+        # (see the docstring), so grade everything the wire still carries — the
+        # host and the exact canonical path, parsed rather than substring-matched
+        # so `https://premiselabs.co.evil/tortoise` cannot pass.
+        parsed = urlsplit(location)
+        assert (parsed.hostname, parsed.path) == ("premiselabs.co", "/tortoise"), (
+            f"{path} redirects to {location!r} — expected the canonical product URL "
+            "on premiselabs.co/tortoise (the scheme is not graded here: a local "
+            "preview rewrites a same-host Location to its own scheme)"
         )
 
 
