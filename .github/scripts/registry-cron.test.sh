@@ -3622,9 +3622,11 @@ fi
 fi  # TARCH guard
 
 # ── 120. an EXECUTABLE-BUT-FAILING client is MISSING, not present (#12135) ─
-# Both probes check that `aws` RUNS, not merely that it exists — the code calls
-# this half load-bearing ("a shim that exists and cannot EXECUTE fails the same way
-# one call later"). No case reached it: every missing-CLI scenario put no `aws` on
+# Both probes check that `aws` RUNS, not merely that it exists — the driver says
+# so in its own words ("a shim that exists and cannot EXECUTE fails the same way
+# one step later, so probe the binary itself") and the installer says the same
+# thing ("… fails identically one call later, so probe the binary").
+# No case reached it: every missing-CLI scenario put no `aws` on
 # PATH at all, so only the `command -v` half was exercised, and deleting the
 # `aws --version` clause left the whole suite green in both files (measured).
 # The regression that survives a green suite is not cosmetic:
