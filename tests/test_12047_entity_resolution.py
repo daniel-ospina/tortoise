@@ -2849,6 +2849,103 @@ class TestThe12120ReviewRound3:
             sdk.close()
 
 
+    def test_a_duplicated_survivor_id_is_refused_through_the_fetch(
+            self, sdk_factory):
+        """Round 5: two nodes claiming the SURVIVOR's id are reached via the fetch.
+
+        Neither duplicate is among the probe's rows, so the `claims` guard cannot
+        see them; the fetch used to take `fetched[0]`, i.e. pick the
+        representative by backend row order — the same order-dependent decision
+        #2164 P2-2 removed (and here it decides whether ONE duplicate or BOTH are
+        retired by the id-keyed fold).
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (a:Object {id:'dup-survivor-12120', name:'Alpha', "
+                "objectKind:'document', status:'live'}) "
+                "CREATE (b:Object {id:'dup-survivor-12120', name:'Beta', "
+                "objectKind:'document', status:'live'}) "
+                "CREATE (c:Object {id:'obj-12120-ref', name:'Widget', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'widget', "
+                "resolved_from:'dup-survivor-12120'})")
+            sdk.create_object("New Widget", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Widget", "supersedes_by": "New Widget",
+                 "evidence": "test"}])
+            assert applied == 0, (
+                "a duplicated survivor id was collapsed into one entity by the "
+                f"fetch: {(applied, skips, msgs)!r}")
+            assert skips, (
+                f"the never-guess refusal did not report itself: {skips!r}")
+            statuses = g.query(
+                "MATCH (o:Object {id:'dup-survivor-12120'}) RETURN o.status"
+            ).result_set
+            assert all(r[0] != "superseded" for r in statuses), statuses
+        finally:
+            sdk.close()
+
+    def test_a_carrier_with_a_deleted_survivor_is_never_folded(self, sdk_factory):
+        """Round 5: an unfetchable survivor leaves only the RETIRED carrier.
+
+        The `resolved_from` pointer can outlive its target (the survivor was
+        deleted). Falling back to the group's own row folded onto exactly the
+        incarnation the merge retired; the group has to be dropped instead, so the
+        caller REFUSES and reports.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (c:Object {id:'obj-12120-orphan', name:'Old Team', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'old team', resolved_from:'gone-survivor-12120'})")
+            sdk.create_object("New Team", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Team", "supersedes_by": "New Team",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips, ("the refusal did not report itself: " f"{skips!r}")
+            row = g.query(
+                "MATCH (o:Object {id:'obj-12120-orphan'}) RETURN o.status"
+            ).result_set
+            assert row and row[0][0] != "superseded", (
+                f"the fold landed on the retired carrier: {row}")
+        finally:
+            sdk.close()
+
+    def test_a_terminal_object_target_is_reported(self, sdk_factory):
+        """Round 5: the Object lane's divergent keep-first refusal reports too.
+
+        Its Subject twin (`\"terminal subject target\"`) already did; the Object
+        arm warned and `continue`d, so a dropped record could not be told from an
+        applied one through the caller's `skipped` channel (#5365).
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (o:Object {id:'obj-12120-term', name:'Widget', "
+                "objectKind:'document', status:'superseded', "
+                "canonical_name:'widget', supersededBy:'Older Widget'})")
+            sdk.create_object("New Widget", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Widget", "supersedes_by": "New Widget",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips, (
+                "the terminal-target refusal never reached the caller's "
+                f"skipped list: {skips!r} (warnings: {msgs!r})")
+            row = g.query(
+                "MATCH (o:Object {id:'obj-12120-term'}) RETURN o.supersededBy"
+            ).result_set
+            assert row and row[0][0] == "Older Widget", row
+        finally:
+            sdk.close()
+
+
 class TestThe12120Finding4TheUnpinnedMigratedReaders:
     """Pins for the seven migrated callers the class above claimed but did not hold.
 

@@ -818,12 +818,36 @@ def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
             continue
         rep = next((r for r in group
                     if r[id_idx] and str(r[id_idx]) == key), None)
-        if rep is None and key not in per_row_keys:
+        if rep is None and key in per_row_keys:
+            # An id-less row IS its own entity (it cannot be merged, so it cannot
+            # be a carrier): its group holds exactly itself and there is no
+            # survivor to fetch. Dropping it here would make the caller see
+            # FEWER candidates than the graph holds — the never-guess refusal
+            # stops firing for a live id-less carrier beside a fold-equal one
+            # (measured: four suites red, review round 5).
+            rep = group[0]
+        elif rep is None:
             fetched = g.query(
-                f"MATCH (n:{label} {{id:$id}}) RETURN {proj}",
+                f"MATCH (n:{label} {{id:$id}}) RETURN {proj} LIMIT 2",
                 params={"id": key}).result_set
+            if len(fetched) > 1:
+                # Two nodes claim the survivor's id: the corruption the caller's
+                # never-guess discipline exists to refuse, reached THROUGH the
+                # fetch (neither duplicate is among `rows`, so `claims` cannot see
+                # it). Returning both hands the caller the same ambiguity it
+                # counts for its own rows; taking `fetched[0]` would pick the
+                # representative by backend row order — the #2164 P2-2 defect.
+                out.extend(fetched)
+                continue
             rep = fetched[0] if fetched else None
-        out.append(rep if rep is not None else group[0])
+        if rep is None:
+            # The survivor is not fetchable (deleted while the `resolved_from`
+            # pointer stayed): the only row left is a RETIRED CARRIER, and
+            # folding onto it is the defect this collapse exists to prevent
+            # (review round 5). Drop the group — the caller then REFUSES the
+            # record ("not found" / "no visible successor") and reports it.
+            continue
+        out.append(rep)
     return out
 
 
@@ -1619,6 +1643,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                  f"(status={o_status!r}, supersededBy={o_sb!r}) — "
                  f"conflict with {supersedes_by!r} skipped "
                  f"(keep-first, the fold never blind-overwrites)")
+            # #5365 (review round 5): the DIVERGENT arm is a refusal and must
+            # reach the caller's `skipped` — its Subject twin already does
+            # (`"terminal subject target"`). Only the same-successor arm above
+            # stays silent: an unchanged conversation re-ingested is an
+            # idempotent dedup, not a refusal.
+            _skip(ref, supersedes_by, "terminal object target")
             continue
         # round-4 review: the fold-through decision (target is LIVE) needs a
         # successor VISIBLE to recall_state's default Object view. That view
