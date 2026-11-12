@@ -948,8 +948,14 @@ def test_event_meta_section_and_validator_are_wired():
     # bumping would let a pre-#4653 binary accept the file, ignore the section
     # and wipe. A later section bumps it again; that is the contract, not a
     # regression.
-    assert _PREWIPE_SNAPSHOT_VERSION == 6
-    assert set(_PREWIPE_SNAPSHOT_READABLE_VERSIONS) >= {1, 2, 3, 4, 5, 6}
+    #
+    # #9752 (v6 -> v7, the `pack_selection` section) is the "later section"
+    # this comment describes, so the pin is `>= 6` rather than `== 6`: the claim
+    # is "this section landed at v5/v6 and the version has not gone BACKWARD",
+    # which a later bump does not weaken. Pinning the literal would make every
+    # future section bump fail HERE — a false red on a test about `event_meta`.
+    assert _PREWIPE_SNAPSHOT_VERSION >= 6
+    assert set(_PREWIPE_SNAPSHOT_READABLE_VERSIONS) >= {1, 2, 3, 4, 5, 6, 7}
     # The union's return literal is hand-written per section, so pin its key
     # set against the tuple: a section added to `_SNAPSHOT_SECTIONS` and
     # forgotten in the literal would be silently dropped from the merged

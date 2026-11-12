@@ -118,7 +118,9 @@ def test_null_and_blank_are_ONE_absent_state_reported_as_its_own_share():
     """FAILS IF a blank kind is folded into a declared kind, or `NULL` is folded into `statement`.
 
     Both folds manufacture a typing/coverage win nobody made: `''` is what the `#548` rebuild
-    SNAPSHOT synthesis writes for a kindless operator (`projection/__init__.py:13804-13806`), and
+    SNAPSHOT synthesis writes for a kindless operator (`projection/__init__.py:14248-14250` —
+    `# Ensure pointKind is present (operators often lack it)` / `clean["pointKind"] = ""`; the
+    anchor is cited by its comment because `#11795`/`#9752`/`#11839` each moved it), and
     `NULL` is the absent property. They are ONE state (absent) and neither is a label.
     """
     probe = _probe()
