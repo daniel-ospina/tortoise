@@ -868,13 +868,16 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             EXEMPT,
             "`tortoise/api.py::_verify_record_vector_width` — a VERIFIER: it reads a record's "
             "declared `embedding_width` and the width's own vector, asks the seam whether the "
-            "declaration is truthful, and stores nothing. The instrument's match is its "
-            "DOCSTRING, which reproduces the measured `_emit(...)` calls (a literal keyword "
-            "payload is what was measured, `#11835` review round 9 P1) — `_EMBED_WRITE` reads raw "
-            "SOURCE, so a docstring QUOTING a shape matches, exactly as it does for "
+            "declaration is truthful, and stores nothing. The instrument's matches are its "
+            "PROSE — the DOCSTRING, which reproduces the measured `_emit(...)` calls (a literal "
+            "keyword payload is what was measured, `#11835` review round 9 P1), AND the two body "
+            "comments that record the later measured cases (`embedding=\"abc\"` and the fold "
+            "storing `'123'`); a third of the three is in the docstring, so a lane that reworded "
+            "only the docstring would still be in the population (measured). `_EMBED_WRITE` reads "
+            "raw SOURCE, so prose QUOTING a shape matches, as it does for "
             "`tortoise.projection::_prewipe_synthetic_write_scope`",
             "#11835",
-            stores=NO_LIVE_VECTOR,  # the match is its DOCSTRING quoting a measured call
+            stores=NO_LIVE_VECTOR,  # matches are its DOCSTRING + 2 body comments, all prose
         ),
     ),
     (

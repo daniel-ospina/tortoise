@@ -437,10 +437,12 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "`tortoise/api.py::_verify_record_vector_width` — a VERIFIER, not a producer: it reads "
         "the record's declared `embedding_width` and the width's own vector and asks the seam "
         "whether the declaration is truthful (`#11835` review round 9, P1). The instrument's "
-        "match is inside its DOCSTRING, which reproduces the measured `_emit(...)` calls — "
-        "`_EMBED_WRITE` reads raw source, so a docstring QUOTING the shape matches, exactly as "
-        "`tortoise.projection::_prewipe_synthetic_write_scope`'s does. It issues no write at "
-        "all (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`)"),
+        "matches are its PROSE — the DOCSTRING reproducing the measured `_emit(...)` calls, and "
+        "the TWO BODY COMMENTS that record the later measured cases (a non-numeric "
+        "`embedding` and the fold storing the raw text); a lane that reworded only the "
+        "docstring is still in the population (measured). `_EMBED_WRITE` reads raw source, so "
+        "prose QUOTING the shape matches, as `tortoise.projection::_prewipe_synthetic_write_scope`'s "
+        "does. It issues no write at all (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`)"),
     "tortoise.consistency::_compare_views": (
         CENSUS_EXEMPT,
         "issues no write; the only WRITE-SHAPED text is a COMMENT in "
