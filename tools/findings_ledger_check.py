@@ -241,7 +241,7 @@ def _is_host_port(token: str) -> bool:
 #: is indistinguishable from a command without a recognised prefix), and prose with no
 #: path marker (`localhost 6379`, `fetch-depth 0`) stays out of scope exactly as the
 #: `key: value` carve-out above does. The tree-wide sweep is what bounded this: at this
-#: head ONE span is refused across 801 `docs/` files — `collision_preflight.py 10984`,
+#: head ONE span is refused across the whole `docs/` tree — `collision_preflight.py 10984`,
 #: a bare tool invocation the arm cannot tell from a path because it has no recognised
 #: program prefix (the `uv run`-prefixed form IS excluded). None is on this page, and
 #: the earlier delimiter sets refused 7, then 600+; each figure was re-measured rather
@@ -251,7 +251,7 @@ def _is_host_port(token: str) -> bool:
 #:   * `_` parsed the identifier `tests/test_findings_ledger_2852.py` as `path _ 2852`;
 #:   * `-` collided with a dated slug (`2026-10-15-7879-postgres-…`) and a commit ref;
 #:   * `/` parsed plain paths as citations — `docs/evidence/11083/README.md`,
-#:     `2024/03/01` — 600+ spans across 801 files (re-derived, not carried);
+#:     `2024/03/01` — 600+ spans across the whole tree then (re-derivable, not carried);
 #:   * `#` parsed issue refs (`daniel-ospina/tortoise#9363`, the form used everywhere
 #:     in this repo) as `path # LINE`;
 #:   * `@` parsed commit refs (`origin/main@3ac6b1636`), and `,` parsed SQL and
@@ -277,7 +277,7 @@ CITATION_UNCOLONED_SHAPE_RE = re.compile(
     # and was the one delimiter the narrowing neither kept nor named in §8 — so
     # `path|999999` went from refused to CLEAN while §8's list presented itself as
     # complete (found by review, measured). It is safe to refuse on the same terms and
-    # was measured for it: every code span in the 1146 tracked files under `docs/` plus
+    # was measured for it: every code span in the 1150 tracked files under `docs/` plus
     # the 144 other tracked `*.md` carries ZERO `path|LINE` spans, so no prose here can
     # red on it (the single apparent match was a PNG read as text).
     r"(?:\s+|\s*\|\s*)(?P<num>\d{1,7})(?:\s*[-–]\s*\d{1,7})?(?![\w.>&|/]|-\w)"
@@ -319,7 +319,7 @@ def _uncoloned_is_exempt(body: str, u: re.Match) -> bool:
 #: above need a `:`, so an out-of-range `path#L999999` and an unverifiable
 #: `path#L16` both left the page CLEAN (measured — #11952), i.e. the likeliest
 #: real-world spelling was also the one shape that looked verified and was not.
-#: MEASURED, as every delimiter in this file must be: every code span in all 1146
+#: MEASURED, as every delimiter in this file must be: every code span in all 1150
 #: tracked files under `docs/` was scanned with this exact pattern — ZERO matches, so
 #: refusing it cannot red this repository's own prose. The bare-number form
 #: (`path#16`) stays a declared carve-out: it is the one that collides with issue refs.
@@ -388,7 +388,10 @@ VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-#: ⛔ IT IS AN EQUALITY, NOT A FLOOR THAT CAN SLIDE DOWN: 47 as of the figure arms
+#: ⛔ WHAT THE CODE ENFORCES IS A LOWER BOUND (`len(MUTATIONS) < MIN_SELF_TEST_MUTATIONS`
+#: reds), so only a SHRINKING population is caught — ADDING an arm without bumping this
+#: constant passes silently, and the two are kept equal by HAND, not by the comparison.
+#: 47 as of the figure arms
 #: (`a falsified §3 count beside a list-free decoy`, `a falsified overtaken figure
 #: beside a compliant decoy`), which closed the paragraph-scoped presence test, plus
 #: the #11902-review arms — a §6 row naming the same issue twice, a §3 row whose
@@ -772,12 +775,12 @@ def _verdicts_by_label(text: str) -> dict[str, str]:
 #: `test_the_span_readers_and_the_extractor_share_one_spelling_list` pins the single
 #: source, so that class of drift now reds instead of shipping.
 _LETTER_ALT_MARKED = (
-    r"\*\*\(([a-l]{1,2})\)\*\*"  # **(a)**
-    r"|\*\*([a-l]{1,2})\*\*"  # **a**
-    r"|`\(?([a-l]{1,2})\)?`"  # `a` / `(a)`
-    r"|\*\(([a-l]{1,2})\)\*"  # *(a)*
-    r"|\*([a-l]{1,2})\*"  # *a*
-    r"|\(([a-l]{1,2})\)"  # (a)
+    r"\*\*\(([a-l])\)\*\*"  # **(a)**
+    r"|\*\*([a-l])\*\*"  # **a**
+    r"|`\(?([a-l])\)?`"  # `a` / `(a)`
+    r"|\*\(([a-l])\)\*"  # *(a)*
+    r"|\*([a-l])\*"  # *a*
+    r"|\(([a-l])\)"  # (a)
 )
 _NAMED_LETTER_RE = re.compile(_LETTER_ALT_MARKED, re.IGNORECASE)
 #: The marked spellings PLUS the bare one. Bare is safe ONLY where a group is ANCHORED to
@@ -818,8 +821,9 @@ _RUN_ITEM_RE = re.compile(r"\u0000|(?<![\w*`])([a-l])(?![\w*`])", re.IGNORECASE)
 #: What may stand BETWEEN two items of the SAME list — separators and whitespace only,
 #: the whole span. A word of any other kind ends the run, which is what keeps prose out:
 #: in `… and **(j)** still read as written, and I think so.` the span between the last
-#: member and the `I` carries `still read as written, and`, so the `I` starts a run of
-#: its own and is never a member.
+#: member and the `I` carries `still read as written, and`, so the `I` starts a run of its
+#: own — and its run has ONE item, so it contributes nothing (a run of two or more
+#: contributes wherever it sits; see the FIRST over-reading below, which states that cost).
 _LIST_SEP_RE = re.compile(
     r"\s*(?:(?:,|;|&)\s*"
     r"|\b(?:and|or|also|plus|as\s+well\s+as|followed\s+by|namely)\b\s*)+",
@@ -894,6 +898,16 @@ def _bare_list_members(masked: str) -> set[str]:
             runs[-1].append(item)
         else:
             runs.append([item])
+    # ⛔ EVERY RUN CONTRIBUTES, and that is a stated OVER-READING rather than an oversight:
+    # membership is sentence-GLOBAL, so a two-item letter run in prose elsewhere in the
+    # sentence supplies members too. Measured: appending `; see h, i.` to a complement list
+    # that OMITS `i` reads CLEAN, because `h, i` is a second run whose tail (`i`, followed by
+    # a full stop) satisfies the ending rule. Scoping the arm to the sentence's FIRST run
+    # would close it, and was rejected: `test_a_letter_added_to_either_tally_list_is_compared_in_every_spelling`
+    # and `test_a_code_or_italic_letter_is_read_like_every_other_markup` both require a letter
+    # added in a LATER clause (`… **(l)** are **DRIFTED**, and a, f too.`) to be compared, so
+    # the same mechanism is also a contract. Bytes are identical in both directions; the
+    # residual census below states the cost.
     for run in runs:
         if len(run) < 2:
             continue
@@ -936,7 +950,7 @@ def _proselike_has_evidence(
        no separator-side evidence to consult and the code reads it; in the documented bare
        spelling the first member sits exactly here (`Only a, f, …`). ⛔ THIS IS A CHOICE,
        NOT A PROOF — nothing to a head's left is examined at all, so prose can supply an
-       `a`/`i` here (see residual 4). It is also NOT true that the span before a head is
+       `a`/`i` here (see the FIFTH residual). It is also NOT true that the span before a head is
        "prose ending in a word": a head can sit at the start of the string, after `(`, or
        after a comma (`then x, I, j …`), and none of that is consulted.
     2. **TAIL** (`pos == len(run) - 1`) — the RIGHT side decides, via `_MEMBER_END_RE`:
@@ -950,9 +964,23 @@ def _proselike_has_evidence(
        DECLARED OVER-REFUSAL: `a, f, h, and i, j` loses its `i`. It is deliberate — see
        the residual below — because the mixture's bytes are the prose bytes.
 
-    ⚠️ RESIDUALS, stated rather than implied — FOUR OVER-READINGS (prose read as a member)
-    and ONE OVER-REFUSAL (a member not read). None is closable in code, because every one is
-    byte-identical to the other side of the same ambiguity:
+    ⚠️ RESIDUALS, stated rather than implied — FIVE OVER-READINGS (prose read as a member)
+    and ONE AMBIGUOUS OVER-REFUSAL (a member not read). ⛔ THE REASON NONE IS CLOSABLE IS THE
+    BYTE-IDENTITY, and nothing wider than that: each is byte-identical to the other side of the
+    same ambiguity, so closing one means choosing the other side's cost. For the first
+    over-reading that cost is a broken pin (its scope fix is refused for exactly that reason);
+    for the predicate-tailed one it is a WIDER predicate list, i.e. accepting the over-block
+    (stated in that bullet) — not a pin. Do not compress the two into one blanket reason:
+    * OVER-READING — a SECOND RUN LATER IN THE SAME SENTENCE: membership is sentence-global,
+      so a two-item letter run in prose contributes its members. Measured: a complement list
+      that OMITS `i`, closed with `; see h, i.`, reads CLEAN (the run's tail `i` sees a full
+      stop). Scoping the arm to the first run closes it and is REFUSED, because
+      `test_a_letter_added_to_either_tally_list_is_compared_in_every_spelling` and
+      `test_a_code_or_italic_letter_is_read_like_every_other_markup` both pin a letter added
+      in a later clause (`… **(l)** are **DRIFTED**, and a, f too.`) as compared — the same
+      mechanism, the opposite verdict. Pinned from the reading side by
+      `test_a_second_run_in_the_same_sentence_supplies_members_too`, so a change that scopes
+      the arm must move that pin and this list together.
     * OVER-READING — INTERIOR adjacency: `…, a, …` / `…, I, …` inside a punctuation-joined
       run, `… and a and …` inside a connector-joined one. A bare list item and an English
       word beside a homogeneous separator are the same bytes.
@@ -966,8 +994,9 @@ def _proselike_has_evidence(
     * OVER-READING — HEAD: prose `I`/`a` at a run's head is read (`I, j still read as
       written.`) — a run begins at its first item, and nothing to its left can distinguish
       the two.
-    * OVER-REFUSAL — a MIXED left separator on an INTERIOR item (`a, f, h, and i, j`) drops
-      that member. Deliberate: those bytes are prose's bytes (`, and I,` closed a stale
+    * OVER-REFUSAL — a MIXED left separator on an INTERIOR `a`/`i` (`a, f, h, and i, j`) drops
+      that member. Only `a`/`i` are subject to the rule, because `_proselike_has_evidence` is
+      consulted only for `_PROSELIKE_LETTERS`: measured, `a, f, h, and c, j` KEEPS its `c`. Deliberate: those bytes are prose's bytes (`, and I,` closed a stale
       complement list — measured), and a false PASS outranks the friction of an over-block
       (AGENTS.md A/B). Pinned by
       `test_a_mixed_separator_interior_join_is_the_declared_over_refusal`, so a change that
@@ -987,7 +1016,14 @@ def _proselike_has_evidence(
 
 
 def _named_letters(sentence: str) -> set[str]:
-    """The letters a sentence names as list members, in any accepted spelling."""
+    """The letters a sentence names, in any accepted spelling.
+
+    ⛔ TWO DIFFERENT RULES, and the caller must know which: a MARKED letter is read
+    UNCONDITIONALLY (the markup IS the claim — `row (c) still read as written` yields `c`,
+    which is not a list member at all), while a BARE one is read only as a member of a list
+    RUN. So this is "the letters the sentence names", NOT "the letters it lists" — candidacy
+    is the wider reading, membership the narrower one.
+    """
     out: set[str] = set()
 
     def _take(match: re.Match[str]) -> str:
@@ -1137,15 +1173,21 @@ def check_verdict_tally(text: str) -> list[str]:
     # de-bolded or backticked stale list ride out of the count. All three measured.
     # A single stray parenthetical `(c)` in prose is still NOT a list, which is what
     # keeps a sentence that merely QUOTES the phrase out of the count.
-    #: One letter. ⛔ MARKUP AROUND THE PARENTHESES DOES NOT DECIDE CANDIDACY, and that
-    #: is why there is no separate `**(a)**` branch: `PAREN` already matches the `(a)`
-    #: inside it, so a bolded letter and a bare one are the same item — which is also
-    #: what stops a `**` around a letter from being the difference between a red and a
-    #: green (the fail-open this filter was widened for). What MARKED adds is the
-    #: PAREN-LESS spellings the page and this repo also use: code `` `a` `` and italic
-    #: `*a*`. ⛔ A SINGLE bare `(c)` is still not a candidate — `row (c) still read as
-    #: written` is ordinary prose, and making it one red a legitimate sentence (found by
-    #: review, measured) — so PAREN is a LIST ITEM only, never a standalone match.
+    #: One letter. ⛔ MARKUP AROUND THE PARENTHESES DOES NOT DECIDE LIST MEMBERSHIP, and
+    #: that is why there is no separate `**(a)**` branch: `PAREN` already matches the
+    #: `(a)` inside it, so within a RUN a bolded letter and a paren one are the same
+    #: item, and a `**` cannot change which ITEMS a list has. ⛔ BUT IT *DOES* DECIDE
+    #: CANDIDACY, and saying otherwise would be false: `letter_sentence`'s standalone
+    #: `MARKED` branch admits `**(c)**` and `` `c` `` while `PAREN` is a LIST ITEM only,
+    #: so for a ONE-member sentence `**` is exactly the difference between a red and a
+    #: green — measured, `Note **(c)** still read as written.` appended to §3's takeaway
+    #: paragraph is a candidate ("carries 2 sentences") while `Note (c) still read as
+    #: written.` is not (CLEAN). For a TWO-or-more list the extractor disjunct makes it
+    #: neutral. What MARKED adds is the PAREN-LESS spellings the page and this repo also
+    #: use: code `` `c` `` and italic `*c*`. ⛔ A SINGLE bare `(c)` is still not a
+    #: candidate — `row (c) still read as written` is ordinary prose, and making it one
+    #: red a legitimate sentence (found by review, measured) — so PAREN is a LIST ITEM
+    #: only, never a standalone match.
     MARKED = r"(?:`\(?[a-l]\)?`|\*\(?[a-l]\)?\*)"
     PAREN = r"\([a-l]\)"  # a parenthesised letter — a LIST ITEM only
     BARE = r"\b[a-l]\b"
@@ -1156,15 +1198,30 @@ def check_verdict_tally(text: str) -> list[str]:
     #: `Note: **a**, **f** and **h** no longer read as written.` (and the plain-run,
     #: `or`/`also`/`plus`/`&`, code-span, italic and uppercase spellings) left `--check`
     #: at rc 0 while the page asserted a list the table contradicts. A sentence is a
-    #: candidate when the extractor finds TWO OR MORE named letters in it (one letter is
-    #: not a list), which is the predicate the comparison itself uses.
+    #: candidate when EITHER `letter_sentence` (the four-form gate below) matches — which
+    #: admits a SINGLE marked letter: measured, `Note `c` still read as written.` is a
+    #: candidate on one letter — OR the extractor finds TWO OR MORE named letters, in any
+    #: spelling and any join: `Note **(c)** is fine and **(d)** is fine, so both still read
+    #: as written.` qualifies with no comma and no connector between them. So candidacy is
+    #: DELIBERATELY WIDER than "a list of two or more members", and the disjunct is what
+    #: makes it wide: one letter is not a list, but a MARKED one is a candidate, in either
+    #: case (`letter_sentence` is compiled IGNORECASE, like the extractor).
     def _is_letter_list(sentence: str) -> bool:
         return bool(letter_sentence.search(sentence)) or len(_named_letters(sentence)) >= 2
 
+    #: ⛔ IGNORECASE, BECAUSE THE EXTRACTOR IS. `MARKED`/`PAREN`/`BARE` are written
+    #: lowercase `[a-l]`, while `_NAMED_LETTER_RE` and `_RUN_ITEM_RE` compile with
+    #: `re.IGNORECASE` — so without this flag a single UPPERCASE marked letter was read by
+    #: the extractor and still was NOT a candidate (the extractor disjunct needs two), and a
+    #: second tally spelled `Note **C** still read as written.` was silently ignored while
+    #: the page documents uppercase as a read spelling (measured: it returned 0 problems,
+    #: the lowercase form returned the second-tally problem). One flag closes it because
+    #: both sides then read the same alphabet.
     letter_sentence = re.compile(
         MARKED
         + r"|" + ITEM + r"(?:\s*,\s*" + ITEM + r")+"  # a list: b, c, d
-        + r"|" + ITEM + r"\s+and\s+" + ITEM  # a two-item list: b and c
+        + r"|" + ITEM + r"\s+and\s+" + ITEM,  # a two-item list: b and c
+        re.IGNORECASE,
     )
     # ⛔ A SENTENCE THAT ONLY **QUOTES** THE PHRASE IS NOT ASSERTING IT. The page
     # discusses the phrase in §8 and in this very comment, so a sentence can contain it

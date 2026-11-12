@@ -1419,8 +1419,9 @@ def test_the_s8_citation_carve_outs_stay_skippable(tmp_path, monkeypatch):
     §8 lists the shapes the refusal does NOT measure — `path#LINE`, `path@LINE`,
     `path-LINE`, `path_LINE`, `path/LINE`, `path,LINE`, `path:L LINE`, `path N --flag`,
     and an HTTP-status line — because every one of them refused correct prose from this
-    repository's own `docs/` when it was measured (801 files — re-derive with
-    `git ls-tree -r --name-only HEAD docs/ | grep -c '\\.md$'`; a hand-typed population rots
+    repository's own `docs/` when it was measured (the whole tree then — it moves, so re-derive
+    it with `git ls-files docs | wc -l`, which counts `.md` and non-`.md` alike; the `.md`-only
+    subset is 803); a hand-typed population rots
     the same way the span counts did). Nothing pinned that list,
     so it could drift from the code with every test green; that is how the whitespace
     RANGE form (`path 16-18`) and `path N --flag` went unnoticed. This test is the
@@ -2076,7 +2077,7 @@ def test_the_pinned_population_is_a_membership_set_not_a_count():
     `PINNED_CORRECTION_LABELS` follows: two independent declarations are two places a
     shrink has to touch, and the point of pinning identity is that there is only one.
     """
-    assert flc.PINNED_INDEXED_ROWS == len(flc.PINNED_INDEXED), (
+    assert len(flc.PINNED_INDEXED) == flc.PINNED_INDEXED_ROWS, (
         "PINNED_INDEXED_ROWS must be len(PINNED_INDEXED) so a count and a set cannot disagree"
     )
     assert len(flc.PINNED_INDEXED) == 42, (
@@ -3142,6 +3143,63 @@ def test_a_written_bare_member_is_still_read(tmp_path, monkeypatch):
             ), f"a bare member inside a run must be read: {replacement!r} -> {problems}"
 
 
+def test_a_second_run_in_the_same_sentence_supplies_members_too() -> None:
+    """Membership is sentence-global — stated as an OVER-READING, pinned from the reading side.
+
+    This is the FAIL-OPEN side of the same mechanism whose contract side is
+    `test_a_letter_added_to_either_tally_list_is_compared_in_every_spelling`: a TWO-ITEM
+    letter run in prose later in the sentence contributes its members. Measured on the real
+    page: a complement list that OMITS `i`, closed with `; see h, i.`, reads CLEAN, because
+    `h, i` is a second run and its tail (`i`, followed by a full stop) satisfies the ending
+    rule — a maintenance edit that appends a cross-reference un-stales the list.
+
+    ⛔ SCOPING THE ARM TO THE FIRST RUN IS REFUSED, and this test says so: it would close this
+    hole and break two pins further down this file, which require a letter added in a LATER clause
+    (`… **(l)** are **DRIFTED**, and a, f too.`) to be compared. Identical bytes, opposite
+    verdicts, so the choice is a TRADE and the residual census states it. If a future change
+    scopes the arm, that change must invert this assertion AND move the census in
+    `tools/findings_ledger_check.py` and the page — drifting silently is what this pins against.
+    """
+    # The reading side: a later run contributes.
+    assert flc._named_letters("Only a, f, h still read as written; see h, i.") == {
+        "a",
+        "f",
+        "h",
+        "i",
+    }, "a second run's members must be read (and the census must say so)"
+    # The control: ONE-item runs still contribute nothing on either side.
+    assert flc._named_letters("Only a, f, h still read as written, and I think so.") == {
+        "a",
+        "f",
+        "h",
+    }, "a run of one item is not a list"
+    # …and the contract side, which is what forbids the scope fix. ⛔ THE LATER CLAUSE MUST BE THE
+    # ONLY SOURCE of the letter asserted, or the assertion passes for the wrong reason: with
+    # `**(a)**` in the first clause it is satisfied by markup alone and does NOT discriminate
+    # (measured — it stays True under `runs[:1]`, the very change it claims to forbid). So the
+    # first clause carries no `a` at all.
+    assert "a" in flc._named_letters(
+        "Only **(f)** and **(j)** still read as written, and **(l)** are **DRIFTED**, and a, f too."
+    ), "a letter added in a LATER clause must still be compared, which is why scoping is refused"
+
+
+def test_a_marked_token_wider_than_one_letter_is_not_a_row_letter() -> None:
+    """§8 bounds every spelling to the twelve letters — so `{1,2}` was a false accusation.
+
+    `_LETTER_ALT_MARKED` used `([a-l]{1,2})`, which reads ANY one- or two-letter all-a..l
+    token in bold/code/italic as a row label: measured on a CORRECT page,
+    `… still read as written (`if` it holds).` REDed with `['a','f','h','i','if','j']`, and
+    `**he**` / `*be*` behaved the same. A two-letter English word in markup is prose, and §8
+    says the forms are "bounded to the twelve letters §3's table can name" — one character.
+    """
+    for span, stray in (("`if`", "if"), ("**he**", "he"), ("*be*", "be"), ("**(ii)**", "ii")):
+        letters = flc._named_letters(f"Only (a), (f), (h) and (j) still read as written, {span} it holds.")
+        assert stray not in letters, f"a {len(stray)}-letter markup token is not a row letter: {span}"
+    # The twelve real ones are still read in every marked spelling.
+    for spelling in ("**(c)**", "**c**", "`c`", "`(c)`", "*(c)*", "*c*", "(c)"):
+        assert flc._named_letters(f"Only (a), (f) and (j) still read as written, {spelling} too.") >= {"c"}
+
+
 def test_a_mixed_separator_interior_join_is_the_declared_over_refusal() -> None:
     """An interior item joined by BOTH kinds of separator loses that member — on purpose.
 
@@ -3281,6 +3339,14 @@ def test_every_spelling_of_a_second_tally_sentence_is_refused(tmp_path, monkeypa
         # CLEAN (measured at e5a7ba2f). The `… and a …` spelling does NOT discriminate:
         # another alternative carries it.
         "Note: j or a no longer read as written.",
+        # ⛔ THE GATE WAS LOWERCASE-ONLY WHILE THE EXTRACTOR IS IGNORECASE, so an UPPERCASE
+        # marked tally was read by one and invisible to the other: measured,
+        # `Note **C** still read as written.` appended to §3's takeaway paragraph returned
+        # ZERO problems while the lowercase form red, and the page documents uppercase as a
+        # read spelling. `letter_sentence` is now compiled IGNORECASE; each case below is a
+        # single member, because a pair would be carried by the extractor disjunct instead.
+        "Note **C** no longer read as written.",
+        "Note `C` no longer read as written.",
     )
     anchor = "is the exact defect #2795 D2 fixed. "
     for decoy in decoys:

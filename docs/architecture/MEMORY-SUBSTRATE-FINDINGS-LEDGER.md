@@ -289,10 +289,11 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   form (path, `#`, `L`, line number), because
   every wider delimiter set refused correct prose when tried
   against this repository's own `docs/`: `_` parses an identifier (`tests/test_findings_ledger_2852.py`),
-  `-` parses a dated slug, `/` parses plain paths and dates (600+ spans across 801 files), `#`
+  `-` parses a dated slug, `/` parses plain paths and dates (600+ spans across the whole `docs/`
+  tree, re-derived rather than carried), `#`
   parses the `owner/repo#N` issue refs this repo writes everywhere, `@` parses commit refs, and `,`
   parses SQL and call prose. The pipe is refused because it was refused before the narrowing and
-  dropping it silently was a red-to-green the carve-out list did not admit: no code span in the 1149
+  dropping it silently was a red-to-green the carve-out list did not admit: no code span in the 1150
   tracked files under `docs/` (nor the 144 other tracked `*.md`) carries a `path|LINE` form, so
   refusing it cannot red this repository's prose (the `docs/` population is what moves — re-derive it
   with `git ls-files docs | wc -l`, never carry this number forward). The permalink form survives that objection and the
@@ -300,7 +301,7 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   issue ref carries no `L`, so `#` + `L` + digits is unambiguous, and it is what a human writes when
   copying a GitHub link — the spelling most likely to arrive looking verified while going unchecked
   (it did: both an out-of-range permalink and an in-range one left this page CLEAN before the arm
-  existed). It is measured, not assumed: every code span in all 1149 tracked files under `docs/`,
+  existed). It is measured, not assumed: every code span in all 1150 tracked files under `docs/`,
   plus the 144 other tracked `*.md`, was swept with the shipped pattern — zero matches, so refusing
   it cannot red this repository's own prose. Rewriting a citation's delimiter is therefore **not**
   universally refused: `path#LINE` (the bare-number form, which IS what collides with issue refs),
@@ -367,7 +368,7 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   one verdict cell to `STILL-TRUE` left the page asserting a superseded count with `--check` at
   **rc 0** — and that number is repeated in this repo's `ci.yml`, `config/ci-surfaces.yml`,
   `docs/00_index.md`, this module's docstring and the test module's, so a wrong one propagates well
-  proof. It must also be the ONLY such paragraph: a decoy carrying a correct-looking tally,
+  beyond the page. It must also be the ONLY such paragraph: a decoy carrying a correct-looking tally,
   inserted anywhere above §3, took the match while the real sentence was falsified (measured, rc 0),
   so more than one is a page defect — and the paragraph must likewise contain **exactly one sentence**
   carrying that phrase, because the arm locates its subject *by pattern*: it joined every matching
@@ -382,14 +383,19 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   **complement** list ("still read as written"), which was joined across sentences and compared as a
   set-union: a second complement sentence could assert a STILL-TRUE letter the real sentence does not,
   so the page could say *seven of the twelve no longer read as written* beside *only `**(a)**` still
-  read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). Both arms count only a
-  sentence that carries a **letter LIST** of two or more single letters — comma-joined
-  (`b, c, d`) or a pair (`b and c`), each letter written bare, bold, code or italic, every form
-  bounded to the twelve letters §3's table can name. ⛔ WHAT MAKES A BARE MEMBER A MEMBER IS THE
+  read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). ⚠️ WHAT MAKES A SENTENCE A CANDIDATE IS WIDER THAN "a letter list of two or
+  more", and the code says so: a sentence qualifies if EITHER the four-form gate matches — which
+  admits a SINGLE marked letter (`Note `c` still read as written.` is a candidate on one letter) — OR
+  the extractor names two or more letters, in any spelling and with NO join required between them
+  (`Note **(c)** is fine and **(d)** is fine, so both still read as written.` qualifies). Each letter
+  may be written bare, bold, code or italic, every form bounded to the twelve letters §3's table can
+  name. A page author who assumes "two comma-joined letters" UNDERSTATES this and gets a red they did
+  not expect. ⛔ WHAT MAKES A BARE MEMBER A MEMBER IS THE
   LIST RUN, NOT THE CHARACTER AFTER IT: a list is a run of two or more items joined by separators
   (`,`, `;`, `&`, `and`, `or`, `also`, `plus`, `as well as`, followed by, namely) with nothing else
   between them — a word of any other kind ends the run, so prose appended after the phrase is a run
-  of its own and never a member. The ending-rule shape this replaced was wrong in BOTH directions,
+  of its own and never a member OF THE PRECEDING RUN (a two-item run of its own DOES
+  contribute elsewhere in the sentence — the residual census below states that cost). The ending-rule shape this replaced was wrong in BOTH directions,
   measured: too loose, `, i.e. today.` supplied `i` and closed a stale complement list, and a
   connector branch with no ending rule at all let `, and I think so.` supply `i` and
   `, and a claim §1 supports.` supply `a`; too tight, it DROPPED a member a sentence writes —
@@ -416,19 +422,31 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   (`still read` yes, `still-unsolved` no). ⛔ A bare comma is NOT an ending for the last item:
   a comma there means the
   run did not end, so `Only a, f, h, i, and then some.` must not read `i` (measured — an
-  ordering that tested the LEFT side first did read it). ⚠️ FOUR OVER-READINGS remain open and
-  none is closable in code, because each is byte-identical to a spelling §8 accepts: an
+  ordering that tested the LEFT side first did read it). ⚠️ FIVE OVER-READINGS remain open and
+  none is closable in code, because each is byte-identical to a spelling §8 accepts: a SECOND
+  RUN later in the same sentence — membership is sentence-global, so `… still read as written;
+  see h, i.` supplies `i` (and scoping the arm to the first run is refused, because a letter
+  added in a later clause must still be compared — `test_a_letter_added_to_either_tally_list_is_compared_in_every_spelling`);
+  an
   `a`/`i` inside a run beside a homogeneous separator (`…, a, …`, or `… and a and …`,
   indistinguishable from the bare and connector spellings); a connector-preceded TAIL with an accepted ending (`a, f, h, and i.` IS the
   Oxford-comma spelling, so it must read); a TAIL followed by one of the arm's own
   predicates (a verb phrase can start with one); and a prose `I`/`a` at a run's HEAD. One
-  OVER-REFUSAL is deliberate and is not closable either: an INTERIOR item joined by a MIXED
-  separator (`a, f, h, and i, j`) loses that member, because those bytes are prose's bytes
+  AMBIGUOUS OVER-REFUSAL is deliberate and is not closable either: an INTERIOR `a`/`i` joined by a
+  MIXED separator (`a, f, h, and i, j`) loses that member (only `a`/`i` are subject to the rule —
+  `a, f, h, and c, j` keeps its `c`), because those bytes are prose's bytes
   and a false PASS outranks the friction of an over-block; the TAIL is decided by what
-  follows it, so the Oxford-comma spelling above still reads. Markup
-  around a
-  member never decides candidacy (`**(c)**` and `(c)` are the same item), which is
-  what stops a `**` from being the difference between a red and a green; code, italic and
+  follows it, so the Oxford-comma spelling above still reads. ⛔ WHAT MAKES NONE CLOSABLE IS THE
+  BYTE-IDENTITY, not any single cost: closing one means choosing the other side's, so for the
+  first the price is a broken pin (its scope fix is refused for exactly that reason) and for the
+  predicate-tailed one it is a wider predicate list, i.e. accepting the over-block. Markup
+  around a member never decides which items a LIST has (`**(c)**` and `(c)` are the same
+  member), so a `**` cannot change a run's membership; ⛔ but markup DOES decide CANDIDACY for
+  a sentence naming ONE letter, because only the marked spellings match standalone: measured,
+  `Note **(c)** still read as written.` appended to §3's takeaway paragraph counts as a second
+  tally while the otherwise identical `Note (c) still read as written.` does not (a single
+  parenthetical letter in prose is not a list, by design); for a list of two or more the
+  extractor disjunct makes markup neutral. Code, italic and
   uppercase spellings are read too, and the letter EXTRACTOR reads every spelling the candidate
   test accepts, so a sentence cannot qualify on its markup and then contribute no letters.
   ⛔ THAT WAS TRUE OF THE EXTRACTOR AND FALSE OF THREE ARMS BESIDE IT — closed at #11902's
