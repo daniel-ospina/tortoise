@@ -522,6 +522,83 @@ def test_a_one_input_operator_claims_no_degenerate_skip(sdk):
     assert "ONTOLOGY §3.1's per-edge triage" in fix, fix
 
 
+def test_a_neutral_direct_edge_carries_nothing_and_says_so(sdk):
+    """A DIRECT edge's direction lives on the RELATIONSHIP, and EP reads it there.
+
+    ``create_direct_edge(..., direction='-')`` is a door, and `ep.py` Batch 3 reads
+    ``coalesce(r.direction, 'bidirectional')`` — the source NODE's ``direction``
+    means nothing for this family. Projecting only ``active.direction`` made such a
+    row read as flowing: it announced "the claim silently loses that support" and
+    offered a §3.1 carry, while nothing had ever been transferred through it
+    (measured below). The mirror error matters too — a node-level ``'-'`` on an
+    ordinary direct edge read as neutral while the belief was real — and it is why
+    ``_4b_state`` takes the direction from the EDGE for this family.
+    """
+    o = _obj(sdk, "PolicyV1")
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    sdk.create_direct_edge("IMPL", p["id"], o["id"], direction="-")
+    assert _q(sdk, "MATCH (:Point {id:$p})-[r:IMPL]->(:Object {id:$o}) "
+                   "RETURN r.direction", {"p": p["id"], "o": o["id"]}) == \
+        [["-"]], "fixture drifted: the edge is not neutral"
+    # The engine fact: a neutral direct edge transfers nothing, even while live.
+    before = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
+    assert not before.get("confidences"), before.get("confidences")
+
+    _obj(sdk, "PolicyV2")
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == o["id"]]
+    assert issues, "a neutral direct edge still leaves a stale edge on the Object"
+    issue = issues[0]
+    assert "no confidence ever transferred through it" in issue.detail, issue.detail
+    assert "silently loses that support" not in issue.detail, (
+        "nothing was ever transferred through a neutral edge: " + issue.detail)
+    assert "may CARRY to the successor" not in issue.fix, (
+        "a neutral edge carries nothing, so §3.1's disposition is DROP: "
+        + issue.fix)
+    assert "the disposition here is DROP" in issue.fix, issue.fix
+    # ...and the archive clause must be the neutral one, not the flowing one.
+    assert "neutral" in issue.fix, issue.fix
+    assert "CLEARING THE DEFICIT" not in issue.fix, issue.fix
+
+
+def test_a_direct_edge_into_a_shaped_successor_keeps_its_belief_claim(sdk):
+    """The successor's shape does not turn a belief-carrying edge into "no factor".
+
+    `_dropped_input` used ``is_operator`` as the "was a belief at stake?" test, so a
+    DIRECT row (where the belief is real while the target is live) was told "EP
+    assembles no factor for this row in the first place … the re-point moves no
+    belief either way" — in the same `fix` string whose §3.1 clause says the IMPL
+    ``may CARRY`` to the successor. Measured: two confidences before the
+    supersession, none after, and two again once the edge is re-pointed onto a live
+    successor.
+    """
+    o = _obj(sdk, "PolicyV1")
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    sdk.create_direct_edge("IMPL", p["id"], o["id"])
+    before = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
+    assert before.get("confidences"), (
+        "fixture drifted: a direct edge builds no belief at all: "
+        + repr(before.get("confidences")))
+    # An OPERATOR-SHAPED successor: EP refuses it as a factor input (#9269).
+    _obj(sdk, "PolicyV2", is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == o["id"]]
+    assert issues
+    fix = issues[0].fix
+    assert "OPERATOR-SHAPED" in fix, (
+        "the successor is operator-shaped, which is why a re-point alone will not "
+        "fund the factor: " + fix)
+    assert "the direct edge carried belief" in fix, (
+        "a direct edge into a live target did carry belief, whatever the "
+        "successor's shape: " + fix)
+    assert "EP assembles no factor for this row in the first place" not in fix, (
+        "that sentence belongs to a neither-arm row, not a direct edge: " + fix)
+
+
 def test_a_supersession_chain_points_the_repair_at_the_live_head(sdk):
     """Re-pointing onto an immediate successor that is ITSELF superseded clears the
     finding and leaves the input anchored to another EP-dead node.

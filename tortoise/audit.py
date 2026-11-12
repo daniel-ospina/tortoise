@@ -619,16 +619,18 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # measured defect rather than a stray survivor.
     #
     # ⛔ That rationale is VOID on three of the four row mechanisms this check
-    # distinguishes — a NEUTRAL operator transfers no confidence by design, a
-    # SHAPED non-``:Point`` endpoint is in neither EP arm, and a DIRECT edge
-    # assembles no factor once its target is terminal (``_active_edge_detail``
-    # says so on each). Those rows are leftover wiring, i.e. check 4's ``medium``
-    # reading. They are nonetheless emitted ``high``, because every aggregate in
-    # this module carries ONE severity per ``issue_type`` (``_sev_total``/
-    # ``to_dict`` keep the FIRST sample's) and a mixed check made ``summary.high``
-    # read 0 over a real high row — a false PASS. Do NOT restore a per-row
-    # severity here before #12154 lands the aggregation redesign; the over-warn is
-    # the safe direction until then.
+    # distinguishes — a NEUTRAL edge (an operator with ``'-'``, or a DIRECT edge
+    # whose RELATIONSHIP carries it) transfers no confidence by design, a SHAPED
+    # non-``:Point`` endpoint is in neither EP arm, and a DIRECT edge stops building
+    # a factor once its target is terminal. The first and third are NOT the same
+    # fact: a direct edge with a flowing direction DOES carry belief while its
+    # target is live (measured: two confidences before the supersession, none
+    # after), so only the neutral and shaped rows are leftover wiring. All of them
+    # are nonetheless emitted ``high``, because every aggregate in this module
+    # carries ONE severity per ``issue_type`` (``_sev_total``/``to_dict`` keep the
+    # FIRST sample's) and a mixed check made ``summary.high`` read 0 over a real high
+    # row — a false PASS. Do NOT restore a per-row severity here before #12154 lands
+    # the aggregation redesign; the over-warn is the safe direction until then.
     #
     # INCOMING only — check 4's orientation, kept so the two checks answer ONE
     # question in two vocabularies.
@@ -817,6 +819,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # (including none, where EP builds no factor at all).
         "RETURN DISTINCT sup.id, sup.name, sup.supersededBy, type(r), r.idx, "
         "coalesce(active.is_operator, false), active.op_type, active.direction, "
+        # ⛔ THE EDGE's direction, because a DIRECT edge's direction lives HERE and
+        # not on the node (``ep.py`` Batch 3 reads ``coalesce(r.direction,
+        # 'bidirectional')``; ``docs/ONTOLOGY.md`` §3.1 says the same). It is a
+        # column of the already-bound ``r``, so no extra ``OPTIONAL MATCH`` —
+        # ``count4b`` and SAMPLE_LIMIT are untouched.
+        "coalesce(r.direction, 'bidirectional'), "
         # ⛔ EP's operator arm ALSO requires the label (``(o:Point)-[:IMPL|NAND]->``),
         # so a non-:Point node carrying ``is_operator=true`` is in NEITHER arm — the
         # direct-edge arm demands a non-operator on both endpoints — and no factor
@@ -845,10 +853,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         and a repair with no ``idx`` for an edge that is an operator input.
         """
         (sup_id, sup_name, sup_sb, edge_type, idx, is_op_flag, op_type,
-         direction, active_labels, active_id, _active_nid, carrier_count,
-         _carrier_id, carrier_status, carrier_sb, carrier_is_operator,
-         carrier_outdated, next_count, next_status, next_outdated,
-         next_is_operator) = row
+         direction, edge_direction, active_labels, active_id, _active_nid,
+         carrier_count, _carrier_id, carrier_status, carrier_sb,
+         carrier_is_operator, carrier_outdated, next_count, next_status,
+         next_outdated, next_is_operator) = row
+        _is_operator = ("Point" in (active_labels or [])
+                        and (is_op_flag is True or op_type is not None))
         return {
             "sup_id": sup_id, "sup_name": sup_name, "sup_sb": sup_sb,
             "edge_type": edge_type, "idx": idx,
@@ -875,9 +885,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # ``msg_alpha``/``msg_beta`` None and a re-audit read CLEAN over a
             # factor EP never built (#12111 round-13 P2).
             "shape": (is_op_flag is not False) or op_type is not None,
-            "is_operator": ("Point" in (active_labels or [])
-                            and (is_op_flag is True or op_type is not None)),
-            "direction": direction, "active_id": active_id,
+            "is_operator": _is_operator,
+            # ⛔ THE DIRECTION EP READS, not the direction the NODE carries. For an
+            # operator input EP uses the operator's ``direction``; for a DIRECT edge
+            # it reads the RELATIONSHIP's (``coalesce(r.direction, 'bidirectional')``,
+            # ``ep.py`` Batch 3) and the node's property means nothing. Projecting
+            # only ``active.direction`` made a ``direction='-'`` direct edge read as
+            # flowing — so the row claimed lost belief while nothing had ever been
+            # carried — and a node-level ``'-'`` on an ordinary direct edge read as
+            # neutral while the belief was real (measured: two confidences before
+            # the supersession, none after, on the default direction).
+            "direction": (direction if _is_operator else edge_direction), "active_id": active_id,
             "carrier_count": carrier_count, "carrier_status": carrier_status,
             "carrier_sb": carrier_sb,
             # ``coalesce(..., false)``: operator-SHAPED means anything EP's
@@ -917,12 +935,27 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         ⛔ The ladder has one more rung than the two-input case makes obvious:
         ``source_stripped`` fires AHEAD of the degenerate test for a directional
         operator whose idx-0 source is the input taken — but only where every input
-        edge carries an ``idx`` (``op_idx_known``; an idx-less input edge degrades
-        the reason to ``degenerate``), so the rung is qualified rather than asserted.
+        edge carries an ``idx`` (``op_idx_known``). Without that the guard is LOST
+        entirely, and the benign branch is not even the one that runs: measured with
+        two live inputs remaining and ``r.idx`` removed from the superseded edge,
+        the factor RUNS with the surviving input renumbered into idx 0 and a ``->``
+        message now flowing the wrong way (``skipped: []``) — the silent direction
+        inversion the guard exists to prevent. Only the below-two case degrades to
+        ``degenerate``.
         """
-        if not s["is_operator"]:
-            return ("EP assembles no factor for this row in the first place, so the "
+        if s["shape"] and not s["is_operator"]:
+            return ("EP assembles no factor for this endpoint in either arm, so the "
                     "re-point moves no belief either way")
+        fwd, bwd = direction_flows(s["direction"])
+        if not (fwd or bwd):
+            return (f"this edge is {_quoted(s['direction'])} (neutral), so no "
+                    "confidence transfers through it by design and the re-point "
+                    "moves no belief either way")
+        if not s["is_operator"]:
+            return ("the direct edge carried belief into the superseded endpoint "
+                    "while it was live, so the re-point moves that belief onto the "
+                    "successor — the wiring is what carries it, not an operator "
+                    "slot")
         return ("EP drops that input from the factor and re-scores it over the "
                 "REMAINING inputs — TWO OR MORE run without it (measured on a "
                 "three-input operator: two confidences, ``skipped: None``), ONE "
@@ -1091,11 +1124,23 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "The successor inherits no belief from this edge unless it was "
                     "separately rewired into a slot EP reads (#11826)")
         else:
+            # ⛔ A DIRECT edge's belief depends on the DIRECTION ITS RELATIONSHIP
+            # carries (EP reads ``coalesce(r.direction, 'bidirectional')`` for this
+            # family), so "the claim silently loses that support" is true only of a
+            # flowing one. Measured: a ``-`` direct edge returns NO confidences
+            # before the supersession as well, so nothing is lost and the stale edge
+            # is leftover wiring.
+            fwd_d, bwd_d = direction_flows(s["direction"])
             detail += (
                 " — the Object lane moved no edges on supersession, and EP builds "
                 "NO factor for a direct edge: with a terminal endpoint the row is "
                 "excluded before evaluation, so there is no skipped-factor record "
-                "for it and the claim silently loses that support (#11826)")
+                "for it and " + (
+                    "the claim silently loses that support (#11826)"
+                    if (fwd_d or bwd_d) else
+                    "this edge is " + _quoted(s["direction"]) + " (neutral), so "
+                    "no confidence ever transferred through it — the stale edge is "
+                    "leftover wiring (#11826)"))
         if (not s["carrier_count"] and s["sup_id"] is not None
                 and s["sup_sb"] and s["sup_name"] == s["sup_sb"]):
             detail += ("; and its supersededBy names the Object ITSELF, so no OTHER "
@@ -1163,35 +1208,29 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
 
         ⛔ The CARRY half is conditional, and ``s`` is what decides it: on a row
         where nothing was ever assembled (a SHAPED non-``:Point`` endpoint — EP's
-        neither arm) or where nothing transfers by design (a NEUTRAL operator),
+        neither arm) or where nothing transfers by design (a NEUTRAL edge — an
+        operator with ``'-'``, or a DIRECT edge whose RELATIONSHIP carries it),
         §3.1's disposition is DROP, and telling the reader an IMPL "may CARRY to the
         successor" there contradicts the very repair it is appended to ("No edge
         rewrite repairs this: EP builds NO factor in either arm").
 
-        ⛔ A DIRECT edge is NOT one of those rows, however easily it reads as one: it
-        carries real belief into the Object while the target is live (measured: two
-        confidences before the supersession, none after), so it keeps the
-        carry/drop triage. Sending it to DROP put a "do not re-point it onto the
-        successor" next to a fix whose whole instruction is "write the equivalent
-        edge onto the successor".
+        ⛔ A DIRECT edge is NOT one of those rows, however easily it reads as one: a
+        direct edge WITH a flowing direction carries real belief into the Object
+        while the target is live (measured: two confidences before the supersession,
+        none after), so it keeps the carry/drop triage. Sending it to DROP put a "do
+        not re-point it onto the successor" next to a fix whose whole instruction is
+        "write the equivalent edge onto the successor". ``s["direction"]`` is the
+        direction EP READS (``_4b_state``: the node's for an operator, the EDGE's for
+        a direct row), so the neutral test is the same predicate on both families.
         """
         fwd, bwd = direction_flows(s["direction"])
-        # ⛔ "A belief existed" is NOT the same question as "this is an operator
-        # input". A DIRECT edge into a superseded Object carries real belief while
-        # its target is live (measured: two confidences before the supersession,
-        # none after), which is exactly why this check exists — so a direct row takes
-        # the carry/drop triage too, and classifying it as "no belief to carry" put
-        # a DROP next to a fix that says "write the equivalent edge onto the
-        # successor". The rows where nothing was ever assembled are the NEITHER-arm
-        # ones (a shaped, non-:Point endpoint), and the one where nothing transfers
-        # by design is a NEUTRAL operator.
         neither_arm = s["shape"] and not s["is_operator"]
-        neutral = s["is_operator"] and not (fwd or bwd)
+        neutral = not (fwd or bwd)
         if neither_arm or neutral:
             why = ("EP assembles no factor for this endpoint in either arm, so the "
                    "support never counted"
                    if neither_arm else
-                   f"this operator is {_quoted(s['direction'])} (neutral), so no "
+                   f"this edge is {_quoted(s['direction'])} (neutral), so no "
                    "confidence transfers through it by design")
             disposal = (
                 f"{why} — the disposition here is DROP, or `pend` (the non-voting "
@@ -1247,6 +1286,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         lead = ((f"Archiving it instead — tortoise_update_entity({_quoted(s['sup_id'])}, "
                  f"{{'status': 'archived'}}) — ")
                 if s["sup_id"] is not None else "Archiving it instead ")
+        fwd, bwd = direction_flows(s["direction"])
+        if not (fwd or bwd):
+            return lead + (
+                "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: this edge is "
+                f"{_quoted(s['direction'])} (neutral), so it transfers NO confidence "
+                "by design — archiving loses no belief, and re-pointing or deleting "
+                "it restores none either, because a neutral edge carries nothing in "
+                "either direction. But " + anchor + " over a stale edge that is "
+                "still there, which is leftover wiring to clean up")
         if not s["is_operator"]:
             if s["shape"]:
                 return lead + (
@@ -1258,20 +1306,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "ends at the superseded Object")
             return lead + (
                 "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: this is a DIRECT "
-                "edge, so EP assembles no factor for it either way (the row is "
-                "excluded before evaluation while the endpoint is terminal, and no "
-                "skipped-factor record appears for it) — " + anchor + " over the "
-                "same unwired claim, which must still be deleted or re-pointed "
-                "onto whatever now carries it")
-        fwd, bwd = direction_flows(s["direction"])
-        if not (fwd or bwd):
-            return lead + (
-                "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: this operator's "
-                "direction transfers NO confidence by design, so archiving loses "
-                "no belief — and re-pointing or deleting the input restores none "
-                "either, because a neutral operator carries nothing in either "
-                "direction. But " + anchor + " over a stale edge that is still "
-                "there, which is leftover wiring to clean up")
+                "edge that DID carry belief while its endpoint was live (measured: "
+                "two confidences before the supersession, none after), and the row "
+                "is excluded before evaluation once the endpoint is terminal — so "
+                "no factor is built and no skipped-factor record appears — " + anchor +
+                " over belief that is now gone. The edge must still be deleted or "
+                "re-pointed onto whatever now carries it")
         return lead + (
             "SILENCES THIS CHECK WITHOUT CLEARING THE DEFICIT: " + _dropped_input(s) +
             " — and " + anchor + ". The edge must still be deleted or re-pointed "
@@ -1289,8 +1329,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             re-audit would read clean over a dead factor).
           * AN AMBIGUOUS NAME (N≥2 carriers, #3573) — the check cannot pick one, so
             the first step is naming the Object meant.
-          * A DIRECT edge — no factor is built and no ``idx`` exists, so the repair
-            writes the equivalent edge onto the successor.
+          * A DIRECT edge — EP reads its direction from the RELATIONSHIP, and no
+            ``idx`` exists, so the repair writes the equivalent edge onto the
+            successor (a flowing direction carried belief; a neutral one carried
+            none).
           * The operator's idx-0 SOURCE of a non-bidirectional operator — EP drops
             the whole factor while that slot is terminal, and DELETING the edge
             alone renumbers a live target into idx 0 and inverts the factor's
@@ -1433,8 +1475,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"edge alone is not the repair: where the operator has ANY other "
                 f"input, that input is renumbered into idx 0 and the factor's "
                 f"direction inverts (ep.py's source_stripped note) — and an "
-                f"operator whose ONLY input this is has no factor to begin with, so "
-                f"only the successor write gives it one. Re-point idx 0 onto the "
+                f"operator whose ONLY input this is has no factor to begin with "
+                f"(EP's factor needs two inputs), so the successor write restores "
+                f"the WIRING, not a factor. Re-point idx 0 onto the "
                 f"successor, then delete the edge into {q}." + tail)
         if s["idx"] is None:
             return prefix + (
@@ -1454,7 +1497,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     _record("superseded_object_active_edges", [
         AuditIssue(
             issue_type="superseded_object_active_edges",
-            # ⛔ ONE severity for the check, deliberately. A per-row calibration            # (a NEUTRAL operator loses no belief, so its row is leftover wiring
+            # ⛔ ONE severity for the check, deliberately. A per-row calibration
+            # (a NEUTRAL edge loses no belief, so its row is leftover wiring
             # rather than a lost one) was tried and REVERTED: every aggregate in
             # this module assumes one severity per ``issue_type`` —
             # ``_sev_total``/``to_dict`` keep the FIRST sample's severity for the
