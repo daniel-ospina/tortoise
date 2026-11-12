@@ -928,6 +928,229 @@ def test_a_verbatim_projection_narrows_no_declared_vector_prop():
         assert f"n.{prop} = ${prop}" in stmt.cypher
 
 
+
+# ── 3c. #11747 — a vector only lands on a label the QUERY leg serves ────────
+
+
+def test_an_unserved_record_label_cannot_be_given_a_vector():
+    """`#11747` — `:Session` has no query path, so the vector must not be stored.
+
+    ⛔ The door is real, and it is the RECORD's: `public.session` is the ONE table
+    whose `chk_*_props_no_derived` refuses NOTHING (`NOT (props ?| ARRAY[]::text[])`,
+    an empty array), and it has no `embedding` column — so a vector can reach this
+    projection through the row's open-set `props` tail and nowhere else. Before
+    this fix it landed on the node while `run_vector_query` refuses
+    `entity_type='session'` before it builds a query: a vector paid for and
+    unreadable, which is exactly what `#5090` DoD row 2 forbids.
+
+    ⛔ Dropped in the row→property map, not only at the writer: `record_serve.read_node`
+    answers from `node_from_row` by contract, so a view that kept the vector would make
+    the record read advertise one the cache refuses.
+    """
+    node = _node("Session", {"props": {"embedding": [0.5, 0.25]}})
+    assert "embedding" not in node.props
+    # NOT SILENT: this module refuses to drop a name it cannot name.
+    assert "embedding" in node.dropped_vectors
+    assert "Session" in node.dropped_vectors["embedding"]
+    stmt = cp.node_statement(node)
+    assert "embedding" not in stmt.params
+    assert "embedding" not in stmt.params["props"]
+    assert "n.embedding" not in stmt.cypher
+    assert dict(stmt.dropped_vectors) == dict(node.dropped_vectors), (
+        "the statement must CARRY the view's drop log, not re-derive a second one")
+
+
+def test_the_gate_is_what_removes_the_tail_vector_not_the_tail():
+    """Non-vacuity: the SAME `props`-tail shape on a SERVED label keeps its vector.
+
+    Without this, `test_an_unserved_record_label_cannot_be_given_a_vector` would still
+    pass if the tail had simply stopped carrying the name — it would be measuring
+    nothing. A record label the query leg DOES serve must keep the vector the tail
+    delivered.
+    """
+    node = _node("Point", {"props": {"embedding": [0.5, 0.25]}})
+    assert "embedding" in node.props
+    assert node.dropped_vectors == {}
+    assert "embedding" in cp.node_statement(node).params
+
+
+def test_the_writer_refuses_a_directly_built_unserved_node():
+    """The writer's own check, for a `RecordNode` that never went through `node_from_row`.
+
+    `record_plan` is a public door: a caller may build the node itself, and the writer
+    is the last place that can refuse. One declaration decides both
+    (`UNSERVED_VECTOR_LABELS`), so they cannot disagree about which labels are refused.
+    """
+    node = cp.RecordNode(label="Session", key="s-1",
+                         props={"id": "s-1", "embedding": [0.5, 0.25]})
+    stmt = cp.node_statement(node)
+    assert "embedding" not in stmt.params
+    assert "n.embedding" not in stmt.cypher
+    assert "embedding" in stmt.dropped_vectors
+
+
+def test_the_unserved_vector_label_class_is_derived_from_the_query_vocabulary(monkeypatch):
+    """Both directions, so neither side of the set can drift away unnoticed.
+
+    * the DERIVED assertion pins the rule: the class is `NODE_TABLES` minus what
+      `run_vector_query` serves, read from the set's **ONE owner**
+      (`tortoise.vector_write.served_store_labels`, `#11641`) — not a list here,
+      and not a second derivation of `tortoise.security` in this module;
+    * the LITERAL pins today's answer, so a record label ADDED without a query
+      path (which would otherwise silently inherit the storing behaviour) or a
+      served label DROPPED reds and sends the reader to the one place that must
+      agree, rather than being absorbed by a derivation nobody reads.
+
+    ⛔ The DELEGATION arm is the one that can actually red on a divergence: this
+    module used to compute its own copy of the set, and a per-label exception
+    added to the OWNER (or a narrower restore bound reached through the
+    vector-write seam) then left every assertion above green, because both sides
+    read the SAME input. Moving the owner's answer is what tells a delegation
+    from a copy (`#11747` review, finding 1).
+    """
+    from tortoise import vector_write as vw
+    from tortoise.security import VALID_ENTITY_TYPES, entity_label
+    from tortoise.vector_write import served_store_labels
+
+    served = {entity_label(t) for t in VALID_ENTITY_TYPES}
+    assert cp.served_vector_labels() == served_store_labels() == served
+    assert frozenset(cp.NODE_TABLES) - served_store_labels() == cp.UNSERVED_VECTOR_LABELS
+    assert sorted(cp.UNSERVED_VECTOR_LABELS) == ["Session"]
+
+    # The delegation arm: move the OWNER's answer and the projection must follow.
+    wider = frozenset(served | {"Batch"})
+    monkeypatch.setattr(vw, "served_store_labels", lambda: wider)
+    assert cp.served_vector_labels() == wider, (
+        "the projection kept its own copy of the served set: the owner now says "
+        f"{sorted(wider)} and this module still says "
+        f"{sorted(cp.served_vector_labels())}")
+
+
+@pytest.mark.parametrize("label", ["Point", "Event", "Source"])
+def test_a_served_label_still_stores_its_vector(label):
+    """The other direction: the gate must not MOVE the hole by over-narrowing.
+
+    `Object`/`Subject` are absent from this list on purpose, and not because of
+    this gate: their `embedding` is DERIVED (recomputed live from `name`, §2.6),
+    which the schema's own `props` CHECK enforces, so a record-sourced rebuild
+    carries none — a narrowing that predates `#11747`. This test pins that the
+    three labels whose vector IS record authority keep storing it.
+    """
+    stmt = cp.node_statement(_node(label, {"embedding": [0.5, 0.25]}))
+    assert "embedding" in stmt.params
+    assert "n.embedding" in stmt.cypher
+    assert stmt.dropped_vectors == {}
+
+
+@pytest.mark.parametrize("seed", [
+    {"embedding": [0.5, 0.25]},                      # the record's COLUMN door
+    {"props": {"embedding": [0.5, 0.25]}},           # the open-set TAIL door
+])
+def test_the_vector_gate_withholds_nothing_on_a_served_label(seed):
+    """Whatever a served label's row yields, the gate records no DROP.
+
+    This is `UNSERVED_VECTOR_LABELS` membership read through the writer: a served
+    label may still project nothing (a DERIVED column, or a tail name the schema
+    refuses) for reasons that are not this gate's, but it must never be recorded
+    in `dropped_vectors` — that map means *"the label is unserved"*.
+    """
+    for label in sorted(set(cp.NODE_TABLES) - cp.UNSERVED_VECTOR_LABELS):
+        try:
+            stmt = cp.node_statement(_node(label, seed))
+        except cp.CacheProjectionError as e:
+            # ⛔ ANOTHER OWNER's refusal, not this gate's: for `Object`/`Subject` the
+            # schema refuses `embedding` as a `props` KEY (the value is DERIVED from
+            # `name`, §2.6), and `_props_from_row` refuses the row rather than
+            # dropping the name. Asserted as that refusal, so a bare `continue`
+            # cannot turn this test vacuous.
+            assert "schema's own CHECK" in str(e), e
+            continue
+        assert stmt.dropped_vectors == {}, (
+            f"{label} is served by run_vector_query — nothing may be withheld for it")
+
+
+def test_a_DROPPED_vector_does_not_leave_the_verbatim_marker_behind():
+    """`#11747` review, finding 6b — a marker must not outlive the value it describes.
+
+    `embedding_verbatim: true` is a PRIMARY claim about the STORAGE FORM of the
+    vector. A `:Session` whose tail carried BOTH the vector and the marker used to
+    store the marker and no vector — measured
+    ``params['props'] == {'id':…, 'turn_count':…, 'embedding_verbatim': True}``
+    with no ``embedding`` clause and no ``n.embedding``: a property asserting a
+    storage form for a value the same statement withheld.
+
+    ⚠️ Non-vacuity in BOTH directions: a node that never had a vector keeps the
+    marker exactly as before (that behaviour is deliberate — a record-sourced
+    cache must not be POORER than the record).
+    """
+    from tortoise.stored_form import VERBATIM_MARKER
+
+    unserved = sorted(cp.UNSERVED_VECTOR_LABELS)
+    assert unserved, "no unserved label to measure — the pin below would be vacuous"
+    for label in unserved:
+        node = _node(label, {"props": {"embedding": [0.5, 0.25],
+                                      VERBATIM_MARKER: True}})
+        assert "embedding" in node.dropped_vectors, (label, node.dropped_vectors)
+        stmt = cp.node_statement(node)
+        assert VERBATIM_MARKER not in stmt.params["props"], (
+            f"{label}: the marker survived the vector it describes — "
+            f"{stmt.params['props']}")
+    # The unchanged half: a marker with no vector to describe is still carried.
+    marker_only = _node("Point", {"props": {VERBATIM_MARKER: True}})
+    assert cp.node_statement(marker_only).params["props"][VERBATIM_MARKER] is True
+
+
+def test_the_PLAN_reports_the_vectors_it_refuses():
+    """`#11747` review, finding 1 — the drop is NAMEABLE on the plan, not only per statement.
+
+    `Statement.dropped_vectors` had no reader in production, so a
+    `rebuild_from_record` over a tenant whose session rows carry a vector DELETED
+    those vectors and printed a clean, complete projection with no mention of it.
+    The plan is where the writer's own statement sits beside the node it was built
+    from, so it is where the drop becomes a count a caller can report.
+
+    ⛔ Read off the STATEMENTS: `node_statement` can refuse a directly-built
+    `RecordNode` that never went through `node_from_row`, and a node-side read
+    would miss exactly that case.
+    """
+    from_server = _node("Session", {"props": {"embedding": [0.5, 0.25]}})
+    built_directly = cp.RecordNode(
+        label="Session", key="s-direct",
+        props={"id": "s-direct", "embedding": [0.5, 0.25]})
+    clean = _node("Point", {"embedding": [0.5, 0.25]})
+
+    plan = cp.record_plan([from_server, built_directly, clean])
+    assert plan.dropped_vectors() == {"Session": 2}, (
+        "both doors must be counted: "
+        f"{plan.dropped_vectors()}")
+    # And a plan that withholds nothing says so.
+    assert cp.record_plan([clean]).dropped_vectors() == {}
+    # The report carries it where an operator reads the run's result.
+    #
+    # ⚠️ `ProjectionReport` is CALLER-FILLABLE: nothing in the tree constructs
+    # one on a run path, so these three assertions pin the RENDERER's shape, not
+    # a wired surface (`#11747` review, finding 3). Where the drop is actually
+    # wired is pinned ELSEWHERE, and the two halves are different tests:
+    #   * the report keys → `RestoreOutcome` parse —
+    #     `test_9556_record_restore_verb.py::test_the_report_carries_the_drop_from_the_projection_to_the_outcome`
+    #     (a STUB projection, so that pin is about the WIRING, not the run);
+    #   * the run itself — `test_cache_projection_live.py`:
+    #     `test_a_REFUSED_rebuild_does_not_LOG_a_drop_it_never_made` asserts a real
+    #     `rebuild_from_record` reports `dropped_vectors == 1`.
+    # ⛔ The earlier version of this note cited
+    # `test_the_human_line_names_the_DROPPED_vectors_and_denies_the_re_run` as
+    # driving "the real `rebuild_from_record` path": it hand-constructs a
+    # `RestoreOutcome` and never calls `rebuild_from_record`, so a lane that
+    # rewrote the wiring would find that citation green (`#11747` round-4 review,
+    # finding F1).
+    report = cp.ProjectionReport(nodes_written=3, dropped_vectors=2,
+                                 dropped_vector_labels=("Session",))
+    assert "2 vector(s) DROPPED" in report.render(), report.render()
+    assert "Session" in report.render(), report.render()
+    assert "DROPPED" not in cp.ProjectionReport(nodes_written=3).render(), (
+        "a projection that withheld nothing must not print a drop clause")
+
+
 def test_is_verbatim_is_an_or_across_the_sides_it_is_given():
     """One side's flag is enough — a dropped flag must not hide a narrowing."""
     from tortoise.stored_form import is_verbatim
