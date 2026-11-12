@@ -689,6 +689,21 @@ COUNT_WORDS: tuple[str, ...] = (
     "seven", "eight", "nine", "ten", "eleven", "twelve",
 )
 
+
+def _count_word(n: int) -> str:
+    """`COUNT_WORDS[n]`, or the digits when `n` is past the end of the tuple.
+
+    ⛔ NEVER index `COUNT_WORDS` bare. `CORRECTION_ROW_RE` accepts labels `a`-`z` while
+    this tuple stops at `twelve`, so appending a thirteenth correction row made
+    `COUNT_WORDS[13]` raise `IndexError` out of `check_document()` — and `main()` catches
+    only `Unverifiable`, so the CLI exited **1**, the code §8 reserves for "a named claim
+    is false", with a traceback over a page edit (measured, review round 5). One site was
+    already guarded inline and three were not, which is exactly how the hole survived: a
+    guard that is written per-expression is a guard that gets forgotten. Every site goes
+    through here now.
+    """
+    return COUNT_WORDS[n] if n < len(COUNT_WORDS) else str(n)
+
 #: The paragraph whose tally the page states in words.
 TAKEAWAY_MARKER = "The one thing to take away"
 
@@ -1043,8 +1058,8 @@ def check_verdict_tally(text: str) -> list[str]:
     paragraph = re.sub(r"\s+", " ", paragraph)
 
     total = len(verdicts)
-    total_word = COUNT_WORDS[total] if total < len(COUNT_WORDS) else str(total)
-    expected = f"{COUNT_WORDS[len(non_still)]} of the {total_word} rows no longer read as written"
+    total_word = _count_word(total)
+    expected = f"{_count_word(len(non_still))} of the {total_word} rows no longer read as written"
     # Split into sentences: the non-STILL-TRUE letters live in the "no longer read
     # as written" sentence, its complement in the "still read as written" one.
     # Partitioning on the phrase instead does not work — "Only **(a)** … **(j)** "
@@ -1402,8 +1417,8 @@ def check_verdict_tally(text: str) -> list[str]:
         )
 
     expected_overtaken = (
-        f"{COUNT_WORDS[len(overtaken)].capitalize()} of the "
-        f"{COUNT_WORDS[len(non_still)]} were"
+        f"{_count_word(len(overtaken)).capitalize()} of the "
+        f"{_count_word(len(non_still))} were"
     )
     # The same rule as the count above, for the same measured reason: the figure is
     # compared against the ONE sentence that states it, never against the paragraph.
@@ -1644,6 +1659,24 @@ def _line_count(path: Path) -> int | None:
         return None
 
 
+def _is_file(path: Path) -> bool:
+    """`path.is_file()`, treating an unresolvable path as "not a file".
+
+    ⛔ `Path.is_file()` is NOT total. `pathlib` swallows only
+    `(ENOENT, ENOTDIR, EBADF, ELOOP)`, so `ENAMETOOLONG` and `EACCES` are re-raised —
+    and a citation path is page-controlled, so a path longer than `PATH_MAX` raised
+    `OSError` out of `check_document()` and the CLI exited 1 (measured, review round 5).
+    The two neighbouring arms already handled this (`target.resolve()` catches
+    `(OSError, RuntimeError)`, `_line_count` catches `OSError`); these two existence
+    checks were the outliers. A path the filesystem refuses is a path the tree does not
+    contain, which is what the caller reports.
+    """
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def check_citations(text: str, root: Path = REPO) -> list[str]:
     """Every backticked `path:line` must resolve, and the line must be in range.
 
@@ -1753,7 +1786,7 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
             # resolved (measured). Such a path is only evidence if it points INSIDE
             # this tree; otherwise it is a dangling reference.
             target = root / rel.lstrip("/")
-            if not target.is_file():
+            if not _is_file(target):
                 problems.append(
                     f"citation {label}{origin}: {rel} is an absolute path outside "
                     "this repository — evidence the repo does not contain is not "
@@ -1781,7 +1814,7 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
                 "evidence the repo does not contain is not evidence"
             )
             continue
-        if not target.is_file():
+        if not _is_file(target):
             problems.append(f"citation {label}{origin}: {rel} does not exist in the tree")
             continue
         n_resolved += 1

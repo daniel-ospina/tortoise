@@ -2006,6 +2006,69 @@ def test_a_huge_section_reference_is_not_evidence():
     assert flc._has_evidence("`§8`", {8}) is True
 
 
+def _append_correction_rows(text: str, extra: int) -> str:
+    """Append `extra` adopter rows directly to the END of §3's table.
+
+    Directly — not after the closing prose. A row appended past a blank line forms a
+    separate table and is invisible to `_table_rows`, which is how a probe can "prove"
+    an unreachable crash (measured while verifying this finding: the first attempt
+    appended after §3's takeaway paragraph and read 12 rows, not 18).
+    """
+    start = text.index("## 3. The corrections log")
+    end = text.index("## 4. The artefact index")
+    lines = text.split("\n")
+    last = max(
+        i for i, line in enumerate(lines)
+        if start <= sum(len(x) + 1 for x in lines[:i]) < end
+        and flc.CORRECTION_ROW_RE.match(line)
+    )
+    letters = [chr(ord("m") + k) for k in range(extra)]
+    rows = [
+        f"| **{letter}** | a claim | **ADOPTED** | **ADOPTED** | `tortoise/pipeline.py:16` | x |"
+        for letter in letters
+    ]
+    return "\n".join(lines[: last + 1] + rows + lines[last + 1 :])
+
+
+def test_a_thirteenth_correction_row_cannot_crash_the_tally(tmp_path, monkeypatch):
+    """FAILS (IndexError, exit 1) if `COUNT_WORDS` is indexed bare.
+
+    `CORRECTION_ROW_RE` accepts labels `a`-`z`, but `COUNT_WORDS` stops at `twelve`, so a
+    thirteenth non-STILL-TRUE row made `COUNT_WORDS[13]` raise `IndexError` out of
+    `check_document()`; `main()` catches only `Unverifiable`, so the CLI exited **1** —
+    the code §8 reserves for "a named claim is false". Measured, review round 5. One of
+    the four sites was already guarded inline and three were not, which is why 47/47
+    self-test arms and every collected case stayed green over it.
+    """
+    text = flc.read_doc(REPO)
+    grown = _append_correction_rows(text, 6)
+    assert grown != text, "the §3 table anchor moved — re-derive this mutation"
+    assert len(flc._verdicts_by_label(grown)) == 18, (
+        "the six rows must land INSIDE §3's table, or this arm tests nothing"
+    )
+    problems = flc.check_document(grown)  # must not raise
+    assert any("no longer read as written" in p for p in problems), problems
+
+
+def test_a_path_the_filesystem_refuses_is_a_dangling_citation(tmp_path, monkeypatch):
+    """FAILS (OSError, exit 1) if `Path.is_file()` is called bare on a citation path.
+
+    `pathlib` swallows only `(ENOENT, ENOTDIR, EBADF, ELOOP)`, so `ENAMETOOLONG` — which a
+    page-controlled path longer than `PATH_MAX` produces — is re-raised, and `main()`
+    catches only `Unverifiable`: the CLI exited 1 with a traceback (measured, round 5).
+    The two neighbouring arms already handled this, so these were the outliers. A path
+    the filesystem refuses is a path the tree does not contain.
+    """
+    text = flc.read_doc(REPO)
+    long_path = "a" * 5000
+    probe = text.replace("`tortoise/pipeline.py:16`", f"`{long_path}.py:16`", 1)
+    assert probe != text, "the citation anchor moved — re-derive this mutation"
+    problems = flc.check_document(probe)  # must not raise
+    assert any("does not exist in the tree" in p for p in problems), problems
+    # And the helper itself, so the assertion is not passing on an unrelated red.
+    assert flc._is_file(flc.REPO / (long_path + ".py")) is False
+
+
 def test_the_pinned_population_is_a_membership_set_not_a_count():
     """FAILS if `PINNED_INDEXED` and `PINNED_INDEXED_ROWS` can drift apart.
 
