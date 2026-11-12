@@ -6185,9 +6185,11 @@ def tortoise_list_dedup_candidates(candidate_type: str = "content",
 
     candidate_type='content' → content-dedup candidates; 'temporal' →
     contradictory/replacement decision Points pending promotion wiring;
-    'entity' → [] (entity queue tracked separately). Each entry carries
-    {id, content, pointKind, method/similarity (content) or replacement
-    (temporal), target_id, candidate_type, status}.
+    'entity' → duplicate-ENTITY pairs (exact → fuzzy → semantic, #12047), each
+    row {candidate_id, existing_id, canonical_name, method, similarity,
+    auto_mergeable, ambiguous}. An EMPTY entity queue is the RESULT OF A SCAN,
+    never a stub: a scan that cannot run raises (`EntityScanUnavailable`), so a
+    caller can always tell "no duplicates" from "cannot answer".
     """
     return _safe(_get_org_sdk().list_dedup_candidates,
                  candidate_type=candidate_type, limit=limit)

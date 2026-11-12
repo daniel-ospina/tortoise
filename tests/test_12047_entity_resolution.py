@@ -890,29 +890,37 @@ class TestSecondReviewRound:
 
     def test_a_semantic_row_can_be_merged_back(self, sdk_factory, monkeypatch):
         """N2: `entity_pair_for` hard-coded `include_semantic=False`, so the queue
-        offered a semantic row the merge then refused as "no pair"."""
-        import tortoise.entity_resolver as er
+        offered a semantic row the merge then refused as "no pair".
 
-        class _Enc:
-            def encode(self, texts):  # identical vectors → similarity 1.0
-                return [[1.0, 0.0] for _ in texts]
+        The seam is `tortoise.embeddings._encode` (imported lazily inside
+        `_semantic_matrix`) — patching anything else is a dead pin (review F-D).
+        The two names are in ONE block ('qua') because the semantic rung is
+        block-scoped by design; their folds share no word, so no deterministic or
+        fuzzy rung can pair them.
+        """
+        import tortoise.embeddings as emb
 
-            def dimensions(self):  # pragma: no cover - shape only
-                return 2
+        def fake_encode(texts):
+            # Distinct-but-identical vectors → cosine 1.0 for every pair.
+            return [[1.0, 0.0, 0.0] for _ in texts], False
 
-        monkeypatch.setattr(er, "_encoder", lambda: _Enc(), raising=False)
+        monkeypatch.setattr(emb, "_encode", fake_encode, raising=False)
         sdk = sdk_factory()
-        # Names that do NOT fold or fuzz together: the semantic rung is the only
-        # one that can pair them.
         _create_raw(sdk, "Subject", "sub-a", "quarterly revenue", "subjectKind", "other")
-        _create_raw(sdk, "Subject", "sub-b", "annual income", "subjectKind", "other")
+        _create_raw(sdk, "Subject", "sub-b", "quasar rebound", "subjectKind", "other")
 
         rows = sdk.list_dedup_candidates(candidate_type="entity")
         semantic = [r for r in rows if r["method"] == "semantic"]
-        if not semantic:  # encoder seam not reachable in this build → not a defect
-            pytest.skip("semantic rung did not produce a row here")
+        assert semantic, (
+            "the semantic rung produced no row with a working encoder and "
+            f"same-block names — queue was {rows!r}")
+        assert semantic[0]["auto_mergeable"] is False, (
+            "a semantic row must never be auto-mergeable (advisory only)")
         pair = entity_pair_for(sdk._get_proj().g, semantic[0]["candidate_id"])
         assert pair, "the merge could not re-derive a row the queue just displayed"
+        assert pair["method"] == "semantic"
+        out = sdk.approve_merge(semantic[0]["candidate_id"], "merge")
+        assert out["action"] == "merge" and out["method"] == "semantic"
 
     # ── N3: a rename maintains the folded key, and collides loudly ───────
 
@@ -1029,3 +1037,143 @@ class TestSecondReviewRound:
         again = sdk.create_object("the pricing memo", "document")
         assert again["id"] == oid
         assert _count(sdk, "Object") == 1
+
+
+class TestThirdReviewRound:
+    """Regression pins for the third review round (F-A..F-F, F-H)."""
+
+    # ── F-A (P0): a re-mention must not rewrite the entity's own key ──────
+
+    def test_a_re_mention_of_the_merged_away_spelling_keeps_the_survivors_key(
+            self, sdk_factory):
+        """F-A: `canonical_name` rode the extra-props lane (`SET n += $extra`),
+        which applies ON MATCH — so creating the MERGED-AWAY spelling resolved
+        onto the survivor and then overwrote the survivor's own folded key with
+        the alias's. The next create of the survivor's own name then minted the
+        duplicate this issue exists to remove."""
+        from tortoise.entity_resolver import apply_entity_merge
+
+        sdk = sdk_factory()
+        survivor = sdk.create_object("Acme Corp", "document")["id"]
+        twin = sdk.create_object("Acme Corporaton", "document")["id"]
+        assert twin != survivor
+        apply_entity_merge(sdk, candidate_id=twin, survivor_id=survivor,
+                           method="fuzzy", similarity=0.9)
+
+        def props(i):
+            rows = sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) RETURN o.name, o.canonical_name",
+                params={"id": i}).result_set
+            return rows[0]
+
+        assert props(survivor) == ["Acme Corp", "acme corp"]
+        again = sdk.create_object("Acme Corporaton", "document")  # the alias
+        assert again["id"] == survivor, "the merged-away spelling must hop"
+        assert props(survivor) == ["Acme Corp", "acme corp"], (
+            "a re-mention rewrote the survivor's resolution key")
+        # …and the survivor is STILL addressable under its own spelling.
+        assert sdk.create_object("acme corp", "document")["id"] == survivor
+
+    def test_a_plain_re_mention_does_not_rewrite_the_key(self, sdk_factory):
+        sdk = sdk_factory()
+        oid = sdk.create_object("Acme Corp", "document")["id"]
+        sdk.create_object("ACME CORPORATION", "document")  # mints its own entity
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$id}) RETURN o.name, o.canonical_name",
+            params={"id": oid}).result_set
+        assert rows[0] == ["Acme Corp", "acme corp"]
+
+    # ── F-B (P1): id-less holders are COUNTED, never collapsed ───────────
+
+    def test_two_id_less_holders_refuse_and_get_no_shared_id(self, sdk_factory):
+        """F-B: the union's Python dedupe keyed id-less rows on `id(None)` — one
+        constant — so two distinct legacy rows collapsed into one, the 2+-holder
+        refusal was skipped, and the adopt stamped ONE id onto BOTH nodes."""
+        sdk = sdk_factory()
+        g = sdk._get_proj().g
+        g.query("CREATE (:Subject {name:'Ghost3'}) CREATE (:Subject {name:'Ghost3'})")
+        assert _count(sdk, "Subject") == 2
+        with pytest.raises(AmbiguousEntityName):
+            sdk.create_subject("Ghost3", "role")
+        ids = g.query("MATCH (n:Subject) RETURN n.id").result_set
+        assert [r[0] for r in ids] == [None, None], (
+            f"an id was stamped onto an id-less holder despite the refusal: {ids}")
+
+    # ── F-C (P2): a scan that cannot run still allows REJECT ─────────────
+
+    def test_reject_survives_a_scan_that_cannot_run(self, sdk_factory, monkeypatch):
+        """F-C: `entity_pair_for` can raise `EntityScanUnavailable`, and
+        `approve_merge`'s reject arm only caught `ValueError` — so the reject
+        verb died with the merge verb. A reject asserts "not duplicates" and
+        needs no survivor; a MERGE must still fail loudly rather than guess.
+
+        (The truncation axis this test used to pin is gone: the merge's
+        re-derivation now runs with `limit=None`, so there is no window to be
+        full of — see `test_the_merge_recomputation_is_untruncated`.)
+        """
+        import tortoise.entity_resolver as er
+
+        sdk = sdk_factory()
+        _create_raw(sdk, "Object", "obj-x", "Acme Corporation", "objectKind", "document")
+        _create_raw(sdk, "Object", "obj-y", "Acme Corporaton", "objectKind", "document")
+
+        def boom(*_a, **_kw):
+            raise EntityScanUnavailable("scan unavailable (test)")
+
+        monkeypatch.setattr(er, "entity_candidates", boom, raising=False)
+        out = sdk.approve_merge("obj-x", "reject")
+        assert out["action"] == "reject" and out["candidate_type"] == "entity"
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object {id:'obj-x'}) RETURN o.dedup_reviewed", ).result_set
+        assert rows[0][0] == "reject"
+        with pytest.raises(EntityScanUnavailable):
+            sdk.approve_merge("obj-y", "merge")
+
+    def test_the_merge_recomputation_is_untruncated(self, sdk_factory, monkeypatch):
+        """The merge must re-derive the queue's pair from the WHOLE graph — a
+        bounded window could answer "no pair" for a candidate outside it."""
+        import tortoise.entity_resolver as er
+
+        seen: list = []
+        real = er.entity_candidates
+
+        def spy(graph, **kw):
+            seen.append(kw.get("limit"))
+            return real(graph, **kw)
+
+        monkeypatch.setattr(er, "entity_candidates", spy, raising=False)
+        sdk = sdk_factory()
+        _create_raw(sdk, "Object", "obj-x", "Acme Corporation", "objectKind", "document")
+        _create_raw(sdk, "Object", "obj-y", "Acme Corporaton", "objectKind", "document")
+        assert entity_pair_for(sdk._get_proj().g, "obj-x")
+        assert seen and seen[0] is None, f"the recompute was bounded: {seen}"
+
+    # ── F-F (P2): the legacy fold shape is still findable ────────────────
+
+    def test_a_row_written_with_the_legacy_fold_still_resolves(self, sdk_factory):
+        """F-F: `mining` wrote `extractor._canonical_name` before this PR
+        (`'The Owner'` → `'the owner'`); the new fold gives `'owner'`, so the
+        folded rung missed every pre-existing row and minted a twin on exactly
+        the graphs this issue measured."""
+        sdk = sdk_factory()
+        obj = sdk.create_object("The Owner", "document")["id"]
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$id}) SET o.canonical_name='the owner'",
+            params={"id": obj})   # the pre-#12047 shape
+        assert sdk.create_object("the owner", "document")["id"] == obj
+        assert _count(sdk, "Object") == 1
+
+    # ── F-H (P2): a no-op re-write keeps a caller-supplied key ───────────
+
+    def test_an_unchanged_name_does_not_clobber_a_caller_supplied_key(self, sdk_factory):
+        sdk = sdk_factory()
+        oid = sdk.create_object("Widget", "document")["id"]
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$id}) SET o.canonical_name='my own key'",
+            params={"id": oid})
+        sdk.update_entity(oid, name="Widget", status="live")  # no-op re-write
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$id}) RETURN o.canonical_name",
+            params={"id": oid}).result_set
+        assert rows[0][0] == "my own key", (
+            "a no-op re-write replaced a caller-supplied canonical_name")

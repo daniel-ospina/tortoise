@@ -23955,7 +23955,11 @@ class TortoiseSDK:
         through to the content branch. Returning a dict instead would make a
         legitimate content verdict unreachable for an id that both labels carry.
         """
-        from .entity_resolver import apply_entity_merge, entity_pair_for
+        from .entity_resolver import (
+            EntityScanUnavailable,
+            apply_entity_merge,
+            entity_pair_for,
+        )
 
         _labels, props = row
         reviewed = str(props.get("dedup_reviewed") or "")
@@ -23984,6 +23988,13 @@ class TortoiseSDK:
                 # An ambiguous candidate has no single survivor to record — the
                 # rejection still stands, it just names no target.
                 target_id = None
+            except EntityScanUnavailable:
+                # #12047 review F-C: the pair window is a bound on the MERGE's
+                # re-derivation. A REJECT does not need a survivor — it asserts
+                # "these are not duplicates" and names the target best-effort —
+                # so a full window must not make the review surface's reject verb
+                # unavailable exactly when the queue is largest.
+                target_id = None
             self.update_entity(candidate_id, dedup_reviewed="reject",
                                reviewed=True,
                                **({"dedup_target_id": target_id}
@@ -23991,6 +24002,9 @@ class TortoiseSDK:
             return {"candidate_id": candidate_id, "action": "reject",
                     "candidate_type": "entity", "wired": False,
                     "deferred_to_promotion": False, "target_id": None}
+        # ⛔ A MERGE never takes the lenient path: it needs the survivor the queue
+        # showed, so `EntityScanUnavailable` (a truncated window) propagates and
+        # the caller is told to re-list, rather than folding into a guessed node.
         pair = entity_pair_for(proj.g, candidate_id)
         if pair is None:
             # An id can be carried by BOTH a Point and an Object/Subject (the
@@ -44451,7 +44465,7 @@ class TortoiseSDK:
                     "Point", tid, "delete", cache_tier=RECORD_ONLY_TIER)
                 for tid in (turn_ids or ())}
 
-    def _refuse_ambiguous_rename(self, id_val: str, new_name: str) -> None:
+    def _refuse_ambiguous_rename(self, id_val: str, new_name: str) -> bool:
         """Refuse a rename onto a name a DIFFERENT live entity already holds.
 
         #3590 R2 + D3: the name is a mutable natural key, and a natural key that
@@ -44489,10 +44503,17 @@ class TortoiseSDK:
         holders of one name — the exact state this guard exists to prevent.
         ``_update_entity`` takes both identity labels' locks (fixed order) around
         both.
+
+        Returns whether the write is a REAL rename (the target's stored name
+        differs) — ``_update_entity`` stamps the folded key only then (#12047
+        review F-H: a read-modify-write re-sending the unchanged name must not
+        replace a caller-supplied ``canonical_name``, and a Point/Event rename
+        must not gain one this module never declares).
         """
         from .entity_identity import _live_holders_same_entity
         from .exceptions import NameAlreadyHeld
         g = self._get_proj().g
+        renamed = False
         # ⛔ LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id AND
         # (n:Object OR n:Subject)` (#3590 review round 5, finding 2). FalkorDB
         # indexes are label-scoped, so a pattern with no label in it can use no
@@ -44514,6 +44535,7 @@ class TortoiseSDK:
             stored = rows[0][0] if rows[0] else None
             if isinstance(stored, str) and stored == new_name:
                 continue
+            renamed = True
             # #12047 review N3: count over the FOLDED key as well. Once the
             # rename maintains `canonical_name` (below), two entities whose
             # folded names collide are as create-poisoned as two whose raw names
@@ -44535,6 +44557,7 @@ class TortoiseSDK:
                       if h is None or str(h) != str(id_val)]
             if others:
                 raise NameAlreadyHeld(label, new_name, others, id_val)
+        return renamed
 
     def _entity_identity_for(self, label: str, name: str, *,
                              explicit_id: str | None = None) -> str:
@@ -45144,16 +45167,33 @@ class TortoiseSDK:
             # call still wins (`setdefault` semantics) — this fills, never
             # overwrites. A non-entity label renamed through here (a Point
             # carrying `name`) just gains an inert property nothing reads.
+            # ⛔ Deferred to AFTER the guard, so the fold is spent only on a REAL
+            # rename (#12047 review F-H): a read-modify-write that re-sends the
+            # unchanged name must not replace a caller-supplied `canonical_name`,
+            # and a Point/Event renamed through here must not gain one.
             from .entity_resolver import normalize_entity_name
             _folded_new = normalize_entity_name(props["name"])
-            if _folded_new:
-                props.setdefault("canonical_name", _folded_new)
         with contextlib.ExitStack() as _rename_lock_stack:
             for _lock_key in _rename_locks:
                 _rename_lock_stack.enter_context(
                     entity_create_lock(*_lock_key))
             if _rename_locks:
-                self._refuse_ambiguous_rename(id_val, props["name"])
+                _renamed = self._refuse_ambiguous_rename(id_val, props["name"])
+                # #12047 review N3: `canonical_name` is the FOLDED key the
+                # deterministic resolution rung queries, so a rename that does
+                # not maintain it leaves the entity invisible under its new
+                # spelling — and a later create of that spelling mints a twin,
+                # the exact damage this issue removes. It rides the SAME applied
+                # map, so `EntityMutated` replays it. A caller that supplied the
+                # key explicitly keeps their value (`setdefault`).
+                # ⛔ Only on a REAL rename (review F-H): a read-modify-write that
+                # re-sends the unchanged name must not spend the write, and must
+                # not replace a caller-supplied key.
+                if _renamed:
+                    from .entity_resolver import normalize_entity_name
+                    _folded_new = normalize_entity_name(props["name"])
+                    if _folded_new:
+                        props.setdefault("canonical_name", _folded_new)
             for label, _prop in _CANONICAL_ENTITY_ID_PROPS:
                 # #4649: a canonical label's identity is an OR-SET, not one key.
                 # NOTE: the primary key is not read here any more — `id_keys` below
@@ -45571,8 +45611,11 @@ class TortoiseSDK:
                 # raw prop refused `subjectKind=" role "` here while the identical
                 # call WITHOUT `roleHolder` succeeded and stored `subjectKind="role"`:
                 # two spellings of one rule, which is the divergence `named_kind`
-                # exists to prevent.
-                _kind = named_kind(props.get("subjectKind"))
+                # exists to prevent. Both PROPERTY spellings are read: a caller
+                # reaching `create_entity(type='subject', subject_kind='role')`
+                # was refused with "got None".
+                _kind = named_kind(props.get("subjectKind")
+                                   or props.get("subject_kind"))
                 if _kind != "role":
                     raise ValueError(
                         "roleHolder is only valid on a Subject of "
@@ -48414,10 +48457,19 @@ class TortoiseSDK:
                                 proj.g, "Object", name)
                             self._create_entity(
                                 "Object", oid,
-                                {"name": name, "objectKind": okind,
-                                 "repo": repo,
-                                 "issue_number": issue_number,
-                                 "url": url},
+                                # #12047 review F-E: this connector lane is a
+                                # producer too, and it wrote no folded key — so a
+                                # later `create_object("the acme corp")` minted a
+                                # twin beside it, the gap `mining`/`EventAPI` had.
+                                # `_with_folded_entity_name` is the SDK door's own
+                                # single stamper; reuse it rather than a second
+                                # fold expression.
+                                _with_folded_entity_name(
+                                    name,
+                                    {"name": name, "objectKind": okind,
+                                     "repo": repo,
+                                     "issue_number": issue_number,
+                                     "url": url}),
                                 "ObjectRegistered")
                     except AmbiguousEntityName as exc:
                         _logger.debug(

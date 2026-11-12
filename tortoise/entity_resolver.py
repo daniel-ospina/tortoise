@@ -662,6 +662,21 @@ def resolve_entity_name(graph, label: str, name: str, *,
 # ── Applying a review verdict (non-destructive) ──────────────────────────
 
 
+def _identity_row(graph, node_id: str, var: str, projection: str):
+    """``projection`` over the ONE identity label that carries ``node_id``.
+
+    Both identity labels are tried in a fixed order — never an unlabelled
+    `MATCH (n) WHERE n.id = $id`, which full-scans every label in the graph.
+    """
+    for label in ("Object", "Subject"):
+        rows = graph.query(
+            f"MATCH ({var}:{label} {{id:$id}}) " + projection,
+            params={"id": node_id}).result_set
+        if rows:
+            return rows[0]
+    return None
+
+
 def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
                        method: str, similarity: float) -> dict:
     """Fold ``candidate_id`` onto ``survivor_id`` WITHOUT deleting either node.
@@ -695,14 +710,15 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     if candidate_id == survivor_id:
         raise ValueError("a merge needs two distinct entities")
     graph = sdk._get_proj().g
-    rows = graph.query(
-        "MATCH (s) WHERE s.id = $sid "
-        "RETURN s.name, coalesce(s.aliases, []), s.canonical_name",
-        params={"sid": survivor_id},
-    ).result_set
-    if not rows:
+    # LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id` (this module's own
+    # rule — an unlabelled id probe full-scans every label in the graph, and
+    # `id` is a natural key on exactly two of them).
+    survivor = _identity_row(
+        graph, survivor_id, "s",
+        "RETURN s.name, coalesce(s.aliases, []), s.canonical_name")
+    if survivor is None:
         raise ValueError(f"No entity {survivor_id!r}")
-    survivor_name, aliases, survivor_canonical = rows[0]
+    survivor_name, aliases, survivor_canonical = survivor
     # `aliases` is an undeclared-but-writable property, so a caller may have
     # stored a bare string (`update_entity(id, aliases="foo")` is reachable).
     # Iterating it would then manufacture one "alias" PER CHARACTER — silently
@@ -711,13 +727,11 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
         aliases = [aliases]
     elif not isinstance(aliases, (list, tuple)):
         aliases = []
-    rows = graph.query(
-        "MATCH (c) WHERE c.id = $cid RETURN c.name, c.canonical_name",
-        params={"cid": candidate_id},
-    ).result_set
-    if not rows:
+    candidate = _identity_row(
+        graph, candidate_id, "c", "RETURN c.name, c.canonical_name")
+    if candidate is None:
         raise ValueError(f"No entity {candidate_id!r}")
-    candidate_name, candidate_canonical = rows[0]
+    candidate_name, candidate_canonical = candidate
     folded = normalize_entity_name(candidate_canonical or candidate_name)
     alias_list = sorted({a for a in (aliases or []) if isinstance(a, str)} | {folded})
     # The survivor's folded key is only FILLED, never rewritten: a caller may

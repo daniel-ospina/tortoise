@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import re
 import threading
 from typing import NamedTuple
 
@@ -198,7 +199,8 @@ def _refuse(label: str, name: str, candidate_ids, *,
 
 def live_name_holder_ids(g, label: str, name: str, *,
                          case_insensitive: bool = False,
-                         name_props: tuple = ("name",)) -> list:
+                         name_props: tuple = ("name",),
+                         also: tuple = ()) -> list:
     """Every LIVE holder of ``name`` for ``label``, by ``n.id`` (raw).
 
     The list is **row-per-holder**, so an id-less legacy/hosted-stub holder
@@ -218,7 +220,7 @@ def live_name_holder_ids(g, label: str, name: str, *,
     """
     return _name_holder_ids(g, label, name,
                             case_insensitive=case_insensitive, live_only=True,
-                            name_props=name_props)
+                            name_props=name_props, also=also)
 
 
 def _adopt_idless_holder(g, label: str, names: str | tuple[str, ...],
@@ -338,6 +340,23 @@ def entity_create_lock(label: str, name: str):
         yield
 
 
+_LEGACY_PUNC = re.compile(r"[^\w\s]")
+'''The PRE-#12047 `canonical_name` shape (lowercase, whitespace-collapsed,
+punctuation stripped) — `extractor._canonical_name`, which every `mining` write
+used before this change. It is READ-ONLY compatibility: the write uses
+`normalize_entity_name` (which also strips a leading article and folds NFKC), and
+the ids that derive from the old shape must not churn (#3590). Without this arm a
+pre-existing row `name='The Owner', canonical_name='the owner'` is invisible to
+the folded rung — `create("the owner")` folded to `owner` matched neither
+property and minted a twin (`#12047` review F-F), on exactly the graphs this
+issue measured.
+'''
+
+
+def _legacy_fold(name: str) -> str:
+    return _LEGACY_PUNC.sub("", re.sub(r"\s+", " ", name.lower().strip()))
+
+
 def _live_holders_same_entity(g, label: str, name: str) -> tuple[list, tuple]:
     """The holders of ``name`` including the FOLDED spelling — and which props found them.
 
@@ -355,30 +374,29 @@ def _live_holders_same_entity(g, label: str, name: str) -> tuple[list, tuple]:
     adopted and the create mints a twin beside it.
     """
     folded = normalize_entity_name(name)
-    raw = live_name_holder_ids(g, label, name)
     if not folded:
-        return raw, ("name",)
-    # ⛔ NOT guarded on ``folded != name``, and NEVER a substitution (review N1):
-    # a raw-name HIT must not short-circuit the folded count. Spelling the name in
-    # its folded form ("owner") with TWO live carriers of that folded identity
-    # ("owner" and "an owner") used to return the raw hit alone, so the create
-    # silently picked one — while the same create spelled "an owner" refused. The
-    # union is what makes "two live carriers is not a choice a create may make"
-    # true for EVERY spelling.
-    props = ("name", "canonical_name")
-    folded_hits = live_name_holder_ids(g, label, folded, name_props=props)
-    # Dedupe by id, keeping the id-less (None) row OUT of the set identity — a
-    # raw legacy row with no id is a holder in its own right (`refuse_if_ambiguous`
-    # counts rows, not truthy ids).
-    seen: set = set()
-    holders: list = []
-    for holder in list(raw) + list(folded_hits):
-        key = ("id", holder) if holder else (id(holder), None)
-        if key in seen:
-            continue
-        seen.add(key)
-        holders.append(holder)
-    return holders, props
+        return live_name_holder_ids(g, label, name), ("name",)
+    # ⛔ ONE query over the UNION predicate — never two queries deduped in Python
+    # (review F-B). The two-query form could not dedupe an ID-LESS row: the
+    # primitive returns ``n.id``, which is ``None`` for every legacy row, so a
+    # Python dedupe collapsed two distinct id-less holders into one, the 2+-holder
+    # refusal was skipped, and the adopt stamped ONE id onto BOTH nodes
+    # (duplicate-id corruption). A single MATCH visits each node once, so the
+    # holder COUNT is the node count and needs no dedupe at all.
+    #
+    # Which spellings and props: the raw surface form (the #452 exact re-mention),
+    # the folded form as a NAME (a legacy row already spelled "owner" when the
+    # caller writes "the owner"), and the folded form as `canonical_name` (a row
+    # this writer already folded). Review N1: this union is computed ALWAYS — a
+    # raw-name HIT must not short-circuit the folded count, or `create("owner")`
+    # silently picks one of two live carriers while `create("the owner")` refuses.
+    # One query, through the audited name-keyed primitive (`also=`), so a probe
+    # for the lock/probe agreement (#3590) still sees every holder read and an
+    # id-less row is counted per NODE (review F-B).
+    return live_name_holder_ids(
+        g, label, name,
+        name_props=("name", "canonical_name"),
+        also=(folded, _legacy_fold(name))), ("name", "canonical_name")
 
 
 def resolve_or_mint(g, label: str, name: str, *,
@@ -479,8 +497,10 @@ def resolve_or_mint(g, label: str, name: str, *,
             # registration of its own: the caller's journal line is what makes
             # the adopted id replayable.
             adopted = ulid()
-            _adopt_idless_holder(g, label, (name, normalize_entity_name(name)),
-                                 adopted, name_props=_props)
+            _adopt_idless_holder(
+                g, label,
+                (name, normalize_entity_name(name), _legacy_fold(name)),
+                adopted, name_props=_props)
             return adopted, True
         # Zero live holders: mint an opaque id. The returned id is only half of
         # the contract: the WRITE that makes it visible must happen before this
@@ -655,16 +675,37 @@ def _name_predicate(case_insensitive: bool,
 def _name_holder_ids(g, label: str, name: str, *,
                      case_insensitive: bool,
                      live_only: bool,
-                     name_props: tuple = ("name",)) -> list:
-    """Raw holder ids for ``name``; ``live_only`` applies D2's predicate."""
+                     name_props: tuple = ("name",),
+                     also: tuple = ()) -> list:
+    """Raw holder ids for ``name`` (and any ``also`` spelling); ``live_only`` applies D2's.
+
+    ``also`` widens the SAME query to more spellings of one entity's key — the
+    folded form beside the caller's raw form (#12047 review F-B/N1). It is one
+    MATCH, so each node contributes exactly ONE row: the holder count is the node
+    count, and an id-less legacy row (``n.id IS NULL``) can never be collapsed
+    into another by a Python dedupe keyed on ``id``.
+    """
     _require_identity_label(label)
     live_pred = f"AND {_terminal_excluded('n.status')} " if live_only else ""
+    props = _require_name_properties(name_props)  # unknown prop → loud (as _name_predicate)
+    spellings = [s for s in dict.fromkeys((name, *also)) if s]
+    arms = []
+    params: dict = {}
+    for i, spelling in enumerate(spellings):
+        key = f"n{i}"
+        # `case_insensitive` lowercases BOTH sides (mirroring `_name_predicate`):
+        # lowercasing only the column made `toLower(n.name) = 'DUP'` — no match,
+        # so a two-live-carrier probe returned zero holders and refused nothing.
+        params[key] = spelling.lower() if case_insensitive else spelling
+        for prop in props:
+            col = f"toLower(n.{prop})" if case_insensitive else f"n.{prop}"
+            arms.append(f"{col} = ${key}")
     rows = g.query(
         f"MATCH (n:{label}) "
-        f"WHERE {_name_predicate(case_insensitive, name_props)} "
+        f"WHERE ({' OR '.join(arms)}) "
         f"{live_pred}"
         "RETURN n.id",
-        params={"name": name}).result_set
+        params=params).result_set
     return [r[0] for r in rows]
 
 
@@ -877,9 +918,11 @@ def resolve_entity_id(g, label: str, value: str | None, *,
     uniqueness check cover the CALLER's full endpoint-resolution space (see
     :func:`_endpoint_idents`).
 
-    ``record_misses=False`` (review N6): a SPECULATIVE probe — one the caller
-    will retry with another spelling — must not leave a `no-live-holder` refusal
-    in the R8 record. Without it a *successful* folded resolve recorded a phantom
+    ``record_misses=False`` (review N6/N1): a SPECULATIVE probe — one the caller
+    will retry with another spelling — must not leave a refusal in the R8 record
+    (neither the `no-live-holder` shape nor the `unaddressable` one; an AMBIGUOUS
+    lookup still RAISES, it just records nothing, so suppressing the record can
+    never turn a refusal into "no holder"). Without it a *successful* folded resolve recorded a phantom
     refusal for the spelling that did not hit, inflating the refused-event set
     with an event that did not happen.
 

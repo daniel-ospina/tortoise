@@ -1889,6 +1889,10 @@ class _EntityHandlers:
         # _persist_extra_props (it would then be read back by the
         # first-registration probe). Mirrors the Object set below.
         "_stub",
+        # #12047 review F-A: projection-owned, ON CREATE only (see the MERGE
+        # clause), exactly like `name` — this set is what keeps a caller prop off
+        # the `SET n += $extra` lane, which applies ON MATCH.
+        "canonical_name",
         "status",  # #1423: status is projection-owned — a SubjectAdded replay
         # must NOT rewrite it via _persist_extra_props (the clobber guard ported
         # from #1350's Object clause: a re-mention of a superseded team/role/
@@ -1900,6 +1904,7 @@ class _EntityHandlers:
         # of the extra-props persistence lane so a caller prop can never seed
         # the first-registration probe's exclusion.
         "_stub",
+        "canonical_name",  # #12047 review F-A: ON CREATE only (see _upsert_subject)
         "embedding", "status",  # #1350: status is projection-owned — an
         # ObjectRegistered replay must NOT rewrite it via _persist_extra_props
         # (the clobber guard: superseded stays superseded on re-mention).
@@ -4923,6 +4928,17 @@ class _EntityHandlers:
             # reads as LIVE by its documented legacy rule — so no read surface
             # changes meaning, and the fabricated claim is gone.
             "            s.status=$st, "
+            # #12047 review F-A: `canonical_name` is the FOLD of `name`, so it
+            # follows `name`'s discipline — written ON CREATE, never re-written
+            # by a later mention. It rode the extra-props lane (`SET s += $extra`,
+            # which applies ON MATCH), so a create that RESOLVED onto an existing
+            # entity — the merged-away spelling resolving to its survivor, the
+            # exact path `apply_entity_merge` promises — overwrote the survivor's
+            # own key with the alias's fold. The survivor was then unaddressable
+            # under its own name and the next create minted the duplicate this
+            # issue exists to remove. Only a RENAME moves it, explicitly, through
+            # `_update_entity` (which journals it).
+            "            s.canonical_name=$cn, "
             "            " + _set_emb + " "
             "ON MATCH SET s.id=coalesce($id, s.id), "
             # #7936: adoption CLEARS the event-stub discriminator the
@@ -4950,6 +4966,7 @@ class _EntityHandlers:
                     # fabricated default here is the defect, not the fix.
                     "sk": ev.get("subject_kind"),
                     "ca": ev.get("createdAt"), "now": _now_iso(),
+                    "cn": ev.get("canonical_name"),  # #12047 F-A: ON CREATE only
                     "st": ev.get("status"),  # #1423: status ON CREATE only
                     "embedding": embedding},
         )
@@ -5046,6 +5063,10 @@ class _EntityHandlers:
             # the Subject clause above (``$st`` is the creation record's own
             # payload; NULL leaves the property absent, which reads LIVE).
             "            o.status=$st, "
+            # #12047 review F-A: the Object twin of the Subject clause above —
+            # ON CREATE only, so a re-mention cannot rewrite the key that
+            # resolved it.
+            "            o.canonical_name=$cn, "
             "            " + _set_emb + " "
             "ON MATCH SET o.id=coalesce($id, o.id), "
             # #7936: adoption CLEARS the event-stub discriminator the
@@ -5057,6 +5078,7 @@ class _EntityHandlers:
             "            " + _set_emb,
             params={"key": merge_value, "id": oid, "name": name,
                     "ok": ok,
+                    "cn": ev.get("canonical_name"),  # #12047 F-A: ON CREATE only
                     "st": ev.get("status"),  # #1350: status ON CREATE only —
                     # ON MATCH never touches it (the clobber guard: a
                     # re-mention cannot reset superseded→live).
