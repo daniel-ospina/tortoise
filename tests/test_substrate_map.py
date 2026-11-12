@@ -2075,7 +2075,7 @@ def test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names() -> Non
 
     Reachable — and it WAS the shipped state: §5's D10 evidence cited
     `projection/entities.py:1584` as `_DOC_RETIRED_KEYS`, whose declaration sat at
-    1974 when this pin was written and 2245 at this head (it was 1584 when the map
+    1974 when this pin was written and 2260 at this head (it was 1584 when the map
     was cut; that module has grown since). The citation therefore sent a reader
     re-examining the retirement mechanism to a comment about `_ingestedAtStored` —
     the exact class of stale evidence pointer the `:Document` pin next door closes
