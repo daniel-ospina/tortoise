@@ -357,7 +357,11 @@ VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 39
+#: ⛔ IT IS AN EQUALITY, NOT A FLOOR THAT CAN SLIDE DOWN: 41 as of the figure arms
+#: (`a falsified §3 count beside a list-free decoy`, `a falsified overtaken figure
+#: beside a compliant decoy`), which closed the paragraph-scoped presence test. Bump
+#: it with any arm added or removed — the population is what the pin compares.
+MIN_SELF_TEST_MUTATIONS = 41
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -621,6 +625,18 @@ COUNT_WORDS: tuple[str, ...] = (
 #: The paragraph whose tally the page states in words.
 TAKEAWAY_MARKER = "The one thing to take away"
 
+#: The two DERIVED FIGURES §3 states in words. Each must live in exactly one sentence, so
+#: the comparison is made against the sentence a lane quotes rather than against the
+#: paragraph (a decoy sentence otherwise satisfies it while the real one is stale).
+_NUMBER_WORDS = "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
+FIGURE_RE = re.compile(
+    rf"\b(?:{_NUMBER_WORDS}) of the (?:{_NUMBER_WORDS}) rows no longer read as written",
+    re.IGNORECASE,
+)
+OVERTAKEN_FIGURE_RE = re.compile(
+    rf"\b(?:{_NUMBER_WORDS}) of the (?:{_NUMBER_WORDS}) were\b", re.IGNORECASE
+)
+
 
 def _verdicts_by_label(text: str) -> dict[str, str]:
     """label -> first bolded verdict token, for every §3 row (empty on no token)."""
@@ -690,7 +706,27 @@ def check_verdict_tally(text: str) -> list[str]:
     total = len(verdicts)
     total_word = COUNT_WORDS[total] if total < len(COUNT_WORDS) else str(total)
     expected = f"{COUNT_WORDS[len(non_still)]} of the {total_word} rows no longer read as written"
-    if expected not in paragraph:
+    # ⛔ A DERIVED FIGURE MUST BE ASSERTED BY THE SENTENCE A LANE QUOTES — a presence
+    # test over the whole PARAGRAPH is defeatable by a decoy sentence, which is the same
+    # defect the letter lists were cured of one arm up (#11902 review P1, third round on
+    # this paragraph). Measured before this arm: falsifying the real sentence's figure
+    # (`seven of the twelve` -> `six of the twelve`) and appending
+    # `Note that seven of the twelve rows no longer read as written.` left `--check` at
+    # rc 0, because `expected in paragraph` was still satisfied by the sentence nobody
+    # quotes — and that figure is repeated in `ci.yml`, `config/ci-surfaces.yml`,
+    # `docs/00_index.md` and both module docstrings, so a false one propagates past the
+    # page. Both figures therefore have to live in EXACTLY ONE sentence.
+    figure_sentences = [
+        s for s in re.split(r"(?<=\.)\s+", paragraph) if FIGURE_RE.search(s)
+    ]
+    if len(figure_sentences) != 1:
+        problems.append(
+            f"§3 tally: {len(figure_sentences)} sentence(s) state a 'N of the M rows no "
+            "longer read as written' figure — the guard cannot tell which one a lane "
+            "quotes, and a decoy can satisfy the comparison while the real sentence goes "
+            "stale; keep exactly one"
+        )
+    elif expected not in figure_sentences[0]:
         problems.append(
             f"§3 tally: the paragraph does not say {expected!r} — the table has "
             f"{len(non_still)} row(s) whose verdict is not STILL-TRUE "
@@ -995,7 +1031,19 @@ def check_verdict_tally(text: str) -> list[str]:
         f"{COUNT_WORDS[len(overtaken)].capitalize()} of the "
         f"{COUNT_WORDS[len(non_still)]} were"
     )
-    if expected_overtaken not in paragraph:
+    # The same rule as the count above, for the same measured reason: the figure is
+    # compared against the ONE sentence that states it, never against the paragraph.
+    overtaken_sentences = [
+        s for s in re.split(r"(?<=\.)\s+", paragraph) if OVERTAKEN_FIGURE_RE.search(s)
+    ]
+    if len(overtaken_sentences) != 1:
+        problems.append(
+            f"§3 tally: {len(overtaken_sentences)} sentence(s) state a 'N of the M were' "
+            "overtaken figure — the guard cannot tell which one a lane quotes, and a "
+            "decoy can satisfy the comparison while the real sentence goes stale; keep "
+            "exactly one"
+        )
+    elif expected_overtaken not in overtaken_sentences[0]:
         problems.append(
             f"§3 tally: the paragraph does not say {expected_overtaken!r}, though "
             f"{len(overtaken)} row(s) are SUPERSEDED-BY-FIX/ADOPTED "
@@ -1846,6 +1894,34 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             1,
         ),
         "out of range",
+    ),
+    (
+        "a falsified §3 count beside a list-free decoy",
+        # The figure was compared with `expected in paragraph`, so a decoy sentence
+        # satisfied it while the sentence a lane quotes went stale — measured before
+        # the figure arms existed. Both mutations must be present for the arm to be
+        # the subject of the test: the falsified real sentence AND the decoy.
+        lambda t: t.replace(
+            "**seven of the twelve rows no longer read as\nwritten**",
+            "**six of the twelve rows no longer read as\nwritten**",
+            1,
+        ).replace(
+            "will find the fix and call it a regression.",
+            "will find the fix and call it a regression. Note that seven of the twelve "
+            "rows no longer read as written.",
+            1,
+        ),
+        "rows no longer read as written' figure",
+    ),
+    (
+        "a falsified overtaken figure beside a compliant decoy",
+        lambda t: t.replace("Four of the seven were", "Five of the seven were", 1).replace(
+            "will find the fix and call it a regression.",
+            "will find the fix and call it a regression. Four of the seven were overtaken, "
+            "per §1.",
+            1,
+        ),
+        "'N of the M were' overtaken figure",
     ),
     (
         "a shorthand citation pointing past the end of its anchor's file",
