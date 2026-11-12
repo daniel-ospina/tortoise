@@ -458,10 +458,18 @@ same step with the same tail is the investigation.
       `has_live_job = None` by design).
 
     There is deliberately **no** "repair the frozen run" remedy here, and that is not an
-    omission: a frozen run — `in_progress` with every job `completed` — is the *proof* that
-    EXCLUDES it from `pr_running` (see the `excluded` sentence), so it can never make the census
-    unmeasured. Such a run is identified *by being probed*, i.e. by the budget lever above, and
-    neither `/cancel` nor `/force-cancel` accepts a repair. It is **NOT `--max-pages`**.
+    omission: a frozen run — `in_progress` with every job `completed` **and its own
+    `updated_at` motionless for `JOB_SETTLE_SECONDS` (300 s)** — is the *proof* that EXCLUDES
+    it from `pr_running` (see the `excluded` sentence), so it can never make the census
+    unmeasured. ⛔ The stillness half is load-bearing: this repo's test matrix is DYNAMIC
+    (`python-ci.yml` instantiates `test`/`test-slow`/`test-carve-out` from
+    `fromJSON(needs.changes.outputs.*_matrix)`), so between the parent job finishing and the
+    shards being created the jobs endpoint answers with ONE `completed` row while the run is
+    about to execute — an all-`completed` list alone would subtract a run that is working.
+    A run whose stillness cannot be proven abstains instead (counted, and reported in
+    `pr_running_unmeasured`). Such a run is identified *by being probed*, i.e. by the budget
+    lever above, and neither `/cancel` nor `/force-cancel` accepts a repair. It is **NOT
+    `--max-pages`**.
 
   In every case an unmeasured dimension is not a measured-healthy one.
 - **It does not reduce jobs per run.** A `python-ci` run is 22 jobs (max 30) by construction; with

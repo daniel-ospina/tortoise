@@ -452,6 +452,20 @@ DEFAULT_MAX_JOB_PROBES = 8
 #: the whole budget and take the reading down with it.
 JOB_PROBE_TIMEOUT_SECONDS = 15
 
+#: How long a run's own `updated_at` must have been STILL before an all-`completed` job
+#: list is accepted as proof of non-execution (#12037 review).
+#:
+#: ⛔ THIS IS NOT TUNING, IT IS THE MISSING HALF OF THE PROOF. A dynamic matrix
+#: (`python-ci.yml` `:832`/`:2241`/`:3410`, `fromJSON(needs.changes.outputs.*_matrix)`)
+#: creates its shard jobs only AFTER its parent job completes, so for a few seconds the
+#: jobs endpoint returns exactly one row — the finished parent — with a correct
+#: `total_count`, matching `run_attempt`, and no truncation. Every structural guard in
+#: `read_run_live_job` passes there, and `False` would subtract a run that is about to
+#: execute 11 shards. 300 s is far above any matrix expansion (seconds) and far below the
+#: 7-day staleness of the frozen runs the clause exists to exclude, so it separates the
+#: two populations with a wide margin on both sides.
+JOB_SETTLE_SECONDS = 300.0
+
 
 class MeasureError(RuntimeError):
     """Could not measure. Fail closed: change nothing, exit 2."""
@@ -487,6 +501,25 @@ class QueuedRun:
     #: When the CURRENT attempt started (`run_started_at`), attempt-scoped. Empty
     #: when GitHub has not stamped it — which is a fact, not a zero.
     run_started_at: str = ""
+    #: When this run last MOVED (`updated_at`), attempt-scoped. Empty when GitHub has
+    #: not stamped it.
+    #:
+    #: ⛔ CARRIED SOLELY TO CORROBORATE `has_live_job is False`, AND IT IS LOAD-BEARING.
+    #: An all-`completed` job list is NOT proof that a run is executing nothing, because
+    #: this repo's test matrix is DYNAMIC — `python-ci.yml` instantiates `test`,
+    #: `test-slow` and `test-carve-out` from
+    #: `matrix: ${{ fromJSON(needs.changes.outputs.fast_matrix) }}` (`:832`, `:2241`,
+    #: `:3410`), so the shard jobs do not EXIST until `changes` completes. In the window
+    #: between those two events the jobs endpoint returns a provably complete,
+    #: attempt-consistent list of exactly ONE row — `changes`, `completed` — while the
+    #: run is about to execute its whole matrix. `total_count`, the attempt proof and
+    #: every completeness guard all pass there, so they cannot separate that window from
+    #: the frozen runs this change exists to exclude. `updated_at` can: it MOVES when
+    #: `changes` completes, and it has been still for 7 days on the frozen runs (which is
+    #: why the issue itself calls them diagnosable at all). Consumed by
+    #: `_settled_still`; a `False` whose run has not provably settled is downgraded to
+    #: `None` (abstain toward EXECUTING).
+    updated_at: str = ""
     #: DOES THIS RUN HAVE A JOB THAT HAS NOT COMPLETED? — the job-level evidence that
     #: a run's own `status` string is not (#12037).
     #:
@@ -501,9 +534,13 @@ class QueuedRun:
     #: Three-valued ON PURPOSE, and the asymmetry is the safety argument:
     #:
     #:   * ``False`` — the jobs were READ, there was at least one, and EVERY one is
-    #:     `completed`. That is a PROOF of non-execution: a run with no non-terminal job
-    #:     is running nothing, whatever its `status` says. Only a positive observation
-    #:     may downgrade a run.
+    #:     `completed`, AND the run's own `updated_at` has been STILL for
+    #:     `JOB_SETTLE_SECONDS` (`_settled_still`). Only a positive observation may
+    #:     downgrade a run, and the job list alone is not one: a DYNAMIC matrix creates
+    #:     its shards only after its parent job completes, so a list containing nothing
+    #:     but the finished parent is a snapshot of a run that is about to expand, not a
+    #:     proof that it is executing nothing. The stillness test is what separates that
+    #:     seconds-wide window from the 7-day-frozen runs the clause exists for.
     #:   * ``True`` — at least one non-terminal job. Executing.
     #:   * ``None`` — NOT MEASURED: a failed jobs read, an empty jobs list, a malformed or
     #:     status-less job row, a payload whose jobs belong to a DIFFERENT attempt, a list
@@ -669,6 +706,31 @@ class QueueHealth:
     trimmable: tuple[QueuedRun, ...] = ()
 
     @property
+    def _unmeasured_token(self) -> str:
+        """Name a PARTIALLY unmeasured census so `pr_running` is not read as exact.
+
+        `pr_running` is an UPPER BOUND whenever any counted run was not measured: an
+        unmeasured run abstains toward EXECUTING, so it is counted while nothing about
+        it was observed. The fully-unmeasured degradation already has its own token
+        (`census=unmeasured`, emitted only when the verdict is `PR-UNWITNESSED`), but
+        the PARTIAL case — `0 < pr_running_unmeasured < pr_running`, the ordinary
+        outcome of a probe budget smaller than the census — rendered byte-identically
+        to a fully measured reading at the same count (#12037 review).
+
+        Emitted ONLY when `pr_running_unmeasured > 0`, so every fully-measured
+        reading's line is unchanged. Returns `""` in the fully-unmeasured case because
+        `census=unmeasured` already says it there, on a line that shows no discount.
+        This is a disclosure token, not a verdict input: it changes no decision.
+        """
+        if not self.pr_running_unmeasured:
+            return ""
+        if self.pr_running_unmeasured >= self.pr_running:
+            # Every counted run is unmeasured — `census=unmeasured` is the token for
+            # that shape, and it is emitted by the `PR-UNWITNESSED` branch.
+            return ""
+        return f", unmeasured={self.pr_running_unmeasured}"
+
+    @property
     def state_line(self) -> str:
         """The one-line state the fleet reads (#9115 acceptance 3).
 
@@ -705,7 +767,8 @@ class QueueHealth:
         if self.verdict == FLOOD:
             return (
                 f"CI: FLOOD({self.dominant_workflow or 'unknown'}, "
-                f"queued={self.queued_total}, pr_running={self.pr_running})"
+                f"queued={self.queued_total}, pr_running={self.pr_running}"
+                f"{self._unmeasured_token})"
             )
         if self.verdict == PR_UNWITNESSED:
             # The one thing an UNWITNESSED wait must never print is a bare `OK`. The
@@ -746,7 +809,7 @@ class QueueHealth:
                 f"CI: PR-UNWITNESSED(queued={self.queued_total}, "
                 f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
                 f"pr_pending={self.pr_pending}, "
-                f"oldest={waited}, feed={feed}{census})"
+                f"oldest={waited}, feed={feed}{census}{self._unmeasured_token})"
             )
         if self.verdict == PR_STARVED:
             oldest = self.oldest_pr_queued_age_seconds
@@ -754,7 +817,7 @@ class QueueHealth:
             return (
                 f"CI: PR-STARVED(queued={self.queued_total}, "
                 f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
-                f"pr_pending={self.pr_pending}{waited})"
+                f"pr_pending={self.pr_pending}{waited}{self._unmeasured_token})"
             )
         if self.verdict == PR_BACKLOGGED:
             # `oldest` is the WHOLE claim here — it is the measurement that says the
@@ -765,7 +828,7 @@ class QueueHealth:
             return (
                 f"CI: PR-BACKLOGGED(queued={self.queued_total}, "
                 f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
-                f"pr_pending={self.pr_pending}{waited})"
+                f"pr_pending={self.pr_pending}{waited}{self._unmeasured_token})"
             )
         # `pr_queued` and `pr_pending` are on the non-FLOOD line too: an `OK` that hid
         # a long PR backlog would be the same "slow CI" reading this tool exists to
@@ -773,7 +836,7 @@ class QueueHealth:
         return (
             f"CI: {self.verdict}(queued={self.queued_total}, "
             f"pr_running={self.pr_running}, pr_queued={self.pr_queued}, "
-            f"pr_pending={self.pr_pending})"
+            f"pr_pending={self.pr_pending}{self._unmeasured_token})"
         )
 
     @property
@@ -1039,6 +1102,44 @@ def _parse_time(value: str) -> datetime | None:
         return None
 
 
+def _settled_still(
+    updated_at: str,
+    now: datetime,
+    settle_seconds: float = JOB_SETTLE_SECONDS,
+) -> bool:
+    """Has this run's own ``updated_at`` provably been STILL for ``settle_seconds``?
+
+    The corroborating half of the `has_live_job is False` proof, and without it that
+    proof is not one (#12037 review). An all-``completed`` job list cannot distinguish
+    a run that is finished from a DYNAMIC-matrix run whose shard jobs have not been
+    created yet — `python-ci.yml` instantiates `test`/`test-slow`/`test-carve-out` from
+    `fromJSON(needs.changes.outputs.*_matrix)` (`:832`, `:2241`, `:3410`), so between
+    the parent's completion and the matrix expansion the endpoint answers with one
+    complete, attempt-consistent, untruncated row.
+
+    `updated_at` is the signal that separates them, and it is the one the issue itself
+    names: it moves whenever any job changes state (so it is seconds old throughout a
+    matrix expansion) and it has been frozen for 7 days on the runs this clause exists
+    to exclude. Note the direction — an UNREADABLE, future-dated, or merely recent
+    stamp returns ``False``, i.e. "not proven settled", which makes the caller ABSTAIN
+    toward EXECUTING. Under-counting `pr_running` is what manufactures `PR-STARVED`, a
+    verdict that authorises a destructive cancel-then-rerun, so the unknown case must
+    never land on the subtracting side.
+    """
+    stamp = _parse_time(updated_at)
+    if stamp is None:
+        # No readable stamp: nothing was proven, so prove nothing.
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    reference = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+    if stamp > reference:
+        # A future-dated stamp is not evidence of stillness (clock skew, or a payload
+        # this module cannot reason about). Abstain rather than subtract.
+        return False
+    return (reference - stamp).total_seconds() >= settle_seconds
+
+
 def age_seconds(created_at: str, now: datetime | None = None) -> float | None:
     """Age of a run, or ``None`` when its timestamp cannot be read.
 
@@ -1074,6 +1175,7 @@ def _project(raw: Iterable[Mapping[str, Any]]) -> list[QueuedRun]:
                 # moves — see `QueuedRun.wait_age_seconds`.
                 run_attempt=int(attempt) if isinstance(attempt, int) and attempt > 0 else 1,
                 run_started_at=str(run.get("run_started_at") or ""),
+                updated_at=str(run.get("updated_at") or ""),
             )
         )
     return out
@@ -2018,10 +2120,27 @@ def read_health(
         key=_probe_order_key,
     )
     attempted = probe_order[:max_job_probes]
-    probed = {
-        run.id: read_run_live_job(repo, run.id, attempt=run.run_attempt)
-        for run in attempted
-    }
+    # ⛔ THE SETTLE REFERENCE (#12037 review). `now` is the caller's measurement clock
+    # (tests pass a fixed instant); when it is absent the settle gate must still have a
+    # clock, or `False` would be granted untested. Resolved ONCE, not per probe, so every
+    # run in one reading is judged against the same instant.
+    settle_now = now if now is not None else datetime.now(UTC)
+    probed: dict[int, bool | None] = {}
+    for run in attempted:
+        live = read_run_live_job(repo, run.id, attempt=run.run_attempt)
+        if live is False and not _settled_still(run.updated_at, settle_now):
+            # ⛔ A STRUCTURALLY VALID "every job is completed" IS NOT YET A PROOF.
+            # Keep the run counted (abstain toward EXECUTING) whenever its own
+            # `updated_at` has moved recently, because that is the signature of a
+            # DYNAMIC matrix whose shards do not exist yet — `python-ci.yml` builds
+            # `test`/`test-slow`/`test-carve-out` from
+            # `fromJSON(needs.changes.outputs.*_matrix)`, so the jobs list holds only
+            # the finished parent for a few seconds while the run is about to execute.
+            # Downgrading to `None` also puts the run in `pr_running_unmeasured`
+            # (it IS in `attempted_ids`, so the split names it `_unread`), whose
+            # documented remedy — RETRY the reading — is exactly right here.
+            live = None
+        probed[run.id] = live
     running = [
         replace(run, has_live_job=probed[run.id]) if run.id in probed else run
         for run in projected

@@ -44,13 +44,19 @@ NOW = datetime(2026, 10, 19, 3, 30, 0, tzinfo=UTC)
 
 
 def run(rid, name, event="issue_comment", age_seconds=600, created_at=None,
-        *, attempt=1, started_age_seconds=None, has_live_job=None):
+        *, attempt=1, started_age_seconds=None, has_live_job=None, updated_at=None):
     stamp = created_at or (NOW - timedelta(seconds=age_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
     started = ("" if started_age_seconds is None
                else (NOW - timedelta(seconds=started_age_seconds)).strftime(
                    "%Y-%m-%dT%H:%M:%SZ"))
+    # A run that has not moved since it was created is the DEFAULT here, because that is
+    # what every fixture in this file models: a run whose fate is settled. `updated_at`
+    # is carried by the real API projection, and `read_health` uses its STILLNESS to
+    # corroborate an all-`completed` job list (`_settled_still`, #12037 review) — so a
+    # fixture that omitted it would silently abstain instead of measuring.
     return Q.QueuedRun(id=rid, name=name, event=event, created_at=stamp,
                        run_attempt=attempt, run_started_at=started,
+                       updated_at=(stamp if updated_at is None else updated_at),
                        has_live_job=has_live_job)
 
 
@@ -701,7 +707,7 @@ def test_read_health_projects_and_classifies(monkeypatch):
     def fake_gh_json(args):
         status = args[-1].split("status=")[1].split("&")[0]
         rows = ([{"id": 1, "name": "finding-provenance", "event": "issues",
-                  "created_at": "2026-10-19T03:00:00Z"}] * 8
+                  "created_at": "2026-10-19T03:00:00Z", "updated_at": "2026-10-19T03:00:00Z"}] * 8
                 if status == "queued" else [])
         return {"total_count": len(rows), "workflow_runs": rows}
 
@@ -2372,9 +2378,9 @@ def test_read_health_probes_only_pr_event_runs(monkeypatch):
         if status == "in_progress":
             return [
                 {"id": 11, "name": "python-ci", "event": "pull_request",
-                 "created_at": "2026-10-19T03:00:00Z"},
+                 "created_at": "2026-10-19T03:00:00Z", "updated_at": "2026-10-19T03:00:00Z"},
                 {"id": 12, "name": "finding-provenance", "event": "issue_comment",
-                 "created_at": "2026-10-19T03:00:00Z"},
+                 "created_at": "2026-10-19T03:00:00Z", "updated_at": "2026-10-19T03:00:00Z"},
             ], False
         return [], False
 
@@ -2521,7 +2527,7 @@ def test_a_capped_probe_never_subtracts_a_run(monkeypatch):
     """Hitting the budget degrades DETECTION; only a READ answer may subtract."""
     monkeys = [
         {"id": 7, "name": "python-ci", "event": "pull_request",
-         "created_at": "2026-10-19T03:00:00Z"},
+         "created_at": "2026-10-19T03:00:00Z", "updated_at": "2026-10-19T03:00:00Z"},
     ]
     monkeypatch.setattr(
         Q,
@@ -2599,7 +2605,7 @@ def test_an_offset_less_timestamp_cannot_crash_the_probe_ordering(monkeypatch):
     """
     rows = [
         {"id": 1, "name": "python-ci", "event": "pull_request",
-         "created_at": "2026-10-19T03:00:00Z"},        # aware
+         "created_at": "2026-10-19T03:00:00Z", "updated_at": "2026-10-19T03:00:00Z"},        # aware
         {"id": 2, "name": "python-ci", "event": "pull_request",
          "created_at": "2026-10-19T03:05:00"},         # NAIVE — used to raise TypeError
         {"id": 3, "name": "python-ci", "event": "pull_request",
@@ -2800,7 +2806,7 @@ def test_read_health_WIRES_the_run_attempt_into_the_probe(monkeypatch):
     seen: list[tuple[int, int | None]] = []
     rows = [
         {"id": 501, "name": "python-ci", "event": "pull_request",
-         "created_at": "2026-10-19T03:00:00Z", "run_attempt": 3},
+         "created_at": "2026-10-19T03:00:00Z", "updated_at": "2026-10-19T03:00:00Z", "run_attempt": 3},
         {"id": 502, "name": "python-ci", "event": "pull_request",
          "created_at": "2026-10-19T03:05:00Z"},   # no attempt -> coerced to 1
     ]
@@ -2944,7 +2950,7 @@ def test_read_health_WIRES_the_probe_timeout_and_the_budget_arithmetic_holds(mon
     """
     seen: list[float | None] = []
     rows = [{"id": 601, "name": "python-ci", "event": "pull_request",
-             "created_at": "2026-10-19T03:00:00Z"}]
+             "created_at": "2026-10-19T03:00:00Z", "updated_at": "2026-10-19T03:00:00Z"}]
 
     def fake_json(args, timeout=None):
         seen.append(timeout)
@@ -3112,9 +3118,9 @@ def test_an_unparseable_stamp_is_probed_LAST_even_under_budget_pressure(monkeypa
          "created_at": "not-a-timestamp"},
         # two frozen runs, the population the budget exists to prove idle
         {"id": 2, "name": "ai-review-gate", "event": "pull_request_target",
-         "created_at": "2026-11-05T00:00:00Z"},
+         "created_at": "2026-10-18T00:00:00Z", "updated_at": "2026-10-18T00:00:00Z"},
         {"id": 3, "name": "ai-review-gate", "event": "pull_request_target",
-         "created_at": "2026-11-05T00:00:01Z"},
+         "created_at": "2026-10-18T00:00:01Z", "updated_at": "2026-10-18T00:00:01Z"},
     ]
     queued_rows = [{"id": 4, "name": "python-ci", "event": "pull_request",
                     "created_at": (NOW - timedelta(seconds=1000)).strftime("%Y-%m-%dT%H:%M:%SZ")}]
@@ -3479,17 +3485,19 @@ def test_the_unmeasured_count_is_SPLIT_into_never_reached_and_read_failed(monkey
     rows = [
         # three PR runs: the oldest two are probed, the third is past the budget
         {"id": 1, "name": "python-ci", "event": "pull_request",
-         "created_at": "2026-11-05T00:00:00Z"},
+         "created_at": "2026-10-18T00:00:00Z", "updated_at": "2026-10-18T00:00:00Z"},
         {"id": 2, "name": "python-ci", "event": "pull_request",
-         "created_at": "2026-11-05T00:00:01Z"},
+         "created_at": "2026-10-18T00:00:01Z", "updated_at": "2026-10-18T00:00:01Z"},
         {"id": 3, "name": "python-ci", "event": "pull_request",
-         "created_at": "2026-11-05T00:00:02Z"},
+         "created_at": "2026-10-18T00:00:02Z", "updated_at": "2026-10-18T00:00:02Z"},
     ]
     queued_rows = [{"id": 9, "name": "python-ci", "event": "pull_request",
                     "created_at": (NOW - timedelta(seconds=1000)).strftime("%Y-%m-%dT%H:%M:%SZ")}]
     monkeypatch.setattr(
         Q, "read_runs",
-        lambda repo, status, max_pages=5: (queued_rows if status == "queued" else rows, False),
+        lambda repo, status, max_pages=5: (
+            queued_rows if status == "queued"
+            else (rows if status == "in_progress" else []), False),
     )
     # EVERY read fails (the likeliest state under load), and the budget of 2 never asks id 3
     monkeypatch.setattr(Q, "read_run_live_job", lambda repo, rid, attempt=None: None)
@@ -3536,17 +3544,19 @@ def test_the_split_counts_the_MERGED_list_not_the_pre_probe_one(monkeypatch):
     """
     rows = [
         {"id": 1, "name": "python-ci", "event": "pull_request",
-         "created_at": "2026-11-05T00:00:00Z"},
+         "created_at": "2026-10-18T00:00:00Z", "updated_at": "2026-10-18T00:00:00Z"},
         {"id": 2, "name": "python-ci", "event": "pull_request",
-         "created_at": "2026-11-05T00:00:01Z"},
+         "created_at": "2026-10-18T00:00:01Z", "updated_at": "2026-10-18T00:00:01Z"},
         {"id": 3, "name": "python-ci", "event": "pull_request",
-         "created_at": "2026-11-05T00:00:02Z"},
+         "created_at": "2026-10-18T00:00:02Z", "updated_at": "2026-10-18T00:00:02Z"},
     ]
     queued_rows = [{"id": 9, "name": "python-ci", "event": "pull_request",
                     "created_at": (NOW - timedelta(seconds=1000)).strftime("%Y-%m-%dT%H:%M:%SZ")}]
     monkeypatch.setattr(
         Q, "read_runs",
-        lambda repo, status, max_pages=5: (queued_rows if status == "queued" else rows, False),
+        lambda repo, status, max_pages=5: (
+            queued_rows if status == "queued"
+            else (rows if status == "in_progress" else []), False),
     )
     # id 1's read fails, id 2 is PROVED idle, id 3 is past the budget
     monkeypatch.setattr(Q, "read_run_live_job",
@@ -3566,3 +3576,115 @@ def test_the_split_counts_the_MERGED_list_not_the_pre_probe_one(monkeypatch):
     assert health.verdict == Q.PR_UNWITNESSED
     claim = next(r for r in health.reasons if r.startswith("PR-UNWITNESSED"))
     assert "1 the probe budget never REACHED" in claim and "1 whose jobs read itself FAILED" in claim, claim
+
+
+# --- review round (2026-11-12, fresh-context reviewer): the settle gate -------------
+#
+# The P1: `False` was granted on "every visible job is `completed`". For a DYNAMIC matrix
+# that is not a proof of non-execution. `python-ci.yml` instantiates `test`, `test-slow`
+# and `test-carve-out` from `fromJSON(needs.changes.outputs.*_matrix)` (`:832`, `:2241`,
+# `:3410`), so the shard jobs do not EXIST until `changes` completes — and in that window
+# the jobs endpoint answers with ONE row (`changes`, `completed`), a matching
+# `total_count`, a matching `run_attempt`, and no truncation. Every structural guard in
+# `read_run_live_job` passes there, so `False` would subtract a run that is about to
+# execute 11 shards. `updated_at` separates the two populations: it MOVES seconds before
+# such a snapshot, and it has been frozen for 7 days on the runs the clause exists for.
+#
+# The direction matters: an unproven stillness must ABSTAIN (count the run), because
+# under-counting manufactures PR-STARVED, which authorises a destructive cancel-then-rerun.
+
+
+def _stamp(age_seconds):
+    return (NOW - timedelta(seconds=age_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_the_settle_gate_refuses_a_run_whose_last_update_just_moved():
+    """THE DYNAMIC-MATRIX WINDOW: a complete-looking job list is not yet a proof."""
+    assert Q._settled_still(_stamp(5), NOW) is False
+    assert Q._settled_still(_stamp(Q.JOB_SETTLE_SECONDS - 1), NOW) is False
+
+
+def test_the_settle_gate_still_accepts_the_seven_day_frozen_run():
+    """The population the clause EXISTS for must keep being excluded — no regression."""
+    assert Q._settled_still(_stamp(7 * 86400), NOW) is True
+    assert Q._settled_still(_stamp(Q.JOB_SETTLE_SECONDS), NOW) is True
+
+
+@pytest.mark.parametrize("value", ["", "not-a-time", "2026-10-19T03:29:00"]) 
+def test_the_settle_gate_abstains_on_an_unreadable_stamp(value):
+    """Nothing proven, so prove nothing — never land an unknown on the subtracting side."""
+    assert Q._settled_still(value, NOW) is False
+
+
+def test_the_settle_gate_abstains_on_a_future_dated_stamp():
+    """A stamp ahead of the clock is not evidence of stillness."""
+    assert Q._settled_still(_stamp(-3600), NOW) is False
+
+
+def test_a_freshly_moved_run_is_not_subtracted_from_pr_running(monkeypatch):
+    """WIRING: a `False` whose run has not settled is downgraded to an abstention.
+
+    Without the gate this reading is `pr_running=0`, `PR-STARVED`, `congests_pr=True` —
+    a destructive authorisation aimed at a run that is expanding its matrix right now.
+    """
+    queued_row = {"id": 1, "name": "python-ci", "event": "pull_request",
+                  "created_at": _stamp(1000), "updated_at": _stamp(1000)}
+    # One PR-event in-progress run whose jobs all read `completed`, but whose own
+    # `updated_at` moved 5 s ago — i.e. it just finished its `changes` parent.
+    moving_row = {"id": 5001, "name": "python-ci", "event": "pull_request",
+                  "created_at": _stamp(60), "updated_at": _stamp(5)}
+
+    monkeypatch.setattr(Q, "read_runs", lambda repo, status, max_pages: (
+        [queued_row] if status == "queued" else ([moving_row] if status == "in_progress" else []), False))
+    monkeypatch.setattr(Q, "read_run_live_job", lambda repo, rid, **kw: False)
+
+    health = Q.read_health("o/r", NOW)
+    assert health.pr_running == 1, "a not-yet-settled run must stay COUNTED"
+    assert health.pr_running_excluded == ()
+    assert health.pr_running_unmeasured == 1
+
+
+def test_a_settled_frozen_run_is_still_subtracted_from_pr_running(monkeypatch):
+    """The converse: a 7-day-frozen run IS excluded, so the fix still fixes #12037."""
+    queued_row = {"id": 1, "name": "python-ci", "event": "pull_request",
+                  "created_at": _stamp(1000), "updated_at": _stamp(1000)}
+    frozen_row = {"id": 42062549845, "name": "redis-guard", "event": "pull_request",
+                  "created_at": _stamp(7 * 86400), "updated_at": _stamp(7 * 86400)}
+
+    monkeypatch.setattr(Q, "read_runs", lambda repo, status, max_pages: (
+        [queued_row] if status == "queued" else ([frozen_row] if status == "in_progress" else []), False))
+    monkeypatch.setattr(Q, "read_run_live_job", lambda repo, rid, **kw: False)
+
+    health = Q.read_health("o/r", NOW)
+    assert health.pr_running == 0
+    assert health.pr_running_excluded == (42062549845,)
+    assert health.verdict == Q.PR_STARVED
+
+
+# --- review round (2026-11-12): the PARTIAL unmeasured census was unreadable ---------
+#
+# `pr_running` is an UPPER BOUND when any counted run was unmeasured, because an
+# unmeasured run abstains toward EXECUTING. The all-unmeasured case had a token
+# (`census=unmeasured`); the PARTIAL case — the ordinary outcome of a budget smaller
+# than the census — rendered byte-identically to a fully-measured reading at the same
+# count, so the operator could not tell "3 executing" from "1 executing + 2 unmeasured".
+
+
+def test_a_partial_unmeasured_census_is_named_on_the_state_line():
+    queued = [run(1, "python-ci", event="pull_request", age_seconds=1000)]
+    # 1 proved executing, 2 unmeasured -> pr_running=3 but only 1 is a measurement.
+    runs = [run(7001, "python-ci", event="pull_request", has_live_job=True),
+            run(7002, "python-ci", event="pull_request", has_live_job=None),
+            run(7003, "python-ci", event="pull_request", has_live_job=None)]
+    health = classify(queued, in_progress=runs, probe_attempted=True)
+    assert health.pr_running == 3 and health.pr_running_unmeasured == 2
+    assert "unmeasured=2" in health.state_line, health.state_line
+
+
+def test_a_fully_measured_census_keeps_its_line_byte_identical():
+    queued = [run(1, "python-ci", event="pull_request", age_seconds=1000)]
+    runs = [run(7001, "python-ci", event="pull_request", has_live_job=True),
+            run(7002, "python-ci", event="pull_request", has_live_job=True)]
+    health = classify(queued, in_progress=runs, probe_attempted=True)
+    assert health.pr_running_unmeasured == 0
+    assert "unmeasured=" not in health.state_line, health.state_line
