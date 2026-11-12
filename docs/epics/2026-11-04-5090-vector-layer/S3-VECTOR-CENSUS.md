@@ -334,9 +334,9 @@ guard on a node the CALLER builds, which the probe had not measured — the pin 
 with no `KEY_PROPERTY` HOLDS the row instead of taking the whole report down with a `KeyError`, and
 the falsifier for the PLANTED property set, without which reverting that derivation to the literal
 `embedding` red no row at all), and seven by `#11455`
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 = 178`). ⚠️ No figure here names what `main` collects TODAY: five of
-those additions are already merged and the seven land with this document, so any "`main` at N"
-would be a moving reference this paragraph forbids — the total is bound to THIS TREE alone): seven
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 7 = 178`). ⚠️ No figure here names what `main` collects TODAY:
+which of those additions are already merged moves with `main`, so any "`main` at N" would be a moving
+reference this paragraph forbids — the total is bound to THIS TREE alone): seven
 row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
 derived-label-wins arm; the runtime-label hold; the unreadable register holding as `UNMEASURED`; the
 malformed-`stores` hold; the register's own `bypass` hold), one that holds the row on a census
