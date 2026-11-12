@@ -245,6 +245,23 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...], int], ...] = (
         1,
     ),
     (
+        "tortoise/goal_judgement.py",
+        "_supersession_evidence",
+        "the #11953 supersession witness's EXISTENCE test, and the ground is the "
+        "pattern's USE: the walk is deliberately TYPE-FREE because the question "
+        "it asks is *does the successor carry ANY incident edge now*, and its "
+        "whole result is consumed as a boolean downstream (`if edges:`) — so no "
+        "edge is returned and nothing about a referent is asked. `LIMIT 1` "
+        "stops the walk at the FIRST edge, so it cannot enumerate or fan out "
+        "either, and `RETURN type(r)` names the relationship TYPE, never the "
+        "edge or its target. Its source IS a `:Point`, which an `aboutObject` "
+        "triple can start at — and the witness CANNOT be type-restricted "
+        "without losing the transfer legs it exists to see (#11953), so a "
+        "`type(r) IN [...]` ground is unavailable here by design",
+        ("RETURN type(r) LIMIT 1",),
+        1,
+    ),
+    (
         "tortoise/hosted_api.py",
         "_load_commit_graph_state",
         "restore/rollback reconciliation, and the walk is TYPE-RESTRICTED: the "

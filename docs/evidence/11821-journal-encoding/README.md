@@ -82,7 +82,8 @@ ruler. The compact writer puts them on different rulers, and their quotient (25,
 32,130 = **78.9 %**) reads part of the spacing change as if it were vector text — which
 is why this probe measures the on-disk span itself (each journal, its own separators) and
 prints the pair above instead. The honest statement is that the vector's share of the
-journal went **81.9 % → 73.0 %** on a fixed ruler.
+journal went **81.9 % → 72.9 %** on a fixed ruler (spaced before, spaced
+after); on the compact ruler the same pair is **82.4 % → 73.0 %**.
 
 Per class — one record per type, the **fullest** one (the shape production writes):
 

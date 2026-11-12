@@ -4617,7 +4617,15 @@ def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2")
         # under `core:` and its mirror, so "the anchor is on this line" alone
         # cannot tell the three apart (#11837 review, P3).
         section = row[4] if len(row) > 4 else None
-        source_label = f"{source_key}.py"
+        # ⛔ The label is the SOURCE's real path, not `<key>.py` (#11837 review P3):
+        # `ci_surfaces` maps to `config/ci-surfaces.yml`, so the fabricated
+        # `ci_surfaces.py` named a file that does not exist in the very failure
+        # message that says a cite points past the end of one.
+        source_label = (
+            _EPIC_CITE_SOURCES[source_key].relative_to(_REPO).as_posix()
+            if source_key in _EPIC_CITE_SOURCES
+            else f"{source_key}.py"
+        )
         lines = docs[doc_label].read_text(encoding="utf-8").splitlines()
         hits = [ln for ln in lines if phrase in ln]
         if len(hits) != 1:
@@ -5127,7 +5135,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # re-derivation onto either stays green while the document's `carve_out:`
         # claim goes false (measured: 5854 and 8173 both drove this row GREEN).
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            ("9633", "- test_pack_logic_writeprobe_11083.py"),
+            ("9714", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
