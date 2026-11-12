@@ -33,6 +33,45 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 
 ---
 
+> **Changelog v3.34 (2026-11-12 — issue #11824 — the §4.3 Object vocabulary is scoped, and `draft` is confirmed):**
+>
+> **Owner approval of the exact changes** is on record on #11824 (2026-11-12: the owner answered `ok` to a
+> three-item amendment proposal, whose full text is quoted below). This entry records it; **v3.33 → v3.34**
+> because one sentence cannot carry two meanings under one version, and a citation to `v3.33` must not be
+> ambiguous between the sentence that landed on 2026-11-11 and this one. The build of the guard is still
+> not part of this change — this is the model.
+>
+> **v3.34 lands the same sentence as v3.33 with three scopes fixed, and nothing else:**
+>
+> > **Core Object types accept `draft`, `live`, `superseded`, `deprecated`, `archived`, `in_progress`,
+> > `completed`; an Object created without a status stores none and reads as `live` (#9974 R1 — never a
+> > fabricated `live` write). At the write door `superseded` requires the successor to be named in the same
+> > write, and a successorless **replacement** is `archived`; `deprecated` is an independent terminal state
+> > and needs no successor. A journal rebuild is unchanged and still restores a supersession recorded
+> > without a successor. `outdated` and `retracted` are not Object lifecycle words (read-only, retained for
+> > legacy data). Pack-declared kinds validate against their own declared words.**
+>
+> **What each scope fixes, and why the previous wording could not stand.** (1) **`draft` stays** — the
+> owner's ruling is that an Object may be a draft; what changes is that the sentence no longer implies the
+> write defaults to a stored `live`. The code stores nothing and an absent status READS as live, because
+> `coalesce($st,'live')` was removed as a fabricated birth in #9974 R1. (2) *"a removal with no successor
+> is `archived`"* redirected **every** `deprecated` write to `archived`, because a deprecated Object is
+> terminal and by definition has no successor — erasing the difference between *something replaced this*
+> and *this was wrong*. The clause is now scoped to a **replacement**, and `deprecated` is stated as an
+> independent terminal state. (3) *"`superseded` requires the successor in the same write"* is true at the
+> **write door** and false of a **journal rebuild**, which legitimately restores a supersession recorded
+> before any successor was named: `_fold_object_superseded` folds `supersededBy` from
+> `ev.get("supersedes_by") or ""`, and `sdk.py` records the id-only legacy `ObjectSuperseded` as a
+> legitimate record row. A guard built from the unscoped sentence would have refused the rebuild and
+> broken §11's reconstruction guarantee.
+>
+> **Still unbuilt, deliberately:** the guard that enforces this vocabulary, including the AX three-part
+> refusals (`status='outdated'` naming both `archived` and `superseded`; one refusal shape across
+> Point/Subject/Object, where `:Subject` currently raises a bare `KeyError`). Tracked on **#8166** (same
+> root as **#10371**), where the buildable contract is recorded.
+
+---
+
 > **Changelog v3.33 (2026-11-11 — issue #11824 — a core Object kind gets a declared lifecycle vocabulary, and one stale tracker flag is recorded):**
 >
 > **Approval** is the owner's decision `D2 — A` on #11824 (2026-11-11): core Object types get their own
