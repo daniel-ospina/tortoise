@@ -3879,7 +3879,13 @@ def test_a_governed_group_in_its_own_sentence_is_validated(tmp_path, monkeypatch
         # ⛔ AND THE PAGE'S OWN LABEL MAY OPEN THE FRAGMENT (`Only **(a)** … still read as
         # written` is the documented list label): without it this spelling read CLEAN.
         "are **DRIFTED**. Only **(i)** and **(j)** do not. Only",
-        # The idiomatic trailing adverbs and continuations, which the tail check must accept.
+        # ⛔ A LONE MARKED ITEM IS THE SPAN (#11902 review, round 15 P3): with
+        # `lone_marked=False` a one-member fragment contributed no letters and read CLEAN,
+        # while the identical claim inside the sentence reds. All three marked spellings.
+        "are **DRIFTED**. — **(i)** do not. Only",
+        "are **DRIFTED**. — `i` do not. Only",
+        "are **DRIFTED**. — *(i)* do not. Only",
+        # The idiomatic trailing adverb, which the tail check must accept.
         "are **DRIFTED**. — **(i)** and **(j)** do not read as written any more. Only",
     )
     for spelled in contradicting:
@@ -3893,6 +3899,8 @@ def test_a_governed_group_in_its_own_sentence_is_validated(tmp_path, monkeypatch
             )
     for spelled in (
         "are **DRIFTED**. — **(c)** and **(d)** do not. Only",
+        # A one-member fragment naming a NON-still row is correct and must stay CLEAN.
+        "are **DRIFTED**. — **(c)** do not. Only",
         "are **DRIFTED**. Rows (i) and (j) do not apply here. Only",
         # ⛔ A NEGATION MUST GOVERN *READING*, or the arm accuses a TRUE sentence
         # (#11902 review, round 12): these all name STILL-TRUE rows and all state what the

@@ -1710,7 +1710,15 @@ def check_verdict_tally(text: str) -> list[str]:
             flags=re.IGNORECASE,
         )
         if not residue.split():
-            governed_letters |= _listed_letters(head, lone_marked=False)
+            # ⛔ A FRAGMENT'S LONE MARKED ITEM IS THE SPAN, exactly as in the governed-span arm
+            # above (#11902 review, round 15 P3): with `lone_marked=False` a one-member marked
+            # fragment (`… — **(i)** do not.`) contributed NO letters and read CLEAN, while the
+            # identical claim inside the sentence reds two lines up. The residue test has
+            # already established that the head is nothing but letter items and separators, so
+            # every marked item here IS a governed member, a lone one included.
+            governed_letters |= _listed_letters(
+                head, lone_marked=bool(_SOLE_ITEM_RE.fullmatch(head.strip()))
+            )
     wrong_governed = sorted(governed_letters & set(still_true))
     if wrong_governed:
         problems.append(

@@ -418,7 +418,9 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   (`do not read`, `read as written any more`), or `do` again (`no longer do.`), never something
   else (`… do not need re-reading.` states exactly what the table says and was wrongly RED before
   that check); and `Only` — this page's own list label — may open the span, since
-  `Only **(i)** and **(j)** do not.` otherwise read CLEAN. ⚠️ **STATED RESIDUAL:** the verb span
+  `Only **(i)** and **(j)** do not.` otherwise read CLEAN; a LONE MARKED item is read when the
+  fragment is nothing but that item, the same rule as the governed-span arm (`… — **(i)** do not.`
+  read CLEAN while the identical claim inside the sentence red, measured). ⚠️ **STATED RESIDUAL:** the verb span
   after the negation must be nothing but a form of `read` / `do` and punctuation. So a negation of
   any OTHER verb is not read (`… no longer hold.`, `… do not overlap the fix.`), **and neither is a
   PUNCTUATED continuation** (`… do not, unlike the rest.` name rows too). Both CLEAN sides are the
