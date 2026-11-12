@@ -7186,11 +7186,14 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # mutated `1 failed, 169 passed, 1 skipped`, the added failure being that
     # named test). ⛔ That cut SUPERSEDES one taken at `origin/main@0dca7fcad`
     # (`3 failed, 167 passed, 1 skipped` → `4 failed, 166 passed, 1 skipped`):
-    # those three were **#12045**'s shard-(d) reds — `tortoise.api::_emit` and
+    # those three were **#12045**'s reds in THIS file (its shard-(d) red proper is
+    # the register test, one failure; this file was the second surface the issue
+    # records) — `tortoise.api::_emit` and
     # `tortoise.api::_verify_record_vector_width`, both in the instrument's
-    # population (the first since `#12000`'s F1b note, the second since its own
-    # `#11835` docstring) and both undeclared in the writer register — so a
-    # baseline taken while they were live
+    # population (both enrolled by `#12000`: `_emit` via its F1b note, the verifier
+    # via the docstring example and two body comments that commit rewrote — the
+    # verifier itself is `#11835`'s) and both undeclared in the writer register — so
+    # a baseline taken while they were live
     # could not show what the mutation ADDS. `#12042` declared both, and the
     # figures above are measured at the tree that carries it; the three reds are
     # therefore historical, not repo context, and this note cites them by issue
