@@ -3384,11 +3384,12 @@ dropped by the squeeze; the non-ASCII bytes dropped by the ASCII fallback when `
 unavailable, refused to emit, or emitted nothing it could convert — a healthy converter does
 that for a tail that is entirely undecodable). When neither path produces an excerpt the body says exactly
 which state it is in, and **the two read-failure states point at different places**: a report
-the alert could not open at all (the variable unset, the file missing, or a named pipe it will
+the alert did not read at all (the variable unset, the file missing, or a named pipe it will
 not block on) sends the reader to the
 `Check migration drift (fail-closed)` **step log** inside the run — the gate's own stdout is
 there, and the alert deliberately does not re-run the gate — while a report that exists but
-yields nothing (empty, or nothing left by the squeeze and its fallback) sends them to the
+yields no text (empty, nothing left by the squeeze and its fallback, or one it could not read
+through — a directory, or a path that could not be re-read) sends them to the
 **run link**. In any of those states, a report **larger than the cap** is named by its real
 size, with the statement that only its last 6000 bytes were read, so a blank or undecodable
 tail is never mistaken for a blank report. It never claims an excerpt it is not showing, never guesses the cause when two states are
