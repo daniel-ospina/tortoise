@@ -143,7 +143,7 @@ JOB = "test-record-postgres"
 #: `16`, `16.4`, `16.4-bookworm`, `pg16`, `pg16-trixie`, `0.8.0-pg16` all read 16.
 #: The `$`-anchored original refused `postgres:16.4` and `0.8.0-pg16` with a
 #: message saying they do not name a major, which they do (#12051 round 13).
-IMAGE_RE = re.compile(r":(?:[A-Za-z0-9._-]*[-_.])?pg(\d+)(?:$|[-_.])|:(\d+)")
+IMAGE_RE = re.compile(r":(?:[A-Za-z0-9._-]*[-_.])?pg(\d+)(?:$|[-_.])|:(\d+)(?:$|[-_.])")
 
 #: The CLIENT package as INSTALLED, not merely NAMED (#12051 review round 8):
 #: the name alone is matched by a read-only diagnostic (`dpkg -l
@@ -474,6 +474,12 @@ def _effective_shell(job: dict | None, step: dict) -> str:
     return "\n".join([default_shell, str(step.get("shell") or "")])
 
 
+def _executed_lines(job: dict | None, step: dict) -> list[str]:
+    """Every line the step EXECUTES: its `shell:` argv plus its `run:` script."""
+
+    return (_effective_shell(job, step) + "\n" + _run_commands(step)).splitlines()
+
+
 def _client_dir_mentions(steps: list[dict], job: dict | None = None) -> list[tuple[int, str, int | None]]:
     """Every line that names a `/usr/lib/postgresql/<major>/bin` directory.
 
@@ -550,6 +556,17 @@ def _unreachable_guards(steps: list[dict], start: int, end: int) -> list[str]:
         for line in _run_commands(steps[index]).splitlines():
             if CONSTANT_GUARD_RE.match(line) or DEAD_CHAIN_RE.search(line):
                 found.append(f"step {index}: {line.strip()}")
+            elif SUBSHELL_OPEN_RE.match(line) or SUBSHELL_CLOSE_RE.match(line):
+                # ⛔ A SUBSHELL IS NOT A SCOPE, IT IS A STATUS (#12051 review round
+                # 14): `( … exit 1 … ) || true` keeps every structural row green —
+                # the branch is flat, armed, compares 16 — while `exit 1` now
+                # terminates the subshell and `|| true` DISCARDS its status, so the
+                # step succeeds after printing its `::error::`. Measured `58 passed`
+                # with the leg on the inherited client, which is exactly what the
+                # fail-closed row exists to prevent.
+                found.append(
+                    f"step {index}: SUBSHELL around the guarded block: {line.strip()}"
+                )
     return found
 
 
@@ -571,6 +588,12 @@ def _replaces_a_client_binary(line: str) -> bool:
         return False
     return bool(BINARY_NAME_RE.search(line, verb.end()))
 
+
+#: A subshell opens here and is not closed on the same line — whatever runs inside
+#: it is a DIFFERENT shell, so its `exit` cannot fail the step.
+SUBSHELL_OPEN_RE = re.compile(r"^[ \t]*\((?!.*\))[ \t]*$")
+#: …and closes with its status DISCARDED (`) || true`, `) ;`, `) && …`).
+SUBSHELL_CLOSE_RE = re.compile(r"^[ \t]*\)[ \t]*(?:\|\||;|&&)")
 
 #: `if:` conditions that CANNOT SKIP the step, normalised (no `${{ }}`, single
 #: spaces). `success()` is the default; `always()` and its two aliases run the
@@ -765,8 +788,12 @@ def _postgres_image_majors(job: dict) -> list[int]:
         # is named `pgvector`, which does not contain `postgres`.
         if "pgvector" not in image and "postgres" not in image:
             continue
-        # The digest is not part of the TAG: `image:pg16@sha256:…` still pins 16.
-        match = IMAGE_RE.search(image.split("@", 1)[0])
+        # The digest is not part of the TAG (`image:pg16@sha256:…` still pins 16),
+        # and neither is the REGISTRY: `ghcr.io/mirror:5000/pgvector/pgvector:pg16`
+        # read as major 5000 — the PORT — and red four rows on a correct pin with a
+        # message describing a divergence that does not exist (round 14). Only the
+        # last path component is the repository+tag.
+        match = IMAGE_RE.search(image.split("@", 1)[0].rsplit("/", 1)[-1])
         assert match, (
             f"postgres image pin {image!r} does not name its major "
             "(`:pg<major>` or `:<major>`); an unpinned major cannot be matched "
@@ -983,19 +1010,27 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
             if major != server_major
         }
     )
+    # ⛔ `shell:` IS EXECUTED ARGV HERE TOO (#12051 review rounds 13-14). Round 13
+    # taught the executed shell to three scans and left these two reading `run:`
+    # only, so the rule whose whole point is spelling-independence ("however the
+    # source is spelled", above) was defeated by one `shell:` line: measured
+    # `58 passed` with the leg's `shell:` running
+    # `ln -sf "$b/17/bin/pg_dump" "$b/16/bin/pg_dump"` — and the identical line in
+    # `run:` correctly red — plus the same for the `_runner_file_commands` glob and
+    # at workflow-level `defaults.run.shell`.
     replacements = sorted(
         set(_path_assignments_that_drop_the_pin(steps, pin_index, server_major, job))
         | {
             f"step {index} REPLACES a client binary: {line!r}"
             for index, step in enumerate(steps)
             if index >= pin_index
-            for line in _run_commands(step).splitlines()
+            for line in _executed_lines(job, step)
             if _replaces_a_client_binary(line)
         }
         | {
             f"step {index} writes the runner's own command file: {line!r}"
             for index, step in enumerate(steps)
-            for line in _run_commands(step).splitlines()
+            for line in _executed_lines(job, step)
             if RUNNER_FILE_COMMAND_RE.search(line)
         }
     )
@@ -1395,6 +1430,9 @@ IMAGE_TAG_POLARITY = [
     ("postgres:16.4-bookworm", 16, "tag + suite"),
     ("pgvector/pgvector:0.8.0-pg16", 16, "a version-first extension tag"),
     ("pgvector/pgvector:pg16-trixie", 16, "tag + suite, extension image"),
+    ("ghcr.io/mirror:5000/pgvector/pgvector:pg16", 16, "a registry PORT is not the major"),
+    ("localhost:5000/postgres:16", 16, "port + plain tag"),
+    ("localhost:5000/postgres:17", 17, "port + wrong major is still read"),
     ("pgvector/pgvector:0.8.0-pg17", 17, "a wrong major is still read"),
     ("postgres:17", 17, "a wrong major is still read, plain tag"),
 ]
@@ -1412,6 +1450,31 @@ def test_an_image_tag_names_its_major_however_it_is_spelled(
 
     read = _postgres_image_majors({"steps": [{"with": {"image": image}}]})
     assert read == [major], f"{why} (measured, round 13): {image!r} read {read}"
+
+
+#: (script, is it refused as unable to fail the step, why) — the pin for the
+#: SUBSHELL half of `_unreachable_guards`. `exit 1` inside a subshell whose status
+#: is discarded terminates the SUBSHELL, not the step (#12051 review round 14).
+SUBSHELL_POLARITY = [
+    ("(\n  exit 1\n) || true", True, "the status is discarded, so the step succeeds"),
+    ("(\n  echo ::error::nope\n) ;", True, "`;` discards the status just as well"),
+    ("(\n  exit 1\n) && echo ok", True, "`&&` grades the failure as success"),
+    ("( cd /tmp && pg_dump --version )", False, "closed on the SAME line: no separate shell"),
+    ('if [ "$major" != "16" ]; then', False, "a flat armed branch is the accepted form"),
+    ("done", False, "a loop terminator is not a subshell"),
+]
+
+
+@pytest.mark.parametrize(
+    ("script", "refused", "why"),
+    SUBSHELL_POLARITY,
+    ids=[c.replace(" ", "-").replace("\n", "")[:28] for c, _, _ in SUBSHELL_POLARITY],
+)
+def test_a_subshell_cannot_swallow_the_failure(script: str, refused: bool, why: str) -> None:
+    """A guarded block must run in the STEP's shell, or its `exit 1` fails nothing."""
+
+    found = _unreachable_guards([{"run": script}], 0, 1)
+    assert bool(found) is refused, f"{why} (measured, round 14): {script!r}"
 
 
 def test_a_fallback_installer_is_refused() -> None:
