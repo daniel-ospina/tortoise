@@ -7169,10 +7169,12 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # 152 — deleting that line left `3 failed, 148 passed, 1 skipped` in a scratch
     # copy, byte-identical to the UNMUTATED copy's three failures at that head,
     # i.e. the removal redded NOTHING. ⛔ That head's three are left
-    # cause-agnostic on purpose: they are NOT #12045's (whose two writers did not
-    # exist until `#11835` landed three days later — attributed below, at the
-    # head where they were actually measured), and a provenance asserted here
-    # would be the false record this note exists to prevent. ⛔ The count is SCOPED
+    # cause-agnostic on purpose: they are NOT #12045's — at that head neither
+    # writer that issue names was in the instrument's population
+    # (`_verify_record_vector_width` did not exist until `#11835`; `_emit`
+    # existed, but the note that enrols it did not until `#12000`'s F1b note),
+    # and a provenance asserted here would be the false record this note exists
+    # to prevent. ⛔ The count is SCOPED
     # to that head rather than re-cut, because this file collects 171 now and no
     # run of it can report
     # 152; an unscoped figure here would be the stale-measurement defect §6 of the
@@ -7185,8 +7187,10 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # named test). ⛔ That cut SUPERSEDES one taken at `origin/main@0dca7fcad`
     # (`3 failed, 167 passed, 1 skipped` → `4 failed, 166 passed, 1 skipped`):
     # those three were **#12045**'s shard-(d) reds — `tortoise.api::_emit` and
-    # `tortoise.api::_verify_record_vector_width` landed by `#12000` and not
-    # declared in the writer register — so a baseline taken while they were live
+    # `tortoise.api::_verify_record_vector_width`, both in the instrument's
+    # population (the first since `#12000`'s F1b note, the second since its own
+    # `#11835` docstring) and both undeclared in the writer register — so a
+    # baseline taken while they were live
     # could not show what the mutation ADDS. `#12042` declared both, and the
     # figures above are measured at the tree that carries it; the three reds are
     # therefore historical, not repo context, and this note cites them by issue
