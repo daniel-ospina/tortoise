@@ -4272,6 +4272,31 @@ jobs:
       # residual: the base copy of a tool cannot yet contain the rule being added).
       - name: The baseline's recorded cut commit resolves
         run: python3 tools/surface_manifest.py check --provenance-strict
+      # ── THE ARCHIVE'S RESTORE ANCHORS MUST BE PROVABLE (#11609) ─────────────────
+      # `archive/` keeps removed code so a removal can be undone, and every entry cites
+      # the commit on the DEFAULT BRANCH that held it (not the batch PR's HEAD, which a
+      # squash merge orphans). The ordinary `archive_surface.py check` runs in the `test`
+      # job, which checks out at `fetch-depth: 1` — where the anchored commit is an absent
+      # ancestor by construction, so the anchor arm says nothing and proves nothing. That is the #9075/#11057 shape exactly: a gate that runs only where it
+      # cannot answer is a no-op gate, and before this step NO workflow invoked the strict
+      # form at all (measured: `rg -- '--anchors'` outside the tool → no match).
+      # This job already pays for `fetch-depth: 0`, which is what the proof NEEDS.
+      # `verify-anchors` imports no `tortoise`; the `check` beside it does, which is why this
+      # job's `pip install -e .` stays.
+      # ⚠️ ACCEPTED RESIDUAL — THE SAME ONE THE STEP ABOVE NAMES, NOT A PINNED COUNTERPART.
+      # Like the cut-commit step, this runs the CHECKOUT'S OWN `tools/archive_surface.py`, so a
+      # PR that rewrites the verifier in the same commit that rewrites `archive/MANIFEST.json`
+      # is graded by its own grader. `tools/surface-guard.py` has a pinned copy for exactly
+      # that reason; the archive verifier does not yet, because pinning it means pinning the
+      # manifest format too (the pinned copy would read a format it does not know). Filed as
+      # part of #11609's batch 1 rather than half-done here — do NOT read this green as
+      # tamper-resistant until the pin lands.
+      - name: The archive's restore anchors resolve and hold their frozen bodies
+        # `--require-entries` too: with no entries every other arm is silent, so an emptied
+        # manifest must be a RED in the job that runs on every PR — not a vacuous OK.
+        run: |
+          python3 tools/archive_surface.py verify-anchors
+          python3 tools/archive_surface.py check --require-entries
       # ── PIN THE TOOLING TO THE BASE REF (#4606) ───────────────────────────
       # The step below would otherwise run the CHECKOUT'S OWN copy, so a PR
       # could add a surface tool and stub the gate out in the same commit: the

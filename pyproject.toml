@@ -277,6 +277,16 @@ tortoise = ["config/routing.yaml", "../tests/sample_transcript.txt",
 # used max-line-length 100).
 line-length = 100
 target-version = "py312"
+# `archive/` is a FROZEN SOURCE ARCHIVE, not maintained code (#11609): it holds the
+# verbatim source of symbols removed from the product surface, so it must stay
+# byte-identical to what was removed. Linting it would either rewrite the archive
+# (defeating "verbatim") or red `ruff check .` on code nothing will ever change.
+# It is outside the shipped package too (`packages.find` does not match it), so this
+# exclude changes nothing about what users receive.
+# ⛔ `extend-exclude`, NOT `exclude`: ruff's `exclude` REPLACES its built-in default
+# list (`.venv`, `build`, `dist`, `node_modules`, …) instead of adding to it — measured,
+# a bare `exclude = ["archive"]` made `node_modules/` lintable again (#11609 review P2).
+extend-exclude = ["archive"]
 
 [tool.ruff.lint]
 # Explicit, version-stable select: ruff 0.16 expanded its DEFAULT surface to
