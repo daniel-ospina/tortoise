@@ -507,9 +507,15 @@ structure, not the return value.
   superseded **Object** that still has a live `IMPL`/`NAND` edge on it
   (`superseded_object_active_edges`, high — the `:Point` lane transfers its
   edges on supersede, the `:Object` lane moves none, so on an Object the
-  survivor is lost belief rather than leftover wiring), a superseded Object
-  whose `supersededBy` name resolves to no node at all
-  (`superseded_by_unresolvable`), and a
+  survivor is lost belief rather than leftover wiring, *unless the successor was
+  rewired separately into a slot EP reads and only the stale edge was left
+  behind* — the emitted `detail` says whether a resolvable successor exists and
+  what EP does with the stripped input, because the repair differs; the check is
+  `:Object`-anchored, so a superseded `:Subject` input is still not covered), a
+  superseded Object
+  whose `supersededBy` name resolves to no OTHER node
+  (`superseded_by_unresolvable` — a rename, a deletion, a name never created, or
+  a pointer naming the Object itself), and a
   keyword heuristic over `IMPL` edges that may have belonged to `NAND`
   (`impl_instead_of_nand`). The **chain-integrity check** validates the
   product-strategy chain rules only — dangling journey→use-case, workflow→JTBD

@@ -13,13 +13,24 @@ What is pinned here is the INSTRUMENT (and the two honesty fixes in the same
 issue's "also measured" list), never the transfer:
 
   * ``superseded_object_active_edges`` (high) — a superseded :Object that still
-    carries an active IMPL/NAND edge, i.e. the defunded factor's shape;
+    carries an active IMPL/NAND edge, i.e. the defunded factor's shape —
+    including its TWO reachable variants, which the emitted strings depend on:
+    a successorless supersede (the generic ``update_entity`` door reaches the
+    status with no ``supersededBy``, so there is nothing to re-point onto) and a
+    successor that was already rewired while the stale edge survived (the factor
+    then RUNS, so the belief is not lost and the repair reduces to the delete);
   * ``superseded_by_unresolvable`` (medium) — ``supersededBy`` is a NAME, so
     renaming the successor dangles the only link the predecessor has to it
     (#3590 made the name mutable and the id the identity);
   * ``get_historical_knowledge(...)["current"]`` now carries ``status`` and
     ``terminal``, so a superseded chain head is not served as the claim that
     stands today.
+
+⛔ SCOPE: both checks are ``:Object``-anchored. A superseded ``:Subject`` that is
+an operator input has the same shape (the Subject lane moves no edges either, and
+EP's participation predicate is label-agnostic) and is reported by NEITHER — a
+declared false-clean, not an oversight; see the check's own note in
+``tortoise/audit.py``.
 
 ⛔ THE TRANSFER IS NOT IMPLEMENTED HERE, deliberately, and the reason is a
 RECORDED DECISION rather than effort: ``docs/ONTOLOGY.md`` §3.1 requires
@@ -191,6 +202,163 @@ def test_the_check_exists_even_when_it_finds_nothing(sdk):
     assert counts["superseded_by_unresolvable"] == 0
 
 
+def test_a_successorless_supersede_still_gets_a_performable_repair(sdk):
+    """The anchor is ``status='superseded'``, and the GENERIC door reaches that
+    status with no successor at all.
+
+    ``#11824``'s AX table records that ``update_entity(object,
+    status='superseded')`` is accepted ON PURPOSE (the mirror shape is out of the
+    guard — refusing it would over-block), so this is a state the engine produces,
+    not a hypothetical. The emitted repair must then name the step that can
+    actually be taken: a successor "named by its supersededBy" does not exist in
+    this state, so the plain transfer wording would be an unperformable repair
+    (#7819's rule) — and ``archived`` must NOT be offered as the repair, because
+    it clears the ANCHOR without clearing the belief (asserted below on the engine,
+    not just in the string).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]])
+
+    # The door the code deliberately permits (measured on this head).
+    sdk.update_entity(v1["id"], status="superseded")
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.status, o.supersededBy",
+              {"i": v1["id"]}) == [["superseded", None]], \
+        "fixture drifted: this door no longer produces a successorless supersede"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues, "the successorless shape is still lost belief — report it"
+    issue = issues[0]
+    assert "no OTHER Object answers its supersededBy (none is set)" in issue.detail, \
+        issue.detail
+    assert "nothing to re-point this input onto" in issue.detail, issue.detail
+    # ⛔ The repair must not send the reader to a node that does not exist, and it
+    # must name the step that DOES exist (name the successor).
+    assert "successor named by its supersededBy" not in issue.fix, issue.fix
+    assert "No resolvable successor is named" in issue.fix, issue.fix
+    assert "'supersededBy': '<the successor name>'" in issue.fix, issue.fix
+    # The door's own signature form (props as ONE dict), pinned again here because
+    # this arm is new: a keyword spelling raises TypeError at the caller.
+    assert f"tortoise_update_entity('{v1['id']}', {{" in issue.fix, issue.fix
+
+    # ⛔ AND ``archived`` is a TRAP the string must warn about, not a repair it may
+    # recommend: archiving clears this check's anchor while EP strips the input
+    # exactly as before, so a re-audit reads CLEAN over a still-degenerate factor.
+    # Both halves are measured here so the warning cannot rot.
+    assert "does NOT clear this" in issue.fix, issue.fix
+    sdk.update_entity(v1["id"], status="archived")
+    assert _issues(sdk, "superseded_object_active_edges") == [], \
+        "archiving did not clear the finding — the string's warning is now wrong"
+    run = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert [s["reason"] for s in run.get("skipped_factors") or []] == ["degenerate"], \
+        ("EP no longer strips an archived input, so archiving WOULD be a repair "
+         f"and the warning must be withdrawn: {run.get('skipped_factors')}")
+
+
+def test_a_barely_resolvable_pointer_takes_the_successorless_arm(sdk):
+    """``supersededBy`` set but resolving to nothing is the SAME repair problem.
+
+    A renamed successor (``#3590`` made the name mutable) leaves the pointer a
+    string that addresses no node, so "re-point onto the successor named by its
+    supersededBy" is as unperformable here as with no pointer at all — and the arm
+    is selected on RESOLUTION, not on the field being present.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.name = 'PolicyV2b'", {"i": v2["id"]})
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    assert "No resolvable successor is named" in issues[0].fix, issues[0].fix
+    assert "successor named by its supersededBy" not in issues[0].fix, issues[0].fix
+    # The pointer is still SET — so this is the 'set but unresolvable' arm, and the
+    # detail must quote the dead name rather than claim no pointer exists.
+    assert "'PolicyV2'" in issues[0].detail, issues[0].detail
+    assert "none is set" not in issues[0].detail, issues[0].detail
+
+
+def test_a_directional_operators_stripped_source_is_not_repaired_by_rewiring(sdk):
+    """The rewiring hedge is scoped to "a slot EP reads", and this is why.
+
+    A directional operator whose idx-0 SOURCE is the superseded Object is skipped
+    by EP's ``source_stripped`` branch (ahead of the degenerate test), so a
+    successor wired in alongside does NOT restore participation — the detail must
+    say so, or it understates a real `high` finding into a benign one.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    op = sdk.create_operator("IMPL", v1["id"], [p["id"]], direction="->")
+    assert _q(sdk, "MATCH (o:Point {id:$i})-[r:IMPL]->(c:Object) RETURN r.idx",
+              {"i": op["id"]}) == [[0]], \
+        "fixture drifted: the superseded Object is no longer the idx-0 source"
+    # Step 1 of the repair, wired anyway: the successor becomes an input.
+    _q(sdk, "MATCH (op:Point {id:$op}), (succ:Object {id:$new}) "
+            "MERGE (op)-[nr:IMPL]->(succ) SET nr.idx = 2",
+       {"op": op["id"], "new": v2["id"]})
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    run = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert [s["reason"] for s in run.get("skipped_factors") or []] == ["source_stripped"], \
+        ("a rewired directional source is no longer skipped — the hedge is now "
+         f"over-cautious: {run.get('skipped_factors')}")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    assert "source_stripped" in issues[0].detail, issues[0].detail
+    assert "a slot EP reads" in issues[0].detail, issues[0].detail
+
+
+def test_a_rewired_successor_leaves_the_stale_edge_reported_honestly(sdk):
+    """Step 1 of the emitted repair performed, step 2 not: the successor carries
+    an equivalent input and the stale edge into the superseded Object survives.
+
+    The finding is still real (a live edge into a terminal node must not stay),
+    but the belief is NOT lost: the factor runs on the survivors. Measured on the
+    engine below — so a detail claiming "the successor inherits no belief"
+    unconditionally would be false in a state the repair itself can produce, and
+    ``high`` would lose the rationale the check gives for choosing it.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    # Step 1 only: wire the successor, leave the stale edge.
+    _q(sdk, "MATCH (op:Point {id:$op}), (succ:Object {id:$new}) "
+            "MERGE (op)-[nr:IMPL]->(succ) SET nr.idx = 2",
+       {"op": op["id"], "new": v2["id"]})
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    assert _q(sdk, "MATCH (o:Object {id:$i})<-[r:IMPL]-(x) RETURN x.id",
+              {"i": v2["id"]}), "fixture drifted: the successor is not wired"
+
+    # The engine fact the wording rests on: three inputs, one stripped, the
+    # factor STILL RUNS (2 participating), so the successor inherits the belief.
+    # ⛔ ``skipped_factors`` alone cannot carry that claim — the key is absent both
+    # when the run consumed the factor AND when it never evaluated it, so the
+    # confidences are asserted beside it.
+    run = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert not run.get("skipped_factors"), (
+        "the factor was skipped anyway — the rewired shape would then be lost "
+        f"belief after all: {run.get('skipped_factors')}")
+    assert run.get("confidences"), (
+        "the factor was never consumed, so 'it still runs' is unproven: "
+        f"{run}")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues, "the stale edge must still be reported — it must not stay"
+    issue = issues[0]
+    assert "unless it was separately rewired into a slot EP reads" in issue.detail, \
+        issue.detail
+    assert "only that delete" in issue.fix, issue.fix
+
+
 # ── 2. the name-keyed successor pointer ───────────────────────────
 
 
@@ -243,6 +411,35 @@ def test_an_object_with_no_successor_name_is_not_reported(sdk):
     v1 = _obj(sdk, "Orphan")
     _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
             "o.supersededBy = ''", {"i": v1["id"]})
+    assert _issues(sdk, "superseded_by_unresolvable") == []
+
+
+def test_a_self_pointer_is_not_a_successor(sdk):
+    """``supersededBy`` naming the Object ITSELF resolves to no OTHER node.
+
+    A plain name match is satisfied by the node that carries the name by
+    definition, so without ``carrier.id <> sup.id`` a self-pointer read as
+    RESOLVED and nothing in the audit mentioned it (measured: ``update_entity(obj,
+    supersededBy='<its own name>')`` is accepted). The repairable fact is the same
+    one a dangling name is — name the real successor.
+    """
+    v1 = _obj(sdk, "PolicyV1")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded'", {"i": v1["id"]})
+    sdk.update_entity(v1["id"], **{"supersededBy": "PolicyV1"})
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
+              {"i": v1["id"]}) == [["PolicyV1"]], \
+        "fixture drifted: the self-pointer was refused by the door"
+
+    issues = _issues(sdk, "superseded_by_unresolvable")
+    assert [i.node_id for i in issues] == [v1["id"]], (
+        "a pointer that names only the node itself was read as resolved: "
+        f"{[(i.node_id, i.detail) for i in issues]}")
+    assert "NO Object carries that name" in issues[0].detail, issues[0].detail
+
+    # The counterpart the exclusion must NOT break: a successor that is a
+    # DIFFERENT node sharing the name still resolves.
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'live'", {"i": v1["id"]})
+    _obj(sdk, "PolicyV1")  # a second, distinct Object with the same name
     assert _issues(sdk, "superseded_by_unresolvable") == []
 
 
