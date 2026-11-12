@@ -453,6 +453,10 @@ class FoldEvidence:
     #: not nothing: `extractedFrom` is declared, so an empty ref set passes the
     #: ref check and the value would otherwise be destroyed with the node.
     blank_refs: tuple[str, ...] = ()
+    #: WHICH spelling of the one date slot the duplicate's row actually carried —
+    #: `scalar["when"]` collapses the pair, so the residual would otherwise name
+    #: `when` over a row that holds only `validFrom`.
+    date_spelling: str | None = None
     #: `(when, validFrom)` when the duplicate held BOTH with different values.
     #: The residual's travel clause is written in `_carry_fold_evidence`, where
     #: the canonical's occupancy is known (free slot ⇒ one value travels;
@@ -817,6 +821,8 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         source_refs=frozenset(refs),
         labels=labels,
         blank_refs=tuple(blank_refs),
+        date_spelling=(None if when is None and validfrom is None else
+                       ("when" if when is not None else "validFrom")),
         slot_conflict_values=(
             (when, validfrom)
             if (when is not None and validfrom is not None
@@ -1276,13 +1282,27 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
         # below (`_finish_date_conflict`).
         if held is not None:
             if held != value:
-                # Named as the SLOT, not the read spelling: `when` and `validFrom`
-                # are one slot, and a receipt saying "when" over a row whose
-                # value lives on `validFrom` sends the reader to a field the
-                # node does not hold.
+                # ⚠️ NAME WHAT EACH NODE ACTUALLY HOLDS. The earlier shape was
+                # `f"{key} (as {write_key})"`, which was right for one direction
+                # and INVERTED for the other: a duplicate holding only
+                # `validFrom` against a canonical holding only `when` printed
+                # "when (as validFrom)" — naming a field neither node holds —
+                # which is exactly the defect the comment above says it fixed.
+                # `key` is the DUPLICATE's spelling (it is present in its
+                # scalar map); `canon_spelling` is the canonical's, read from
+                # whichever of the two the occupancy check found.
+                canon_spelling = (write_key
+                                  if canonical.get(write_key) is not None else key)
+                # `key` is the collapsed scalar's name; the DUPLICATE's own
+                # spelling comes from the read (`date_spelling`), or is `key` for
+                # a slot that has only one spelling (`search_keys`).
+                dup_spelling = (evidence.date_spelling
+                                if write_key == "validFrom" else None) or key
+                label = (dup_spelling if canon_spelling == dup_spelling
+                         else f"{dup_spelling} (the canonical holds it as "
+                              f"{canon_spelling})")
                 out["residual"].append(
-                    (key if key == write_key else f"{key} (as {write_key})")
-                    + " — the canonical's value differs")
+                    f"{label} — the canonical's value differs")
             continue
         to_write[write_key] = value
 

@@ -1878,7 +1878,8 @@ def test_an_OCCUPIED_date_slot_says_NEITHER_spelling_travelled():
     """The dual-date residual is built by the READ, which cannot see the
     canonical's occupancy — and `when` only reaches the writer when the slot is
     FREE. On an occupied slot the receipt claimed "only '2026-08-01' travelled"
-    one clause before "when (as validFrom) — the canonical's value differs": the
+    one clause before "when (the canonical holds it as validFrom) — the
+    canonical's value differs": the
     duplicate's date never travelled at all, and the canonical stored its own
     (measured through the real seam with a canonical `validFrom`)."""
     graph = _FakeGraph(
@@ -2054,3 +2055,66 @@ def test_a_CANONICAL_EMPTY_STRING_single_slot_is_OCCUPIED():
     assert out["ok"] is True, out
     assert "search_keys" not in out["copied"], out
     assert sdk.calls == [], sdk.calls
+
+
+# ── 24) round 21: the residual that named the WRONG node, the de-dup line ──
+
+
+def test_the_differing_date_names_what_EACH_node_holds__both_directions():
+    """The residual was `f"{key} (as {write_key})"` — right for a duplicate
+    holding `when`, INVERTED for one holding only `validFrom` against a canonical
+    holding only `when`, where it printed "when (as validFrom)": a field neither
+    node holds. Both directions are pinned here, and nothing pinned either
+    before (mutating the spellings left every test green)."""
+    dup_only_validfrom = _FakeGraph(
+        dup_row=("session:s", [], None, None, None, None, None, None,
+                 "2026-08-02", None, None, None),
+        canon_row=("session:s", [], None, None, None, None, None,
+                   "2026-08-01", None, None, None, None))
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(dup_only_validfrom), "pt_dup", "pt_canon")
+    assert any("validFrom (the canonical holds it as when) — the canonical's "
+               "value differs" in r for r in out["residual"]), out["residual"]
+    assert not any("(as validFrom)" in r for r in out["residual"]), out
+
+    dup_only_when = _FakeGraph(
+        dup_row=("session:s", [], None, None, None, None, None,
+                 "2026-08-01", None, None, None, None),
+        canon_row=("session:s", [], None, None, None, None, None, None,
+                   "2026-08-02", None, None, None))
+    other = capture_fold.carry_fold_evidence(
+        _FakeProj(dup_only_when), "pt_dup", "pt_canon")
+    assert any("when (the canonical holds it as validFrom) — the canonical's "
+               "value differs" in r for r in other["residual"]), other
+    assert not any("(as when)" in r for r in other["residual"]), other
+
+
+def test_the_residual_list_is_DEDUPLICATED_for_parallel_edges():
+    """The wrapper's `dict.fromkeys` was presented as the "ONE place" fact-once is
+    enforced and was pinned by nothing (replacing it with `list(...)` left every
+    test green). The repeatable shape is two PARALLEL edges between the same pair:
+    the read returns both, `_carried` reports each, and the two sentences are
+    identical."""
+    edges = [("aboutObject", "Object", "obj_1", 0.4),
+             ("aboutObject", "Object", "obj_1", 0.4)]
+    graph = _FakeGraph(edges=edges, carried={"obj_1": (1, 0.9)})
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is True, out
+    graded = [r for r in out["residual"] if r.startswith("confidence of ")]
+    assert graded == ["confidence of aboutObject→obj_1"], out["residual"]
+
+
+def test_the_declared_bounds_are_named_on_the_arm_that_CARRIED_something(
+        sdk, monkeypatch):
+    """The write-history / edge-attribute disclosure was gated on
+    `not carried and not copied` — exactly the state where nothing was carried —
+    so the ORDINARY fold (one link carried) destroyed those classes with no
+    clause naming them. This is that fold."""
+    sdk.create_object("Acme")
+    _extracted, meta = _extract(
+        sdk, monkeypatch, evidence={"aboutEntities": ["Acme"]})
+    said = next(w for w in meta["warnings"] if "folded into canonical" in w)
+    assert "1 attachment link(s)" in said, said          # something WAS carried
+    assert "#12146" in said, said                        # …and the bound is named
+    assert "createdAt" in said, said

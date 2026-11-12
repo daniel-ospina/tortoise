@@ -1467,6 +1467,22 @@ assert (
 )
 
 
+def _fold_declared_bounds_note() -> str:
+    """The two classes this fold does NOT read, named on the receipt.
+
+    ⚠️ Emitted on EVERY arm that carried anything, not only on the "nothing was
+    carried" clause: `carried >= 1` suppressed that clause, so the ordinary fold
+    destroyed the duplicate's `createdAt`/`updatedAt` and any non-`confidence`
+    attribute on its own links with NO clause naming them. Both are DECLARED — the
+    structural props in `capture_fold._STRUCTURAL_PROPS`, the attribute bound in
+    `_CARRIED_EDGE_ATTRS` + #12146 — but "declared in a docstring" is not
+    "disclosed on the receipt an operator reads."
+    """
+    return ("the row's `createdAt`/`updatedAt` went with it, and edge "
+            "attributes beyond `confidence` are a declared bound this fold "
+            "does not read (#12146)")
+
+
 def _fold_residual_clause(fold_report: dict) -> str:
     """The refusal's residual clause, minus anything `blocked` already said.
 
@@ -17065,14 +17081,16 @@ class TortoiseSDK:
                                 # the receipt asserted an absence over a node
                                 # that lost its own write time.
                                 + (", no per-occurrence evidence of its own "
-                                   "to carry beyond its write history — the "
-                                   "row's `createdAt`/`updatedAt` went with it, "
-                                   "and edge attributes beyond `confidence` are "
-                                   "a declared bound this fold does not read "
-                                   "(#12146)"
+                                   "to carry beyond its write history — "
+                                   + _fold_declared_bounds_note()
                                    if (not carried and not copied and not residual
                                        and not undeclared)
-                                   else ""))
+                                   else "")
+                                # ⚠️ …and the same disclosure on the arm that DID
+                                # carry something: the bound is not a property of
+                                # an empty fold, it is a property of the delete.
+                                + (f"; {_fold_declared_bounds_note()}"
+                                   if (carried or copied) else ""))
                             if residual:
                                 # ⚠️ NOT "kept the canonical's own …": a support
                                 # field the canonical does not hold at all (an
