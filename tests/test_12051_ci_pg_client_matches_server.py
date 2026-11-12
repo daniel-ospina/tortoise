@@ -43,6 +43,43 @@ client majors, so the assertion is made where the version is decided: the
 workflow. Reproduced by hand (documented on #12051): a PG17 client dumping into
 `pgvector/pgvector:pg16` fails with exactly the error quoted above, and the same
 server's own PG16 client dumps and restores clean.
+
+WHAT THIS GUARD CANNOT SEE — read this before trusting a green run.
+
+This is a HERMETIC TEXT GUARD: it reads `.github/workflows/python-ci.yml` and
+nothing else, and it cannot execute what it reads. Nine review rounds each closed
+one way a text search could be satisfied by a different spelling of the same act
+(a comment, a second write, a disjunction, an unread one, an `echo`-only
+producer, a nested branch, the leg's own PATH export, a non-literal client dir,
+a binary replaced out of the pinned directory). The class that REMAINS open is
+not a tenth spelling — it is the one a text guard cannot reach:
+
+- **Dead code reads as live.** A `$GITHUB_PATH` write inside `if false; then …
+  fi` or a `: <<'EOF'` heredoc is present in the text, so the rows that require
+  it stay green although nothing is appended (measured, round 9). Deciding
+  whether a shell line EXECUTES needs a shell, not a regex. The compensating
+  control is the pin's own in-job assertion: it prints `pg_dump --version`, so a
+  pin that never took effect is visible in the log of the step that tried.
+- **A path built at runtime is invisible.** `b=/usr/lib/postgresql; ln -sf
+  "$b/17/bin/pg_dump" …/16/bin/pg_dump` names no major this guard can read. What
+  IS refused is the mutating VERB carrying a client binary name, at or after the
+  pin, however the source is spelled — so the plausible form is loud even when
+  the arithmetic is not. The same applies to the runner's own command-file
+  directory (`_runner_file_commands`): naming it is refused outright, but a
+  directory reached through yet another variable is not.
+- **A directory derived rather than spelled** (`ls -d /usr/lib/postgresql/*/bin
+  | sort -V | tail -1`) is caught only because the rule treats a client dir it
+  cannot read as an offender; the same derivation hidden inside an invoked
+  script is not.
+- **An invoked script is read as one line** (`run: bash x.sh`). No in-repo
+  script this job calls names or moves a client dir — kept that way, because
+  this guard cannot follow one.
+- **The extraction's arithmetic** (`sed -E 's/.*/16/'`) cannot be proven; the
+  in-job assertion is what makes a constant visible.
+
+So: a green run means "no plausible spelling of the regression is in this
+text", not "the job provably installs and uses pg16". The job's own assertion is
+the part that observes reality.
 """
 from __future__ import annotations
 
@@ -72,8 +109,29 @@ CLIENT_PKG_RE = re.compile(
     r"(?:apt-get|apt|aptitude)\s+(?:install|reinstall)[^\n]*?postgresql-client-(\d+)\b"
 )
 
-#: The name alone, for MESSAGES and for the "is this the pin step" fallback.
-CLIENT_NAME_RE = re.compile(r"postgresql-client-(\d+)\b")
+#: The runner's own command-file directory (#12051 review round 9): `$GITHUB_PATH`
+#: is a PATH into this dir whose NAME carries a per-run guid, so a step that
+#: globs it can append without ever mentioning `GITHUB_PATH` — measured GREEN
+#: (`for f in "$RUNNER_TEMP"/_runner_file_commands/add_path_*; do echo /usr/bin
+#: >> "$f"; done`). Nothing legitimate in this job names the directory, so the
+#: name itself is refused.
+RUNNER_FILE_COMMAND_RE = re.compile(r"_runner_file_commands")
+
+#: A command that REPLACES a binary rather than naming one (#12051 review round
+#: 9). The pinned dir can be rewritten after the pin, and "may the job NAME
+#: another major" cannot see it when the base path arrives in a variable:
+#: measured GREEN, restoring #12051 —
+#: `b=/usr/lib/postgresql; sudo ln -sf "$b/17/bin/pg_dump" "$b/16/bin/pg_dump"`
+#: and a `find`-derived `cp "$src" …/16/bin/pg_dump`. Keying on the BINARY NAME
+#: plus a mutating verb is independent of HOW the source path is spelled, which
+#: is the axis that was open.
+BINARY_MUTATION_RE = re.compile(
+    r"\b(?:"
+    r"ln|cp|mv|rm|unlink|chmod|chown|patch|tee|dd|"
+    r"update-alternatives|install|sed[ \t]+-i|dpkg[ \t]+-i|perl[ \t]+-i"
+    r")\b"
+)
+BINARY_NAME_RE = re.compile(r"\b(?:pg_dump|pg_restore|pg_ctl|pg_wrapper)\b")
 
 #: The `$GITHUB_PATH` write as ONE unit: the versioned dir IS the value written.
 #: `echo <dir> >> "$GITHUB_PATH"` — read the major from the
@@ -110,8 +168,9 @@ GITHUB_PATH_MENTION_RE = re.compile(r"\bGITHUB_PATH\b")
 #: assignment runs after the runner composes the prepend (actions/runner
 #: `Handler.AddPrependPathToEnvironment` → `ScriptHandler`), that export WINS.
 #: Measured GREEN before this rule, with the in-job `pg_dump --version`
-#: assertion still printing 16 because it lives in the PIN step. So no line in
-#: this job may name a major other than the servers'.
+#: assertion still printing 16 because it lives in the PIN step. So no `run:`
+#: line of this job — nor the `shell:` it is executed through — may name a
+#: versioned client dir of another major.
 #: ⛔ THE TOKEN IS NOT REQUIRED TO BE DIGITS (#12051 review round 8): matching
 #: `\d+` let the leg derive the directory instead of spelling it —
 #: `export PATH="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1):$PATH"`
@@ -240,7 +299,7 @@ def _github_path_writes(steps: list[dict]) -> list[tuple[int, str, int | None]]:
     ]
 
 
-def _client_dir_mentions(steps: list[dict]) -> list[tuple[int, str, int | None]]:
+def _client_dir_mentions(steps: list[dict], job: dict | None = None) -> list[tuple[int, str, int | None]]:
     """Every line that names a `/usr/lib/postgresql/<major>/bin` directory.
 
     The PATH that matters on the leg is not built by `$GITHUB_PATH` alone: the
@@ -249,11 +308,20 @@ def _client_dir_mentions(steps: list[dict]) -> list[tuple[int, str, int | None]]
     wins (actions/runner `Handler.AddPrependPathToEnvironment` / `ScriptHandler`).
     Measured GREEN before this rule, with the in-job `pg_dump --version`
     assertion still printing 16 because it lives in the pin step.
+
+    `shell:` IS PART OF THE POPULATION (#12051 review round 9): it is EXECUTED
+    argv, not decoration — the runner splits it (`ParseShellOptionString`, first
+    space only) and substitutes `{0}`, so
+    `shell: bash -c 'export PATH=/usr/lib/postgresql/17/bin:$PATH; exec bash {0}'`
+    moves the leg's PATH while `_run_text()` never saw it. Measured GREEN at the
+    step AND at `defaults.run.shell`; both are scanned here.
     """
 
-    found: list[tuple[int, str, int]] = []
+    default_shell = str(((job or {}).get("defaults") or {}).get("run", {}).get("shell") or "")
+    found: list[tuple[int, str, int | None]] = []
     for index, step in enumerate(steps):
-        for line in _run_commands(step).splitlines():
+        shell = "\n".join([default_shell, str(step.get("shell") or "")])
+        for line in (shell + "\n" + _run_commands(step)).splitlines():
             for match in CLIENT_DIR_RE.finditer(line):
                 token = match.group("token")
                 found.append((index, line.strip(), int(token) if token.isdigit() else None))
@@ -446,8 +514,17 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     `ScriptHandler`). Measured GREEN before this rule, with the in-job
     `pg_dump --version` assertion still printing 16 because it lives in the PIN
     step. So the population here is `_client_dir_mentions()` — every line that
-    names a versioned client dir, whatever it does with it — and the rule is the
-    simple, complete one: no other major may be named at all.
+    names a versioned client dir, whatever it does with it, in the step's `run:`
+    script or the `shell:` it executes through.
+
+    ⛔ AND THE BINARY ITSELF CAN BE REPLACED (#12051 review round 9), which no
+    "may the job NAME another major" rule can catch when the base path arrives in
+    a variable: `b=/usr/lib/postgresql; sudo ln -sf "$b/17/bin/pg_dump"
+    "$b/16/bin/pg_dump"` and a `find`-derived `cp …/16/bin/pg_dump` were both
+    measured GREEN, and both leave the leg resolving the pg17 binary out of the
+    pinned dir. So a MUTATING verb carrying a client binary name is refused at
+    or after the pin, however the source is spelled. The pin's own
+    `postgresql-client-<n>` install line is the one exclusion.
 
     Read through `_run_commands()` for the same reason as every other search
     here: a commented-out line is inert shell that reads identically to the live
@@ -497,17 +574,34 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
                 if major is not None
                 else f"step {index} names a client dir whose major this guard cannot read: {line!r}"
             )
-            for index, line, major in _client_dir_mentions(steps)
+            for index, line, major in _client_dir_mentions(steps, job)
             if major != server_major
         }
     )
-    assert not (offenders or other_majors), (
-        "a `$GITHUB_PATH` write (or a step's own PATH entry) changes which "
-        "client major the leg runs: "
-        + "; ".join(offenders + other_majors)
-        + ". Later writes and in-step assignments both WIN over the pin, so the "
-        "leg would run on that client instead (#12051). The pin's own literal "
-        f"pg{server_major} append is the only way this job may name a client dir."
+    replacements = sorted(
+        {
+            f"step {index} REPLACES a client binary: {line!r}"
+            for index, step in enumerate(steps)
+            if index >= pin_index
+            for line in _run_commands(step).splitlines()
+            if BINARY_MUTATION_RE.search(line)
+            and BINARY_NAME_RE.search(line)
+            and not CLIENT_PKG_RE.search(line)
+        }
+        | {
+            f"step {index} writes the runner's own command file: {line!r}"
+            for index, step in enumerate(steps)
+            for line in _run_commands(step).splitlines()
+            if RUNNER_FILE_COMMAND_RE.search(line)
+        }
+    )
+    assert not (offenders or other_majors or replacements), (
+        "a `$GITHUB_PATH` write, a step's own PATH entry, or a REPLACEMENT of a "
+        "client binary changes which client the leg runs: "
+        + "; ".join(offenders + other_majors + replacements)
+        + ". Later writes and in-step assignments both WIN over the pin, and a "
+        "replaced binary is what the pinned dir resolves, so the leg would run "
+        "on that client instead (#12051)."
     )
 
 
@@ -544,9 +638,13 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     `continue-on-error: true` on the pin step makes `exit 1` set
     `Result = TaskResult.Succeeded` (actions/runner
     `ExecutionContext.ApplyContinueOnError`), and `if: false` skips the branch
-    outright — both measured GREEN. Presence, not truthiness, is what is checked:
-    YAML parses `if: false` as boolean `False`, so `pin.get("if")` reads as
-    "absent".
+    outright — both measured GREEN. The check is on the steps that actually
+    CARRY the write and the branch (round 9: keying it on the whole
+    `[install, leg)` window red an unrelated step's `continue-on-error: true`
+    while calling that step "a step carrying the client pin", which it is not),
+    and it reads VALUES, not presence — `continue-on-error: false` and
+    `if: success()` skip nothing, and YAML parses `if: false` as boolean
+    `False`, so a truthiness read sees "absent".
     """
     steps = _steps(job)
     pin_index, pin = _pin_step(steps)
@@ -570,17 +668,25 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     ]
     skippable = [
         index
-        for index, step in enumerate(steps)
-        if pin_index <= index < leg_start
-        and ("continue-on-error" in step or "if" in step)
+        for index in sorted(
+            {index for index, _, _ in _github_path_writes(steps)}
+            | {index for index, _ in hits}
+        )
+        if steps[index].get("continue-on-error")
+        or (
+            "if" in steps[index]
+            and steps[index]["if"] not in (True, "success()", "success")
+        )
     ]
     assert not skippable, (
-        "a step carrying the client pin is SKIPPABLE — "
-        f"step(s) {skippable} set(s) `continue-on-error` (its `exit 1` sets "
+        "the step(s) carrying the client pin and its assertion are SKIPPABLE — "
+        f"step(s) {skippable} set `continue-on-error: true` (its `exit 1` sets "
         "`Result = TaskResult.Succeeded`, actions/runner "
-        "`ExecutionContext.ApplyContinueOnError`) or `if:` (a false condition "
-        "skips the pin and its assertion with it). Either way the leg runs on "
-        "the inherited client and the job can stay green (#12051)."
+        "`ExecutionContext.ApplyContinueOnError`) or a non-`success()` `if:` (a "
+        "false condition skips the pin and the assertion with it). Either way "
+        "the leg runs on the inherited client and the job can stay green "
+        "(#12051). Only steps CARRYING the write or the branch are checked — an "
+        "unrelated step's `continue-on-error` is none of this row's business."
     )
     assert hits, (
         "no step between the client install and the record leg has an ARMED "
@@ -590,34 +696,33 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
         "`exit 1` in the text while being unable to fire, which is the "
         "disjunction this assertion used to be (measured, #12051 round 4)"
     )
-    assert len(hits) == 1, (
-        "expected exactly ONE armed fail-closed branch between the client "
-        f"install (step {pin_index}) and the record leg (step {leg_start}); "
-        f"found {len(hits)} at step(s) {[index for index, _ in hits]} — two "
-        "assertions can disagree about which major is armed, and this row "
-        "cannot tell which one runs last"
-    )
-    branch_index, branch = hits[0]
-    branch_text = _run_code(steps[branch_index])
-    assert int(branch.group("major")) == server_major, (
-        "the fail-closed branch compares against major "
-        f"{branch.group('major')} but the provisioned servers are pg{server_major} — "
-        "a branch that can never be true is the same symptom as no branch"
-    )
-    assert FAIL_CLOSED_ANNOUNCE_RE.search(branch.group("body")), (
-        "the armed branch never ANNOUNCES a `::error::` on its own line — a "
-        "branch that prints nothing and continues ships the bad artifact "
-        "silently (measured, round 7: `false && echo \"::error::…\"` contains "
-        "the token and never runs)"
-    )
-    assert FAIL_CLOSED_STOP_RE.search(branch.group("body")), (
-        "the armed branch never STOPS on its own `exit 1` line — measured, "
-        "round 7: `false && exit 1` and `bail() { exit 1; }` both contain the "
-        "token while the branch announces and continues, so the job runs the "
-        "leg on the inherited client and exits 0"
-    )
+    # EVERY located branch must be armed against the servers' major, and must
+    # announce and stop. Multiple branches are ACCEPTED when they AGREE (one per
+    # tool is a correct layout): round 9 measured that requiring exactly one red
+    # that correct tree with "two assertions can disagree", which they do not.
+    for branch_index, branch in hits:
+        assert int(branch.group("major")) == server_major, (
+            f"the fail-closed branch at step {branch_index} compares against "
+            f"major {branch.group('major')} but the provisioned servers are "
+            f"pg{server_major} — a branch that can never be true is the same "
+            "symptom as no branch"
+        )
+        assert FAIL_CLOSED_ANNOUNCE_RE.search(branch.group("body")), (
+            f"the armed branch at step {branch_index} never ANNOUNCES a "
+            "`::error::` on its own line — a branch that prints nothing and "
+            "continues ships the bad artifact silently (measured, round 7)"
+        )
+        assert FAIL_CLOSED_STOP_RE.search(branch.group("body")), (
+            f"the armed branch at step {branch_index} never STOPS on its own "
+            "`exit 1` line — measured, round 7: `false && exit 1` and "
+            "`bail() { exit 1; }` both contain the token while the branch "
+            "announces and continues, so the job runs the leg on the inherited "
+            "client and exits 0"
+        )
+
+    asserted = "\n".join(_run_commands(steps[index]) for index, _ in hits)
     for tool in ("pg_dump", "pg_restore"):
-        assert tool in _run_commands(steps[branch_index]), (
+        assert tool in asserted, (
             f"the pin must assert `{tool} --version`: the drill resolves BOTH "
             "from PATH, and pinning only one leaves the other on the image's "
             "client"
