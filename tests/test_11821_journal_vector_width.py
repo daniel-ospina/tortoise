@@ -1095,6 +1095,54 @@ def test_a_caller_cannot_name_a_record_shaped_payload_at_the_funnel_doors(
     # ways. The width rule itself is pinned by the rows above.
 
 
+def test_the_record_channel_cannot_carry_an_envelope_name(tmp_path):
+    """#11835 review: the ENVELOPE family was half-closed — `_emit`'s KEYWORD
+    payload refused it, its POSITIONAL record did not.
+
+    The record belongs to `add_point` / `add_operator`, which is why the first
+    fix checked it for `point` only. But the replay's `_norm` is
+    `{**ev, **ev["point"]}`, so a caller keyed `type=` INSIDE the record is
+    spliced OVER the envelope — it is the record's identity on replay, not a
+    payload field. Measured at `95b98e6cf1`: `add_point("hello", prov,
+    type="PointDeleted")` was ACCEPTED, journalled `"type":"PointAdded"` with
+    the caller's `"type":"PointDeleted"` nested inside, returned a point id,
+    and the replay dispatched on `PointDeleted` — an arm that matches nothing,
+    so the point was lost SILENTLY. `ts=` / `initiated_by=` / `event_id=`
+    correspondingly forged the replay's when / by-whom / id.
+    """
+    from tortoise.api import EventAPI, provenance
+    from tortoise.log import EventLog
+
+    events = tmp_path / "record-envelope"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    for key, value in (("type", "PointDeleted"),
+                       ("ts", "1999-01-01T00:00:00Z"),
+                       ("initiated_by", "somebody"),
+                       ("agent_id", "agent-9"),
+                       ("actor_user_id", "user-9"),
+                       ("event_id", "forged-event")):
+        with pytest.raises(ValueError, match="ENVELOPE"):
+            api.add_point("hello", provenance("src:7", [0, 5], "q"),
+                          **{key: value})
+    assert not journal.exists() or not journal.read_text().strip(), (
+        "a refused record must leave NOTHING to replay")
+
+    # …and the door's OWN record still lands, envelope minted by the funnel.
+    pid = api.add_point("a real point", provenance("src:8", [0, 5], "q"))
+    added = [json.loads(ln) for ln in journal.read_text().splitlines()
+             if ln.strip()]
+    assert len(added) == 1, "the ordinary door must still journal exactly one"
+    assert added[0]["type"] == "PointAdded", (
+        "the funnel's own type must not be shadowed by the record")
+    assert added[0]["point"]["id"] == pid
+    assert not set(added[0]["point"]) & {
+        "type", "ts", "initiated_by", "agent_id", "actor_user_id",
+        "event_id"}, "the door's record must carry no envelope name"
+
+
 def test_the_eventapi_emit_door_refuses_a_caller_named_marker(tmp_path):
     """The marker is writer-minted at this door too — `add_point`'s rule, one over.
 

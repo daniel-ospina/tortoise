@@ -120,8 +120,9 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #: ⛔ AND THE SAME HOLE, ONE NAME OVER (#11948): `**props` splats onto the
 #: ENVELOPE as well, where `type=` RE-TYPES the record and `event_id=` /
 #: `ts=` / `initiated_by=` / `agent_id=` rewrite its identity. That family is
-#: refused at `_emit` and at the doors, exactly as this one is — see
-#: `_ENVELOPE_KEYS` below.
+#: refused at `_emit` on BOTH of its channels and at the passthrough doors —
+#: see `_ENVELOPE_KEYS` below, and the POSITIONAL arm's own note for why one
+#: channel was not enough.
 _NESTED_RECORD_KEYS = frozenset({"point"})
 
 #: The journal ENVELOPE names — the shape `_emit` itself builds, not a payload.
@@ -139,6 +140,20 @@ _NESTED_RECORD_KEYS = frozenset({"point"})
 #: `tests/test_api.py`), and `add_document` takes NAMED parameters rather than
 #: splatting a caller's dict, so refusing it here would reverse a recorded
 #: decision instead of closing a door. The passthrough doors refuse it below.
+#:
+#: ⛔ AND ON THE POSITIONAL RECORD TOO — `_emit` refuses this family on BOTH of
+#: its channels. The first fix refused it in the KEYWORD payload only, on the
+#: reasoning that the record belongs to `add_point` / `add_operator`. But the
+#: replay's `_norm` is `{**ev, **ev["point"]}`: a caller keyed `type=` inside
+#: the record is spliced OVER the envelope, so it is not a payload field there
+#: either — it is the record's identity on every replay. Measured at
+#: `95b98e6cf1`: `add_point("hello", prov, type="PointDeleted")` was ACCEPTED,
+#: journalled `"type":"PointAdded"` with the caller's `"type":"PointDeleted"`
+#: nested inside, returned a point id, and the replay dispatched on
+#: `PointDeleted` — an arm that matches nothing, so the point was lost SILENTLY
+#: (`ts=` / `initiated_by=` / `event_id=` correspondingly forged the replay's
+#: when / by-whom / id). One channel is never enough: the money gate's own note
+#: below states the rule this broke.
 _ENVELOPE_KEYS = frozenset({
     "type",
     "ts",
@@ -399,6 +414,12 @@ class EventAPI:
                 raise TypeError(
                     f"_emit takes at most ONE record payload, got {len(record)}")
             _refuse_caller_named_record_keys(
+                record[0], f"the `{type_}` record door")
+            # ⛔ NOT a payload field on this channel either: see
+            # `_ENVELOPE_KEYS`'s positional note. `_norm` splices the record
+            # over the envelope on replay, so a caller keyed `type=` / `ts=` /
+            # `event_id=` here re-types or re-attributes the replayed record.
+            _refuse_caller_named_envelope_keys(
                 record[0], f"the `{type_}` record door")
             payload["point"] = record[0]
         # #7951 — THE JOURNAL ORDERING CONTRACT: **journal first, then
