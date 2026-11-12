@@ -388,7 +388,11 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   shaped any other way there is a verdict with **no handling rule**, which is the state §1 exists to
   prevent. §1's header is the **FIRST `|` row and nothing else**: the skip used to be a prefix test on
   the word `Verdict`, so any row whose first cell merely began with it (`| Verdicts | … |`) escaped the
-  very arm beside it (measured, rc 0), and a table with no header at all is refused too.
+  very arm beside it (measured, rc 0), a table with no header at all is refused too, and the
+  header slot is exempted by SHAPE rather than by position — skipping the first `|` row
+  unconditionally exempted whatever stood there, so substituting a claim class for the header
+  (`| SUPERSEDED-BY-DRIFT | Means | … |`) left `--check` at rc 0 while the same row one line
+  lower reded (measured).
   That
   refusal counts the first table's ROWS and every other `|` line in the section, not only table
   separators, because a lone `|` row appended under a blank line brings no separator: measured, it
