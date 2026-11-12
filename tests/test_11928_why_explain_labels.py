@@ -315,6 +315,40 @@ def test_two_distinct_event_counter_claims_are_both_surfaced(sdk):
         "two distinct counter-claims collapsed into one fusion entry: " + repr(snippets))
 
 
+def test_two_distinct_event_supporters_are_both_surfaced(sdk):
+    """The SUPPORT leg's fusion key, pinned — review round 4 (#12268).
+
+    The counter-claim pin above covers `_assemble_conflicts`'s key. The support
+    fold has its own (`_assemble_supports`'s ``pending[pid][sup_key]``, keyed on
+    `id(sup)` from the last RETURN column), and it is the one review round 1
+    landed FOR a measured defect — so leaving it unpinned would let a reversion
+    to the display id keep every other case here green while a real supporter
+    silently vanished from the chain again. The manifest `durations` row for this
+    file names both collision pins, so the row must not describe coverage the
+    suite does not have.
+
+    Measured: passes at this head; a reverted ``sup_key`` yields ONE chain entry.
+    """
+    claim = sdk.create_point("statement", "the build is green")
+    g = sdk._get_proj().g
+    g.query("CREATE (e:Event {id:'SX1', name:'first supporter', "
+            "eventKind:'note'})")
+    g.query("CREATE (e:Event {eventId:'SX1', name:'second supporter', "
+            "eventKind:'note'})")
+    g.query(
+        "MATCH (a:Event {id:'SX1'}), (t) WHERE t.id = $t "
+        "CREATE (a)-[:IMPL]->(t)", params={"t": claim["id"]})
+    g.query(
+        "MATCH (a:Event {eventId:'SX1'}), (t) WHERE t.id = $t "
+        "CREATE (a)-[:IMPL]->(t)", params={"t": claim["id"]})
+
+    chain = assemble_why_blocks(sdk._get_proj(), [claim["id"]])[claim["id"]][
+        "support_chain"]
+    assert sorted(e["content_snippet"] for e in chain) == [
+        "first supporter", "second supporter"], (
+        "two distinct supporters collapsed into one fusion entry: " + repr(chain))
+
+
 def test_the_point_lane_gains_no_assessment_and_keeps_its_supersession(sdk):
     """A claim nothing judged gets NO ``assessment`` key, and still gets the
     Point-only supersession view it always had.
