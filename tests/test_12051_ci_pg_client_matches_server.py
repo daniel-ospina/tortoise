@@ -1167,26 +1167,23 @@ def _replaces_a_client_binary(line: str) -> bool:
       above could not see `: > /usr/lib/postgresql/16/bin/pg_dump` — measured
       green, and it is the full regression. See `REDIRECT_TARGET_RE`.
 
-    The pin's own install line is excluded.
+    NO line is exempt: the pin's own install line fires no arm at all (no binary
+    NAME, no client DIR, no redirect), which is measured, and every text-shaped
+    exemption this function ever carried was satisfied by TEXT (#12069 round 27).
     """
 
-    # ⛔ THE PIN'S OWN INSTALL LINE IS EXEMPT — AND ONLY A MENTION THAT IS ITSELF
-    # A COMMAND (#12069 review round 25, then round 26 measured the hole in the
-    # round-25 narrowing). Scoping the exemption to the mention's SEGMENT was not
-    # enough, because the mention could be TEXT inside a quoted operand in the
-    # SAME segment as the offender, and then the whole line was "the install
-    # segment":
+    # ⛔ NO LINE IS EXEMPT, AND THERE IS NOTHING TO EXEMPT (#12069 review round
+    # 27). Three rounds tried to scope an exemption for the pin's own install line
+    # (whole line → segment → command-position mention), and each was a text test
+    # a payload could satisfy:
     #
     #     echo "apt-get install -y postgresql-client-16" > /usr/lib/postgresql/16/bin/pg_dump
     #
     # was GREEN — the #12051 wrapper regression, written by a payload that merely
-    # NAMES the pin — and a redirect of the INSTALL COMMAND's own stdout into the
-    # pinned binary (`… postgresql-client-16 > …/16/bin/pg_dump`) was spared by the
-    # same exemption. ⛔ Round 27 measured that the exemption has NO work to do: the
-    # pin's install line fires no arm (no binary NAME, no client DIR, no redirect),
-    # so `_replaces_a_client_binary` is False for it without one — while every
-    # spelling of the exemption was a text test that could be satisfied by TEXT.
-    # It is therefore GONE rather than narrowed again: there is nothing to exempt.
+    # NAMES the pin — and the install command's own stdout redirected into the
+    # pinned binary was spared too. The exemption is GONE, and the install line
+    # needs none: it fires no arm (measured). Producers of `$GITHUB_PATH` are
+    # spared by the ordinary rule that an unwritten mention has no verb.
 
     # ⛔ BEFORE the verb rule, because a redirection has NO verb (#12069 review
     # P1): `: > /usr/lib/postgresql/16/bin/pg_dump` rewrote the pinned binary with
@@ -1401,7 +1398,15 @@ def _owning_verb(line: str, pos: int) -> re.Match[str] | None:
     seg_start, seg_end = _segment_bounds(line, pos)
     owner = None
     for verb in BINARY_MUTATION_RE.finditer(line, seg_start, seg_end):
-        if verb.end() <= pos:
+        # ⛔ A VERB IS A WORD IN COMMAND POSITION, NOT ANY PATH COMPONENT (#12069
+        # review round 28, measured FAIL-CLOSED). Without this, a SOURCE path whose
+        # last component spells a mutating verb became "the owning verb":
+        #
+        #     \cp -a /tmp/dd "$b/17/bin/" /tmp/snap      -- refused as a write
+        #
+        # — a plain READ, red because `/tmp/dd` owns it. `_is_command_position` is
+        # this file's answer for run-vs-operand, so it decides here too.
+        if verb.end() <= pos and _is_command_position(line, verb.start()):
             owner = verb
     return owner
 
@@ -1511,9 +1516,17 @@ def _is_command_position(line: str, start: int) -> bool:
         # A skipped separator can be glued onto the word (`true;cp`) and a wrapper
         # can be path-qualified, so the word is split at a separator and stripped
         # of its backslash and its directories before either test runs.
-        word = re.split(r"[;|&({]", token)[-1].lstrip("\\")
-        word = word.rsplit("/", 1)[-1]
-        if word in _WRAPPER_WORDS:
+        head_word = re.split(r"[;|&({]", token)[-1].lstrip("\\")
+        word = head_word.rsplit("/", 1)[-1]
+        # ⛔ THE WRAPPER TEST MUST NOT STRIP DIRECTORIES (#12069 review round 28,
+        # measured FAIL-OPEN). With one normalised word for both tests, an OPERAND
+        # whose BASENAME is a wrapper word became "the wrapper":
+        #
+        #     cp -a /tmp/env "$b/16/bin"        /usr/bin/rsync -a --rsh=/usr/bin/env …
+        #
+        # answered COMMAND and spared the replacement. A wrapper is the WORD ITSELF,
+        # not a path whose last component happens to spell it.
+        if head_word in _WRAPPER_WORDS:
             return True
         # ⛔ ONE VERB TABLE, NOT TWO (#12069 review 14, measured FAIL-OPEN).
         # A second hand-kept list here went stale the moment it was written: it did
@@ -3286,8 +3299,8 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     "$b/16/bin/pg_dump"` and a `find`-derived `cp …/16/bin/pg_dump` were both
     measured GREEN, and both leave the leg resolving the pg17 binary out of the
     pinned dir. So a MUTATING verb carrying a client binary name is refused at
-    or after the pin, however the source is spelled. The pin's own
-    `postgresql-client-<n>` install line is the one exclusion.
+    or after the pin, however the source is spelled — NO line is exempt (the pin's
+    own install line fires no arm at all; see `_replaces_a_client_binary`).
 
     Read through `_run_commands()` for the same reason as every other search
     here: a commented-out line is inert shell that reads identically to the live
@@ -3390,8 +3403,8 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
             # postgresql-client-16` on a box that already has the package is a
             # NO-OP, so a rewrite above the pin survives it. Measured: appending
             # `: > /usr/lib/postgresql/16/bin/pg_dump` to the pre-pin install
-            # step's `run:` left `187 passed`. The pin's own install line stays
-            # excluded by `CLIENT_PKG_RE` inside `_replaces_a_client_binary`.
+            # step's `run:` left `187 passed`. NO line is exempt: the pin's own
+            # install line fires no arm (see `_replaces_a_client_binary`).
             for line in _executed_lines(job, step)
             if _replaces_a_client_binary(line)
         }
@@ -4901,14 +4914,15 @@ BINARY_MUTATION_POLARITY = [
     (
         'sudo apt-get install -y --no-install-recommends postgresql-client-16',
         False,
-        "CONTROL: the PIN's own install line is exempt — but only its own SEGMENT "
-        "(#12069 round 25; the exemption used to be the whole line)",
+        "CONTROL: the PIN's own install line fires NO arm (no binary name, no "
+        "client dir, no redirect) — it is green by that, not by an exemption "
+        "(#12069 round 27: every text exemption was removable)",
     ),
     (
         'sudo apt-get install -y --no-install-recommends postgresql-client-16 && sudo rsync -a "$b/17/bin/" "$b/16/bin/"',
         True,
         "#12069 round-25 P1: a replacement CHAINED onto the install line was GREEN "
-        "— the exemption is the install SEGMENT, not the line (measured)",
+        "— no line is exempt, so it is graded (measured)",
     ),
     (
         'sudo apt-get install -y --no-install-recommends postgresql-client-16 && : > /usr/lib/postgresql/16/bin/pg_dump',
@@ -4985,6 +4999,19 @@ BINARY_MUTATION_POLARITY = [
         True,
         "#12069 round-27 P2: a GLOB base was unread (the token arm had the glob, not the "
         "base) — measured GREEN",
+    ),
+    (
+        'cp -a $RUNNER_TEMP/env "$b/16/bin"',
+        True,
+        "#12069 round-28 P2: an OPERAND whose BASENAME is a wrapper word is not a "
+        "command — it was read as one and spared the replacement (measured)",
+    ),
+    (
+        '\\cp -a /tmp/dd "$b/17/bin/" /tmp/snap',
+        False,
+        "CONTROL: a SOURCE path whose last component spells a verb is not the owning "
+        "verb, so this READ stays green (#12069 round 28: the normalisation made it "
+        "RED until the owner check)",
     ),
     (
         'sudo cpio -idmv -D "$b/16/bin"',
