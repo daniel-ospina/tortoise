@@ -155,11 +155,37 @@ NOTHING (`NOT (props ?| ARRAY[]::text[])`, an empty array) and it has no
 `embedding` column, so a vector could arrive through the row's open-set `props`
 tail. It is now refused at the writer (`cache_projection.UNSERVED_VECTOR_LABELS`,
 derived as `NODE_TABLES` minus the served set — never a list) and the refusal is
-**reported on the statement** (`Statement.dropped_vectors`), because this
-projection does not drop a name it cannot name. ⛔ Not an index decision: which
+**reported**, because this projection does not drop a name it cannot name.
+⛔ Not an index decision: which
 labels get a VECTOR INDEX is §14.3 **V3** (`#11901`), and nothing here creates
 one. ⛔ Nor a narrowing of the 2026-11-10 ruling: `:Object` and `:Subject` are
 served, keep their embeddings, and are untouched.
+
+**Where the drop is REPORTED — three surfaces, because the first two are not
+enough on their own** (`#11747`'s review, finding 1: `Statement.dropped_vectors`
+only, which no production reader touched):
+
+* the STATEMENT (`Statement.dropped_vectors`) and the VIEW
+  (`RecordNode.dropped_vectors`, so a record read cannot advertise a vector the
+  cache refuses);
+* the PLAN and the REPORT — `ProjectionPlan.dropped_vectors()` (read off the
+  statements, so a directly-built `RecordNode` is counted too) feeds
+  `ProjectionReport.dropped_vectors` / `dropped_vector_labels`; and
+* the RUN — `rebuild_from_record` returns both keys and logs a warning, and
+  `record_restore.RestoreOutcome` prints them on the operator's line and in
+  `as_dict()`. A rebuild that DELETES vectors a previous cache held must not read
+  the same as one that lost nothing, and no re-run can bring them back: the
+  record row is the only carrier and it is what the drop was applied to.
+
+⚠️ **And it is DECLARED to the parity rule.** The drop happens in the row→property
+map, so the record ANSWER no longer carries the vector and a LEGACY cache node
+that still holds one is an asymmetry `record_serve.parity_difference` must
+explain (the `#11747` review's one design decision, taken here in the open):
+`cache_projection.unserved_vector_declined_properties` is its fifth enumerated
+explanation, in both directions, so such a pair reads CACHE-HELD rather than as a
+projection gap whose only sanctioned repair is a re-projection that can no longer
+add the field. The alternative — moving the drop off the read door — was
+rejected: it would restore the "live ≠ rebuild" divergence the drop removes.
 
 ### 0.6 Verification
 

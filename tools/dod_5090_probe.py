@@ -2333,8 +2333,9 @@ def score_path_bullet() -> Row:
         # invisible unless the row prints where each label came from, and this one rests on a
         # MEASUREMENT the discovery cannot make at all (`#11747`).
         "cache projection vector targets (MEASURED by running "
-        "cache_projection.node_from_row → node_statement over every record label, both the "
-        f"`embedding` column and the `props` tail — #11747): {sorted(projection['labels'])}",
+        "cache_projection.node_from_row → node_statement over every record label — the "
+        "`embedding` column, the `props` tail, and a directly-built `RecordNode` — "
+        f"#11747): {sorted(projection['labels'])}",
         f"served labels (run_vector_query vocabulary): {sorted(served)}",
         f"stored-without-a-query-path: {sorted(orphans) or 'none'}",
     ]
@@ -2347,7 +2348,7 @@ def score_path_bullet() -> Row:
     if projection["unmeasured"]:
         notes.append(
             "cache projection labels whose store could not be MEASURED (hold this row at "
-            "PARTIAL — neither the column door nor the props tail could be built): "
+            "PARTIAL — not one of the three doors could be built): "
             + "; ".join(f"{label}: {why}" for label, why in
                         sorted(projection["unmeasured"].items()))
         )
