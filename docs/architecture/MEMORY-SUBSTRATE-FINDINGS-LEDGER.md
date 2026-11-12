@@ -78,8 +78,10 @@ Pattern 4 is the one the review got **most wrong when it was written**, and the
 correction is worth keeping visible: the review's initial instinct was to treat
 "fixed vs flexible" as an unresolved *argument*. It was instead an unresolved
 *design*, and the two-tier answer (canonical meanings in core, tenant-owned
-labels/order in the graph) is what shipped — `tortoise/pipeline.py:16` is that
-decision in code. See correction **(e)**.
+labels/order in the graph) is what shipped — `tortoise/pipeline.py:5-14` states the two
+*It has two tiers* split, and `tortoise/pipeline.py:16` is that decision in code
+(`pipelineStageId` / `pipelineSlot` / `pipelineOutcome` are the core-side meanings, the
+graph-owned stage names are the other tier). See correction **(e)**.
 
 ---
 
@@ -137,7 +139,7 @@ code while the brief itself never did.
 | `design/2026-09-10-decision-briefs-workstream-C.md` (167 l) | Near-full comment on #2826 | #2826 is CLOSED `NOT_PLANNED` — still readable, no longer a queue |
 | `design/2026-09-10-a1-a2-comment.md` (103 l) | Near-full comment on #2826 (A1/A2 briefs) | Same |
 | `design/2026-09-10-a1-a2-decision-briefs.md` (71 l) | **Gone** — never posted, superseded by the A1 comment by design | Nothing; flagged local-only when written |
-| `<corpus>/2026-09-09-ontology-evidence.md` (431 l) | **MIRRORED (condensed)** — comment on #2725 | The corpus-grounding dossier: all 8 meeting docs read and grepped against the proposed 10-kind pack, verdict **8/10 kinds STRONG**, `milestone` WEAK, several lifecycle states design extrapolations. This is the **only** corpus artefact with a surviving mirror — the payload it was derived from does not survive (§6.3) |
+| `<corpus>/2026-09-09-ontology-evidence.md` (431 l) | **MIRRORED (condensed)** — comment on #2725 | The corpus-grounding dossier: all 8 meeting docs read and grepped against the proposed 10-kind pack, verdict **8/10 kinds STRONG**, `milestone` WEAK, several lifecycle states design extrapolations. This is the **only** corpus artefact with a surviving mirror — the payload it was derived from does not survive (#2852 §6.1, "artefacts with NO durable home") |
 | `<corpus>/README.md` + 8 `.docx` + 8 `plaintext/*.txt` (~976 KB) | **Gone from this machine** — and **must never** enter this public repo (#2852 §6.3) | Nothing reachable; originals were also in `~/Downloads`, unverified |
 | `~/.swarm/issue-triage-2026-09-09.md` (~5 KB) | **Gone** — local-only by design | Nothing; its outcome (33 closures + a 10-item shortlist) is in the tracker, the reasoning is not |
 
@@ -178,7 +180,7 @@ Three consequences, and they are the actionable part of this page:
 2. **Do not attempt to re-mirror what is gone.** The ledger's §6.4 proposed three candidate
    durable homes and committed nothing, deliberately: *"Do not commit anything without the
    owner's choice."* That choice is now partly moot for the briefs and entirely live for the
-   corpus — the corpus is customer material and is barred from this repo by §6.3 regardless
+   corpus — the corpus is customer material and is barred from this repo by #2852 §6.3 regardless
    of who decides.
 3. **The lesson is the process one, not the content one.** A brief that changes nothing is
    not durable, and a brief that changes something does not need to be. Record the finding
@@ -260,7 +262,14 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   table IS the authority, so its five rows must equal the enforced tuple — in order, which is why a
   pure reordering reds too and names both sequences; deleting one was measured to
   leave every arm green while §3 still used the verdict;
-- every **`path:line` citation** in §3 and §5 resolves in the tree, and the line number is in range —
+- every **§3 row still says what it records** — the retracted claim and the correction are both
+  non-empty (a three-word floor), and the correction is not a copy of the claim. The population pin,
+  the verdict vocabulary and the evidence floor all hold a row PRESENT while those two columns go
+  unread, so without this arm the corrections log could lose every claim it retracts, or every
+  correction it records, and still be certified: measured — blanking either column in all twelve rows
+  left `--check` at exit 0 and `--self-test` at `PASS` before this arm existed (found by review, and
+  the reason the mutation population went 41 → 44);
+- every **`path:line` citation** on the page resolves in the tree, and the line number is in range —
   a citation that points at nothing is the doc's own "declared ≠ stored" defect, and it looks exactly
   like evidence. ⛔ **In range is not ON TARGET**: this arm cannot tell a citation that lands on its
   symbol from one that lands on a comment above it once the file shifts. Measured on this page's path: rows
@@ -292,7 +301,7 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   `-` parses a dated slug, `/` parses plain paths and dates (600+ spans across 801 files), `#`
   parses the `owner/repo#N` issue refs this repo writes everywhere, `@` parses commit refs, and `,`
   parses SQL and call prose. The pipe is refused because it was refused before the narrowing and
-  dropping it silently was a red-to-green the carve-out list did not admit: no code span in the 1149
+  dropping it silently was a red-to-green the carve-out list did not admit: no code span in the 1150
   tracked files under `docs/` (nor the 144 other tracked `*.md`) carries a `path|LINE` form, so
   refusing it cannot red this repository's prose (the `docs/` population is what moves — re-derive it
   with `git ls-files docs | wc -l`, never carry this number forward). The permalink form survives that objection and the
@@ -300,7 +309,7 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   issue ref carries no `L`, so `#` + `L` + digits is unambiguous, and it is what a human writes when
   copying a GitHub link — the spelling most likely to arrive looking verified while going unchecked
   (it did: both an out-of-range permalink and an in-range one left this page CLEAN before the arm
-  existed). It is measured, not assumed: every code span in all 1149 tracked files under `docs/`,
+  existed). It is measured, not assumed: every code span in all 1150 tracked files under `docs/`,
   plus the 144 other tracked `*.md`, was swept with the shipped pattern — zero matches, so refusing
   it cannot red this repository's own prose. Rewriting a citation's delimiter is therefore **not**
   universally refused: `path#LINE` (the bare-number form, which IS what collides with issue refs),
@@ -492,10 +501,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   stored* defect, inside the correction that exists to stop it — and the reason two reviewers could
   each "prove" the other side was the stale one.
 
-The self-test that proves the arms its 41 mutations exercise still fire has its own **population
+The self-test that proves the arms its 44 mutations exercise still fire has its own **population
 floor** (`MIN_SELF_TEST_MUTATIONS`). An emptied arm set used to print `PASS (0 failing arm(s))` and
 exit 0 — a gate reporting OK when it cannot run — so a shrunk population now reds instead. ⛔ **The
-population is 41 mutations of the PAGE, not a proof of the guard**, and every one of them edits the
+population is 44 mutations of the PAGE, not a proof of the guard**, and every one of them edits the
 page's text (a falsified tally, a deleted correction row, a second survivor sentence), so anything an
 arm reads that is not the page's CONTENT is outside it. Of the arms `check_document()` calls, exactly
 two are blind this way — `check_section_presence`, the FIRST one called, and `check_registration`,
@@ -515,9 +524,9 @@ five run in the `test` jobs on both change classes this guard exists for (`core`
 Two mechanisms, stated separately, for the same reason the ancestry arm below states its own.
 
 Exactly one arm needs `git` **history**: the frontmatter's `measured_at_commit` must be an ancestor of
-`HEAD`. The other twelve read this checkout's tree and nothing else, and the tool keeps that split
+`HEAD`. The other thirteen read this checkout's tree and nothing else, and the tool keeps that split
 (`check_document()` / `check_all()`) because the two jobs that run it differ: the REQUIRED `docs` job
-checks out at `fetch-depth: 0` and runs `--check` (all thirteen arms), while the `test` jobs check out at
+checks out at `fetch-depth: 0` and runs `--check` (all fourteen arms), while the `test` jobs check out at
 the default depth 1, cannot resolve `f70d884b7` at all, and are where this page's own test module runs.
 In a depth-1 clone `--check` therefore reports **exit 2 UNVERIFIED** — never `0`, and never a verdict
 against the document it could not read — and `--self-test`, which drives only the tree-only arms,
@@ -539,9 +548,15 @@ drift; `true` *and* an unanswerable probe both take **exit 2 UNVERIFIED**, never
 
 **Deliberately not checked:** the issue states in §6, the durability column in §4, and every
 `~/.swarm` claim in §5. They are **dated readings of things outside this repository**, and a guard
-that asserted them would either fail on someone else's tracker or, worse, pass by not looking. This
-follows `SUBSTRATE-REBUILD-MAP.md`'s ruling: *the tracker half is deliberately not guarded — it is
-dated and its command is recorded.* The command for §6 is `gh issue view <N> --json state`, and it
+that asserted them would either fail on someone else's tracker or, worse, pass by not looking. The
+**prose of §8's own bullet lines** is in the same class one step in: `check_section_presence` pins
+that §8 exists with a body and nothing enumerates what its bullets claim, so a bullet asserting a
+check nobody runs is green (measured, found by review). Pinning arbitrary English would be the
+false-accusation class one arm over, so this list is the honest position rather than the checked one.
+This
+follows `SUBSTRATE-REBUILD-MAP.md`'s ruling, quoted rather than paraphrased: **"The tracker half cannot
+be machine-checked, and pretending otherwise would be the exact failure this document exists to
+prevent."** So §1 records the *command*, and the dated results are recorded beside it. The command for §6 is `gh issue view <N> --json state`, and it
 was run per issue, not sampled.
 
 ⚠️ **Eight more are unguarded, and none is out-of-repo — they are simply not armed yet (#11902, #11957).**

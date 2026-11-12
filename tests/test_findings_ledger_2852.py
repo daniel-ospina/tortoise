@@ -242,7 +242,7 @@ def test_mutation_population_is_pinned():
     invented claim class left `check_document()` at `[]` where the parent returned a
     problem — so the exemption is the shape `| Verdict | … |`, and a reworded header is a
     deliberate two-place edit rather than a silent one.
-    39 is the population at this head.
+    44 is the population at this head.
     """
     # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
     # at this head two merges of two 25-arm populations produced 26 arms while the
@@ -253,8 +253,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 41, (
-        "this line RECORDS the population (41 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 44, (
+        "this line RECORDS the population (44 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -463,6 +463,36 @@ def test_emptying_the_whole_evidence_column_is_rejected(tmp_path, monkeypatch):
     problems = _doc_problems()
     offenders = [p for p in problems if "names no `path:line`, issue, command or §N" in p]
     assert len(offenders) == 12, problems
+
+
+def test_emptying_the_claim_or_the_correction_column_is_rejected(tmp_path, monkeypatch):
+    """FAILS if a §3 row can keep its verdict and evidence while losing its CONTENT.
+
+    Found by review (#11902 P2). The population pin, the verdict arm and the
+    evidence floor all hold a row PRESENT, so cells 2 (the retracted claim) and 3
+    (the correction) were read by nothing: measured before the fix, blanking
+    EITHER column in all twelve rows left `--check` at exit 0 and `--self-test` at
+    PASS. That is a corrections log whose corrections are gone, certified as
+    verified — the exact class the twelve-row population pin exists to prevent,
+    reached without deleting a row.
+    """
+    for column, label in ((2, "retracted-claim"), (3, "correction")):
+        _mutated(tmp_path, monkeypatch, flc._blank_claim_or_correction(column))
+        problems = _doc_problems()
+        offenders = [p for p in problems if f"its {label} cell carries" in p]
+        assert len(offenders) == 12, (column, problems)
+
+
+def test_a_correction_that_copies_its_claim_is_rejected(tmp_path, monkeypatch):
+    """FAILS if a row can assert that its claim corrects itself.
+
+    A copy satisfies presence, the verdict vocabulary and the evidence floor, so
+    every other arm reads the row as ordinary while it records no correction at
+    all — the same fail-open one column over from the blank-cell one.
+    """
+    _mutated(tmp_path, monkeypatch, flc._correction_copies_the_claim)
+    problems = _doc_problems()
+    assert any("COPY of the retracted claim" in p for p in problems), problems
 
 
 # ── no citation shape is exempt ────────────────────────────────────────────

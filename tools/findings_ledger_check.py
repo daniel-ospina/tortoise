@@ -49,7 +49,11 @@ That makes four things load-bearing in a way that is invisible to a reader:
 What this does NOT check, deliberately
 --------------------------------------
 The issue states in §6, the durability column in §4, and every `~/.swarm` claim
-in §5 are **dated readings of things outside this repository**. A guard over them
+in §5 are **dated readings of things outside this repository**. So is the PROSE of
+§8's own bullet lines: `check_section_presence` pins that §8 exists with a body, and
+nothing enumerates what its bullets CLAIM, so an added "- `--check` also verifies the
+tracker state of §6." is green (measured, #11902 review P3). Pinning arbitrary English
+would be the false-accusation class one arm over; the honest position is this sentence. A guard over them
 would either red on someone else's tracker closing an issue, or pass by not
 looking — and the second is worse. This follows `SUBSTRATE-REBUILD-MAP.md`'s
 ruling that the tracker half is dated and carries its command instead of a pin.
@@ -361,7 +365,7 @@ VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
 #: (`a falsified §3 count beside a list-free decoy`, `a falsified overtaken figure
 #: beside a compliant decoy`), which closed the paragraph-scoped presence test. Bump
 #: it with any arm added or removed — the population is what the pin compares.
-MIN_SELF_TEST_MUTATIONS = 41
+MIN_SELF_TEST_MUTATIONS = 44
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -583,6 +587,66 @@ def _has_evidence(cell: str, sections: set[int]) -> bool:
         if CITATION_SHAPE_RE.match(body[1:-1]) and _has_path_marker(body[1:-1]):
             return True
     return False
+
+
+#: A §3 claim/correction cell must still SAY something. Three words is the floor
+#: rather than a length, because a cell is prose with code spans in it and the
+#: shortest honest correction on this page ("**False** — verified absent") is four.
+_CLAIM_WORD_FLOOR = 3
+
+#: Markup stripped before a cell is counted, so ``**False**`` and ``False`` are one word.
+_MARKUP_RE = re.compile(r"[`*_\[\]()#>|]+")
+
+
+def _plain_words(cell: str) -> int:
+    """Words carrying at least one alphanumeric character, markup stripped."""
+    return sum(
+        1
+        for word in _MARKUP_RE.sub(" ", cell).split()
+        if any(char.isalnum() for char in word)
+    )
+
+
+def check_claim_and_correction_cells(text: str) -> list[str]:
+    """§3: every row must still STATE the claim it retracts and the correction.
+
+    The population pin, the verdict arm and the evidence floor all hold a §3 row
+    PRESENT while the two columns that carry its content go unread — measured
+    (found by review): blanking cell 2 (the retracted claim) in all twelve rows, or
+    cell 3 (the correction) in all twelve, left `--check` at exit 0 and `--self-test`
+    at PASS, so the corrections log could lose every correction it records and still
+    be certified as verified. That is the doc's own "declared ≠ stored" defect inside
+    the table whose purpose is to record what was corrected.
+
+    The second rule is the same fail-open one column over: a correction cell that is
+    a COPY of the claim asserts that the claim corrects itself, which every other arm
+    reads as an ordinary row.
+    """
+    problems: list[str] = []
+    section = _region(text, "## 3. The corrections log", "## 4. The artefact index")
+    for offset, line in _table_rows(section):
+        match = CORRECTION_ROW_RE.match(line)
+        if match is None:
+            continue  # check_verdicts owns the shape refusal
+        cells = _split_row_cells(line)
+        claim = cells[2] if len(cells) > 2 else ""
+        correction = cells[3] if len(cells) > 3 else ""
+        for label, cell in (("retracted-claim", claim), ("correction", correction)):
+            words = _plain_words(cell)
+            if words < _CLAIM_WORD_FLOOR:
+                problems.append(
+                    f"row ({match.group(1)}) at §3 line {offset}: its {label} cell "
+                    f"carries {words} word(s) — a row whose {label} is gone records a "
+                    "verdict for a claim no reader can see; the twelve-row population "
+                    "pin holds it PRESENT while its content is empty"
+                )
+        if _MARKUP_RE.sub("", claim).split() == _MARKUP_RE.sub("", correction).split():
+            problems.append(
+                f"row ({match.group(1)}) at §3 line {offset}: its correction cell is a "
+                "COPY of the retracted claim — a claim cannot be its own correction, and "
+                "every other arm reads the row as ordinary"
+            )
+    return problems
 
 
 def check_evidence_cells(text: str) -> list[str]:
@@ -2058,6 +2122,7 @@ def check_document(text: str, root: Path = REPO) -> list[str]:
     problems.extend(check_vocabulary(text))
     problems.extend(check_verdicts(text))
     problems.extend(check_verdict_tally(text))
+    problems.extend(check_claim_and_correction_cells(text))
     problems.extend(check_evidence_cells(text))
     problems.extend(check_citations(text, root))
     problems.extend(check_citation_shapes(text))
@@ -2116,6 +2181,63 @@ def _empty_evidence_cells(text: str) -> str:
             cells[5] = " "
             lines[i] = "|".join(cells) + "\n"
     return "".join(lines)
+
+
+def _blank_claim_or_correction(index: int) -> Callable[[str], str]:
+    """Blank one content column of §3 (2 = the retracted claim, 3 = the correction).
+
+    The fail-open under test is the one the population pin cannot see: every row stays
+    PRESENT, keeps its verdict and keeps its evidence, while the column that says WHAT
+    was corrected carries nothing.
+    """
+
+    def mutate(text: str) -> str:
+        lines = text.splitlines(keepends=True)
+        try:
+            start = next(
+                i for i, ln in enumerate(lines) if ln.startswith("## 3. The corrections log")
+            )
+            end = next(
+                i for i, ln in enumerate(lines) if ln.startswith("## 4. The artefact index")
+            )
+        except StopIteration:  # pragma: no cover - the region arms cover this
+            return text
+        for i in range(start, end):
+            row = lines[i].rstrip("\n")
+            if not CORRECTION_ROW_RE.match(row) or "\\|" in row:
+                continue
+            cells = _split_row_cells(row)
+            if len(cells) > index:
+                cells[index] = " "
+                lines[i] = "|".join(cells) + "\n"
+        return "".join(lines)
+
+    return mutate
+
+
+def _correction_copies_the_claim(text: str) -> str:
+    """Make one row's correction cell a copy of its claim — the row asserts its claim corrected itself."""
+    lines = text.splitlines(keepends=True)
+    try:
+        start = next(
+            i for i, ln in enumerate(lines) if ln.startswith("## 3. The corrections log")
+        )
+        end = next(
+            i for i, ln in enumerate(lines) if ln.startswith("## 4. The artefact index")
+        )
+    except StopIteration:  # pragma: no cover - the region arms cover this
+        return text
+    for i in range(start, end):
+        row = lines[i].rstrip("\n")
+        if not CORRECTION_ROW_RE.match(row) or "\\|" in row:
+            continue
+        cells = _split_row_cells(row)
+        if len(cells) <= 3:
+            continue
+        cells[3] = cells[2]
+        lines[i] = "|".join(cells) + "\n"
+        return "".join(lines)
+    return text
 
 
 MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
@@ -2529,6 +2651,32 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             1,
         ),
         "sentences saying 'still read as written'",
+    ),
+    (
+        # #11902 review P2: the population pin, the verdict arm and the evidence floor
+        # all hold a §3 row PRESENT while the two columns carrying its CONTENT went
+        # unread — measured: blanking cell 2 (the retracted claim) in all twelve rows
+        # left `--check` at exit 0, so the corrections log could lose every claim it
+        # retracts and still be certified. This arm fails if the content floor is lost.
+        "a §3 retracted-claim cell blanked in every row",
+        _blank_claim_or_correction(2),
+        "its retracted-claim cell carries",
+    ),
+    (
+        # The same hole one column over, and the one that matters more: what the
+        # review LEARNED is the correction. Blanking it in all twelve rows also left
+        # `--check` at exit 0 before this arm existed.
+        "a §3 correction cell blanked in every row",
+        _blank_claim_or_correction(3),
+        "its correction cell carries",
+    ),
+    (
+        # A correction that is a COPY of its claim satisfies presence, the verdict arm
+        # and the evidence floor: the row reads as ordinary while asserting that the
+        # claim corrected itself.
+        "a §3 correction cell that copies its own claim",
+        _correction_copies_the_claim,
+        "COPY of the retracted claim",
     ),
 )
 
