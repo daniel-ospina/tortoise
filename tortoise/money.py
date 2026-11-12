@@ -464,9 +464,9 @@ def refuse_malformed_money_in_payload(payload, *, door: str = "") -> None:
     one flat bag the way the SDK doors do: it passes the RECORD it is about to
     journal, and WHERE the money keys sit depends on the door —
     ``ObjectRegistered`` / ``EventRecorded`` splat them at the top level, but
-    ``PointAdded`` nests the whole record under ``point=`` (``add_point`` builds
-    ``p`` and emits ``point=p``); ``EventRecorded`` also carries ``uses[]``
-    items. A gate that read only the top level was measured INERT on the Point
+    ``PointAdded`` nests the whole record under ``point`` (``add_point`` builds
+    ``p`` and passes it to ``_emit`` as the record payload, which the funnel
+    renders as ``point``); ``EventRecorded`` also carries ``uses[]`` items. A gate that read only the top level was measured INERT on the Point
     door — the door ``extractor`` / ``ingest`` / ``docs_miner`` / ``mining`` /
     the CLI all write through — so ``add_point(..., amountMinor=…)`` landed
     ``amountMinor`` with no currency beside it and made :func:`total_minor`

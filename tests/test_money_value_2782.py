@@ -21,6 +21,7 @@ Runnable (URI-less embedded):
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -1520,7 +1521,8 @@ class TestNonSanitizedSeams:
     def test_the_pipeline_seam_cannot_land_a_malformed_money_value(
             self, journaled_sdk, tmp_path, door):
         """All THREE prop-carrying doors, including the one that NESTS its
-        payload (`add_point` → `_emit("PointAdded", point=p, …)`).
+        payload (`add_point` → `_emit("PointAdded", p, …)`, rendered onto the
+        record as `point`).
 
         #11836 review P1 (measured): the gate graded the flat record, so
         `add_point(content, provenance, amountMinor=25_000_000)` was ACCEPTED
@@ -1683,12 +1685,21 @@ class TestNonSanitizedSeams:
         assert rows[0][0] is None, "money reached a :Source surface"
         journal = events / "events.jsonl"
         assert journal.exists(), "the create did not journal"
-        text = journal.read_text()
-        assert "SourceCreated" in text, "no SourceCreated record in the journal"
-        assert f'"amountMinor": {COMMITTED_MINOR}' in text, (
+        records = [json.loads(line) for line in journal.read_text().splitlines()
+                   if line.strip()]
+        created = [r for r in records if r.get("type") == "SourceCreated"]
+        assert created, "no SourceCreated record in the journal"
+        # ⛔ PARSE the record; do NOT substring-match its text. #11821 made the
+        # journal writer emit COMPACT separators
+        # (`json.dumps(..., separators=(",", ":"))`), so the needles this row
+        # used to carry — `'"amountMinor": 25000000'` and
+        # `'"currency": "BRL"'`, both with the space — matched nothing and the
+        # row went red on a formatting change that moved no value. The claim is
+        # about what the RECORD carries, so read the record.
+        assert created[-1].get("amountMinor") == COMMITTED_MINOR, (
             "the bound moved: the journal no longer carries the well-formed "
             "value, so this docstring is stale")
-        assert '"currency": "BRL"' in text
+        assert created[-1].get("currency") == "BRL"
 
 
 class TestThePayloadWalkFailsClosedAtItsDepthBound:

@@ -1836,6 +1836,14 @@ class _EntityHandlers:
         # strip) does not: the two rebuild routes would then diverge on a
         # property, which is the failure #10017 exists to remove.
         "cache_tier",
+        # #11821 P0: the journal payload's vector WIDTH (`f32` / `f64`). It is a
+        # description of the journal's ENCODING, so no label may carry it: the
+        # point fast-path owns it in `_POINT_HANDLED`, and this entry is what
+        # stops the OTHER payload shapes that now stamp it — an `EventRecorded`
+        # from `_journal_event_raw_write`, whose props reach `_upsert_event`'s
+        # extra-props walk — from putting a live-only-ish property on a `:Event`
+        # a record-sourced rebuild would not reproduce.
+        "embedding_width",
         # Lane L5 (#5097): the `SourceCreated` record's OWN discriminator, set by
         # the one producer whose record COMPLETES an existing stub instead of
         # creating a Source (`sdk._materialize_session_source`'s trailing
@@ -2382,6 +2390,16 @@ class _EntityHandlers:
         # ACTIVE model as its origin (`stamp_journal_embedding`). Never a node
         # property — the node's vector identity is not a fact about the node.
         "embedding_preserved",
+        # #11821 P0: journal-payload metadata — the WIDTH the payload's vector
+        # text was written at (`f32` for a vector our embedder produced, `f64`
+        # for a caller-owned / preserved one that must keep its raw form). It
+        # describes the JOURNAL's encoding, exactly like the three identity
+        # stamps above: the node holds the engine's `vecf32` (or the raw value)
+        # and has no width to declare, so persisting it would be a live-only
+        # property a rebuild never restores. Own-clause-free on purpose — the
+        # point is that NOTHING writes it, which is what `_POINT_HANDLED`
+        # (the open-set passthrough's skip list) guarantees.
+        "embedding_width",
         # #10010 review P1: journal-payload metadata (`_fold_source_evidence`).
         # States that this creation-shaped record FOLDED evidence into an
         # EXISTING Point instead of creating one, which is what the replay's

@@ -49,6 +49,7 @@ from test_10017_cache_tier import _read_view  # the tier suite's reader control
 
 from tortoise import log as tlog
 from tortoise import record_projection as rp
+from tortoise.embeddings import JOURNAL_VECTOR_WIDTH_KEY
 from tortoise.projection import _NO_POINT_FOLD, _NO_PROJECTION_FOLD
 
 SESSION = "sess-10017-carrier"
@@ -305,7 +306,13 @@ def _assert_snapshot_contract(snapshot: dict, *, optional=frozenset(),
     message naming the wrong cause — so the pin is stated as the contract.
     """
     keys = set(snapshot)
-    allowed = rp.TURNS_SNAPSHOT_KEYS | optional
+    # #11821 P0: the contract's declared OPTIONAL set is always permitted, on
+    # top of the branch this call expects. A payload key the writer mints and
+    # the contract declares must not red a call site that only names the branch
+    # it is asserting — the per-branch presence is asserted separately below
+    # (`assert "embedding_preserved" in snapshot` &c.), so this stays a
+    # "no UNDECLARED key" pin rather than an exact-set one.
+    allowed = rp.TURNS_SNAPSHOT_KEYS | rp.TURNS_SNAPSHOT_OPTIONAL_KEYS | optional
     assert not (keys - allowed), (
         f"{context}: the writer's per-turn snapshot gained {sorted(keys - allowed)}; "
         "TURNS_SNAPSHOT_KEYS is the contract step 7 inherits, so both move together")
@@ -317,9 +324,22 @@ def _assert_snapshot_contract(snapshot: dict, *, optional=frozenset(),
         f"{context}: {sorted(omitted)} — the unattestable pair is omitted "
         "TOGETHER or not at all (a half-omitted snapshot leaves one column "
         "asserting what the other refuses to)")
-    assert not (keys & rp.TURNS_SNAPSHOT_OPTIONAL_KEYS - optional), (
-        f"{context}: the optional branch {sorted((keys & rp.TURNS_SNAPSHOT_OPTIONAL_KEYS) - optional)} "
+    assert not ((keys & rp.TURNS_SNAPSHOT_OPTIONAL_KEYS) - optional
+                - _ORTHOGONAL_OPTIONAL_KEYS), (
+        f"{context}: the optional branch "
+        f"{sorted(((keys & rp.TURNS_SNAPSHOT_OPTIONAL_KEYS) - optional) - _ORTHOGONAL_OPTIONAL_KEYS)} "
         "has no business in this snapshot")
+
+
+#: Contract keys that ride on TOP of a branch rather than being one. #11821 P0's
+#: `embedding_width` describes the WIDTH of whatever vector the snapshot carries,
+#: so it is present on the encoded branch (`f32`) and on the preserved one
+#: (`f64`), and it is absent only when there is no vector at all — which is why
+#: it belongs to the OPTIONAL set (it cannot ride a vectorless snapshot) without
+#: being a mutually-exclusive branch. The exclusivity pin above is about
+#: branches, so it names this exemption rather than weakening to "anything
+#: declared is allowed".
+_ORTHOGONAL_OPTIONAL_KEYS = frozenset({JOURNAL_VECTOR_WIDTH_KEY})
 
 
 def test_the_carrier_payload_keys_are_the_ones_the_capture_writer_builds(sdk):
