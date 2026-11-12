@@ -44,6 +44,8 @@ from dataclasses import dataclass, field
 from tortoise.live import (  # #7927: traversal-position widening + the ONE
     # two-key identity declaration (``EPISTEMIC_ID_KEYS``) every widened
     # surface must resolve through.
+    DRAFT_STATUS,  # #780: EP strips a DRAFT input exactly as it strips a
+    # terminal one, so a draft successor is a repair that does not repair.
     direction_flows,  # the ONE read-side direction normalizer — the repair's
     # idx-0-source arm has to ask the SAME question ep.py asks.
     epistemic_disjunction,
@@ -709,6 +711,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "OPTIONAL MATCH (carrier:Object) WHERE carrier.name = sup.supersededBy "
         "AND carrier.id <> sup.id\n"
         "WITH sup, r, active, count(carrier) AS carrier_count, "
+        "     head(collect(carrier.id)) AS carrier_id, "
         "     head(collect(carrier.status)) AS carrier_status, "
         "     head(collect(carrier.supersededBy)) AS carrier_sb\n"
         # ⛔ ONE HOP OF LOOKAHEAD, because "the successor is itself terminal" is NOT
@@ -718,9 +721,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # would otherwise be told to "target the LIVE head of that chain" — a node
         # that does not exist, the #7819 rule this module refuses to emit.
         "OPTIONAL MATCH (nxt:Object) WHERE nxt.name = carrier_sb "
-        "AND nxt.id <> sup.id\n"
-        "WITH sup, r, active, carrier_count, carrier_status, carrier_sb, "
-        "     count(nxt) AS next_count, head(collect(nxt.status)) AS next_status\n"
+        # The hop must exclude the CARRIER as well as the subject: a successor
+        # whose own ``supersededBy`` is its own name would otherwise find
+        # ITSELF and the string would tell the reader to walk a chain with no
+        # live head.
+        "AND nxt.id <> sup.id AND nxt.id <> carrier_id\n"
+        "WITH sup, r, active, carrier_count, carrier_id, carrier_status, "
+        "     carrier_sb, count(nxt) AS next_count, "
+        "     head(collect(nxt.status)) AS next_status\n"
         # ``r.idx`` and the OPERATOR's ``direction`` are projected because the repair
         # differs in the idx-0 source slot (ep.py's ``source_stripped`` hazard),
         # ``op_type`` because EP's operator predicate is the flag OR ``op_type``
@@ -729,7 +737,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "RETURN DISTINCT sup.id, sup.name, sup.supersededBy, type(r), r.idx, "
         "coalesce(active.is_operator, false), active.op_type, active.direction, "
         f"{epistemic_identity('active')}, active.id, carrier_count, "
-        "carrier_status, carrier_sb, next_count, next_status "
+        "carrier_id, carrier_status, carrier_sb, next_count, next_status "
         f"LIMIT {SAMPLE_LIMIT}",
     )
 
@@ -746,8 +754,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         and a repair with no ``idx`` for an edge that is an operator input.
         """
         (sup_id, sup_name, sup_sb, edge_type, idx, is_op_flag, op_type,
-         direction, active_id, _active_nid, carrier_count, carrier_status,
-         carrier_sb, next_count, next_status) = row
+         direction, active_id, _active_nid, carrier_count, _carrier_id,
+         carrier_status, carrier_sb, next_count, next_status) = row
         return {
             "sup_id": sup_id, "sup_name": sup_name, "sup_sb": sup_sb,
             "edge_type": edge_type, "idx": idx,
@@ -776,6 +784,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             return (f"; and its supersededBy ({_quoted(s['sup_sb'])}) is AMBIGUOUS "
                     f"({s['carrier_count']} Objects carry it, #3573), so the repair "
                     "must name the Object meant as the successor")
+        if (s["carrier_status"] or "") == DRAFT_STATUS:
+            # ⛔ A DRAFT successor is not terminal, so without this arm it takes the
+            # ordinary one — but EP strips a draft input exactly as it strips a
+            # terminal input (#780). The re-point would then read CLEAN on a
+            # re-audit with the factor still degenerate: the same self-inflicted
+            # false NEGATIVE the successorless arm refuses for ``archived``, and
+            # reachable through the sanctioned fold lane (measured:
+            # ``apply_supersessions`` folds a draft successor with NO warning).
+            return (f"; the successor it names is '{DRAFT_STATUS}', which EP "
+                    "strips like a terminal input (#780) — it needs promoting to "
+                    "live as well, or the re-point leaves the factor degenerate")
         if is_terminal_status(s["carrier_status"]):
             return ("; the successor it names is ITSELF "
                     f"{_quoted(s['carrier_status'])}, so the re-point must target "
@@ -834,18 +853,32 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         if not s["carrier_count"] or s["carrier_count"] > 1:
             return ""
         status = s["carrier_status"]
+        succ = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "the successor"
+        if (status or "") == DRAFT_STATUS:
+            return (f" ⛔ {succ} is '{DRAFT_STATUS}', which EP strips the same way "
+                    "(#780): promote it to live as well, or the re-point leaves "
+                    "the factor degenerate")
         if not is_terminal_status(status):
             return ""
-        succ = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "the successor"
         if not s["carrier_sb"]:
             return (f" ⛔ {succ} is ITSELF {_quoted(status)} and names NO successor, "
                     "so there is no chain to follow: re-point onto whatever now "
                     "carries the claim, or delete the edge")
+        if s["carrier_sb"] == s["sup_sb"]:
+            return (f" ⛔ {succ} names ITSELF as its own successor, so that chain "
+                    "loops with no live head: re-point onto whatever now carries "
+                    "the claim, or delete the edge")
         if not s["next_count"]:
             return (f" ⛔ {succ} is ITSELF {_quoted(status)} and its own "
                     f"supersededBy ({_quoted(s['carrier_sb'])}) answers no OTHER "
                     "Object either, so the chain has no resolvable head: re-point "
                     "onto whatever now carries the claim, or delete the edge")
+        if s["next_count"] > 1:
+            return (f" ⛔ {succ} is ITSELF {_quoted(status)} and its own "
+                    f"supersededBy ({_quoted(s['carrier_sb'])}) names "
+                    f"{s['next_count']} Objects — the next hop is exactly the "
+                    "ambiguity this check refuses to resolve, so name the LIVE "
+                    "head by ID")
         if is_terminal_status(s["next_status"]):
             return (f" ⛔ {succ} is ITSELF {_quoted(status)}, and the next link "
                     f"({_quoted(s['carrier_sb'])}) is {_quoted(s['next_status'])} "
@@ -878,6 +911,22 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             only the delete.
         """
         q = _quoted(s["sup_id"]) if s["sup_id"] is not None else _quoted(s["sup_name"])
+        if s["sup_id"] is None:
+            # ⛔ ``tortoise_update_entity`` keys on the ID, so embedding a NAME in its
+            # first argument addresses a key that does not exist. Only a raw
+            # ``REMOVE o.id`` reaches this state (no SDK writer mints an id-less
+            # Object), but the string must not hand out a call that cannot work —
+            # 4c already answers this state in prose, and the two checks must not
+            # disagree about it.
+            return (
+                f"No id-keyed repair is possible for the superseded Object named "
+                f"{_quoted(s['sup_name'])} (it carries no id, so "
+                "tortoise_update_entity cannot address it): give it one, then name "
+                f"the successor on it and re-point this {s['edge_type']} input onto "
+                "that successor, deleting the edge into the old endpoint. Archiving "
+                "it instead does NOT clear this: EP strips a terminal input either "
+                "way, so the edge must still be deleted or re-pointed onto whatever "
+                "now carries the claim")
         if not s["carrier_count"]:
             fix = (
                 f"No resolvable successor is named for {q}, so there is nothing to "
@@ -1032,7 +1081,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # the other `fix` strings here (``tortoise_update_point(id, {...})``).
             fix=((f"Re-point the successor link: tortoise_update_entity({_quoted(sup_id)}, "
                   "{'status': 'superseded', 'supersededBy': "
-                  "'<the successor CURRENT name>'}')")
+                  "'<the successor CURRENT name>'})")
                  if sup_id is not None else
                  (f"Set the successor name on the Object named {_quoted(sup_name)} "
                   f"to the CURRENT name of {_quoted(sb_name)}")),

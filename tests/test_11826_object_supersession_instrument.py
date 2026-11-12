@@ -54,6 +54,7 @@ inherited the edge, not because the check stopped looking.
 """
 from __future__ import annotations
 
+import ast
 import os
 import sys
 
@@ -511,6 +512,10 @@ def test_a_renamed_successor_dangles_the_pointer_and_is_reported(sdk):
         f"Re-point the successor link: tortoise_update_entity('{v1['id']}', {{"), \
         issues[0].fix
     assert "''" not in issues[0].fix, "a doubled apostrophe is not a usable literal"
+    # ⛔ A single stray quote is the same defect and a prefix match cannot see it:
+    # parse the CALL the string hands the caller (see
+    # ``test_the_unresolvable_repair_is_a_parsable_call``).
+    ast.parse(issues[0].fix.split(": ", 1)[1])
 
 
 def test_an_ambiguous_name_is_not_reported_as_a_dead_one(sdk):
@@ -637,6 +642,142 @@ def test_a_self_pointer_is_not_a_successor(sdk):
     assert [i for i in _issues(sdk, "superseded_by_unresolvable")
             if i.node_id == v1["id"]] == [], \
         "a twin carrying the name resolves the pointer — the exclusion went too far"
+
+
+def test_a_draft_successor_is_not_a_working_repair(sdk):
+    """A DRAFT successor is not terminal, but EP strips it exactly as it strips one.
+
+    ``is_terminal_status('draft')`` is False, so a draft successor takes the
+    ordinary "re-point onto the successor" arm — and the reader who performs it
+    gets a re-audit that reads CLEAN over a factor that is STILL degenerate
+    (``include_draft=False``, #780). That is the same self-inflicted false
+    NEGATIVE the successorless arm refuses for ``archived``, and it is reachable
+    through the SANCTIONED fold lane: ``apply_supersessions`` folds a draft
+    successor with no warning, and a draft is the natural state of a fresh node.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2", status="draft")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) RETURN o.status", {}) == \
+        [["draft"]], "fixture drifted: the successor is not a draft"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    assert "which EP strips like a terminal input" in issues[0].detail, \
+        issues[0].detail
+    assert "promote it to live as well" in issues[0].fix, issues[0].fix
+
+    # And the clause is load-bearing: perform the repair the fix prescribes and
+    # the factor is still degenerate, so "re-point and re-audit clean" is false.
+    _q(sdk, "MATCH (o:Object {id:$i})-[r:IMPL]->() "
+            "MATCH (s:Object {name:$s}) MERGE (o)-[nr:IMPL]->(s) "
+            "SET nr.idx = 0 DELETE r",
+       {"i": op["id"], "s": "PolicyV2"})
+    run = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert [s["reason"] for s in run.get("skipped_factors") or []] == ["degenerate"], \
+        ("the draft input is stripped, so the prescribed re-point alone does not "
+         f"restore the belief: {run.get('skipped_factors')}")
+
+
+def test_a_chains_ambiguous_next_hop_is_not_named_as_the_target(sdk):
+    """The hop after the successor is subject to the SAME ambiguity rule.
+
+    ``head(collect(nxt.status))`` picks an arbitrary carrier, so an ambiguous next
+    name could be announced as "LIVE, so target THAT" — handing the reader a name
+    this check refuses to resolve one hop earlier, and a re-point onto a terminal
+    twin. The order the carriers were created in must not change the sentence.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _obj(sdk, "AH2")  # live carrier, created first
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
+            "o.supersededBy = 'AH2'", {"i": v2["id"]})
+    _q(sdk, "CREATE (:Object {id:'dead-ah', name:'AH2', status:'superseded'})", {})
+    assert _q(sdk, "MATCH (o:Object {name:'AH2'}) RETURN count(o)", {}) == [[2]], \
+        "fixture drifted: the next hop is not ambiguous"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    fix = issues[0].fix
+    assert "names 2 Objects" in fix, fix
+    assert "name the LIVE head by ID" in fix, fix
+    assert "target THAT" not in fix, (
+        "an ambiguous next hop must not be named as the target: " + fix)
+
+
+def test_a_chains_self_loop_is_not_walked(sdk):
+    """A successor whose own ``supersededBy`` is its own name has no live head.
+
+    The second hop did not exclude the CARRIER, so it found ITSELF and the string
+    told the reader to walk a chain whose only named node is the successor.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="superseded", **{"supersededBy": "PolicyV2"})
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.supersededBy",
+              {"i": v2["id"]}) == [["PolicyV2"]], "fixture drifted"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    fix = issues[0].fix
+    assert "names ITSELF as its own successor" in fix, fix
+    assert "no live head" in fix, fix
+    assert "target THAT" not in fix, fix
+
+
+def test_the_unresolvable_repair_is_a_parsable_call(sdk):
+    """The emitted repair must be callable Python, not just the right prefix.
+
+    ``tortoise_update_entity(<id>, {...})`` is the door's shape; a stray quote makes
+    the whole call a SyntaxError, and a prefix assertion cannot see one. #7819's rule
+    — a repair that always raises is worse than no repair — is about the CALL, so
+    the test parses it rather than matching its start.
+    """
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) SET o.name = 'PolicyV2b'", {})
+
+    issues = [i for i in _issues(sdk, "superseded_by_unresolvable")
+              if i.node_id == v1["id"]]
+    assert issues
+    call = issues[0].fix.split(": ", 1)[1]
+    ast.parse(call)  # raises SyntaxError on a stray quote
+    assert call.endswith("})"), call
+
+
+def test_an_idless_object_is_not_handed_an_id_keyed_call(sdk):
+    """``tortoise_update_entity`` keys on the ID, so a NAME there cannot work.
+
+    Only a raw ``REMOVE o.id`` reaches this state (no SDK writer mints an id-less
+    Object), but the string must not hand out a call that cannot work, and 4c
+    already answers the same state in prose — the two checks must not disagree.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
+            "o.supersededBy = 'Gone' REMOVE o.id", {"i": v1["id"]})
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV1'}) RETURN o.id", {}) == [[None]], \
+        "fixture drifted: the id survived"
+
+    issues = _issues(sdk, "superseded_object_active_edges")
+    assert issues
+    fix = issues[0].fix
+    assert "tortoise_update_entity" in fix and "cannot address it" in fix, fix
+    assert "tortoise_update_entity('PolicyV1'" not in fix, (
+        "a name was embedded where the door expects an id: " + fix)
 
 
 # ── 3. the history surface stops hiding a terminal chain head ──────
