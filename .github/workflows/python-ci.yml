@@ -4612,7 +4612,7 @@ jobs:
     #     archive has no PG16 client — so the in-step `apt-cache show`
     #     precondition is what fails closed") is why it is worth spelling out:
     #     the pin no longer DEPENDS on the box's ARCHIVE carrying the major
-    #     (#12051 round 3 makes `<codename>-pgdg` the source that RESOLVES it, and
+    #     (#12051 round 3 makes `<codename>-pgdg` the source that LISTS it, and
     #     the step ASSERTS that index LISTS this major — `apt-cache policy` must show
     #     a pgdg row for it — because `apt-get update` reports a
     #     repository it could not FETCH as a WARNING and exits 0, so an egress
