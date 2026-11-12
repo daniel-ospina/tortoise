@@ -3378,7 +3378,8 @@ def test_a_metering_only_diff_runs_the_storage_dimension_pins():
     """#11968 review (P2): the arithmetic's own diff must select the guard that pins it.
 
     `tests/test_pricing_storage_dimensions.py` pins
-    `metering.storage_overage_cost_usd` (21 call sites), and `tortoise/metering.py`
+    `metering.storage_overage_cost_usd` (12 invocations, all in that file — the
+    function has no production caller yet), and `tortoise/metering.py`
     is an exact `SOURCE_PATTERNS["api"]` entry. A named-surface match REPLACES the
     `core` fallback (#2938), so a `metering.py`-only diff resolves `['api']` and a
     `core`-only registration leaves the overage arithmetic asleep on the very

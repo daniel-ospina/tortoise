@@ -2232,8 +2232,9 @@ surfaces:
   # has no business running on a battery-only diff.
   - test_11739_quote_population_probe.py
 
-  # #11758/#11981: the two purchasable storage dimensions (graph + document
-  # storage) and the `solo` $19 tier that first sells them. The pins drive
+  # #11758/#11981: the two purchasable storage dimensions — `graph_storage`
+  # (`hot capacity`) and `postgres_storage` (`stored data`) — and the `solo` $19
+  # tier that first sells them. The pins drive
   # `metering.storage_overage_cost_usd`, which reads `pricing.storage_limits` /
   # `pricing.storage_overage_rate` / `pricing.BYTES_PER_GB` and prices against the
   # tier table in `cost_dimensions` / `allowance_gate`. Hermetic — arithmetic and
