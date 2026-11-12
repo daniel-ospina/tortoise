@@ -6038,6 +6038,17 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     for shape, filename, content in (
         ("commented-out stanza", "pgdg.list", "# deb https://apt.postgresql.org/pub/repos/apt noble-pgdg main\n"),
         ("apt-ignored backup", "pgdg.list.save", "deb https://apt.postgresql.org/pub/repos/apt noble-pgdg main\n"),
+        # ⛔ THE DEB822 SPELLING NEEDS ITS OWN ROW: the `URIs:` alternative in the probe is a
+        # SEPARATE expression, so a maintainer widening only it stayed GREEN (MEASURED, review
+        # of `ee48814138`: loosening it to `URIs:.*apt\.postgresql\.org` left `285 passed`
+        # while a fully commented-out `.sources` paragraph is NOT something apt reads —
+        # measured rc 0, no error, and `apt-cache policy` names no postgresql package).
+        (
+            "commented-out deb822 stanza",
+            "pgdg.sources",
+            "#Types: deb\n#URIs: https://apt.postgresql.org/pub/repos/apt\n"
+            "#Suites: noble-pgdg\n#Components: main\n",
+        ),
     ):
         configured = run_with(
             'apt-cache() { echo "Candidate: 16.15-1.pgdg24.04+2"; '
@@ -6075,11 +6086,19 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "Components: main\n"
         "Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc\n"
     )
-    for shape, kwargs in (
-        ("a deb822 `sources.list.d/pgdg.sources`", {"plant": {"pgdg.sources": deb822}}),
+    for shape, kwargs, consequence in (
+        (
+            "a deb822 `sources.list.d/pgdg.sources`",
+            {"plant": {"pgdg.sources": deb822}},
+            "the second stanza would carry a different Signed-By from the one that file "
+            "lists, and apt then refuses the WHOLE source list",
+        ),
         (
             "the legacy `/etc/apt/sources.list`",
             {"plant_sources_file": "deb https://apt.postgresql.org/pub/repos/apt noble-pgdg main\n"},
+            "the step adds a stanza the box does not need — benign HERE, because the fixture "
+            "carries no `signed-by` (apt only warns `configured multiple times`), but writing "
+            "it is still wrong: the operator's own stanza is the one apt should keep using",
         ),
     ):
         reused = run_with(
@@ -6093,9 +6112,8 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
             + repr(reused_combined)
         )
         assert "already configured on this box" in reused_combined, (
-            f"the presence probe MISSED {shape} — apt reads it, so the step then writes a "
-            "second stanza for the same URI+suite with a different Signed-By and apt "
-            "refuses the whole source list: " + repr(reused_combined)
+            f"the presence probe MISSED {shape} — apt reads it, so {consequence}: "
+            + repr(reused_combined)
         )
         assert tee_log.read_text(encoding="utf-8").strip() == "", (
             f"the step WROTE its own stanza on a box already configured through {shape}: "
@@ -6354,11 +6372,14 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     unguard the os-release source -> 2 failed (THIS row and the executed arm); `-16` -> `-18`
     on the install -> 3 failed (the pin rows, where the install major is asserted); hoist
     `install -d`/`install -m 0644` out of the gate -> 1 failed (the reuse arm, again ABORTING
-    under `set -u` — on `$key_file`, which only the else-branch's `mktemp` defines — so this
-    mutant also does not reach the `install` recorder); drop `*.sources`, the `URIs:`
+    under `set -u` — the `install -d` line DOES run and IS recorded (`-d /etc/apt/keyrings` in
+    the stub's log), then the `-m 0644` line aborts on `$key_file`, which only the else-branch's
+    `mktemp` defines, so the `install_log == ''` assertion is never REACHED: like the `tee`
+    hoist, this proves the `set -u` guard and not the recorders); drop `*.sources`, the `URIs:`
     alternative, or the legacy `sources.list` operand from the presence probe -> 1 failed EACH
     (the positive-shape arms above; MEASURED GREEN before they existed — that was the gap);
-    widen the presence probe so it accepts a COMMENTED-OUT stanza -> 1 failed; make it
+    widen the presence probe so it accepts a COMMENTED-OUT stanza -> 1 failed (the ignored-shape
+    loop, which now covers BOTH spellings — `deb`/`.list` and `URIs:`/`.sources`); make it
     RECURSIVE over `sources.list.d` so an apt-ignored `pgdg.list.save` counts -> 1 failed
     (both are the ignored-shape arm). Each mutant's own message was read, not just the
     count — a red for the wrong reason is not evidence.
