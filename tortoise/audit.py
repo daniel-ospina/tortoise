@@ -1127,8 +1127,24 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "confidence transfers through it by design and the re-point "
                     "moves no belief either way")
         if not s["is_operator"]:
+            # ⛔ …and the DIRECT arm has its own split, on the endpoint that was
+            # superseded: where that endpoint is one EP refuses (``op_type`` only, or
+            # ``is_operator`` true), NO belief was ever carried through this edge —
+            # measured: ``confidences {}`` and ``skipped_factors None`` BEFORE the
+            # supersession, in both shapes — so "the direct edge carried belief … that
+            # belief is NOT moved" contradicted the same finding's own ``detail``
+            # ("no confidence was ever carried through this edge"), and only this
+            # helper failed to consult the flag every other consequence helper reads
+            # (#12210 review, P2).
+            if s["sup_refused"] or s["sup_flag_shaped"]:
+                return ("EP's direct-edge arm refuses the superseded endpoint itself "
+                        "(it is operator-shaped), so no confidence was EVER carried "
+                        "through this edge — measured ``confidences {}`` and "
+                        "``skipped_factors None`` before the supersession — and an "
+                        "edge written onto a live claim successor is what would "
+                        "establish one; a carry onto the dead name changes nothing")
             # ⛔ Every caller is an "EP will not read it" arm (an operator-shaped or
-            # draft successor — a neutral edge returns at the rung above and never
+            # dead successor — a neutral edge returns at the rung above and never
             # reaches this one), so the honest sentence is that the belief this edge
             # DID carry is NOT moved by the repair named — measured:
             # a direct edge re-pointed onto an operator-shaped successor leaves

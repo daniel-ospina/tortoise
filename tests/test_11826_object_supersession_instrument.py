@@ -3180,3 +3180,40 @@ def test_the_draft_strings_state_the_arity_ladder(sdk):
     assert "promotion alone leaves the stale edge where it is (measured: ``confidences {}``)" \
         not in fix, (
         "the measured outcome at this arity is not an empty confidence set: " + fix)
+
+
+def test_a_direct_row_whose_SUPERSEDED_endpoint_is_shaped_claims_no_belief(sdk):
+    """No belief was EVER carried through an edge into a shaped superseded endpoint.
+
+    Measured on `p --IMPL--> V1(op_type='IMPL')` before the supersession:
+    `confidences {}`, `skipped_factors None` — so "the direct edge carried belief into
+    the superseded endpoint while it was live … that belief is NOT moved" is false
+    there, and it contradicted this finding's own `detail` ("no confidence was ever
+    carried through this edge") (#12210 review, P2).
+    """
+    for shape in ("op_type", "is_operator"):
+        p = sdk.create_point("statement", f"gateway {shape}")
+        v1 = _obj(sdk, f"PolicyV1-{shape}")
+        v2 = _obj(sdk, f"PolicyV2-{shape}")
+        sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+        if shape == "op_type":
+            _q(sdk, "MATCH (o:Object {id:$i}) SET o.op_type = 'IMPL'", {"i": v1["id"]})
+        else:
+            _q(sdk, "MATCH (o:Object {id:$i}) SET o.is_operator = true", {"i": v1["id"]})
+
+        # ⛔ The measurement is taken BEFORE the supersession — the audit row only
+        # exists once the anchor is superseded, so the "was any belief ever carried"
+        # question has to be answered from EP, not from the finding.
+        before = sdk.compute_confidence(anchors=[p["id"]], require_calibration=False)
+        assert before["confidences"] == {}, (
+            f"a shaped superseded endpoint never carried belief ({shape}): {before}")
+
+        _supersede_object(sdk, f"PolicyV1-{shape}", f"PolicyV2-{shape}")
+        sdk.update_entity(v2["id"], status="archived")
+        after = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                     if i.node_id == v1["id"])
+        fix = after.fix
+        assert "no confidence was EVER carried" in fix, (
+            f"the {shape} endpoint never carried belief, so the fix must not claim it "
+            "did: " + fix)
+        assert "carried belief into the superseded endpoint" not in fix, fix
