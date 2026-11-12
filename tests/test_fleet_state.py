@@ -1543,7 +1543,13 @@ def test_the_open_issue_read_uses_the_scaled_bound(monkeypatch) -> None:
     monkeypatch.setattr(fs, "_capture", capture)
     assert fs.open_issues("o/r") == []
     assert seen["timeout"] == fs.gh_list_timeout(fs.OPEN_ISSUES_LIMIT)
-    assert "--limit" in seen["cmd"] and "2000" in seen["cmd"]
+    # ⛔ THE ARGV TOKEN IS THE CONSTANT, never a literal. This asserted the bare
+    # string "2000", so raising `OPEN_ISSUES_LIMIT` (2000 -> 5000, the repo had
+    # outgrown the window and the claim gate abstained on every issue) failed a
+    # test whose own docstring says it checks that the surface RECEIVES the bound
+    # it derives. Pin the derivation, not the number: a constant change must not
+    # be able to redden a test about wiring, and a wiring break must still fail.
+    assert "--limit" in seen["cmd"] and str(fs.OPEN_ISSUES_LIMIT) in seen["cmd"]
 
     fs.open_prs("o/r")
     assert seen["timeout"] == fs.gh_list_timeout(400)

@@ -2303,10 +2303,27 @@ def open_prs(repo: str, limit: int = 400) -> GitHubRows:
 #: attribution on membership in this set, so a truncated read makes "no lane is
 #: attributed" UNPROVABLE for the issues it did not see — the claim gate would
 #: then answer "nobody" from a read that cannot claim coverage (#8175). The
-#: window is far above any repo the fleet reads; if a repo ever exceeds it the
-#: board SAYS SO (``reconciliation["open_issues_truncated"]``) and the pre-flight
-#: refuses instead of answering.
-OPEN_ISSUES_LIMIT = 2000
+#: window must therefore stay above the population of every repo the fleet reads;
+#: if a repo ever exceeds it the board SAYS SO
+#: (``reconciliation["open_issues_truncated"]``) and the pre-flight refuses
+#: instead of answering.
+#:
+#: ⛔ THE « FAR ABOVE ANY REPO » ASSUMPTION WAS OUTGROWN — measured 2026-11-12:
+#: `daniel-ospina/tortoise` holds **2,057 open issues** against the previous
+#: 2,000, so `open_issues_truncated` stamped true and the claim gate answered
+#: INCOMPLETE for EVERY target in that repo — `collision_preflight.py` exited 2
+#: and `who-is-on.sh` printed "ANSWER INCOMPLETE" on all thirteen issues tried.
+#: The fail-closed path worked exactly as designed; what failed was the
+#: headroom. The population was 989 on 2026-10-14 (the figure quoted in the
+#: collision gate's docstring) and 1,854 by #11202, so it roughly doubled in a
+#: month — a 2,000 ceiling was already inside the growth curve when it was
+#: chosen. 5,000 restores the invariant with room for that trend, and costs
+#: NOTHING on the happy path: `gh --limit` pages until the rows run out, so the
+#: read's cost is set by the ACTUAL count (~7 ms/row), not by the ceiling — the
+#: ceiling only decides when coverage becomes unprovable. `gh_list_timeout`
+#: derives its bound from the same number, so the wider window raises a bound
+#: nothing pays on the happy path rather than tightening one.
+OPEN_ISSUES_LIMIT = 5000
 
 
 def open_issues(repo: str, limit: int = OPEN_ISSUES_LIMIT) -> GitHubRows:
