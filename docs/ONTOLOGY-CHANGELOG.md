@@ -100,9 +100,11 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > *"mem0 and Letta have no successor concept"*, which is false of mem0 (its Supersede feature carries a system-inferred replacement
 > pointer) and was never verified for Letta from a primary source. (c) It named Cognee's `close_node()`, which cognee removed in 1.6.5
 > (2026-10-16) — an API that no longer exists. What survives all three is the narrower, load-bearing claim:
-> **the successor pointer is system-inferred, so no caller is required to supply it.** What practitioners argue
-> about is the opposite direction: *"a tombstone that says 'superseded' without recording what superseded it is a summary with a
-> timestamp"* — i.e. when the WORD means "replaced", the pointer is not optional. Both hold at once only if the word carries the
+> **the successor pointer is system-inferred, so no caller is required to supply it.** The tension runs the other way too — and this
+> next sentence is the entry's OWN REASONING, not a sourced finding: an earlier version put it in quotation marks with no
+> attribution, and it appears in neither the cited study nor any comment on #11824, so it could not be checked from the artifact.
+> Stated plainly: when the WORD means "replaced", the pointer is not optional, so a tombstone that says `superseded` without
+> recording what superseded it records a timestamp and no replacement. Both hold at once only if the word carries the
 > pointer and the successorless case is a different word — which is what this sentence now says. The same survey's measured
 > failure mode is the one already tracked here: that study of five stores found *"no system enforces revocation by
 > default"* — the mark exists and retrieval ignores it, our #11825/#11826 exactly.

@@ -1260,7 +1260,7 @@ def _block_bodies(changelog: str) -> list[str]:
     return [changelog[a:b] for a, b in zip(starts, starts[1:] + [len(changelog)])]
 
 
-def test_a_4_3_change_must_be_quoted_verbatim_by_the_release_that_lands_it() -> None:
+def test_a_4_3_change_must_be_quoted_verbatim_by_some_changelog_block() -> None:
     """A changelog that quotes a sentence the model does not carry is a false record.
 
     ``docs/ONTOLOGY.md:39`` and ``ONTOLOGY-CHANGELOG.md:32`` both require
@@ -1276,7 +1276,18 @@ def test_a_4_3_change_must_be_quoted_verbatim_by_the_release_that_lands_it() -> 
     an approved artifact came to disagree with itself. Nothing else in the tree
     compares them.
 
-    ⛔ THE RULE IS "MAY NOT CHANGE WITHOUT A RELEASE RECORDING IT", NOT "EVERY
+    ⛔ SCOPE OF THE CLAIM — read this before trusting the name. What is enforced
+    is *"§4.3 may not change without SOME block quoting the new text"*, not
+    "the release that changed it quotes it": the comparison target is the newest
+    block that quotes the clause AT ALL, so a lane could change §4.3 and paste
+    the new sentence into an OLDER block's quote and this pin would pass
+    (measured: new text into v3.34's quote plus a quoteless v3.35 → both pins
+    green). Tying the quote to the version that actually made the change needs
+    the previous release's clause, which the file does not carry; the residual
+    is stated rather than papered over, and the cheap half — "the model and its
+    record disagree" — is fully covered.
+
+    ⛔ THE RULE IS "MAY NOT CHANGE WITHOUT A BLOCK RECORDING IT", NOT "EVERY
     BLOCK MUST QUOTE". An earlier cut of this pin demanded a §4.3 quote in the
     NEWEST block unconditionally, which reds the next release that touches §4.5
     or §4.6 and teaches the lane to paste a §4.3 quote into an entry that did
