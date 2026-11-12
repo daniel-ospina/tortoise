@@ -3474,6 +3474,107 @@ assert_not_contains "$OUT" "The condition is real" \
 assert_contains "$(cat "$LOG.heartbeat" 2>/dev/null)" '"r2_ok":null' \
   "118. the driver heartbeat records r2_ok as UNMEASURED (null), not a measurement it never took"
 
+# Review P2-1 (round 3): the missing-CLI arm exits FIRST, so the PURGE_FAILED and
+# RECONCILE_FAILED arms below it never run — and `cli_scope` accounted for
+# SWEEP_NO_COVERAGE only. A run whose purge leg failed therefore ended on a line
+# asserting a complete account of itself while silence covered an erasure-UNVERIFIED
+# fault, whose own incident could not be filed either (no CLI ⇒ no dedup object).
+# Nothing pinned that, so the fix could be dropped silently — pin it.
+export STUB_SWEEP_BODY='{"status":"backed_up","graph_totals":{"attempted":1,"backed_up":1}}'
+export STUB_PURGE_CODE=500
+set +e
+ULOUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+ULRC=$?
+set -e
+assert_eq "$ULRC" 1 "118. a FAILED purge is still RED when the CLI is missing"
+assert_contains "$ULOUT" "purge ride-along ALSO failed" \
+  "118. … and the terminal line names the purge fault whose own arm this exit pre-empts"
+assert_contains "$ULOUT" "erasure is UNVERIFIED" \
+  "118. … stating the consequence, not just the leg name"
+unset STUB_PURGE_CODE
+# Round 3 (review F2): the RECONCILE clause needed its own pin — deleting it left the
+# suite fully GREEN (659/0), which is the very "fix could be dropped silently" defect
+# this block's own comment names. The purge and reconcile clauses are separate `if`s,
+# so one assertion cannot cover both.
+export STUB_RECONCILE_CODE=500
+set +e
+RLOUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+set -e
+assert_contains "$RLOUT" "reconcile ride-along ALSO failed" \
+  "118. the terminal line names a FAILED reconcile too (its own arm is pre-empted as well)"
+assert_not_contains "$RLOUT" "purge ride-along ALSO failed" \
+  "118. … and does not invent the purge fault, which did not happen this run"
+unset STUB_RECONCILE_CODE
+# Round 3 (review F1): `already_running` with a FRESH completion stamp leaves
+# NO_COVERAGE=0, so it fell through to the generic "the sweep leg ran too" arm while the
+# same run logged "sweep skipped (status=already_running)" — two lines of one run at
+# odds, the C5 defect one arm further in. Pin the correct wording AND the absence of
+# the contradictory one.
+export STUB_STATUS_BODY="$(status_body true null '"storage broken"' true 1 "$TS_RECENT")"
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+set +e
+SKOUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+set -e
+assert_contains "$SKOUT" "the sweep call returned NO report (status=already_running)" \
+  "118. a skipped sweep is reported as NO report read, not as a leg that ran"
+# Review round 5 (F1c): the clause AFTER the prefix is what said a false thing —
+# "no sweep leg completed" is contradicted by the same run's "last real sweep 5m
+# ago" line. Pin the corrected claim, not just the prefix.
+assert_contains "$SKOUT" "so this run read no sweep result" \
+  "118. … naming what the run lacked (a report), not a completion the log contradicts"
+assert_not_contains "$SKOUT" "the sweep leg ran too (status=already_running)" \
+  "118. … and the terminal line no longer contradicts the run's own 'sweep skipped' line"
+# Round 4 (review F1a/F1b): the round-3 arm only covered the NO_COVERAGE=0 path, so
+# `transport_error` (NO_COVERAGE=1 unconditionally, :2008) and `driver_timeout` still
+# reached wording that claimed "the sweep leg ran" while the same run logged "sweep
+# skipped". Both now key on the driver's own SWEEP_REPORT_READ classification. Neither
+# was reachable from the suite before — no aws-free run set STUB_SWEEP_RC.
+export STUB_SWEEP_RC=56
+export STUB_STATUS_BODY="$(status_body true null '"storage broken"' true 1 "$TS_RECENT")"
+set +e
+TEOUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+set -e
+assert_contains "$TEOUT" "the sweep call returned NO report (status=transport_error)" \
+  "118. transport_error: a transport fault is reported as NO report, even with a coverage fault also recorded"
+# Review round 5 (F2a): "recorded off that unmeasured state" misattributed the
+# evidence — the stale-stamp sub-shapes record a coverage fault off a MEASURED age,
+# which is a real DR fault independent of the missing CLI. Pin the attribution-free
+# wording so it cannot silently come back.
+assert_contains "$TEOUT" "and a coverage fault was recorded — its SWEEP_NO_COVERAGE incident" \
+  "118. … without attributing the coverage fault to the missing CLI"
+assert_not_contains "$TEOUT" "recorded off that unmeasured state" \
+  "118. … and never claims the measured fault was an artefact of the missing binary"
+assert_not_contains "$TEOUT" "the sweep leg ran but also reported a coverage fault (status=transport_error)" \
+  "118. … and it no longer claims the leg ran in the same run that logged 'sweep skipped'"
+export STUB_SWEEP_RC=28
+set +e
+DTOUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+set -e
+assert_contains "$DTOUT" "the sweep call returned NO report (status=driver_timeout)" \
+  "118. driver_timeout: the driver's own ceiling is reported as NO report read, not as a leg that ran"
+assert_not_contains "$DTOUT" "the sweep leg ran too (status=driver_timeout)" \
+  "118. … which is the same contradiction the already_running case pinned"
+# Round 6 (F1d): the trailing clause was the SAME refuted claim one clause later —
+# these shapes print a measured completion age and then denied coverage was measured.
+assert_contains "$DTOUT" "no coverage fault was recorded this run" \
+  "118. … and states what was not done, rather than denying the age it just measured"
+assert_not_contains "$DTOUT" "coverage is unmeasured" \
+  "118. … never claiming unmeasured coverage when the run measured a completion age"
+unset STUB_SWEEP_RC
+# Round 6 (F2b): "a SECOND fault" was false for the zero-coverage statuses — their
+# coverage fault exists only because R2_LIST_OK was pinned to 0 by the missing CLI, so
+# it is the missing CLI's own consequence. Pin the corrected attribution.
+export STUB_SWEEP_BODY='{"status":"no_teams","graph_totals":{"attempted":1,"backed_up":0}}'
+export STUB_STATUS_BODY="$(status_body true null '"storage broken"' true 1 "$TS_RECENT")"
+set +e
+NTOUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+set -e
+assert_contains "$NTOUT" "not a second fault" \
+  "118. no_teams: the coverage fault is attributed to the missing CLI, not called a second fault"
+assert_not_contains "$NTOUT" "— a SECOND fault" \
+  "118. … and the "second fault" wording is not reached for a zero-coverage status"
+unset STUB_SWEEP_RC
+
 # ── 119. #12135: the declaration side is honest about both runner families ─
 # ensure-aws-cli.sh is the half that PREVENTS case 118 in production, so its
 # no-op branch is the one that has to be exact: GitHub-hosted runners already
@@ -3678,6 +3779,115 @@ else
   assert_contains "$BEOUT" "downloading" \
     "120. … and installs the pinned build instead"
 fi
+# ── 121. #12135: the INSTALL path itself (review round 5) ─────────────────────
+# Case 119 pins the NO-OP branch (the one GitHub-hosted runners take, and the fleet's
+# self-hosted pool — the hosts this whole change exists for — never does) and three
+# branches that ABORT at the digest. NOTHING executed `unzip`, `aws/install`, the
+# post-check or the `GITHUB_PATH` append, so replacing the install invocation with a
+# no-op — or dropping the GITHUB_PATH append, without which the driver never sees the
+# binary — left the suite fully GREEN. That is the "the fix could be dropped silently"
+# shape this PR already filed once against itself (round-3 F2).
+#
+# A synthetic archive whose `aws/install` writes the binary into `--bin-dir`, plus a
+# `curl` stub that serves it, makes the REAL code path run offline and fast. The pins
+# are rewritten in a COPY; the shipped digests are never touched.
+if [ -z "$TARCH" ]; then
+  ok "121. install-path assertions skipped — host arch $(uname -m) has no pinned AWS CLI build"
+else
+  mkdir -p "$FIX/inst/build/aws" "$FIX/inst/serve"
+  cat > "$FIX/inst/build/aws/install" <<'SYNTH_INSTALLER_EOF'
+#!/usr/bin/env bash
+# Stands in for the real AWS installer: honours the two flags ensure-aws-cli.sh
+# passes and writes an executable into --bin-dir, which is what the post-check runs.
+bindir=""; installdir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --bin-dir) shift; bindir="$1" ;;
+    --install-dir) shift; installdir="$1" ;;
+  esac
+  shift
+done
+mkdir -p "$bindir" "$installdir"
+printf '#!/usr/bin/env bash\necho "aws-cli/2.31.27 Python/3.11.9 Linux/exe/%s"\n' "$b" > "$bindir/aws"
+chmod +x "$bindir/aws"
+printf '%s\n' "$bindir" > "$SYNTH_MARKER"
+SYNTH_INSTALLER_EOF
+  chmod +x "$FIX/inst/build/aws/install"
+  ( cd "$FIX/inst/build" && zip -qr "$FIX/inst/serve/archive.zip" aws )
+  SYNTH_SHA="$(sha256sum "$FIX/inst/serve/archive.zip" | awk '{print $1}')"
+  # The served zip is renamed to whatever the installer asks for; the stub writes it
+  # to the requested --output so the digest check sees exactly our bytes.
+  cat > "$FIX/inst/serve/curl" <<'SYNTH_CURL_EOF'
+#!/usr/bin/env bash
+out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--output) out="$2"; shift 2 ;;
+    --output=*) out="${1#--output=}"; shift ;;
+    *) shift ;;
+  esac
+done
+[ -n "$out" ] || { echo "synth-curl: no --output" >&2; exit 2; }
+cp "$SYNTH_ARCHIVE" "$out"
+SYNTH_CURL_EOF
+  chmod +x "$FIX/inst/serve/curl"
+  cp "$ENSURE" "$FIX/inst/ensure.sh"
+  chmod +x "$FIX/inst/ensure.sh"
+  # Rewrite BOTH pins (arch-independent: whichever arch this host is, its pin must
+  # match the archive our stub serves).
+  for v in PIN_SHA256_X86_64 PIN_SHA256_AARCH64; do
+    sed -i.bak "s|^$v=.*|$v=\"$SYNTH_SHA\"|" "$FIX/inst/ensure.sh"
+  done
+  rm -f "$FIX/inst/ensure.sh.bak"
+  GP="$FIX/inst/github_path"; : > "$GP"
+  set +e
+  # Invoked DIRECTLY (shebang + exec bit), never `bash <path>` — see the note at 119.
+  IOUT="$(PATH="$FIX/inst/serve:$FIX/noaws" GITHUB_PATH="$GP" \
+    RUNNER_TOOL_CACHE="$FIX/inst/toolcache" SYNTH_ARCHIVE="$FIX/inst/serve/archive.zip" \
+    SYNTH_MARKER="$FIX/inst/installer-called" "$FIX/inst/ensure.sh" 2>&1)"
+  IRC=$?
+  set -e
+  IROOT="$FIX/inst/toolcache/aws-cli-${TPIN}-${TARCH}"
+  assert_eq "$IRC" 0 "121. the install path SUCCEEDS end to end on a valid archive (exit 0)"
+  assert_contains "$IOUT" "sha256 verified" "121. … after the digest check passes"
+  assert_eq "$([ -f "$FIX/inst/installer-called" ] && echo yes || echo no)" "yes" \
+    "121. … the bundled aws/install script is actually invoked (not a no-op)"
+  assert_eq "$([ -x "$IROOT/bin/aws" ] && echo yes || echo no)" "yes" \
+    "121. … leaving an executable aws inside the tool-cache tree's bin/"
+  assert_contains "$IOUT" "installed — aws-cli/2.31.27" \
+    "121. … and the post-check RAN the installed binary and reported its version"
+  assert_contains "$(cat "$GP")" "$IROOT/bin" \
+    "121. … and its bin dir is appended to GITHUB_PATH, without which the driver never sees it"
+fi  # synthetic-install guard
+
+# ── 122. #12135: the REUSE branch's GITHUB_PATH append (review round 6) ──────
+# Case 120 covers the INSTALL path's append, case 119 the no-op, tamper, broken-cache
+# and discard paths. Untested until now: the reuse branch. That is the branch a
+# self-hosted host takes on EVERY run after the first — a fresh job's PATH never
+# contains $root/bin, so the `command -v aws` miss at :51 falls through and :67
+# reuses — and its append at :69 is the ONLY thing that puts `aws` on the driver's
+# PATH. Without it the driver reds hourly and never recovers, because the reuse probe
+# always pre-empts the install branch that does append: the same permanent-wedge
+# shape the discard pin exists to prevent.
+if [ -z "$TARCH" ]; then
+  ok "122. reuse-path assertions skipped — host arch $(uname -m) has no pinned AWS CLI build"
+else
+  RBIN="$FIX/inst/toolcache-reuse/aws-cli-${TPIN}-${TARCH}/bin"
+  mkdir -p "$RBIN"
+  cp "$FIX/awsok/aws" "$RBIN/aws"
+  chmod +x "$RBIN/aws"
+  RGP="$FIX/inst/gp-reuse"; : > "$RGP"
+  set +e
+  RROUT="$(PATH="$FIX/noaws" GITHUB_PATH="$RGP" RUNNER_TOOL_CACHE="$FIX/inst/toolcache-reuse" \
+    "$ENSURE" 2>&1)"
+  RRC=$?
+  set -e
+  assert_eq "$RRC" 0 "122. a working cached tree is REUSED (exit 0)"
+  assert_contains "$RROUT" "reusing" "122. … and says so"
+  assert_not_contains "$RROUT" "downloading" "122. … with no download"
+  assert_contains "$(cat "$RGP")" "$RBIN" \
+    "122. … and its bin dir reaches GITHUB_PATH, without which every later job reds"
+fi  # reuse guard
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"

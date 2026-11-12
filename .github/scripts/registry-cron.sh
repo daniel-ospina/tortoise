@@ -736,6 +736,9 @@ resolve_global() { # kind comment — close an open global incident (no-op if no
   # deduped, and it is what this run's terminal message claims.
   if [ "${AWS_CLI_MISSING:-0}" = "1" ]; then
     log "self-heal: leaving ${kind} unchanged — the aws CLI is missing, so a close could not delete its dedup sentinel or persist the recovery window (#12135); a CLI-present run resolves it"
+    # rc 0 for the same `set -e` reason as file_alert's refusal above: a non-zero
+    # return at any bare call site aborts the driver before the sweep. "Deferred" is
+    # the intended outcome of this run, not a failure of it.
     return 0
   fi
   # #3127: refuse to clear a kind this driver has no evidence for. Without this
@@ -900,6 +903,12 @@ file_alert() { # kind title body dedup_id
   # immediately before this refusal, so the sentence is true at every kind.
   if [ "${AWS_CLI_MISSING:-0}" = "1" ]; then
     fail "${kind} DETECTED but NOT FILED — the dedup object needs the aws CLI, which is missing on this runner (#12135). The finding logged above is what this run measured; this run is RED, and no incident can be filed or resolved until the CLI is installed."
+    # ⛔ rc MUST be 0 even though nothing was filed: every call site is a BARE command
+    # under `set -euo pipefail`, so returning non-zero here would abort the driver at
+    # the first alert and lose the hour's sweep — the one thing this branch exists to
+    # preserve (measured: `return 1` here reds 8 case-118 assertions, including
+    # "the SWEEP still ran"). This is NOT the alert_streak_set contract, whose callers
+    # test its rc; do not "normalize" the two.
     return 0
   fi
   tmp="$(mktemp)"
@@ -1706,6 +1715,17 @@ elif [ -z "$RUN" ]; then
   RUN='{"status":"empty_response"}'
 fi
 RUN_STATUS="$(printf '%s' "$RUN" | jq -r 'if type=="object" then (.status // "error") else "error" end' 2>/dev/null || echo error)"
+# #12135 review round 4 (F1a): the driver's OWN classification of "no sweep report
+# was read" — the same four statuses the ride-along skip list carries (`:2045`) and
+# the no-report terminal arm on the driver side already names. The CLI terminal
+# summary must key on THIS, not on a per-status guess inside one branch:
+# `transport_error` sets NO_COVERAGE=1 unconditionally (`:2008`), so any "no report"
+# arm placed in the NO_COVERAGE=0 branch is unreachable for it — an arm that reads
+# like coverage and can never run. One flag, both branches, all four statuses.
+SWEEP_REPORT_READ=1
+case "$RUN_STATUS" in
+  already_running|driver_timeout|transport_error|empty_response) SWEEP_REPORT_READ=0 ;;
+esac
 # Security review: RUN_STATUS is app-controlled — never publish it verbatim.
 RUN_STATUS_SAFE="$(redact "$RUN_STATUS")"
 # Review P2 (bug-deep): `teams_backed_up` counts only DEFAULT-graph backups, so
@@ -2251,7 +2271,59 @@ if [ "$AWS_CLI_MISSING" = "1" ]; then
   # defect C5 fixed. Key on the driver's OWN measured flag instead: `$NO_COVERAGE`
   # is 1 exactly when a `file_alert SWEEP_NO_COVERAGE` was attempted this run.
   if [ "$NO_COVERAGE" = "1" ]; then
-    cli_scope="the sweep leg ran but also reported a coverage fault (status=$RUN_STATUS_SAFE) — a SECOND fault, and its SWEEP_NO_COVERAGE incident could not be filed while the CLI is missing"
+    # #12135 review round 4 (F1a): `transport_error` reaches NO_COVERAGE=1
+    # unconditionally, and the other no-report statuses reach it from their own
+    # unmeasured shapes — so "the sweep leg ran" was still being claimed, in THIS
+    # branch, for a run whose own log said "sweep skipped". Split on the driver's
+    # classification instead of asserting the leg ran.
+    if [ "$SWEEP_REPORT_READ" = "0" ]; then
+      # #12135 review round 7 (cycle-5 note 1): the F1d comment belongs to the
+      # NO_COVERAGE=0 arm (:2312), NOT here — this branch is gated on
+      # NO_COVERAGE=1, so a comment saying "no coverage fault was recorded
+      # (NO_COVERAGE=0)" would be exactly backwards, and a later lane trusting it
+      # could "restore" the line below to deny a coverage fault this run DID record:
+      # the C5 defect direction, reintroduced by a comment. State this arm's own
+      # truth: a coverage fault WAS recorded, off a run that read no report — so the
+      # fault rests on the driver's own classification (:2008/:2019), not on a sweep
+      # result, and its incident could not be filed without the CLI.
+      cli_scope="the sweep call returned NO report (status=$RUN_STATUS_SAFE), and a coverage fault was recorded — its SWEEP_NO_COVERAGE incident could not be filed while the CLI is missing"
+    else
+      # #12135 review round 6 (F2b): "a SECOND fault" is false for the three
+      # zero-coverage statuses. Their coverage fault exists ONLY because R2_LIST_OK
+      # was pinned to 0 by the missing client (:1857) — it is the missing CLI's own
+      # consequence, not an independent second fault, and the incident body it would
+      # have carried even blames ListObjects permissions. Attribution, in the
+      # opposite direction from F2a.
+      case "$RUN_STATUS" in
+        no_teams|no_eligible_teams|no_work)
+          cli_scope="the sweep leg ran (status=$RUN_STATUS_SAFE), but the pool it needs to judge coverage could not be measured without the CLI — so the fault recorded here is the missing CLI's own consequence, not a second fault, and its SWEEP_NO_COVERAGE incident could not be filed" ;;
+        *)
+          cli_scope="the sweep leg ran but also reported a coverage fault (status=$RUN_STATUS_SAFE) — a SECOND fault, and its SWEEP_NO_COVERAGE incident could not be filed while the CLI is missing" ;;
+      esac
+    fi
+  elif [ "$SWEEP_REPORT_READ" = "0" ]; then
+    # #12135 review round 4 (F1b): the NO_COVERAGE=0 arm for a run that read no
+    # report at all — `already_running` on a fresh stamp reaches here via
+    # `:1802/:1814/:1826`, `driver_timeout` via `:1918/:1934`. The generic arm below
+    # claimed "the sweep leg ran too", which their own "sweep skipped" line and the
+    # driver-side no-report arm both contradict. `driver_timeout` is included: its
+    # fresh-stamp reading is about COVERAGE (the default arm's second clause, which
+    # stays correct), not about whether a report was read — so the two clauses are
+    # satisfiable at once, which is why this is its own branch and not a fifth case.
+    # #12135 review round 5 (F1c): "no sweep leg completed" was itself false in
+    # 100% of the shapes that reach this arm — `already_running` on a fresh stamp
+    # logs `sweep lock held; last real sweep 5m ago — healthy` (:1827), and
+    # `driver_timeout`/`empty_response` on a fresh stamp log `the last COMPLETED
+    # sweep was 5m ago` (:1985). A completed sweep IS on record; what this run did
+    # not get is a REPORT. (The third shape — no usable stamp + measured-empty pool
+    # — cannot reach here while the CLI is missing, because R2_LIST_OK is pinned to
+    # 0 and that forces a SWEEP_NO_COVERAGE filing.) Say what the run actually
+    # lacks. Round 6 (F1d): the TRAILING clause was the same refuted claim one clause
+    # later — every shape that reaches this arm carries a usable fresh completion age
+    # (a no-stamp shape is forced to file SWEEP_NO_COVERAGE, because R2_LIST_OK is
+    # pinned to 0), so "coverage is unmeasured" denied the very measurement the run
+    # printed above. State what was not done instead.
+    cli_scope="the sweep call returned NO report (status=$RUN_STATUS_SAFE), so this run read no sweep result — no coverage fault was recorded this run (the completion age it measured is named above)"
   else
     case "$RUN_STATUS" in
       backed_up)
@@ -2262,7 +2334,23 @@ if [ "$AWS_CLI_MISSING" = "1" ]; then
         cli_scope="the sweep leg ran too (status=$RUN_STATUS_SAFE) — no coverage fault was measured this run" ;;
     esac
   fi
-  fail "RED: the aws CLI is missing on this runner, so this run could not measure R2, dedup, file or resolve any incident (#12135). $cli_scope. Fix: install the CLI (the workflow's 'Ensure the AWS CLI' step does it idempotently), then re-run."
+  # review P2-1: this arm EXITS FIRST, so the PURGE_FAILED and RECONCILE_FAILED arms
+  # below it never run — and `cli_scope` above accounts for SWEEP_NO_COVERAGE only.
+  # A run whose purge leg failed therefore ended on a line asserting a complete
+  # account of itself while silence covered an erasure-UNVERIFIED fault, whose own
+  # incident could not be filed either (no CLI ⇒ no dedup object). Same class as C5:
+  # the summary must not deny a fault the run just measured. Both flags are already
+  # set by the time this arm runs (`file_alert PURGE_FAILED` / `RECONCILE_FAILED`),
+  # so naming them here is the cheapest correct fix — moving the arm below them would
+  # instead bury the CAUSE under two consequences of it.
+  extra=""
+  if [ "$PURGE_FAILED" = "1" ]; then
+    extra="$extra The purge ride-along ALSO failed — erasure is UNVERIFIED this run, and its PURGE_FAILED incident could not be filed (no CLI ⇒ no dedup object); it is named here because that arm's own summary is never reached."
+  fi
+  if [ "$RECONCILE_FAILED" = "1" ]; then
+    extra="$extra The reconcile ride-along ALSO failed — its RECONCILE_FAILED incident could not be filed; named here for the same reason."
+  fi
+  fail "RED: the aws CLI is missing on this runner, so this run could not measure R2, dedup, file or resolve any incident (#12135). $cli_scope.${extra} Fix: install the CLI (the workflow's 'Ensure the AWS CLI' step does it idempotently), then re-run."
   exit 1
 fi
 if [ "$PURGE_FAILED" = "1" ]; then
