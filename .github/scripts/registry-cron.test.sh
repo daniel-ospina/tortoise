@@ -3510,9 +3510,36 @@ BOUT="$(PATH="$FIX/tamper:$FIX/noaws" GITHUB_PATH="" RUNNER_TOOL_CACHE="$FIX/too
   "$ENSURE" 2>&1)"
 BRC=$?
 set -e
-assert_eq "$BRC" 1 "119. a BROKEN cached tree is not reused (it falls through to a real install)"
+assert_eq "$BRC" 1 "119. a BROKEN cached tree is not reused (the probe runs the binary, so it falls through to the download)"
 assert_contains "$BOUT" "downloading" \
-  "119. … the probe RUNS the cached binary instead of stat-ing it"
+  "119. … so a stat-only probe cannot call a broken cache good"
+# ⛔ The RE-INSTALL path carries the P1 fix (cycle 2): a cancelled install leaves
+# `$root/v2/<version>` with no working `bin/aws`, the installer then prints
+# "Found same AWS CLI version … Skipping install" and exits 0, and the post-check
+# fails — forever, since the step is continue-on-error. The discard that prevents
+# it must therefore be PINNED, not just present. A pre-seeded partial tree + a
+# tampered download is enough: the discard runs BEFORE the download, so the tree
+# must be GONE even though the run fails at the digest.
+mkdir -p "$FIX/toolcache-partial/aws-cli-2.31.27-x86_64/v2/2.31.27"
+printf 'partial install' > "$FIX/toolcache-partial/aws-cli-2.31.27-x86_64/v2/2.31.27/marker"
+set +e
+POUT="$(PATH="$FIX/tamper:$FIX/noaws" GITHUB_PATH="" RUNNER_TOOL_CACHE="$FIX/toolcache-partial" \
+  "$ENSURE" 2>&1)"
+PRC=$?
+set -e
+assert_eq "$PRC" 1 "119. a partial install tree still aborts on a bad archive"
+assert_eq "$([ -e "$FIX/toolcache-partial/aws-cli-2.31.27-x86_64/v2/2.31.27/marker" ] && echo present || echo gone)" \
+  "gone" "119. … and the unusable tree is DISCARDED first (without it the installer skips and wedges the host forever)"
+# A source-order pin as well: the discard must precede the installer invocation,
+# because moving it later re-creates the wedge while the assertion above (which
+# only sees the pre-download state) would still pass.
+DISCARD_LINE="$(grep -n 'rm -rf "\$root"' "$ENSURE" | head -1 | cut -d: -f1 || true)"
+INSTALL_LINE="$(grep -n 'aws/install" --bin-dir' "$ENSURE" | head -1 | cut -d: -f1 || true)"
+if [ -n "$DISCARD_LINE" ] && [ -n "$INSTALL_LINE" ] && [ "$DISCARD_LINE" -lt "$INSTALL_LINE" ]; then
+  ok "119. the discard precedes the installer call"
+else
+  bad "119. the discard is missing or comes after the installer (discard=${DISCARD_LINE:-none}, install=${INSTALL_LINE:-none})"
+fi
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
