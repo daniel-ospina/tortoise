@@ -886,6 +886,33 @@ assert_not_contains "$UNDEC_BODY" '```' "case 17l: and it pastes no fenced block
 assert_contains "$UNDEC_BODY" "only its last 6000 were read" "case 17l: and the 6000-byte cut is DECLARED in this arm too (review round 6 — the intro promises it beside the excerpt)"
 assert_contains "$UNDEC_BODY" "15400 bytes" "case 17l: and it names the report's real size"
 
+# ── case 17m: the ASCII FALLBACK's own diagnostic must not reach the job log (round 7) ─
+# The same rationale that put `2>/dev/null` on the `iconv` squeeze applies one line down: an
+# absent or failing `tr` prints its own diagnostic, which lands in the job log beside an alert
+# that went out perfectly well. R3 named "the converter", so this is the same class just
+# outside its letter — measured: `tr: command not found` reached the run's stderr.
+TR_NOISY_DIR="$FIX/bin-tr-noisy"
+mkdir -p "$TR_NOISY_DIR"
+cat > "$TR_NOISY_DIR/tr" <<TR_NOISY_EOF
+#!/usr/bin/env bash
+# Fails ONLY the ASCII-fallback squeeze (its own \`-d\` flag) and does so noisily.
+for a in "\$@"; do
+  if [ "\$a" = "-d" ]; then
+    echo "tr: cannot delete" >&2
+    exit 1
+  fi
+done
+exec "$REAL_TR" "\$@"
+TR_NOISY_EOF
+chmod +x "$TR_NOISY_DIR/tr"
+reset_case
+export PATH="$TR_NOISY_DIR:$PATH_BEFORE_ICONV_SHIM"
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-undecodable-tail.txt"
+export PATH="$PATH_BEFORE_ICONV_SHIM"
+assert_eq "$RC" "0" "case 17m: a FAILING, NOISY ASCII fallback still files the alert"
+assert_not_contains "$OUT" "tr: cannot delete" "case 17m: and its diagnostic is SUPPRESSED — the job log carries the alert, not the fallback's complaint"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "produced no excerpt either" "case 17m: and the body still names the state it is in"
+
 # ── case 17d: the READ GUARD — an existing but unreadable report must not abort ─────
 # NOTE THE MECHANISM (corrected, pass-5 review): a DIRECTORY is `-s`-TRUE on this fs, so
 # this case would have reached the read even before the `-e`/`-p` widening. What it pins is
@@ -928,7 +955,9 @@ reset_case
 if command -v timeout >/dev/null 2>&1; then
   timeout 20 "$HELPER" --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/report-fifo" >/dev/null 2>&1
   assert_eq "$?" "0" "case 17f: a FIFO report does not hang the alert (a hang returns 124 here)"
-  assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "was not readable" "case 17f: and a FIFO is refused as not readable, which is true of it"
+  assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "was NOT READ" "case 17f: and a FIFO is described as NOT READ — it IS readable, reading it is what would block (review round 7)"
+  assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "was not readable" "case 17f: and NOT as 'not readable', which is false of a pipe a reader can drain"
+  assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "is a named pipe" "case 17f: and it names the real property — a pipe, which could block"
 else
   ok "case 17f: SKIPPED on this host — no \`timeout\` binary (macOS); the FIFO guard is pinned by CI (ubuntu-latest)"
 fi

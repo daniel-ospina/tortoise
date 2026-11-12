@@ -418,7 +418,7 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           # 49cf519354, and case 17h pins it. (An earlier draft of this comment said a merge
           # dropped main's `|| true` — false, and the same class this change removes: a
           # sentence stating a mechanism the artifact does not show.)
-          excerpt="$(printf '%s' "$raw_tail" | LC_ALL=C tr -d '\200-\377' || true)"
+          excerpt="$(printf '%s' "$raw_tail" | LC_ALL=C tr -d '\200-\377' 2>/dev/null || true)"
           # ⛔ The fallback has a SECOND empty state, and the sentence below is a claim
           # about an artifact: a report whose excerpt-able text is entirely non-ASCII
           # (e.g. `→→→`) squeezes to NOTHING, so the fenced block further down is skipped
@@ -480,7 +480,16 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           fi
         fi
       else
-        echo "⚠️ **The gate's report file was not readable** (\`${DRIFT_REPORT_FILE:-<unset>}\`)."
+        # ⛔ NAME THE PROPERTY THAT WAS MEASURED, NOT ONE THAT WAS NOT (review round 7, P3).
+        # This arm is reached for an unset/missing path AND for a named pipe. A FIFO IS
+        # readable — a reader gets its bytes — so "was not readable" is false there; what is
+        # true is that reading it can BLOCK (open(2) waits for a writer), which is exactly why
+        # the guard refuses it. The state is split so each body says what is true of it.
+        if [ -p "${DRIFT_REPORT_FILE:-}" ]; then
+          echo "⚠️ **The gate's report file was NOT READ** (\`${DRIFT_REPORT_FILE}\` is a named pipe, and reading it could block this alert indefinitely)."
+        else
+          echo "⚠️ **The gate's report file was not readable** (\`${DRIFT_REPORT_FILE:-<unset>}\`)."
+        fi
         echo "The blocking versions and the remediation are in the run's \`Check migration drift"
         echo "(fail-closed)\` step log — this alert deliberately does NOT re-run the gate, because a"
         echo "second reading of prod can name a different blocking set than the run that failed."
