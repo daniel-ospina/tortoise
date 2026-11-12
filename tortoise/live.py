@@ -32,6 +32,8 @@ is the factor-extraction family that must agree on ``include_draft``, so
 
 from __future__ import annotations
 
+import json
+
 # ══════════════════════════════════════════════════════════════════════════
 # #2901 — THE canonical Point-status partition. ONE declaration, imported by
 # every reader that must skip non-current Points.
@@ -562,6 +564,102 @@ _EVENT_TERMINAL_STATE_REFUSAL = (
 )
 
 
+def _status_is_discarded_by_every_writer(value: object) -> bool:
+    """True only when every writer DISCARDS ``value`` on its way to the node.
+
+    The question :func:`refuse_terminal_event_state` asks before typing a
+    non-string ``status``: a value no writer keeps leaves the node with no
+    ``status``, so it cannot be a terminal half-state and refusing it would be
+    #7925 round 4's over-rejection class. ⛔ But THREE paths can carry a
+    ``status`` to the store and each has its OWN predicate, so asking one of
+    them is not enough — measured at review cycle 3, after the first revision
+    asked only the fold's:
+
+      * ``_is_persistable_prop_value`` is the **FOLD's** filter. It refuses
+        ``np.int64``/``Decimal``/``np.bool_`` LEAVES that the engine really
+        DOES store, so scoping on it alone let ``update_entity(status=np.int64(7))``
+        write ``7`` onto the node (HEAD refused it).
+      * ``projection._value_ok`` is the **LIVE WRITE transport's** predicate —
+        what the ``#7369`` gate nulls on. A value it accepts is stored.
+      * the **JOURNAL encoder** is a third rule: ``bytes``/``set``/
+        ``bytearray`` are not JSON-serialisable, so accepting one did not reach
+        the fold at all — it raised a bare ``TypeError`` in the record append at
+        ``add_event``/``_emit``, and at ``emit_belief`` it raised inside the
+        best-effort ``except`` arm, which DROPPED the record silently.
+
+    So a value is safe to accept only if the FOLD drops it, the TRANSPORT does
+    not store it, and the JOURNAL CAN encode it — the third clause is a
+    requirement to PASS, not to fail (an un-encodable value is refused rather
+    than left to crash the append).
+
+    Imported at CALL time so this leaf module keeps importing nothing from the
+    projection at import time (the construction ``sdk._status_is_stored_unhashable``
+    also uses).
+    """
+    from .projection import _value_ok
+    from .projection.entities import _is_persistable_prop_value
+
+    if _is_persistable_prop_value(value) or _value_ok(value):
+        return False
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _event_state_key(key):
+    """The caller's key as a plain ``str``, insensitive to an overriding subclass.
+
+    ``str.__str__`` returns a plain ``str`` and does not consult ``__str__``,
+    ``__hash__`` or ``__eq__`` on a subclass, which is the whole point: both the
+    KEY and the VALUE of an ``:Event``'s state may be a ``str`` subclass.
+    """
+    return str.__str__(key) if isinstance(key, str) else key
+
+
+def declares_status_key(props) -> bool:
+    """True when ``props`` declares ``status`` under ANY ``str`` key naming it.
+
+    The presence TEST must be as shape-independent as the refusal it guards:
+    ``"status" in props`` hashes the literal name, so a ``str`` SUBCLASS key that
+    overrides ``__hash__`` is missed and ``sdk.update_entity`` then skips the
+    guard entirely (measured at review cycle 4 — the VALUE axis was closed and
+    the KEY axis was not).
+    """
+    return any(_event_state_key(key) == "status" for key in props)
+
+
+def _event_state_keys(props) -> tuple[object, object]:
+    """``(status, outdated)`` for a caller's property map, INSENSITIVE to a lying
+    ``str`` KEY.
+
+    ⛔ ``props.get("status")`` is not a boundary. A ``str`` SUBCLASS key that
+    overrides ``__hash__`` (or ``__eq__``) is invisible to the dict lookup for the
+    literal name, while ``_persist_extra_props`` writes it anyway — it iterates
+    ``items()`` and the driver renders the key with ``str()``. Measured at review
+    cycle 4: ``{class K(str): __hash__ = lambda s: 0; "status": "superseded"}``
+    reached ``add_event``/``update_entity``/``create_entity('event')`` unrefused and
+    STORED ``superseded``, i.e. the guard's promise — an answer independent of the
+    kwargs SHAPE (``api._emit`` says the same) — failed on the KEY axis while the
+    value axis was already closed.
+
+    So the key is normalised the same way the value is (``str.__str__`` returns a
+    plain ``str`` without consulting the subclass) and compared by EQUALITY,
+    never by hashing the caller's object. A non-``str`` key cannot name these
+    properties and is skipped. Cost on the normal path is a shallow scan of the
+    caller's map — the same order as the loop the writer runs anyway.
+    """
+    status = outdated = None
+    for key, value in props.items():
+        key = _event_state_key(key)
+        if key == "status":
+            status = value
+        elif key == "outdated":
+            outdated = value
+    return status, outdated
+
+
 def refuse_terminal_event_state(props, *, door: str) -> None:
     """Refuse the TERMINAL half of the status vocabulary on an `:Event`.
 
@@ -611,6 +709,25 @@ def refuse_terminal_event_state(props, *, door: str) -> None:
     was measurably false once this door existed, so the value is refused rather
     than half-read (review cycle 1, P1).
 
+    ⛔ The STATUS half is typed by what the writers can KEEP, not by "is a
+    string": a value no writer keeps can never land on the node, so it cannot
+    make an ``:Event`` terminal — refusing it would reject a bundle the writer
+    accepts, the over-rejection class #7925 review round 4 already fixed once
+    (re-pinned by ``tests/test_ingest_event_endpoint.py::``
+    ``test_direct_route_object_and_event_status_values_not_over_rejected``,
+    #9974 R1: dropped now means ABSENT, not a fabricated 'live').
+    ``_status_is_discarded_by_every_writer`` asks that question of ALL THREE
+    write paths (fold allowlist, transport ``_value_ok``, journal JSON encoder),
+    so a list (persistable, unhashable), an int, an ``np.int64`` and a ``bytes``
+    are all still refused while a plain ``dict`` rides the drop. What such a
+    value DOES depends on the door and both outcomes are legal: the FOLD skips
+    the key (``_persist_extra_props``), so an existing status survives
+    untouched, while the LIVE write door hands it to the ``#7369`` transport
+    gate, which nulls it — and ``SET n += {status: null}`` REMOVES the property,
+    i.e. it CLEARS, an outcome this function already permits by design
+    (``status=None`` clears). Neither can PRODUCE a terminal state, which is the
+    only thing this gate is about.
+
     ``props`` is the caller's property map. The SDK doors flatten it first
     (``_coerce_props``), so a nested ``props={"status": …}`` reaches here as a
     top-level key. At ``add_event`` the flatten never runs and a nested map is
@@ -625,8 +742,7 @@ def refuse_terminal_event_state(props, *, door: str) -> None:
     ``door`` names the surface in the refusal, per `docs/ax/ax-principles.md`
     (#10183): refused, exactly what failed, exactly what to do.
     """
-    status = props.get("status")
-    outdated = props.get("outdated")
+    status, outdated = _event_state_keys(props)
     # Both keys are typed here, because this is the ONE `:Event` writer with no
     # ``_sanitize_props`` intake to do it. A non-STRING status is not merely
     # undeclared: an unhashable one (a list, a dict) reached the membership test
@@ -634,14 +750,38 @@ def refuse_terminal_event_state(props, *, door: str) -> None:
     # no door name and no remedy, measured at this door (review cycle 2, P2) —
     # while a hashable non-string (an int) glided through and stored a status no
     # vocabulary can name. Refused symmetrically with ``outdated`` below.
+    #
+    # ⛔ BUT ONLY WHEN **EVERY** WRITER DISCARDS IT — the over-rejection this
+    # scope fixes is a recorded contract, not a preference. A value no writer
+    # keeps can never make an Event terminal, and refusing it only rejects a
+    # bundle the writer accepts. That is #7925 review round 4's over-rejection
+    # class — the reason the array refusal is scoped by
+    # ``sdk._status_is_stored_unhashable`` rather than by "not a string" — and
+    # pinning it as "not a string" here reddened
+    # ``tests/test_ingest_event_endpoint.py::``
+    # ``test_direct_route_object_and_event_status_values_not_over_rejected``.
+    #
+    # ⛔ "Discarded" is a THREE-predicate question, not one
+    # (``_status_is_discarded_by_every_writer``): the fold's allowlist, the live
+    # write transport's ``_value_ok``, and the journal's JSON encoder each keep
+    # or reject a different set, and asking only the fold's — as the first
+    # revision of this scope did — let an ``np.int64`` be STORED and a ``bytes``
+    # turn a named refusal into a bare ``TypeError`` (review cycle 3, P2).
     if status is not None and not isinstance(status, str):
-        raise ValueError(
-            f"Refused: `status={status!r}` is not a legal value on an :Event "
-            f"({door}). `status` is a STRING drawn from the vocabulary, or "
-            f"`None` to clear it. WHAT TO DO: pass a string (to record a "
-            f"correction, write a NEW :Event; for ingest state use "
-            f"`eventStatus`)."
-        )
+        if not _status_is_discarded_by_every_writer(status):
+            raise ValueError(
+                f"Refused: `status={status!r}` is not a legal value on an :Event "
+                f"({door}). `status` is a STRING drawn from the vocabulary, or "
+                f"`None` to clear it. WHAT TO DO: pass a string (to record a "
+                f"correction, write a NEW :Event; for ingest state use "
+                f"`eventStatus`)."
+            )
+        # Every writer discards it, so evaluate it the way every reader will see
+        # the node. Otherwise the terminal test below asks a frozenset whether it
+        # holds a dict and raises a bare ``TypeError`` — the un-named 500-class
+        # the typing above exists to prevent, reintroduced on the one value it
+        # must NOT refuse.
+        status = None
     if outdated is not None and not isinstance(outdated, bool):
         raise ValueError(
             f"Refused: `outdated={outdated!r}` is not a legal value on an "
@@ -652,6 +792,17 @@ def refuse_terminal_event_state(props, *, door: str) -> None:
             f"writes props without `_sanitize_props`. WHAT TO DO: pass `True`, "
             f"`False`, or omit the key."
         )
+    # ⛔ A ``str`` SUBCLASS can LIE about all three methods the terminal test
+    # uses, and it reaches here as a perfectly legal ``isinstance(status, str)``:
+    # ``__hash__ = None`` raises inside the frozenset membership, a constant
+    # ``__hash__`` lands in the wrong bucket so a terminal word tests False, and
+    # ``__eq__`` can answer False outright. Measured at review cycle 3 — the
+    # value was then STORED as ``'superseded'``, i.e. the guard became a bypass
+    # instead of a refusal. ``str.__str__`` returns a plain ``str`` and does not
+    # consult any of the subclass's overrides, so the test runs on the value the
+    # store would actually hold.
+    if isinstance(status, str):
+        status = str.__str__(status)
     if not is_terminal_status(status, outdated):
         return
     # Terminal — name the key that made it so. `is_terminal_status` is

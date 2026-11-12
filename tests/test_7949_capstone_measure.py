@@ -5134,8 +5134,17 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # anchor text also sits under `core:` and its mirror, so without it a
         # re-derivation onto either stays green while the document's `carve_out:`
         # claim goes false (measured: 5854 and 8173 both drove this row GREEN).
+        # Re-derived 9714 -> 9842 (review cycle 3, P3 — the first revision of this
+        # comment mis-attributed the move). MEASURED: the pin was ALREADY stale at
+        # the merge base `8126970432c9`, where the entry sat at 9810, not 9714 —
+        # that pre-existing drift is why this row was red on main. #11825 adds 32
+        # lines ABOVE it (the new surface row), moving 9810 -> 9842; the `durations`
+        # row it also adds sits at 10118, BELOW the cite, so it moves nothing. The
+        # document's cite is bumped with the pin, so the row and the doc agree on
+        # the live line and the claim the row makes (the entry is inside
+        # `carve_out:`) is true again.
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            ("9714", "- test_pack_logic_writeprobe_11083.py"),
+            ("9842", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (

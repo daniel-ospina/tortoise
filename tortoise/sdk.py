@@ -127,8 +127,7 @@ from .live import is_terminal_status  # #2498 shared terminal predicate (Python 
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
-from .live import status_as_reported  # #9974 R1 absent-status rendering (shared with live.py)
-from .live import refuse_terminal_event_state  # #11825 an :Event carries no lifecycle state
+from .live import status_as_reported, refuse_terminal_event_state  # #9974 R1 + #11825
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -44902,7 +44901,16 @@ class TortoiseSDK:
         # cannot be in ``props`` by now — the shared helper tests it for the
         # doors that never pass through `_sanitize_props` (`EventAPI.add_event`,
         # and `create_entity`, whose Event branch runs before `_create_entity`).
-        if ("status" in props
+        #
+        # ⛔ The presence TEST is the helper's, not `"status" in props`: a dict
+        # lookup hashes the literal name, so a ``str`` SUBCLASS key that overrides
+        # ``__hash__`` missed it and this guard was SKIPPED for the whole write
+        # (measured at review cycle 4, after the value axis was already closed).
+        # Imported here rather than at module scope because a new import line
+        # shifts every ``sdk.py`` line the capstone documentation cites.
+        from .live import declares_status_key
+
+        if (declares_status_key(props)
                 and self._label_reachable_by(proj.g, "Event", id_val)):
             refuse_terminal_event_state(props, door="update_entity")
 

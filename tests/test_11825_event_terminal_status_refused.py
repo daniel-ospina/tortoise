@@ -345,13 +345,198 @@ class TestTheEventApiDoor:
                           event={"id": "ev-api-nested-flag", "outdated": True})
         assert _journal_lines(sdk._test_log) == []
 
-    @pytest.mark.parametrize("value", [123, ["a"], {"a": 1}])
-    def test_a_non_string_status_is_a_named_refusal_not_a_type_error(self, sdk, value):
+    @pytest.mark.parametrize("value", [123, ["a"]])
+    def test_a_stored_non_string_status_is_a_named_refusal(self, sdk, value):
         """Review cycle 2, P2 — an unhashable status raised a bare `TypeError`
-        (no door name, no remedy) and a hashable one stored an unnameable value."""
+        (no door name, no remedy) and a hashable one stored an unnameable value.
+
+        Both are PERSISTABLE, so both would land on the node — the test is
+        scoped to those, see the drop pin below.
+        """
         api = self._api(sdk)
         with pytest.raises(ValueError, match="not a legal value on an :Event"):
             api.add_event("ev-api-typed", "deployment", status=value)
+        assert _journal_lines(sdk._test_log) == []
+
+    @pytest.mark.parametrize("value", [b"x", {1, 2}, bytearray(b"x")])
+    def test_a_value_the_journal_cannot_encode_is_refused_not_left_to_crash(self, sdk, value):
+        """Review cycle 3, P2 — THREE writers, not one.
+
+        The first revision of the scope asked only the FOLD's allowlist, so these
+        were accepted: they are not persistable, but the JSON journal encoder
+        raises on them — a bare `TypeError` at `add_event`/`_emit`, and at
+        `emit_belief` a raise inside the best-effort `except` arm that DROPS the
+        record silently. Refused by name, and nothing is journalled (proved by
+        the fact that this door journals the whole bundle, so a swallowed write
+        would have appended a record).
+        """
+        api = self._api(sdk)
+        with pytest.raises(ValueError, match="not a legal value on an :Event"):
+            api.add_event("ev-api-unencodable", "deployment", status=value)
+        assert _journal_lines(sdk._test_log) == []
+
+    @pytest.mark.parametrize("factory", ["np.int64", "np.bool_", "Decimal"])
+    def test_a_value_the_transport_stores_is_refused_even_if_the_fold_would_drop_it(self, sdk, factory):
+        """Review cycle 3, P2 — the fold's allowlist is NOT the writer's test.
+
+        ``_is_persistable_prop_value`` refuses these LEAVES while the engine
+        really does STORE them (``projection._value_ok``, the predicate the
+        ``#7369`` gate nulls on), so scoping on the fold alone let
+        ``update_entity(status=np.int64(7))`` write ``7`` onto the node — a
+        status no vocabulary can name, which is exactly what the type refusal is
+        for. Refused now, and the stored status is untouched.
+        """
+        np = pytest.importorskip("numpy")
+        from decimal import Decimal
+
+        value = {"np.int64": lambda: np.int64(7),
+                 "np.bool_": lambda: np.bool_(True),
+                 "Decimal": lambda: Decimal("0.25")}[factory]()
+        eid = _event(sdk, name=f"Transport-{factory}")
+        sdk.update_entity(eid, status="draft")
+        with pytest.raises(ValueError, match="not a legal value on an :Event"):
+            sdk.update_entity(eid, status=value)
+        assert _props(sdk, eid)["status"] == "draft"
+
+    def test_a_non_persistable_status_rides_the_writers_drop(self, sdk):
+        """The other side of the same boundary — a value that cannot be STORED
+        cannot be a STATE.
+
+        ``{"a": 1}`` is not persistable, so ``_persist_extra_props`` SKIPS the
+        key: a new node is born with no ``status`` and can never be terminal.
+        Refusing it would reject a bundle the writer accepts — the
+        over-rejection class #7925 review round 4 fixed once, re-pinned here by
+        ``tests/test_ingest_event_endpoint.py::``
+        ``test_direct_route_object_and_event_status_values_not_over_rejected``
+        (#9974 R1: dropped means ABSENT, not a fabricated 'live'). The type
+        refusal is therefore scoped by what the writer STORES, not by "is a
+        string". What the two doors then DO with such a value differs, and that
+        is pinned next.
+        """
+        api = self._api(sdk)
+        api.add_event("ev-api-dropped", "deployment", status={"a": 1})
+        stored = _props(sdk, "ev-api-dropped")
+        assert "status" not in stored, stored
+
+    def test_the_two_doors_handle_a_dropped_status_differently_and_both_are_legal(self, sdk):
+        """Review cycle 3, P2 — "dropped" is FOLD behaviour, not a universal rule.
+
+        The fold skips a non-persistable property (``_persist_extra_props``), so
+        ``add_event`` leaves an EXISTING status untouched. The live write door
+        hands the same value to the ``#7369`` transport gate, which nulls it —
+        and ``SET n += {status: null}`` REMOVES the property, so
+        ``update_entity`` CLEARS it. Two different outcomes from one accepted
+        value; neither can PRODUCE a terminal state, which is the only property
+        this gate is about (and clearing is permitted by design: ``status=None``
+        clears). Pinned because the docstring's first revision claimed the fold's
+        outcome was universal, and nothing measured the other door.
+        """
+        api = self._api(sdk)
+        api.add_event("ev-drop-fold", "deployment", status="draft")
+        assert _props(sdk, "ev-drop-fold")["status"] == "draft"
+        api.add_event("ev-drop-fold", "deployment", status={"a": 1})
+        assert _props(sdk, "ev-drop-fold")["status"] == "draft"
+
+        eid = _event(sdk, name="DropLive")
+        sdk.update_entity(eid, status="draft")
+        assert _props(sdk, eid)["status"] == "draft"
+        sdk.update_entity(eid, status={"a": 1})
+        assert "status" not in _props(sdk, eid)
+
+    def test_an_unhashable_string_subclass_is_refused_by_name(self, sdk):
+        """Review cycle 3, P3 — a ``str`` SUBCLASS can be unhashable.
+
+        ``class S(str): __hash__ = None`` passes ``isinstance(status, str)``, so
+        the ``frozenset`` membership inside ``is_terminal_status`` raised a bare
+        ``TypeError`` at every door. Pre-existing — the original predicate had
+        the same hole — but it falsifies the claim that this gate never leaks an
+        un-named 500-class, so the value is now normalised with
+        ``str.__str__`` and a TERMINAL one is still refused, by name. A
+        ``TypeError`` escaping here fails this test rather than passing it.
+        """
+
+        class _UnhashableStr(str):
+            __hash__ = None
+
+        api = self._api(sdk)
+        with pytest.raises(ValueError, match="not writable on an :Event"):
+            api.add_event("ev-api-subclass", "deployment",
+                          status=_UnhashableStr("superseded"))
+        assert _journal_lines(sdk._test_log) == []
+
+    def test_a_str_subclass_KEY_cannot_smuggle_a_terminal_status(self, sdk):
+        """Review cycle 4, P2 — the KEY is caller input too, and ``props.get`` is
+        not a boundary.
+
+        ``props.get("status")`` hashes the literal name, so a ``str`` SUBCLASS key
+        that overrides ``__hash__`` (or ``__eq__``) is invisible to it while
+        ``_persist_extra_props`` writes it anyway (it iterates ``items()`` and the
+        driver renders the key with ``str()``) — MEASURED at review cycle 4:
+        ``add_event(**{K("status"): "superseded"})``, the same through
+        ``update_entity`` and ``create_entity('event')``, all ACCEPTED and STORED
+        as ``superseded``. The value axis was already closed; this pins the key
+        axis, so the guard's promise — an answer independent of the kwargs SHAPE —
+        holds on both.
+        """
+
+        class _ConstHashKey(str):
+            def __hash__(self):
+                return 0
+
+        class _LyingEqKey(str):
+            # ``__eq__`` alone would make the class UNHASHABLE (Python nulls
+            # ``__hash__``), and an unhashable key cannot be passed through ``**``
+            # at all — so the reachable shape keeps the base hash and lies only
+            # about equality. ``props.get("status")`` then finds the bucket and
+            # the stored KEY's ``__eq__`` answers False, which is the miss.
+            __hash__ = str.__hash__
+
+            def __eq__(self, other):
+                return False
+
+            __ne__ = __eq__
+
+        for key in (_ConstHashKey("status"), _LyingEqKey("status")):
+            api = self._api(sdk)
+            with pytest.raises(ValueError, match="not writable on an :Event"):
+                api.add_event("ev-api-keyed", "deployment", **{key: "superseded"})
+            assert _journal_lines(sdk._test_log) == []
+
+        eid = _event(sdk, name="KeyedUpdate")
+        sdk.update_entity(eid, status="draft")
+        with pytest.raises(ValueError, match="not writable on an :Event"):
+            sdk.update_entity(eid, **{_ConstHashKey("status"): "superseded"})
+        assert _props(sdk, eid)["status"] == "draft"
+
+    def test_a_str_subclass_that_lies_about_hash_and_eq_is_still_refused(self, sdk):
+        """Review cycle 3, P2 — the normalisation is the whole fix.
+
+        A subclass can defeat the terminal test three ways: a constant
+        ``__hash__`` lands in the wrong bucket so a terminal word tests False, an
+        ``__eq__`` that answers False is caught by the same membership call, and
+        ``__hash__ = None`` raises. With the first two MEASURED at review cycle 3
+        the value was not refused — it was STORED as ``'superseded'``, i.e. the
+        guard became the bypass instead of the refusal. ``str.__str__`` returns
+        a plain ``str`` without consulting any override, so the test runs on the
+        value the store would hold.
+        """
+
+        class _LyingStr(str):
+            def __hash__(self):
+                return 0
+
+            def __str__(self):
+                return "draft"
+
+            def __eq__(self, other):
+                return False
+
+            __ne__ = __eq__
+
+        api = self._api(sdk)
+        with pytest.raises(ValueError, match="not writable on an :Event"):
+            api.add_event("ev-api-lying", "deployment",
+                          status=_LyingStr("superseded"))
         assert _journal_lines(sdk._test_log) == []
 
 
