@@ -33697,10 +33697,12 @@ class TortoiseSDK:
           ranges cannot see (a wider denominator lowers the ratio and raises
           ``no_belief``, both in range — see the no-clamp note below), and it
           then still credited that number to ``_edged_claim_ids``' own
-          population, where the ratio is ``1/2 = 0.5`` on this fixture's 2-chain
-          (the suite helper baselines its last claim, so one of the two edged
-          claims carries a belief; ``0/2 = 0.0`` only for an UN-baselined chain
-          — #12138 §2) — in range either way. The two directions
+          population, where the ratio is ``0/2 = 0.0`` — in range. (That
+          measurement's 2-chain carries NO baseline, which is what leaves the
+          wider numerator at 10; baseline its head the way the suite helper
+          ``_chain`` does and the same arithmetic reads 11 over 2 — ``5.5`` /
+          ``-9.0`` — with ``1/2 = 0.5`` here instead. Both variants are in
+          range, which is the point; #12138 §2.) The two directions
           and the two populations are distinct; only the scope mix produces the
           5.0 / -8.0 pair.
         - ``belief_present`` — the SAME population, counted through the shared
