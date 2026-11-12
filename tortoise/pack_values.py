@@ -41,6 +41,17 @@ the seam this module ships; rendering it into the classification index text is
 explicitly NOT done (it would rotate the npz cache key — see
 ``value_extractor.compile_kind_index_spec``).
 
+**What #11915 changed about that sentence, precisely.** ``percent`` now HAS a
+storing shape — ``tortoise/percent.py`` (``basisPoints`` int 0–10000, plus
+``verbatim`` only where the value came from prose), validated at the SDK's one
+props intake and at the journal-payload seam, the same way ``money`` is. So a
+declared ``percent`` value field is no longer a field nothing can hold. What is
+still absent, and honestly so, is the step in between: the *declared field
+name* (``targetPct``) is a PROMPT-side semantic name, and binding a declaration
+name to the shape's canonical props is the ``POINT_PROPS`` register's job — as
+is the S5 derivation that would turn a sentence into a stored percentage. Both
+are named here rather than implied done.
+
 **Relationship to the WS-B design**
 (``docs/plans/2026-09-10-ws-b-pack-property-declaration.md``, D2). That design
 generalizes the per-kind declaration into a ``props`` register that also
