@@ -35,7 +35,12 @@ other CI-surface guards cover:
    "<major>" ]; then … fi` unit that announces and stops, in a step that can
    actually run and actually red the job (no `if:`, no `continue-on-error`) —
    and that is not sitting inside a block whose condition is a literal
-   constant, which is present and inert at the same time.
+   constant, which is present and inert at the same time. The "actually run
+   and actually red" half is asserted at BOTH scopes (a JOB-level
+   `continue-on-error: true` disarms every step, a JOB-level `if:` this guard
+   cannot read can skip the whole job), the branch must be INSIDE the loop that
+   covers the tools (a dedented `if … fi` asserts only the LAST tool), and its
+   status must be OBSERVABLE.
 5. **The pin runs BEFORE the leg**, because `$GITHUB_PATH` only affects
    subsequent steps: a pin placed after the pytest step is inert, and the job
    would red for a reason no diff explains.
@@ -115,6 +120,21 @@ not a tenth spelling — it is the one a text guard cannot reach:
   by an INVOKED script (`run: bash x.sh`), by a composite action this job calls,
   or by a reusable workflow this job calls — the invoked-script blind spot
   above, in one more mechanism.
+- **A loop whose list is a VARIABLE is refused, not resolved.** Any `$` in the
+  list (`for tool in $TOOLS`, `${TOOLS:-a b}`) names nothing this guard can
+  count, so the row reds with a message naming the accepted form (the literal
+  tool names). Reading the variable failed in the FAIL-OPEN direction every time
+  (#12069 reviews 14-16, each measured): the module's own tuple is not the
+  shell's value; the code's first assignment is not its last
+  (`TOOLS="a b"; TOOLS=a` iterates ONE tool); a conditional assignment may not
+  run; and a DEFAULT is a literal the guard would credit while the shell
+  iterates something else.
+- **A JOB-level `if:` is accepted only in enumerated shapes** — a non-skipping
+  condition, or `always() && needs.<id>.result == 'success'` with `<id>` in this
+  job's own `needs:`. Any other job-level condition is reported, because its
+  POLARITY is not readable from text: `needs.x.result == 'failure'` and
+  `needs.x.outputs.docs_only != 'true'` are false on the healthy path, so the
+  job would silently not run.
 - **A PATH entry's PRECEDENCE is read from the value, not from the shell.**
   `_keeps_the_pin_first` requires the pinned dir (or `$PATH`) to be the FIRST
   entry, so a prepend is an offender — but a value built at runtime
@@ -678,14 +698,179 @@ def _conditional_skip(step: dict) -> str | None:
     return None
 
 
+#: The ONE `needs.`-gated job-level `if:` whose polarity a text guard can read:
+#: `always() && needs.<id>.result == 'success'` runs the job exactly when the
+#: upstream SUCCEEDED, and a FAILED upstream reds the run — so the job can never
+#: be skipped silently on the healthy path. The inverted spellings
+#: (`== 'failure'`, `!= 'success'`) are FALSE on that path and are reported
+#: (#12069 review round 15, measured: both graded GREEN before).
+NEEDS_GATED_IF_RE = re.compile(
+    r"always\(\)\s*&&\s*needs\.(?P<job>[A-Za-z_][\w-]*)\.result\s*==\s*'success'"
+)
+
+
+def _job_scope_skip(job: dict) -> str | None:
+    """The JOB-level `if:` / `continue-on-error` that can hide the whole job.
+
+    ⛔ Every row read the STEP and nothing read the JOB (#12069 review round 14,
+    measured): a job-level `continue-on-error: true` disarms each step's `exit 1`,
+    and a job-level `if: github.event_name == 'push'` skips the whole job on a PR
+    while the RUN stays GREEN — the pin cannot red anything and the text is
+    untouched.
+
+    ⛔ A `needs.` mention is NOT a licence to skip (round 15, measured): accepting
+    any condition containing `needs.` also accepted
+    `needs.changes.result == 'failure'` and `!= 'success'`, which are FALSE on the
+    healthy path. A condition's POLARITY is not readable from text, so the
+    accepted forms are enumerated instead.
+    """
+
+    if job.get("continue-on-error"):
+        return f"continue-on-error: {job['continue-on-error']!r} (JOB level)"
+    condition = job.get("if")
+    if condition is None or condition is True:
+        return None
+    key = _normalise_if(condition)
+    if key in NON_SKIPPING_IF:
+        return None
+    raw_needs = job.get("needs")
+    if isinstance(raw_needs, str):
+        needs = {raw_needs}
+    elif isinstance(raw_needs, (list, tuple, set)):
+        needs = {str(entry) for entry in raw_needs}
+    else:
+        needs = set()
+    match = NEEDS_GATED_IF_RE.fullmatch(key)
+    if match and match.group("job") in needs:
+        return None
+    return f"if: {condition!r} (JOB level)"
+
+
+def _asserting_loop_line_spans(code: str) -> list[tuple[int, int]]:
+    """`(header line, `done` line)` for each loop that version-checks its variable.
+
+    ⛔ The fail-closed assertion has to sit INSIDE the loop that covers the tools
+    (#12069 review round 16, measured): dedenting the `if … fi` past `done` — a
+    plain refactor — leaves `$major` asserted for the LAST tool only while every
+    row stays GREEN. With a pg17 `pg_dump` and a pg16 `pg_restore` the pin then
+    exits 0 and the drill reds later with the misattributed
+    `transaction_timeout` error #12051 exists to remove.
+
+    Only loops that name MORE THAN ONE tool are returned: a single-tool loop
+    asserts that tool whether the branch is inside or after it.
+    """
+
+    lines = code.splitlines()
+    spans: list[tuple[int, int]] = []
+    index = 0
+    while index < len(lines):
+        inline = LOOP_HEAD_INLINE_RE.match(lines[index])
+        head = inline or LOOP_HEAD_OPEN_RE.match(lines[index])
+        if not head:
+            index += 1
+            continue
+        var = head.group("var")
+        if "$" in head.group("names"):
+            index += 1
+            continue
+        tools = {
+            name
+            for name in re.findall(r"[A-Za-z_][\w-]*", head.group("names"))
+            if name in TOOLS
+        }
+        do_line = index
+        if not inline:
+            for probe in range(index + 1, len(lines)):
+                if LOOP_DO_RE.match(lines[probe]):
+                    do_line = probe
+                    break
+                if lines[probe].strip() and not lines[probe].lstrip().startswith("#"):
+                    do_line = -1
+                    break
+        end = None
+        if (
+            do_line >= 0
+            and inline is not None
+            and re.search(r"(?:^|[;&])[ \t]*done\b", inline.group("rest") or "")
+        ):
+            end = index  # one-line loop: body and `done` share the header line
+        if end is None and do_line >= 0:
+            for probe in range(do_line + 1, len(lines)):
+                if LOOP_END_RE.match(lines[probe]):
+                    end = probe
+                    break
+        if end is None:
+            index += 1
+            continue
+        body = "\n".join(lines[do_line : end + 1])
+        if len(tools) > 1 and re.search(rf"\$\{{?{re.escape(var)}\b", body):
+            spans.append((index, end))
+        index = end + 1
+    return spans
+
+
+def _unasserted_client_checks(code: str) -> list[int]:
+    """The `--version` checks that NO armed branch follows before the next check.
+
+    ⛔ The inside-loop rule presupposes a LOOP (#12069 review round 18, measured):
+    the same row advertises "a `<tool> --version` line per tool" as accepted, so a
+    pin that UNROLLS the loop is correct and has no multi-tool span at all. The
+    per-tool shape is asserted THIS way instead: every check must be followed by
+    an armed branch before the next check, which keeps two-checks-one-branch RED.
+
+    ⛔ A PRINTED mention is not a check (round 19, measured): an announce naming
+    the command it ran is skipped by the same predicate `_version_checked_tools`
+    uses.
+    """
+
+    branch_lines = [
+        code.count("\n", 0, match.start())
+        for match in FAIL_CLOSED_BRANCH_RE.finditer(code)
+    ]
+    check_lines: list[int] = []
+    for match in re.finditer(r"--version\b", code):
+        line_start = code.rfind("\n", 0, match.start()) + 1
+        if _command_word(code[line_start : match.start()]) in PRINTING_COMMANDS:
+            continue
+        check_lines.append(code.count("\n", 0, match.start()))
+    if not check_lines:
+        return []
+    bounds = [*check_lines[1:], len(code.splitlines()) + 1]
+    return [
+        check_line
+        for check_line, next_check in zip(check_lines, bounds, strict=True)
+        if not any(check_line < branch_line < next_check for branch_line in branch_lines)
+    ]
+
+
 #: The two clients the record drill resolves from PATH (`record_backup.py`
 #: defaults each to its bare name).
 TOOLS = ("pg_dump", "pg_restore")
 
-LOOP_HEAD_RE = re.compile(
-    r"^[ \t]*for[ \t]+(?P<var>[A-Za-z_]\w*)[ \t]+in[ \t]+(?P<names>[^;]*);?[ \t]*do[ \t]*$"
+#: A loop header, in EVERY spelling a correct shell allows (#12069 review rounds
+#: 14-18, each measured): `do` on the header line, the POSIX two-line form
+#: (`for x in a b` then `do`), and the one-line form (`for x in a b; do cmd; done`
+#: — the body starts on the header line, so it is captured in `rest`). Requiring
+#: `do` at end-of-line red every other spelling with "the pin never
+#: VERSION-CHECKS", whose body did.
+LOOP_HEAD_INLINE_RE = re.compile(
+    r"^[ \t]*for[ \t]+(?P<var>[A-Za-z_]\w*)[ \t]+in[ \t]+(?P<names>[^;]*?)"
+    r"[ \t]*;?[ \t]*do\b(?P<rest>.*)$"
 )
+LOOP_HEAD_OPEN_RE = re.compile(
+    r"^[ \t]*for[ \t]+(?P<var>[A-Za-z_]\w*)[ \t]+in[ \t]+(?P<names>[^;]*?)"
+    r"[ \t]*;?[ \t]*$"
+)
+LOOP_DO_RE = re.compile(r"^[ \t]*do[ \t]*$")
 LOOP_END_RE = re.compile(r"^[ \t]*done\b")
+
+#: `${NAME}` -> `$NAME`. `COMMAND_WORD_RE` treats `{`/`}` as command SEPARATORS,
+#: so a braced variable's command word came out empty and the `f"${{{loop_var}}}"`
+#: acceptance in `scan()` was DEAD CODE — a correct pin writing
+#: `version="$("${tool}" --version)"` red as "never VERSION-CHECKS" (#12069 review
+#: round 17, measured). Normalising first keeps `{ … }` groups working, which
+#: dropping `{}` from the separator class would have broken.
+BRACED_VAR_RE = re.compile(r"\$\{([A-Za-z_]\w*)\}")
 
 #: Commands that PRINT their argument instead of running it. A client named after
 #: one of these is MENTIONED, not checked (#12051 review round 12): with the
@@ -774,6 +959,7 @@ def _version_checked_tools(code: str) -> set[str]:
     lines = code.splitlines()
 
     def scan(line: str, loop_var: str | None, loop_names: set[str]) -> None:
+        line = BRACED_VAR_RE.sub(r"$\1", line)
         for match in re.finditer(r"--version\b", line):
             word = _command_word(line[: match.start()])
             if not word or word in PRINTING_COMMANDS:
@@ -783,19 +969,54 @@ def _version_checked_tools(code: str) -> set[str]:
             elif word in TOOLS:
                 checked.add(word)
 
+    def loop_names(raw: str) -> set[str]:
+        """The tools a header names LITERALLY. Any `$` in the list names NOTHING.
+
+        ⛔ A variable list is REFUSED, not resolved (#12069 reviews 14-16, each
+        measured): expanding `$TOOLS` to this module's tuple graded
+        `TOOLS=pg_dump` + `for tool in $TOOLS` GREEN with `pg_restore` never
+        checked; reading the code's assignment is not enough (the shell uses the
+        LAST one); and a DEFAULT (`${TOOLS:-pg_dump pg_restore}`) is a literal
+        the guard would credit while the shell iterates something else.
+        """
+
+        if "$" in raw:
+            return set()
+        return {
+            name for name in re.findall(r"[A-Za-z_][\w-]*", raw) if name in TOOLS
+        }
+
     for index, line in enumerate(lines):
-        head = LOOP_HEAD_RE.match(line)
+        body_start = index + 1
+        head = LOOP_HEAD_INLINE_RE.match(line)
+        if not head:
+            head = LOOP_HEAD_OPEN_RE.match(line)
+            if head:
+                # POSIX two-line form: `do` must open the loop on the NEXT line
+                # that would run (blank and comment-only lines allowed).
+                for offset in range(index + 1, len(lines)):
+                    probe = lines[offset]
+                    if LOOP_DO_RE.match(probe):
+                        body_start = offset + 1
+                        break
+                    if probe.strip() and not probe.lstrip().startswith("#"):
+                        head = None
+                        break
+                else:
+                    head = None
         if not head:
             scan(line, None, set())
             continue
-        names = {
-            name
-            for name in re.findall(r"[A-Za-z_][\w-]*", head.group("names"))
-            if name in TOOLS
-        }
+        names = loop_names(head.group("names"))
         var = head.group("var")
         body: list[str] = []
-        for body_line in lines[index + 1 :]:
+        rest = head.groupdict().get("rest") or ""
+        if rest.strip():
+            # The one-line form: the body starts on the header line.
+            scan(rest, var, names)
+            if re.search(r"(?:^|[;&])[ \t]*done\b", rest):
+                continue  # closed on its own line: no body to follow
+        for body_line in lines[body_start:]:
             if LOOP_END_RE.match(body_line):
                 break
             body.append(body_line)
@@ -1430,8 +1651,62 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
             "11: `version=\"$(pg_dump --version)\"` under the unchanged header "
             "`for tool in pg_dump pg_restore; do` stayed GREEN with pg_restore "
             "never checked). Accepted forms: that loop with `\"$tool\" "
-            "--version` in its body, or a `<tool> --version` line per tool."
+            "--version` in its body (any of the three `for`/`do` spellings), or a "
+            "`<tool> --version` line per tool. A header whose LIST is a variable "
+            "(`for tool in $TOOLS`) is refused rather than resolved: the shell's "
+            "value is not readable from text, so write the names literally."
         )
+
+    # ⛔ The assertion must be evaluated for EVERY tool, not for whichever one ran
+    # last (#12069 review round 16, measured): a dedented `if … fi` asserts the
+    # LAST tool only, and a pg17 `pg_dump` beside a pg16 `pg_restore` then exits 0.
+    for branch_step in {index for index, _ in hits}:
+        code = _run_commands(steps[branch_step])
+        if len(_version_checked_tools(code)) < 2:
+            continue
+        spans = _asserting_loop_line_spans(code)
+        if spans:
+            for branch in FAIL_CLOSED_BRANCH_RE.finditer(code):
+                branch_line = code.count("\n", 0, branch.start())
+                assert any(start <= branch_line <= end for start, end in spans), (
+                    f"the armed branch at step {branch_step} is OUTSIDE the loop "
+                    "that version-checks the tools, so `$major` is asserted for "
+                    "the LAST tool only — a pg17 `pg_dump` beside a pg16 "
+                    "`pg_restore` then exits 0 and the drill reds later with an "
+                    "error that blames the diff. Put the `if … fi` INSIDE the "
+                    "`for … done` body (#12069 review round 16, measured GREEN "
+                    "on the dedented form)."
+                )
+        else:
+            unasserted = _unasserted_client_checks(code)
+            assert not unasserted, (
+                f"the client pin at step {branch_step} VERSION-CHECKS a tool and "
+                f"never asserts its major: line(s) {unasserted} have no armed "
+                "branch before the next check (two checks with one branch is the "
+                "fail-open this row exists to refuse). Accepted layouts: one "
+                "multi-tool `for … do` with the `if … fi` inside it, or ONE "
+                "armed branch per `--version` check (#12069 review round 18)."
+            )
+
+
+def test_the_job_itself_can_run_and_fail(job: dict) -> None:
+    """The pin's `exit 1` must be able to red the JOB, not only the step.
+
+    Item 4 asserts the PIN STEP is unconditional; that is not enough (#12069
+    review round 14, measured): a JOB-level `continue-on-error: true` disarms
+    every step's failure, and a JOB-level `if:` that this guard cannot read can
+    skip the whole job while the RUN stays green.
+    """
+
+    reason = _job_scope_skip(job)
+
+    assert reason is None, (
+        f"the JOB `{JOB}` sets {reason} — the client pin's `::error::` + `exit 1` "
+        "cannot red a job that is skipped or that tolerates failure, so every row "
+        "grades a pin that can never fire. A job-level `if:` is accepted only when "
+        "it gates on an upstream `needs.` RESULT (a failed upstream reds the RUN) "
+        "or is a non-skipping condition (#12069 review rounds 14-15, measured)."
+    )
 
 
 def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
@@ -1610,7 +1885,240 @@ VERSION_CHECK_POLARITY = [
         {"pg_dump", "pg_restore"},
         "#12069: a condition on ANOTHER variable does NOT narrow the coverage",
     ),
+    (
+        'for tool in pg_dump pg_restore\ndo\n  version="$("$tool" --version)"\ndone',
+        {"pg_dump", "pg_restore"},
+        "the POSIX two-line `for` / `do` form is the same loop (#12069 round 14)",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do version="$("$tool" --version)"; done',
+        {"pg_dump", "pg_restore"},
+        "the ONE-LINE form: the body starts on the header line",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n  version="$("${tool}" --version)"\ndone',
+        {"pg_dump", "pg_restore"},
+        "a BRACED loop variable is the same variable: `${tool}` == `$tool`",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n  version="$(echo "${tool} --version")"\ndone',
+        set(),
+        "bracing does not turn an `echo` into a check",
+    ),
+    (
+        '{ pg_dump --version; }',
+        {"pg_dump"},
+        "a `{ … }` group is not a braced variable",
+    ),
+    (
+        'for tool in $TOOLS; do\n  version="$("$tool" --version)"\ndone',
+        set(),
+        "a VARIABLE list names NOTHING (#12069 rounds 14-16, measured)",
+    ),
+    (
+        'TOOLS="pg_dump pg_restore"\nTOOLS="pg_dump"\n'
+        'for tool in $TOOLS; do\n  version="$("$tool" --version)"\ndone',
+        set(),
+        "a narrower reassignment makes the shell iterate ONE tool: any read is a guess",
+    ),
+    (
+        'for tool in ${TOOLS:-pg_dump pg_restore}; do\n  version="$("$tool" --version)"\ndone',
+        set(),
+        "a DEFAULT is a literal the guard must not credit",
+    ),
+    (
+        'for tool in $TOOLSET; do\n  version="$("$tool" --version)"\ndone',
+        set(),
+        "`$TOOLSET` is not `$TOOLS`: a shared prefix is a different variable",
+    ),
+    (
+        'for tool in pg_dump pg_restore\necho unrelated\ndo\n'
+        '  version="$("$tool" --version)"\ndone',
+        set(),
+        "a `do` on a LATER line is another construct's: this header opens no loop",
+    ),
 ]
+
+
+#: (job, can the JOB be skipped or disarmed, why) — the pin for `_job_scope_skip`.
+JOB_SCOPE_POLARITY = [
+    ({}, False, "an unconditional job"),
+    ({"if": "always()"}, False, "`always()` runs the job whenever the run does"),
+    ({"if": "success()"}, False, "the default condition"),
+    ({"if": "!cancelled()"}, False, "the accepted spelling"),
+    ({"if": True}, False, "a literal `true` is not a condition"),
+    (
+        {"needs": "changes", "if": "always() && needs.changes.result == 'success'"},
+        False,
+        "the REAL job: runs exactly when upstream SUCCEEDED, else the run is red",
+    ),
+    (
+        {"needs": ["changes"], "if": "${{ always() && needs.changes.result == 'success' }}"},
+        False,
+        "the same shape, wrapped, with a list `needs:`",
+    ),
+    (
+        {"needs": "changes", "if": "needs.changes.result == 'failure'"},
+        True,
+        "INVERTED polarity: FALSE on the healthy path, so the job never runs",
+    ),
+    (
+        {"needs": "changes", "if": "needs.changes.result != 'success'"},
+        True,
+        "the same inversion, spelled with `!=`",
+    ),
+    (
+        {"needs": "changes", "if": "false && needs.changes.result == 'success'"},
+        True,
+        "a dead chain to a `needs.` mention is still a dead chain",
+    ),
+    (
+        {"needs": "changes", "if": "always() && needs.setup.result == 'success'"},
+        True,
+        "`needs.setup` is not in this job's `needs:`, so it evaluates null",
+    ),
+    (
+        {"if": "${{ needs.changes.outputs.docs_only != 'true' }}"},
+        True,
+        "an OUTPUTS gate's polarity cannot be read from text",
+    ),
+    (
+        {"needs": "changes", "if": "github.event_name == 'push'"},
+        True,
+        "the job NEVER RUNS on a PR and the run is GREEN",
+    ),
+    ({"if": "cancelled()"}, True, "skipped exactly when it matters"),
+    ({"continue-on-error": True}, True, "JOB-level `continue-on-error` disarms every step"),
+    ({"continue-on-error": "${{ true }}"}, True, "the expression spelling disarms it too"),
+    ({"continue-on-error": False}, False, "explicitly armed"),
+]
+
+
+@pytest.mark.parametrize(
+    ("job", "hides", "why"),
+    JOB_SCOPE_POLARITY,
+    ids=[why.replace(" ", "-")[:32] for _, _, why in JOB_SCOPE_POLARITY],
+)
+def test_the_job_scope_is_read_in_both_directions(
+    job: dict, hides: bool, why: str
+) -> None:
+    """A job-level skip/disarm is read, and only where it can actually hide the pin."""
+
+    reason = _job_scope_skip(job)
+
+    assert (reason is not None) is hides, (
+        f"{why} (measured, #12069 round 15): {job!r} -> {reason!r}"
+    )
+
+
+#: (code, is the `if … fi` inside the loop that covers the tools, why) — the pin
+#: for `_asserting_loop_line_spans` (#12069 review round 16).
+PIN_ASSERTION_POLARITY = [
+    (
+        'for tool in pg_dump pg_restore; do\n  version="$("$tool" --version)"\n'
+        '  if [ "$major" != "16" ]; then\n    exit 1\n  fi\ndone',
+        True,
+        "the real shape: the branch is inside the loop body",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n  version="$("$tool" --version)"\ndone\n'
+        'if [ "$major" != "16" ]; then\n  exit 1\nfi',
+        False,
+        "DEDENTED past `done`: only the last tool's major is asserted",
+    ),
+    (
+        'for tool in pg_dump pg_restore\ndo\n  version="$("$tool" --version)"\n'
+        '  if [ "$major" != "16" ]; then\n    exit 1\n  fi\ndone',
+        True,
+        "the same, in the two-line `for` / `do` spelling",
+    ),
+    (
+        'for tool in pg_dump; do\n  version="$("$tool" --version)"\ndone\n'
+        'if [ "$major" != "16" ]; then\n  exit 1\nfi',
+        False,
+        "a SINGLE-tool loop yields no span: the row skips it, one tool is asserted",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("code", "inside", "why"),
+    PIN_ASSERTION_POLARITY,
+    ids=[why.replace(" ", "-")[:32] for _, _, why in PIN_ASSERTION_POLARITY],
+)
+def test_the_armed_branch_is_inside_the_covering_loop(
+    code: str, inside: bool, why: str
+) -> None:
+    """`$major` must be asserted for EVERY tool, which means inside the loop."""
+
+    branch = code.find('if [ "$major"')
+    branch_line = code.count("\n", 0, branch)
+    spans = _asserting_loop_line_spans(code)
+
+    assert any(start <= branch_line <= end for start, end in spans) is inside, (
+        f"{why} (measured, round 16): spans={spans}, branch at line {branch_line}"
+    )
+
+
+#: (code, does EVERY `--version` check get its own armed branch, why) — the
+#: PER-TOOL half of the armed-branch row (#12069 review rounds 18-19).
+PER_TOOL_ASSERTION_POLARITY = [
+    (
+        'version="$(pg_dump --version)"\nif [ "$major" != "16" ]; then\n  exit 1\nfi\n'
+        'version="$(pg_restore --version)"\nif [ "$major" != "16" ]; then\n  exit 1\nfi',
+        True,
+        "the unrolled layout: one check, one branch, per tool",
+    ),
+    (
+        'for tool in pg_dump; do\n  version="$("$tool" --version)"\n'
+        '  if [ "$major" != "16" ]; then\n    exit 1\n  fi\ndone\n'
+        'for tool in pg_restore; do\n  version="$("$tool" --version)"\n'
+        '  if [ "$major" != "16" ]; then\n    exit 1\n  fi\ndone',
+        True,
+        "one single-tool loop per tool, branch inside each",
+    ),
+    (
+        'version="$(pg_dump --version)"\nversion="$(pg_restore --version)"\n'
+        'if [ "$major" != "16" ]; then\n  exit 1\nfi',
+        False,
+        "two checks, ONE branch: pg_dump's major is never compared",
+    ),
+    (
+        'version="$(pg_dump --version)"\nversion="$(pg_restore --version)"\n'
+        'if [ "$major" != "16" ]; then\n  exit 1\nfi\n'
+        'if [ "$major" != "16" ]; then\n  exit 1\nfi',
+        False,
+        "both branches AFTER both checks: only the LAST client's major is asserted",
+    ),
+    (
+        'version="$(pg_dump --version)"',
+        False,
+        "a check with no branch at all",
+    ),
+    (
+        'version="$(pg_dump --version)"\nif [ "$major" != "16" ]; then\n'
+        '  echo "::error::pg_dump --version reports $version"\n  exit 1\nfi',
+        True,
+        "an ANNOUNCE that names `--version` is a mention, not a check",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("code", "asserted", "why"),
+    PER_TOOL_ASSERTION_POLARITY,
+    ids=[why.replace(" ", "-")[:32] for _, _, why in PER_TOOL_ASSERTION_POLARITY],
+)
+def test_every_client_check_gets_its_own_armed_branch(
+    code: str, asserted: bool, why: str
+) -> None:
+    """The per-tool layout must not red, and a shared branch must still red."""
+
+    unasserted = _unasserted_client_checks(code)
+
+    assert (not unasserted) is asserted, (
+        f"{why} (measured, round 19): unasserted check line(s) {unasserted}"
+    )
 
 
 #: (line, does it DROP the pinned dir, why) — the pin for
