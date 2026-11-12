@@ -609,6 +609,18 @@ assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "co
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "non-ASCII" "and DECLARES the non-ASCII loss, so a mangled report never reads as the gate's own text"
 assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "NOT byte-identical" "and it does NOT claim a squeeze it did not perform"
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "and the ASCII report is still carried, so the operator sees what is blocking"
+# ⛔ R4's CARRYING half (review round 2, P2). 17i pins the empty state hard; nothing pinned the
+# direction that matters just as much: in the state where the fallback DOES produce text, the body
+# must say it is pasted AND actually paste it — and must never also claim nothing was. Without these
+# three rows an edit that emits the empty-state sentence from the carrying arm passes every other
+# assertion in this file (183/183, measured), shipping "it is pasted with its non-ASCII bytes
+# dropped … NOTHING is pasted below" directly above a fenced report: the on-call reader concludes
+# the report is absent and leaves for the run, which is the exact consumer-side failure #12200 is
+# about, mirrored.
+FALLBACK_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)"
+assert_contains "$FALLBACK_BODY" "it is pasted with its non-ASCII bytes dropped" "and the CARRYING arm claims the paste it really performs"
+assert_not_contains "$FALLBACK_BODY" "NOTHING is pasted below" "and it never ALSO claims nothing was pasted — the two states' sentences are exclusive"
+assert_contains "$FALLBACK_BODY" '```' "and the excerpt is FENCED, so the claim is accompanied by the artifact it describes"
 # This arm is reached only when NO converter ran, so the split character is still in
 # the raw bytes: the fallback must drop it (not paste it), or the issue body is
 # undecodable. Pinned here as well as in case 17g, because a "fix" that swaps this
@@ -709,12 +721,22 @@ assert_not_contains "$BODY_17I" "it is pasted with its non-ASCII bytes dropped" 
 # different verb), and a verb-agnostic row pins the claim's distinctive clause (the loss
 # declaration), which no synonym for "is pasted" can avoid — the two nets catch different
 # regressions and BOTH are kept.
-# ⚠️ The subject list is why neither row false-reds on the CORRECT wording: the fixed
-# empty-state sentence says "NOTHING is pasted below", whose subject is `NOTHING` — never one
-# of the claim subjects here. A rewrite that makes the negation's subject a listed noun WOULD
-# false-red, and that is the correct trade: the state sentence is ours to word.
-assert_no_match "$BODY_17I" '(it|they|this|the excerpt|the report|the degraded report) (is|are|was|were|has been|have been) (pasted|reproduced|quoted|included|shown|carried|printed)' "case 17i: no phrasing of a PASTE/PRESENCE claim survives (#12200)"
-assert_not_contains "$BODY_17I" "with its non-ASCII bytes dropped" "case 17i: and no LOSS CLAUSE survives either — verb-agnostic, so a synonym for 'pasted' cannot carry it in"
+# ⚠️ BOTH nets match against a NEWLINE-FLATTENED body (review round 2, P3): this script writes each
+# sentence as ~90-char `echo` lines, and `assert_no_match` greps line by line — so a claim whose
+# subject and verb land on DIFFERENT lines (`echo "the report is"` / `echo "reproduced below."`)
+# escaped both nets while the rendered markdown joins them into the claim. Flattening makes the nets
+# match what the READER sees, not what the source happens to wrap on.
+# ⚠️ The subject list is why neither row false-reds on the CORRECT wording: the fixed empty-state
+# sentence says "NOTHING is pasted below", whose subject is `NOTHING` — never one of the claim
+# subjects above. A rewrite that gives the negation a listed subject WOULD false-red, and that is
+# the correct trade: the state sentence is ours to word.
+BODY_17I_FLAT="$(printf '%s' "$BODY_17I" | tr '\n' ' ')"
+# ⛔ Case-INSENSITIVE for the shape row, because a claim can start a sentence ("The report is
+# reproduced below.") — measured: the capitalised split-line variant walked past a lowercase-only
+# ERE. The correct wording is safe under lowercasing: its subject is `nothing`.
+BODY_17I_LC="$(printf '%s' "$BODY_17I_FLAT" | tr '[:upper:]' '[:lower:]')"
+assert_no_match "$BODY_17I_LC" '(it|they|this|the excerpt|the report|the degraded report) (is|are|was|were|has been|have been) +(pasted|reproduced|quoted|included|shown|carried|printed)' "case 17i: no phrasing of a PASTE/PRESENCE claim survives (#12200), across line breaks and case"
+assert_not_contains "$BODY_17I_FLAT" "with its non-ASCII bytes dropped" "case 17i: and no LOSS CLAUSE survives either — verb-agnostic, so a synonym for 'pasted' cannot carry it in"
 assert_no_match "$BODY_17I" 'follows verbatim' "case 17i: and the section intro claims no verbatim report either — the louder sibling of the same class"
 assert_not_contains "$BODY_17I" '```' "case 17i: and it pastes NO fenced block, in any form"
 if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then

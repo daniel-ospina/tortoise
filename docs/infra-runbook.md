@@ -3383,8 +3383,7 @@ excerpt the losses it makes (the 6000-byte cut; a multibyte character split by t
 dropped by the squeeze; the non-ASCII bytes dropped by the ASCII fallback when `iconv` is
 unavailable or refuses to emit). When neither path produces an excerpt — the report unreadable,
 empty, or nothing left by the squeeze and its fallback — the body says exactly that and sends
-the reader to the run link (for a report it could not even read, to the step log inside that
-run). It never claims an excerpt it is not showing, never guesses the cause when two states are
+the reader to the run link (or, when the read itself failed, to the step log inside that run). It never claims an excerpt it is not showing, never guesses the cause when two states are
 indistinguishable from there, and the section intro no longer promises a "verbatim" report it
 may not be carrying (#12200): on-call reads the body, so a false claim there costs the reader
 the trip they were trying to avoid.
