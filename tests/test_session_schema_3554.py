@@ -1231,14 +1231,25 @@ def _newest_block_body(changelog: str) -> str:
 
     ⛔ ITS EXTENT IS NOT `_block_bodies(changelog)[0]`'s, and the difference is
     not cosmetic: `_block_bodies` starts AT the header line, this starts at the
-    newline that ends it. Measured at `7e6baffc5d`: 11,269 chars against 11,375,
-    so **a citation written in the header line is invisible to this function**
-    and therefore to the pin that reads it (#12089 finding 3, found by a fresh
-    review at the merged head of #12004). The earlier docstring said "from its
-    header", which describes `_block_bodies`' extent, not this one's. Widening
-    the extent is deliberately NOT done here: it would loosen the citation pin
-    (more text seen means more citations accepted), so the residual is stated
-    instead.
+    newline that ends it. **A citation written in the header line is therefore
+    invisible to this function** and to the pin that reads it (#12089 finding 3,
+    found by a fresh review at the merged head of #12004). Measured: 11,269 /
+    11,375 chars at `7e6baffc5d`, and 11,444 / 11,550 at `4b1d6cd0d4` (#12109
+    edited the newest block's body in between, which moved BOTH figures by the
+    same 175).
+
+    ⛔ THE ABSOLUTE FIGURES MOVE WITH EVERY CHANGELOG EDIT, which is why each is
+    anchored to the head it was measured at rather than quoted as "now": a bare
+    count is the re-staling defect this module is cleaning up (#12087). What
+    does NOT move is the DIFFERENCE between the two extents — it is exactly the
+    header line's own length (106 chars at both heads), i.e. the declared
+    residual and nothing else — and that invariant is machine-checked by
+    `test_the_newest_block_body_drops_the_header_line_and_nothing_else`.
+
+    The earlier docstring said "from its header", which describes
+    `_block_bodies`' extent, not this one's. Widening the extent is deliberately
+    NOT done here: it would loosen the citation pin (more text seen means more
+    citations accepted), so the residual is stated AND pinned instead.
     """
     start = changelog.index("> **Changelog v3.")
     match = _BLOCK_VERSION_RE.match(changelog[start:changelog.index("\n", start)])
@@ -1312,6 +1323,37 @@ def test_block_bodies_degrades_to_empty_without_a_version_header() -> None:
     """
     assert _block_bodies("") == []
     assert _block_bodies("prose\nwith no version header\n") == []
+
+
+def test_the_newest_block_body_drops_the_header_line_and_nothing_else() -> None:
+    """`_newest_block_body` drops exactly the header LINE, and no other text.
+
+    Why this is asserted rather than described: the sibling docstring states a
+    RESIDUAL (a citation written inside the header line is invisible to the §4.3
+    citation pin) together with the deliberate decision NOT to widen the extent,
+    because widening it means more text seen and therefore more citations
+    accepted — a loosened gate (#12089). A decision recorded only in prose is
+    re-decided by the next lane that finds the asymmetry untidy, so the asymmetry
+    itself is pinned: the two extents share an END and differ by the header line.
+
+    ⛔ THE ABSOLUTE LENGTHS ARE DELIBERATELY NOT PINNED. `#12109` moved both by 175
+    chars with one changelog edit, and a figure quoted as "now" is the re-staling
+    defect this module is cleaning up (#12087): the DIFFERENCE is what carries
+    the claim, and it is invariant under any edit to a block's body.
+    """
+    changelog = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")
+    whole = _block_bodies(changelog)[0]
+    body = _newest_block_body(changelog)
+    header = whole.split("\n", 1)[0]
+    assert whole.endswith(body), (
+        "the two extents do not share an END, so the difference between them is "
+        "not the header: `_newest_block_body` must stop where its block stops")
+    assert len(whole) - len(body) == len(header), (
+        f"`_newest_block_body` drops {len(whole) - len(body)} chars from the "
+        f"newest block, but its header line is {len(header)}. A LARGER drop is a "
+        "narrowing (it would hide body citations from the §4.3 pin); a SMALLER "
+        "one is a widening (it would accept a citation written in the header "
+        "line, loosening the pin — #12089)")
 
 
 def test_a_4_3_bold_clause_change_must_be_quoted_verbatim_by_some_changelog_block() -> None:
@@ -1395,12 +1437,18 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
 
     The file's CRITICAL RULE names a PERSON, so the entry has to name where that
     person's answer lives. The sibling entries do it by comment id —
-    ``#11827 (comment 6805834755)``, ``#11083 (comment 6667121779)`` — and the
-    v3.34 entry did not: it asserted *"the owner answered `ok` to a three-item
-    amendment proposal"*. The answer existed in a decision lane's pane, not on
-    any surface the next lane could read (``DECISION RELAY``: recorded nowhere
-    the next lane reads is a default, not a decision). The relay comment that
-    finally recorded it (``6815950417``) is what this entry must cite.
+    ``#11827 (comment 6805834755)``, ``#11083 (comment 6667121779)`` — and v3.34
+    does it with the relay comment ``6815950417``. ⛔ NOT "v3.34 did not cite
+    one": the citation and the block were added by the SAME commit
+    (``c1df4c6914``, and the pre-squash commits pair them identically), so no
+    commit in this repo has ever carried a v3.34 block without it — a review
+    round measured that and this sentence is what it corrected. What the entry
+    ALSO records is the approval it was written from: *"the owner answered `ok`
+    to a three-item amendment proposal"*, an answer whose only home was a
+    decision lane's pane, on no surface the next lane could read (``DECISION
+    RELAY``: recorded nowhere the next lane reads is a default, not a decision).
+    That is why the relay comment (``6815950417``) is what the entry must cite,
+    and the shape — not this id — is what the pin enforces below.
 
     Pinned as a SHAPE, not as that id: a later entry cites its own relay, and a
     shape is what stays true.
