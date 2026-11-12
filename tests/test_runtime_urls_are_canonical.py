@@ -246,10 +246,12 @@ RETIRED_HOST_ALLOWLIST = {
         "to #12057, which lists this row."),
     "website/apps/dashboard/functions/blog/api/[[path]].ts": (
         1,
-        "#11767 item 4 — DEFAULT_BLOG_ORIGIN is still the retired host. ⛔ The "
-        "hop lands on premiselabs.co/blog (301, measured 2026-11-12) — the blog's "
-        "OWN canonical origin, NOT the premiselabs.co/tortoise product page an "
-        "earlier revision of this note named. Moving it changes what the blog API "
+        "#11767 item 4 — DEFAULT_BLOG_ORIGIN is still the retired host. ⛔ A bare "
+        "`/blog` on it 301s to premiselabs.co/blog (measured 2026-11-12) — the "
+        "blog's OWN canonical origin, NOT the premiselabs.co/tortoise product "
+        "page an earlier revision of this note named — but the URLs this "
+        "constant actually emits are `/blog/api/*`, which are NOT redirected at "
+        "all. Moving it changes what the blog API "
         "reads THROUGH, not just a link: the retired host's `/blog*` 301s with "
         "`/blog/api/*` deliberately excluded from the map, so a base flip that "
         "misses the exclusion turns a POST into a GET. The sweep is #12057's."),
@@ -287,8 +289,10 @@ RETIRED_HOST_ALLOWLIST = {
         "sweep (#12057). Measured 2026-11-12."),
     "website/apps/blog-admin/src/App.tsx": (
         1,
-        "#11767 item 4 — blog-admin UI origin; deferred with the blog sweep "
-        "(#12057). Measured 2026-11-12."),
+        "#11767 item 4 — the header's link to the PUBLIC BLOG at :53 (its visible "
+        "text at :58 is a bare host, which this counter does not see). ⛔ Not the "
+        "admin's own UI origin — the retired host is the blog the admin LINKS TO. "
+        "Deferred with the blog sweep (#12057). Measured 2026-11-12."),
     "website/apps/blog-admin/src/pages/PostEditor.tsx": (
         3,
         "#11767 item 4 — three PUBLIC-POST permalinks (`/blog/${slug}`, View and "
@@ -304,7 +308,13 @@ RETIRED_HOST_ALLOWLIST = {
         "the blog sweep (#12057). Measured 2026-11-12."),
     "website/apps/dashboard/src/harnesses.js": (
         1,
-        "DOCS_ORIGIN constant (301 -> premiselabs.co/tortoise/docs). Deferred to "
+        "⛔ NOT a 301 to `/docs`, and not `/docs` at all: `DOCS_ORIGIN` builds "
+        "`${DOCS_ORIGIN}/skills/<name>.skill` and nothing else (:80-81). "
+        "`_middleware.ts` has no `/skills` branch and `website/_redirects` has no "
+        "rule, so the retired host SERVES the archive (200, no `Location`) and so "
+        "does premiselabs.co (200, same bytes; both measured 2026-11-12) — "
+        "re-aiming this constant moves WHICH host answers an identical download, "
+        "it never saves a hop. Deferred to "
         "#12057 with the rest of the dashboard copy. ⚠️ This row counts the FULL "
         "origin (`RETIRED_ORIGIN` carries the scheme), so it sees only this "
         "constant. The markdown-ish `:277` step used to carry a bare-host copy of "
@@ -341,7 +351,7 @@ RETIRED_HOST_ALLOWLIST = {
 #:   website/functions/blog/_lib.ts                          0  navHtml repointed to the terminal forms (row removed)
 #:   website/apps/blog-admin/src/lib/blog-api.ts             1  DEFAULT_AUTHOR_IMAGE_URL avatar
 #:   website/apps/dashboard/functions/admin/[[path]].ts      1  the 403 page's ← Back to the blog link
-#:   website/apps/blog-admin/src/App.tsx                     1  blog-admin UI origin
+#:   website/apps/blog-admin/src/App.tsx                     1  header link to the PUBLIC BLOG
 #:   website/apps/blog-admin/src/pages/PostEditor.tsx        3  public-post permalinks (View / copy-link)
 #:   website/apps/blog-admin/src/pages/PostsList.tsx          1  "View public post" permalink
 #:   website/apps/dashboard/public/invite-accept.html        0  re-aimed by #12058 (row removed)
@@ -351,8 +361,20 @@ RETIRED_HOST_ALLOWLIST = {
 #:   website/apps/dashboard/src/harnesses.js                 1  DOCS_ORIGIN
 #:   website/apps/dashboard/src/overviewEmptyAction.js       1  ONBOARDING_FUNNEL_HREF (app origin)
 #:   website/apps/dashboard/src/billingCta.js                1  COMPARE_PLANS_URL
-#: None of the TEN deferrals is a broken link (every one still 301s onto the
-#: canonical host); they are a SCOPE deferral, and all ten files they name ARE
+#: None of the TEN deferrals is a broken link, and no row is a silent leftover —
+#: every literal is one of two things, and its reason says which:
+#:   (a) a 301 off the retired host onto a canonical origin — `premiselabs.co`, or
+#:       `app.premiselabs.co` for the one `/auth` literal (`_middleware.ts`
+#:       :403-406, which pins `/auth` BEFORE the product-host block) and
+#:       `ONBOARDING_FUNNEL_HREF`'s `/welcome` (`website/_redirects` :36 — the
+#:       middleware's `/welcome` entry sits in `APP_ONLY` INSIDE the company-host
+#:       block at :342/:350, so the retired host never reaches it);
+#:   (b) SERVED ON THE RETIRED HOST, no redirect at all — `harnesses.js`'s
+#:       `/skills/<name>.skill` download and `DEFAULT_BLOG_ORIGIN`'s `/blog/api/*`
+#:       calls, which `_middleware.ts` :331-335 EXCLUDES from the blog 301 because
+#:       a redirect would turn a POST into a GET. Re-aiming either changes WHICH
+#:       host answers; it saves no hop, so it is not the same sweep as (a).
+#: Either way they are a SCOPE deferral, and all ten files they name ARE
 #: in `RETIRED_HOST_ALLOWLIST` with the same kind of reason — recording a count is
 #: not blessing the literal, it is what makes the deferral visible and what forces
 #: a sweep to update the record in the same commit.
@@ -373,7 +395,7 @@ RETIRED_HOST_ALLOWLIST = {
 #:
 #: ⛔ An earlier revision of this paragraph said the OPPOSITE — that they were
 #: "deliberately NOT added", because blessing them "would turn a deferral into a
-#: decision" — while the map eleven lines up already carried them. Left standing,
+#: decision" — while the map above already carried them. Left standing,
 #: that is an instruction to delete the very entries that make this guard able to
 #: fail, leaving a red count check nobody can explain.
 #:
@@ -395,7 +417,12 @@ RUNTIME_FILES = (
     "supabase/config.toml",
     # #11767 items 4 and 5 — dashboard/blog surfaces whose retired-origin literals
     # are RECORDED above rather than re-aimed here. In the surface so the guard
-    # can fail on them; every entry carries a measured 301 and a deferral note.
+    # can fail on them; every DEFERRAL row carries its measured terminator (a 301
+    # hop, or a 200 served where there is no hop to save), named inline wherever it
+    # is anything but the default 301 onto premiselabs.co — the four non-website
+    # KEEP rows are CORS/Host allowlists, not links, so there is no terminator to
+    # record for them and nothing is deferred on them (see :46-50). Every DEFERRAL
+    # row carries its deferral note.
     "website/apps/dashboard/public/invite-accept.html",
     "website/apps/dashboard/public/welcome.html",
     "website/apps/dashboard/public/signup.html",
