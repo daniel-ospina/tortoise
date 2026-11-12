@@ -208,11 +208,23 @@ not be re-derived — and one CLOSED issue must not be read as fixed:**
   research is done and the *mechanism* is unbuilt. **Issue closure is not evidence of a fix.**
 - **`#2696`** is an epic with human gates, not a defect. Count it as scope, never as a bug.
 
-**⚠️ Two more CLOSED rows must not be read as fixed.** `#2782` (CLOSED `COMPLETED` 2026-11-11) and
-`#2787` (CLOSED `NOT_PLANNED` 2026-09-29) both sit in the buckets above, and both are **OPEN as
-defects** on the problem map — `#2782`'s representation half shipped while its cross-company
-identity half did not (pinned by `tests/test_money_value_2782.py`), and `#2787`'s kind-bucket rule
-is still unimplemented. Tracker closure is not the status question; this page buckets by the
+**⚠️ Two more CLOSED rows sit in the buckets above, and they resolved in OPPOSITE directions —
+which is why tracker state answers neither question on its own.**
+
+**`#2787`** (CLOSED `NOT_PLANNED` 2026-09-29) is still **OPEN as a defect** on the problem map: its
+kind-bucket rule is unimplemented. A closed issue that is not a fixed defect.
+
+**`#2782`** (CLOSED `COMPLETED` 2026-11-11) is **VERIFIED-FIXED** on the problem map, and this page
+said the opposite until it was re-measured against the merge base. The representation landed
+earlier — a flat, currency-safe money value on entities and on the Point lane — and the write
+boundary, which is what *"money has no representation"* was really about, shipped in `#11836`
+(merge `ccf5c4036c09`), pinned by `tests/test_money_value_2782.py::TestWriteBoundary`. Its
+cross-company **identity** clause was **moved onto `#2730`, not dropped**, so `#2782` is not one of
+the problem map's survivors and must not be counted as one. A closed issue that *is* a fixed
+defect — the mirror of `#2787`, and the reason a survivor count is only ever read from the problem
+map's own table.
+
+Tracker closure is not the status question; this page buckets by the
 tracker's own `stateReason` and says so, which is exactly why the bucket column must be read as a
 *closure* fact and never as a *fix* fact.
 
