@@ -518,9 +518,9 @@ budget to spend. Floor 30 nodes, so a three-node run cannot certify itself.
 **Mentions are out of scope, by decision, not by convenience (§10.1, #9736).** `#5199`'s owner-approved
 option A (2026-09-25) put the version anchor on the **derivation** link, and the writer's own constant
 names those classes: `_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})`
-(`tortoise/projection/edges.py:747`) — `:Object` links are identity/mention links and are pinned
+(`tortoise/projection/edges.py:843`) — `:Object` links are identity/mention links and are pinned
 property-free by `tests/test_source_version_references_5199.py::test_identity_link_stays_property_free`
-(`tortoise/projection/edges.py:721-723`, `docs/architecture/STORAGE-ARCHITECTURE.md:763`). Counting `:Object` mentions in
+(`tortoise/projection/edges.py:817-819`, `docs/architecture/STORAGE-ARCHITECTURE.md:763`). Counting `:Object` mentions in
 E3's denominator therefore made `= 1.000` **unreachable as registered**: every mention link is
 unanchored by rule, so a run would have reported the decision as a defect. `:Point` carries the anchor
 on the node itself (`#5038`), which is why the derivation set is those two link labels **plus**
@@ -609,8 +609,8 @@ one (`#7949` §2 R7).
   hierarchy seam writes the entry's `type` (`tortoise/pack_hierarchy.py:215-224`: *"the edge this
   function would write carries `decomposesInto`, which `create_edge` refuses"*) and every writer folds
   `composedOf`/`decomposesInto`/`contains`/`wraps` onto `hasPart`
-  (`tortoise/projection/edges.py:1513`). `hasPart` is in `create_edge`'s own predicate set;
-  `decomposesInto` is not (`edges.py:621-632`). So the row pins the ONE written family and names the
+  (`tortoise/projection/edges.py:1619-1620`). `hasPart` is in `create_edge`'s own predicate set;
+  `decomposesInto` is not (`edges.py:717-726`). So the row pins the ONE written family and names the
   declared spellings that fold onto it (`a1_relation_family_fold`) — a pin on the declared spelling
   would name a label that occurs zero times on every graph this repository can write, i.e. an
   unsatisfiable bar. ⚠️ **What the family half does NOT prove:** `hasPart` is also in the generic
@@ -1071,7 +1071,7 @@ steps:
     - step: S2.3
       condition: >-
         the S2 map left at least one candidate's kind missing or `unclassified`, so
-        `_collect_classify_items` (tortoise/extractor_v2.py:11857, `def _collect_classify_items`) had an item to hand the classifier;
+        `_collect_classify_items` (tortoise/extractor_v2.py:11866, `def _collect_classify_items`) had an item to hand the classifier;
         when the map types every candidate the pass has no work and neither classify pass runs
       idle_evidence: >-
         the run's own classify surface reads enabled=true with empty s2/union, the receipt's
@@ -1123,7 +1123,7 @@ a1_relation_family_fold:
   # ⛔ WRITTEN label -> the pack-declared predicates that fold onto it. Both of the dev pack's
   # hierarchy entries (Theme -> Epic, Epic -> Issue) are written `hasPart`; `decomposesInto`,
   # `composedOf`, `contains` and `wraps` are DECLARED spellings the writers fold onto that one
-  # label (projection/edges.py:1513, pack_hierarchy.py:215-224). Pinning a declared spelling names
+  # label (projection/edges.py:1619-1620, pack_hierarchy.py:215-224). Pinning a declared spelling names
   # a label that occurs zero times on any graph this repository writes (#10982 review round 2).
   hasPart: [hasPart, decomposesInto, composedOf, contains, wraps]
 pre_existing_unscored_logs:
@@ -1200,7 +1200,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11857-11879` (`_collect_classify_items`, the collector's item set), `:14276` and `:14429` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11866-11888` (`_collect_classify_items`, the collector's item set), `:14285` and `:14438` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
@@ -1276,7 +1276,7 @@ under either class set).
 version anchor sits on the **derivation link**, and `:Object` reaches its source through an
 identity/mention link that carries **no** `sourceVersion` **by design**. Pinned in the tree, not in
 prose: `_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})`
-(`tortoise/projection/edges.py:747`), `edges.py:721-723`'s statement of the rule, and
+(`tortoise/projection/edges.py:843`), `edges.py:817-819`'s statement of the rule, and
 `tests/test_source_version_references_5199.py::test_identity_link_stays_property_free`.
 
 **Why the old denominator was a defect and not a bar.** Counted over `Point` + `Object` + `Event`, E3's
@@ -1688,11 +1688,11 @@ exists". A2 is the one genuine absence: no S3 RESOLVE attach/mint census has eve
 `a1_relation_families: [decomposesInto, hasPart]` — the pack's two **declared hierarchy predicates**.
 `decomposesInto` is never a relationship **label**: both hierarchy entries are written `type: hasPart`,
 and the OPERATOR writers fold `composedOf`/`decomposesInto`/`contains`/`wraps` onto that same label
-(`tortoise/projection/edges.py:1513`, `tortoise/record_projection.py:4771-4779`) while the hierarchy seam writes the
+(`tortoise/projection/edges.py:1619-1620`, `tortoise/record_projection.py:4996-4997`) while the hierarchy seam writes the
 entry's `type` and REFUSES a `decomposesInto` entry
 (`tortoise/pack_hierarchy.py:215-224`: *"the edge this function would write carries `decomposesInto`,
 which `create_edge` refuses"*); `create_edge`'s own predicate set carries `hasPart` and not
-`decomposesInto` (`edges.py:621-632`). A pin on the declared
+`decomposesInto` (`edges.py:717-726`). A pin on the declared
 spelling therefore named a label that occurs zero times on every graph this repository can write, and
 the registered bar — *">= 1 edge for EACH of the two families"* — was **unsatisfiable**: `#10984` (C3)
 would have scored `A1` RED forever on a correct product. The pin is now the ONE written family
@@ -2163,9 +2163,9 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 ### 11.1 The finding, and what it is not
 
-`_collect_classify_items` (`tortoise/extractor_v2.py:11857-11879`) collects only candidates whose kind
+`_collect_classify_items` (`tortoise/extractor_v2.py:11866-11888`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:14276` (the S2 pass) and `:14429` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:14285` (the S2 pass) and `:14438` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -2209,7 +2209,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:14289`, `classify(S2) failed` / `:14440`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:14298`, `classify(S2) failed` / `:14449`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
@@ -2526,8 +2526,9 @@ to answer.
 
 > ⛔ **Superseded for the merged tree by §10.28** — but only for the cites that entry names.
 > This entry's `tortoise/projection/__init__.py:14248-14250` window is untouched by `#12067`
-> (that diff has no hunk in `projection/__init__.py`), so it is still the live value; §10.28
-> supersedes this entry only in the sense that it is now the newest entry.
+> (that diff has no hunk in `projection/__init__.py`), so it stayed the live value through
+> §10.28; §10.29 then measured it at `:14265-14267` for the merged tree this record ships
+> with, and §10.29 owns that window.
 >
 - **What redded.** `probes/capstone_measure.py:2989` carried
   `tortoise/projection/__init__.py:14245-14247` from §10.26, and `29ec0f3471` ("name :PackSelection at
@@ -2548,14 +2549,19 @@ to answer.
   are the ones this record froze. `document_sha256` is re-cut in this same commit, per §8's rule for
   *any* edit to this file, and the probe's cite and this document's cite are re-pointed TOGETHER so
   they cannot disagree about this anchor.
-- **This entry's window is still the live one** — §10.28 succeeds it as the newest entry, but
-  `#12067` has no hunk in `tortoise/projection/__init__.py`, so this entry's `:14248-14250`
-  remains the value in this tree. (§10.26's records the `:14245` window; `29ec0f3471` then
-  inserted a net `+3` above the anchor, making the live window `:14248-14250`, which is what
-  this entry measures.)
+- ⛔ **Superseded for THIS tree by §10.29.** This entry's window was the live one when it was
+  written, and `#12067` has no hunk in `tortoise/projection/__init__.py` — but a later merge on
+  the branch inserted above the anchor, so the window this tree carries is
+  `projection/__init__.py:14265-14267`, not `:14248-14250`. §10.29 owns the values this tree
+  carries. (§10.26 records the `:14245` window; `29ec0f3471` then inserted a net `+3` above the
+  anchor, making `:14248-14250` what this entry measured.)
 
 ### 10.28 — the §11/§9 cite block re-derived for `#12067`'s `+54`, and the `#10360` read-back re-pointed (2026-11-13, `#12067`)
 
+> ⛔ **Superseded for THIS tree by §10.29.** `34bb716315` (the `MITIGATES` bridge probe) inserts
+> a further `+9` inside the same relation-builder hunk, so every cite below moves by `+9` and the
+> read-back's band becomes `+37`. §10.29 owns the values this tree carries.
+>
 > **A successor entry, not an edit to §10.23 or §10.24.** Both of those number the head
 > they name and must stay byte-identical to `main` — §10.19's rule, restated by §10.22
 > (*"a history entry is not re-pointed in place"*) and by §10.24's own preamble (*"re-numbering
@@ -2606,5 +2612,46 @@ to answer.
   threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
   denominator are the ones this record froze. `document_sha256` is re-cut in this same commit,
   per §8's rule for *any* edit to this file.
+- **§10.29 succeeds this entry**, so nothing here is live: `34bb716315` moved the same
+  cites by a further `+9`, and the entry that carries a `LIVE for the merged tree` bullet
+  is §10.29, not this one.
+
+### 10.29 — the same block re-derived once more, for the `MITIGATES` probe's `+9` (2026-11-13, `#12067`)
+
+> **A successor entry, not an edit to §10.28.** §10.28's numbers are a faithful record of the
+> head it names; `34bb716315` then inserted 9 lines into the same relation-builder hunk, and the
+> handling is the one §10.26→§10.27 used for this branch's own earlier moves.
+
+- **What moved.** `34bb716315` ("the `MITIGATES` bridge probe reads the DECLARED mechanism") adds
+  **+9** lines to `tortoise/extractor_v2.py`, inside the relation builder's mechanism guard
+  (`@@ -9934,11 +9934,20 @@`) — i.e. BELOW the `OUTPUT_CONTRACT` prose and ABOVE every cite in
+  §11's block. The branch's total delta against `main` is therefore **+63** in nine hunks (the
+  hunk that was `+21` is now `+30`), and the bands become `0` above `:1758`, `+7` to `:9934`,
+  `+37` to `:11224`, and `+63` below `:11477`. The `#10360` read-back sits in the `+37` band,
+  which is why it moves by `+9` rather than `+63`.
+- **New value — measured at this head, by opening each line:** `_collect_classify_items` at
+  `:11866`, extent `:11866-11888`; the two `if items:` gates at `:14285`/`:14438`; the two
+  fail-open `except` arms at `:14298`/`:14449`; the two result blocks at `:14649` (closing
+  `:14655`) and `:14659` (closing `:14663`); `_run_vet_pass`'s S2.2 call at `:16843` and its
+  post-S4 union call at `:14414`; and the `#10360` read-back
+  (`_value_fidelity_judged = _state_value_verbatim_enforced()`) at `:10545`.
+- **Verified by content, not by arithmetic.** `:11866` is
+  `def _collect_classify_items(embed_list: dict) -> list[dict]:`, `:11888` is `return items`;
+  `:14285`/`:14438` are the two `if items:` gates; `:14298`/`:14449` are the two fail-open
+  `except` arms whose warnings name `classify(S2) failed` / `classify(union) failed`; `:14649`
+  opens `result["classify_later"]` and `:14655` closes it (`}`), `:14659` opens `result["vet"]`
+  and `:14663` closes it; `:16843` is
+  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:14414` is
+  `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`; `:10545` is the read-back assignment.
+- **What moved: the citations, and nothing that is a protocol value.** No metric, denominator,
+  threshold, class set or corpus pin is changed — every §1–§9 criterion VALUE and the E4
+  denominator are the ones this record froze. `document_sha256` is re-cut in this same commit,
+  per §8's rule for *any* edit to this file.
+- **Also re-derived by the same merge: four `edges.py` / `record_projection.py` cites** in
+  §3.7 and A1 that the branch's own inserts had moved — the composition fold
+  (`edges.py:1619-1620`), `create_edge`'s own predicate set (`edges.py:717-726`, which admits the
+  composition spelling and refuses its sibling), the identity/mention rule that keeps
+  `Object` property-free (`edges.py:817-819`), and the record projection's copy of the same fold
+  map (`record_projection.py:4996-4997`). Citations only; no criterion value moved.
 - **This entry is LIVE for the merged tree** — it has no successor, so it must not carry a
   supersede marker.
