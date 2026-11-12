@@ -543,7 +543,20 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
 
     So this test RUNS the committed step's prefix — verbatim, from `run:`, up to
     (not including) the `apt-get install` line — under `bash`, with `sudo`,
-    `apt-get` and `apt-cache` stubbed. Hermetic: no network, no apt, no sudo.
+    `apt-get`, `apt-cache`, `install`, `curl` and `tee` stubbed. Hermetic: no
+    network, no apt, no sudo, and no write outside `tmp_path`.
+
+    ⛔ THE STUB SET MUST COVER EVERY PRIVILEGED/EFFECTFUL COMMAND IN THE PREFIX,
+    not only the ones the guard itself calls. MEASURED 2026-11-12 on the rebase of
+    the PGDG change onto #12071: the prefix had grown a repo setup
+    (`sudo install -d /usr/share/postgresql-common/pgdg`, a `curl` of the PGDG
+    key, `| sudo tee /etc/apt/sources.list.d/pgdg.list`), and with `sudo`
+    forwarding to the real command the absent-stub run died on
+    `install: cannot create directory '/usr/share/postgresql-common': Permission
+    denied` — rc≠0, no `::error::`, so this test reported the guard as disarmed
+    when it was armed. On a box running the suite as root it would instead have
+    written the HOST's apt sources and fetched from the network — which is why
+    the stubs below are part of the contract this test claims, not decoration.
     The failing-stub run must STOP with a named `::error::`; the succeeding-stub
     run must NOT stop, or the job would red on every image that carries the
     client.
@@ -564,15 +577,20 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
 
     def run_with(stub: str) -> subprocess.CompletedProcess[str]:
         script = tmp_path / "precondition.sh"
-        # ⛔ `sudo` and `apt-get` are stubbed TOO. Without them the prefix runs
-        # the HOST's real `sudo apt-cache` / `sudo apt-get update`: on a box where
-        # sudo is passwordless and the package is known to apt the probe
-        # SUCCEEDS, the failure branch is never taken, and the test reports a
-        # disarmed guard that is actually armed — and reads the host's package
-        # index while doing it.
+        # ⛔ `sudo`, `apt-*` AND THE REPO-SETUP COMMANDS are stubbed. Without the
+        # first two the prefix runs the HOST's real `sudo apt-cache` / `sudo apt-get
+        # update`: on a box where sudo is passwordless and the package is known to
+        # apt the probe SUCCEEDS, the failure branch is never taken, and the test
+        # reports a disarmed guard that is actually armed — and reads the host's
+        # package index while doing it. The PGDG setup lines (`install`, `curl`,
+        # `tee` — see the docstring) are the same class one step further on: unstubbed,
+        # they either abort the prefix before the guard runs or write the host.
         script.write_text(
             'sudo() { "$@"; }\n'
             "apt-get() { return 0; }\n"
+            "install() { return 0; }\n"
+            "curl() { return 0; }\n"
+            "tee() { cat >/dev/null; }\n"
             f"{stub}\n{prefix}\n"
             "echo REACHED_PAST_PRECONDITION\n",
             encoding="utf-8",
