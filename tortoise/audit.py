@@ -758,7 +758,20 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # ``outdated`` half (an ``invalidate_point`` source is EP-dead), so the
         # separate conjunct below is redundant and now sits INSIDE the shared
         # predicate instead of beside it.
-        f"AND {_live_only('active')}\n"
+        # ⛔ THE ARGUMENT IS AN ALIAS-QUALIFIED STATUS PROPERTY, never the node
+        # alias: ``_live_only`` builds ``({clause} <> 'archived')`` style tests, and
+        # a NODE compared to a string is a TYPE comparison — measured on this engine,
+        # ``RETURN n <> 'archived'`` is ``True`` for a node whose ``status`` IS
+        # 'archived' (``n.status <> 'archived'`` is ``False``). Passing the bare
+        # alias made the whole status half of the predicate INERT (only the
+        # ``outdated`` half survived), so archived and draft SOURCES were reported as
+        # an "active IMPL edge" whose belief the supersession supposedly destroyed —
+        # measured: 2 confidences before the ARCHIVE, 0 after it and 0 after the
+        # supersession, ``skipped: None``, i.e. the factor was already gone and
+        # nothing was stripped at the supersession (#12111 round 21, P1). Every
+        # other call site passes the qualified form (``ep.py``, ``analyze.py``,
+        # ``sdk.py``).
+        f"AND {_live_only('active.status')}\n"
         # ⚠️ Check 4 (the ``:Point`` orientation) keeps the older hand-spelled
         # filter; that divergence is a recorded follow-up rather than half-fixed
         # here. It is the same false-CLEAN class, so it is named rather than
@@ -774,8 +787,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         f"WHERE {epistemic_disjunction('active')} "
         # EP's own liveness — the SAME predicate as ``count4b`` above, because a
         # half-applied filter (count filtered, rows not) inverts the module's
-        # ``count >= len(issues)`` invariant.
-        f"AND {_live_only('active')}\n"
+        # ``count >= len(issues)`` invariant. The ``.status`` suffix is load-bearing
+        # — see the note on ``count4b``.
+        f"AND {_live_only('active.status')}\n"
         # ⛔ CARRIER COUNT, in the same statement, because the repair's arm turns on
         # whether the pointer RESOLVES — not on whether it is merely SET. A
         # `supersededBy` naming a renamed successor, or the node itself, is present

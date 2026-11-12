@@ -2436,3 +2436,37 @@ def test_an_op_type_only_ANCHOR_is_refused_by_the_direct_arm_only(sdk):
         "the operator lane admits this node, so only the direct arm refuses it: "
         + issue.fix)
     assert "direct" in issue.fix.lower(), issue.fix
+
+
+def test_a_dead_SOURCE_is_not_an_active_edge(sdk):
+    """The liveness filter must compare the STATUS, not the NODE.
+
+    ``_live_only`` builds ``({clause} <> 'archived')`` style tests, and a NODE
+    compared to a string is a TYPE comparison: measured on this engine,
+    ``RETURN n <> 'archived'`` is ``True`` for a node whose ``status`` IS 'archived'
+    while ``n.status <> 'archived'`` is ``False``. Passing the bare alias made the
+    status half of the predicate inert, so an ARCHIVED source was reported as an
+    "active IMPL edge" and the row claimed the supersession destroyed belief that
+    the archive had already destroyed — measured: 2 confidences before the ARCHIVE,
+    0 after it, 0 after the supersession, ``skipped: None``.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_direct_edge("IMPL", p["id"], v1["id"])
+    assert sdk.compute_confidence(anchors=[p["id"]],
+                                  require_calibration=False)["confidences"], \
+        "fixture drifted: the live edge must build a factor"
+    # EP-dead source BEFORE the supersession: the factor is already gone.
+    sdk.update_entity(p["id"], status="archived")
+    assert not (sdk.compute_confidence(anchors=[p["id"]],
+                                       require_calibration=False)["confidences"]), \
+        "fixture drifted: EP must drop the factor once the source is dead"
+    _obj(sdk, "PolicyV2")
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    rows = [i for i in _issues(sdk, "superseded_object_active_edges")]
+    assert rows == [], (
+        "a dead source is not an active edge, and the belief was lost at the "
+        f"ARCHIVE, not here: {[i.detail for i in rows]}")
+    assert audit_graph(sdk._get_proj()).check_counts[
+        "superseded_object_active_edges"] == 0
