@@ -63,10 +63,12 @@ logger = logging.getLogger(__name__)
 #: ⛔ AND THE RULE IS ONE NESTING LEVEL DEEP (#11835 review round 4, F1). The
 #: two gates below read the ENVELOPE, which is safe only while a record-shaped
 #: payload is DOOR-BUILT — `add_point`/`add_operator` hand `_emit` their record
-#: POSITIONALLY (rendered onto the envelope as `point`) after stamping it
-#: themselves (with `creating=True`, so the origin attestation rides a creating
-#: record's own basis). A CALLER that builds one bypasses both gates, and the
-#: funnel must not "just stamp it" to close that: `creating=False`
+#: POSITIONALLY (rendered onto the envelope as `point`). `add_point` also stamps
+#: it (with `creating=True`, so the origin attestation rides a creating record's
+#: own basis); `add_operator`'s record carries NO vector to attest — `_point`
+#: builds one only for the operator-less, string-content path — so there is no
+#: marker on it to lie about. A CALLER that builds one bypasses both gates, and
+#: the funnel must not "just stamp it" to close that: `creating=False`
 #: DROPS `embedding_model`/`embedding_revision`/`embedding_text_hash`, which would
 #: strip the attestation off every ordinary `PointAdded` (R1). So the nested
 #: shape is REFUSED, at `_emit` itself, via `_NESTED_RECORD_KEYS` below — a gate
@@ -510,17 +512,21 @@ class EventAPI:
         # empty. ⚠️ THE CONTENTS ARE CALLER-REACHABLE ALL THE SAME — `add_point`
         # does `p.update(fields)` and hands `p` positionally, which is how the
         # envelope family got in one nesting level down (#11948 review at
-        # `95b98e6cf1`). So the record is checked against TWO of the three
-        # families — `point` and the envelope names — and ALL THREE refusals run
-        # before the append below (the commit point), which therefore leaves
-        # nothing to replay.
+        # `95b98e6cf1`). So all three families are handled on this channel
+        # BEFORE the append below (the commit point), which therefore leaves
+        # nothing to replay: `point` and the envelope names are REFUSED, and a
+        # declared vector width is VERIFIED.
         #
-        # ⛔ THE MARKER FAMILY IS DELIBERATELY NOT CHECKED HERE, and that is not
-        # a gap to tidy away: `_point`'s own `stamp_journal_embedding` writes
-        # `embedding_width` into this very record, so a funnel-wide marker
-        # refusal would refuse every `add_point`. The caller-marker refusal
-        # lives at that door (`_forged_keys`) instead, and `add_operator` takes
-        # no `**kwargs` — so no public door can reach this channel with one.
+        # ⛔ THE MARKER FAMILY IS VERIFIED, NOT REFUSED, and that distinction is
+        # measured: `_point`'s own `stamp_journal_embedding` writes
+        # `embedding_width` into this very record, so refusing
+        # `_SERVER_MANAGED_EMBEDDING_KEYS` here would red every vector-bearing
+        # `PointAdded`/`OperatorAdded`. The harm the marker rule exists to
+        # prevent is a marker that LIES — a declared `f32` over values it does
+        # not describe — and `_verify_record_vector_width` asks the seam's own
+        # question instead: a truthful declaration lands, a lie is refused, and
+        # undecidable input keeps the pre-guard posture (a WRITE never fails on
+        # an import).
         _refuse_caller_named_record_keys(payload, f"the `{type_}` envelope")
         if record:
             if len(record) > 1:
