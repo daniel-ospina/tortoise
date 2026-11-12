@@ -221,9 +221,11 @@ def _record_when_running(name: str, pid: int, env: dict[str, str],
     single sample cannot disagree, and what the reds this issue reports actually are is
     not a predicate mismatch:
 
-      * at the preview decoy the decoy never reached `execve` (a renamed multi-call
-        binary, #12039 measured on `ubuntu-26.04`) — the fixture's; fixed here, and now
-        probed with `_await_exec` instead of `_wait_alive`;
+      * at the preview decoy the decoy REACHED `execve` and died there — a renamed
+        multi-call binary cannot run under its new name (#12039 measured on
+        `ubuntu-26.04`) — the fixture's; fixed here, and now probed with `_await_exec`
+        rather than `_wait_alive`, because a decoy that has NOT reached exec is a live
+        copy of the parent and `record` would accept it;
       * otherwise the process was gone by the time `record` spawned its shell — a GAP IN
         TIME, which no retry reverses (issue #12039; `test (a)` red on main at
         `4b1d6cd0d4`).
@@ -291,19 +293,21 @@ def _refusal_arm(env: dict[str, str], name: str, pid: int) -> str:
             "the LIVENESS leg refused (`pid_running`). ⚠️ THE WITNESS DOES NOT SAY WHICH "
             "OF THAT ARM'S THREE CAUSES FIRED — `kill -0` failing gives ESRCH (gone) or "
             "EPERM (unsignalable), and a `Z` state letter is the third — so this names "
-            "the candidates and not a culprit: the decoy exited or never exec'd (the "
-            "fixture's), or a peer job's machine-global reap killed it (#10283's "
-            "actual defect, i.e. a REAL finding). ⚠️ A `/proc` that loses a LIVE pid is "
-            "NOT one of them and lands on the start-time arm instead: `pid_state` "
-            "returns empty, and `[[ \"\" != \"Z\" ]]` is true, so `pid_running` passes "
-            "and `pid_starttime` is what refuses. Read the decoy's own exit status and "
-            "the job log before closing a red here as flake (`stderr` says 'is not "
+            "the candidates and not a culprit: the decoy EXITED at exec (a renamed "
+            "multi-call binary cannot run under its new name — the fixture's), or a "
+            "peer job's machine-global reap killed it (#10283's actual defect, i.e. a "
+            "REAL finding). ⚠️ A pid the read could not SEE is NOT one of them and "
+            "lands on the start-time arm instead: `pid_state` returns empty, "
+            "`[[ \"\" != \"Z\" ]]` is true, so `pid_running` passes and "
+            "`pid_starttime` is what refuses. Read the decoy's own exit status and the "
+            "job log before closing a red here as flake (`stderr` says 'is not "
             "running' for every cause named above)"
         )
     if arm == "no-start-time":
-        return ("the START-TIME leg refused (`pid_starttime`): `/proc` lost the pid "
-                "under us — the retryable arm this poll exists to absorb, so a "
-                "persistent refusal here is a real `/proc` failure")
+        return ("the START-TIME leg refused (`pid_starttime`): the SUT could not read "
+                "the pid's start time — `/proc` on Linux, `ps -o lstart=` on a host "
+                "without it — so this is the retryable arm the poll exists to absorb, "
+                "and a persistent refusal here is a real read failure")
     return f"unrecognised refusal witness {text!r} — the arm is not covered here"
 
 
