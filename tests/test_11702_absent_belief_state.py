@@ -5733,11 +5733,90 @@ def _sentences(rel: str) -> list[str]:
     return [s for s in _SENTENCE_END.split(_belief_prose(rel)) if s.strip()]
 
 
+def _mirror_is_named_affirmatively(sentence: str) -> bool:
+    """True when the sentence names the mirror in a clause that does not DENY
+    it (#11993).
+
+    The original predicate cleared the claim on the bare substring ``mirror``,
+    so a sentence that INVERTED the relation it must state certified itself:
+
+        "a prior-only claim's confidence_mean IS the declared PRIOR mean;
+         the readable ``n.confidence`` mirror never leads it."
+
+    `_PRIOR_MEAN_CLAIM_PATTERNS` matched it and the mirror substring suppressed
+    the problem, so the guard reported "pinned" while certifying exactly the
+    defect it exists to catch — a false PASS. A claim is therefore qualified
+    only by an AFFIRMATIVE mention.
+
+    The scoping is the file's OWN, not a new one: the same `_NEGATED` +
+    `_CLAUSE_BREAK` machinery `_negates_its_verb` uses for the `has_ep` gloss,
+    for the same measured reason — a negator in a DIFFERENT clause belongs to a
+    different predicate and must not deny the mention:
+
+        "confidence_mean IS the declared PRIOR mean — or the readable mirror's
+         value, which LEADS it — never a measured one."
+
+    is AFFIRMATIVE: the mirror's clause carries no negator, and the `never`
+    attaches to "a measured one" in its own clause. A sentence whose own
+    mirror-carrying clause IS denied is not qualified ("…; the mirror never
+    leads it"). A comma does NOT break a clause, so "the mirror leads it, never
+    the pair" is treated as DENIED (fail-closed: the safer direction for a prose
+    guard, and the shape never occurs in the corpus). A mirror mention is
+    affirmative when ANY clause carrying it has no negator, so a mixed sentence
+    that states the relation correctly in one clause and denies it in another is
+    not reported: the guard's unit is the CLAIM, and the claim is qualified in
+    the clause that states it.
+
+    Deliberately NOT a verb-keyed negation (the shape the closed #11922 branch
+    carried as `_MIRROR_LEAD_NEGATED`, which locates a negator BEFORE the verb
+    `lead`). Measured against that branch's own regex, the verb-keyed arm DOES
+    catch `not` / `never` / `isn't` / `doesn't` in front of `lead` — it is
+    better than this predicate on `doesn't`, and #11999 carries that residual
+    because this one leaves it open. What the verb-keyed arm MISSES is every
+    inversion whose verb is not `lead` ("the mirror loses to the pair", "the
+    pair outranks the mirror") and every denial with no `lead` in reach ("the
+    mirror never is the value") — so it is the same class with a narrower KEY,
+    not a superset. Neither arm is a superset of the other.
+
+    RESIDUALS, disclosed and not closed here — tracked as #11999, measured
+    before it was filed, so neither is a silent gap:
+      * a NEGATOR-FREE inversion ("the mirror loses to the pair", "the pair
+        outranks the mirror") carries no denial word and is still certified.
+        Closing it needs a positive-verb allow-list (#11993's options b/c),
+        which fail-closes on ordinary rewording and is the shape-list this
+        repo's R1/R2/R3 rule has seen falsified by "a shape beside the one it
+        named";
+      * `_NEGATED` lists `not` / `never` / `isn't` only, so CONTRACTION
+        negators ("doesn't", "cannot", "won't") and `no`-negation ("no
+        readable mirror is consulted here") still certify — `no` is excluded
+        from `_NEGATED` on purpose, for the `has_ep` guard's reason ("no mere
+        flag" is a determiner). That regex is shared with `_ep_pass_claims` and
+        is deliberately NOT widened here — widening it changes a second
+        guard's verdicts and belongs in its own reviewed change, not in the
+        tail of this one.
+      * a MIXED sentence — one affirmative mirror clause and one negated one —
+        is CLEARED, because the rule is "ANY mirror-carrying clause without a
+        negator". That is the deliberate fail-open edge of this predicate: the
+        clause that STATES the claim qualifies it, and the guard's unit is the
+        claim. Pinned by a control row, so the `all`-clause variant cannot be
+        substituted without a red.
+    A future lane should take either residual to #11999 rather than quietly
+    widening this predicate.
+    """
+    clauses = [c for c in _CLAUSE_BREAK.split(sentence)
+               if "mirror" in c.lower()]
+    return any(not _NEGATED.search(c) for c in clauses)
+
+
 def _unqualified_claims_on(sentence: str, patterns) -> list[str]:
     """The mirror-guard's predicate on ONE sentence (the reusable core of
     `_unqualified_claims`, so the control test exercises the real logic rather
-    than a regex object in isolation)."""
-    if "mirror" in sentence.lower():
+    than a regex object in isolation.
+
+    BOTH callers share this core — `_PRIOR_MEAN_CLAIM_PATTERNS` and
+    `_ABSENT_CLAIM` — so the affirmative-mention rule (#11993) is a property of
+    the predicate, not of one guard."""
+    if _mirror_is_named_affirmatively(sentence):
         return []
     return [sentence] if any(p.search(sentence) for p in patterns) else []
 
@@ -5820,6 +5899,59 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
         "Its confidence_mean is the PRIOR mean, and it clears the floor.",
         _PRIOR_MEAN_CLAIM_PATTERNS), \
         "the mirror-guard never reports an unqualified sentence"
+    # #11993: a bare `mirror` SUBSTRING must not clear a claim. A sentence that
+    # INVERTS the relation the guard exists to pin used to certify itself — the
+    # guard reported "pinned" while certifying the defect. Each `_NEGATED`
+    # spelling gets its own row, so a later edit to that regex (or a re-widening
+    # of the predicate back to a substring test) reds HERE rather than passing
+    # green over an inverted sentence.
+    _INVERTED = ("A prior-only claim's confidence_mean IS the declared PRIOR "
+                 "mean; the readable ``n.confidence`` mirror {}.")
+    for _neg in ("does not lead it", "never leads it", "isn't the leader"):
+        assert _unqualified_claims_on(_INVERTED.format(_neg),
+                                      _PRIOR_MEAN_CLAIM_PATTERNS), (
+            "the mirror-guard certifies a NEGATED mirror mention "
+            f"(`mirror {_neg}`) — a false PASS (#11993)")
+    # …and the fix must not turn the guard into a blanket rejector: the two
+    # AFFIRMATIVE shapes the shipped prose uses (a relation after an em dash, a
+    # relation in the clause that follows the mention) stay cleared.
+    for _affirming in (
+            "A prior-only claim's confidence_mean IS the declared PRIOR mean — "
+            "or the readable ``n.confidence`` mirror's value, which LEADS it.",
+            "its confidence_mean IS the declared PRIOR mean — or the mirror's "
+            "value when one is readable, because R1 leads."):
+        assert not _unqualified_claims_on(_affirming,
+                                          _PRIOR_MEAN_CLAIM_PATTERNS), \
+            "the mirror-guard now rejects an AFFIRMATIVE mirror mention: " \
+            + _affirming
+    # The DENIAL is scoped to the CLAUSE that carries the mirror, not to the
+    # sentence: a `never` in a later clause belongs to a different predicate.
+    # The real corpus writes exactly this shape (why.py), and a SENTENCE-scoped
+    # negation mutant — `"mirror" in s and not _NEGATED.search(s)` — reds here.
+    # (It also reds the corpus assertion on the shipped why.py sentence; this row
+    # is the ATTRIBUTABLE killer, which is what the mutation must be judged by.)
+    assert not _unqualified_claims_on(
+        "confidence_mean IS the declared PRIOR mean — or the readable mirror's "
+        "value, which LEADS it — never a measured one.",
+        _PRIOR_MEAN_CLAIM_PATTERNS), \
+        "the denial is SENTENCE-scoped: a `never` in a clause that does not " \
+        "carry the mirror denied an affirmative mention"
+    # …and the rule is ANY mirror-carrying clause, not EVERY one: a MIXED
+    # sentence is cleared, because the clause that STATES the claim qualifies
+    # it. Pinned so the `all`-clause variant — which passes every row above —
+    # cannot be substituted for the documented rule without a red.
+    assert not _unqualified_claims_on(
+        "confidence_mean IS the declared PRIOR mean — or the mirror's value, "
+        "which LEADS it — but the mirror never leads R1 in practice.",
+        _PRIOR_MEAN_CLAIM_PATTERNS), \
+        "the rule is now ALL-clauses: a mixed sentence whose affirmative " \
+        "mirror clause states the relation was reported"
+    # The absent-claim guard shares the predicate, so it shares the fix; assert
+    # it separately so a future divergence between the two guards is visible.
+    assert _unqualified_claims_on(
+        "prior mean (ep_alpha/beta), else ``None``; the readable mirror never "
+        "leads.", (_ABSENT_CLAIM,)), \
+        "the absent-claim guard certifies a NEGATED mirror mention (#11993)"
     # The absent-claim guard must survive the REWORDINGS of the same false
     # prediction, not just the one that shipped it.
     for spelling in (
