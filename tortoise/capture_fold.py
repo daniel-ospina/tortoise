@@ -230,32 +230,35 @@ _CARRIABLE_ATTACHMENT_LABELS = {
 
 #: Edges whose content the fold verifies as a FIELD rather than carrying as an
 #: edge: `(Point)-[:extractedFrom]->(Source)` is the claim's PROVENANCE, and a
-#: Point holds it as `extractedFrom`/`extractedFromAll` too — the ref check
-#: (`uncarried_source_ref`) refuses the fold when the canonical does not already
-#: carry the duplicate's ref, so the edge itself needs no carry and the delete
-#: removes a link whose meaning the canonical already has.
+#: Point holds it as `extractedFrom`/`extractedFromAll` too, so the ref check
+#: (`uncarried_source_ref`) is what stops the field from being lost.
 #:
-#: ⚠️ The exemption is CONDITIONAL and OUTBOUND-ONLY: it applies to an outbound
-#: edge whose target id/url is one of the row's own refs — the case the field
-#: check actually covers. An exemption applied to every `extractedFrom` edge (the
-#: earlier, symmetric shape) skipped the edge BEFORE the ref check could see it,
-#: so (a) an edge pointing at a source the row's field does not name was destroyed
-#: on an `ok=True` fold, and (b) the same line was copied onto the inbound axis,
-#: where the ground cannot hold at all — an inbound edge is not the projection of
-#: any field on the duplicate. Both are `unexpected_edge` refusals now.
+#: ⚠️ THE EDGE IS STILL CHECKED SEPARATELY, and the exemption's real ground is
+#: the CANONICAL's own edge, not the row's field:
+#:
+#: * the outbound read COLLECTS every `extractedFrom` target into
+#:   `FoldEvidence.provenance_edges`, and the carry refuses `unexpected_edge`
+#:   when the canonical has no `extractedFrom` edge to that same target — because
+#:   the field check does NOT imply the edge exists. An earlier revision granted
+#:   the exemption on the FIELD and skipped the edge before the edge check could
+#:   see it: an edge pointing at a source the row's field does not name was
+#:   destroyed on an `ok=True` fold.
+#: * the exemption is OUTBOUND-ONLY. The same line was copied onto the inbound
+#:   axis, where the ground cannot hold at all — an inbound edge is not the
+#:   projection of any field on the duplicate. It is an `unexpected_edge` refusal.
+#:
+#: So an outbound `extractedFrom` edge whose target the row's FIELD does not name
+#: still proceeds when the canonical already holds that same edge, and the delete
+#: then removes a link whose meaning the canonical demonstrably has. That is the
+#: implemented rule, and a test distinguishes it from the field-ref mechanism.
 _PROVENANCE_RELS = ("extractedFrom",)
 
-#: Outbound `about*` edges whose predicate has NO permitted Point-source triple.
-#: Only a rel-ignoring writer can have made one (the capture cascade mints
-#: `aboutDocument` for a Point when the name resolves to a `:Source`), and a
-#: fold cannot re-create it — so its presence REFUSES the fold.
-#: ⚠️ DERIVED, not hand-listed: a second tuple of the same fact could drift in
-#: the direction that matters (removing a rel here changes nothing if the
-#: complement check below is what fires), so the partition is computed from the
-#: one list that says which predicates a Point may write.
-_WRITERLESS_ATTACHMENT_RELS = tuple(
-    rel for rel in _FOLD_ATTACHMENT_RELS
-    if rel not in _CARRIABLE_ATTACHMENT_RELS)
+# (There is deliberately no writer-less PREDICATE tuple here. An earlier
+# revision carried one — hand-listed, then derived — while the operative test at
+# the refusal site is `rel not in _CARRIABLE_ATTACHMENT_RELS`; a second spelling
+# of that fact is the "constant nothing reads" shape this module criticises
+# twice, and its only reader was a test asserting the partition was consistent
+# with itself. The refusal site names every writer-less rel it found.)
 
 #: ONE OCCURRENCE'S ADDRESS — an all-or-nothing group.
 #:
@@ -412,9 +415,15 @@ _OUTBOUND_EDGES_QUERY = (
 class FoldEvidence:
     """What ONE duplicate node holds, read off the live graph.
 
-    ``attachments`` is ``(rel, target_label, target_id, confidence)``; a
-    target with no id is reported in ``unaddressable`` instead, because
-    `link_entity` MERGEs on ``{id:$id}`` and would mint a different node.
+    ``attachments`` is ``(rel, target_label, target_id, confidence)``. A target
+    with NEITHER an id nor a url is reported in ``unaddressable`` instead — there
+    is nothing to name it by. A URL-ONLY target is addressable here (the read
+    coalesces ``t.id, t.url``) but not by the writer, which MATCHes ``{id:$id}``
+    and finds nothing, so it REFUSES as ``link_not_carried`` rather than being
+    reported as unaddressable. (An earlier version of this docstring said a
+    target with no id lands in ``unaddressable`` and that the writer "would mint a
+    different node" — false twice: the coalesce makes it addressable, and
+    `link_entity` creates nothing when the MATCH finds no node.)
     """
 
     attachments: tuple[tuple[str, str, str, Any], ...] = ()
@@ -1037,9 +1046,10 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
     #    cascade can mint `aboutDocument`/`aboutPoint` on a Point; neither is a
     #    permitted §3.2 triple for a Point source, so `link_entity` cannot
     #    re-create it.)
-    # ⚠️ `rel not in _CARRIABLE_ATTACHMENT_RELS` is the operative test;
-    # `_WRITERLESS_ATTACHMENT_RELS` is DERIVED from it (a hand-listed second copy
-    # could be edited with no effect, and no test reads it).
+    # ⚠️ ONE list decides: the COMPLEMENT of `_CARRIABLE_ATTACHMENT_RELS`, tested
+    # right here. A second, hand-listed or derived tuple of the same fact was the
+    # "constant nothing reads" shape — its only reader was a test asserting it
+    # matched its own input.
     writer_less = sorted({rel for rel, _label, _target, _conf
                           in evidence.attachments
                           if rel not in _CARRIABLE_ATTACHMENT_RELS})
@@ -1150,7 +1160,12 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             out["blocked"] = (
                 "its " + ", ".join(sorted(to_write))
                 + " evidence could not be written onto the canonical "
-                f"({type(e).__name__}: {e})")
+                f"({type(e).__name__}: {e}) — the raise does not say WHICH "
+                "side refused it: a value the write door will not store is the "
+                "DUPLICATE's own malformed evidence (its span has its own "
+                "`malformed_address` refusal; the other slots have no "
+                "per-slot validity door), while a refusal from the canonical's "
+                "own write would be the other case")
             # Nothing landed (the write raised), but the RESIDUALS were already
             # computed — disclose them here too, or a raise after a differing
             # `pointKind` crosses that difference in silence, the class round 5

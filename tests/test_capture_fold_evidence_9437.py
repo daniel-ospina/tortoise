@@ -1461,15 +1461,19 @@ def test_a_provenance_edge_with_no_address_refuses():
     assert out["ok"] is False and out["reason"] == "unexpected_edge", out
 
 
-def test_the_writerless_partition_is_derived_from_the_carriable_one():
-    """Two hand-listed tuples of one fact can drift in the direction that matters
-    (removing a rel from the writerless list changes nothing if the complement
-    check is what fires), and no test read the second one."""
-    assert set(capture_fold._WRITERLESS_ATTACHMENT_RELS) == (
-        set(capture_fold._FOLD_ATTACHMENT_RELS)
-        - set(capture_fold._CARRIABLE_ATTACHMENT_RELS)), (
-            capture_fold._WRITERLESS_ATTACHMENT_RELS,
-            capture_fold._CARRIABLE_ATTACHMENT_RELS)
+def test_the_writerless_predicates_are_the_CARRIABLE_complement():
+    """ONE list decides which predicates a Point may write, and the refusal site
+    tests that list directly. A second tuple of the same fact (hand-listed, then
+    derived) was the "constant nothing reads" shape: its only reader was a test
+    asserting it matched its own input, so editing it changed nothing."""
+    writerless = (set(capture_fold._FOLD_ATTACHMENT_RELS)
+                  - set(capture_fold._CARRIABLE_ATTACHMENT_RELS))
+    assert writerless, "the partition must not be empty"
+    for rel in sorted(writerless):
+        out = capture_fold.carry_fold_evidence(
+            _FakeProj(_FakeGraph(edges=[(rel, "Document", "doc_1", None)])),
+            "pt_dup", "pt_canon")
+        assert out["reason"] == "uncarriable_attachment", (rel, out)
 
 
 def test_the_link_refusal_states_the_total_not_only_the_first_three():
@@ -1662,3 +1666,51 @@ def test_the_seam_never_repeats_a_residual_the_module_already_printed():
         {"blocked": "…", "residual": [item]}) == f"; it also holds {item}"
     assert sdk_mod._fold_residual_clause(
         {"blocked": None, "residual": []}) == ""
+
+
+# ── 17) round 14: the two mechanisms the docstrings conflated, and the
+#         "unproven" read-back arm ──
+
+
+def test_the_provenance_exemption_is_grounded_on_the_CANONICAL_edge():
+    """The exemption's ground is the canonical's own edge, NOT the row's field —
+    the two are different mechanisms and the docstring used to describe the wrong
+    one. Here the row's `extractedFrom` field is `session:s` while the duplicate's
+    EDGE points at `src_other`: the edge proceeds only because the canonical
+    holds an edge to `src_other` too, so the folded link's meaning survives."""
+    row = ("session:s", [], None, None, None, None, None, None,
+           None, None, None, None)                 # field names ONLY session:s
+    graph = _FakeGraph(dup_row=row,
+                       edges=[("extractedFrom", "Source", "src_other", None)])
+    graph.canon_prov_targets = ["src_other"]       # the canonical holds the edge
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is True, out
+    # …and with the canonical NOT holding it, the same edge refuses — so the two
+    # mechanisms are distinguishable and neither is a formality.
+    graph2 = _FakeGraph(dup_row=row,
+                        edges=[("extractedFrom", "Source", "src_other", None)])
+    out2 = capture_fold.carry_fold_evidence(
+        _FakeProj(graph2), "pt_dup", "pt_canon")
+    assert out2["ok"] is False and out2["reason"] == "unexpected_edge", out2
+
+
+def test_an_unreadable_canonical_AFTER_the_write_says_unproven():
+    """"we cannot say" and "the evidence is not there" are different facts, and
+    this arm's whole purpose is the first one: the write raised nothing, the
+    read-back cannot see the canonical (it vanished, or gained a second row), so
+    the carry is UNPROVEN — and `copied` must stay empty rather than report a
+    landing nothing verified."""
+    # A free slot on the duplicate, so a write IS attempted (an empty
+    # `to_write` never reaches the read-back this test is about).
+    graph = _FakeGraph(dup_row=_DUP_ROW_QUOTED)
+
+    def _vanish(props):
+        graph.canon_rows = [list(graph.canon_row), list(graph.canon_row)]
+
+    sdk = _FakeSDK(on_update=_vanish)
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is False and out["reason"] == "slot_write_failed", out
+    assert "unproven" in out["blocked"], out["blocked"]
+    assert out["copied"] == [], out
