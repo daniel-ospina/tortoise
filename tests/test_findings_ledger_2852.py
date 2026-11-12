@@ -2476,12 +2476,17 @@ def test_english_prose_cannot_supply_a_missing_member(tmp_path, monkeypatch):
         ),
         # ⛔ AND THE PHANTOM THAT *IS* CONNECTED TO THE RUN. The four shapes above supply
         # their letter across a sentence's worth of words, so the run rule alone refuses
-        # them, and the ENDING rule (`a`/`i` at the end of a run must be followed by list
-        # punctuation, the sentence end, or the list's own predicate) was left with no
-        # case at all — measured: disabling it outright kept the suite green. These two
-        # insert the prose INSIDE the list, so the phantom is a run member and only the
-        # ending rule can refuse it (`i.e.` is refused because a full stop followed by a
-        # letter does not end a member; `and I` because `think` is not a predicate).
+        # them, and the ENDING rule was left with no case at all — measured: disabling it
+        # outright kept the suite green. These two insert the prose INSIDE the list, so the
+        # phantom is a run member and only the ending rule can refuse it (`i.e.` is refused
+        # because a full stop followed by a letter does not end a member; `and I` because
+        # `think` is not a predicate).
+        # ⛔ WHAT THE ENDING RULE ACCEPTS IS THE SENTENCE'S OWN ENDING, NOT LIST PUNCTUATION:
+        # a full stop that does not begin an abbreviation, the end of the sentence, a
+        # closing parenthesis, a colon, an em/en dash, or one of the arm's own predicates as
+        # a whole word. A comma is deliberately NOT accepted (a comma after the last item
+        # means the run had not ended), and neither is a semicolon — both are run separators,
+        # so if no item follows them, the list is over and prose continues.
         (
             ", and I think so, inside the run",
             "Only **(a)**, **(f)**,\n**(h)** and **(j)**, and I think so, "
@@ -2491,6 +2496,20 @@ def test_english_prose_cannot_supply_a_missing_member(tmp_path, monkeypatch):
             ", i.e. today, inside the run",
             "Only **(a)**, **(f)**,\n**(h)** and **(j)**, i.e. today, "
             "still read as written.",
+        ),
+        # ⛔ AND THE PHANTOM THE REVIEWER FOUND ONE LEVEL FURTHER IN (#11902 review): an
+        # `a`/`i` in an INTERIOR run position is not the run's tail, so an ending test
+        # applied only there left it with NO evidence test at all — `, and I,` and
+        # `, and a,` closed a stale list while reading CLEAN. A connector word beside the
+        # letter is what makes those prose; the documented bare spelling carries only
+        # punctuation (`a, f, h, i, j`).
+        (
+            ", and I, in an INTERIOR position",
+            "Only **(a)**, **(f)**,\n**(h)**, and I, **(j)** still read as written.",
+        ),
+        (
+            ", and a, in an INTERIOR position",
+            "Only **(f)**,\n**(h)**, **(i)**, and a, **(j)** still read as written.",
         ),
     )
     for shape, replacement in cases:
@@ -2522,6 +2541,30 @@ def test_english_prose_cannot_supply_a_missing_member(tmp_path, monkeypatch):
             f"Only **(a)** still read as written, {prose}."
         ) == {"a"}, f"prose must contribute no row letter: {prose!r}"
 
+    #: ⛔ AND THE SAME QUESTION ABOUT THE OTHER SIDE OF A LIST ITEM. Which side is evidence
+    #: depends on the position: a run's TAIL is decided by what FOLLOWS it, so a bare
+    #: `a`/`i` whose LEFT neighbour is a comma must not be read just because a comma sits
+    #: there — measured, an ordering that tested the left side first read a phantom `i`
+    #: out of `Only a, f, h, i foo bar.` and `Only a, f, h, i, and then some.` (found by
+    #: the verification gate on the first attempt at this rule).
+    for sentence in (
+        "Only a, f, h, i foo bar.",
+        "Only a, f, h, i think so.",
+        "Only a, f, h, i, and then some.",
+    ):
+        assert flc._named_letters(sentence) == {"a", "f", "h"}, f"prose must not supply the trailing `i`: {sentence!r}"
+
+    #: …while every documented spelling keeps reading EVERY member, including the ones
+    #: that only work because a position rule is applied the right way round.
+    for sentence, expected in (
+        ("Only a, f, h, i, j still read as written.", {"a", "f", "h", "i", "j"}),
+        ("Only a, f, h, i and j still read as written.", {"a", "f", "h", "i", "j"}),
+        ("Only a, f, h, i remain STILL-TRUE.", {"a", "f", "h", "i"}),
+        ("Only a, f, h, i) still read as written.", {"a", "f", "h", "i"}),
+        ("Note: j or a no longer read as written.", {"a", "j"}),
+    ):
+        assert flc._named_letters(sentence) == expected, f"a documented spelling must read every member: {sentence!r}"
+
 
 def test_a_written_bare_member_is_still_read(tmp_path, monkeypatch):
     """FAILS if the guard refuses a spelling §8 declares accepted.
@@ -2531,7 +2574,8 @@ def test_a_written_bare_member_is_still_read(tmp_path, monkeypatch):
 
     * `Only a, f, h, i, j still read as written.` — the comma-joined BARE spelling —
       yielded `['a','f','h','i']` and RED, because the trailing `j` is followed by ` still`
-      and not by list punctuation. It was CLEAN one commit earlier: the fix introduced the
+      and not by the OLD rule's list punctuation. It was CLEAN one commit earlier: the
+      fix introduced the
       false accusation.
     * `Only **(a)**, **(f)**, **(h)**, **(i)**, c and **(j)** still read as written.` read
       CLEAN while claiming a SUPERSEDED-BY-FIX row as still: the bare `c` before ` and`
