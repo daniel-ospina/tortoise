@@ -2423,6 +2423,32 @@ def test_a_de_bolded_second_tally_sentence_is_still_refused(tmp_path, monkeypatc
             ), f"a second genuine tally in plain text must red: {decoy!r} -> {problems}"
 
 
+def test_a_possessive_apostrophe_cannot_hide_a_second_tally(tmp_path, monkeypatch):
+    """FAILS if an apostrophe is treated as a quote delimiter, hiding a second tally.
+
+    The quote-stripping regex was `"[^"]*"|'[^']*'`, so in English prose it blanked
+    everything between two POSSESSIVES. Measured before the fix, appending this one
+    sentence left `check_verdict_tally` CLEAN and `--check` at rc 0 — a second stale
+    tally *and* a falsified verdict behind two apostrophes — while the parent refused
+    the identical page. The false-accusation cases the stripping exists for all use
+    double quotes, so a single quote now delimits only at a non-letter boundary.
+    """
+    decoy = (
+        " The review's summary — seven of the twelve rows no longer read as written,"
+        " **(c)** is STILL-TRUE — is what the ledger's author repeats."
+    )
+    _mutated(
+        tmp_path,
+        monkeypatch,
+        lambda t: t.replace("stated both ways.)", f"stated both ways.) {decoy}", 1),
+    )
+    problems = _doc_problems()
+    assert any("sentences saying 'no longer read as written'" in p for p in problems), (
+        "a possessive apostrophe must not hide a second stale tally",
+        problems,
+    )
+
+
 def test_a_second_still_read_as_written_sentence_is_refused(tmp_path, monkeypatch):
     """FAILS if the tally's COMPLEMENT list can be joined across sentences.
 
