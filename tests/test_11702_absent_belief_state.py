@@ -6139,6 +6139,12 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # TRUE and must never be reported (cycle 7, P1).
             "a T2 ``credibilityTier`` prior reads 0.75",
             "``credibility_prior`` for T2 is 0.75",
+            # …and this one is the ONLY pin that exercises the LEADING half of
+            # the anchor: the two above are held by `(?!\w)` alone, so without
+            # this string the `(?<![A-Za-z_])` could be deleted with a green
+            # suite. `source_credibility` has `_` before the token, so it needs
+            # the lookbehind (review cycle 8).
+            "the ``source_credibility`` T2 prior reads 0.75",
             # …a POST-VERB relative pronoun, which crossed the window until
             # cycle 5 measured it (true prose, reported).
             "the credibility word reads a default which is 0.75",
