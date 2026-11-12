@@ -182,10 +182,15 @@ def test_a_goal_belief_really_moved_so_the_explanation_is_about_a_move(sdk):
     # on liveness, not on "the newest row").
     blocks = assemble_why_blocks(sdk._get_proj(), [goal["id"]])
     assessments = blocks[goal["id"]]["assessment"]
-    # ⛔ THE COUNT IS THE LIVENESS PIN, not the identity: a mutant that drops
-    # `_live_only('j.status')` from the assessment read leaves TWO candidates,
-    # and the identity assertions below still pass because the newest sorts
-    # first — measured (mutation pass F1). Only the count moves.
+    # The COUNT is the invariant the identity assertions cannot express: one
+    # goal, one indicator, one target => exactly one live verdict. NOTE it is not
+    # a liveness pin, and this fixture cannot be one: `supersede_point` transfers
+    # the predecessor's operator edge (#6180), so the superseded judgement stops
+    # matching the wiring read altogether and the liveness predicate is never
+    # exercised here — a mutant that drops it leaves this row green (measured).
+    # Liveness is pinned by
+    # `test_a_retired_judgement_is_not_reported_as_a_live_verdict` below, which
+    # retires a judgement WITHOUT a transfer.
     assert len(assessments) == 1, (
         "a SUPERSEDED judgement is being reported as a live verdict: "
         + repr([a["judgement_id"] for a in assessments]))
@@ -224,11 +229,15 @@ def test_a_retired_judgement_is_not_reported_as_a_live_verdict(sdk):
 
 # ── 2. a READING (an :Event) is explainable ───────────────────────────────
 
-def test_a_reading_event_is_explainable_and_carries_its_name(sdk):
-    """An ``:Event`` gets a block, and its text is its ``name``.
+def test_a_reading_event_is_explainable(sdk):
+    """An ``:Event`` gets a block of its own.
 
-    This is the #8169 defect class: a read that matches but returns an empty
-    snippet is inert — the block exists and says nothing.
+    NOTE the reading's TEXT is not asserted here — a block carries no self-entry,
+    so this row would pass with ``_text_expr`` reverted to a bare ``content``.
+    The text is pinned where a reading is actually NAMED as an endpoint:
+    ``test_an_operator_endpoint_written_as_an_event_is_traversed`` (support
+    chain) and ``test_a_nand_counter_claim_written_as_an_event_is_surfaced``
+    (conflicts) — both red on that mutant.
     """
     indicator, _target, _goal = _world(sdk, tag="ev")
     reading = _reading(sdk, indicator, 12.0, at="2026-11-11T10:00:00Z")
@@ -309,6 +318,48 @@ def test_a_nand_counter_claim_written_as_an_event_is_surfaced(sdk):
     assert nands, f"the Event counter-claim was dropped: {blocks[claim['id']]}"
     assert nands[0]["point_id"] == counter["id"]
     assert nands[0]["content_snippet"] == "report was disputed"
+
+
+def test_a_nand_operators_non_point_source_is_surfaced(sdk):
+    """The CONFLICTS leg's ``src`` widening (review, mutation F3).
+
+    The counter-claim of an operator-mediated NAND is its INPUT source at idx 0,
+    and #7813 admits all four labels there. No fixture reached that arm: with
+    ``epistemic_disjunction('src')`` narrowed to ``src:Point`` every test stayed
+    green, while the real effect is an operator-mediated counterargument written
+    as an ``:Event`` silently vanishing from ``conflicts``.
+    """
+    claim = sdk.create_point("statement", "the migration is safe to run")
+    evidence = sdk.create_event("migration broke staging", "incident",
+                                startedAt="2026-11-11T09:00:00Z")
+    sdk.create_operator("NAND", evidence["id"], [claim["id"]], direction="-")
+    assert _labels(sdk, evidence["id"]) == ["Event"]
+
+    block = assemble_why_blocks(sdk._get_proj(), [claim["id"]])[claim["id"]]
+    nands = (block.get("conflicts") or {}).get("nands") or []
+    assert [n["content_snippet"] for n in nands] == ["migration broke staging"], (
+        "an operator-mediated counterargument written as an :Event was dropped: "
+        + repr(block.get("conflicts")))
+
+
+def test_a_tradeoff_alternative_written_as_an_object_is_surfaced(sdk):
+    """The TRADEOFFS leg's ``alt`` widening, same class (mutation F3).
+
+    Every tradeoff fixture in the suite builds ``option`` POINTS, so narrowing
+    ``epistemic_disjunction('alt')`` to ``alt:Point`` left every test green while
+    an alternative written as an ``:Object`` would silently empty the dimension.
+    """
+    decision = sdk.create_point("decision", "how to land the rollout")
+    alt_a = sdk.create_object("land it behind a flag", objectKind="option")
+    alt_b = sdk.create_object("land it to everyone", objectKind="option")
+    sdk.create_operator("IMPL", decision["id"], [alt_a["id"]])
+    sdk.create_operator("IMPL", decision["id"], [alt_b["id"]])
+
+    block = assemble_why_blocks(sdk._get_proj(), [decision["id"]])[decision["id"]]
+    labels = sorted(t["label"] for t in block.get("tradeoffs") or [])
+    assert labels == ["land it behind a flag", "land it to everyone"], (
+        "Object alternatives were dropped from tradeoffs: "
+        + repr(block.get("tradeoffs")))
 
 
 # ── 4. the :Point lane is unchanged ───────────────────────────────────────
@@ -453,6 +504,21 @@ def test_a_derived_claim_that_is_not_a_judgement_is_not_an_assessment(sdk):
     # The support chain DOES name it — it is real support, just not a verdict.
     assert block["support_chain"][0]["point_id"] == derived["id"]
 
+    # AND THE OTHER CONJUNCT: `claimClass = 'derived'`. A `judgementState` alone
+    # is not a verdict either — `goal_judgement` records a shape that carries
+    # `judgementState`/`goalId` on a NON-derived claim, and presenting that as
+    # the goal's verdict is the same defect from the other side. Measured: the
+    # assertions above stay green with `claimClass` dropped from the
+    # discriminator.
+    other = _world(sdk, tag="nonderived")[2]
+    stamped = sdk.create_point("statement", "a non-derived claim with a state",
+                               judgementState="met")
+    sdk.create_operator("IMPL", stamped["id"], [other["id"]], direction="->")
+    other_block = assemble_why_blocks(sdk._get_proj(), [other["id"]])[other["id"]]
+    assert "assessment" not in other_block, (
+        "a NON-derived claim carrying a judgementState was presented as a "
+        "verdict: " + repr(other_block.get("assessment")))
+
 
 def test_an_eventId_only_event_is_not_explainable_and_that_is_recorded(sdk):
     """RESIDUAL 2, pinned as a behaviour rather than left to prose.
@@ -499,8 +565,10 @@ def test_the_fusion_order_is_total_so_row_order_cannot_decide(sdk):
     The last component is the INTERNAL node id — the same key the fusion dedupes
     on — because ``point_id`` alone is NOT unique (two distinct ``:Event``s can
     emit the same ``coalesce(id, eventId)``). Dropping it makes the order depend
-    on Cypher row order, and NOTHING caught that: the mutation left 105 tests
-    green across the three changed test files.
+    on Cypher row order, and NOTHING caught that: mutating all three sorts
+    together left every test in the three changed files green. (No count is
+    quoted here: it moves with every row added, and a figure copied from one run
+    re-stales.)
 
     Two assertions, and they are different instruments on purpose:
       * BEHAVIOUR — two supporters whose display ids collide come out in
@@ -572,6 +640,20 @@ def test_an_unchanged_state_keeps_one_live_judgement_per_target(sdk):
     judgements = [a["judgement_id"] for a in block["assessment"]]
     assert set(judgements) == {first["point_id"], second["point_id"]}
     assert len(judgements) <= W4_MAX_ASSESSMENTS
+
+    # THE BUDGET ITSELF, with a fixture that EXCEEDS it: two targets cannot pin
+    # a cap of three (measured — uncapping left every test green). D4 allows n
+    # targets, so a goal with several must still emit at most W4_MAX_ASSESSMENTS.
+    for i in range(4, 8):
+        extra = sdk.create_object(f"CI <= {i}m [multi]", objectKind="target",
+                                  comparator="<=", threshold=float(i), dwell=1)
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=Target.from_node(extra))
+    capped = assemble_why_blocks(sdk._get_proj(), [goal["id"]])[goal["id"]]
+    assert len(capped["assessment"]) == W4_MAX_ASSESSMENTS, (
+        "the assessment budget is not enforced: "
+        f"{len(capped['assessment'])} verdicts emitted for a cap of "
+        f"{W4_MAX_ASSESSMENTS}")
     # Newest first.
     assert judgements == sorted(
         judgements,
