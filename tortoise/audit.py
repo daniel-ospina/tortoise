@@ -929,13 +929,25 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                         and (is_op_flag is True or op_type is not None))
         return {
             "sup_id": sup_id, "sup_name": sup_name, "sup_sb": sup_sb,
-            # ⛔ Was the SUPERSEDED endpoint itself one EP refuses? BOTH arms test the
-            # same shape on the input/anchor side (``_non_operator`` for an operator
-            # input, ``_non_op`` for a direct edge's endpoints), so one predicate
-            # answers it for both lanes: the flag is not ``false``, or an ``op_type``
-            # is set. Where it is true the belief was never carried, so the
-            # belief-LOSS arm of both strings is false.
-            "sup_refused": ((_sup_flag is not False) or sup_op_type is not None),
+            # ⛔ Was the SUPERSEDED endpoint itself one EP refuses? SPLIT BY LANE —
+            # the two arms take DIFFERENT predicates, deliberately: ``ep.py``'s
+            # ``_non_operator`` (an operator input) tests the FLAG ONLY — "Adding an
+            # ``op_type IS NULL`` conjunct here (as the direct-edge arms carry) would
+            # exclude the hybrid … The two are deliberately NOT unified"
+            # (``ep.py:98-149``) — while ``_non_op`` (a direct edge) also demands
+            # ``op_type IS NULL``. Applying the stricter one to both lanes said an
+            # ``op_type``-only SUPERSEDED input "was never admitted" and that
+            # "nothing is lost" on a row where the factor measurably WAS admitted
+            # before the supersession and lost after it (measured: 2 confidences, no
+            # skips → 1, ``degenerate``; review round 18, #12111).
+            "sup_refused": ((_sup_flag is not False) if _is_operator
+                            else (_sup_flag is not False
+                                  or sup_op_type is not None)),
+            # ⛔ ONE flow test for both strings: a neutral row carries nothing in
+            # either direction, so successor advice ("promote it to live", "target a
+            # CLAIM successor") prescribes a transfer such an edge cannot perform.
+            "neutral_row": not any(direction_flows(
+                direction if _is_operator else edge_direction)),
             "edge_type": edge_type, "idx": idx,
             # ⛔ EP's predicate is the flag OR ``op_type`` AND the ``:Point`` label
             # (its arms are ``(o:Point)-[:IMPL|NAND]->(c)`` and a non-operator check
@@ -1346,7 +1358,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 and s["sup_sb"] and s["sup_name"] == s["sup_sb"]):
             detail += ("; and its supersededBy names the Object ITSELF, so no OTHER "
                        "Object answers it — name the real successor")
-        else:
+        elif not s["neutral_row"]:
+            # ⛔ NOT on a NEUTRAL row: that clause tells the reader to promote the
+            # successor to live or to target a CLAIM successor — advice about a
+            # transfer a neutral edge never performs (measured: re-pointing or
+            # promoting moves no posterior; review round 18, #12111).
             detail += _successor_note(s)
         if s["active_id"] is None:
             detail += ("; that endpoint carries no identity, so it cannot be named "
@@ -1739,13 +1755,24 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # ``_update_nary_factor`` returns at ``if not (fwd or bwd)`` before any
             # renumbering (measured: posteriors identical before and after, with
             # the successor rewired and with the stale edge deleted).
-            return prefix + (
-                f"Re-point this {s['edge_type']} input from {q} onto {dest} if "
-                f"the claim should still be wired there, then delete the edge "
-                f"into {q}. ⛔ Nothing was LOST by "
-                f"leaving it: this operator is '-' (neutral), so no confidence "
-                f"transferred through this edge either way (measured: posteriors "
-                f"identical before and after the supersession)" + tail)
+            # ⛔ AND NO ``prefix``/``tail``, for the reason the neutral-DIRECT arm
+            # below already records: ``_chain_tail`` appends "target a CLAIM
+            # successor" / "promote it to live as well" — advice about a transfer a
+            # neutral edge never performs, and false here (measured: promoting or
+            # re-pointing a neutral operator's input moves no posterior; round 18,
+            # #12111).
+            ambiguous = (
+                f" ({_quoted(s['sup_sb'])} is carried by {s['carrier_count']} "
+                "Objects, but the successor's identity does not change this "
+                "repair)" if s["carrier_count"] > 1 else "")
+            return (
+                f"Delete this {s['edge_type']} input from {q}{ambiguous} — this "
+                f"operator is {_quoted(s['direction'])} (neutral), so it transfers "
+                f"NO confidence in either direction and §3.1's disposition is DROP; "
+                f"re-pointing it onto a successor would keep the same inert "
+                f"connection. ⛔ Nothing was LOST by deleting it (measured: "
+                f"posteriors identical before and after the supersession, and after "
+                f"the delete)")
         if s["idx"] == 0 and fwd != bwd:
             return prefix + (
                 f"Write {'a CLAIM successor' if refused else 'the successor (' + successor + ')'} "

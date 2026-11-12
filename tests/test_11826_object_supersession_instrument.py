@@ -1182,7 +1182,15 @@ def test_a_neutral_operator_does_not_claim_lost_belief(sdk):
     assert "The successor inherits no belief" not in issues[0].detail, (
         "a neutral operator transfers nothing, so the successor cannot inherit "
         "it however it is wired: " + issues[0].detail)
-    assert "Nothing was LOST by leaving it" in issues[0].fix, issues[0].fix
+    # ⛔ The neutral row's instruction is the DELETE §3.1 prescribes, and it must
+    # not carry successor advice a neutral edge cannot act on ("promote it to live"
+    # / "target a CLAIM successor" — measured: re-pointing a neutral input moves no
+    # posterior, so the advice is false there; review round 18, #12111).
+    assert "Nothing was LOST by deleting it" in issues[0].fix, issues[0].fix
+    assert "Delete this" in issues[0].fix, issues[0].fix
+    lower = issues[0].fix.lower()
+    assert "promote it to live" not in lower, issues[0].fix
+    assert "Re-point this" not in issues[0].fix, issues[0].fix
     assert "direction inverts" not in issues[0].fix, (
         "nothing is renumbered when neither leg flows: " + issues[0].fix)
 
@@ -2231,3 +2239,84 @@ def test_a_non_canonical_live_spelling_is_still_live(sdk):
                     "real: a literal filter would report nothing here")
     result = audit_graph(sdk._get_proj())
     assert result.check_counts["superseded_object_active_edges"] >= 1
+
+
+def test_a_neutral_operator_gets_no_successor_advice(sdk):
+    """A neutral edge cannot act on "promote it to live" / "target a CLAIM successor".
+
+    Measured: with a ``direction='-'`` operator whose successor is a DRAFT, the row
+    said no belief was lost while the same string told the reader the successor
+    "needs promoting to live as well" and to "target a CLAIM successor" — a transfer
+    a neutral edge never performs (re-pointing or promoting it moves no posterior;
+    verified in the same test). The direct lane already suppressed this; the
+    operator lane did not (#12111 review round 18).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyDraft", status="draft")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
+    assert _q(sdk, "MATCH (o {id:$i}) RETURN o.direction", {"i": op["id"]}) == [["-"]]
+    before = sdk.compute_confidence(factors=[op["id"]],
+                                    require_calibration=False)["confidences"]
+
+    _supersede_object(sdk, "PolicyV1", "PolicyDraft")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    detail, fix = issues[0].detail, issues[0].fix
+    for text, label in ((detail, "detail"), (fix, "fix")):
+        assert "promote it to live" not in text.lower(), (
+            f"a neutral edge cannot be revived by promoting its successor: {label}"
+            + text)
+        assert "target a CLAIM successor" not in text, (
+            f"same: nothing transfers, so the successor's claim-ness is moot: {label}"
+            + text)
+    assert "transfers NO confidence" in detail, detail
+
+    # ...and the measurement that makes the advice void: no posterior moves.
+    after = sdk.compute_confidence(factors=[op["id"]],
+                                   require_calibration=False)["confidences"]
+    for node_id, value in after.items():
+        if node_id in before:
+            assert value == before[node_id], (
+                f"a neutral operator moved a posterior: {node_id}")
+
+
+def test_an_op_type_only_SUPERSEDED_input_IS_stripped_by_the_operator_lane(sdk):
+    """``_non_operator`` has NO ``op_type`` conjunct — the two lanes differ, again.
+
+    ``ep.py``: "Adding an ``op_type IS NULL`` conjunct here (as the direct-edge arms
+    carry) would exclude the hybrid … The two are deliberately NOT unified", and its
+    operator-input filter tests ``is_operator`` only. So an ``op_type``-only
+    SUPERSEDED input PARTICIPATED in the factor and is STRIPPED at supersession —
+    measured: two confidences and no skips before, one and ``degenerate`` after.
+    Applying the direct lane's stricter predicate here said "EP's input selection
+    never admitted this input … nothing is lost", a false all-clear over belief the
+    supersession really did defund.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1", op_type="IMPL")
+    _obj(sdk, "PolicyV2")
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.is_operator, o.op_type",
+              {"i": v1["id"]}) == [[None, "IMPL"]], "fixture drifted"
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    live = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert len(live["confidences"]) == 2 and not live.get("skipped_factors"), (
+        "fixture drifted: EP's operator lane must ADMIT an op_type-only input: "
+        + repr(live))
+
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    after = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert len(after["confidences"]) == 1, (
+        "fixture drifted: the strip must leave one participating input: "
+        + repr(after))
+    assert [k for k in (after.get("skipped_factors") or [])
+            if k.get("reason")], "fixture drifted: the strip is not recorded"
+
+    detail = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                  if i.node_id == v1["id"]).detail
+    assert "never admitted this input" not in detail, (
+        "EP admitted it and then stripped it — the direct lane's predicate does not "
+        "answer this lane: " + detail)
+    assert "strips that terminal input" in detail, detail
