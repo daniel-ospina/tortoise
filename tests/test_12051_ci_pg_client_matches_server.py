@@ -57,7 +57,14 @@ JOB = "test-record-postgres"
 #: rather than about the spelling.
 IMAGE_RE = re.compile(r":(?:pg)?(\d+)$")
 CLIENT_PKG_RE = re.compile(r"postgresql-client-(\d+)\b")
-CLIENT_PATH_RE = re.compile(r"/usr/lib/postgresql/(\d+)/bin")
+
+#: The `$GITHUB_PATH` write as ONE unit: the versioned dir IS the value written.
+#: `echo <dir> >> "$GITHUB_PATH"` — read the major from the
+#: write line itself, never from an `export` elsewhere in the step.
+GITHUB_PATH_PREPEND_RE = re.compile(
+    r"echo\s+(?P<quote>['\"]?)/usr/lib/postgresql/(?P<major>\d+)/bin(?P=quote)"
+    r"\s*>>\s*['\"]?\$GITHUB_PATH"
+)
 
 
 @pytest.fixture(scope="module")
@@ -126,11 +133,21 @@ def test_the_two_provisioned_servers_are_one_major(job: dict) -> None:
 
 
 def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> None:
-    """`postgresql-client-<major>` AND a `/usr/lib/postgresql/<major>/bin` prepend.
+    """`postgresql-client-<major>` AND `/usr/lib/postgresql/<major>/bin` ON `$GITHUB_PATH`.
 
     Both halves are load-bearing: the package supplies the binaries, and the
     prepend is what makes them win over the runner image's own (newer) client
     and over `postgresql-common`'s unversioned wrapper.
+
+    ⛔ THE PREPEND IS ASSERTED AS ONE FACT, NOT TWO (#12051 review P2). The
+    first cut checked "the versioned dir appears somewhere in the step" and
+    "`GITHUB_PATH` is written somewhere in the step" — two independent
+    disjunctions. Measured: a step whose `$GITHUB_PATH` write says `/usr/bin`
+    while an intra-step `export PATH=/usr/lib/postgresql/16/bin:…` stays behind
+    passed all four tests, and on the LEG that is the full revert — `/usr/bin`
+    resolves through `pg_wrapper` to the image's newest client (17), while the
+    in-step check still prints 16 because it runs under the export. The write
+    line is therefore matched as a unit below.
     """
     steps = _steps(job)
     image_majors = _postgres_image_majors(job)
@@ -149,15 +166,20 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
         "from a PG17 client into a PG16 server is #12051"
     )
 
-    paths = {int(p) for p in CLIENT_PATH_RE.findall(text)}
-    assert server_major in paths, (
-        f"the pin step never puts `/usr/lib/postgresql/{server_major}/bin` on "
-        f"PATH (found {sorted(paths)}); the versioned binaries would then lose "
-        "to the runner image's own client, and the pin would be decorative"
+    # ONE regex over the WHOLE command: the versioned dir must be the value
+    # WRITTEN TO `$GITHUB_PATH`. A bare `CLIENT_PATH_RE`/`"GITHUB_PATH" in text`
+    # pair is satisfiable by two different lines and by an inert `export`.
+    prepend = GITHUB_PATH_PREPEND_RE.search(text)
+    assert prepend, (
+        "the pin step never writes a `/usr/lib/postgresql/<major>/bin` entry to "
+        "`$GITHUB_PATH`; a prepend that only exists as an `export` inside this "
+        "step cannot reach the pytest leg, so the leg would resolve `pg_dump` "
+        f"from the runner image instead (step text: {text!r})"
     )
-    assert "GITHUB_PATH" in text, (
-        "the PATH prepend must be written to `$GITHUB_PATH` — exporting it in "
-        "one step's shell does not reach the pytest step"
+    assert int(prepend.group("major")) == server_major, (
+        f"the `$GITHUB_PATH` prepend names major {prepend.group('major')} but the "
+        f"provisioned servers are pg{server_major} — the versioned binaries "
+        "would lose to the runner image's own client, which is #12051"
     )
 
 
@@ -167,13 +189,33 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     Without this the pin degrades on a runner-image change: the artifact would
     still be dumped by the newer client, and D8 would red with a message that
     blames the record path (#12051's whole complaint).
+
+    ⛔ THE CONDITION IS ASSERTED, NOT JUST ITS MESSAGE (#12051 review P3).
+    `"::error::" in text and "exit 1" in text` cannot tell an ARMED branch from
+    a disarmed one: measured, `if [ "$major" != "16" ]; then` → `if false; then`
+    left all four tests green while the job would never fail closed. The
+    comparison literal is therefore pinned to the servers' major.
+
+    STATED LIMIT: this is a hermetic text guard, so it cannot prove the
+    version-EXTRACTION arithmetic — a `sed` rewritten to a constant (`s/.*/16/`)
+    still passes. The alternative is arming two real client majors in CI, which
+    this job cannot do without provisioning a second client version; the
+    in-job assertion (`pg_dump --version` printed and checked) is what makes a
+    constant extraction visible in the log instead.
     """
     _, pin = _pin_step(_steps(job))
     text = _run_text(pin)
+    server_major = _postgres_image_majors(job)[0]
+
     assert "::error::" in text and "exit 1" in text, (
         "the client pin asserts nothing about the version it actually got — it "
         "must `echo \"::error::…\"` and `exit 1` on a mismatch, so a runner "
         "image change surfaces as this step, not as an unrestorable artifact"
+    )
+    assert f'"$major" != "{server_major}"' in text, (
+        "the pin never COMPARES the client's major with the servers' "
+        f"({server_major}) — a branch that cannot fire is the same symptom as no "
+        "branch at all, which is what left #12051 invisible for a day"
     )
     for tool in ("pg_dump", "pg_restore"):
         assert tool in text, (
