@@ -67,7 +67,7 @@ Host routing lives in `website/functions/_middleware.ts`:
     differently, and naming the three explicitly is deliberate.) On the exact `premiselabs.co` host
     the middleware 301s them to the app origin with the code in its `Location` (the recorded
     residual); on `tortoise.*`/previews there is no middleware branch to keep, so the request falls
-    through to the **backstop** at `_middleware.ts:501` and is refused with the same 400
+    through to the **backstop** at `_middleware.ts:514` and is refused with the same 400
     (`/signup?code=…` on the tortoise host — pinned by the suite).
   - `/auth`, `/auth.html` (301), `/auth/*` (302) and `/admin`, `/admin/*` (302) are
     **host-independent**: those branches run on every host, so an exempt-shaped request carrying a
@@ -79,7 +79,7 @@ Host routing lives in `website/functions/_middleware.ts`:
   - the middleware's `APP_ONLY` **branch** (`/auth`, `/signup`, `/welcome`, `/invite-accept` + `.html`
     twins) runs **only** on the exact `premiselabs.co` host (`COMPANY_HOSTS`) — but `/auth` and
     `/auth.html` also have their own **unconditional** 301 below, so for those two the branch is not
-    what preserves the redirect on `tortoise.*`/previews (`_middleware.ts:403-408`);
+    what preserves the redirect on `tortoise.*`/previews (`_middleware.ts:416-421`);
   - `/auth` and `/auth.html` 301 **unconditionally** — the redirect #4054 shipped, left alone because
     it is already in browsers' caches and changing it is its own decision — while `/auth/*` answers
     **302** (`#4346`) and `/admin` **302**s (`#4409`), all **unconditionally** (those cover
@@ -89,7 +89,7 @@ Host routing lives in `website/functions/_middleware.ts`:
   - on the tortoise host the other three (`/signup`, `/welcome`, `/invite-accept` + twins) are 301'd
     by the **static** `website/_redirects`, not by the middleware. Deleting those rules breaks the
     tortoise host — the middleware does not cover it **for an ordinary request**. It DOES answer
-    those paths when the request carries a stray `?code=`: the backstop at `_middleware.ts:501`
+    those paths when the request carries a stray `?code=`: the backstop at `_middleware.ts:514`
     returns the 400 before `context.next()` reaches `_redirects`, so `tortoise…/signup?code=…` is a
     refusal, not a 301. Do not "fix" that by adding a middleware redirect for it — the backstop's
     own comment forbids reversing the exemption that way
@@ -329,8 +329,8 @@ dashboard.
 
 | Asset | Host | Notes |
 | --- | --- | --- |
-| `website/robots.txt` | `premiselabs.co` | advertises the **index** (`/sitemap.xml`), which names the three same-host children — the shape Google documents for an index. ⛔ `app.premiselabs.co/sitemap.xml` is **not** listed: that sitemap belongs to the separate `tortoise-dashboard` Pages project and is advertised by that project's own `apps/dashboard/public/robots.txt` (#11766) |
-| `website/sitemap.xml` | `premiselabs.co` | **the conventional `/sitemap.xml` entry point** (#11615): a `<sitemapindex>` naming the three below, every `<loc>` on this host — the protocol's same-site rule for index files is **satisfied**, so the deviation record this row used to carry is deleted rather than reworded (#11766; it asserted the defect #11623 named) |
+| `website/robots.txt` | `premiselabs.co` | advertises the **index** (`/sitemap.xml`), which names the three same-host children — the shape Google documents for an index. The retired host **301s** this file along with the sitemaps (`CRAWLER_SURFACE` in `functions/_middleware.ts`), so there is exactly one host a crawler can read it from. ⛔ `app.premiselabs.co/sitemap.xml` is **not** listed: that sitemap belongs to the separate `tortoise-dashboard` Pages project and is advertised by that project's own `apps/dashboard/public/robots.txt` (#11766) |
+| `website/sitemap.xml` | `premiselabs.co` | **the conventional `/sitemap.xml` entry point** (#11615): a `<sitemapindex>` naming the three below, every `<loc>` on this host — the protocol's same-site rule for index files is **satisfied**, so the deviation record this row used to carry is deleted rather than reworded (#11766; it asserted the defect #11623 named). That satisfaction depends on the middleware: a root ASSET is not a page, so the retired host served its own 200 copy until `CRAWLER_SURFACE` 301'd it — measured 2026-11-12 (`tortoise.premiselabs.co/sitemap.xml` → 200, an index naming off-host children) |
 | `website/sitemap-company.xml` | `premiselabs.co` | two URLs (`/`, `/contact`) — company page + contact form (the contact URL was added by #4705 and this row said "single URL" until 2026-11-09) |
 | `website/sitemap-product.xml` | `premiselabs.co` | nine URLs, one per 200: `/tortoise` (the product page), then `docs`, `faq`, `self-hosted`, `security`, `license` **under** the prefix, and `/privacy`, `/tos`, `/dpa` at the company **root** (`LEGAL_AT_ROOT` — those govern the business, not the product). ⛔ `/tortoise/privacy` is a **404**, measured 2026-11-12, so it is not merely a redirect to avoid. The auth URLs are not in this sitemap: `/signin` 301s to `/auth`, and `/auth` itself lives on the app origin (#4054) |
 | `website/_redirects` | `premiselabs.co` | trailing-slash 301s → extensionless canonicals; `/index.html → /`; `/sitemap_index.xml → /sitemap.xml` (the second convention tools probe, #11615); `.html` dedupe for non-auth pages |
@@ -377,6 +377,10 @@ Rules:
   canonical product URL: `/product`, `/product.html` and (on the product host) `/index.html` 301 →
   `premiselabs.co/tortoise`. They are duplicates of the root rewrite, not separate pages. The raw
   `.html` spellings of the product set normalize onto the extensionless form so the chain is one hop.
+  The same block 301s the **crawler surface** (`CRAWLER_SURFACE`: `robots.txt` and `sitemap*.xml`) off
+  the retired host — they are root ASSETS, so no page branch matched them and the retired host served
+  its own 200 copy of the index until #11766; pinned by
+  `tests/test_middleware_host_consolidation.mjs`, which drives the real `onRequest`.
 - **Search Console submission:** submit `https://premiselabs.co/sitemap.xml` — the index names the
   three same-host children, so they are submitted with it. The app origin's sitemap stays submitted
   from its own property, as it always was — the marketing index no longer names it (#11766).

@@ -76,6 +76,16 @@ const ROOT_HTML = new Set(
     .map((f) => `/${f}`),
 );
 
+// …and the CRAWLER surface is served from root FILES too: `robots.txt` and the sitemaps
+// are static assets, not pages, so no page branch in the middleware matches them. Derived
+// from disk like `ROOT_HTML`, so a row that lands on one of them is falsifiable: delete
+// `sitemap-product.xml` and the row that must land on a 200 reds (#11766).
+const ROOT_ASSETS = new Set(
+  readdirSync(WEBSITE)
+    .filter((f) => f === "robots.txt" || f.endsWith(".xml"))
+    .map((f) => `/${f}`),
+);
+
 // The two layers BELOW the middleware that a bare asset mock would get wrong,
 // modelled explicitly so the pass-through assertions are about reality:
 //   • Pages Functions — `/blog` and `/blog/*` are served by
@@ -112,6 +122,9 @@ async function assetsFetch(assetUrl) {
     // `website/apps/dashboard/functions/admin/[[path]].ts` does.
     return new Response(null, { status: 301, headers: { Location: COMMITTED_REDIRECTS.get(pathname) } });
   }
+  if (ROOT_ASSETS.has(pathname)) {
+    return new Response(`asset:${pathname}`, { status: 200 });
+  }
   if (ROOT_HTML.has(pathname)) {
     return new Response(`<html data-asset="${pathname}"></html>`, { status: 200 });
   }
@@ -145,6 +158,9 @@ function ctx(urlStr) {
       }
       if (u.pathname === "/") {
         return new Response(`<html data-asset="/index.html"></html>`, { status: 200 });
+      }
+      if (ROOT_ASSETS.has(u.pathname)) {
+        return new Response(`asset:${u.pathname}`, { status: 200 });
       }
       if (ROOT_HTML.has(u.pathname) || ROOT_HTML.has(`${u.pathname}.html`)) {
         return new Response(`<html data-asset="${u.pathname}"></html>`, { status: 200 });
@@ -225,6 +241,25 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
     ["/privacy.html", "/privacy"],
     ["/tos", "/tos"],
     ["/dpa", "/dpa"],
+  ]) {
+    await assertOneHop(`https://${PRODUCT}${from}`, {
+      expectLocation: `https://${COMPANY}${to}`,
+    });
+  }
+
+  // ⛔ THE CRAWLER SURFACE IS NOT A PAGE (#11766). `robots.txt` and the sitemaps are root
+  // ASSETS, so without an explicit branch the retired host falls through to the asset
+  // router and answers 200 with a sitemap index whose <loc>s are all on the marketing
+  // host — an index naming sitemaps off its own site, which the Sitemaps protocol forbids
+  // (a subdomain is the spec's own counterexample). Measured on the live site before this
+  // branch existed: `tortoise.premiselabs.co/sitemap.xml` → 200. The alias maps straight
+  // to the index in ONE hop rather than chaining through the company host's `_redirects`.
+  for (const [from, to] of [
+    ["/sitemap.xml", "/sitemap.xml"],
+    ["/sitemap-company.xml", "/sitemap-company.xml"],
+    ["/sitemap-product.xml", "/sitemap-product.xml"],
+    ["/robots.txt", "/robots.txt"],
+    ["/sitemap_index.xml", "/sitemap.xml"],
   ]) {
     await assertOneHop(`https://${PRODUCT}${from}`, {
       expectLocation: `https://${COMPANY}${to}`,

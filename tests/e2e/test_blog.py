@@ -107,7 +107,7 @@ _BLOG_HOSTS_DIFFER = COMPANY != TORTISE
 #
 #    premiselabs.co            serves the blog (robots.txt names THIS host's index)
 #    tortoise.premiselabs.co   the retired origin; 301s /blog* to the company origin
-#                              (`_middleware.ts:513-521`, `_lib.ts:63-68`). The as-written
+#                              (`_middleware.ts:526-533`, `_lib.ts:63-68`). The as-written
 #                              arm FOLLOWS that hop rather than grading it (see the note on
 #                              the probe below); the hop's direction is asserted in
 #                              `test_host_isolation_blog`.

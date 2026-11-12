@@ -2787,6 +2787,26 @@ def _document_for_loc(url: str) -> Path | None:
     return None
 
 
+def _canonical_page_url(document: Path) -> str:
+    """The ONE URL this project serves `document` at — the canonical form (#11762).
+
+    Derived from the two set mirrors the middleware is pinned to (`PRODUCT_PAGE_NAMES`,
+    `PRODUCT_PREFIX`) rather than from a second table, so it cannot describe a map that
+    does not exist. The legal pages that govern the BUSINESS have no preview entry and fall
+    through to the company root, which is where `LEGAL_AT_ROOT` keeps them.
+    """
+    name = document.stem
+    if name == "index":
+        path = "/"
+    elif name == "product":
+        path = f"/{PRODUCT_PREFIX}"
+    elif name in PRODUCT_PAGE_NAMES:
+        path = f"/{PRODUCT_PREFIX}/{name}"
+    else:
+        path = f"/{name}"
+    return f"{MARKETING_ORIGIN}{path}"
+
+
 def test_the_product_prefix_resolves_to_the_served_document() -> None:
     """A product <loc> resolves through the prefix to the file that serves it.
 
@@ -2829,6 +2849,40 @@ def test_the_product_prefix_resolves_to_the_served_document() -> None:
         f"{sorted(served_names)} under /{PRODUCT_PREFIX} while this module resolves "
         f"{sorted(PRODUCT_PAGE_NAMES)} — a <loc> for a page in one set and not the "
         "other resolves to a 404 live while the sitemap walk stays green")
+
+
+def test_every_page_loc_is_the_canonical_url_for_its_document() -> None:
+    """A page `<loc>` must be the URL the page is CANONICAL at, not merely one that resolves.
+
+    ⛔ "RESOLVES" AND "IS CANONICAL" ARE DIFFERENT PROPERTIES, and every other walk in this
+    file asserts only the first. Measured on this change: replacing
+    `https://premiselabs.co/tortoise/docs` with `https://premiselabs.co/docs` — a live 301
+    onto the canonical form — left `75 passed`, while `sitemap-product.xml`'s own header
+    says every `<loc>` is "the URL that answers 200". Submitting redirects is what people
+    read as a migration error, which is exactly the defect #11766 removes for the retired
+    host; it must not be re-introducible for the forms the move CREATED.
+
+    The canonical form is derived (`_canonical_page_url`), so this stays a property rather
+    than a list: `/docs` and `/docs.html` on the company host, a trailing slash, or
+    `/tortoise/privacy` (a 404) all red, and a NEW page is held to it without editing here.
+    """
+    problems = []
+    for sitemap in _published_sitemaps(WEBSITE):
+        for loc in _xml_locs(sitemap):
+            document = _document_for_loc(loc)
+            if document is None:
+                # A dead <loc> is `test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex`'s
+                # subject; reporting it here too would name one defect twice.
+                continue
+            canonical = _canonical_page_url(document)
+            if loc != canonical:
+                problems.append(
+                    f"{sitemap.name}: {loc} resolves to {document.name}, whose canonical URL "
+                    f"is {canonical}"
+                )
+    assert not problems, "\n".join(problems) + (
+        "\nA <loc> that redirects teaches a crawler the canonical URL moved. Name the URL "
+        "that ANSWERS 200")
 
 
 def test_the_site_root_is_a_different_page_per_host() -> None:
@@ -3067,11 +3121,22 @@ def test_every_advertised_sitemap_is_servable_from_this_tree() -> None:
     lines: robots.txt names the index, and a walk of the raw lines would grade exactly one
     document while the three children it points at stayed unmeasured.
 
+    ⛔ THE APP PROJECT'S OWN ADVERTISEMENT IS IN THE WALK, and dropping it here would be a
+    coverage REGRESSION: `website/apps/dashboard/public/robots.txt` is committed in this
+    tree and advertises `https://app.premiselabs.co/sitemap.xml`, a URL `_sitemap_file_for`
+    resolves inside the dashboard's `public/`. Without it, deleting that sitemap while its
+    robots.txt still names it is green everywhere — a robots.txt advertising a 404, which is
+    this test's own subject.
+
     Its CONVERSE — a sitemap that exists and is advertised by nothing — is
     `test_every_sitemap_in_the_tree_is_advertised`. Both halves are needed: this one walks
     the advertisement, that one walks the tree.
     """
-    missing = [url for url in sorted(_advertised_sitemaps()) if _sitemap_file_for(url) is None]
+    advertised = set(_advertised_sitemaps())
+    app_robots = WEBSITE / "apps" / "dashboard" / "public" / "robots.txt"
+    if app_robots.is_file():
+        advertised |= set(_robots_sitemap_urls(app_robots))
+    missing = [url for url in sorted(advertised) if _sitemap_file_for(url) is None]
     assert not missing, (
         f"an advertised sitemap has no file or Function behind it: "
         f"{missing}. Either add the sitemap or drop the reference — a crawler that reads "
@@ -3130,9 +3195,12 @@ def test_every_sitemap_in_the_tree_is_advertised() -> None:
                 "the app project's OWN robots.txt has to advertise "
                 "https://app.premiselabs.co/sitemap.xml, and it does not")
     assert not problems, "\n".join(problems) + (
-        "\nAdvertise it — in BOTH files, since the index and robots.txt are held equal to "
-        "each other — or delete it. A sitemap that exists but is advertised by nothing is "
-        "#11615 with its halves swapped")
+        "\nAdvertise it from the file that OWNS it — this project's `robots.txt` or a "
+        "`<loc>` in the index robots.txt advertises, or, for the app origin, that "
+        "project's own `robots.txt`. ⛔ NOT from a foreign-host index: #11766's "
+        "same-host assertion reds on exactly that advice, which is what this sentence "
+        "used to give. Or delete it — a sitemap that exists but is advertised by "
+        "nothing is #11615 with its halves swapped")
 
 
 def test_sitemap_discovery_reads_the_root_element_not_the_filename(tmp_path: Path) -> None:
