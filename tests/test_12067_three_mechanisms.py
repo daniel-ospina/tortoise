@@ -148,9 +148,16 @@ def test_the_mechanism_set_is_three_and_closed():
     assert set(_MECHANISM_POTENTIALS) == MECHANISM_VALUES
     # Every mechanism is also a core predicate — one home, no second list…
     assert MECHANISM_VALUES <= CORE_PREDICATES
-    # …and the sdk's ORDERED spelling (the tuple five call sites iterate) is that
-    # same set, so a fourth mechanism cannot land in one home only (#12067 review
-    # round 5, P2: it was a second declaration nothing compared).
+    # …and the sdk's ORDERED spelling is that same set, so a fourth mechanism
+    # cannot land in one home only (#12067 review round 5, P2: it was a second
+    # declaration nothing compared). ⛔ NO COUNT IS PINNED HERE (review round 13,
+    # P2): an earlier revision said "the tuple five call sites iterate", and the
+    # commit that wrote it had just DELETED the fifth (`edge_type = ("hasPart"
+    # if op_type not in _MECHANISM_OP_TYPES …)`, replaced by
+    # `mechanism_rel_type`) — so the count described the pre-fix tree. Four
+    # sites happen to test membership against it now; that is an observation, not
+    # a number to trust, because a count in prose is exactly how a stale fact
+    # entered this file before (`:1400-1401`). Re-derive it, do not read it.
     assert set(_MECHANISM_OP_TYPES) == MECHANISM_VALUES
     assert set(MECHANISM_REL_TYPES) == MECHANISM_VALUES
 
