@@ -477,6 +477,71 @@ _CONTRACT_RUN_RE = re.compile(
     r"^        run: (?:bash )?\.github/scripts/" + re.escape(CONTRACT_STEP)
 )
 
+#: A step BEGINS at a sequence item under `steps:` — six spaces and a `-`. The dash may be
+#: BARE (the step's first key then sits on the following line), which is why this admits
+#: end-of-line as well as whitespace after it: `re.match(r"^      - ")` did not, so a bare
+#: marker fell through, the backward search ran to line 0, and the JOB's own `if:` was then
+#: attributed to the contract step — a false violation demanding a remedy that cannot apply.
+_STEP_MARKER = re.compile(r"^      -(?:\s|$)")
+
+#: Step keys that make a step able to never run (`if:`) or to pass while failing
+#: (`continue-on-error:`). Either one defuses the contract: the job then reaches `gh` with
+#: no provisioned tool and dies 127 (#9018) while every textual check still passes.
+_STEP_DEFUSERS = ("if", "continue-on-error")
+
+
+def _step_bounds(lines: list[str], at: int) -> tuple[int, int]:
+    """The range of `lines` holding the step that owns `lines[at]`.
+
+    ⛔ THE BOUND IS THE WHOLE STEP. A guard written AFTER the `run:` is invisible to a scan
+    that stops at it, and YAML puts no constraint on key order — GitHub's own examples write
+    `continue-on-error:` after the command. See `_contract_violations`.
+    """
+    start = 0
+    for i in range(at - 1, -1, -1):
+        if _STEP_MARKER.match(lines[i]):
+            start = i
+            break
+    end = len(lines)
+    for i in range(at + 1, len(lines)):
+        if _STEP_MARKER.match(lines[i]):
+            end = i
+            break
+    return start, end
+
+
+def _step_defusers(lines: list[str], at: int) -> list[str]:
+    """The defusing keys the step owning `lines[at]` carries (`[]` when none).
+
+    ONE implementation, because the coverage arm and the ordering arm must not disagree: a
+    predicate that saw a guard where the other did not would SUPPRESS the very finding the
+    ordering arm raises — `_undeclared_gh_jobs` reads this function too, through
+    `_live_contract_step`. A commented-out key is not a key.
+    """
+    start, end = _step_bounds(lines, at)
+    out = []
+    for line in lines[start:end]:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        key = stripped.split(":")[0]
+        if key in _STEP_DEFUSERS:
+            out.append(key)
+    return out
+
+
+def _live_contract_step(body: list[str]) -> bool:
+    """Is some step the contract step itself, in command position, and UNGUARDED?
+
+    The coverage arm's half of the ordering arm's question. A job whose only contract step
+    is guarded is NOT covered: the step is present textually and can never provision
+    anything, which is exactly the silent fail-open `#9018` is about.
+    """
+    for at, line in enumerate(body):
+        if _CONTRACT_RUN_RE.match(line) and not _step_defusers(body, at):
+            return True
+    return False
+
 
 def _job_block(path: Path, job: str) -> str:
     """The YAML slice for one job — from `  <job>:` to the next top-level job.
@@ -516,6 +581,13 @@ def _contract_violations(block: str, scripts: frozenset[str]) -> list[str]:
     natural spelling a future author would reach for. A guarded step satisfies every
     textual check while being able to never run, which is this file's definition of a
     silent fail-open.
+
+    ⛔ THE GUARD IS READ OVER THE WHOLE STEP (`_step_defusers`), not over the lines before
+    the `run:`. YAML puts no constraint on key order and GitHub's own examples write
+    `continue-on-error:` after the command, so the earlier `[step_start, at)` scan answered
+    `[]` for a step carrying BOTH defusers after its `run:` (measured on this head, #12167
+    review). The same scan also attributed a JOB-LEVEL `if:` to the step whenever the step's
+    marker was a bare `-`, because `re.match(r"^      - ")` needs a space after the dash.
     """
     if CONTRACT_STEP not in block:
         return [
@@ -538,18 +610,11 @@ def _contract_violations(block: str, scripts: frozenset[str]) -> list[str]:
             f"the derived helpers — so it can still die with 127: {early}. "
             f"`{CONTRACT_STEP}` must come first (#9018)"
         )
-    step_start = 0
-    for i in range(at - 1, -1, -1):
-        if re.match(r"^      - ", lines[i]):
-            step_start = i
-            break
-    for line in lines[step_start:at]:
-        key = line.strip().split(":")[0]
-        if key in ("if", "continue-on-error"):
-            out.append(
-                f"the contract step carries a `{key}:`, so it may never run and the "
-                "job can reach `gh` with no runner-tool contract at all (#9018)"
-            )
+    for key in _step_defusers(lines, at):
+        out.append(
+            f"the contract step carries a `{key}:`, so it may never run and the "
+            "job can reach `gh` with no runner-tool contract at all (#9018)"
+        )
     return out
 
 
@@ -631,6 +696,38 @@ def test_a_guarded_contract_step_is_not_compliant():
             "  job:\n    steps:\n      - name: contract\n" + shape + "\n", scripts
         )
         assert got and "command position" in got[0], (why, got)
+
+    # ⛔ KEY ORDER IS NOT A DEFENCE (#12167 review). YAML puts no constraint on it, and
+    # GitHub's own examples write `continue-on-error:` after the command. The first cut of
+    # this arm scanned only the lines BEFORE `run:`, so a step carrying BOTH defusers after
+    # it answered `[]` — measured on this head: `if: runner.os == 'Linux'` and
+    # `continue-on-error: true` each written below the `run:` produced no violation at all.
+    for late in ("if: runner.os == 'Linux'", "continue-on-error: true"):
+        got = _contract_violations(
+            "  job:\n    steps:\n      - name: contract\n" + body + f"        {late}\n", scripts
+        )
+        assert got and late.split(":")[0] in got[0], (
+            f"a `{late}` written AFTER the step's `run:` was not seen — a guarded contract "
+            f"step reported clean ({got!r})"
+        )
+
+    # …and the SAME scan must not reach OUTSIDE the step. A bare `-` marker (the step's first
+    # key on the next line) did not match `^      - `, so `step_start` stayed 0 and the JOB's
+    # own `if:` was attributed to the contract step — a false violation whose demanded remedy
+    # cannot apply. Measured on this head: `['the contract step carries a `if:`', …]`.
+    bare = (
+        "  job:\n"
+        "    if: needs.changes.outputs.python == 'true'\n"
+        "    runs-on: ubuntu-24.04\n"
+        "    steps:\n"
+        "      -\n"
+        "        name: contract\n"
+        f"        run: bash .github/scripts/{CONTRACT_STEP}\n"
+    )
+    assert _contract_violations(bare, scripts) == [], (
+        "a JOB-level `if:` was attributed to the contract step — the bare `-` step marker "
+        "does not end the backward search"
+    )
 
 
 def test_the_command_spelling_variants_are_hazards():
@@ -990,7 +1087,9 @@ def _jobs(path: Path) -> list[tuple[str, list[str]]]:
     literal block (`run: |`), whose resolved lines ARE its physical lines, adds nothing — and
     neither does the ordinary single-line `run: <cmd>`, whose resolved value is that command
     WITHOUT the `run: ` prefix. Comparing raw lines alone would add every one of those twice
-    and report each hazard twice (measured: 10 duplicated hits across 7 workflows).
+    and report each hazard twice (measured: 51 duplicated hit lines across 18 workflows / 22
+    jobs if this filter is removed — `finding-provenance.yml::provenance` 8, `::classify` 5,
+    `ci-timing.yml::measure` 4, `mergify-guard-recut.yml::recut` 4, …).
     """
     text = path.read_text()
     parsed = _yaml_jobs(text)
@@ -1569,8 +1668,9 @@ def _undeclared_gh_jobs(
             # Covered = carries the step (the property that matters) OR is declared.
             # `GH_JOBS` is the separate POSITION pin, not the coverage record.
             #
-            # ⛔ THE SAME STRICT PREDICATE AS THE ORDERING PIN, and it used to be the loose
-            # substring test one arm up. `CONTRACT_STEP in text` matched a COMMENTED-OUT step
+            # ⛔ THE SAME PREDICATE AS THE ORDERING PIN — literally the same function's
+            # question, and it used to be the loose substring test one arm up.
+            # `CONTRACT_STEP in text` matched a COMMENTED-OUT step
             # (`# run: bash .github/scripts/…`) and a prose one
             # (`echo "if this 404s, run … ensure gh by hand"`) — so `_gh_hazards` correctly
             # reported a `gh`-using job that had NO contract step, and THIS arm then
@@ -1579,7 +1679,14 @@ def _undeclared_gh_jobs(
             # is exactly what this scan exists to catch): both shapes passed. Loose == strict
             # across all 41 workflows / 92 jobs today (0 divergence), so this moves no live
             # verdict — and it is the `#12133` prose these very steps carry.
-            if any(_CONTRACT_RUN_RE.match(line) for line in body):
+            #
+            # ⛔ AND A GUARDED STEP IS NOT COVERAGE EITHER (#12167 review). The strict
+            # predicate alone still accepted a contract step carrying `if:` or
+            # `continue-on-error:`, so a BRAND-NEW job — the only thing this scan exists to
+            # catch — was suppressed as covered while `_contract_violations` called the same
+            # block a violation. `_live_contract_step` reads the guard through the SAME
+            # `_step_defusers` the ordering arm uses, so the two cannot diverge again.
+            if _live_contract_step(body):
                 continue
             if (path.name, job) in wired or (path.name, job) in declared_gaps:
                 continue
@@ -1647,6 +1754,31 @@ def test_a_commented_out_or_printed_step_is_not_coverage(tmp_path):
     assert _undeclared_gh_jobs(tmp_path, _gh_executing_scripts(), set(), set()) == [], (
         "a compliant synthetic job was reported as undeclared"
     )
+
+    # ⛔ AND A GUARDED STEP IS NOT COVERAGE (#12167 review). The strict `_CONTRACT_RUN_RE`
+    # predicate says nothing about guard keys, so a brand-new job whose contract step carries
+    # `if:`/`continue-on-error:` was suppressed as COVERED — while `_contract_violations` on
+    # the same block called it a violation. Measured on this head: `[]` from this arm and
+    # `['the contract step carries a `if:`', …]` from the ordering arm. The two arms must not
+    # be able to disagree; `_live_contract_step` reads the guard through the SAME
+    # `_step_defusers` the ordering arm uses.
+    for where in ("before", "after"):
+        guard = "        if: runner.os == 'Linux'\n"
+        run_line = "        run: bash .github/scripts/" + CONTRACT_STEP + "\n"
+        step = (
+            "      - name: contract\n" + guard + run_line
+            if where == "before"
+            else "      - name: contract\n" + run_line + guard
+        )
+        (tmp_path / "synthetic.yml").write_text(
+            synthetic("      - name: peek\n        run: gh pr view 1 --json number\n" + step)
+        )
+        got = _undeclared_gh_jobs(tmp_path, _gh_executing_scripts(), set(), set())
+        assert got == ["synthetic.yml::newjob"], (
+            f"a job whose ONLY contract step is guarded (`if:` {where} the run:) was accepted "
+            f"as coverage — the scan went green on a step that can never provision anything "
+            f"({got!r})"
+        )
 
 
 def test_every_pool_eligible_gh_job_is_declared():
@@ -2679,8 +2811,9 @@ def test_the_contract_step_reader_cannot_be_defused_by_prose():
     # silently answering `[]` there is how a missing step reads as a clean job.
     missing = _contract_violations("        run: gh pr view 1", scripts)
     assert missing and CONTRACT_STEP in missing[0], missing
-    # ⛔ AND IT IS DERIVED, not a text list. The old list named 5 of the 49 derived helpers and
-    # 8 of `_GH_CMD`'s subcommands, so a job could put `check-required-set.py` or `gh secret`
+    # ⛔ AND IT IS DERIVED, not a text list. The old list named 5 of the 49 helpers derivable
+    # at that head (51 at this one — `_SCRIPT_GLOBS` gained `operations/orchestrator-harness/`)
+    # and 8 of `_GH_CMD`'s subcommands, so a job could put `check-required-set.py` or `gh secret`
     # ahead of the contract step and this pin stayed green. Both are pre-contract hazards now.
     for shape in (
         "        run: python3 .github/scripts/check-required-set.py",
@@ -2745,7 +2878,7 @@ def test_an_expression_valued_runs_on_keeps_its_job_in_the_scan():
     `test` routes its odd legs to an explicit `["self-hosted", "self-hosted-x64"]`
     pin, i.e. the one job whose legs can reach a minimal-`PATH` pool runner BY NAME —
     and it is the largest job in the tree (28 steps; next largest is 19), so it is the
-    the one whose dropping-out this rule exists to notice. Dropping it out of this scan is
+    one whose dropping-out this rule exists to notice. Dropping it out of this scan is
     silent: the scan can only red on jobs it looks at, so a `gh`-using step added to
     `test` later would join the #9018 gap with the suite green. It is `gh`-free today,
     which is why nothing reds now and why the arm has to be a pin instead of a fix to
