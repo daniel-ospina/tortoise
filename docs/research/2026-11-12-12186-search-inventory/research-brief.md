@@ -455,7 +455,7 @@ declared as **`#8486`'s own question** and must not be armed on a lane's judgeme
 
 ### Zep's Jaccard is over NAME SHINGLES. Confirmed from the source.
 
-`graphiti_core/utils/maintenance/dedup_helpers.py`:
+[`graphiti_core/utils/maintenance/dedup_helpers.py`](https://github.com/getzep/graphiti/blob/main/graphiti_core/utils/maintenance/dedup_helpers.py):
 
 ```python
 def _shingles(normalized_name: str) -> set[str]:
@@ -558,7 +558,7 @@ class EntityNode(Node):
         self.name_embedding = await embedder.create(input_data=[text])
 ```
 
-(`graphiti_core/nodes.py:499-511`.) ⭐ **Zep separates the embedded key from the adjudication context**:
+([`graphiti_core/nodes.py:499-511`](https://github.com/getzep/graphiti/blob/main/graphiti_core/nodes.py).) ⭐ **Zep separates the embedded key from the adjudication context**:
 `summary` is a *regional summary of surrounding edges*, and it is rendered into the dedupe prompt's
 `EXISTING ENTITIES` JSON (`graphiti_core/prompts/dedupe_nodes.py`) — **never embedded**.
 
@@ -607,7 +607,11 @@ vector.
 
 ## 7.6 EXPANDED — the performers round 1 never read, to mechanism level
 
-**Mem0 (April 2026) — read from `README.md`, the vendor's 2026 report, and the code.** Single-pass
+**Mem0 (April 2026) — read from the [README](https://github.com/mem0ai/mem0/blob/main/README.md), the
+vendor's [2026 report](https://mem0.ai/blog/state-of-ai-agent-memory-2026), and the code
+([`mem0/memory/main.py`](https://github.com/mem0ai/mem0/blob/main/mem0/memory/main.py),
+[`mem0/utils/scoring.py`](https://github.com/mem0ai/mem0/blob/main/mem0/utils/scoring.py),
+[`mem0/utils/entity_extraction.py`](https://github.com/mem0ai/mem0/blob/main/mem0/utils/entity_extraction.py)).** Single-pass
 **ADD-only** extraction: one LLM call, **no UPDATE/DELETE** — *"Memories accumulate; nothing is overwritten"*.
 Agent-generated facts are first-class. Entity linking into `{collection}_entities`. Multi-signal retrieval
 = semantic + **BM25** + entity matching, **additive-normalised** (not RRF), over a **semantic-only candidate
@@ -621,7 +625,9 @@ open-source SDK"**).
 edges** buys most of the graph's retrieval value — which is an argument for B2-as-*candidate-generation* and
 against B2-as-*edge-overlap-score*.
 
-**Cognee — read from its docs.** Identity is a **function of the name**: *"The identity of the stored node is
+**Cognee — read from its docs
+([docs.cognee.ai/python-api/cognify](https://docs.cognee.ai/python-api/cognify),
+[cognee.ai/grounding-ai-memory](https://www.cognee.ai/grounding-ai-memory)).** Identity is a **function of the name**: *"The identity of the stored node is
 derived from its `name` (normalized to lowercase, with spaces turned into underscores and apostrophes
 stripped), so every mention of the same name … resolves to the same `Entity` node instead of creating a
 duplicate"* (`Entity.id_for(name)`). Several same-name nodes **inside one chunk** get deterministic
@@ -637,7 +643,9 @@ We did the opposite deliberately — `#3590` landed `merge_key = "id"` — so si
 is the only mechanism left (which is exactly the KEEP ruling's premise). ⛔ **Not a candidate: it would
 reverse `#3590`.** It is evidence for *why our problem exists*, not a fix for it.
 
-**Honcho — read from its README/CLAUDE.md and reasoning docs.** Entities are **declared, not extracted**:
+**Honcho — read from its [README](https://github.com/plastic-labs/honcho/blob/main/README.md),
+[`CLAUDE.md`](https://github.com/plastic-labs/honcho/blob/main/CLAUDE.md) and
+[reasoning docs](https://honcho.dev/docs/v3/documentation/core-concepts/reasoning).** Entities are **declared, not extracted**:
 "peers" (humans and agents) are first-class records, and there is no name-matching rung anywhere. Storage
 is PostgreSQL + pgvector; representations live in **collections keyed by `(observer, observed)` peer
 pairs**, which is how it models per-observer knowledge asymmetry. A background **Deriver** is *"a single LLM
@@ -647,7 +655,9 @@ into reasoning trees on a schedule; retrieval includes **hybrid BM25 + vector** 
 class because it never mints an entity from prose. It is only usable as evidence that resolution is a
 **write-path** decision, not a read-path one.
 
-**Supermemory — read from its docs.** The knowledge graph is **facts on facts, not entity-relation-entity
+**Supermemory — read from its docs
+([supermemory.ai/docs/concepts/how-it-works](https://supermemory.ai/docs/concepts/how-it-works),
+[supermemory.ai/docs/concepts/graph-memory](https://supermemory.ai/docs/concepts/graph-memory)).** The knowledge graph is **facts on facts, not entity-relation-entity
 triples** (*"not classic entity–relation–entity triples you maintain by hand"*): nodes are memory entries;
 edges are `updates` / `extends` / `derives`. A second phase, **"dreaming"**, forms memories from *coherent
 units* rather than per-write (`dreaming: "dynamic"` by default; `"instant"` for demos) — i.e. deferred
@@ -658,7 +668,10 @@ re-ranking.
 retrieval graph at all**. Entity resolution is not a prerequisite for a top score; it is a prerequisite for
 *our* semantics (identity, supersession, EP over a closed component).
 
-**Letta/MemGPT and Mastra:** round 1's §5.1 readings are **inherited, not re-verified this lane** — declared
+**Letta/MemGPT and Mastra:** round 1's §5.1 readings — Mastra =
+[mastra.ai/research/observational-memory](https://mastra.ai/research/observational-memory), Letta =
+[letta.com/blog/sleep-time-compute](https://letta.com/blog/sleep-time-compute) — are **inherited, not
+re-verified this lane** — declared
 in §7.9. Mastra's observability route remains the counter-case for the whole retrieval-centric inventory;
 Hindsight (§7.2b, 91.4 % LongMemEval with Gemini-3 Pro per its ACL demo paper) is the counter-case to
 *"Mem0 deleted its graph because graphs don't help"*.
@@ -690,6 +703,14 @@ exposed than Zep's to the transitive hazard. §7.7 is that trade, priced.
 
 ### The controls the field actually uses
 
+Sources, so each row is attributable: **erikevenson** =
+[erikevenson.github.io/architect/patterns/entity-resolution](https://erikevenson.github.io/architect/patterns/entity-resolution/)
+· **archtin** = [archtin.com/blog/entity-resolution-in-knowledge-graphs](https://archtin.com/blog/entity-resolution-in-knowledge-graphs)
+· **granveo** = [granveo.com/blog/resolve-entities-without-corrupting-knowledge-graph](https://www.granveo.com/blog/resolve-entities-without-corrupting-knowledge-graph)
+· **writeitai** = [github.com/writeitai/remember-stack — entity_registry.md](https://github.com/writeitai/remember-stack/blob/main/plan/analysis/entity_registry.md)
+(⚠️ a **third-party design note**, not a vendor primary — its Senzing/Wikidata characterisations are quoted
+from it, not verified against Senzing's or Wikidata's own documentation this lane).
+
 | control | source | do we have it? |
 |---|---|---|
 | **Maximum cluster size**, anything above it routed to **review**, not published | erikevenson; archtin (*"a cluster of 500 people is a bug, not a discovery"*) | ⛔ **NO** |
@@ -697,7 +718,7 @@ exposed than Zep's to the transitive hazard. §7.7 is that trade, priced.
 | **Persisted no-merge assertions**, honoured by the clustering step so an un-merge is not a treadmill | erikevenson (*"a steward's 'these are not the same' must be persisted"*) | ✅ **YES** — `dedup_target_id` / `dedup_rejected_targets` are read by `_ENTITY_READ` (`entity_resolver.py:203-214`) |
 | **Merge = redirect, not rewrite** (Wikidata QIDs never reused; a dead ID resolves to the survivor forever) | writeitai; and the SAME_AS pattern | ✅ **YES** — see below |
 | **Un-merge is deleting one edge** and re-clustering, not a recovery exercise | archtin (*"Unmerging is deleting one `SAME_AS` edge and re-clustering"*) | ✅ **structurally yes**; ⛔ **but nothing in-tree issues it** — `rg 'resolved_from'` over `tortoise/` finds **one write** (`apply_entity_merge`) and **reads only** (the `_ENTITY_READ` predicate at `:199-214`, `follow_resolved_from`, and four call sites in `entity_identity.py`); there is **no clear/REMOVE/reverse path at all** |
-| **`score`, `method`, `decidedAt` recorded ON the link** so *"why are these one customer"* is one query | archtin (*`SET r.score=$score, r.method=$method, r.decidedAt=datetime()`*); Senzing (*"every merge records why"*) | ⛔ **NO — the fields exist in the return value only** |
+| **`score`, `method`, `decidedAt` recorded ON the link** so *"why are these one customer"* is one query | archtin (*`SET r.score=$score, r.method=$method, r.decidedAt=datetime()`*); "Senzing — every merge records *why*" is **writeitai's** characterisation, quoted not verified | ⛔ **NO — the fields exist in the return value only** |
 | **Append-only decision rows + pre-merge membership snapshot** (what makes un-merge possible) | writeitai; granveo | ⚠️ **partly** — the journal gives replay (`derived == replay(journal)`), but there is no pre-merge *membership* snapshot |
 | **Cluster-size distribution** as a health metric (*"emerging giant cluster = over-merge in progress"*) | writeitai | ⛔ **NO** |
 | **Three outcomes** — same / different / **unresolved** | granveo | ✅ the review queue + `dedup_reviewed` exist |
