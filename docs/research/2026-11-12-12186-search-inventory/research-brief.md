@@ -347,13 +347,13 @@ lane a file-wide search.
 
 ---
 
-# §7. Round 2 — the primaries round 1 could not read, and the three disputes settled
+## §7. Round 2 — the primaries round 1 could not read, and the three disputes settled
 
 **Lane:** `research/12186-round2-depth` · verified at **`9828250732`** (round 1 pinned `1f28d107cf`)
 · research only, no implementation. This section **extends** §1–§6; it does not replace them, and where
 it falsifies a round-1 claim the falsified claim is named so the two can be read together.
 
-## 7.0 Rung taken, queries, and one thing that changed
+### 7.0 Rung taken, queries, and one thing that changed
 
 **Rung 1 worked this time.** `mcp__seo-intelligence__perplexity_search` was force-loaded and answered on
 this cell; round 1's cell reported `Unknown MCP server 'seo-intelligence'` (§0). Rung 2 was never needed.
@@ -397,9 +397,9 @@ is **`:40740-40758`** at this head — the file grew **1,184** lines in one day 
 enclosing block is `:40806-40854`). Every locator below
 is re-derived at `9828250732`; a lane reading this doc at a later head must re-derive, not copy.
 
-## 7.1 C2 SETTLED — the product lane runs TF-IDF, that is the vendor's own name for it, and BM25 is one gate away
+### 7.1 C2 SETTLED — the product lane runs TF-IDF, that is the vendor's own name for it, and BM25 is one gate away
 
-### The vendor says TF-IDF, and the API has no scorer to change it
+#### The vendor says TF-IDF, and the API has no scorer to change it
 
 FalkorDB's full-text documentation states the returned score's identity directly
 ([docs.falkordb.com/cypher/indexing/fulltext-index](https://docs.falkordb.com/cypher/indexing/fulltext-index)):
@@ -427,7 +427,7 @@ by any documented route.
 `CREATE FULLTEXT INDEX FOR (n:{label}) ON ({fields_expr})` or the legacy procedure, with **no `OPTIONS`
 block** (`:20785-20788`) — so the index is on vendor defaults: default language, default stopwords, TF-IDF.
 
-### Our own tree says three different things, and one of them is a comment error
+#### Our own tree says three different things, and one of them is a comment error
 
 | site | claim | verdict |
 |---|---|---|
@@ -443,7 +443,7 @@ row's own words: *"Drop the "build BM25" reading — a lane dispatched on the ep
 gap to fill"* and this section's *"the title is literally accurate"* answer different questions (what a lane
 would **do**, vs what the title **describes**), so they are compatible: keep the title, correct the instinct.
 
-### The bound round 1 stated but never explained: the arm is embedded-only for a latency reason, not a decision
+#### The bound round 1 stated but never explained: the arm is embedded-only for a latency reason, not a decision
 
 `tortoise/search_engine.py:3103-3107`, verbatim:
 
@@ -469,7 +469,7 @@ never a p95 of the corpus read. **The measurement the arm's own precondition dem
 unscoped** — recorded on `#8486` as a scope question (`comment 6837663346`), not assumed to be covered by
 it. M-7 inherits that: its gate is *a number nobody has scoped*, not a scheduled benchmark.
 
-### The mechanism nobody had stated: the scorer acts on RECALL, not on order
+#### The mechanism nobody had stated: the scorer acts on RECALL, not on order
 
 The FTS leg does `ORDER BY score DESC … LIMIT $limit` (`search_engine.py:2993-2994`), and `rrf_fusion`
 **throws the leg's score away** — the binding is literally `for rank, (pid, _score) in enumerate(ranked)`
@@ -482,16 +482,16 @@ C2 a **candidate-generation (recall) lever**, not a ranking lever — i.e. it be
 **M3 must measure the FTS leg's recall@k in isolation**, not only its score distribution. §6.2's word is
 "re-ranks"; the sharper, actionable word is **"re-selects"**.
 
-### Contradiction test
+#### Contradiction test
 
 **No recorded decision reaches "measure the hosted corpus-read latency".** V1 gates the **index location**
 (`SEARCH-ARCHITECTURE.md:§6.2`) and an in-process leg does not move the index. ⚠️ But broadly arming a
 lexical arm on the product read path is exactly what M3's measurement would have to judge, so this is
 declared as **`#8486`'s own question** and must not be armed on a lane's judgement — see M-7 in §7.8.
 
-## 7.2 B2 SETTLED — name shingles, and the highest-precision non-name signal is not an overlap score
+### 7.2 B2 SETTLED — name shingles, and the highest-precision non-name signal is not an overlap score
 
-### Zep's Jaccard is over NAME SHINGLES. Confirmed from the source.
+#### Zep's Jaccard is over NAME SHINGLES. Confirmed from the source
 
 [`graphiti_core/utils/maintenance/dedup_helpers.py`](https://github.com/getzep/graphiti/blob/main/graphiti_core/utils/maintenance/dedup_helpers.py):
 
@@ -516,7 +516,7 @@ name, escalate straight to the LLM and never run fuzzy** (`:345-350`) → entrop
 fuzzy (`:356-380`, candidate universe from the LSH buckets at `:359-361`). So an **ambiguous** exact name is a *deliberate* LLM case; the fuzzy arm only ever sees
 the residual.
 
-### The highest-precision non-name signal in systems that do **entity linking** (with or without a traversable graph) is **candidate generation**, not overlap
+#### The highest-precision non-name signal in systems that do **entity linking** (with or without a traversable graph) is **candidate generation**, not overlap
 
 Two mechanisms, both read from source or the paper, and neither is a pairwise neighbour-overlap feature:
 
@@ -562,7 +562,7 @@ candidates a vector leg cannot reach*, not to score pairs; **(ii)** the cross-en
 which is the order C1 and A6 need, and which our `rrf_fusion` + `ask_lane_rerank` already implement in the
 ask path.
 
-### ⚠️ CORRECTION to round 1's absolute
+#### ⚠️ CORRECTION to round 1's absolute
 
 Round 1 wrote *"no surveyed system reports typed-edge neighbourhood overlap as a ranking feature"*. That is
 true of the **memory systems** surveyed, and **false of ER practice**, which recommends exactly it:
@@ -575,9 +575,9 @@ is absent — which is round 1's conclusion, reached on a claim it had stated to
 
 **Contradiction test:** no recorded decision reaches this work.
 
-## 7.3 A3 SETTLED — the field exists (`title`), the vector is already name-only, and context belongs in the adjudicator
+### 7.3 A3 SETTLED — the field exists (`title`), the vector is already name-only, and context belongs in the adjudicator
 
-### `:Object` carries `title`, not just `name`
+#### `:Object` carries `title`, not just `name`
 
 `tortoise/projection/entities.py`: `title` is in the `:Object` property list (`:1902`), written
 `o.title=coalesce($title, '')` (`:5069`) and merged `o.title=coalesce($title, o.title)` (`:5087`).
@@ -587,7 +587,7 @@ is absent — which is round 1's conclusion, reached on a claim it had stated to
 census settles it** (`MATCH (o:Object) WHERE o.title IS NOT NULL AND o.title <> '' RETURN count(*)`) — and
 that count does not exist anywhere in this repo. See **M-8**.
 
-### Our `:Object` vector is ALREADY Zep's shape
+#### Our `:Object` vector is ALREADY Zep's shape
 
 `_upsert_object` computes the embedding from the **name alone** —
 `embedding = encode_for_row(name, self.required_embedding_dim)` (`:5013-5020`, comment *"Compute embedding
@@ -609,7 +609,7 @@ class EntityNode(Node):
 `summary` is a *regional summary of surrounding edges*, and it is rendered into the dedupe prompt's
 `EXISTING ENTITIES` JSON (`graphiti_core/prompts/dedupe_nodes.py`) — **never embedded**.
 
-### The minimal viable version, for a graph whose entities have no description field
+#### The minimal viable version, for a graph whose entities have no description field
 
 1. **Keep the vector name-only.** It is the **resolution key** job (§12.2c `:1313`), and it is what both we
    and Zep already do. Putting context in the vector would answer *"does this entity's neighbourhood look
@@ -627,7 +627,7 @@ being added to.
 KEEP ruling and §12.2c are **obeyed**, not reversed: nothing here removes, stops writing, or newly indexes a
 vector.
 
-## 7.4 CONFIRMED — round 1 was right, and here is the primary source
+### 7.4 CONFIRMED — round 1 was right, and here is the primary source
 
 | round-1 claim | status at `9828250732` |
 |---|---|
@@ -640,7 +640,7 @@ vector.
 | **D2** the read ledger must not be an admission-control signal | ✅ recorded, and **not re-litigated here** — §7 (`SEARCH-ARCHITECTURE.md`) + §17.4.6. Nothing in this section proposes it. |
 | **M-4** transitive closure is the merge hazard | ✅ confirmed **externally twice**; see §7.7, which also finds the hazard is *half-built* in our tree rather than absent. |
 
-## 7.5 CORRECTED — round-1 claims this round falsifies
+### 7.5 CORRECTED — round-1 claims this round falsifies
 
 | # | round-1 claim | the falsification | what it changes |
 |---|---|---|---|
@@ -652,7 +652,7 @@ vector.
 | **6** | A2: *"419 real surface variants"* — ⚠️ **not a round-1 quotation: this wording appears in neither round 1's doc nor the epic's body** (which says *"0 of 419 spelling variants"*). It is a **wording guard**, kept in this table so the distinction is not lost, not a falsification of anything round 1 wrote. | The population is **GENERATED** from real names, not observed (`#11901` comment `6836274599`, the relay). | Any sentence that calls the 419 a population of *real* variants overstates it; round 1's own word (`variants`) is correct. |
 | **7** | *(brief premise, not a round-1 quotation — §5 item 1 already keeps the two citations apart: the **arXiv paper** is 2025/ECAI, the **2026 report** is the April-2026 numbers)* Mem0's April-2026 algorithm is documented by **an arXiv paper** | There is **no April-2026 paper**. `arXiv:2504.19413` is **2025** (ECAI 2025) and **predates** the April-2026 algorithm; Mem0's own page says so explicitly: *"this report also covers Mem0's April 2026 … update, which **post-dates** the original ECAI 2025 paper and isn't reflected in its published numbers"* ([mem0.ai/blog/state-of-ai-agent-memory-2026](https://mem0.ai/blog/state-of-ai-agent-memory-2026)). | Cite the **README + blog + code** for the April-2026 algorithm, and the **2025 paper** only for what the 2025 paper measured. The two must not be merged into one citation. |
 
-## 7.6 EXPANDED — the performers round 1 never read, to mechanism level
+### 7.6 EXPANDED — the performers round 1 never read, to mechanism level
 
 **Mem0 (April 2026) — read from the [README](https://github.com/mem0ai/mem0/blob/main/README.md), the
 vendor's [2026 report](https://mem0.ai/blog/state-of-ai-agent-memory-2026), and the code
@@ -742,7 +742,7 @@ Hindsight (§7.2, item (b); 91.4 % LongMemEval with Gemini-3 Pro per its ACL dem
 83.6 % figure for its own open-source 20B model) is the counter-case to
 *"Mem0 deleted its graph because graphs don't help"*.
 
-### The cross-cutting finding, which no single row shows
+#### The cross-cutting finding, which no single row shows
 
 **At the top of the board, entity identity is DECLARED or DERIVED, not MATCHED.** Mastra: no entity layer.
 Honcho: peers are records. Mem0 (Apr 2026): ADD-only, nothing merged. Supermemory: facts, not entities.
@@ -751,9 +751,9 @@ Cognee: `id = f(name)` by construction. **The only surveyed system that runs a r
 chain.** Our system does persist a redirect pointer — which is *more* recoverable than Zep's and *more*
 exposed than Zep's to the transitive hazard. §7.7 is that trade, priced.
 
-## 7.7 Merge chains and reversibility — what the field does, and what we already have
+### 7.7 Merge chains and reversibility — what the field does, and what we already have
 
-### The hazard, stated externally (two independent sources, not our record)
+#### The hazard, stated externally (two independent sources, not our record)
 
 - Connected-components clustering *"is transitive by construction"*, so **"A matches B and B matches C puts
   A and C in the same entity even where A and C were compared and rejected. The pairwise model's own verdict
@@ -767,7 +767,7 @@ exposed than Zep's to the transitive hazard. §7.7 is that trade, priced.
 - *"Record **which derived claims, embeddings, summaries, and permissions depended on the old cluster** so
   they can be invalidated"* — ([granveo.com](https://www.granveo.com/blog/resolve-entities-without-corrupting-knowledge-graph))
 
-### The controls the field actually uses
+#### The controls the field actually uses
 
 Sources, so each row is attributable: **erikevenson** =
 [erikevenson.github.io/architect/patterns/entity-resolution](https://erikevenson.github.io/architect/patterns/entity-resolution/)
@@ -789,7 +789,7 @@ from it, not verified against Senzing's or Wikidata's own documentation this lan
 | **Cluster-size distribution** as a health metric (*"emerging giant cluster = over-merge in progress"*) | writeitai | ⛔ **NO** |
 | **Three outcomes** — same / different / **unresolved** | granveo | ✅ the review queue + `dedup_reviewed` exist |
 
-### What our tree already has — verified, and better than most of the field
+#### What our tree already has — verified, and better than most of the field
 
 `apply_entity_merge` (`tortoise/entity_resolver.py:728-812`) is a **non-destructive, journal-backable
 redirect**, not a collapse: the survivor gains the candidate's folded name in `aliases[]`, the candidate is
@@ -806,7 +806,7 @@ resolver-only defect — it is walked by identity reads.
 "remove the pointer" — and it is **more reversible than Zep's**, which needs no reversal because it never
 persists a merge.
 
-### What we do NOT have, and it is cheap
+#### What we do NOT have, and it is cheap
 
 1. **No evidence on the link.** `apply_entity_merge` **returns** `method` and `similarity` (`:808-810`) but
    **writes neither** — the persisted properties are `resolved_from`, `dedup_reviewed`, `reviewed`, and
@@ -840,9 +840,9 @@ persists a merge.
 **Contradiction test:** nothing here reverses the KEEP ruling, §12.2c, V1 or §2.0. M-9/M-10 obey the
 non-destructive-merge rule (`#2730` §6.7.3, `#783` J-2) rather than revising it.
 
-## 7.8 The levers no inventory lists yet
+### 7.8 The levers no inventory lists yet
 
-### M-7 ⭐ **Arm the BM25 leg on the HOSTED lane — the non-index route to C2**
+#### M-7 ⭐ **Arm the BM25 leg on the HOSTED lane — the non-index route to C2**
 
 The in-process Okapi BM25 leg exists, is default-ON, and is gated to `is_embedded` for a stated
 **latency** reason (a ≤`DEFAULT_BM25_CORPUS_CAP` = 20 000-row corpus read tokenised in Python outside
@@ -859,7 +859,7 @@ measurement** (§7.1, `#8486` `comment 6837663346`): the gate has to be the corp
 artifact holds it yet. An arming decision taken on "`#8486` is still open" without that number is the same
 fail-open the gate exists to prevent.
 
-### M-8 ⭐ **The `title` census** — one query that decides whether A3 has a context field at all
+#### M-8 ⭐ **The `title` census** — one query that decides whether A3 has a context field at all
 
 `MATCH (o:Object) WHERE o.title IS NOT NULL AND o.title <> '' RETURN count(*)` (+ the same over `:Subject`).
 **Why:** §7.3 shows `title` is the only candidate context field on the label, and its fill rate is unknown
@@ -868,7 +868,7 @@ because the writer `coalesce`s to `''`. **No artifact in this repo holds this nu
 **Falsifier:** near-zero non-empty → `title` is a dead slot, A3's context arm reduces to topology (neighbour
 names), and the extractor supplies the only real context. Cost: one query per graph.
 
-### M-9 **Stamp the merge link** — `method`, `similarity`, `decidedAt` (and the actor, where one exists)
+#### M-9 **Stamp the merge link** — `method`, `similarity`, `decidedAt` (and the actor, where one exists)
 
 `apply_entity_merge` already receives `method` and `similarity` and throws them away; `decidedAt` (and the
 actor, where one exists) is **not computed anywhere in the function** — `update_entity`'s own write is the
@@ -877,7 +877,7 @@ natural timestamp. Three properties on the redirect make
 auditable. Cost: ~5 lines in a function that already validates its inputs.
 **Falsifier:** a reviewer cannot show a case where the stamp changes a decision → it is decoration; drop it.
 
-### M-10 ⭐ **Blast-radius / chain-length guard on the merge closure**
+#### M-10 ⭐ **Blast-radius / chain-length guard on the merge closure**
 
 Before an `apply_entity_merge` is accepted, compute the closure it joins (both endpoints' existing chains and
 fan-in) and **refuse or route to review** above N — and *report* the chain length that `follow_resolved_from`
@@ -886,7 +886,7 @@ transitive-closure mitigation, and §7.7 shows we have none of it.
 **Falsifier:** no `resolved_from` chain longer than 1 exists on any real graph → the guard is inert, keep the
 reporting half and drop the refusal. ⚠️ Cannot be measured on this box (§7.9).
 
-### M-11 **Entity-boost over the UNION candidate set** — Mem0's signal without Mem0's pool
+#### M-11 **Entity-boost over the UNION candidate set** — Mem0's signal without Mem0's pool
 
 Mem0's entity boost is a good signal applied to a **narrow** pool (semantic-only, `mem0/memory/main.py:1680-1691`). Ours
 would be a **per-document additive boost** over `rrf_fusion`'s union — so a BM25-only or entity-only match can
@@ -895,7 +895,7 @@ still surface. ⚠️ **Deliberately NOT Mem0's construction:** copying the pool
 **Falsifier:** the boost does not change ranking on the `#11901` fixture beyond its own weight →
 `ENTITY_BOOST_WEIGHT` is doing the work and the entity collection is not earned.
 
-## 7.9 What this lane could NOT establish (declared, never skipped)
+### 7.9 What this lane could NOT establish (declared, never skipped)
 
 1. **No graph census was possible.** This box serves no tenant for these populations, so `Object.title` fill
    rate (M-8), `resolved_from` chain lengths and cluster sizes (M-10) are **declared and unmeasured**. Every
@@ -927,7 +927,7 @@ still surface. ⚠️ **Deliberately NOT Mem0's construction:** copying the pool
    re-measured here.
 8. **Zep's LLM dedupe quality is unmeasured anywhere** — no isolated number exists, in its repo or its paper.
 
-## 7.10 Contradiction test — one row per finding in §7
+### 7.10 Contradiction test — one row per finding in §7
 
 | finding | recorded decision it would reverse | verdict |
 |---|---|---|
