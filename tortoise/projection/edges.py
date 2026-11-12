@@ -1605,9 +1605,20 @@ class _EdgeHandlers:
             return
         # #331 (review r3): .get() — a malformed operator dict without
         # op_type/inputs must degrade to no typed edges, not KeyError.
-        rel_type = {"NAND": "NAND", "IMPL": "IMPL",
-                     "composedOf": "hasPart", "decomposesInto": "hasPart",
-                     "contains": "hasPart", "wraps": "hasPart"}.get(op.get("op_type"))
+        # #12067: the third mechanism reuses the IMPL edge type (the mechanism of
+        # record is the operator's `op_type`, and `sdk.create_operator` writes
+        # `:IMPL` for `coherence`). Omitting it here minted INPUT edges ONLY on
+        # replay, so a rebuilt graph priced a coherence operator as inert while
+        # the live graph priced it — live/replay divergence, silently.
+        # ⛔ READ the declaration, never restate it: this map and the writer
+        # drifted once already, and the drift is silent (live and replay priced
+        # the same operator differently). `ep.MECHANISM_REL_TYPES` is the single
+        # home for the mechanism half; the composition spellings are the fold's
+        # own.
+        from tortoise.ep import MECHANISM_REL_TYPES as _MECH
+        rel_type = ({**_MECH, "composedOf": "hasPart", "decomposesInto": "hasPart",
+                     "contains": "hasPart", "wraps": "hasPart"}
+                    .get(op.get("op_type")))
         import logging as _logging
         _log = _logging.getLogger(__name__)
         # #7902: the operator endpoint may carry any of :Point/:Subject/

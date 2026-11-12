@@ -74,6 +74,12 @@ def test_mechanism_map_is_ontology_s8s_table():
     assert SEMANTICS_MECHANISMS == {
         "addresses": "IMPL",
         "causes": "IMPL",
+        # ⛔ #12067 documents `dependsOn`/`hasPart` as NECESSITY (coherence), but
+        # they stay IMPL in this map: it drives the OPERATOR-LESS direct-edge
+        # leg, and a bare edge carries its mechanism as its edge type
+        # (IMPL/NAND only). Declaring them `coherence` here dropped nine pack
+        # relations on the ingest path (#12067 review, P1) — see ONTOLOGY §8's
+        # table, whose Mechanism cell states both spellings for these two rows.
         "dependsOn": "IMPL",
         "hasPart": "IMPL",
         "produces": "IMPL",
@@ -116,7 +122,7 @@ def test_part_whole_op_type_declares_no_mechanism(sdk):
     tidy-up that drops or widens it would report `op_type 'composedOf'
     contradicts … 'IMPL'` on every such write, and before this test NOTHING
     failed — so the exclusion was a stated contract with zero coverage."""
-    assert frozenset({"IMPL", "NAND"}) == CORE_PREDICATES
+    assert frozenset({"IMPL", "NAND", "coherence"}) == CORE_PREDICATES
     a, b = _two_points(sdk)
     for op_type in ("composedOf", "decomposesInto", "contains", "wraps"):
         # `hasPart` and `supports` both declare IMPL: the loudest possible
@@ -142,8 +148,13 @@ def test_retired_word_is_compared_as_its_canonical_meaning(sdk):
         assert warns[0]["declared_mechanism"] == "NAND", (kwargs, warns[0])
         # ... and the NAND spelling of the same meaning agrees, so the warning
         # above is about the meaning, not about the parameter.
+        # ⛔ A FRESH PAIR per write: one pair carries at most one mechanism
+        # (#12067's closed set), so reusing `(a, b)` here would be refused
+        # rather than warned — and the assertion below is about the WARNING.
+        a, b = _two_points(sdk)
         op_ok = sdk.create_operator("NAND", a, [b], **kwargs)
         assert not _mechanism_warnings(op_ok), (kwargs, op_ok.get("warnings"))
+        a, b = _two_points(sdk)
 
 
 def test_pack_declaration_outranks_s8_neutrality(sdk):
@@ -162,6 +173,8 @@ def test_pack_declaration_outranks_s8_neutrality(sdk):
     warns = _mechanism_warnings(sdk.create_operator("NAND", a, [b], label="marks"))
     assert warns, "the pack says IMPL, so a NAND `marks` is the same inversion"
     assert warns[0]["declared_mechanism"] == "IMPL"
+    # A fresh pair: one pair carries at most one mechanism (#12067).
+    a, b = _two_points(sdk)
     assert not _mechanism_warnings(sdk.create_operator("IMPL", a, [b], label="marks"))
 
 
@@ -195,6 +208,10 @@ def test_a_pack_only_contradiction_names_no_meaning_the_caller_never_gave(sdk):
     assert "carrying an IMPL meaning" not in nand_case, nand_case
     assert "supports" not in nand_case, nand_case
 
+    # Each write below lands on a FRESH pair: one pair carries at most one
+    # mechanism (#12067's closed set), and these assertions are about the
+    # WARNING each write produces.
+    a, b = _two_points(sdk)
     # direction IMPL: the pack declares NAND (`competesWith`), again no meaning.
     impl_case = _mechanism_warnings(
         sdk.create_operator("IMPL", a, [b], label="competesWith"))[0]["message"]
@@ -208,6 +225,7 @@ def test_a_pack_only_contradiction_names_no_meaning_the_caller_never_gave(sdk):
     # ... and the meaning path KEEPS its worked example, so the two sources do
     # not collapse into one wording (the pre-#7852 `label` spelling included).
     for kwargs in ({"semantics": "supports"}, {"label": "supports"}):
+        a, b = _two_points(sdk)
         by_meaning = _mechanism_warnings(
             sdk.create_operator("NAND", a, [b], **kwargs))[0]["message"]
         assert "carrying an IMPL meaning (e.g. 'supports')" in by_meaning, (
@@ -620,6 +638,10 @@ def test_message_describes_each_direction_correctly(sdk):
     a, b = _two_points(sdk)
     impl_case = _mechanism_warnings(
         sdk.create_operator("IMPL", a, [b], semantics="refutes"))[0]["message"]
+    # ⛔ A fresh pair per write — one pair carries at most one mechanism
+    # (#12067's closed set). This test is about the MESSAGE, which each write
+    # produces on its own.
+    a, b = _two_points(sdk)
     nand_case = _mechanism_warnings(
         sdk.create_operator("NAND", a, [b], semantics="supports"))[0]["message"]
     # Assert the CLAIM each sentence makes about the WIRE's effect, and the
@@ -711,6 +733,9 @@ def test_neutral_meaning_does_not_pin_a_mechanism(sdk):
     for semantics in ("related", "transacts", "ownedBy", "managedBy"):
         assert semantics not in SEMANTICS_MECHANISMS, semantics
         for op_type in ("IMPL", "NAND"):
+            # Fresh pair per write — one pair carries at most one mechanism
+            # (#12067's closed set); the assertion is about the warning.
+            a, b = _two_points(sdk)
             op = sdk.create_operator(op_type, a, [b], semantics=semantics)
             assert not _mechanism_warnings(op), (op_type, semantics, op["warnings"])
 
@@ -720,11 +745,14 @@ def test_a_structural_meaning_still_declares_its_mechanism(sdk):
     §8 gives `hasPart`/`addresses`/`dependsOn` IMPL too, so a NAND write of one
     is the same inversion and must be reported. Without this, an implementation
     that only mapped `supports`/`refutes` would pass the tests above."""
-    a, b = _two_points(sdk)
     for semantics in ("hasPart", "addresses", "dependsOn", "causes"):
+        # Fresh pair per write: one pair carries at most one mechanism (#12067's
+        # closed set), and this test is about the WARNING each write produces.
+        a, b = _two_points(sdk)
         op = sdk.create_operator("NAND", a, [b], semantics=semantics)
         assert _mechanism_warnings(op), (semantics, op.get("warnings"))
         # ... and the agreeing direction stays silent.
+        a, b = _two_points(sdk)
         op2 = sdk.create_operator("IMPL", a, [b], semantics=semantics)
         assert not _mechanism_warnings(op2), (semantics, op2.get("warnings"))
 

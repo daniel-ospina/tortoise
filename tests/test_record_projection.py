@@ -4023,25 +4023,65 @@ def test_the_composition_spellings_all_land_hasPart():
                         ("INPUT", 0, "p1", "op1")], (op_type, rows)
 
 
-def test_the_operator_rel_type_map_is_the_folds_own():
-    """Parity pin: the mapping is restated, so pin it to `_create_edges`' source.
+def test_a_coherence_operator_replays_its_IMPL_edge():
+    """⛔ #12067 — the THIRD mechanism must replay the same edge the live writer
+    writes, or a rebuilt graph prices it as inert.
 
-    The module is loaded STANDALONE by the PGlite harness, so the fold's literal
-    cannot be imported. Each spelling and each target predicate is asserted to
-    appear in the fold's own source: a predicate the fold adds without a row here
-    makes the record poorer than the graph on that op_type, and a row the fold
-    does not write makes it richer — both are rebuild-lane divergences.
+    `create_operator("coherence")` stores the factor on an `:IMPL` edge (the
+    mechanism of record is the node's `op_type`), and `ep.py` reads/writes the
+    message slots on that edge. Both replay maps were missing the spelling, so a
+    rebuild materialised INPUT edges ONLY: no `:IMPL` edge, no message slot, and
+    `_affected_factors` found nothing — silently divergent from the live graph
+    (#12067 review, P0). The two maps are pinned to each other elsewhere, which
+    is exactly why BOTH could be wrong together; this asserts the BEHAVIOUR.
+    """
+    rows = _operator_records(_operator_added(
+        {"op_type": "coherence", "inputs": ["p1", "p2"]}))
+    assert rows == [
+        ("IMPL", 0, "op1", "p1"),
+        ("INPUT", 0, "p1", "op1"),
+        ("IMPL", 1, "op1", "p2"),
+        ("INPUT", 1, "p2", "op1"),
+    ], rows
+    # ... and the record map says the same thing it just did.
+    assert rp._OPERATOR_REL_TYPES["coherence"] == "IMPL"
+
+
+def test_the_operator_rel_type_map_is_the_folds_own():
+    """Parity pin: the record's map, the fold and `ep` must agree per op_type.
+
+    ⛔ #12067: the pin used to require the mapping to be RESTATED in the fold's
+    source, which is exactly the drift it was meant to catch — the third
+    mechanism was added to two of the three copies and a rebuilt graph priced it
+    as inert. It now pins the stronger property: the fold READS
+    `ep.MECHANISM_REL_TYPES`, and the only rows it may spell itself are the four
+    composition spellings (a structural `hasPart`, not a mechanism).
+
+    A predicate the fold adds without a row here makes the record poorer than the
+    graph on that op_type; a row the fold does not write makes it richer — both
+    are rebuild-lane divergences.
     """
     import inspect
 
+    from tortoise.ep import MECHANISM_REL_TYPES
     from tortoise.projection.edges import _EdgeHandlers
 
     source = inspect.getsource(_EdgeHandlers._create_edges)
-    for op_type, rel_type in rp._OPERATOR_REL_TYPES.items():
+    assert "MECHANISM_REL_TYPES" in source, (
+        "the fold must READ the declaration, not restate it (#12067)")
+    # ⛔ The RECORD's own map must restate `composedOf`/… (it cannot import the
+    # package: `supabase/tests/pglite/validate.mjs` loads this module STANDALONE,
+    # stdlib only), so what keeps it honest is the VALUE parity asserted below,
+    # not a read. Both halves are pinned: read where the module can import,
+    # value-equality where it cannot (#12067 review round 5, P1).
+    composition = {"composedOf": "hasPart", "decomposesInto": "hasPart",
+                   "contains": "hasPart", "wraps": "hasPart"}
+    for op_type, rel_type in composition.items():
         assert f'"{op_type}": "{rel_type}"' in source, (op_type, rel_type)
+    # The record's map DERIVES the mechanism half, so the three can never drift.
+    for op_type, rel_type in MECHANISM_REL_TYPES.items():
+        assert rp._OPERATOR_REL_TYPES[op_type] == rel_type, op_type
     assert set(rp._OPERATOR_REL_TYPES.values()) == {"IMPL", "NAND", "hasPart"}
-    # Non-vacuity: the fold's map is a LITERAL in the source we just read.
-    assert '"NAND": "NAND"' in source and '"IMPL": "IMPL"' in source
 
 
 def test_a_mitigation_lands_the_canonical_mitigated_by_mirror():
