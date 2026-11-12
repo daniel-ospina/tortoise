@@ -1313,6 +1313,12 @@ def test_a_RETARGETED_loop_and_a_moved_store_both_FAIL_the_row():
     # rather than answer by an empty `any(...)`.
     assert violation("def _other() -> None:\n    pass\n") is not None
 
+    # (6) …and an UNREADABLE source is not a pass either: a file that does not parse raises out of
+    # the arm. Silently answering "the claim holds" for evidence nobody could read is the failure
+    # mode this whole lane is about, one level up.
+    with pytest.raises(SyntaxError):
+        violation("def _update_entity(:\n")
+
 
 #: The clauses that name a store by ALIAS — the only ones this rule can attribute to a label.
 #: Keyed by FORM so `test_every_store_alias_pattern_still_sees_a_live_store` can tell a member that
