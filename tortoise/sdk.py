@@ -45590,6 +45590,9 @@ class TortoiseSDK:
             _role_holder_alias = props.pop("role_holder", None)
             if _role_holder is None:
                 _role_holder = _role_holder_alias
+            # The PRE-FLIGHT's resolved holder id, kept (#12047 round-3 P1): the
+            # self-edge refusal needs it, and it must run before the write.
+            _holder_id = None
             # #1423 (review P1): `status` arrives through `**props` below, so this
             # surface is a SECOND door onto an undeclared Subject status.
             # Validate against ONTOLOGY §4.2's declared lifecycle and fail closed,
@@ -45623,7 +45626,7 @@ class TortoiseSDK:
                         "roleHolder is only valid on a Subject of "
                         f"subjectKind='role', got {_kind!r} for {name!r}")
                 from .entity_resolver import resolve_role_holder
-                resolve_role_holder(self, _role_holder, required=True)
+                _holder_id = resolve_role_holder(self, _role_holder, required=True)
             # ⛔ #3590 review (finding 1): resolve AND write under ONE lock.
             # `resolve_or_mint` only closes the check-then-act window if the
             # write that makes the holder visible happens before the lock is
@@ -45635,6 +45638,20 @@ class TortoiseSDK:
             with entity_create_lock("Subject", name):
                 _subject_id = self._entity_identity_for(
                     "Subject", name, explicit_id=_server_id)
+                # ⛔ #12047 round-3 P1: the SELF-EDGE refusal runs HERE — after
+                # the role's id is resolved and BEFORE `_create_entity` writes
+                # anything. `wire_holds_role` refuses the same edge, but it runs
+                # after the write: `_upsert_subject`'s
+                # `ON MATCH SET s.subjectKind = coalesce($sk, s.subjectKind)`
+                # overwrote the holder's stored kind with 'role' and journaled a
+                # `SubjectAdded` line, and only then did the call raise — telling
+                # the caller the create failed while the graph recorded that the
+                # person had become a role (the F5 atomicity class, one rung out).
+                # `_entity_identity_for` mints but does not write (its docstring),
+                # so a refusal here leaves NOTHING behind.
+                if _holder_id is not None:
+                    from .entity_resolver import refuse_role_self_edge
+                    refuse_role_self_edge(_holder_id, _subject_id)
                 node = self._create_entity(
                     "Subject",
                     _subject_id,
@@ -45646,10 +45663,12 @@ class TortoiseSDK:
                 # is a Subject id or name, and an unresolvable/ambiguous holder
                 # RAISES rather than wiring the role to a guess (#1370).
                 # ⛔ Every refusal above was checked BEFORE the write (review F5):
-                # `resolve_role_holder` runs first, so a bad holder or a non-role kind
-                # cannot leave a node + a `SubjectAdded` journal line behind while
-                # telling the caller the call failed — the atomicity rule
-                # `_update_entity` states for its own status change.
+                # `resolve_role_holder` runs first and the self-edge check runs
+                # inside the create lock (§ round-3 P1), so a bad holder, a
+                # non-role kind or a self edge cannot leave a node + a
+                # `SubjectAdded` journal line behind while telling the caller the
+                # call failed — the atomicity rule `_update_entity` states for its
+                # own status change.
                 from .entity_resolver import wire_holds_role
                 wire_holds_role(self, _role_holder, _subject_id)
         elif t == "object":

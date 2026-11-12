@@ -41,6 +41,7 @@ from tortoise.entity_identity import AmbiguousEntityName
 from tortoise.entity_resolver import (
     EntityScanUnavailable,
     apply_entity_merge,
+    block_key,
     entity_candidates,
     entity_pair_for,
     find_live_holder,
@@ -314,6 +315,42 @@ class TestSemanticTier:
 
         rows = entity_candidates(sdk._get_proj().g, encode_fn=_boom)
         assert rows and rows[0]["method"] == "fuzzy"
+
+    def test_the_lexical_length_prune_does_not_narrow_the_semantic_pool(
+            self, sdk_factory):
+        """round-3 P2: the fuzzy rung's length prune ran BEFORE the vector lookup.
+
+        Its bound is lexical (difflib's ratio is <= 2*min/(sum)), so using it to
+        skip the SEMANTIC lookup dropped pairs the vectors rank — a pair inside
+        one block, scored 1.0 by the encoder, never looked at. That is an
+        undeclared bound and the same under-report this module exists to remove,
+        one rung further out; production pipelines keep per-rung candidate pools
+        for exactly this reason.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "abc corp", "subjectKind", "other")
+        _create_raw(sdk, "Subject", "sub-b",
+                    "abc corporation international holdings",
+                    "subjectKind", "other")
+        g = sdk._get_proj().g
+        left = normalize_entity_name("abc corp")
+        right = normalize_entity_name("abc corporation international holdings")
+        # Preconditions, asserted so the pin cannot go vacuous: ONE block (else
+        # no pair is ever considered), the fuzzy rung misses it, and the very
+        # length ratio the prune uses WOULD have dropped the pair.
+        assert block_key(left) == block_key(right) == "abc"
+        assert similarity(left, right) < 0.60, "the FUZZY rung must miss this pair"
+        assert 2 * min(len(left), len(right)) < 0.60 * (len(left) + len(right)), (
+            "this pair must fall under the pre-fix length prune")
+
+        def _identical_vectors(texts):
+            return ([[1.0, 0.0, 0.0] for _ in texts], True)
+
+        rows = entity_candidates(g, encode_fn=_identical_vectors)
+        assert [r["method"] for r in rows] == ["semantic"], (
+            f"the lexical prune narrowed the semantic pool: {rows}")
+        assert rows[0]["semantic_similarity"] == pytest.approx(1.0)
+        assert rows[0]["auto_mergeable"] is False
 
 
 # ── review parity with Points: merge / reject ─────────────────────────────
@@ -999,7 +1036,7 @@ class TestSecondReviewRound:
 
     def test_a_role_cannot_hold_itself(self, sdk_factory):
         sdk = sdk_factory()
-        sdk.create_subject("Dana", "naturalPerson")
+        person = sdk.create_subject("Dana", "naturalPerson")
         # `Dana` names the person, so the role create resolves ONTO the person and
         # the holder is that same node — the self edge the guard exists for.
         with pytest.raises(ValueError, match="cannot hold itself"):
@@ -1007,6 +1044,21 @@ class TestSecondReviewRound:
         assert sdk._get_proj().g.query(
             "MATCH (:Subject)-[r:holdsRole]->(:Subject) RETURN count(r)"
         ).result_set[0][0] == 0
+        # ⛔ round-3 P1: the refusal must run BEFORE the write. The role create
+        # FOLDS ONTO the person, and a post-write refusal left the person stored
+        # as `subjectKind='role'` (plus a `SubjectAdded` journal line) while the
+        # caller was told the create failed — the F5 atomicity class, one rung out.
+        kind = sdk._get_proj().g.query(
+            "MATCH (s:Subject {id:$id}) RETURN s.subjectKind",
+            params={"id": person["id"]}).result_set
+        assert kind == [["naturalPerson"]], (
+            f"a REFUSED create rewrote the holder's kind: {kind}")
+        log = sdk._get_event_log()
+        if log is not None:
+            journal = [e for e in log.read_all() if e.get("type") == "SubjectAdded"]
+            assert len(journal) == 1, (
+                f"a REFUSED create journaled a SubjectAdded line: {journal}")
+        assert _count(sdk, "Subject") == 1
 
     # ── N8: every producer folds the key it writes ───────────────────────
 

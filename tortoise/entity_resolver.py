@@ -289,7 +289,11 @@ def _semantic_matrix(entities: list[dict], encode_fn) -> dict:
     3-character prefix is not proposed. That is deliberate: cross-block
     all-pairs is the pair explosion the ladder forbids, and a bounded rung that
     says so is better than an unbounded one. (The semantic test therefore places
-    its pair inside one block.) The threshold it compares against
+    its pair inside one block.) ⛔ It is NOT scoped by any other rung's arithmetic:
+    the fuzzy rung's length prune is a LEXICAL bound, so `entity_candidates` only
+    applies it to a pair the vectors cannot answer for (#12047 round-3 P2) — a
+    lexical omission must never cap the vector pool's recall. The threshold it
+    compares against
     is ``embeddings.DEFAULT_THRESHOLD`` — reused, never re-invented (#2730 §5: a
     second similarity constant was REFUSED).
 
@@ -400,16 +404,28 @@ def entity_candidates(graph, *, limit: int | None = 50,
                 for right in members[i + 1:]:
                     if right["id"] in settled:
                         continue
-                    # EXACT bound: difflib ratio <= 2*min/(sum), so a pair that
-                    # cannot reach the review floor is skipped without comparing.
+                    # ⛔ TWO rungs, TWO candidate pools (#12047 round-3 P2). The
+                    # length bound below is a LEXICAL one: difflib's ratio is
+                    # <= 2*min/(sum), so a pair that cannot reach the review
+                    # floor needs no comparison. Applying it BEFORE the vector
+                    # lookup let one rung's arithmetic prune another rung's pool —
+                    # 'abc corp' vs 'abc corporation international holdings' is
+                    # scored by the vectors and was dropped unlooked-at, an
+                    # undeclared bound and exactly the under-report this module
+                    # exists to remove. So the vector is read FIRST (a dict hit),
+                    # and the prune applies only when the semantic rung cannot
+                    # answer for this pair — `_SEM_FLOOR` is 1.0 when `sem` is
+                    # empty, so an off/absent rung prunes exactly as before.
                     _la, _lb = len(left["folded"]), len(right["folded"])
-                    if _la and _lb and 2 * min(_la, _lb) < review_threshold * (_la + _lb):
-                        continue
-                    fuzzy_sim = (1.0 if left["folded"] == right["folded"]
-                                 else similarity(left["folded"], right["folded"]))
                     sem_sim = sem.get((left["id"], right["id"]))
                     if sem_sim is None:
                         sem_sim = sem.get((right["id"], left["id"]))
+                    _sem_can_answer = sem_sim is not None and sem_sim >= _SEM_FLOOR
+                    if (not _sem_can_answer and _la and _lb
+                            and 2 * min(_la, _lb) < review_threshold * (_la + _lb)):
+                        continue
+                    fuzzy_sim = (1.0 if left["folded"] == right["folded"]
+                                 else similarity(left["folded"], right["folded"]))
                     if fuzzy_sim >= 1.0:
                         method, sim = "exact", 1.0
                     elif fuzzy_sim >= review_threshold:
@@ -899,6 +915,31 @@ def resolve_role_holder(sdk, holder: str, *, required: bool = True) -> str | Non
     return follow_resolved_from(g, "Subject", entity_id)
 
 
+def refuse_role_self_edge(holder_id: str, role_id: str) -> None:
+    """Raise when the DECLARED holder IS the role being written.
+
+    A role is not its own holder (#1370's "no subject > wrong subject"): writing
+    it would assert a category error as a fact, reported as success.
+
+    ⛔ ONE spelling, callable BEFORE the write (#12047 round-3 P1). The refusal
+    used to live only inside :func:`wire_holds_role`, which runs AFTER the role's
+    node and its ``SubjectAdded`` journal line exist — so the caller was told the
+    create failed while the graph recorded that the person had become a role.
+    ``create_entity`` now calls this between resolving the role's id and
+    ``_create_entity``; :func:`wire_holds_role` keeps calling it as its own guard
+    (defence in depth for every other caller). A second copy of the message would
+    be two spellings of one rule — the divergence ``named_kind`` exists to
+    prevent.
+    """
+    if holder_id != role_id:
+        return
+    raise ValueError(
+        f"holdsRole: {role_id!r} cannot hold itself — a role needs a "
+        f"DIFFERENT person Subject as its holder. The role's name resolved "
+        f"onto the holder itself (the two folds collide), so give the role "
+        f"its own name (e.g. 'the owner role') rather than the person's")
+
+
 def wire_holds_role(sdk, holder: str, role_id: str) -> dict:
     """Wire ``(holder:Subject)-[:holdsRole]->(role:Subject)`` — the missing producer.
 
@@ -910,12 +951,7 @@ def wire_holds_role(sdk, holder: str, role_id: str) -> dict:
     DECLARED by the caller (``create_subject(..., roleHolder=…)``).
     """
     holder_id = resolve_role_holder(sdk, holder)
-    if holder_id == role_id:
-        # A role is not its own holder (#1370's "no subject > wrong subject"):
-        # writing it would assert a category error as a fact, reported as success.
-        raise ValueError(
-            f"holdsRole: {role_id!r} cannot hold itself — a role needs a "
-            f"DIFFERENT person Subject as its holder. The role's name resolved "
-            f"onto the holder itself (the two folds collide), so give the role "
-            f"its own name (e.g. 'the owner role') rather than the person's")
+    # Unreachable from `create_entity` (which refuses BEFORE the write), and kept
+    # for every other caller: wiring a self edge is a category error either way.
+    refuse_role_self_edge(holder_id, role_id)
     return sdk.create_edge("holdsRole", holder_id, role_id)
