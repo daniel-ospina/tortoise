@@ -2065,6 +2065,19 @@ class PackRegistry:
             if _kf in ont and not isinstance(ont[_kf], dict):
                 errors.append(f"ontology.{_kf} must be a mapping — got "
                               f"{type(ont[_kf]).__name__}")
+        # ⛔ AND THE ELEMENTS, one level below the container (round-13 review P3,
+        # measured): `relations: [1]` passed the list arm and then surfaced
+        # `"'int' object has no attribute 'get'"` from the loop below — the exact
+        # stack-trace-with-a-status-code the block above exists to close, on the
+        # surface the guide tells authors to trust. `chains`/`hierarchies`/
+        # `kindDefs` already name their element/key defects; `relations` was the
+        # single hole.
+        _rels = ont.get("relations")
+        if isinstance(_rels, list):
+            for _i, _rel in enumerate(_rels):
+                if not isinstance(_rel, dict):
+                    errors.append(f"ontology.relations[{_i}]: expected a "
+                                  f"mapping, got {type(_rel).__name__}")
         if errors:
             return errors
 
@@ -2082,10 +2095,11 @@ class PackRegistry:
                 errors.append("ontology.extends must be 'core'")
 
             for kind_field in KIND_FIELDS:
+                # ⛔ THE TYPE IS ALREADY SETTLED ABOVE — this loop's old
+                # `not isinstance(kinds, list)` arm became unreachable the moment
+                # the block that returns early on a non-list landed (round-13
+                # review P3): two gates where only one runs. Elements only.
                 kinds = ont.get(kind_field, [])
-                if not isinstance(kinds, list):
-                    errors.append(f"ontology.{kind_field} must be a list")
-                    continue
                 for k in kinds:
                     if not isinstance(k, str) or not k:
                         errors.append(f"ontology.{kind_field}: invalid kind value: {k}")

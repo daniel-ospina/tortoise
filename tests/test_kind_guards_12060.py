@@ -2255,6 +2255,11 @@ depends_on: []
              "ontology.relations must be a list", "str"),
             ("  extends: core\n  kindDefs: [1]",
              "ontology.kindDefs must be a mapping", "list"),
+            # ⛔ AND AN ELEMENT one level below the container (round-13 review P3):
+            # `relations: [1]` passed the list arm and surfaced
+            # `"'int' object has no attribute 'get'"` from the loop below.
+            ("  extends: core\n  relations: [1]",
+             "ontology.relations[0]: expected a mapping", "int"),
         )
         for body, wording, type_name in cases:
             errors = validate_manifest(base.format(body=body)).errors
