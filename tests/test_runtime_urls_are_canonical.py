@@ -419,20 +419,22 @@ RUNTIME_FILES = (
 #:   * six RUNTIME EMITTERS — `tortoise/email_notify.py` (the invite link's base),
 #:     `tortoise/abuse.py` (the appeal URL), `website/functions/blog/_lib.ts` (the
 #:     blog origin), and the three dashboard landing surfaces
-#:     `invite-accept.html`, `welcome.html`, `wizardPrompts.js`. The sweep has taken
-#:     each to zero occurrences; the file STAYS in the surface so a literal coming
-#:     back REDS the count check instead of leaving the surface silently.
+#:     `invite-accept.html`, `welcome.html`, `wizardPrompts.js`. Each measures 0
+#:     occurrences today; the file STAYS in the surface so a literal coming back
+#:     REDS the count check instead of leaving the surface silently.
 #:   * three DOCUMENTS a human copies — the two onboarding `SKILL.md` copies and
 #:     `.env.example` — which `test_documents_humans_copy_do_not_name_the_retired
 #:     _host` (above) pins by name and which must never name the retired host in any
 #:     form.
 #:
-#: ⛔ THIS COMMENT RECORDS A MEASUREMENT, NOT A HISTORY. What is asserted, and what
-#: `test_the_runtime_surface_is_the_whole_population_it_claims` re-measures on every
-#: run, is: these nine paths are members of `RUNTIME_FILES`, and each carries 0
-#: occurrences of `RETIRED_ORIGIN` today. It deliberately makes no claim about which
-#: commit took a given file to zero — that split is not in this file and a claim
-#: nobody re-measures is the class this module exists to refuse.
+#: ⛔ THIS BLOCK ASSERTS ONLY WHAT THE TEST BELOW RE-MEASURES: these nine paths are
+#: members of `RUNTIME_FILES`, and each carries 0 occurrences of `RETIRED_ORIGIN`
+#: today. WHICH landing took a given file to zero is recorded ELSEWHERE in this file —
+#: at `RUNTIME_FILES` (`re-aimed by #12058 (row removed)`) and in the module
+#: docstring (#12058's three rows, and #11765/PR #11976 for `_lib.ts`). This block
+#: keeps no second copy of that history on purpose: a claim nobody re-measures is the
+#: class this module exists to refuse, and the one thing here that IS re-measured is
+#: the zero.
 EXPECTED_ZERO_COUNT_FILES = frozenset({
     "tortoise/email_notify.py",
     "tortoise/abuse.py",
