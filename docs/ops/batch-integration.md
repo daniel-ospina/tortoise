@@ -1274,7 +1274,7 @@ hosted label precisely because the producer's artifacts feed the canary streak, 
 comparison of TESTS across runs. Moving the producer onto another class would turn it into a
 comparison of runner classes — the failure measured 2026-10-27..30, when run `40986603502` (head
 `5a2ae6aa1`) had `test (i)`, the canary, taken by `pi-runner-vm-5` (ARM64) and killed at 32m12s of a
-30m budget (`docs/ops/ci-runner-x64.md:847`, `:888`). A fold gets priority on the legs that carry the
+30m budget (`docs/ops/ci-runner-x64.md:857`, `:898`). A fold gets priority on the legs that carry the
 wall; the producer stays where the streak expects it.
 
 ⛔ **The class does not buy PARALLEL legs.** `strategy.max-parallel: 3` (#6744) is a bare literal on

@@ -288,7 +288,7 @@ only leg whose pin is about speed, and the mitigation buys it nothing (above):
 These are **accepted costs of the temporary mitigation, stated as costs**, and all nine revert with
 it. If the mitigation becomes permanent, the scoping fix is to put the starved required legs on a
 label the pool answers and leave `mirror-images` / `workflow-lint` / the four observers /
-`finding-provenance` on one only hosted answers.
+`finding-provenance` / `test-record-postgres` on one only hosted answers.
 
 **The escape hatch, and the proof it works.** `ubuntu-24.04` is an **OS fact**, not a fallback label:
 `CI_RUNNER_OS_LABEL=on` (or `=auto`, which derives it from `/etc/os-release`) rides it on every label

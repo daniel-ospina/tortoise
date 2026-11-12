@@ -3512,7 +3512,15 @@ def test_every_test_name_the_runbook_names_exists():
 
 
 # ── 8h. `tools/` citations INTO the runbook ────────────────────────────────────────────────
-_TOOLS_CITING_THE_RUNBOOK = ("tools/install-ci-runner-x64.sh", "tools/runner_autoscale.py")
+_TOOLS_CITING_THE_RUNBOOK = (
+    "tools/install-ci-runner-x64.sh",
+    "tools/runner_autoscale.py",
+    # #12071: `tools/ci_selection.py` cites the runbook's split-matrix measurement
+    # row and the watchdog-kill sentence. It was OUTSIDE every pin, so the +10-line
+    # insert in this PR left both cites pointing at a heading and a blank line and
+    # nothing reded. Registered so the next shift does.
+    "tools/ci_selection.py",
+)
 
 # cited landing line -> a regex the cited line (or range) must match, i.e. the sentence the
 # citing comment names. Keyed by the runbook line the citation must point at at THIS head.
@@ -3522,6 +3530,7 @@ _TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
     26: r"^\| `ubuntu-24\.04` \| 10 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
     90: r"still does \*\*not\*\* claim any",
     95: r"DROPS the whole class on re-registration",
+    857: r"^\| `40986603502`",
 }
 
 

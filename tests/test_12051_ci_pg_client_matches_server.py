@@ -41,6 +41,7 @@ server's own PG16 client dumps and restores clean.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -269,11 +270,16 @@ def _code_only(text: str) -> str:
 
 
 #: The precondition, in either shell shape that actually fails closed: an `if !`
-#: guard around the probe, or the probe short-circuiting into a `{ …; exit 1; }`
+#: guard around the probe, or the probe short-circuiting into a `{ … }` / `( … )`
 #: group. FACTS are extracted (probe verb either way, quoted or not, any redirect
 #: spelling); the SPELLING is deliberately not pinned, because equivalent
 #: rewrites are the same behaviour and a guard that reds them is a false block —
 #: which teaches the next lane to widen the assertion instead of trusting it.
+#:
+#: `_normalised_code` erases `${…}` expansions FIRST. Without that, a `}` inside
+#: the shipped message (`${ImageOS:-unknown}`) truncates a `.*?\}` body match, so
+#: the exact rewrite this guard promises to accept false-red as "does not
+#: `exit 1`" — the most misleading possible failure.
 _IF_PRECONDITION_RE = re.compile(
     r"^if\s+!\s*(?:sudo\s+)?apt-cache\s+(?:show|policy)\s+['\"]?"
     r"postgresql-client-(?P<major>\d+)['\"]?[^;]*;\s*then(?P<body>.*?)^fi\s*$",
@@ -281,9 +287,26 @@ _IF_PRECONDITION_RE = re.compile(
 )
 _OR_PRECONDITION_RE = re.compile(
     r"(?:sudo\s+)?apt-cache\s+(?:show|policy)\s+['\"]?"
-    r"postgresql-client-(?P<major>\d+)['\"]?[^|\n]*\|\|\s*\{(?P<body>.*?)\}",
-    re.DOTALL,
+    r"postgresql-client-(?P<major>\d+)['\"]?[^|\n]*\|\|\s*[({]"
+    # The failing branch as a BOUNDED WINDOW of following lines, never up to a
+    # matched brace: the shipped message contains `( )` and `{ }` of its own, so
+    # brace-matching truncates the body and then reports the guard as missing —
+    # the most misleading failure this file could produce.
+    r"(?P<body>(?:[^\n]*\n){0,5}[^\n]*)",
+    re.MULTILINE,
 )
+
+_PARAM_EXPANSION_RE = re.compile(r"\$\{[^}]*\}")
+
+
+def _normalised_code(text: str) -> str:
+    """Comment-stripped shell with `${…}` expansions erased.
+
+    Erasing them is control-flow-neutral (an expansion never opens or closes a
+    block) and it is what makes a `}` inside a message string invisible to the
+    block matchers.
+    """
+    return _PARAM_EXPANSION_RE.sub("", _code_only(text))
 
 
 def _precondition(code: str) -> re.Match[str]:
@@ -291,7 +314,9 @@ def _precondition(code: str) -> re.Match[str]:
 
     A bare `"apt-cache show" in text` is satisfied by a commented-out line and by
     a block that is present but unreachable, so the caller passes
-    `_code_only(...)`.
+    `_normalised_code(...)`. Reachability itself is NOT provable from text — that
+    is what `test_the_precondition_actually_fires_when_the_package_is_absent`
+    executes the committed step for.
     """
     match = _IF_PRECONDITION_RE.search(code) or _OR_PRECONDITION_RE.search(code)
     assert match, (
@@ -341,23 +366,30 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
         "ubuntu-26.04, whose archive has no `postgresql-client-16`, so this job "
         "reds before a single test runs (#12051). Name the release."
     )
-    for label in labels:
-        assert label in KNOWN_GOOD_IMAGE_MAJOR, (
-            f"`{JOB}` runs on {label!r}, whose PostgreSQL client major has not "
-            "been measured. PROVE it — `apt-cache policy "
-            f"postgresql-client-{server_major}` on that image — and add the "
-            "pair to KNOWN_GOOD_IMAGE_MAJOR. The image supplies the drill's "
-            "client, so adopting one unmeasured is how #12051 round 2 shipped."
-        )
-        assert KNOWN_GOOD_IMAGE_MAJOR[label] == server_major, (
-            f"`{JOB}`'s two servers are pg{server_major}, but {label} carries a "
-            f"pg{KNOWN_GOOD_IMAGE_MAJOR[label]} client: the archive would be "
-            "dumped by a client whose major differs from the restore target "
-            "(#12051)."
-        )
+    assert len(labels) == 1 and labels[0].startswith("ubuntu-"), (
+        f"`{JOB}` asks for {labels!r}. This pin needs ONE named hosted image: the "
+        "drill's PostgreSQL client major comes from that image's archive, so any "
+        "second label (e.g. `self-hosted`) makes the client an inherited fact of "
+        "whichever box answers — the exact inheritance #12051 removed. The "
+        "in-step precondition fails closed on such a box; this assertion is the "
+        "contract."
+    )
+    label = labels[0]
+    assert label in KNOWN_GOOD_IMAGE_MAJOR, (
+        f"`{JOB}` runs on {label!r}, whose PostgreSQL client major has not been "
+        "measured. PROVE it — `apt-cache policy "
+        f"postgresql-client-{server_major}` on that image — and add the pair to "
+        "KNOWN_GOOD_IMAGE_MAJOR. The image supplies the drill's client, so "
+        "adopting one unmeasured is how #12051 round 2 shipped."
+    )
+    assert KNOWN_GOOD_IMAGE_MAJOR[label] == server_major, (
+        f"`{JOB}`'s two servers are pg{server_major}, but {label} carries a "
+        f"pg{KNOWN_GOOD_IMAGE_MAJOR[label]} client: the archive would be dumped "
+        "by a client whose major differs from the restore target (#12051)."
+    )
 
     _, pin = _pin_step(_steps(job))
-    code = _code_only(_run_text(pin))
+    code = _normalised_code(_run_text(pin))
     precondition = _precondition(code)
     assert int(precondition.group("major")) == server_major, (
         f"the precondition probes postgresql-client-"
@@ -368,17 +400,15 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
         "the precondition fails silently: an absent package must be reported as "
         "its OWN named failure, not as the archive's opaque apt error"
     )
-    assert re.search(r"\bexit\s+1\s*(?:;|\}|$)", body), (
+    assert re.search(r"\bexit\s+1\s*(?:;|\}|\)|$)", body), (
         "the precondition does not `exit 1`, so a missing client would fall "
         "through to the install and surface as exit 100 again. Any separator is "
-        "accepted (`exit 1` on its own line, `; exit 1;`, `; exit 1; }`) — the "
-        "fact is the exit status, not the punctuation around it."
+        "accepted — the fact is the exit status, not the punctuation around it."
     )
 
     # ⛔ ORDER IS PART OF THE FIX. A precondition placed AFTER the install is
     # inert: the install has already died with the opaque `exit 100` this block
-    # exists to replace. Measured as a gap — moving the whole block below the
-    # install left the guard green while the diagnostic was gone.
+    # exists to replace.
     assert code.index("apt-cache") < code.index("apt-get install"), (
         "the package precondition runs AFTER `apt-get install`, so on an image "
         "whose archive lacks the major the job dies with the archive's opaque "
@@ -398,4 +428,86 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
         f"the pin INSTALLS postgresql-client-{install.group('major')} while the "
         f"servers are pg{server_major}: the versioned PATH prepend would then "
         "point at a directory the install never created"
+    )
+
+
+def test_the_precondition_actually_fires_when_the_package_is_absent(
+    job: dict, tmp_path: Path
+) -> None:
+    """REACHABILITY, executed — text cannot prove an armed guard from a dead one.
+
+    Every other assertion in this file reads the step's text, and text does not
+    distinguish "the guard is armed" from "the guard is present but unreachable".
+    MEASURED, all of these satisfied the text assertions:
+      · `... >/dev/null 2>&1 || true; then` — the probe's status thrown away
+      · `exit 1` moved inside `if false; then … fi` — the token is still there
+      · the whole block wrapped in `if [ -z "${NEVER_SET:-}" ]; then … fi`
+
+    So this test RUNS the committed step's prefix — verbatim, from `run:`, up to
+    (not including) the `apt-get install` line — under `bash`, with `sudo`,
+    `apt-get` and `apt-cache` stubbed. Hermetic: no network, no apt, no sudo.
+    The failing-stub run must STOP with a named `::error::`; the succeeding-stub
+    run must NOT stop, or the job would red on every image that carries the
+    client.
+    """
+    _, pin = _pin_step(_steps(job))
+    lines = _run_text(pin).splitlines()
+    install_at = next(
+        (i for i, line in enumerate(lines) if re.search(r"apt-get\s+install", line)),
+        None,
+    )
+    assert install_at is not None, "the pin has no `apt-get install` line to run up to"
+    prefix = "\n".join(lines[:install_at]).rstrip()
+    assert "apt-cache" in prefix, (
+        "the precondition is not before the install in the committed step, so "
+        "there is nothing to execute ahead of it (the order assertion above "
+        "should already have caught this)"
+    )
+
+    def run_with(stub: str) -> subprocess.CompletedProcess[str]:
+        script = tmp_path / "precondition.sh"
+        # ⛔ `sudo` and `apt-get` are stubbed TOO. Without them the prefix runs
+        # the HOST's real `sudo apt-cache` / `sudo apt-get update`: on a box where
+        # sudo is passwordless and the package is known to apt the probe
+        # SUCCEEDS, the failure branch is never taken, and the test reports a
+        # disarmed guard that is actually armed — and reads the host's package
+        # index while doing it.
+        script.write_text(
+            'sudo() { "$@"; }\n'
+            "apt-get() { return 0; }\n"
+            f"{stub}\n{prefix}\n"
+            "echo REACHED_PAST_PRECONDITION\n",
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            ["bash", str(script)], capture_output=True, text=True, timeout=60
+        )
+
+    absent = run_with(
+        'apt-cache() { echo "E: Unable to locate package" >&2; return 100; }'
+    )
+    combined = absent.stdout + absent.stderr
+    assert absent.returncode != 0, (
+        "with `apt-cache` FAILING the committed precondition did not stop the "
+        "step, so it is unreachable or disarmed (`|| true`, an `exit 1` inside a "
+        "dead branch, or a wrapper that never runs). On a real image without the "
+        f"client this reaches `apt-get install` and dies with exit 100. Output: {combined!r}"
+    )
+    assert "REACHED_PAST_PRECONDITION" not in absent.stdout, (
+        "the precondition let the script continue past itself with the package "
+        f"absent — it is not armed: {combined!r}"
+    )
+    assert "::error::" in combined, (
+        "the precondition stopped the step but never NAMED the cause: the whole "
+        f"point is that a missing client reads as THIS defect, not an apt error: {combined!r}"
+    )
+
+    present = run_with("apt-cache() { return 0; }")
+    assert present.returncode == 0, (
+        "with `apt-cache` SUCCEEDING the precondition stopped the step — the job "
+        f"would red on every image that carries the client: {present.stderr!r}"
+    )
+    assert "REACHED_PAST_PRECONDITION" in present.stdout, (
+        "the script never reached the line after the precondition even when the "
+        "package resolved — the block is unconditional"
     )
