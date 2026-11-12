@@ -41,6 +41,7 @@ Runnable embedded:
 from __future__ import annotations
 
 import contextlib
+import gc
 import json
 import os
 import subprocess
@@ -1090,6 +1091,61 @@ class TestReviewRound2Closed:
         rows = kind_guard_counts()
         assert sum(r["count"] for r in rows if r["outcome"] == "skipped") == 1
         assert not [r for r in rows if r["outcome"] == "accepted"]
+
+    def test_the_abstain_marker_dies_with_its_own_decision(self):
+        """R2 P2 (review at `39615f22`). The marker is keyed on `id(decision)`
+        but its first version stored the REPLACEMENT as the weak value, so the
+        entry outlived the decision it was about and a later decision allocated
+        at the recycled address was served ANOTHER write's abstention.
+
+        The discrimination: `test_abstain_is_idempotent_per_decision` keeps the
+        decision alive across both calls, so it cannot see this. Here the
+        decision is dropped while the REPLACEMENT the caller holds stays alive —
+        the exact shape `_apply_kind_guard` creates, because it hands the
+        replacement back to `create_entity` and holds it for the rest of the
+        write. MEASURED before the fix: the entry survived (`1` entry, key
+        present) and a threaded door reported `accepted: 12 / skipped: 468` over
+        480 abstentions. After: `0` entries and `skipped: 480`.
+        """
+        d = resolve(ISSUE_NAME, "subject", None, pack_confusions=())
+        replacement = kg.abstain(d, "probe")
+        replacement = kg.abstain(d, "probe")
+        address = id(d)
+        assert kg._ABSTAINED, "the marker was never recorded — the test is vacuous"
+        del d
+        gc.collect()
+        # The caller still holds `replacement`: that MUST NOT keep the entry
+        # alive, because the entry is about the decision that has died.
+        assert replacement is not None
+        assert address not in kg._ABSTAINED, (
+            "the abstain marker outlived the decision it is keyed on — a "
+            "decision allocated at this recycled address would be served this "
+            "write's skipped rule/target as its own")
+
+    def test_the_next_write_gets_its_own_correction_after_the_first_dies(self):
+        """…and the correction is per WRITE, not per process.
+
+        The pre-fix map served a hit without asking whether the entry was about
+        THIS decision, so the observable damage was a second write whose reply
+        carried the first write's `skipped` block while its own `accepted` was
+        left uncorrected — the counter reporting a redirect that did not happen.
+        Deterministic here (no allocator dependence): the first decision dies and
+        the second abstains, and both corrections must be present exactly once.
+        """
+        first = resolve(ISSUE_NAME, "subject", None, pack_confusions=())
+        first_replacement = kg.abstain(first, "first write's reason")
+        del first
+        gc.collect()
+
+        second = resolve(ISSUE_NAME, "subject", None, pack_confusions=())
+        second_replacement = kg.abstain(second, "second write's reason")
+        assert second_replacement is not first_replacement, (
+            "the second write was served the first write's abstention")
+        assert second_replacement.skipped["reason"] == "second write's reason", (
+            second_replacement.skipped)
+        rows = kind_guard_counts()
+        assert sum(r["count"] for r in rows if r["outcome"] == "skipped") == 2, rows
+        assert sum(r["count"] for r in rows if r["outcome"] == "accepted") == 0, rows
 
     def test_the_table_check_reports_from_the_DOCUMENTED_shape(self):
         """R2 P2. `guard_table()`'s docstring claimed an unroutable guard was

@@ -883,9 +883,14 @@ def abstain(decision: GuardDecision, reason: str, *,
     # HAPPENED.
     if decision.outcome != GuardOutcome.REDIRECT:
         return decision
-    _already = _ABSTAINED.get(id(decision))
-    if _already is not None:
-        return _already
+    _entry = _ABSTAINED.get(id(decision))
+    if _entry is not None:
+        if _entry[0]() is decision:
+            return _entry[1]
+        # A RECYCLED ADDRESS: this entry belongs to a decision that is gone.
+        # Dropping it is the whole point of storing the ref — the marker must
+        # never be served to a decision it was not minted for.
+        _ABSTAINED.pop(id(decision), None)
     _unrecord(decision.rule or "", decision.declared_kind, decision.kind or "",
               GuardOutcome.REDIRECT)
     skipped = {"rule": decision.rule, "target": decision.kind, "reason": reason}
@@ -895,10 +900,20 @@ def abstain(decision: GuardDecision, reason: str, *,
         outcome=GuardOutcome.SKIPPED, layer=_layer,
         declared_kind=decision.declared_kind, declared_layer=_layer,
         skipped=skipped, rule=decision.rule)
-    # Remembered as the REPLACEMENT, so a second `abstain` on the same redirect
-    # answers with the abstention it already produced instead of handing the
-    # caller back a redirect the door would then APPLY.
-    _ABSTAINED[id(decision)] = _replacement
+    # Remembered as `(ref to this decision, the REPLACEMENT)`, so a second
+    # `abstain` on the same redirect answers with the abstention it already
+    # produced instead of handing the caller back a redirect the door would then
+    # APPLY — while an entry whose decision has died is forgotten with it.
+    _key = id(decision)
+
+    def _forget(_ref: weakref.ref, *, _key: int = _key) -> None:
+        # Evict ONLY the dead owner's entry: a successor that already owns this
+        # key must not be dropped by a predecessor's callback.
+        _current = _ABSTAINED.get(_key)
+        if _current is not None and _current[0] is _ref:
+            _ABSTAINED.pop(_key, None)
+
+    _ABSTAINED[_key] = (weakref.ref(decision, _forget), _replacement)
     return _replacement
 
 
@@ -1090,14 +1105,21 @@ def _admit(label: str | None, seen: set[str]) -> str:
     return _l
 
 
-#: Decisions `abstain` has already corrected. A WEAK-VALUE map keyed on `id()`,
-#: not a `WeakSet`: `GuardDecision` carries dict payloads, so a value-based hash
-#: raises (`TypeError: unhashable type: 'dict'`) on exactly the decisions this
-#: has to track. Only the KEY is hashed here. The weak values are what make the
-#: recycled-id aliasing impossible: an entry dies with its decision, so a live
-#: object can never inherit a stale marker.
-_ABSTAINED: weakref.WeakValueDictionary[int, GuardDecision] = \
-    weakref.WeakValueDictionary()
+#: Decisions `abstain` has already corrected. Keyed on `id()` behind a
+#: `weakref` to the decision ITSELF — not a `WeakSet`: `GuardDecision` carries
+#: dict payloads, so a value-based hash raises (`TypeError: unhashable type:
+#: 'dict'`) on exactly the decisions this has to track. Only the KEY is hashed
+#: here.
+#: ⛔ The stored value is `(ref to the ORIGINAL, replacement)`, and a hit counts
+#: only when `ref()` still RESOLVES to the decision being asked about: an entry
+#: dies with the decision it is about. A map whose weak value was the
+#: REPLACEMENT died with the *replacement* instead — and `_apply_kind_guard`
+#: hands that replacement back to `create_entity` for the rest of the write, so
+#: the entry outlived its key and a later decision allocated at the recycled
+#: address inherited ANOTHER write's marker (measured on the threaded door,
+#: 480 abstentions: 12 stale inheritances and a tally reporting 12 redirects
+#: that did not happen — the one thing this counter exists to prevent).
+_ABSTAINED: dict[int, tuple[weakref.ref, GuardDecision]] = {}
 
 
 def _record(rule: str, from_kind: str | None, to_kind: str, outcome: str) -> None:
