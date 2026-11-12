@@ -2379,10 +2379,16 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     #: one. A needle is a contiguous SPAN, so no wording rule makes it unreachable by such a
     #: rewrite (measured, repeatedly); what separates the two is CONTEXT. So a hit only counts
     #: when the passage it lands in does not itself state the second half.
-    #: ⛔ `still for` rather than bare `still`: "still counted" is ordinary prose in THIS module
+    #: ⛔ AND THIS TUPLE IS ITSELF A WORDING RULE, so it is stated as one. A correct qualifier
+    #: reds unless it names stillness with one of these tokens IN THE SAME SENTENCE: measured, a
+    #: correct edit phrased "unless its stamp has stopped moving" or "while the run has been
+    #: QUIET for 300 s" redded. So the tuple carries the stillness vocabulary these docs
+    #: actually use, not only the module's identifier.
+    #: `still for` rather than bare `still`: "still counted" is ordinary prose in THIS module
     #: (an abstained run is "still counted as executing"), so the loose token would disarm real
     #: hits — measured.
-    SECOND_HALF = ("updated_at", "job_settle_seconds", "still for")
+    SECOND_HALF = ("updated_at", "job_settle_seconds", "still for", "motionless", "quiet",
+                   "stopped moving", "stops moving", "settle window", "has been still")
 
     def hits(hay: str, needle: str) -> bool:
         """Does ``needle`` occur where the second half is NOT also stated nearby?
@@ -2525,6 +2531,10 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # to the CLAIM, not to the bare count: "three causes, one bucket" alone is a true
         # statement about `PR-UNWITNESSED` and reds on legitimate prose.
         "disproved — three causes, one bucket",
+        # the count form that shipped MOST RECENTLY (review P2): it shipped from c0c53f8c
+        # through 77cae6056 — ten revisions — and a revert to it was silent while only the
+        # "three causes" form was pinned.
+        "disproved. FOUR causes, ONE bucket — and the causes span three layers",
     ]
     flats = {name: flat(text) for name, text in scanned.items()}
     # The guard's own docstring quotes several of these to describe them, so the test file
@@ -2667,6 +2677,11 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # still fire — a count re-added without a stillness clause is exactly the revert the
         # needle exists for.
         "disproved — three causes, one bucket: the jobs could NOT be read.",
+        # the same claim with the numeral it grew to. ⛔ Its provenance is the BRANCH, not
+        # `origin/main`: main never carried either numeral, but the branch carried this one for
+        # ten revisions — so it is a shipped retracted claim, and the dead-needle check is right
+        # to demand it here.
+        "disproved. FOUR causes, ONE bucket — and the causes span three layers,",
         # ⛔ A RE-TYPED REVERT, not a shipped quote: `flat()` turns the shipped
         # "all-jobs" / newline / "-completed" into "all-jobs -completed", so a revert that
         # re-types it without the break would otherwise be caught by no needle at all
