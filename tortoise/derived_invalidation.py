@@ -30,11 +30,16 @@ push back on explicitly if they are wrong:
    (``PointRetracted``), window end stamped. ``supersede_point`` is the wrong verb
    here (it needs a replacement, and would transfer the dead claim's operator onto
    whatever it was handed), and ``invalidate_point`` is the wrong verb too (it
-   requires a ``corrected_by`` point and mints a ``CORRECTS`` edge to it). This is
-   the SAME retirement a state gets when a reading changes it — the design's
-   ``replace`` primitive — reached through the door that exists today. #11824 (the
-   uniform cross-kind ``replace``) is still open; nothing here re-implements it,
-   and no migration, backfill or compatibility shim is carried.
+   requires a ``corrected_by`` point and mints a ``CORRECTS`` edge to it). What it
+   shares with the reading-change path is the FACTS a reader sees — a terminal
+   status, a stamped window end and exclusion from every live read — not the
+   mechanism: a reading change goes through ``supersede_point`` (status
+   ``superseded``, a SUCCESSOR, the predecessor's operator TRANSFERRED onto it),
+   while a retirement has no successor to hand anything to and therefore uses
+   ``retract_point``. ⛔ The difference is stated because it has a residual of its
+   own (below): a retracted claim's operator is neither transferred nor removed.
+   #11824 (the uniform cross-kind ``replace``) is still open; nothing here
+   re-implements it, and no migration, backfill or compatibility shim is carried.
 2. **The decision is declared and the set is CLOSED.** :data:`STALE_REASONS`
    names every reason a derived state may be retired for; there is no ``reason``
    string a caller can invent, and ``tests/test_11926_derived_invalidation.py``
@@ -62,6 +67,18 @@ implied. These are recorded residuals, not oversights:
   reports the goal at all — i.e. the *claim* stops counting immediately and the
   cached number ages out on the next pass that has a factor for it. Filed
   against the EP/``replace`` lane (#11824), not silently repaired here.
+* **It does not move the retired claim's OPERATOR.** The door is
+  ``retract_point``, which touches no operator, so the IMPL operator that carried
+  the claim stays in the graph pointing at a retracted Point. EP is safe — a
+  terminal input never participates in a propagation pass (``ep.py``'s shared
+  ``TERMINAL_EXCLUDED_STATUSES`` predicate), measured: ``compute_confidence()``
+  stops reporting the goal. What is left is graph litter that a supersession would
+  have migrated: MEASURED, the documented follow-up ``judge_and_record`` returns a
+  NEW ``operator_id`` with ``extraOperators: []`` — no transfer — so each
+  retire → re-derive cycle adds one operator. Removing or re-pointing it is the
+  ``replace`` primitive's job (#11824), the same lane that owns the EP-posterior
+  residual above; doing it here would be a second writer for an edge this module
+  did not mint.
 * **It does not propagate a goal's retirement to its targets and sub-goals**
   (design of record row 12's second half). That is lifecycle propagation across
   entity kinds — the five-mechanisms problem #11824 exists to unify — and this
@@ -608,8 +625,14 @@ def invalidate(
        vocabulary plus the legacy ``outdated`` flag, exactly the predicate the
        read paths use, so "already retired" here means the same thing it means
        everywhere else.
-    3. ``retract_point`` — journal-first, so a rebuild replays the retirement
-       instead of resurrecting a claim the live graph retired.
+    3. ``retract_point`` — journal-first ORDER, so a rebuild replays the retirement
+       instead of resurrecting a claim the live graph retired. ⚠️ ORDER is what
+       the door guarantees and CONFIRMATION is not: its own docstring records
+       that a failed append still retracts the cache node and reports success
+       (#9124 part 2, open), and that residual is inherited here — ``invalidate``
+       reports ``invalidated: True`` from the door's return and cannot observe a
+       lost ``PointRetracted``. Named rather than papered over; confirming the
+       append belongs to #9124.
     4. reconcile the goal's ``goalState`` cache — gated on the WORD in the cache
        (:func:`reconcile_goal_state_cache`), never on the reason: a word this
        engine wrote is reconciled or cleared, anything else is preserved. A
@@ -727,14 +750,35 @@ def reconcile_goal_state_cache(sdk: Any, goal_id: str | None) -> dict:
     Idempotent and re-runnable: a caller can repair a cache by calling this again
     with the goal's id, which is the recovery route when a transient write failure
     left the word stale (``invalidate`` reports that rather than raising).
+
+    ⛔ A GOAL THAT NO LONGER EXISTS IS REPORTED, NEVER REPORTED CLEARED. "The goal
+    node is gone" and "the goal holds no cached word" are different facts, and
+    folding them (``get_entity(...) or {}``) made this function answer
+    ``{"checked": True, "cleared": True}`` for a deleted node — a write that lands
+    nowhere, because ``update_entity`` on a missing id is a silent no-op. MEASURED
+    by review: a sweep over a deleted goal reported ``cleared: True``, and the
+    documented repair route reported it again, forever. The absent case returns
+    ``checked: False`` with ``gone: True``, which ``invalidate_stale`` surfaces as
+    ``counts.gone`` — a sweep may not read clean while a reconcile did not happen.
     """
     if not goal_id:
         return {"checked": False, "reason": "no goalId on the retired claim"}
     try:
-        goal = sdk.get_entity(goal_id) or {}
+        goal = sdk.get_entity(goal_id)
     except Exception as exc:
         return {"checked": False,
                 "error": f"{type(exc).__name__}: {exc}"}
+    if not goal:
+        # ⛔ NOT the same fact as "the goal holds no derived word": there is no
+        # node to point at anything, so nothing was reconciled. Reported as
+        # `gone` so a sweep cannot read clean on a retirement it could not follow.
+        # A falsy read IS the absent case: `get_entity` answers `{}` for an id
+        # with no node (measured — a deleted node and a never-existent id both
+        # return `{}`, never `None`), which is why the caller must use the same
+        # predicate the read paths do rather than truthiness of a prop.
+        return {"checked": False, "gone": True,
+                "reason": f"the goal {goal_id!r} no longer exists — its cache "
+                          "cannot be reconciled"}
     current = goal.get("goalState")
     if current is not None and current not in DERIVED_GOAL_STATES:
         return {"checked": True, "goalState": current, "preserved": True,
@@ -776,8 +820,15 @@ def invalidate_stale(
     :func:`invalidate` returned, per finding — including a per-finding ``error``
     when one retirement refused, so the rest of the sweep's results survive),
     ``undecidable`` (verdicts the module could not decide — surfaced, never
-    dropped), ``counts`` (including ``failed``) and ``truncated`` (true when the
-    scan hit ``limit``, i.e. the sweep did not see the whole graph).
+    dropped), ``counts`` (including ``failed`` and ``gone``) and ``truncated``
+    (true when the scan hit ``limit``, i.e. the sweep did not see the whole graph).
+
+    ``counts.gone`` counts the findings whose goal NO LONGER EXISTS, i.e. the
+    retirement landed but the goal's ``goalState`` cache could not be reconciled
+    because there is no node to reconcile it on. It is not a failure of the
+    retirement (which did land) and not a success of the reconcile (which did not
+    happen) — it is its own bucket, and it exists so a sweep over deleted goals
+    cannot read clean.
     """
     found = verdicts(sdk, goal_id=goal_id, indicator_id=indicator_id,
                      target_id=target_id, limit=limit)
@@ -816,6 +867,13 @@ def invalidate_stale(
             "stale": len(stale),
             "retired": sum(1 for r in invalidated if r.get("invalidated")),
             "alreadyRetired": sum(1 for r in invalidated if r.get("alreadyRetired")),
+            # ⛔ A RETIREMENT WHOSE GOAL IS GONE IS ITS OWN BUCKET. The retirement
+            # landed; the cache reconcile could not happen (no node to point at
+            # anything). Reported per finding as `cache.gone`, and counted here,
+            # so neither the summary nor the nested key claims a clear that never
+            # ran — the same rule as `failed` below.
+            "gone": sum(1 for r in invalidated
+                        if (r.get("cache") or {}).get("gone") is True),
             # ⛔ A FAILED CACHE RECONCILE IS A FAILURE OF THIS SWEEP. It is
             # reported per finding (`cache.error`) but a summary that counts only
             # per-finding retirements reads CLEAN while the goal still shows a

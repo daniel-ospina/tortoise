@@ -9,10 +9,19 @@ counting.
 
 Every fact asserted here was MEASURED on this head, embedded OR docker lane (the
 shared ``sdk_factory`` is URI-aware); ``TORTOISE_TEST_CARVE_OUT=1`` selects the
-embedded carve-out. The suite is hermetic: no network, no model, no clock
-dependence — every instant it compares is supplied by the test.
+embedded carve-out. The suite is hermetic: no network, no model, and every instant
+an assertion ORDER as evidence is supplied by the test. ⚠️ Two facts read from the
+WRITER's clock are not test-supplied, and are named here rather than claimed away
+by the sentence above (review P3): ``evaluatedAt``/``createdAt`` are
+``datetime.now(UTC)`` minted inside ``record_judgement`` (which exposes no seam to
+pass one in), so the back-dated test asserts that the mint is *later than* the
+boundary it wrote — a comparison no host clock older than ``2026-11-11`` could
+satisfy. The seeded names use a digest, never ``hash()``, whose ``str`` salt is
+per process (``PYTHONHASHSEED``).
 """
 from __future__ import annotations
+
+import hashlib
 
 import pytest
 
@@ -321,6 +330,86 @@ def test_a_failed_read_of_the_DEFINITION_BOUNDARY_is_undecidable_not_healthy(sdk
     finally:
         sdk.get_entity = real_get
     assert sdk.get_entity(made["point_id"])["status"] == "live"
+
+
+def test_a_failed_boundary_read_does_NOT_derive_or_write(sdk):
+    """⛔ REVIEW P2, reproduced. The derivation half inherited the very fold the
+    invalidation half refuses: ``definition_boundary()`` returned ``None`` both for
+    "no boundary declared" and for "the indicator read raised", so ``judge``
+    served a PRE-boundary reading, called it ``met``, and ``judge_and_record``
+    minted that state and wrote it into the goal's ``goalState`` — a durable wrong
+    word from a transient read failure, and exactly the "wrong number rather than a
+    stale one" hazard capability 9 exists to remove.
+
+    MEASURED before the fix, on a world with one reading at 10:00 and the boundary
+    at 12:00 (only the indicator read failing)::
+
+        healthy read -> state='unknown' reading=None             (nothing written)
+        failed read  -> state='met'     reading='<pre-boundary>' (minted + cached)
+
+    The honest answer costs nothing: ``GOAL_STATE_CACHE['unknown'] is None``, so
+    ``unknown`` writes no cache word and flips nothing (#11822's rule for a missing
+    reading).
+    """
+    i, t, g = _world(sdk, tag="boundary-read-fail-derive")
+    _reading(sdk, i, 9.0, at="2026-11-11T10:00:00Z")
+    mark_definition_change(sdk, i["id"], at="2026-11-11T12:00:00+00:00")
+    target = Target.from_node(t)
+    # control: a healthy read of the SAME world answers unknown — the boundary
+    # excludes the only reading, so there is nothing to judge.
+    assert judge(sdk, indicator_id=i["id"], target=target, goal_id=g["id"]).state == "unknown"
+
+    real_get = sdk.get_entity
+
+    def failing(node_id, *a, **kw):
+        if node_id == i["id"]:
+            raise RuntimeError("transient read failure")
+        return real_get(node_id, *a, **kw)
+
+    sdk.get_entity = failing
+    try:
+        judged = judge(sdk, indicator_id=i["id"], target=target, goal_id=g["id"])
+        assert judged.state == "unknown", (
+            "a failed read of the definition boundary was treated as 'no boundary "
+            f"declared', so a pre-boundary reading was judged: {judged.state!r}")
+        assert judged.reading is None
+        assert judged.reason == "boundary-unreadable"
+        made = judge_and_record(sdk, goal_id=g["id"], indicator_id=i["id"], target=target)
+        assert made["written"] is False, made
+    finally:
+        sdk.get_entity = real_get
+    # ⛔ nothing was written — the goal keeps the word it was created with
+    assert sdk.get_entity(g["id"])["goalState"] == "active"
+
+
+def test_a_GOAL_that_no_longer_EXISTS_is_reported_gone_not_cleared(sdk):
+    """⛔ REVIEW P3, reproduced. ``reconcile_goal_state_cache`` folded a MISSING goal
+    into "the goal holds no cached word" (``get_entity(...) or {}``), and
+    ``update_entity`` on a missing id is a silent no-op — so a sweep over a deleted
+    goal reported ``cleared: True`` for a write that landed nowhere, and the
+    documented repair route kept reporting it forever.
+
+    The retirement DID land; only the cache follow-up could not happen. That is its
+    own bucket (``counts.gone``), never a failure of the retirement and never a
+    success of the reconcile.
+    """
+    i, t, g = _world(sdk, tag="goal-gone-cache")
+    made = _judge(sdk, i, t, g)
+    assert sdk.get_entity(g["id"])["goalState"] == "met"
+    sdk.delete_entity(g["id"])
+    report = invalidate_stale(sdk, goal_id=g["id"])
+    assert report["counts"]["retired"] == 1
+    assert report["counts"]["failed"] == 0
+    assert report["counts"]["gone"] == 1, report["counts"]
+    cache = report["invalidated"][0]["cache"]
+    assert cache["checked"] is False
+    assert cache["gone"] is True
+    assert "no longer exists" in cache["reason"]
+    # the retirement itself landed — this is a reconcile gap, not a retire gap
+    assert sdk.get_entity(made["point_id"])["status"] == "retracted"
+    # and the repair route says the same thing instead of claiming a clear
+    again = reconcile_goal_state_cache(sdk, g["id"])
+    assert again["checked"] is False and again["gone"] is True
 
 
 def test_the_boundary_is_read_from_the_NODE_already_fetched(sdk):
@@ -657,7 +746,7 @@ def test_a_boundary_that_names_no_instant_is_REFUSED_at_the_door(sdk, stamp):
     reading (nothing can be shown to be after a moment nobody can place), so the
     indicator silently stopped producing judgements — and every later repair was
     refused, because the monotone check could not order the stored value either."""
-    i, _t, _g = _world(sdk, tag=f"bad-stamp-{abs(hash(stamp))}")
+    i, _t, _g = _world(sdk, tag="bad-stamp-" + hashlib.sha1(stamp.encode()).hexdigest()[:8])
     with pytest.raises(ValueError, match="must name an instant"):
         mark_definition_change(sdk, i["id"], at=stamp)
     assert sdk.get_entity(i["id"]).get(DEFINITION_BOUNDARY_PROP) is None

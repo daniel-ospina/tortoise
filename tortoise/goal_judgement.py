@@ -116,6 +116,7 @@ from typing import Any
 from .live import TERMINAL_EXCLUDED_STATUSES as _TERMINAL_EXCLUDED_STATUSES
 
 __all__ = [
+    "BOUNDARY_UNREADABLE",
     "COMPARATORS",
     "DECISION_TABLE",
     "DEFAULT_STRENGTH",
@@ -211,6 +212,40 @@ DEFAULT_STRENGTH = 0.9
 #: not trend across it (:func:`judge`). ``derived_invalidation`` owns the
 #: retirement of the states derived under the old definition.
 DEFINITION_BOUNDARY_PROP = "definitionChangedAt"
+
+
+class _BoundaryUnreadable:
+    """The indicator's boundary could NOT be read — NOT the same fact as "none".
+
+    ⛔ The distinction is the whole reason this sentinel exists. ``None`` already
+    means "this indicator declares no boundary" — the state of every indicator
+    today, which admits every reading. A FAILED READ is the opposite fact: the
+    indicator may well declare one, so no reading can be shown to be comparable
+    with the current definition. Folding the two made the derivation fail OPEN,
+    which is the one direction it must never fail in: with the indicator read
+    patched to raise, :func:`judge` served a PRE-boundary reading, judged it
+    ``met``, and :func:`judge_and_record` minted that state and wrote it into the
+    goal's ``goalState`` — a durable wrong word produced by a transient database
+    hiccup. MEASURED on this lane (one reading at ``2026-11-11T10:00``, boundary
+    ``2026-11-11T12:00``, only the indicator read failing)::
+
+        healthy read   -> state='unknown'  reading=None             (nothing written)
+        failed read    -> state='met'      reading='<pre-boundary>' (minted + cached)
+
+    ``derived_invalidation`` deliberately does NOT consume this helper for the
+    retirement decision (it reads the property off the node it has already
+    fetched); this sentinel exists so the DERIVATION can tell the two facts
+    apart too, instead of relying on that one caller getting it right.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "BOUNDARY_UNREADABLE"
+
+
+#: The one instance. Identity-compared, never equality-compared.
+BOUNDARY_UNREADABLE = _BoundaryUnreadable()
 
 
 def prior_for(state: str, strength: float = DEFAULT_STRENGTH) -> tuple[float, float]:
@@ -781,34 +816,38 @@ def compare(
 
 
 def definition_boundary(sdk: Any, indicator_id: str) -> Any:
-    """The indicator's declared definition boundary (:data:`DEFINITION_BOUNDARY_PROP`).
+    """The indicator's declared definition boundary — THREE-WAY, never two.
 
-    ``None`` when the indicator declares none — which is the state of EVERY
-    indicator today and is not the same fact as "the definition never changed":
-    it is "no boundary was ever declared", so no reading is excluded on this
-    ground and no judgement is retired for it. An ABSENT stamp is not evidence
-    of a change, and inventing one would retire claims nobody changed.
+    :data:`BOUNDARY_UNREADABLE` when the indicator could not be read (or does not
+    exist), ``None`` when it was read and declares no boundary, else the stamp as
+    stored (never coerced to a datetime here — the ordering decision belongs to
+    :func:`instant_at_or_after`, the one place that knows what an incomparable
+    value means).
 
-    The value is handed back as stored (never coerced to a datetime here): the
-    ordering decision belongs to :func:`instant_at_or_after`, which is the one
-    place that knows what an incomparable value means.
+    ⛔ ``None`` IS NOT "WE COULD NOT TELL". It is "no boundary was ever
+    declared", which is the state of EVERY indicator today: no reading is
+    excluded on this ground and no judgement is retired for it. An ABSENT stamp
+    is not evidence of a change, and inventing one would retire claims nobody
+    changed. A FAILED READ is the opposite fact — the indicator may well declare
+    one — and folding it into ``None`` made :func:`judge` trend across a
+    definition boundary it could not see (see :data:`BOUNDARY_UNREADABLE` for the
+    measurement). The derivation therefore answers ``unknown`` and writes
+    nothing, which is #11822's own rule for a missing reading.
 
-    ⚠️ A FAILED READ ALSO RETURNS ``None``, and that is deliberate for the CALLER
-    this exists for (:func:`judge`): an indicator read that fails means no reading
-    can be shown to predate anything, so serving the readings keeps the derivation
-    working until the next pass re-reads. An INVALIDATION must not inherit that
-    fold — "the boundary could not be read" and "no boundary was declared" are
-    opposite facts there, and treating the first as the second makes a stale claim
-    look healthy — which is why ``derived_invalidation.invalidation_for`` reads the
-    property from the indicator node it has ALREADY fetched instead of calling
-    this.
+    ``derived_invalidation.invalidation_for`` still reads the property from the
+    indicator node it has ALREADY fetched rather than calling this, for a second
+    reason: a retirement is terminal, so it must also keep "the node is missing"
+    distinct from "the property is absent" on the node it read.
     """
     if not indicator_id:
         return None
     try:
-        node = sdk.get_entity(indicator_id) or {}
+        node = sdk.get_entity(indicator_id)
     except Exception:
-        return None
+        return BOUNDARY_UNREADABLE
+    if not node:
+        # A missing node is a read we cannot make, not a boundary that is absent.
+        return BOUNDARY_UNREADABLE
     return node.get(DEFINITION_BOUNDARY_PROP)
 
 
@@ -976,17 +1015,32 @@ def judge(
     ``unknown``: #11822's rule that a missing reading is not a state change then
     retires nothing and mints nothing, which is the honest answer to "the
     definition changed and nothing has been measured under the new one yet".
+
+    ⛔ AND A BOUNDARY THAT COULD NOT BE READ IS ALSO ``unknown``, never "no
+    boundary was declared". ``BOUNDARY_UNREADABLE`` means the indicator may
+    declare a boundary this pass could not see, so no reading can be shown to be
+    comparable with the current definition: the judgement is ``unknown`` (reason
+    ``boundary-unreadable``), ``reading`` stays ``None``, and
+    :func:`record_judgement` writes nothing. The alternative — serving the
+    readings as if none was declared — is what minted a durable ``met`` from a
+    pre-boundary reading on a transient read failure (measured; see
+    :data:`BOUNDARY_UNREADABLE`), which is exactly the "wrong number rather than a
+    stale one" hazard capability 9 exists to remove.
     """
-    readings = latest_readings(
-        sdk, indicator_id, event_kind=event_kind,
-        limit=max(100, target.dwell),
-        since=definition_boundary(sdk, indicator_id),
-    )
+    boundary = definition_boundary(sdk, indicator_id)
     previous = latest_judgement(sdk, goal_id=goal_id, indicator_id=indicator_id,
                                target_id=target.target_id)
     previous_state = (previous or {}).get("judgementState") or "unknown"
     if previous_state not in JUDGEMENT_STATES:
         previous_state = "unknown"
+    if boundary is BOUNDARY_UNREADABLE:
+        return Judgement(state="unknown", reason="boundary-unreadable",
+                         target=target, previous_state=previous_state)
+    readings = latest_readings(
+        sdk, indicator_id, event_kind=event_kind,
+        limit=max(100, target.dwell),
+        since=boundary,
+    )
     return compare(readings, target, previous_state=previous_state)
 
 
