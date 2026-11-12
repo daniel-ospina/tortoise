@@ -206,7 +206,8 @@ not a tenth spelling — it is the one a text guard cannot reach:
   command position.
 - **The directory arm reads a text, and a text can be laundered.** The destination
   is taken as the last POSITIONAL path token of the owning verb's command
-  segment, with redirect targets and `-`-prefixed options skipped. SIX residuals
+  segment, with redirect targets and `-`-prefixed options skipped. SEVEN
+  residuals
   are stated rather than claimed closed, and each spares or refuses for its OWN
   mechanism — they are not one: an option whose value is a SEPARATE token written
   AFTER the target (`rsync … "$b/17/bin/" "$b/16/bin/" -e "ssh -o X=/a"`) moves
@@ -224,8 +225,13 @@ not a tenth spelling — it is the one a text guard cannot reach:
   the OPPOSITE direction —
   it is REFUSED (`d=$RUNNER_TEMP/tools; sudo chmod -R a+rX "$d/16/bin"` red, the
   same act on a literal path with an extra component green), which is fail-closed
-  and kept because a variable base cannot be resolved; and an EXTRACTOR's
-  destination is not graded at all (`tar -xf x.tgz -C "$b/16/bin"`, `unzip -o
+  and kept because a variable base cannot be resolved; a path RELATIVE to a `cd`
+  (`cd /usr/lib/postgresql && sudo rsync -a 17/bin/ 16/bin/`) names no client-dir
+  base at all, and this guard reads ONE LINE at a time — the `cd` may sit on an
+  earlier line or in an earlier step, which a line regex cannot model, so the arm
+  is not reached (measured GREEN; declared here rather than modelled, because
+  modelling it would mean carrying a working directory the text does not
+  guarantee); and an EXTRACTOR's destination is not graded at all (`tar -xf x.tgz -C "$b/16/bin"`, `unzip -o
   x.zip -d "$b/16/bin"`, `dpkg-deb -x x.deb "$b/16/bin"`, `cpio -D "$b/16/bin"`
   each overwrite every client). That last one is deliberate: the extractor verbs
   are absent from the mutation list by design (round 9 — `tar -czf …`,
@@ -239,6 +245,19 @@ not a tenth spelling — it is the one a text guard cannot reach:
   the last positional token of the owning verb's segment — residual 1 is such a
   class (the reading lands on the wrong token, and it is fail-OPEN, not
   fail-closed).
+
+  ⛔ THE BRACE-GLUED SPELLING WAS A MEASURED FAIL-OPEN AND IS NOW CLOSED
+  (#12069 review round 29). `b=/usr/lib/postgresql/; sudo rsync -a "${b}17/bin/"
+  "${b}16/bin/"` — the base is a braced variable glued to the token, with no
+  separator at all — was GREEN and is the COMPLETE #12051 directory replacement.
+  It was not residual 2 (base quoted apart): residual 2 has a separator and is
+  never matched, whereas this one simply had no `/` for the pattern to bind on.
+  `CLIENT_DIR_ANY_BASE_RE` now admits an optional separator for the BRACED form
+  only, and both spellings are pinned `True` in `BINARY_MUTATION_POLARITY`. Not
+  an unbraced one: `$b17` re-parses as the single variable `b17`, so gluing
+  there is a different variable, not a base+token pair. This is the round-24
+  lesson again — a claim of totality is only as good as the last spelling
+  someone measured.
 
 So: a green run means "no plausible spelling of the regression is in this
 text", not "the job provably installs and uses pg16". The job's own assertion is
@@ -734,9 +753,27 @@ CLIENT_DIR_RE = re.compile(r"/usr/lib/postgresql/(?P<token>[^/\s]+)/bin")
 #: and this file's own fixtures are the variable-base spelling (#12069 review
 #: round 23). Its cost is stated with the other residuals: a versioned path under
 #: a variable base is REFUSED, its literal spelling spared.
+#: ⛔ THE SEPARATOR BEFORE THE TOKEN IS NOT MANDATORY FOR A BRACED VARIABLE
+#: (#12069 review round 29, measured GREEN). The base and the token can be GLUED
+#: when the base is a braced variable whose own value carries the slash:
+#:
+#:     b=/usr/lib/postgresql/
+#:     sudo rsync -a "${b}17/bin/" "${b}16/bin/"     # GREEN before this fix
+#:
+#: That is the complete #12051 directory replacement, and it is NOT the
+#: base-quoted-apart residual (`"$b"/16/bin/`): there is no separator at all.
+#: The original pattern demanded a literal `/` between base and token, so
+#: nothing matched and the last-path machinery was never reached — the same act
+#: one spelling over from the shape this rule exists to refuse. It also inverted
+#: the rule's own principle: a variable base is refused precisely BECAUSE it
+#: cannot be resolved, yet this sibling spelling of the same unresolvable base
+#: was spared.
+#: ⛔ The optional `/` is allowed ONLY for the BRACED form. `$b17` re-parses as
+#: the single variable `b17`, so an unbraced glued token is a different variable
+#: and must not be read as a base+token pair.
 CLIENT_DIR_ANY_BASE_RE = re.compile(
-    r"(?:\$\{?\w+\}?|/[\w.*/-]*(?:postgresql|postgres|pg)[\w.*/-]*)"
-    r"/(?P<token>\d+|\*|\$\{?\w+\}?)/bin"
+    r"(?:\$\{\w+\}/?|\$\w+/|/[\w.*/-]*(?:postgresql|postgres|pg)[\w.*/-]*/)"
+    r"(?P<token>\d+|\*|\$\{?\w+\}?)/bin"
 )
 
 #: The fail-closed branch as ONE unit (#12051 review rounds 4, 6 and 7): the
@@ -1235,10 +1272,21 @@ def _replaces_a_client_binary(line: str) -> bool:
     #     sudo rsync -a "$b/17/bin/" "$b/16/bin/" >> "$GITHUB_STEP_SUMMARY"   -- GREEN
     #     sudo chmod a+r "/usr/lib/postgresql/16/bin" >> "$GITHUB_STEP_SUMMARY" -- GREEN
     #
-    # The exemption is gone. A `$GITHUB_PATH` append still costs nothing here: a
-    # producer (`echo`, `printf`, `tee` of a directory) has no verb this guard
+    # The exemption is gone. A `$GITHUB_PATH` append written with `echo` or
+    # `printf` still costs nothing here: neither is a mutating verb this guard
     # recognises, so `_owning_verb` answers None and the mention is spared by the
     # same rule that spares every other unwritten mention.
+    # ⛔ `tee` IS NOT SPARED, and this comment claimed it was (#12069 review
+    # round 29, measured). `tee` is in `BINARY_MUTATION_RE` and is not a
+    # destination verb, so a `tee` of a directory is refused wherever it sits:
+    #
+    #     sudo tee -a "$GITHUB_PATH" <<< "/usr/lib/postgresql/16/bin"   -- REFUSED
+    #     echo "$b/16/bin" | sudo tee -a "$GITHUB_PATH"                -- GREEN
+    #
+    # Fail-closed (a false RED, never a bypass), and pinned as such in
+    # `BINARY_MUTATION_POLARITY`: the shape the pin step actually uses is `echo`
+    # + `>>`, which stays GREEN. The sentence is corrected rather than the
+    # posture, because widening the exemption is what round 27 measured away.
     for dir_match in CLIENT_DIR_ANY_BASE_RE.finditer(line):
         if _is_command_position(line, dir_match.start()):
             continue
@@ -4775,6 +4823,58 @@ BINARY_MUTATION_POLARITY = [
         'sudo mv "$b/17/bin" "$b/16/bin"',
         True,
         "#12069 round-19 P1: `mv` of the dir, measured GREEN before the fix",
+    ),
+    (
+        'b=/usr/lib/postgresql/; sudo rsync -a "${b}17/bin/" "${b}16/bin/"',
+        True,
+        "#12069 round-29 P1: the base is GLUED to the token — a braced variable "
+        "whose own value carries the slash. Measured GREEN before the fix, and it "
+        "is the complete #12051 directory replacement, so it is NOT the "
+        "base-quoted-apart residual: there is no separator at all.",
+    ),
+    (
+        'b=/usr/lib/postgresql; sudo rsync -a "${b}/17/bin/" "${b}/16/bin/"',
+        True,
+        "#12069 round-29: the braced form WITH an explicit separator — the same "
+        "act, and widening the pattern to admit the glued spelling must not lose it",
+    ),
+    (
+        'b=/usr/lib/postgresql; sudo rsync -a "$b/17/bin/" "$d/"',
+        False,
+        "STATED RESIDUAL (#12069 round-29, measured): the VERSION component is "
+        "itself a variable, so the destination names no token this guard can "
+        "place. Declared in the docstring's residual list; pinned so closing it "
+        "is a deliberate edit rather than an accident.",
+    ),
+    (
+        'b=/usr/lib/postgresql; sudo sh -c \'rsync -a "$b/17/bin/" "$b/16/bin/"\'',
+        False,
+        "STATED RESIDUAL (#12069 round-29, measured): a quoted command word puts "
+        "both mentions in COMMAND position for a text guard that reads words, so "
+        "the body is not parsed. Declared, and pinned.",
+    ),
+    (
+        'cd /usr/lib/postgresql && sudo rsync -a 17/bin/ 16/bin/',
+        False,
+        "STATED RESIDUAL (#12069 round-29, measured): a path RELATIVE to a `cd` "
+        "elsewhere names no client-dir base at all, and the guard reads one line "
+        "at a time — the `cd` may be in an earlier line or step, which a line "
+        "regex cannot model. Declared, and pinned.",
+    ),
+    (
+        'sudo tee -a "$GITHUB_PATH" <<< "/usr/lib/postgresql/16/bin"',
+        True,
+        "ADMITTED OVER-REFUSAL (#12069 round-29, measured): `tee` IS a mutating "
+        "verb and has no direction, so a `tee` of a versioned dir is refused even "
+        "though it only appends a path. Fail-closed, and the pin step's own shape "
+        "(`echo … >> \"$GITHUB_PATH\"`) stays GREEN — pinned so widening the "
+        "exemption is a deliberate edit, not a silent one.",
+    ),
+    (
+        'echo "$b/16/bin" | sudo tee -a "$GITHUB_PATH"',
+        False,
+        "CONTROL: piping into `tee` puts the client dir in COMMAND position — the "
+        "ordinary append spelling, and it must stay green",
     ),
     (
         'rm -rf "$RUNNER_TEMP/tools/bin"',
