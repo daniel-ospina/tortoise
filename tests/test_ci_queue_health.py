@@ -2427,7 +2427,17 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
 
     RESIDUAL, stated plainly: this catches the phrasings that have actually shipped, not a
     novel paraphrase — a NEW wrong wording, or a revert that keeps the wrong claim but
-    rephrases it, is not caught. Widening the match is not free either: once case and
+    rephrases it, is not caught. ⛔ AND IT IS PER-SITE: every needle here was written BY HAND
+    for a site someone noticed, so a site NO needle was written for can revert to `origin/main`
+    and stay green — measured on this very diff, which corrects the same claim at several
+    surfaces (the wait witness, cause (b)'s `created_at`, `False`'s CANDIDATE status, the
+    `_executing_claim` docstring twin) and pins only some of them. That is the ceiling of a
+    hand-enumerated blocklist, not a defect to keep chasing: the enumeration is unbounded by
+    construction (sites × claims), and a round that adds needles for the four sites a reviewer
+    happened to try leaves the next four free. What this guard DOES establish is narrower and
+    still worth having: the phrasings that actually shipped at the sites it names cannot come
+    back, and the load-bearing claims have presence pins (`must_state`) so a DELETION reds.
+    Widening the match is not free either: once case and
     backticks are ignored every needle must stay long enough to be unambiguous ("by being
     probed" alone would collide with the pre-fix sentence's own "identified *by being
     probed*" clause),
