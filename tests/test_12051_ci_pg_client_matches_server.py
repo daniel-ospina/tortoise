@@ -5605,16 +5605,19 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     claiming hermeticity must not need. MEASURED: on a box without that file the
     absent arm dies at the source line and reports the guard as silent.
 
-    ELEVEN arm call sites (FOURTEEN runs — the `configured` loop drives THREE ignored
+    TWELVE arm call sites (FIFTEEN runs — the `configured` loop drives THREE ignored
     shapes and the `reused` loop TWO readable ones) over the step's FIVE named
     pre-install branches: the os-release SOURCE, the key fetch, the codename,
     `apt-get update`, and the ORIGIN check (THREE arms: an `apt-cache` that fails, an
     index that loaded but does not name apt.postgresql.org, and the control that
     reaches past) — plus the STREAM-DRAIN arm (`match_then_noise`: a producer that
     keeps writing after the match, the only shape that can show the `grep -q` +
-    `pipefail` SIGPIPE red) and the REUSE arm (`already`: an operator PGDG stanza is
+    `pipefail` SIGPIPE red), the REUSE arm (`already`: an operator PGDG stanza is
     present and the key host is unreachable, so the step must neither add a second
-    stanza nor fetch a key it will not use).
+    stanza nor fetch a key it will not use) and its UNVERIFIABLE sibling
+    (`dangling_key`: the same reuse branch with `apt-get update` failing, so the red
+    lands on THAT guard and nothing self-heals — `main`'s merged trap can leave a
+    reused stanza pointing at a keyring it deleted).
     The step carries SEVEN `::error::` pairs, so a whole-output search is satisfied
     by any of them (MEASURED, review cycle 9: two gutted `exit 1`s left the suite
     GREEN).
@@ -5721,10 +5724,19 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # here instead of restoring the host dependency.
     # ⛔ THE FACT, NOT THE SPELLING (this file's own rule — `curl -o`/`--output`, `install -D`
     # and `.`/`source` are tolerated for the same reason): the probe is located by what it
-    # DOES (a recursive `grep` line naming apt.postgresql.org and the apt source paths), and
-    # only its OPERAND PATHS are replaced. Pinning `grep -rqs '<pattern>' <paths> 2>/dev/null`
-    # verbatim false-redded `grep -rlqs`, `-e '<pattern>'` and a trailing-slash spelling as
-    # "Re-derive the substitution" — the guard telling the maintainer to do work already done.
+    # DOES — a `grep` line naming apt.postgresql.org and an apt source path — and only its
+    # OPERAND PATHS are replaced. Pinning one verbatim text
+    # (`grep -qE -e '<pattern>' … 2>/dev/null`) false-redded a single `-e`, a `-F`, and a
+    # trailing-slash path as "Re-derive the substitution" — the guard telling the maintainer to
+    # do work already done. ⚠️ RECURSION IS NOT ONE OF THOSE FREEDOMS: the committed probe
+    # names the apt-READABLE operands explicitly (`/etc/apt/sources.list`,
+    # `sources.list.d/*.list`, `sources.list.d/*.sources`), so it never sees the BACKUP names
+    # apt ignores (`pgdg.list.save`, `pgdg.list.distUpgrade` — ordinary apt/dpkg operations).
+    # `-r` ALONE IS NOT THE DEFECT — MEASURED here: adding `-r` to that operand list left the
+    # file at `285 passed`, because the operands are still the globs. What reds is pointing the
+    # probe at the DIRECTORY (`sources.list.d/`), which is what makes a backup count: MEASURED
+    # `1 failed` — the ignored-shape loop below. So it is the OPERAND SHAPE, not the flag, that
+    # the suite pins; describing this probe as "recursive" was the stale claim.
     probe_lines = [
         line
         for line in code_only(prefix).splitlines()
@@ -5919,6 +5931,43 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "needs it not, and on an operator stanza whose `Signed-By` differs a second one makes "
         "apt refuse the whole list (benign on THIS no-`signed-by` fixture, wrong either way): "
         + repr(tee_log.read_text(encoding="utf-8"))
+    )
+
+    # ⛔ A REUSED STANZA IS TRUSTED, NOT REPAIRED — and that COST is PINNED here, not merely
+    # stated in the workflow comment and the runbook. When the operator's stanza names a
+    # `Signed-By` key that no longer exists, this step neither repairs it nor deletes it: it
+    # owns only its own private pair, so `apt-get update` is the first thing that can notice,
+    # and the red lands THERE — not on the ORIGIN check, which the workflow comment names for
+    # the ignored-shape case. The state is REAL, not hypothetical: `main`'s merged trap
+    # produced it on a pool box (an operator `pgdg.list` rewritten onto the shared keyring the
+    # trap then deleted — #12051's own post-close table), so after this PR such a box reds on
+    # every later run until its own stanza is repaired. MEASURED in review on `ubuntu:24.04`
+    # (apt 2.8.3) with a dangling `signed-by`: `apt-get update` rc 100, `E: The repository … is
+    # not signed`, i.e. the update guard, never the ORIGIN one. The harness stubs `apt-get`, so
+    # what this arm pins is the STEP's behaviour on that pre-state: reuse, write nothing, red
+    # on the update guard.
+    dangling_key = run_with(
+        "apt-cache() { return 0; }",
+        apt_get="apt-get() { return 100; }",
+        existing_pgdg=True,
+    )
+    dangling_combined = dangling_key.stdout + dangling_key.stderr
+    assert dangling_key.returncode != 0 and "REACHED_PAST_PRECONDITION" not in dangling_key.stdout, (
+        "a box whose REUSED PGDG stanza cannot be verified did not stop the step, so an "
+        f"unverifiable source is trusted all the way to the install: {dangling_combined!r}"
+    )
+    assert "already configured on this box" in dangling_combined, (
+        "the step did not take the REUSE branch on a box naming apt.postgresql.org, so this "
+        "arm is not measuring the reused-stanza path at all: " + repr(dangling_combined)
+    )
+    assert "apt-get update FAILED" in dangling_combined, (
+        "an unreadable `Signed-By` on a REUSED stanza must red on the `apt-get update` guard — "
+        "that is the branch whose message tells the operator this step added neither file"
+        + repr(dangling_combined)
+    )
+    assert tee_log.read_text(encoding="utf-8").strip() == "", (
+        "the step WROTE a stanza on a box whose own stanza it was reusing, so it repaired "
+        "state it does not own: " + repr(tee_log.read_text(encoding="utf-8"))
     )
 
     # ⛔ AND THE PROBE MUST READ ONLY WHAT apt READS. A recursive grep over the whole
