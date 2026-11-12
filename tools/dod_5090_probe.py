@@ -360,12 +360,61 @@ UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
         "calling `encode_for_row` — so discovery classes it `gated` before any write "
         "predicate runs and it owes (and carries) no declaration (#11398)"
     ),
+    # ── The SHALLOW-BINDING forms of an alias that the `ImportFrom` resolver does NOT reach ──
+    # ⛔ `#12020` round 6. The alias bullet above closes `from … import X as Y`. These four are
+    # the same decision expressed other ways, they are BLIND today, and each is MEASURED (`{}` =
+    # absent from the population, `gated` = owes nothing) rather than inferred — the register's
+    # claim must not be read as "every aliasing spelling is resolved". Pinned by
+    # `tests/test_embed_writer_register.py::test_the_alias_forms_discovery_still_cannot_see_are_named`,
+    # which reds BOTH when the naming is deleted and when one of them stops being blind.
+    "assignment alias (`_set = set_embedding_clause`) ": (
+        "a bare `Name` bound from an imported name is the same DECLARED symbol as the `as` form, "
+        "but `_import_aliases` reads only `ast.ImportFrom`, so the writer below is ABSENT from the "
+        "population (measured `{}`) and no register row can ever be owed for it:"
+        "\n\n    from tortoise.vector_write import set_embedding_clause"
+        "\n    _set = set_embedding_clause"
+        "\n    def w(proj):"
+        "\n        return proj.g.query(\"MATCH (y) SET y += $p\", {\"p\": _set(\"y\")})"
+    ),
+    "assignment alias for the GATE (`_enc = encode_for_row`)": (
+        "the same shape reached at the seam instead of a clause builder: measured `{}` — the "
+        "writer is absent, so the row that says no write path embeds outside the gate cannot see "
+        "this one at all. Named rather than assumed absent."
+    ),
+    "module-qualified builder (`vw.clear_then_set_prefix`) ": (
+        "`import tortoise.vector_write as vw` then `vw.clear_then_set_prefix(\"n\")`: measured "
+        "`{}`. The TEXT pass knows only the literal spelling `set_embedding_clause(`, which is why "
+        "the SECOND clause builder is invisible in this form even unaliased."
+    ),
+    "`global` rebinding of an alias inside a nested scope": (
+        "`global _enc` + `_enc = lambda …` inside a nested `def` rebinds the module alias for the "
+        "whole writer, and the own-scope rule cannot see it: measured `gated` — the DANGEROUS "
+        "direction, because `gated` is outside the guard's population, so the writer owes no "
+        "declaration while never reaching the gate."
+    ),
 }
+
+
+#: The comprehension forms, each of which introduces its OWN scope (#11389
+#: review, P2). Named once so the walks that must agree about them cannot drift
+#: apart — this definition lives HERE, ahead of its first reader, because the
+#: own-scope walk below needs it (`#12020` round 6, measured: a comprehension
+#: TARGET enrolled as a writer-scope binding deleted a real clause-builder
+#: writer from the population, the exact fail-open `_locally_bound` exists to
+#: avoid, one scope axis over).
+_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp,
+                        ast.GeneratorExp)
 
 
 #: Node types that OPEN A SCOPE. An import or a binding inside one is a fact about THAT scope, not
 #: about the module or the enclosing writer — the axis along which the alias map leaked (#12020 r4).
-_NEW_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+#: ⛔ THE COMPREHENSIONS ARE SCOPES TOO (`#11389`'s finding, applied to this walk in `#12020` round
+#: 6): `[_set for _set in rows]` binds `_set` for the element only, so counting it as a writer-scope
+#: binding dropped the writer's module alias and — for a clause-builder alias — the writer itself:
+#: measured `{}` for a body whose control is `unresolved_write`, and `_shadowed_names` already
+#: skipped comprehension subtrees for exactly this reason. One tuple, so the two walks cannot drift.
+_NEW_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
+                    *_COMPREHENSION_NODES)
 
 
 def _walk_own_scope(root: ast.AST):
@@ -607,16 +656,6 @@ CENSUS_BYPASS = "bypass"
 CENSUS_CLASSES = (CENSUS_RECOGNISED, CENSUS_EXEMPT, CENSUS_BYPASS)
 
 WRITER_CENSUS: dict[str, tuple[str, str]] = {
-    "tortoise.api::_verify_record_vector_width": (
-        CENSUS_EXEMPT,
-        "`tortoise/api.py::_verify_record_vector_width` — ALL THREE matches are PROSE, and the site "
-        "is not uniform (measured): one in its DOCSTRING, the transcript that explains the guard "
-        "(`embedding=[0.1234567890123, 1/3])`), and two in IN-BODY COMMENTS — `api.py:330` "
-        "(`measured with embedding=\"abc\"`) and `api.py:352` (`point.embedding = '123'`, the "
-        "fold's stored value quoted back). The body VERIFIES and returns: it re-derives the "
-        "declared width through `shortest_float32_vector` and raises on a disagreement, so a "
-        "truthful declaration lands and a lie is refused. Nothing is stored here — the writer it "
-        "verifies for is `_emit` above, and the store is the fold's"),
     "tortoise.api::add_point": (
         CENSUS_EXEMPT,
         "`tortoise/api.py::add_point` — discovered by the CONTAINER-KEY shape "
@@ -3698,13 +3737,6 @@ def vector_leg_surface() -> list[dict]:
     if fixed_declared:
         out.append({"tools": fixed_declared})
     return out
-
-
-#: The comprehension forms, each of which introduces its OWN scope (#11389
-#: review, P2). Named once so the two walks that must agree about them cannot
-#: drift apart.
-_COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp,
-                        ast.GeneratorExp)
 
 
 def _comprehension_targets(node: ast.AST) -> frozenset[str]:

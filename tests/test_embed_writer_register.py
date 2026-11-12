@@ -559,6 +559,94 @@ def test_the_register_names_the_shapes_its_discovery_cannot_see():
     )
     live = register.classify("tortoise.sdk::_update_entity")
     assert (live.cls, live.owner_issue) == (EXEMPT, "#4094"), live
+
+
+#: The alias forms `_import_aliases` does NOT reach, with the measured outcome. ⛔ The point of this
+#: table is that the class is CLOSED FOR ONE SPELLING and these are named rather than assumed
+#: absent (`#12020` round 6, review P3): every entry is a real vector write, none is in the
+#: population, and `{}` vs `gated` decides whether the silence merely under-credits or lands in the
+#: DANGEROUS direction (`gated` is outside the guard's population, so no declaration is owed).
+ALIAS_FORMS_STILL_BLIND: dict[str, tuple[str, dict[str, str], str, str]] = {
+    "assignment_alias": (
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "_set = set_embedding_clause\n"
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": _set("y")})\n',
+        {},
+        "the same declared symbol as the `as` form, bound by assignment — `_import_aliases` "
+        "reads only `ast.ImportFrom`, so the writer is ABSENT (fail-open)",
+        "_set = set_embedding_clause",
+    ),
+    "assignment_alias_for_the_gate": (
+        "from tortoise.embeddings import encode_for_row\n"
+        "_enc = encode_for_row\n"
+        "\n"
+        "def w(text):\n"
+        "    return _enc(text, 384)\n",
+        {},
+        "the seam reached through an assignment alias: the writer that embeds outside the gate is "
+        "invisible, so the row forbidding exactly that cannot see it",
+        "_enc = encode_for_row",
+    ),
+    "module_qualified_second_builder": (
+        "import tortoise.vector_write as vw\n"
+        "\n"
+        "def w(proj):\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": vw.clear_then_set_prefix("y")})\n',
+        {},
+        "the TEXT pass knows only `set_embedding_clause(`, so the SECOND clause builder is "
+        "invisible in its module-qualified form",
+        "vw.clear_then_set_prefix",
+    ),
+    "global_rebinding_in_a_nested_scope": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    def inner():\n"
+        "        global _enc\n"
+        "        _enc = lambda *a: a\n"
+        "    proj.g.query(\"MATCH (n:Point) SET n += $p\", {\"p\": set_embedding_clause(\"n\")})\n"
+        "    return _enc(text, 384)\n",
+        {"tortoise.m::w": "gated"},
+        "`global` rebinds the module alias from a nested scope, and the own-scope rule cannot see "
+        "it: the DANGEROUS direction — `gated` owes no declaration while never reaching the gate",
+        "`global` rebinding",
+    ),
+}
+
+
+def test_the_alias_forms_discovery_still_cannot_see_are_named(tmp_path):
+    """`#12020` round 6: the alias class is CLOSED FOR ONE SPELLING, and says so.
+
+    The bullet that closes the `from … import X as Y` fail-open is easy to read as "aliases are
+    resolved". They are not: the four shapes below are real vector writes, none reaches the
+    population, and one of them lands `gated` — the direction that owes nothing.
+
+    Pinned BOTH ways, because either half alone rots:
+
+    * the instrument NAMES each shape (`probe.UNDECIDABLE_WRITE_SHAPES`), so the silence is a
+      recorded residual rather than an assumption; and
+    * each shape is STILL blind, driven through the real `probe._embedding_writers` on a scratch
+      module — so the day a resolver lands, this reds and the naming has to be retired in the
+      same change rather than becoming a stale claim.
+    """
+    for shape, (body, expected, why, marker) in ALIAS_FORMS_STILL_BLIND.items():
+        # ⛔ ONE naming entry PER shape, matched by a marker unique to it. A token-split check
+        # ("does any key contain 'assignment' / 'alias'") was the first cut and it is INERT: two
+        # shapes share those tokens, so renaming one naming entry left the pin green (measured —
+        # the mutation that should have redded it passed).
+        hits = [key for key in probe.UNDECIDABLE_WRITE_SHAPES if marker in key]
+        assert len(hits) == 1, (
+            f"{shape} is measured-blind and must be named by exactly ONE "
+            f"`probe.UNDECIDABLE_WRITE_SHAPES` entry carrying {marker!r} — an unnamed (or "
+            f"twice-named) blind shape is the fail-open this register exists to refuse; got {hits}")
+        found = probe._embedding_writers(_scratch_root(tmp_path, shape, body))
+        kinds = {name: entry.get("kind") for name, entry in found.items()}
+        assert kinds == expected, (
+            f"{shape}: {why}\n  measured {kinds}, expected {expected} — if a resolver landed, "
+            "leave this table and retire the shape from UNDECIDABLE_WRITE_SHAPES")
     # ⛔ TWO instances, dispositioned DIFFERENTLY, and both named in the published Blind spot note
     # (`#11398`): the singular wording read as "this is the whole population", while the second
     # instance — `sdk::update_point`, `n += $props` in its promote arm — is `gated` because it also
