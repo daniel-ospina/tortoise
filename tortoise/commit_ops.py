@@ -1100,11 +1100,19 @@ def _ref_candidates(entities, label: str, *, id_idx: int = 1,
       unaddressable while it sat in the graph with an id and a live status
       (review round 10).
 
-    So a group with a representative contributes it; a group whose survivor is
-    gone contributes its LIVE members, and the existing never-guess count then
-    reproduces the raw arm's behaviour exactly (two live carriers → refuse, one →
-    fold). Terminal members are dropped: folding onto one is the round-5 defect,
-    and the keep-first arms own a terminal TARGET.
+    Which rows a group contributes — three arms, in this order:
+
+    * a LIVE representative contributes ITSELF (the survivor is the entity);
+    * a TERMINAL representative, or a gone one, contributes its LIVE members —
+      a retired survivor beside a live carrier must not refuse a fold the raw arm
+      applied (rounds 18/19), and folding onto a TERMINAL member is still the
+      round-5 defect, so terminal members are dropped;
+    * a TERMINAL representative with no live member contributes itself, because it
+      IS the target and the keep-first arms own it (an idempotent re-ingest stays a
+      silent dedup).
+
+    The existing never-guess count then reproduces the raw arm's behaviour exactly
+    (two live carriers → refuse, one → fold).
 
     Returns ``(rows, widened_ids)``. ``widened_ids`` names the rows contributed by
     a GONE-SURVIVOR group — the only rows for which the never-guess count is a
@@ -1402,6 +1410,11 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
         "RETURN ID(s), s.id, s.name, s.status, s.supersededBy",
         params={"ref": ref},
     ).result_set
+    # Every row the ref RESOLVED to, from either arm — the keep-first arm reads
+    # their stored `supersededBy` to keep an idempotent re-ingest silent when the
+    # entity's representative (the SURVIVOR) stores something else (round 19).
+    _subj_raw: list = []
+    _subj_matched_rows = list(by_id)
     if len(by_id) > 1:
         # #1423 review P2: the Object twin records this refusal durably
         # (``record_non_folded``) as well as warning — the entry IS the
@@ -1433,6 +1446,8 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
             ).result_set if _ref_space else [],
             with_groups=True)
         by_name, _ref_widened = _ref_candidates(_subj_raw, "Subject")
+        _subj_matched_rows += [r for _rep, _key, _members in _subj_raw
+                              for r in _members if len(r) > 4]
         if len(by_name) > 1:
             # ⛔ A DUPLICATE-ID pair is CORRUPTION, not two incarnations, and the
             # live narrowing below cannot tell them apart: with one claimant
@@ -1519,11 +1534,19 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
     # DIVERGENT successor warns — the Object lane's exact asymmetry, so a
     # conflict stays auditable instead of vanishing.
     if (target_status or "") in SUBJECT_TERMINAL_STATUSES:
-        if not _same_successor(
-                target_sb or "", supersedes_by,
-                candidate_names=[mname
-                                 for _rep, _key, members in sb_entities
-                                 for _mid, mname, _mst in members]):
+        # ⛔ A node matched for the REF may already store exactly this successor
+        # while the entity's representative (the SURVIVOR) does not — the Object
+        # twin's round-19 guard, and the same reading of the re-ingest rule: an
+        # unchanged conversation re-ingested is a dedup, not a divergence.
+        if not (
+                _same_successor(
+                    target_sb or "", supersedes_by,
+                    candidate_names=[mname
+                                     for _rep, _key, members in sb_entities
+                                     for _mid, mname, _mst in members])
+                or (not _same_successor(target_sb or "", supersedes_by)
+                    and any(_same_successor(str(r[4] or ""), supersedes_by)
+                            for r in _subj_matched_rows if len(r) > 4))):
             warn(f"subject supersession {ref!r} already terminal "
                  f"(status={target_status!r}, supersededBy={target_sb!r}) — "
                  f"conflict with {supersedes_by!r} skipped "
@@ -2315,6 +2338,20 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # fell through to the fold, clobbering e.g. archived→superseded
         # (and for retracted, reversing the #689 leak-guard direction).
         if (o_status or "") in _RECALL_OBJECT_EXCLUDED_STATUS:
+            # ⛔ A node matched for the REF may already carry exactly this
+            # successor even when the TARGET's representative does not (review
+            # round 19): `_entity_rows` hands back the entity's SURVIVOR, so a
+            # merge-then-supersede graph reports the RETIRED survivor's stored
+            # value while the live carrier that was folded stores this record's.
+            # Comparing only the representative turned a second identical call
+            # into a reported divergence plus a `skipped` entry — where `main`
+            # (whose raw arm hit the carrier) was silent, and where hosted counts
+            # a warn as a real keep-first conflict.
+            _stored_here = (o_sb or "")
+            if (not _same_successor(_stored_here, supersedes_by)
+                    and any(_same_successor(str(r[4] or ""), supersedes_by)
+                            for r in _name_rows if len(r) > 4)):
+                continue
             # #5370/#12120: the fold stores the successor NODE's spelling; rows
             # folded BEFORE #5370 carry the old 200-char prefix (#2164's fold
             # cap) and rows folded after it may store a spelling that folds

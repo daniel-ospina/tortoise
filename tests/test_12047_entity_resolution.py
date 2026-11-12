@@ -4737,6 +4737,19 @@ class TestThe12120ReviewRound18:
                 "MATCH (o:Object {id:'r18-carrier'}) "
                 "RETURN o.status, o.supersededBy").result_set
             assert row and tuple(row[0]) == ("superseded", "New Co"), row
+            # ⛔ The SECOND call is the SAME conversation re-ingested, and it must
+            # be silent (review round 19): the entity's representative is still the
+            # RETIRED survivor storing 'Elsewhere', so a keep-first arm that reads
+            # only the representative reports a divergence and a `skipped` entry
+            # for a record that is already applied — where `main`, whose raw arm
+            # hit the carrier storing 'New Co', was silent. `hosted_api` counts
+            # that warn as a real keep-first conflict.
+            applied2, skips2, msgs2 = self._apply(sdk, [
+                {"superseded": "The Team", "supersedes_by": "New Co",
+                 "evidence": "test"}])
+            assert (applied2, skips2, msgs2) == (0, [], []), (
+                "a re-ingest of an applied fold was reported as a divergence: "
+                f"{(applied2, skips2, msgs2)!r}")
         finally:
             sdk.close()
 
