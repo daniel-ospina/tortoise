@@ -250,7 +250,13 @@ def live_surface(root: Path | None = None) -> dict:
 
 
 def _anchor_violations(
-    root: Path, symbol: str, rel: str, entry: dict, source_path: str, body: str
+    root: Path,
+    symbol: str,
+    rel: str,
+    entry: dict,
+    source_path: str,
+    body: str,
+    node_key: str | None = None,
 ) -> list[str]:
     """Does the recorded commit actually hold this frozen block?
 
@@ -287,7 +293,9 @@ def _anchor_violations(
             "NOT hold — the commit IS present in this clone, so its absence is not a fetch gap: "
             "the anchor names a commit that never contained this code"
         ]
-    expected = expected_block(str(entry.get("kind") or ""), symbol, source_path, blob)
+    expected = expected_block(
+        str(entry.get("kind") or ""), symbol, source_path, blob, node_key
+    )
     if expected is not None:
         if expected.rstrip() != body.strip("\n"):
             return [
@@ -305,7 +313,9 @@ def _anchor_violations(
     return []
 
 
-def expected_block(kind: str, symbol: str, source_path: str, source: str) -> str | None:
+def expected_block(
+    kind: str, symbol: str, source_path: str, source: str, node_key: str | None = None
+) -> str | None:
     """The block *symbol* WOULD extract from *source*, or None when it has no exact key.
 
     The same extractors the writer uses, applied to a blob instead of the working tree — one
@@ -319,6 +329,27 @@ def expected_block(kind: str, symbol: str, source_path: str, source: str) -> str
         return None
     if kind == MODULE:
         return source.rstrip()
+    if node_key:
+        # The node the writer sliced FROM, named explicitly: `FunctionDef:<name>` for a function
+        # (including a shared helper, whose name is NOT the entry symbol) or
+        # `ToolDefinition:<name>` for a registry literal.
+        want_kind, _, want_name = node_key.partition(":")
+        for node in ast.walk(tree):
+            if want_kind == "FunctionDef" and isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ) and node.name == want_name:
+                return _segment(source, node)
+            if want_kind == "ToolDefinition" and isinstance(node, ast.Call) and (
+                isinstance(node.func, ast.Name) and node.func.id == "ToolDefinition"
+            ):
+                for keyword in node.keywords:
+                    if (
+                        keyword.arg == "name"
+                        and isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value == want_name
+                    ):
+                        return _segment(source, node)
+        return None
     if kind == SDK_METHOD:
         for node in tree.body:
             if isinstance(node, ast.ClassDef) and node.name == "TortoiseSDK":
@@ -606,7 +637,9 @@ def file_violations(entries: list[dict], archive_dir: Path | None = None,
                     # recorded commit can. This is the check that makes `archived_at` a
                     # citation rather than a number (measured in review: an entry re-anchored
                     # to a commit that does not hold its body passed every other arm).
-                    out += _anchor_violations(root, symbol, rel, entry, path, body)
+                    out += _anchor_violations(
+                        root, symbol, rel, entry, path, body, row.get("node")
+                    )
         anchor = str(entry.get("archived_at") or "")
         if not _SHA_RE.match(anchor) or anchor == "0" * 40:
             out.append(
@@ -713,6 +746,15 @@ def check(root: Path | None = None) -> list[str]:
     entries = manifest["entries"]
     problems: list[str] = []
     problems += manifest_violations(manifest, root / "archive")
+    if not entries:
+        # A VACUOUS PASS. With no entries every arm below is silent, so a PR that empties the
+        # manifest and deletes the archived files would be green — in the job whose whole point
+        # is that removed code stays recoverable. The archive is permanently non-empty from
+        # batch 0 onward, so an empty one is a defect, not a first run.
+        problems.append(
+            "the archive is EMPTY — batch 0 landed one entry and every removal batch ADDS one; "
+            "an empty manifest means the archived code was deleted, not that there is none"
+        )
     problems += file_violations(entries, root / "archive", root)
     problems += surface_violations(entries, live_surface(root))
     problems += package_violations(root)
@@ -781,6 +823,60 @@ def write_index(root: Path | None = None) -> Path:
 
 # ── writing an archive entry ──────────────────────────────────────────────────
 
+def _git(root: Path, *args: str) -> tuple[int, str]:
+    """(exit status, stdout) for one git command, or (-1, "") when git cannot run."""
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, text=True, check=False
+        )
+    except OSError:  # pragma: no cover - env
+        return -1, ""
+    return proc.returncode, proc.stdout
+
+
+def default_branch_ref(root: Path) -> str | None:
+    """The ref that names this repo's default branch, as this clone knows it.
+
+    `origin/main` first: a lane worktree always has it, and it is the ref a squash-merge lands
+    on. The local branch names are the fallback for a plain clone or a test fixture.
+    """
+    for ref in ("origin/main", "main", "origin/master", "master"):
+        code, _ = _git(root, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+        if code == 0:
+            return ref
+  # A clone with a non-standard default branch: ask git, then map the remote HEAD to a ref.
+    code, out = _git(root, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    if code == 0 and out.strip():
+        return out.strip().removeprefix("refs/remotes/")
+    return None
+
+
+def anchor_sha(root: Path, paths: list[str]) -> tuple[str, str]:
+    """(commit on the default branch that last held *paths*, the ref it came from).
+
+    ⛔ NOT `git rev-parse HEAD`. This repo lands by squash, so a batch PR's own commit never
+    reaches `main`; an archive that cites it is unreadable from `main` the moment it merges,
+    and `verify-anchors` (which the required `surface-guard` job runs on a depth-0 clone) would
+    red every later run. The durable citation is the commit on the default branch that held the
+    source, which is also the state a restore would want.
+    """
+    ref = default_branch_ref(root)
+    if ref is None:
+        raise ArchiveRefused(
+            f"cannot find a default-branch ref in {root} (tried origin/main, main, "
+            "origin/master, master, origin/HEAD) — the archive records the commit on the "
+            "default branch that held the code, so it must be able to name one"
+        )
+    code, out = _git(root, "rev-list", "-1", ref, "--", *paths)
+    sha = out.strip()
+    if code != 0 or not _SHA_RE.match(sha):
+        raise ArchiveRefused(
+            f"{', '.join(paths)} is not on {ref} — this code never landed on the default "
+            "branch, so there is no released state to restore. Delete it; do not archive it"
+        )
+    return sha, ref
+
+
 def _head_sha(root: Path) -> str:
     """The commit the code is being frozen FROM — the restore anchor.
 
@@ -826,7 +922,7 @@ def _segment(source: str, node: ast.AST) -> str:
     return "\n".join(source.splitlines()[start - 1:node.end_lineno])
 
 
-def _mcp_source(root: Path, tool: str) -> list[tuple[str, str]]:
+def _mcp_source(root: Path, tool: str) -> list[tuple[str, str, str | None]]:
     """The `ToolDefinition` literal for *tool*, plus any handler that names it.
 
     Handlers are found by AST rather than by a naming convention: an MCP handler is a
@@ -847,7 +943,10 @@ def _mcp_source(root: Path, tool: str) -> list[tuple[str, str]]:
                 and isinstance(keyword.value, ast.Constant)
                 and keyword.value.value == tool
             ):
-                return [("tortoise/tool_registry.py", _segment(registry, node))]
+                return [
+                    ("tortoise/tool_registry.py", _segment(registry, node),
+                     f"ToolDefinition:{tool}")
+                ]
     raise ArchiveRefused(
         f"{tool} has no `ToolDefinition` in tortoise/tool_registry.py — nothing to archive. "
         "Retired-forward entries live in RETIRED_USE_INSTEAD and are NOT archived."
@@ -867,7 +966,7 @@ def _code_without_docstring(node: ast.AST) -> list[ast.stmt]:
     return body
 
 
-def _mcp_handlers(root: Path, tool: str) -> list[tuple[str, str]]:
+def _mcp_handlers(root: Path, tool: str) -> list[tuple[str, str, str | None]]:
     """The `mcp_server.py` function(s) that IMPLEMENT *tool*.
 
     Two shapes exist in this repo and both must be captured, because the archive's promise
@@ -900,7 +999,7 @@ def _mcp_handlers(root: Path, tool: str) -> list[tuple[str, str]]:
     if not path.exists():  # pragma: no cover - layout invariant
         return []
     source = path.read_text(encoding="utf-8")
-    found: list[tuple[str, str]] = []
+    found: list[tuple[str, str, str | None]] = []
     for node in ast.parse(source).body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -909,11 +1008,17 @@ def _mcp_handlers(root: Path, tool: str) -> list[tuple[str, str]]:
             for statement in _code_without_docstring(node)
             for child in ast.walk(statement)
         ):
-            found.append(("tortoise/mcp_server.py", _segment(source, node)))
+            # ⛔ The key is the FUNCTION's own name, not the entry symbol: a shared helper
+            # captured because a branch of it serves this tool must be re-extractable as
+            # ITSELF, or the anchor arm compares it to the handler and calls a correct archive
+            # forged (measured: 8 of the 72 live tools).
+            found.append(
+                ("tortoise/mcp_server.py", _segment(source, node), f"FunctionDef:{node.name}")
+            )
     return found
 
 
-def _module_source(root: Path, symbol: str) -> list[tuple[str, str]]:
+def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]:
     """A whole module frozen verbatim. *symbol* is the dotted module path.
 
     This is the kind for code that was archived INSIDE the package before this mechanism
@@ -929,10 +1034,10 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str]]:
         ast.parse(source, filename=str(path))
     except (OSError, SyntaxError) as exc:
         raise ArchiveRefused(f"could not read {rel}: {exc}") from exc
-    return [(rel, source)]
+    return [(rel, source, None)]
 
 
-def _sdk_source(root: Path, method: str) -> list[tuple[str, str]]:
+def _sdk_source(root: Path, method: str) -> list[tuple[str, str, str | None]]:
     path = root / "tortoise" / "sdk.py"
     source = path.read_text(encoding="utf-8")
     for node in ast.parse(source).body:
@@ -940,7 +1045,10 @@ def _sdk_source(root: Path, method: str) -> list[tuple[str, str]]:
             continue
         for child in node.body:
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == method:
-                return [(str(path.relative_to(root)), _segment(source, child))]
+                return [
+                    (str(path.relative_to(root)), _segment(source, child),
+                     f"FunctionDef:{method}")
+                ]
     raise ArchiveRefused(
         f"{method} is not a method of TortoiseSDK in tortoise/sdk.py — nothing to archive"
     )
@@ -953,7 +1061,7 @@ def render_archive_file(
     reason: str,
     archived_from: str,
     sha: str,
-    blocks: list[tuple[str, str]],
+    blocks: list[tuple[str, str, str | None]],
 ) -> tuple[str, list[dict]]:
     """Render one archived file, and the `blocks` digest list for its manifest row.
 
@@ -984,7 +1092,7 @@ def render_archive_file(
     ]
     body: list[str] = []
     frozen: list[dict] = []
-    for source_path, segment in blocks:
+    for source_path, segment, node_key in blocks:
         text_block = segment.rstrip()
         body += [
             f"{VERBATIM_BANNER}{source_path} ──",
@@ -996,38 +1104,35 @@ def render_archive_file(
         # hold it": a banner-presence check alone passed on a body that had been emptied.
         frozen.append({
             "path": source_path,
+            "node": node_key,
             "sha256": _sha256(text_block.strip("\n")),
         })
     return "\n".join(header + body), frozen
 
 
-def _require_sources_match_head(root: Path, paths: list[str]) -> None:
-    """Refuse to freeze source that HEAD does not hold.
+def _require_sources_match_anchor(root: Path, sha: str, paths: list[str]) -> None:
+    """Refuse to freeze source that the ANCHOR commit does not hold, byte for byte.
 
-    The anchor is the commit; the body is read from the WORKING TREE. If a source file has
-    uncommitted changes, the archived body is not what the recorded commit contains, so the
-    restore instruction ("copy this back and it is as it was") would be false. Commit the
-    source first, then archive — the order this enforces.
+    The anchor is a commit; the body is read from the WORKING TREE. If they differ, the archived
+    body is not what the recorded commit contains, so "copy this back and it is as it was" would
+    be false. Comparing CONTENT to the anchor (rather than asking `git status`) is what makes
+    that a proof: `git status` is blind to a `skip-worktree`/`assume-unchanged` bit, and it says
+    nothing about whether the anchor commit holds the file at all.
     """
-    try:
-        proc = subprocess.run(
-            ["git", "status", "--porcelain", "--", *paths],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:  # pragma: no cover - env
+    differing: list[str] = []
+    for path in paths:
+        code, blob = _git(root, "show", f"{sha}:{path}")
+        try:
+            on_disk = (root / path).read_text(encoding="utf-8")
+        except OSError:
+            on_disk = ""
+        if code != 0 or blob != on_disk:
+            differing.append(path)
+    if differing:
         raise ArchiveRefused(
-            f"cannot confirm {paths} match HEAD ({exc}) — refusing to freeze source whose "
-            "commit cannot be verified"
-        ) from exc
-    dirty = [ln[3:] for ln in proc.stdout.splitlines() if ln.strip()]
-    if dirty:
-        raise ArchiveRefused(
-            "refusing to freeze source with uncommitted changes to "
-            f"{', '.join(dirty)} — commit it first, so the archived body is what the "
-            "recorded commit holds"
+            "refusing to freeze source the recorded commit does not hold: "
+            f"{', '.join(differing)} differ from {sha} — land the source on the default branch "
+            "first (or revert the edit), so the archived body is exactly what the citation says"
         )
 
 
@@ -1099,8 +1204,10 @@ def archive_symbol(
         blocks = _module_source(root, symbol)
 
     archived_from = blocks[0][0] if kind == MODULE else SOURCE_OF[kind]
-    sha = _head_sha(root)
-    _require_sources_match_head(root, sorted({p for p, _ in blocks}))
+    # ⛔ THE ANCHOR IS A COMMIT ON THE DEFAULT BRANCH, not this branch's HEAD (see
+    # `anchor_sha`): a squash merge would otherwise orphan the citation the archive rests on.
+    sha, _ref = anchor_sha(root, sorted({p for p, _s, _n in blocks}))
+    _require_sources_match_anchor(root, sha, sorted({p for p, _s, _n in blocks}))
     rel = archive_rel(kind, batch, symbol)
     path = root / rel
     # Containment, belt-and-braces after the slug/symbol validation: resolve and refuse
@@ -1133,7 +1240,7 @@ def archive_symbol(
         "file": rel,
         "archived_from": archived_from,
         "archived_at": sha,
-        "sources": [p for p, _ in blocks],
+        "sources": [p for p, _s, _n in blocks],
         "blocks": frozen,
     }
     manifest["entries"].append(entry)

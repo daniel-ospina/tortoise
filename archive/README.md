@@ -106,7 +106,9 @@ existed is moved out. `tortoise/archived/` is refused by the gate for that reaso
   the tag. A later batch that removes SDK methods archives them **here**.
 
 ```bash
-# 1. Freeze the code. Run BEFORE deleting: it reads the source at HEAD and records that commit.
+# 1. Freeze the code. Run BEFORE deleting: it reads the source from the working tree and records
+#    the commit on the DEFAULT BRANCH that last held it — not this branch's HEAD, because a
+#    squash merge never lands that commit on `main` and the citation would then be unreadable.
 uv run python tools/archive_surface.py archive mcp-tool tortoise_search \
     --batch mcp-read-duplicates --reason 'no per-tool destination; removed (#11609)'
 
@@ -138,7 +140,12 @@ uv run python tools/archive_surface.py verify-anchors
 
 ## Restoring a removed symbol
 
-**The archived file is the source of record** — it does not depend on git history surviving:
+**The archived file is the source of record** — reading it needs no git history. Two things do
+need history, and both are checked: `verify-anchors` proves each file's cited commit is readable
+here AND holds the block exactly (it runs on a full-history clone in CI), and `check` refuses an
+archive with **no entries at all** so an emptied manifest cannot pass vacuously. What no gate
+sees is an entry **removed** from a non-empty manifest — a shrink guard is not built; that
+direction is part of [#12237](https://github.com/daniel-ospina/tortoise/issues/12237).
 
 1. open `archive/mcp-tools/<batch>/<tool>.py` (or `sdk-methods/…`, `modules/…`) and copy **each**
    verbatim block back into the file named in **its own** `verbatim from <path>` banner — one

@@ -20,6 +20,7 @@ reappears on the live surface — the archive must not be a slow leak back.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import subprocess
@@ -512,7 +513,7 @@ def test_the_writer_refuses_to_freeze_a_dirty_source(tree: Path) -> None:
         (tree / "tortoise" / "tool_registry.py").read_text(encoding="utf-8") + "# edit\n",
         encoding="utf-8",
     )
-    with pytest.raises(arch.ArchiveRefused, match="uncommitted changes"):
+    with pytest.raises(arch.ArchiveRefused, match="does not hold"):
         arch.archive_symbol(arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree)
 
 
@@ -673,6 +674,79 @@ def test_an_unreadable_anchor_is_UNPROVEN_not_silently_green(tree: Path) -> None
         )
 
 
+def test_the_restore_anchor_is_a_commit_on_the_default_branch(tree: Path) -> None:
+    """A batch PR's own HEAD never reaches `main` (this repo lands by squash)."""
+    ref = arch.default_branch_ref(tree)
+    assert ref is not None
+    entry = arch.archive_symbol(arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree)
+    code, _ = arch._git(tree, "merge-base", "--is-ancestor", entry["archived_at"], ref)
+    assert code == 0, (
+        f"{entry['archived_at']} is not an ancestor of {ref} — after a squash merge the anchor "
+        "would be unreachable and `verify-anchors` would red on every later run"
+    )
+    assert entry["archived_at"] == arch.anchor_sha(tree, ["tortoise/tool_registry.py"])[0]
+
+
+def test_source_that_never_landed_on_the_default_branch_is_refused(tree: Path) -> None:
+    """Code that never shipped has no released state to restore — delete it, do not archive."""
+    (tree / "tortoise" / "branchonly.py").write_text("X = 1\n", encoding="utf-8")
+    subprocess.run(["git", "checkout", "-q", "-b", "feature"], cwd=tree, check=True)
+    _commit(tree, "tortoise/branchonly.py")
+    with pytest.raises(arch.ArchiveRefused, match="never landed on the default branch"):
+        arch.archive_symbol(arch.MODULE, "tortoise.branchonly", "b1", "r", root=tree)
+
+
+def test_segment_is_byte_exact(tree: Path) -> None:
+    """Writer and gate share `_segment`, so a substring assertion cannot see a bad slice.
+
+    A one-line mutation (appending the next line) leaves every other assertion in this file
+    passing, and `file_violations` re-runs the SAME function, so the blindness is mutual.
+    """
+    source = (
+        "class C:\n"
+        "    @dec(1)\n"
+        "    @other\n"
+        "    def f(self):\n"
+        "        return 1\n"
+        "\n"
+        "    def g(self):\n"
+        "        return 2\n"
+    )
+    tree_ast = ast.parse(source)
+    method = tree_ast.body[0].body[0]
+    assert arch._segment(source, method) == (
+        "    @dec(1)\n    @other\n    def f(self):\n        return 1"
+    ), "decorators included, indentation preserved, nothing from the next method"
+
+
+def test_a_surface_violation_reaches_check_through_its_call_site(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`check()` must aggregate the SURFACE arm, or that call site is deletable green."""
+    arch.archive_symbol(arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree)
+    monkeypatch.setattr(
+        arch, "live_surface", lambda root=None: _surface(tools={"tortoise_search"})
+    )
+    monkeypatch.setattr(arch, "package_violations", lambda root=None: [])
+    monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
+    problems = arch.check(tree)
+    assert any("REAPPEARED on the live MCP surface" in problem for problem in problems), (
+        "an archived tool back in TOOL_REGISTRY must fail `check`, not only the helper"
+    )
+
+
+def test_an_empty_archive_is_reported(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A vacuous PASS: with no entries every other arm is silent."""
+    arch.write_index(tree)
+    # `check` refuses a foreign tree by design (`live_surface(root)`), so the surface half is
+    # stubbed here — an empty manifest is a defect regardless of what the surface says.
+    monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
+    problems = arch.check(tree)
+    assert any("EMPTY" in problem for problem in problems)
+
+
 def test_a_re_anchored_entry_is_caught_by_check_not_just_by_the_helper(tree: Path) -> None:
     """The arm must be exercised through `file_violations` — the only place `check` calls it.
 
@@ -691,7 +765,7 @@ def test_a_re_anchored_entry_is_caught_by_check_not_just_by_the_helper(tree: Pat
     # this is what a repair or a re-cut looks like, and only the anchor arm can see it.
     text, frozen = arch.render_archive_file(
         entry["kind"], entry["symbol"], entry["batch"], entry["reason"],
-        entry["archived_from"], root_commit, [(path, body)],
+        entry["archived_from"], root_commit, [(path, body, None)],
     )
     (tree / entry["file"]).write_text(text, encoding="utf-8")
     forged = dict(entry, archived_at=root_commit, blocks=frozen)
