@@ -58,16 +58,33 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > is `archived`"* redirected **every** `deprecated` write to `archived`, because a deprecated Object is
 > terminal and by definition has no successor — erasing the difference between *something replaced this*
 > and *this was wrong*. The clause is now scoped to a **replacement**, and `deprecated` is stated as an
-> independent terminal state. (3) *"`superseded` requires the successor in the same write"* holds on the
-> **supersession lane** (`apply_supersessions` / `ObjectSuperseded`, where `commit_schema` requires
-> `supersedes_by`) and on **neither** the generic `create` nor `update` door — both are MEASURED to accept
-> `status='superseded'` with `supersededBy` absent, and `sdk.py` records that mirror shape as **deliberately
-> out of the guard** ("Refusing it would be an over-block"). It is also false of a **journal rebuild**,
-> which legitimately restores a supersession recorded before any successor was named
-> (`_fold_object_superseded` folds `supersededBy` from `ev.get("supersedes_by") or ""`; `sdk.py` records
-> the id-only legacy `ObjectSuperseded` as a legitimate record row). ⚠️ **The §4.3 clause above still says
-> "at the write door", which is FALSE of those two doors**; it is owner-approved text, so the correction is
-> with the owner on #11824 rather than in this entry.
+> independent terminal state. (3) **The successor clause is stated as a DEFINITION OF THE WORD, not as a description of a door.** The
+> previous wording — *"at the write door `superseded` requires the successor"* — was MEASURED FALSE of the
+> generic doors (`create_object(..., status='superseded')` and `update_entity(<object>, status='superseded')`
+> both store `status='superseded'` with `supersededBy` absent), so a guard builder reading it concluded the
+> door was already covered or built a refusal `sdk.py` calls an **over-block**. The clause now says what the
+> word MEANS — *`superseded` means **replaced by**: it names the successor, and a retirement with no
+> successor is `archived`* — which is true of the vocabulary and enforceable by the unbuilt guard, and it no
+> longer needs an over-block because `archived` is a legal successorless route. The **journal rebuild**
+> carve-out is kept and must be: `_fold_object_superseded` folds `supersededBy` from
+> `ev.get("supersedes_by") or ""`, and `sdk.py` records the id-only legacy `ObjectSuperseded` as a
+> legitimate record row, so a refusal at the rebuild would break §11's reconstruction guarantee.
+>
+> **Why the clause became a definition rather than a narrower door rule (research, 2026-11-12).** Every agent-memory system surveyed
+> uses *soft revocation* rather than deletion, and none requires a caller to name a successor to mark something no-longer-current:
+> Graphiti/Zep sets an edge's `invalid_at` to the invalidating edge's `valid_at` and lets the SYSTEM link them; Cognee's
+> `close_node()` stamps a validity end and takes no successor; mem0 and Letta have no successor concept. What practitioners argue
+> about is the opposite direction: *"a tombstone that says 'superseded' without recording what superseded it is a summary with a
+> timestamp"* — i.e. when the WORD means "replaced", the pointer is not optional. Both hold at once only if the word carries the
+> pointer and the successorless case is a different word — which is what this sentence now says. The same survey's measured
+> failure mode is the one already tracked here: a 2026 empirical study of five stores found *"no system enforces revocation by
+> default"* — the mark exists and retrieval ignores it, our #11825/#11826 exactly.
+>
+> ⚠️ **OWED, and deliberately not in this entry:** the vocabulary has no word for *no longer current, replacement not yet known* —
+> the state the extractor's own owner-ruled policy needs (*"mark stale now, supersede on re-inference"*, `stale ≠ wrong`). That gap
+> is why the `status='superseded'`-without-carrier shape came into use, and why refusing it read as an over-block. `stale` is the
+> candidate word; adding it is an ontology EXPANSION and needs the owner's approval of its exact wording under the 2026-11-11 ruling,
+> so it is not part of this change.
 >
 > **Still unbuilt, deliberately:** the guard that enforces this vocabulary, including the AX three-part
 > refusals (`status='outdated'` naming both `archived` and `superseded`; one refusal shape across
