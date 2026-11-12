@@ -330,14 +330,32 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
 def test_the_sdk_and_api_spellings_agree():
     """Two modules, ONE family — a drift here is how the third door is missed.
 
-    The SDK set is a superset on purpose, and the reason is NOT that `api` lacks an
-    intake to guard: `EventAPI.add_point` refuses `embeddingText` through its own
-    `_forged_keys` (`tortoise/api.py:1187-1195`). The name is absent from
+    WHAT THIS ROW ASSERTS, exactly: every key of the API's embedding-marker set
+    (`api._SERVER_MANAGED_EMBEDDING_KEYS`) is a member of the SDK's marker family
+    (`sdk._SERVER_MANAGED_EMBEDDING_MARKERS`). It compares those two sets and
+    nothing else.
+
+    The SDK set is a superset by one name, and the reason is NOT that `api` lacks
+    an intake to guard: `EventAPI.add_point` refuses `embeddingText` through its
+    own `_forged_keys` (`tortoise/api.py:1187-1196`). The name is absent from
     `_SERVER_MANAGED_EMBEDDING_KEYS` because it is the enriched TEXT — a payload
     field, not a marker (`api.py:58-60`) — and the SDK files it under the marker
-    family because the SDK's own `_sanitize_props` must refuse it the same way.
-    So: every name the API funnel refuses must also be refused here; the extra name
-    is an SDK placement, not an API gap.
+    family because the SDK's own `_sanitize_props` must refuse it the same way. So
+    the extra name is an SDK placement, not an API gap.
+
+    ⛔ NOT ASSERTED HERE, deliberately: `_forged_keys` is that set UNION a literal
+    of five NON-embedding names — `evidence_fold`, `extractedFromAll`,
+    `sourceVersion`, `sourceVersionTransit`, `sourceVersions`. Those are not
+    markers and are not in either embedding set, so comparing them against one
+    would assert a membership they do not have and do not need. They are refused
+    on the SDK side anyway, by their own guards — measured at this commit, all
+    five raise out of `_sanitize_props` ("server-managed provenance fields" /
+    "server-managed journal record flag"). An earlier draft of this docstring
+    claimed "every name the API funnel refuses must also be refused here", which
+    read as a superset check the assertion never performed (#11858 review cycle
+    6, P3). The sibling literal is a hand-list this row cannot see; if a name is
+    ever added to it that the SDK does NOT refuse, this row stays green — that gap
+    is on `EventAPI.add_point`'s guards, not on this comparison.
     """
     from tortoise.api import _SERVER_MANAGED_EMBEDDING_KEYS
     from tortoise.sdk import _SERVER_MANAGED_EMBEDDING_MARKERS

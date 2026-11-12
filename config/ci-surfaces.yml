@@ -4441,6 +4441,22 @@ surfaces:
   # `test_a_verbatim_vector_is_never_narrowed` (the #5004 round-7 promise that a
   # caller-owned vector keeps its raw form).
   - test_11821_journal_vector_width.py
+  # #11858: DUAL-REGISTERED with `sdk` for the same reason the row above is
+  # dual-registered with `eval` — a named-surface match REPLACES the `core`
+  # fallback (#2938), so one row cannot cover a seam whose two halves are mapped
+  # to two different surfaces. THIS PR's guard lives in `tortoise/sdk.py` (the
+  # `create_source` door, the `sdk` row) but the file also pins the API-side
+  # spelling agreement (`api._SERVER_MANAGED_EMBEDDING_KEYS` must be a subset of
+  # the SDK family) and `tortoise/api.py`'s residual note — so on an
+  # `api.py`-only diff, with only the `sdk` row, the agreement pin would run in
+  # no lane exactly when it can break. Measured at `28b1b652ad` (review cycle 6,
+  # P1): the file landed with NO manifest row at all, so
+  # `tools/ci_selection.py --integrity` redded
+  # (`manifest drift: ['test_11858_source_door_markers.py']`) and
+  # `manifest-integrity` — which IS in `python-ci-gate.needs` — held the merge
+  # red while a `sdk.py` diff would have run the pins and an `api.py` diff would
+  # not.
+  - test_11858_source_door_markers.py
   - test_test_lane_tool.py
   # #11385 (review P1): the S4 re-emit tax's instrument (`tools/s4_reeemit_tax.py`)
   # and its evidence bundle. Same class as `test_journal_growth.py` above — a
@@ -8115,6 +8131,7 @@ surfaces:
   # policy module moves.
   - test_csp_plan_doc_consistency.py
   sdk:
+  - test_11858_source_door_markers.py
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #8290: the RESERVED-namespace half lives in `tortoise/ids.py`, which
   # `SOURCE_PATTERNS` maps to the NAMED surface `sdk` — and a named-surface match
