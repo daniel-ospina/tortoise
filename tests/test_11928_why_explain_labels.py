@@ -378,6 +378,42 @@ def test_two_distinct_event_supporters_are_both_surfaced(sdk):
         "two distinct supporters collapsed into one fusion entry: " + repr(chain))
 
 
+# ── 3c. the widened positions are still RESTRICTED to the four labels ─────
+
+def test_a_non_epistemic_endpoint_is_not_traversed(sdk):
+    """The disjunction on every traversal position is a FILTER, and a filter
+    nobody asserts is a filter nobody will keep — found by the mutation pass:
+    deleting `epistemic_disjunction('sup')` from the direct support read (and
+    separately `epistemic_disjunction('c')` from the conflicts read) left every
+    other case in this file GREEN.
+
+    The widening's own cases pass either way, because the disjunction RESTRICTS:
+    `MATCH (sup)-[r:IMPL]->(n)` is label-agnostic, so without it a `:Document`
+    wired as an IMPL source is presented as an epistemic SUPPORTER, and a
+    `:Source` NANDer as a counter-claim. Pre-#11928 those nodes were excluded by
+    the label on `sup`/`c`; this pins the replacement.
+    """
+    claim = sdk.create_point("statement", "the build is green [non-epistemic]")
+    g = sdk._get_proj().g
+    g.query("CREATE (d:Document {id:'DOC-1', name:'a document', title:'Doc'})")
+    g.query("CREATE (s:Source {id:'SRC-1', name:'a source'})")
+    g.query("MATCH (d:Document {id:'DOC-1'}), (t) WHERE t.id = $t "
+            "CREATE (d)-[:IMPL]->(t)", params={"t": claim["id"]})
+    g.query("MATCH (s:Source {id:'SRC-1'}), (t) WHERE t.id = $t "
+            "CREATE (s)-[:NAND]->(t)", params={"t": claim["id"]})
+
+    block = assemble_why_blocks(sdk._get_proj(), [claim["id"]])[claim["id"]]
+    chain_ids = {e["point_id"] for e in block["support_chain"]}
+    assert "DOC-1" not in chain_ids, (
+        "a non-epistemic IMPL source was presented as a supporter: "
+        + repr(block["support_chain"]))
+    nand_ids = {n["point_id"] for n in
+                (block.get("conflicts") or {}).get("nands") or []}
+    assert "SRC-1" not in nand_ids, (
+        "a non-epistemic NANDer was presented as a counter-claim: "
+        + repr(block.get("conflicts")))
+
+
 def test_the_point_lane_gains_no_assessment_and_keeps_its_supersession(sdk):
     """A claim nothing judged gets NO ``assessment`` key, and still gets the
     Point-only supersession view it always had.
