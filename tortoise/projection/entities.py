@@ -4948,6 +4948,14 @@ class _EntityHandlers:
             # never writes `_stub`). A legacy random-ulid stub carries no
             # `_stub`, so this is a no-op there.
             "            s._stub=NULL, "
+            # #12047 round-4 finding 2: FILL an absent key on match, never
+            # overwrite one. ON CREATE alone left every pre-#12047 row without a
+            # fold forever — the rung stayed blind on exactly the population this
+            # issue measured, and the next variant spelling minted a twin. The
+            # `coalesce` shape is the one two lines below already uses for
+            # `title`/`createdAt`, and it cannot re-introduce F-A (whose defect was
+            # the UNCONDITIONAL overwrite).
+            "            s.canonical_name=coalesce(s.canonical_name, $cn), "
             "            s.subjectKind=coalesce($sk, s.subjectKind), "
             # #2295: ON MATCH createdAt ADOPTS only when absent
             # (coalesce(s.createdAt, $ca) — existing value wins): mirrors the
@@ -5072,6 +5080,8 @@ class _EntityHandlers:
             # #7936: adoption CLEARS the event-stub discriminator the
             # first-registration probe excludes (see _upsert_subject).
             "            o._stub=NULL, "
+            # #12047 round-4 finding 2: the Object twin of the Subject fill.
+            "            o.canonical_name=coalesce(o.canonical_name, $cn), "
             "            o.objectKind=coalesce($ok, o.objectKind), "
             "            o.createdAt=coalesce(o.createdAt, $ca), "
             "            o.title=coalesce($title, o.title), "

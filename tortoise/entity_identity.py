@@ -56,7 +56,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import re
 import threading
 from typing import NamedTuple
 
@@ -200,7 +199,8 @@ def _refuse(label: str, name: str, candidate_ids, *,
 def live_name_holder_ids(g, label: str, name: str, *,
                          case_insensitive: bool = False,
                          name_props: tuple = ("name",),
-                         also: tuple = ()) -> list:
+                         also: tuple = (),
+                         alias_of: tuple = ()) -> list:
     """Every LIVE holder of ``name`` for ``label``, by ``n.id`` (raw).
 
     The list is **row-per-holder**, so an id-less legacy/hosted-stub holder
@@ -220,7 +220,8 @@ def live_name_holder_ids(g, label: str, name: str, *,
     """
     return _name_holder_ids(g, label, name,
                             case_insensitive=case_insensitive, live_only=True,
-                            name_props=name_props, also=also)
+                            name_props=name_props, also=also,
+                            alias_of=alias_of)
 
 
 def _adopt_idless_holder(g, label: str, names: str | tuple[str, ...],
@@ -263,13 +264,19 @@ def _adopt_idless_holder(g, label: str, names: str | tuple[str, ...],
     if not spellings:
         return
     arms = " OR ".join(f"n.{prop} IN $names" for prop in name_props)
+    # #12047 round-4 finding 2: the adopted row also GAINS the folded key, in the
+    # same `SET`. Without it an adopted legacy row stays invisible to the folded
+    # rung and the next variant spelling mints the twin the adoption just avoided
+    # (an id-less row is `n.id IS NULL`, so nothing had ever written the key).
+    folded = normalize_entity_name(names[0] if isinstance(names, tuple) else names)
     g.query(
         f"MATCH (n:{label}) "
         f"WHERE ({arms}) "
         f"AND {_terminal_excluded('n.status')} "
         "AND n.id IS NULL "
-        "SET n.id = $id",
-        params={"names": spellings, "id": node_id})
+        "SET n.id = $id, "
+        "    n.canonical_name = coalesce(n.canonical_name, $cn)",
+        params={"names": spellings, "id": node_id, "cn": folded})
 
 
 #: One lock per ``(label, name)`` for the CREATE-side resolve-or-mint
@@ -340,23 +347,6 @@ def entity_create_lock(label: str, name: str):
         yield
 
 
-_LEGACY_PUNC = re.compile(r"[^\w\s]")
-'''The PRE-#12047 `canonical_name` shape (lowercase, whitespace-collapsed,
-punctuation stripped) — `extractor._canonical_name`, which every `mining` write
-used before this change. It is READ-ONLY compatibility: the write uses
-`normalize_entity_name` (which also strips a leading article and folds NFKC), and
-the ids that derive from the old shape must not churn (#3590). Without this arm a
-pre-existing row `name='The Owner', canonical_name='the owner'` is invisible to
-the folded rung — `create("the owner")` folded to `owner` matched neither
-property and minted a twin (`#12047` review F-F), on exactly the graphs this
-issue measured.
-'''
-
-
-def _legacy_fold(name: str) -> str:
-    return _LEGACY_PUNC.sub("", re.sub(r"\s+", " ", name.lower().strip()))
-
-
 def _live_holders_same_entity(g, label: str, name: str) -> tuple[list, tuple]:
     """The holders of ``name`` including the FOLDED spelling — and which props found them.
 
@@ -390,13 +380,44 @@ def _live_holders_same_entity(g, label: str, name: str) -> tuple[list, tuple]:
     # this writer already folded). Review N1: this union is computed ALWAYS — a
     # raw-name HIT must not short-circuit the folded count, or `create("owner")`
     # silently picks one of two live carriers while `create("the owner")` refuses.
+    #
+    # ⛔ The PRE-#12047 fold shape (`extractor._canonical_name`) is deliberately NOT
+    # an arm here (round-4 finding 5). It looked like free compatibility and was a
+    # silent WRONG WRITE: that shape strips punctuation without inserting a space,
+    # so its key for "a-b" is "ab" — the same key the NEW fold gives "AB", and a
+    # write of "a-b" then resolved onto an unrelated "AB" node. A merge the queue
+    # can never show (neither fold compares them equal). The repair path for
+    # legacy rows is the review flow, which already sees them — `scan_entities`
+    # re-folds `canonical_name or name` in Python, so such a pair IS queued, and
+    # `apply_entity_merge` then writes the new-shape key onto both nodes.
     # One query, through the audited name-keyed primitive (`also=`), so a probe
     # for the lock/probe agreement (#3590) still sees every holder read and an
     # id-less row is counted per NODE (review F-B).
-    return live_name_holder_ids(
+    rows = live_name_holder_ids(
         g, label, name,
         name_props=("name", "canonical_name"),
-        also=(folded, _legacy_fold(name))), ("name", "canonical_name")
+        also=(folded,),
+        alias_of=(folded,))
+    # ⛔ A MERGED-AWAY carrier is not an independent holder (round-4 finding 1):
+    # `apply_entity_merge` leaves BOTH nodes live (the merge is non-destructive)
+    # and stamps the candidate with the same folded key, so counting rows made the
+    # verb that REPAIRS a name the verb that POISONS it — after `approve_merge`
+    # every later `create` of that name raised `AmbiguousEntityName` and a rename
+    # onto the variant raised `NameAlreadyHeld`, because the refusal fires before
+    # the `resolved_from` hop. Collapse each carrier onto its survivor and count
+    # DISTINCT ids; an id-less row carries no `resolved_from` evidence and stays
+    # a holder in its own right, per-row (F-B's node-exactness).
+    from .entity_resolver import follow_resolved_from
+    collapsed: list = []
+    seen: set = set()
+    for holder in rows:
+        resolved = follow_resolved_from(g, label, holder) if holder else None
+        key = resolved if resolved else f"id-less:{len(collapsed)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        collapsed.append(resolved)
+    return collapsed, ("name", "canonical_name")
 
 
 def resolve_or_mint(g, label: str, name: str, *,
@@ -498,8 +519,7 @@ def resolve_or_mint(g, label: str, name: str, *,
             # the adopted id replayable.
             adopted = ulid()
             _adopt_idless_holder(
-                g, label,
-                (name, normalize_entity_name(name), _legacy_fold(name)),
+                g, label, (name, normalize_entity_name(name)),
                 adopted, name_props=_props)
             return adopted, True
         # Zero live holders: mint an opaque id. The returned id is only half of
@@ -676,7 +696,8 @@ def _name_holder_ids(g, label: str, name: str, *,
                      case_insensitive: bool,
                      live_only: bool,
                      name_props: tuple = ("name",),
-                     also: tuple = ()) -> list:
+                     also: tuple = (),
+                     alias_of: tuple = ()) -> list:
     """Raw holder ids for ``name`` (and any ``also`` spelling); ``live_only`` applies D2's.
 
     ``also`` widens the SAME query to more spellings of one entity's key — the
@@ -691,6 +712,15 @@ def _name_holder_ids(g, label: str, name: str, *,
     spellings = [s for s in dict.fromkeys((name, *also)) if s]
     arms = []
     params: dict = {}
+    # #12047 round-4 finding 3: the merge records the variant in the SURVIVOR's
+    # `aliases` (that is the non-destructive merge), so the write path must
+    # honour it — otherwise the promise "a later write of the variant resolves"
+    # holds only while the retired carrier is still LIVE, and dies the moment it
+    # is superseded (the terminal exclusion drops it), minting a twin.
+    for i, spelling in enumerate([s for s in dict.fromkeys(alias_of) if s]):
+        key = f"an{i}"
+        params[key] = spelling
+        arms.append(f"${key} IN coalesce(n.aliases, [])")
     for i, spelling in enumerate(spellings):
         key = f"n{i}"
         # `case_insensitive` lowercases BOTH sides (mirroring `_name_predicate`):

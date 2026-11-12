@@ -1150,20 +1150,142 @@ class TestThirdReviewRound:
         assert entity_pair_for(sdk._get_proj().g, row["candidate_id"])
         assert seen and seen[0] is None, f"the recompute was bounded: {seen}"
 
-    # ── F-F (P2): the legacy fold shape is still findable ────────────────
+    # ── F1 (P1): the merge REPAIRS the name, it does not poison it ────────
 
-    def test_a_row_written_with_the_legacy_fold_still_resolves(self, sdk_factory):
-        """F-F: `mining` wrote `extractor._canonical_name` before this PR
-        (`'The Owner'` → `'the owner'`); the new fold gives `'owner'`, so the
-        folded rung missed every pre-existing row and minted a twin on exactly
-        the graphs this issue measured."""
+    def test_a_merged_name_stays_writable_and_renameable(self, sdk_factory):
+        """F1: `apply_entity_merge` leaves both nodes LIVE and stamps the
+        candidate with the same folded key, so counting rows made the repair
+        verb the poisoning verb — every later create of the name raised
+        `AmbiguousEntityName` (the refusal fires before the `resolved_from` hop)
+        and a rename onto the variant raised `NameAlreadyHeld`."""
+        sdk = sdk_factory()
+        # Raw rows: the two spellings are fold-equal, so the SDK door would
+        # resolve them at create time and leave NO pair to review. The damaged
+        # graphs have exactly this shape (written before any resolution existed).
+        _create_raw(sdk, "Object", "obj-a", "The Owner", "objectKind", "document")
+        _create_raw(sdk, "Object", "obj-b", "the owner", "objectKind", "document")
+        a, b = "obj-a", "obj-b"
+        row = next(r for r in sdk.list_dedup_candidates(candidate_type="entity")
+                   if r["candidate_id"] == b)
+        assert row["method"] == "exact", row
+        out = sdk.approve_merge(row["candidate_id"], "merge")
+        assert out["survived_id"] == a
+        for spelling in ("The Owner", "the owner", "OWNER", "The  Owner"):
+            assert sdk.create_object(spelling, "document")["id"] == a, (
+                f"{spelling!r} no longer resolves onto the survivor after a merge")
+        # …and the survivor may be renamed onto the variant's spelling.
+        sdk.update_entity(a, name="THE OWNER ")
+        assert _count(sdk, "Object") == 2, (
+            "the merge must never delete either node")
+
+    # ── F2 (P1): an ABSENT key is filled, a present one is never overwritten ──
+
+    def test_a_pre_existing_row_gains_the_fold_it_never_had(self, sdk_factory):
+        """F2: ON CREATE only left every pre-#12047 row without a key forever —
+        the rung stayed blind on exactly the population this issue measured."""
+        sdk = sdk_factory()
+        _create_raw(sdk, "Object", "p-1", "The Owner", "objectKind", "document")
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {id:'p-1'}) REMOVE o.canonical_name")
+        assert sdk.create_object("The Owner", "document")["id"] == "p-1"
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object {id:'p-1'}) RETURN o.canonical_name").result_set
+        assert rows[0][0] == "owner", "the create did not fill the absent fold"
+        assert sdk.create_object("the owner", "document")["id"] == "p-1"
+        assert _count(sdk, "Object") == 1
+
+    def test_an_adopted_id_less_row_gains_the_fold(self, sdk_factory):
+        sdk = sdk_factory()
+        sdk._get_proj().g.query(
+            "CREATE (:Object {name:'Legacy Doc', objectKind:'document', "
+            "status:'live'})")
+        oid = sdk.create_object("Legacy Doc", "document")["id"]
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$id}) RETURN o.canonical_name",
+            params={"id": oid}).result_set
+        assert rows[0][0] == "legacy doc"
+
+    # ── F5 (P2): an article is a WORD, not a prefix ──────────────────────
+
+    def test_a_hyphenated_name_keeps_its_first_token(self):
+        """F5: `normalize("a-b")` was `"b"` — a different key from
+        `_legacy_fold("a-b") == "ab"`, so the union of the two arms resolved a
+        write of "a-b" onto an unrelated "AB" node: a merge the queue cannot
+        show, because neither fold compares them equal."""
+        assert normalize_entity_name("a-b") == "a b"
+        assert normalize_entity_name("A-B") == "a b"
+        assert normalize_entity_name("the-owner") == "the owner"
+        # …while a real leading article is still not identity.
+        assert normalize_entity_name("the owner") == "owner"
+        assert normalize_entity_name("an apple") == "apple"
+        assert normalize_entity_name("the_owner") == "owner"
+
+    def test_a_hyphenated_name_does_not_resolve_onto_an_unrelated_node(
+            self, sdk_factory):
+        sdk = sdk_factory()
+        ab = sdk.create_object("AB", "document")["id"]
+        assert sdk.create_object("a-b", "document")["id"] != ab, (
+            "a-name with a hyphen resolved onto an unrelated 'AB' node")
+
+    # ── F-F (P2): a pre-#12047 row is REPAIRED by the review flow ────────
+
+    def test_a_legacy_fold_row_is_queued_and_repaired_by_a_merge(self, sdk_factory):
+        """F-F, as finally settled. `mining` wrote `extractor._canonical_name`
+        before this PR — a DIFFERENT fold (`"The Owner"` → `"the owner"`, where
+        the new fold gives `"owner"`) — so such a row is invisible to the create
+        rung. Making the create rung match the old shape too was tried and
+        WITHDRAWN: that shape strips punctuation without inserting a space, so its
+        key for "a-b" is "ab" — the new fold's key for "AB" — and a create of
+        "a-b" then resolved onto an unrelated "AB" node (a silent wrong write the
+        queue can never show; round-4 finding 5).
+
+        The repair path is the flow this PR exists for: `scan_entities` re-folds
+        `canonical_name or name` in Python, so the pair IS queued, and the merge
+        writes the new-shape key onto the node.
+        """
         sdk = sdk_factory()
         obj = sdk.create_object("The Owner", "document")["id"]
         sdk._get_proj().g.query(
             "MATCH (o:Object {id:$id}) SET o.canonical_name='the owner'",
             params={"id": obj})   # the pre-#12047 shape
-        assert sdk.create_object("the owner", "document")["id"] == obj
-        assert _count(sdk, "Object") == 1
+        # A near-duplicate of the SAME legacy row, in the same block, so the
+        # ladder scores it (their folds are "owner" and "owner doc").
+        _create_raw(sdk, "Object", "obj-twin", "The Owner Doc",
+                    "objectKind", "document")
+
+        # 1) the queue sees the pair, because it folds `canonical_name or name`
+        #    at READ time — the legacy row is found by the graph, not by the rung.
+        rows = sdk.list_dedup_candidates(candidate_type="entity")
+        pair = [r for r in rows
+                if {r["candidate_id"], r["existing_id"]} == {obj, "obj-twin"}]
+        assert pair, f"the legacy row is invisible to the queue: {rows!r}"
+
+        # 2) the merge stamps the NEW-shape key on the retiree, so its spelling
+        #    resolves onto the survivor afterwards (via the `resolved_from` hop).
+        out = sdk.approve_merge(pair[0]["candidate_id"], "merge")
+        surv = out["survived_id"]
+        # The merge records the variant in the SURVIVOR's aliases, and the write
+        # path honours them — so the legacy spelling resolves even after the
+        # retired carrier is superseded (a terminal node is excluded from the
+        # live-holder union, so the alias is the only remaining evidence).
+        sdk.update_entity(out["candidate_id"], status="superseded")
+        assert sdk.create_object("the owner", "document")["id"] == surv
+
+    def test_the_alias_arm_survives_the_carriers_retirement(self, sdk_factory):
+        """Finding 3: the write path read `name`/`canonical_name` only, so the
+        merge's promise ("a later write of the variant resolves") held only while
+        the retired carrier stayed LIVE — it died the moment it was superseded,
+        which is the ordinary next step."""
+        sdk = sdk_factory()
+        a = sdk.create_object("Acme Corp", "document")["id"]
+        b = sdk.create_object("Acme Corporaton", "document")
+        if b["id"] == a:
+            pytest.skip("resolved at create time — no merge to test")
+        out = sdk.approve_merge(b["id"], "merge")
+        assert out["survived_id"] == a
+        sdk.update_entity(b["id"], status="superseded")
+        assert sdk.create_object("Acme Corporaton", "document")["id"] == a
+        assert _count(sdk, "Object") == 2, "the merge must not delete either node"
 
     # ── F-H (P2): a no-op re-write keeps a caller-supplied key ───────────
 

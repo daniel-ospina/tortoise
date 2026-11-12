@@ -45167,12 +45167,6 @@ class TortoiseSDK:
             # call still wins (`setdefault` semantics) — this fills, never
             # overwrites. A non-entity label renamed through here (a Point
             # carrying `name`) just gains an inert property nothing reads.
-            # ⛔ Deferred to AFTER the guard, so the fold is spent only on a REAL
-            # rename (#12047 review F-H): a read-modify-write that re-sends the
-            # unchanged name must not replace a caller-supplied `canonical_name`,
-            # and a Point/Event renamed through here must not gain one.
-            from .entity_resolver import normalize_entity_name
-            _folded_new = normalize_entity_name(props["name"])
         with contextlib.ExitStack() as _rename_lock_stack:
             for _lock_key in _rename_locks:
                 _rename_lock_stack.enter_context(
@@ -45189,6 +45183,14 @@ class TortoiseSDK:
                 # ⛔ Only on a REAL rename (review F-H): a read-modify-write that
                 # re-sends the unchanged name must not spend the write, and must
                 # not replace a caller-supplied key.
+                # ⛔ Deferred to AFTER the guard, so the fold is spent only on a
+                # REAL rename (#12047 review F-H): a read-modify-write that
+                # re-sends the unchanged name must not replace a caller-supplied
+                # `canonical_name`, and a Point/Event renamed through here must
+                # not gain one. A caller who DOES supply the key on a real rename
+                # keeps it — and then OWNS maintaining the rung for that entity
+                # (round-4 finding 7: the stored fold stays at the caller's value,
+                # so the new spelling is not a folded-rung hit).
                 if _renamed:
                     from .entity_resolver import normalize_entity_name
                     _folded_new = normalize_entity_name(props["name"])

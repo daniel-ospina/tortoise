@@ -114,6 +114,11 @@ SEMANTIC_MAX_ENTITIES = 2000
 
 _NON_ALNUM = re.compile(r"[^\w]+", re.UNICODE)
 
+#: A leading article at a WORD boundary (space or the underscore that stands for
+#: internal whitespace) — never a bare prefix, so `a-b`/`the-owner` keep their
+#: first token (#12047 round-4 finding 5).
+_LEADING_ARTICLE = re.compile(r"^(?:the|an|a)(?=[\s_])", re.IGNORECASE)
+
 
 class EntityScanUnavailable(RuntimeError):
     """The entity scan could not run — never reported as "no duplicates".
@@ -150,11 +155,25 @@ def normalize_entity_name(name: object) -> str:
     every entity in the graph.
     """
     raw = "" if name is None else str(name)
-    folded = unicodedata.normalize("NFKC", raw).casefold()
+    # `.strip()` first: the article anchor is `^`, so a padded name ("  The Owner")
+    # would otherwise keep its article and fold differently from the same name
+    # written unpadded.
+    folded = unicodedata.normalize("NFKC", raw).casefold().strip()
+    # ⛔ THE ARTICLE IS A WORD, NOT A PREFIX (#12047 round-4 finding 5). The fold
+    # used to split on every punctuation run and then drop a leading
+    # ``the``/``an``/``a`` TOKEN — so ``normalize("a-b")`` was ``"b"``, a
+    # different key from ``_legacy_fold("a-b") == "ab"``. The create path unions
+    # both arms, so a write of "a-b" resolved onto an unrelated `"AB"` node: a
+    # merge the queue can never show, because the two spellings do not compare
+    # equal under EITHER fold. Stripping is therefore anchored on a real SPACE (or
+    # the ``_`` written for internal whitespace): "the owner" → "owner",
+    # "a-b" → "a b".
+    while True:
+        stripped = _LEADING_ARTICLE.sub("", folded, count=1)
+        if stripped == folded:
+            break
+        folded = stripped
     tokens = [t for t in _NON_ALNUM.split(folded.replace("_", " ")) if t]
-    # A leading article is not identity: "the owner" and "owner" are one entity.
-    while len(tokens) > 1 and tokens[0] in _ARTICLES:
-        tokens = tokens[1:]
     out = " ".join(tokens)
     if out:
         return out
