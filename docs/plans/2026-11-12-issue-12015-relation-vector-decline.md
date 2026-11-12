@@ -40,12 +40,17 @@ the vector, and `RecordRelation` had no way to say so.
 ## What changes
 
 1. **One declaration** — `cache_projection.relation_vector_declined_properties()`,
-   returning `stored_vector_props()` (an IMPORT-TIME snapshot of the store seam, exactly
-   like `UNSERVED_VECTOR_LABELS`; it is a function, not a constant, because there is no
-   arithmetic to compute, both edge doors should read one spelling, and the instrument's
-   falsifier needs a name to replace). The node rule stays a set difference; an edge has
-   no label to subtract. The report KEY format gets its own single owner too:
-   `relationship_target` / `is_relationship_target` / `RELATIONSHIP_TARGET_PREFIX`.
+   which calls `stored_vector_props()` **on every call**, so a rebind of THIS module's
+   `STORED_VECTOR_PROPS` moves the rule immediately; the only import-time part is the
+   owner→module binding (`from .stored_form import …`). ⛔ Not an "import-time snapshot":
+   `06-cache-projection.md` §0.5c owns that wording (and names the natural repair this
+   phrasing would invite — hoisting it to a module-level `frozenset` — which reds
+   `test_the_declined_edge_property_set_is_DERIVED_not_a_second_list`). It is a function,
+   not a constant, because there is no arithmetic to compute, both edge doors should read
+   one spelling, and the instrument's falsifier needs a name to replace. The node rule
+   stays a set difference; an edge has no label to subtract. The report KEY format gets
+   its own single owner too: `relationship_target` / `is_relationship_target` /
+   `RELATIONSHIP_TARGET_PREFIX`.
 2. **Both edge doors drop and RECORD it** —
    `relation_from_row` (row → view, so a record read cannot advertise bytes the writer
    refuses) and `relation_statement` (its own check, because `record_plan` is public and
@@ -53,9 +58,11 @@ the vector, and `RecordRelation` had no way to say so.
 3. **The plan reports it** — `ProjectionPlan.dropped_vectors()` adds
    `<relationship:TYPE>` keys (`#11641`'s spelling), with the node loop bounded by
    `len(self.nodes)` so a relation statement can never be read as a node's.
-4. **The operator's line names the right survivor** — `record_restore.RestoreOutcome`
-   and `rebuild_from_record`'s warning say "label(s) / relationship type(s)" and
-   "the edges are restored" where an edge is what survived.
+4. **The operator's line names the right survivor** — `ProjectionReport.render()` says
+   "unserved label(s) / relationship type(s)"; `record_restore.RestoreOutcome.render()`
+   and `rebuild_from_record`'s warning say "target(s) with no query path" (they name no
+   object kind), and the survivor clause reads "the edges are restored" where an edge is
+   what survived.
 5. **The instrument measures the edge door** — `dod_5090_probe`'
    `cache_projection_store_labels()` gains `relationships`, built by running both edge
    doors over every allowlisted predicate, and row 2 unions `<relationship:TYPE>` into

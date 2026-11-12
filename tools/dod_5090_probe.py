@@ -3235,6 +3235,14 @@ def score_path_bullet() -> Row:
         "cache_projection.relation_from_row → relation_statement over every allowlisted "
         "predicate — the `props` bag and a directly-built `RecordRelation` — "
         f"#12015): {sorted(projection['relationships'])}",
+        # The POPULATION the edge arm actually planted on and saw a door refuse. Without this
+        # line an empty `relationships` is the SAME PRINTED EVIDENCE as an arm that never ran:
+        # both read `stored-without-a-query-path: none` / `MET` (`#12015` review, finding D —
+        # `relationships_probed` was computed and never read, so the row could not tell the two
+        # apart). The neighbouring note states the rule: a `MET` must not rest on an unprinted set.
+        "cache projection RELATIONSHIP door PLANTED ON and saw REFUSE (an empty population "
+        "holds this row at PARTIAL — it is NOT evidence that no edge stores a vector): "
+        f"{sorted(projection['relationships_probed'])}",
         f"served labels (run_vector_query vocabulary): {sorted(served)}",
         f"stored-without-a-query-path: {sorted(orphans) or 'none'}",
     ]
@@ -3483,7 +3491,10 @@ def score_path_bullet() -> Row:
                       or resolved["partial"] or resolved["contradictions"]
                       or resolved["at_runtime"] or resolved["violations"]
                       or resolved["error"]
-                      or projection["error"] or projection["unmeasured"])
+                      or projection["error"] or projection["unmeasured"]
+                      # An EMPTY edge population is not a clean edge population: no door
+                      # refused anything, so nothing was measured on the edge axis.
+                      or not projection["relationships_probed"])
         else "MET")
     return Row(
         bullet=2,
