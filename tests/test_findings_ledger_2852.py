@@ -1866,8 +1866,9 @@ def test_a_re_spelled_ref_cannot_hide_a_duplicate():
 
     Reachable by a plain re-spelling: `#2714` and `#02714` are distinct strings, so a
     duplicate test over the raw match saw nothing while the census was one issue short
-    (measured on the round-1 tool: `check_document()` `[]`). Normalising to `int` makes
-    the two spellings the same issue, which is what the row means.
+    (measured on the round-1 tool: `check_document()` `[]`). Normalising to the issue
+    NUMBER — as a leading-zero-stripped digit STRING, never `int()` — makes the two
+    spellings the same issue, which is what the row means.
     """
     text = flc.read_doc(REPO)
     assert flc.check_state_arithmetic(text) == []
@@ -1910,7 +1911,7 @@ def test_a_long_ref_cannot_crash_the_guard():
     `main()`'s `except Unverifiable`, and the CLI exited **1**: the code §8 documents as
     "drift, a named claim is false", over a page that states no falsified claim and with
     a traceback rather than a named claim. Measured on the round-2 tool. Refs are
-    compared as normalised digit STRINGS now, so nothing here converts untrusted text —
+    compared as normalised digit STRINGS now, so no REF here is converted from text —
     the same class as the round-1 `UnicodeDecodeError` hole, and the reason the fix is
     "stop converting" rather than "catch it".
 
@@ -1925,6 +1926,84 @@ def test_a_long_ref_cannot_crash_the_guard():
     assert any("never indexed" in p for p in problems), problems
     assert all(len(p) < 1000 for p in problems), [len(p) for p in problems]
     assert any("digits)" in p for p in problems), problems
+
+
+#: Every position where an unbounded `\d+` run reaches an `int()` conversion, and what the
+#: guard must say about it. ⛔ Parametrized rather than one case on purpose: the version
+#: above mutates only a REF position, so it stayed GREEN while four other conversion sites
+#: were live — a test asserting an invariant its own function violated (#11902 review round
+#: 4). Anyone adding an `int()` on page-controlled text must add a row here.
+_LONG_NUMBER_SITES = (
+    (
+        "a §6 state row's count cell",
+        lambda t, h: t.replace("| **OPEN** | **4** |", f"| **OPEN** | **{h}** |", 1),
+        "too long to convert",
+    ),
+    (
+        "a citation's line span",
+        lambda t, h: t.replace("`tortoise/pipeline.py:16`", f"`tortoise/pipeline.py:{h}`", 1),
+        "is out of range",
+    ),
+    (
+        # Document level only NO-CRASH here: the cell this replaces carries other evidence,
+        # so the floor legitimately stays quiet. The REFUSAL is pinned directly by
+        # `test_a_huge_section_reference_is_not_evidence` below.
+        "a `§N` section reference in an evidence cell",
+        lambda t, h: t.replace("`tortoise/pipeline.py:16`", f"`§{h}`", 1),
+        None,
+    ),
+    (
+        # No problem is expected here — an absurd heading number is simply not a section
+        # anything resolves. What is forbidden is the CRASH, which is what this asserts.
+        "a numbered heading",
+        lambda t, h: t.replace(
+            "## 7. What this changes", f"## {h}. A new section\n\n## 7. What this changes", 1
+        ),
+        None,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("site", "mutate", "expect"),
+    _LONG_NUMBER_SITES,
+    ids=[case[0] for case in _LONG_NUMBER_SITES],
+)
+def test_no_position_converts_an_unbounded_digit_run(site, mutate, expect):
+    r"""FAILS (traceback, exit 1) if ANY `\d+` position is passed to `int()`.
+
+    Python refuses to convert an integer literal above 4,300 digits, so any `int()` on a
+    digit run a PAGE controls can raise `ValueError`. That escapes `main()`'s
+    `except Unverifiable` and the CLI exits **1** — the code §8 documents as "drift, a
+    named claim is false" — with a traceback, over a page that may state nothing at all.
+    Measured live at four sites after the ref path was already fixed: the §6 count cell, a
+    citation's line span, a `§N` reference, and a heading number.
+
+    Each is refused BEFORE the conversion now, and every message is bounded so a
+    4,301-digit number cannot flood a log either.
+    """
+    text = flc.read_doc(REPO)
+    probe = mutate(text, "9" * 4301)
+    assert probe != text, f"the {site} anchor moved — re-derive this mutation"
+    problems = flc.check_document(probe)  # must not raise
+    if expect is not None:
+        assert any(expect in p for p in problems), (site, problems)
+    assert all(len(p) < 1000 for p in problems), [(site, len(p)) for p in problems]
+
+
+def test_a_huge_section_reference_is_not_evidence():
+    """FAILS (traceback) if a `§`-reference is converted without a length bound.
+
+    `SECTION_REF_TOKEN_RE` is `§\\s?(\\d+)` — an unbounded digit run — so `int(n)` on a
+    4,301-digit section number raised `ValueError` out of the evidence floor, past
+    `main()`'s `except Unverifiable`, and the CLI exited 1 (measured, round 4). A number
+    that long cannot name a heading, so it is not evidence; the caller must REFUSE it
+    rather than convert it, and the refusal is what makes the evidence floor red.
+    """
+    assert flc._has_evidence("`§" + "9" * 4301 + "`", {1, 2, 3}) is False
+    # The negative control: a real section reference IS evidence, so the arm above is not
+    # passing because `_has_evidence` refuses everything.
+    assert flc._has_evidence("`§8`", {8}) is True
 
 
 def test_the_pinned_population_is_a_membership_set_not_a_count():

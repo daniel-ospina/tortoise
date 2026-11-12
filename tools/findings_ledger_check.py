@@ -141,6 +141,22 @@ PINNED_INDEXED: frozenset[int] = frozenset(
 PINNED_INDEXED_ROWS = len(PINNED_INDEXED)
 
 #: §6's per-state rows, and the label each must carry in its first column.
+#: A `\d+` run is UNBOUNDED, and Python refuses to convert an integer literal longer than
+#: 4,300 digits (`sys.set_int_max_str_digits`) — so ANY `int()` on text a page controls can
+#: raise `ValueError`, which escapes `main()`'s `except Unverifiable` as a traceback with
+#: exit **1**: the code §8 reserves for "a named claim is false", over a page that may
+#: state nothing at all. Measured at FOUR sites in this module (#11902 review rounds 3 and
+#: 4 — the §6 count cell, a `§N` reference, a heading number, and a citation's line span).
+#: No caller below converts a longer run: a number this long cannot be a real section,
+#: line or population, so each caller REFUSES it instead of converting it.
+MAX_CONVERTIBLE_DIGITS = 9
+
+
+def _convertible(raw: str) -> bool:
+    """Is `raw` short enough that `int(raw)` cannot raise? (`\\d+` is unbounded.)"""
+    return len(raw) <= MAX_CONVERTIBLE_DIGITS
+
+
 STATE_ROWS: tuple[str, ...] = (
     "OPEN",
     "CLOSED COMPLETED",
@@ -577,7 +593,12 @@ def _has_evidence(cell: str, sections: set[int]) -> bool:
     """
     if ISSUE_REF_RE.search(cell):
         return True
-    if any(int(n) in sections for n in SECTION_REF_TOKEN_RE.findall(cell)):
+    # `_convertible` first: `int()` on an unbounded `\d+` raises `ValueError`, and the
+    # short-circuit is what keeps a hostile `§9999…` from reaching the conversion.
+    if any(
+        _convertible(n) and int(n) in sections
+        for n in SECTION_REF_TOKEN_RE.findall(cell)
+    ):
         return True
     for match in re.finditer(r"`[^`\n]+`", cell):
         body = match.group(0)
@@ -631,7 +652,7 @@ def check_evidence_cells(text: str) -> list[str]:
     """
     problems: list[str] = []
     section = _region(text, "## 3. The corrections log", "## 4. The artefact index")
-    sections = {int(n) for n in HEADING_NUMBER_RE.findall(text)}
+    sections = {int(n) for n in HEADING_NUMBER_RE.findall(text) if _convertible(n)}
     for offset, line in _table_rows(section):
         match = CORRECTION_ROW_RE.match(line)
         if match is None:
@@ -1655,7 +1676,23 @@ def check_citations(text: str, root: Path = REPO) -> list[str]:
         if _is_host_port(match.group(0)):
             continue
         raw = match.group(0)[1:-1]
-        start, end = int(match.group("start")), match.group("end")
+        start_raw, end_raw = match.group("start"), match.group("end")
+        if not _convertible(start_raw) or (end_raw and not _convertible(end_raw)):
+            # Refuse BEFORE converting (see `MAX_CONVERTIBLE_DIGITS`): `int()` on either
+            # end of the span raised out of the guard, and the CLI exited 1 — "a named
+            # claim is false" — over a line number that simply cannot be resolved.
+            longest = max(len(start_raw), len(end_raw or ""))
+            # `raw` is the WHOLE token, so it carries the 4,301-digit run — truncate it,
+            # or the bounded-message guarantee this refuses for is broken by the message.
+            shown = raw if len(raw) <= 80 else f"{raw[:60]}…({len(raw)} chars)"
+            problems.append(
+                f"citation {shown}: line {start_raw[:12]}…"
+                + (f"-{end_raw[:12]}…" if end_raw else "")
+                + f" ({longest} digits) is out of range — a line number that long cannot "
+                "resolve, so the citation names nothing that can be opened"
+            )
+            continue
+        start, end = int(start_raw), end_raw
         span = f"{start}{'-' + end if end else ''}"
         rel = match.group("path")
         origin = ""
@@ -1787,7 +1824,7 @@ def check_state_arithmetic(text: str) -> list[str]:
     problems: list[str] = []
     section = _region(text, "## 6. The issue index", "## 7. What this changes")
     found: dict[str, int] = {}
-    row_refs: dict[str, list[int]] = {}
+    row_refs: dict[str, list[str]] = {}
     for offset, line in _table_rows(section):
         match = STATE_ROW_RE.match(line)
         if not match:
@@ -1800,7 +1837,19 @@ def check_state_arithmetic(text: str) -> list[str]:
                 "population while a bucket has moved"
             )
             continue
-        label, count, which = match.group("label"), int(match.group("count")), match.group("which")
+        label, raw_count, which = match.group("label"), match.group("count"), match.group("which")
+        if not _convertible(raw_count):
+            # Refuse BEFORE converting: `int()` here raised out of the guard and the CLI
+            # exited 1, which reads as "a named claim is false" over a page that may state
+            # nothing (measured). A population this large cannot be reconciled, so it is
+            # reported as drift and treated as zero — which also reds the sum arm.
+            problems.append(
+                f"§6 row {label!r}: its count cell names a {len(raw_count)}-digit number "
+                "— no indexed population is that large, and a count too long to convert "
+                "is a substituted claim rather than a reconciled one"
+            )
+            raw_count = "0"
+        count = int(raw_count)
         if label in found:
             problems.append(f"§6: state row {label!r} appears twice — ambiguates the arithmetic")
             continue
