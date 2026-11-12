@@ -157,7 +157,8 @@ writes (`test_a_duplicate_with_nothing_to_carry_issues_no_writes` pins that at
 the write door, not at the receipt).
 
 Reads per fold: three unconditional (the duplicate's props, its outbound edges,
-its inbound edges) plus one per canonical view and one read-back per
+its inbound edges) plus TWO per canonical view (the properties row and the
+canonical's own `extractedFrom` targets) and one read-back per
 `link_entity`/`_carried` pair. The widened rel set costs NO extra read — one
 query covers them all.
 
@@ -314,8 +315,13 @@ _REPORTED_FIELDS = ("confidence", "pointKind", "eventId", "status",
 #: The props the fold neither carries nor reports because they are the ROW's
 #: identity or the projection's own bookkeeping rather than the occurrence's
 #: evidence: `id` addresses the row, `content`/`content_hash` are the dedup key
-#: the FOLD ITSELF is about, `createdAt` is first-writer history and `updatedAt`
-#: moves on any later write.
+#: the FOLD ITSELF is about, and `createdAt`/`updatedAt` are the row's WRITE
+#: HISTORY — an artefact of the store, not asserted content. ⚠️ That is the real
+#: ground: the canonical's `createdAt` is the first writer's, and the DUPLICATE's
+#: is LATER (two occurrences in one capture are written at different times), so
+#: it is not "first-writer history" the duplicate shares — it is that
+#: occurrence's own write time, and it dies with the node. Reporting it would put
+#: a residual on every fold, so it is a DECLARED exemption, not a silent one.
 #:
 #: ⚠️ `is_operator` and `status` used to sit here on the ground that "`sdk`
 #: refuses an operator-wired duplicate before this module is reached" — which is
@@ -447,6 +453,11 @@ class FoldEvidence:
     #: not nothing: `extractedFrom` is declared, so an empty ref set passes the
     #: ref check and the value would otherwise be destroyed with the node.
     blank_refs: tuple[str, ...] = ()
+    #: `(when, validFrom)` when the duplicate held BOTH with different values.
+    #: The residual's travel clause is written in `_carry_fold_evidence`, where
+    #: the canonical's occupancy is known (free slot ⇒ one value travels;
+    #: occupied ⇒ neither does).
+    slot_conflict_values: tuple[Any, Any] | None = None
     source_refs: frozenset[str] = frozenset()
     scalar: dict[str, Any] = field(default_factory=dict)
     #: The duplicate's own span evidence is NOT a valid address — the reason is
@@ -695,13 +706,17 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         # ⚠️ The SUBJECT is the SECOND SPELLING, not the field: the sinks prefix
         # every residual with "did not carry ", and a subject of `validFrom`
         # produced "copied validFrom; did not carry validFrom (as when)" — the
-        # contradiction this clause exists to remove, one level up. `validFrom`
-        # WAS carried (as `when`); what did not survive is the duplicate's second
-        # spelling.
+        # contradiction this clause exists to remove, one level up.
+        # ⚠️ AND IT MAKES NO TRAVEL CLAIM HERE. This read cannot see the
+        # canonical's occupancy, and `when` only reaches the writer when the
+        # canonical's date slot is FREE — so "only X travelled" was FALSE on an
+        # occupied slot (where nothing travelled and a second residual,
+        # "when (as validFrom) — the canonical's value differs", said so in the
+        # same sentence). The sentence is completed in `_carry_fold_evidence`
+        # step 6b, where the occupancy is known.
         slot_conflicts.append(
             f"the duplicate's second validFrom (as when) spelling — it held "
-            f"both ({when!r} and {validfrom!r}) for one slot, so only "
-            f"{when!r} travelled; {validfrom!r} went with the node")
+            f"both ({when!r} and {validfrom!r}) for one slot")
 
     # The span is an ADDRESS, and "half an address" is only ONE of the ways a
     # duplicate's own evidence can be unwritable. `validate_span` is the ONE home
@@ -802,6 +817,10 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         source_refs=frozenset(refs),
         labels=labels,
         blank_refs=tuple(blank_refs),
+        slot_conflict_values=(
+            (when, validfrom)
+            if (when is not None and validfrom is not None
+                and when != validfrom) else None),
         scalar=scalar,
         malformed_address=malformed_address,
         inbound=tuple(inbound),
@@ -860,6 +879,20 @@ def _canonical_view(proj: Any, canonical_id: str) -> dict | None:
         "status": _status, "is_operator": _is_operator,
         "prov_targets": prov_targets,
     }
+
+
+#: The prefix of the duplicate's dual-date residual, so the travel clause can be
+#: appended to THAT item rather than emitted as a second residual (which the sinks
+#: would prefix with another "did not carry").
+_SLOT_CONFLICT_PREFIX = "the duplicate's second validFrom (as when) spelling"
+
+
+def _complete_slot_conflict(out: dict, sentence: str) -> None:
+    """Append the travel clause to the dual-date residual, if this fold has one."""
+    for i, item in enumerate(out.get("residual") or ()):
+        if item.startswith(_SLOT_CONFLICT_PREFIX):
+            out["residual"][i] = f"{item}, {sentence}"
+            return
 
 
 def _already_written(out: dict) -> str:
@@ -1194,6 +1227,14 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
         held = canonical.get(write_key)
         if held is None:
             held = canonical.get(key)
+        if key == "when" and evidence.slot_conflict_values is not None:
+            won, lost = evidence.slot_conflict_values
+            _complete_slot_conflict(out,
+                                    (f"so only {won!r} travelled; {lost!r} "
+                                     "went with the node") if held is None else
+                                    ("so neither spelling travelled — the "
+                                     f"canonical's own value ({held!r}) "
+                                     "stands"))
         if held is not None:
             if held != value:
                 # Named as the SLOT, not the read spelling: `when` and `validFrom`

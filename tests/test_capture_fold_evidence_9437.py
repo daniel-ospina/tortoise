@@ -1860,3 +1860,39 @@ def test_a_DIFFERING_provenanceSource_refuses_the_fold():
         _FakeProj(_FakeGraph(dup_prov_source="session:s")),
         "pt_dup", "pt_canon")
     assert same["ok"] is True and not same["residual"], same
+
+
+# ── 21) round 18: the OCCUPIED date slot — where "only X travelled" was false ──
+
+
+def test_an_OCCUPIED_date_slot_says_NEITHER_spelling_travelled():
+    """The dual-date residual is built by the READ, which cannot see the
+    canonical's occupancy — and `when` only reaches the writer when the slot is
+    FREE. On an occupied slot the receipt claimed "only '2026-08-01' travelled"
+    one clause before "when (as validFrom) — the canonical's value differs": the
+    duplicate's date never travelled at all, and the canonical stored its own
+    (measured through the real seam with a canonical `validFrom`)."""
+    graph = _FakeGraph(
+        dup_row=("session:s", [], "q", 10, 40, "turn-1", None,
+                 "2026-08-01", "2026-08-02", None, None, None),
+        canon_row=("session:s", [], "q", None, None, "turn-0", None,
+                   None, "2026-09-09", None, None, None))
+    sdk = _FakeSDK()
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=sdk)
+    assert out["ok"] is True, out
+    item = next(r for r in out["residual"]
+                if r.startswith("the duplicate's second validFrom"))
+    assert "neither spelling travelled" in item, item
+    assert "'2026-09-09'" in item, item               # the surviving date, named
+    assert "travelled; " not in item, item            # the false clause is gone
+    # …and the write door was never asked to hold a date.
+    assert sdk.calls == [], sdk.calls
+    # The other half — a FREE slot — still names the traveller (that pin already
+    # existed; this asserts the two arms DISAGREE only where reality does).
+    free = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph(
+            dup_row=("session:s", [], "q", 10, 40, "turn-1", None,
+                     "2026-08-01", "2026-08-02", None, None, None))),
+        "pt_dup", "pt_canon", sdk=_FakeSDK(on_update=_FakeGraph().apply_slot))
+    assert any("only '2026-08-01' travelled" in r for r in free["residual"]), free
