@@ -1,7 +1,9 @@
 """#1135 — welcome_url / billing defaults derive from env, not hardcoded hosts.
 
 - welcome_url (github_callback redirect) must follow EMAIL_LINK_BASE_URL
-  (the static Pages host, same as invite-accept/recover links).
+  (the email-link origin, same as invite-accept/recover links). #11767: that
+  origin default is the APP host — /welcome.html has lived there since #4054,
+  so the default redirect is terminal (0 hops), not a 301 into the app.
 - Billing success/cancel/portal DEFAULTS must follow TORTOISE_DASHBOARD_URL
   (the dashboard host), matching __main__.py's claim-flow convention.
 """
@@ -12,7 +14,7 @@ import pytest
 from tortoise.hosted_api import app
 from fastapi.testclient import TestClient
 
-DEFAULT_EMAIL_BASE = "https://tortoise.premiselabs.co"
+DEFAULT_EMAIL_BASE = "https://app.premiselabs.co"
 DEFAULT_DASHBOARD = "https://app.premiselabs.co"
 
 
@@ -36,14 +38,15 @@ def test_welcome_redirect_follows_email_link_base(client, monkeypatch):
     """#1135: welcome_url derives from EMAIL_LINK_BASE_URL — not a hardcoded host."""
     monkeypatch.setenv("EMAIL_LINK_BASE_URL", "https://links.example.com")
     loc = _denied_location(client)
-    assert loc == "https://links.example.com/welcome.html?github=denied"
+    assert loc == "https://links.example.com/welcome?github=denied"
 
 
 def test_welcome_redirect_default_host(client, monkeypatch):
-    """Unset EMAIL_LINK_BASE_URL → default static-Pages host (unchanged)."""
+    """Unset EMAIL_LINK_BASE_URL → default email-link origin (#11767: the app host,
+    where /welcome.html actually lives — 0 hops instead of a 301 into it)."""
     monkeypatch.delenv("EMAIL_LINK_BASE_URL", raising=False)
     loc = _denied_location(client)
-    assert loc == f"{DEFAULT_EMAIL_BASE}/welcome.html?github=denied"
+    assert loc == f"{DEFAULT_EMAIL_BASE}/welcome?github=denied"
 
 
 # ── billing defaults ← TORTOISE_DASHBOARD_URL ───────────────────────────────

@@ -6,17 +6,17 @@
   <title>Docs — Tortoise</title>
   <meta name="description" content="Tortoise documentation: what it is, quickstart, and API reference.">
   <meta name="theme-color" content="#060b14">
-  <link rel="canonical" href="https://tortoise.premiselabs.co/docs">
+  <link rel="canonical" href="https://premiselabs.co/tortoise/docs">
   <link rel="icon" href="/favicon.ico?v=62885cadb6d1" sizes="32x32 48x48">
   <link rel="icon" type="image/png" href="/favicon.png?v=49f77b817262" sizes="256x256">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=d528e4e4021a">
   <meta name="twitter:card" content="summary_large_image">
-  <meta property="og:image" content="https://tortoise.premiselabs.co/assets/og-tortoise.jpg">
+  <meta property="og:image" content="https://premiselabs.co/assets/og-tortoise.jpg">
   <meta property="og:image:type" content="image/jpeg">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Tortoise — context and reasoning infrastructure for agents. A gradient triangle mark beside the Premise Labs wordmark.">
-  <meta name="twitter:image" content="https://tortoise.premiselabs.co/assets/og-tortoise.jpg">
+  <meta name="twitter:image" content="https://premiselabs.co/assets/og-tortoise.jpg">
   <meta name="twitter:image:alt" content="Tortoise — context and reasoning infrastructure for agents. A gradient triangle mark beside the Premise Labs wordmark.">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -102,11 +102,11 @@
 </head>
 <body>
   <div class="topbar">
-    <a class="logo" href="/"><img src="/logo.png" alt="Premise Labs" onerror="this.style.display='none'"></a>
+    <a class="logo" href="/tortoise"><img src="/logo.png" alt="Premise Labs" onerror="this.style.display='none'"></a>
     <nav>
-      <a href="https://tortoise.premiselabs.co/">Product</a>
-      <a href="/docs" class="active">Docs</a>
-      <a href="/faq">FAQ</a>
+      <a href="https://premiselabs.co/tortoise">Product</a>
+      <a href="/tortoise/docs" class="active">Docs</a>
+      <a href="/tortoise/faq">FAQ</a>
       <a href="/blog">Blog</a>
     </nav>
     <a class="login" href="/auth?mode=login">Login</a>
@@ -123,7 +123,7 @@
       <a href="#mcp">Connect your agent (MCP)</a>
       <a href="#api">API reference</a>
       <a href="#next">Next steps</a>
-      <a href="/faq">FAQ — design questions</a>
+      <a href="/tortoise/faq">FAQ — design questions</a>
     </div>
 
     <h2 id="what">What is Tortoise?</h2>
@@ -187,7 +187,7 @@
     <h2 id="quickstart">Quickstart (5 minutes)</h2>
     <div class="card">
       <h3>1. Create an account</h3>
-      <p>Sign up at <a href="/auth">tortoise.premiselabs.co/auth</a>. You'll get an API key in the in-app welcome card — copy it (it's shown once), then export it in your shell:</p>
+      <p>Sign up at <a href="/auth">app.premiselabs.co/auth</a>. You'll get an API key in the in-app welcome card — copy it (it's shown once), then export it in your shell:</p>
       <pre><code>export TORTOISE_API_KEY=YOUR_KEY</code></pre>
     </div>
     <div class="card">
@@ -299,7 +299,7 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-
     </div>
     <div class="card">
       <h3>Setup — self-hosted (stdio)</h3>
-      <p>Running Tortoise on your own infrastructure? Point the MCP client at a local process over stdio instead (see the <a href="/self-hosted">self-hosted guide</a>). A stdio server gets its database from <code>TORTOISE_DB_URI</code> — do <em>not</em> set <code>TORTOISE_API_KEY</code> here: the stdio transport cannot carry auth tokens, and setting it disables every tool:</p>
+      <p>Running Tortoise on your own infrastructure? Point the MCP client at a local process over stdio instead (see the <a href="/tortoise/self-hosted">self-hosted guide</a>). A stdio server gets its database from <code>TORTOISE_DB_URI</code> — do <em>not</em> set <code>TORTOISE_API_KEY</code> here: the stdio transport cannot carry auth tokens, and setting it disables every tool:</p>
       <pre><code>{
   "mcpServers": {
     "tortoise": {
@@ -352,8 +352,8 @@ codex mcp add tortoise --url https://api.premiselabs.co/mcp/ --bearer-token-env-
     <h2 id="next">Next steps</h2>
     <ul>
       <li>Explore the <a href="https://app.premiselabs.co">dashboard</a> — manage keys and sessions</li>
-      <li>Read the <a href="/faq">FAQ</a> — why the graph stores relationships, how confidence is computed, and what happens when the graph is wrong</li>
-      <li>Read the <a href="https://tortoise.premiselabs.co/">product story</a></li>
+      <li>Read the <a href="/tortoise/faq">FAQ</a> — why the graph stores relationships, how confidence is computed, and what happens when the graph is wrong</li>
+      <li>Read the <a href="https://premiselabs.co/tortoise">product story</a></li>
       <li>Questions? <a href="/contact">Send us a message</a> or email <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a></li>
     </ul>
   </div>

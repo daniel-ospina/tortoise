@@ -128,7 +128,7 @@ export function OverviewEmptyActions({ snippetKey }) {
 // documentation →" and the closing card's "Read the docs"), which import it
 // rather than re-typing the URL. It is NOT the only literal of that URL in the
 // repo — see the ⚠️ above.
-export const SDK_DOCS_HREF = 'https://tortoise.premiselabs.co/docs'
+export const SDK_DOCS_HREF = 'https://premiselabs.co/tortoise/docs'
 // The agent-connection route the self/undecided arm has always offered. Named
 // for what it IS (the onboarding funnel's url), not for the surface it is
 // supposed to lead to: for a signed-in user it round-trips (see the ⚠️ above).

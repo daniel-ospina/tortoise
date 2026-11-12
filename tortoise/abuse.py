@@ -347,9 +347,38 @@ def abuse_disabled() -> bool:
 
 
 def appeal_url() -> str:
+    """Where a suspended org/agent is told to appeal.
+
+    #11767: the host is the CANONICAL company origin, not the retired
+    `tortoise.premiselabs.co`. ``/docs#appeal`` (not ``/docs.html``) because the
+    canonical path is what the redirect map serves. It is ONE hop, deliberately:
+    ``/docs`` is a permanent SAME-HOST 301 onto the docs page's terminal address
+    ``/tortoise/docs`` (#11763; measured live 2026-11-12 — 301, then 200, one
+    redirect, both on the company origin). Emitting the terminal path here would
+    make it 0 hops, and that is deliberately NOT done in this PR: this function's
+    DESTINATION is #11939's decision (`/docs#appeal` with the section written, or
+    `/contact`), so flipping the path now would decide half of a question that
+    issue may answer by moving the link somewhere else entirely. #12049 re-points
+    the pasted onboarding copies and explicitly does NOT touch this function
+    (its item 4) — so do not read this comment as "someone else will";
+    #11939 is the owner of where this link goes, and it is OPEN.
+    ⛔ An earlier revision of THIS docstring left a `#12049 and not #11764`
+    paragraph here, arguing the pasted-onboarding re-point would have no owner
+    without #12049. That fact is true but it is about `onboarding/SKILL.md`, not
+    about `appeal_url()`, and sitting under the sentence above it read as a claim
+    that #12049 WOULD re-point this function — the opposite of what #12049 says.
+    The onboarding fact is recorded where it belongs (the guard's OWNERSHIP
+    paragraph, and #12049's own scope), not here.
+
+    ⚠️ The fragment is DEAD and this function does not claim otherwise: the
+    docs page has no ``id="appeal"`` (and no occurrence of the word), so this
+    resolves to the top of the page. Filed as #11939 (the destination decision:
+    add the section, or point at ``/contact``) — deliberately NOT fixed here, so
+    that a host flip is not mistaken for a working appeal link.
+    """
     return os.environ.get(
         "TORTOISE_ABUSE_APPEAL_URL",
-        "https://tortoise.premiselabs.co/docs.html#appeal",
+        "https://premiselabs.co/docs#appeal",
     )
 
 
