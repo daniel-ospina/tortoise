@@ -1340,14 +1340,16 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
 
     ⛔ WHAT THIS PIN ENFORCES IS NARROWER THAN "the approval is discharged", which
     is why the name says "cites a comment id" and not "discharges its approval".
-    It requires a comment reference in one of the forms the fleet writes; it does
-    **not** verify that the referenced comment is an approval. Measured at this
-    head: a block reading *"No approval is recorded anywhere; the only comment
-    999999 is unrelated"* passes, and so does one that cites the id only to
-    disclaim it. (An issue number, a "comments <n>" form and a bare parenthesised
-    number do not — that arm is closed above.) Closing the rest needs the
-    comment's own text, an API read this pin cannot make, so the residual is
-    tracked in #12068 rather than grown here.
+    It requires a comment reference in one of the **enumerated** forms below —
+    not every form the fleet writes; the plural ``comments <id>`` is refused on
+    purpose, because accepting it re-opens the issue-number arm (*"the discussion
+    comments 118245"*). It does **not** verify that the referenced comment is an
+    approval. Measured at this head: a block reading *"No approval is recorded
+    anywhere; the only comment 999999 is unrelated"* passes, and so does one that
+    cites the id only to disclaim it. (An issue number, a "comments <n>" form and
+    a bare parenthesised number do not — that arm is closed above.) Closing the
+    rest needs the comment's own text, an API read this pin cannot make, so the
+    residual is tracked in #12068 rather than grown here.
 
     ⛔ SCOPED TO A RELEASE THAT RECORDS §4.3, because the unconditional form was
     measured to false-block. Demanding a comment id in EVERY newest block reds
@@ -1362,8 +1364,11 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     block = _newest_block_body(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
     if _quoted_clause(block) is None:
         # This release does not record the §4.3 clause, so it owes no §4.3-style
-        # approval citation. (A release that CHANGES §4.3 is caught by the sibling
-        # pin: it must quote the new sentence, and then this arm applies.)
+        # approval citation. ⛔ A release that CHANGES §4.3 is NOT reliably caught
+        # by the sibling pin here, and an earlier version of this comment said it
+        # was: pasting the new sentence into an OLDER block's quote leaves the
+        # newest block quoteless, the sibling pin green, and this arm disabled.
+        # Measured; see the SCOPE paragraph above and #12068.
         return
     # Accept the forms the fleet actually writes: ``comment 1234567890``,
     # ``comment `1234567890` ``, ``comment-id: 1234567890``, and the permalink
