@@ -1358,8 +1358,11 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     comment id, and v3.33 — the block that landed `D2 — A` for this very
     question — cites none. What the approval rule actually needs is that no
     release RECORDS owner-approved §4.3 text without naming where that approval
-    lives, so the requirement is tied to the same condition the sibling pin uses:
-    a newest block that quotes the §4.3 clause must name a comment id.
+    lives. The requirement is scoped to §4.3, like the sibling pin, but it is NOT
+    the sibling pin's gate: it is armed only when the newest block quotes the
+    clause, which makes it strictly narrower — the sibling pin also speaks when
+    an OLDER block quotes it, and reds in the state where an older block still
+    carries pre-change text while the newest quotes nothing.
     """
     block = _newest_block_body(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
     if _quoted_clause(block) is None:
