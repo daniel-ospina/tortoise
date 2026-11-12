@@ -113,6 +113,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import hashlib
 import json
 import os
@@ -137,16 +138,19 @@ _SNAKE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+){1,3}\b")
 #: Stems that make a definite description a *clause fragment* rather than a
 #: name. Excluded so the population is not dominated by "the same", "the two",
 #: "the next" — those are function words the extractor discards, not entities.
-_STOP_FIRST = frozenset("""
-same two next other first second last whole only few many more most such
-one ones thing things way ways one's rest above below following
-""".split())
+_STOP_FIRST = frozenset({
+    "same", "two", "next", "other", "first", "second", "last", "whole", "only",
+    "few", "many", "more", "most", "such", "one", "ones", "thing", "things", "way",
+    "ways", "one's", "rest", "above", "below", "following",
+})
 #: A definite description ending in one of these is a sentence fragment.
-_STOP_LAST = frozenset("""
-be been being is are was were do does did done have has had will would can
-could should must may might not no yes and or but if then than that this
-these those it its they them their we our you your he she his her
-""".split())
+_STOP_LAST = frozenset({
+    "be", "been", "being", "is", "are", "was", "were", "do", "does", "did", "done",
+    "have", "has", "had", "will", "would", "can", "could", "should", "must", "may",
+    "might", "not", "no", "yes", "and", "or", "but", "if", "then", "than", "that",
+    "this", "these", "those", "it", "its", "they", "them", "their", "we", "our",
+    "you", "your", "he", "she", "his", "her",
+})
 
 
 def harvest(sessions_dir: Path, stats: dict | None = None) -> dict[str, collections.Counter]:
@@ -202,7 +206,12 @@ def harvest(sessions_dir: Path, stats: dict | None = None) -> dict[str, collecti
             blob = "\n".join(parts)
             seen: set[tuple[str, str]] = set()
 
-            def _add(cls: str, name: str) -> None:
+            # `seen` is re-created per record, and this closure is defined
+            # INSIDE the loop — so it is passed in rather than captured:
+            # a captured loop variable is ruff B023, and it is also the shape
+            # where a later refactor (hoisting the def) silently lets every
+            # record share the first record's dedupe set.
+            def _add(cls: str, name: str, seen: set[tuple[str, str]]) -> None:
                 name = name.strip()
                 if not name or (cls, name) in seen:
                     return
@@ -224,13 +233,13 @@ def harvest(sessions_dir: Path, stats: dict | None = None) -> dict[str, collecti
                     continue
                 if len(toks[1]) < 2:
                     continue
-                _add("definite", phrase)
+                _add("definite", phrase, seen)
             for m in _ISSUE_REF.finditer(blob):
-                _add("ident", m.group(0))
+                _add("ident", m.group(0), seen)
             for m in _SNAKE.finditer(blob):
-                _add("ident", m.group(0))
+                _add("ident", m.group(0), seen)
             for m in _PATH.finditer(blob):
-                _add("path", m.group(0))
+                _add("path", m.group(0), seen)
     return out
 
 
@@ -732,10 +741,8 @@ def run(args: argparse.Namespace) -> int:
             Path(args.out).write_text(payload + "\n")
         print(payload)
     finally:
-        try:
+        with contextlib.suppress(Exception):
             sdk.close()
-        except Exception:
-            pass
     return 0
 
 

@@ -724,7 +724,9 @@ def test_the_briefs_restatements_all_recompute(report, control):
         return (datetime.strptime(art["measured_at"], "%Y-%m-%dT%H:%M:%SZ")
                 - timedelta(seconds=art["corpus"]["elapsed_s"]))
 
-    gap_s = int(round((_harvest_at(control) - _harvest_at(report)).total_seconds()))
+    # `round()` returns an int for a float argument, so `int(...)` around it was
+    # a no-op cast (ruff RUF046).
+    gap_s = round((_harvest_at(control) - _harvest_at(report)).total_seconds())
     assert f"the two harvests {gap_s} s apart" in text, (
         f"§2 does not state the recomputed harvest-to-harvest interval ({gap_s} s)")
     assert f"the hybrid sweep alone took {report['corpus']['elapsed_s']:.0f} s" in text, (
@@ -1075,7 +1077,7 @@ def test_main_writes_the_input_accounting_into_the_artifact_it_emits(tmp_path, m
             # `_drive`'s fakes, not here.
             return _FakeQuery(list(self._stored))
 
-        def _upsert_object(self, row):  # noqa: D401 - stub
+        def _upsert_object(self, row):  # stub
             self._stored.append((row["id"], row["name"]))
             return row
 
