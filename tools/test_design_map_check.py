@@ -60,6 +60,14 @@ top-level, so no row can be hidden that way today; the residual is stated rather
 than claimed away, and such a line is neither graded nor refused (refusing it would
 red a docs-only code-block edit).
 
+A `|` line inside a FENCED code block is still **graded**, deliberately: moving a
+row into a fence takes it out of the rendered table, which is the shrink this
+checker exists to catch, so the fail-closed direction is to grade it. The cost is
+that a fenced table EXAMPLE that is itself invalid reds — the shipped map has none,
+and the alternative (skipping fences) is a one-line way to hide a row. This
+predicate has no fence model at all, at column 0 either; #11415 widened the
+indentation band, not the fence boundary.
+
 **Exit codes:** `0` clean · `1` violations (printed, one per line) · `2` the map
 could not be read or a required section is missing (an unparseable map is not a
 clean one — same posture as the census's unreadable-catalogue refusal).
@@ -1189,6 +1197,27 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
 #: the shrink that is two places short of that must still be loud.
 MIN_SELF_TEST_MUTATIONS = 22
 
+#: How many SHAPES `--self-test` must run the population against. A floor for the
+#: same reason as `MIN_SELF_TEST_MUTATIONS`: deleting the indented entry is a
+#: ONE-place edit that otherwise leaves `--self-test` green with its second arm
+#: gone (fresh review of PR #12016, P3 — measured: the summary printed one success
+#: line and every pin stayed green). With the floor, that edit exits 1 and names
+#: what went missing.
+MIN_SELF_TEST_PASSES = 2
+
+
+def self_test_passes(text: str) -> tuple[tuple[str, str, bool], ...]:
+    """The shapes the population runs against: the map, and the map indented.
+
+    The second shape is the #11415 arm: a mutator or a rule that can only reach
+    column-0 rows reports UNTESTABLE (or misses) on it, which is exactly how the
+    hole survived 21 column-0-only mutations.
+    """
+    return (
+        ("shipped map", text, True),
+        (f"rows indented {SELF_TEST_INDENT} spaces", _indented_tables(text), False),
+    )
+
 
 #: The indentation the SECOND self-test pass applies to every table row. Within
 #: `MAX_TABLE_INDENT`, so the copy is the same map a reader sees (#11415 measured
@@ -1283,13 +1312,19 @@ def self_test(text: str) -> int:
             file=sys.stderr,
         )
         return 1
+    passes = self_test_passes(text)
+    if len(passes) < MIN_SELF_TEST_PASSES:
+        print(
+            f"self-test: {len(passes)} shape(s) exercised, at least "
+            f"{MIN_SELF_TEST_PASSES} required — a single-shape run cannot see an "
+            "indentation-blind arm or mutator",
+            file=sys.stderr,
+        )
+        return 1
     total = len(SELF_TEST_MUTATIONS)
     failures = 0
     untestable = 0
-    for label, candidate, verbose in (
-        ("shipped map", text, True),
-        (f"rows indented {SELF_TEST_INDENT} spaces", _indented_tables(text), False),
-    ):
+    for label, candidate, verbose in passes:
         pass_failures, pass_untestable = _run_mutation_pass(candidate, label, verbose=verbose)
         failures += pass_failures
         untestable += pass_untestable
@@ -1298,16 +1333,16 @@ def self_test(text: str) -> int:
         print(
             f"self-test: {total}/{total} mutation(s) behaved as designed on the {label}"
         )
-    passes = 2
+    denominator = total * len(passes)
     if failures:
         print(
-            f"self-test: {failures}/{total * passes} mutation(s) NOT caught — "
+            f"self-test: {failures}/{denominator} mutation(s) NOT caught — "
             "the checker is a rubber stamp",
             file=sys.stderr,
         )
     if untestable:
         print(
-            f"self-test: {untestable}/{total * passes} case(s) UNTESTABLE — a mutation "
+            f"self-test: {untestable}/{denominator} case(s) UNTESTABLE — a mutation "
             "target moved, so those rules were NOT exercised by this run",
             file=sys.stderr,
         )

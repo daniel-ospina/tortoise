@@ -2439,7 +2439,7 @@ def test_an_ARMED_deployment_surface_reads_ON(tmp_path, monkeypatch):
     assert shipped["deployment"]["silent"] == [], shipped
     note = _gate_note(shipped)
     assert "gate enabled by default: True" in note, note
-    assert "every existing deployment file is armed" in note, note
+    assert "every deployment file that builds the Tortoise process is armed" in note, note
 
 
 def test_an_armed_compose_file_does_not_stand_for_the_IMAGE_build_files(
