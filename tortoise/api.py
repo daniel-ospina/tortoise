@@ -321,7 +321,15 @@ _ENVELOPE_KEYS_AT_PASSTHROUGH = _ENVELOPE_KEYS | {
 #: context strip a v2 stop-write exists to perform (#11835 review round 9, P3).
 #: Kept OUT of `_ENVELOPE_KEYS` on purpose — the RECORD doors pass it as a
 #: keyword (`add_point` / `add_operator` both pass `projection_version=2`), so a
-#: shared refusal would refuse their own call; only the RECORD channel refuses it.
+#: shared presence refusal would refuse their own call. The RECORD channel refuses
+#: it (`_refuse_caller_named_funnel_keys` passes `record=True`), and so do the three
+#: passthrough doors, which pass this same set on their KEYWORD payload — so the
+#: earlier wording "only the RECORD channel refuses it" was false (#11996 review
+#: round 18, measured: `projection_version=1` is refused by `add_event`,
+#: `add_object` and `emit_belief`, journalled=0). ⛔ `_emit`'s OWN keyword channel
+#: cannot refuse PRESENCE for the reason above, so it refuses the TYPE instead (see
+#: the `projection_version` arm there): an exact `int` is the producers' own value,
+#: and the `int`-1-bypasses-the-context-strip case stays the stated trade-off.
 _RECORD_ENVELOPE_EXTRA = frozenset({"projection_version"})
 
 def _refuse_non_str_keys(fields, channel: str) -> None:
@@ -1735,6 +1743,35 @@ class EventAPI:
                 f"{_forged_markers} are server-managed journal fields (embedding "
                 f"width / storage form / origin) and cannot be set via "
                 f"{type_}'s payload")
+        # ⛔ AND THE ONE ENVELOPE KEY PRESENCE CANNOT REFUSE IS TYPE-CHECKED HERE
+        # (#11996 review round 18, measured). `projection_version` is kept out of
+        # `_ENVELOPE_KEYS` because `add_point` / `add_operator` pass their OWN int
+        # through this same channel, so a presence refusal would break them — but
+        # NOTHING checked the type, and this append is the commit point:
+        #
+        #     _emit("PointAdded", id="p", content="c", projection_version="x")
+        #       -> JOURNALLED with a `str` version; the fold then raises on every
+        #          replay: TypeError: '>=' not supported between instances of
+        #          'str' and 'int'  (FalkorProjection.apply + five rebuild passes)
+        #
+        # A record every replay refuses is worse than a refused write: it is the
+        # durable-corruption shape this whole fix exists to prevent, and the three
+        # passthrough doors already refuse the KEY outright.
+        if "projection_version" in payload:
+            _pv = payload["projection_version"]
+            if type(_pv) is not int:
+                raise ValueError(
+                    f"projection_version={_pv!r} on {type_}'s payload must be an "
+                    f"exact `int`: the fold compares it with `>= 2` and the "
+                    f"journal append is the commit point, so a non-numeric value "
+                    f"is a record every replay refuses (#11996)")
+            # ⛔ Stated, not implied: the VALUE is the producers' (`2` from
+            # `add_point`, `_SERVER_PROJECTION_VERSION` elsewhere), so an `int` a
+            # caller supplies still lands on this channel — a `1` suppresses the
+            # `#49` v2 context strip. That is the SAME trade-off the
+            # `_RECORD_ENVELOPE_EXTRA` note records, kept so the producers' own
+            # call is not refused; a presence refusal here would be the fix for
+            # both, and it needs their calls moved off this channel first.
         # ⛔ The same set on the OTHER channel. `_forged_markers` above covers the
         # vector family; these are the record facts no seam call here mints, and
         # this channel is not the SAFER one — `record_is_evidence_fold` reads a

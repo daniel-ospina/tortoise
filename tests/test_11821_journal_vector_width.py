@@ -1515,6 +1515,28 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
                                                   projection_version=1))):
         with pytest.raises(ValueError, match="projection_version"):
             _call()
+    # ⛔ …AND `_emit`'s OWN KEYWORD CHANNEL CANNOT REFUSE PRESENCE, SO IT REFUSES
+    # THE TYPE (#11996 review round 18, measured). `projection_version` is out of
+    # `_ENVELOPE_KEYS` because `add_point`/`add_operator` pass THEIR OWN int through
+    # this channel — but nothing then checked the type, and this append is the
+    # commit point:
+    #
+    #     api._emit("PointAdded", id="p", content="c", projection_version="x")
+    #       -> JOURNALLED with a `str` version, and every replay then raises
+    #          TypeError: '>=' not supported between instances of 'str' and 'int'
+    #          (FalkorProjection.apply + the five rebuild passes)
+    #
+    # A record every replay refuses is the durable-corruption shape this whole fix
+    # exists to prevent. Falsifier: delete the `type(_pv) is not int` arm and the
+    # four rows below land (measured).
+    for _pv in ("x", 1.5, True, None):
+        with pytest.raises(ValueError, match="must be an exact `int`"):
+            api._emit("PointAdded", id=f"p-pv-type-{_pv}", content="c",
+                      projection_version=_pv)
+    # ⛔ …and the two ints that DO land are stated, not implied — but they are
+    # pinned in their OWN test (`test_emit_keyword_pins_the_int_projection_
+    # versions_that_still_land`), because everything above this line asserts that
+    # no refusal left a record behind and these two DO write.
 
     with pytest.raises(ValueError, match="sourceVersionTransit"):
         api._emit("PointAdded", {"id": "p-transit-rec", "content": "c",
@@ -1594,6 +1616,28 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
                             provenance("src:9", [0, 1], "q"),
                             embedding=[0.5], fields={"extractedFrom": ["src:9"]})
     assert _minted
+
+
+def test_emit_keyword_pins_the_int_projection_versions_that_still_land(tmp_path):
+    """`_emit`'s keyword channel refuses a NON-int `projection_version`, not the key.
+
+    `projection_version` cannot be refused by PRESENCE on this channel: `add_point`
+    and `add_operator` pass their OWN `2` here, so the arm is a TYPE check (#11996
+    review round 18, measured). What that leaves — an `int` a caller supplies — is
+    the residual, and it is pinned as LANDING rather than described in prose, so
+    nobody reads "projection_version is guarded" and assumes more than the type
+    arm buys: `2` is the producers' own value and `1` suppresses the `#49` v2
+    context strip on a record the fold then reads.
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    api = EventAPI(EventLog(tmp_path / "events.jsonl"),
+                   initiated_by="extractor", projection=None)
+    for _pv in (2, 1):
+        api._emit("PointAdded", id=f"p-pv-int-{_pv}", content="c",
+                  projection_version=_pv)
+    assert len((tmp_path / "events.jsonl").read_text().splitlines()) == 2
 
 
 def test_the_transit_anchor_is_derived_and_a_caller_cannot_forge_it(tmp_path):
