@@ -3397,15 +3397,20 @@ async def run_control_plane_call(fn, *, op: str,
                 # became an unhandled ``TimeoutError``). The future is the only
                 # witness that the work RAN, so it must supply what propagates.
                 #
-                # ⛔ ...and NOT ``from None`` either (#11962 review): ``from
-                # None`` writes ``__cause__ = None`` on THIS exception object,
-                # so a domain ``ValueError`` raised ``from KeyError`` loses its
-                # KeyError. That chain is the domain error's own provenance, not
-                # the bound's misleading context — suppressing it with B904 is
-                # discarding evidence we do not own. A plain ``raise`` keeps
-                # ``__cause__`` intact and costs only the "during handling of
-                # the above" note.
-                raise future_exc  # noqa: B904
+                # ⛔ ...and neither a plain ``raise`` nor ``from None``
+                # (#11962 review, measured through this seam): a plain ``raise``
+                # inside an ``except`` arm RE-INSTALLS the bound as
+                # ``__context__`` with ``__suppress_context__`` False, so every
+                # traceback still reads ``TimeoutError`` → "During handling of
+                # the above exception…" → the domain error — the artifact this
+                # PR exists to delete, for a failure that had nothing to do with
+                # the wait. ``from None`` instead wipes ``__cause__`` and so
+                # discards the domain error's OWN provenance (a ``ValueError``
+                # raised ``from KeyError``) — evidence we do not own.
+                # ``from future_exc.__cause__`` dominates both: identical to
+                # ``from None`` when there is no cause, and the honest "direct
+                # cause" chain when there is.
+                raise future_exc from future_exc.__cause__
             reason = ("pool backlog full" if isinstance(future_exc, _WorkerBacklogFull)
                       else f"exceeded its {bound}s bound")
             if not future.done():
@@ -3496,15 +3501,17 @@ async def reawait_control_plane_call(future, *, op: str, timeout: float,
                           if future.done() and not future.cancelled() else None)
             if future_exc is not None and not isinstance(
                     future_exc, _WorkerBacklogFull):
-                # ⛔ ``raise future_exc``, not a bare ``raise`` — the same defect
-                # as the sibling seam's (#11961). The arm above proves the
-                # FUTURE is the witness that the work RAN and failed on its own;
-                # a bare ``raise`` propagates the bound's TimeoutError instead,
-                # which is a claim about OUR wait, not about the work. And not
-                # ``from None`` either: that rewrites the domain exception's
-                # ``__cause__`` to None, discarding a chain it owns (#11962
-                # review — see the sibling seam).
-                raise future_exc  # noqa: B904
+                # ⛔ ``raise future_exc from future_exc.__cause__`` — the same
+                # defect and the same remedy as the sibling seam's (#11961,
+                # #11962 review). The arm above proves the FUTURE is the witness
+                # that the work RAN and failed on its own; a bare ``raise``
+                # propagates the bound's TimeoutError instead, which is a claim
+                # about OUR wait, not about the work — and a plain ``raise`` of
+                # the future's error still re-installs that bound as its
+                # ``__context__``. ``from None`` over-corrects: it wipes a
+                # ``__cause__`` the domain exception owns. Re-raising from the
+                # exception's OWN cause keeps the chain and drops the bound.
+                raise future_exc from future_exc.__cause__
             if not future.done():
                 future.add_done_callback(_log_abandoned_outcome(op))
             outcome = "bound_miss_running"
@@ -5821,7 +5828,21 @@ def _bounded_graph_size(target, timeout: float) -> int:
         if future.done() and not future.cancelled():
             graph_size_exc = future.exception()
             if graph_size_exc is not None:
-                raise graph_size_exc  # noqa: B904
+                # ...and ``from <its own cause>``, not a plain ``raise`` and not
+                # ``from None``: a plain raise re-installs the budget's expiry as
+                # ``__context__`` (the "during handling the above" artifact),
+                # while ``from None`` discards a cause this error owns (#11962
+                # review — the same remedy as the two control-plane seams).
+                raise graph_size_exc from graph_size_exc.__cause__
+            # ⛔ ...and the OTHER outcome in that window: the count SUCCEEDED.
+            # ``graph_size_exc`` is then None, and falling through would publish
+            # ``graph_size_error="…exceeded its Ns budget"`` with
+            # ``graph_size: 0`` for a count that COMPLETED — an overrun that did
+            # not happen, reported against an answer that exists (#11962
+            # review). The sibling site ``_acquire_on_probe_worker`` (fixed
+            # earlier in this PR) answers this window the same way (→
+            # ``return future.result()``); hand the value back.
+            return sum(future.result().values())
         raise TimeoutError(
             f"graph_size count exceeded its {timeout}s budget") from exc
     return sum(counts.values())

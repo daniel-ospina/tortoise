@@ -1668,9 +1668,57 @@ class TestGraphSizeMeasurementIsBoundedAndReported:
             lambda name, **kw: SimpleNamespace(
                 submit=lambda fn: _LandedAfterTheWaitExpired()))
 
-        with pytest.raises(TimeoutError, match="redis socket read timeout"):
+        with pytest.raises(TimeoutError, match="redis socket read timeout") as caught:
             monitoring._bounded_graph_size(
                 SimpleNamespace(taxonomy=lambda: {"Point": 1}), 0.05)
+        # ...and the budget is not DISPLAYED as its context: a plain ``raise``
+        # re-installs it with ``__suppress_context__`` False (measured), which is
+        # the "during handling the above" artifact #11961 exists to delete.
+        assert caught.value.__suppress_context__ is True, (
+            "the propagated count failure still carries the budget's expiry as "
+            f"its displayed context: __context__={caught.value.__context__!r}")
+
+    def test_a_count_that_lands_after_the_budget_expired_is_returned(
+            self, monkeypatch):
+        """#11962 review — the OTHER outcome in that window: the count SUCCEEDED.
+
+        ``_bounded_graph_size``'s arm reads ``future.exception()`` and, when it is
+        not None, re-raises it. When it IS None — the worker landed a SUCCESS
+        inside the same window — control used to fall through to the budget
+        ``TimeoutError``, so ``metrics()`` published
+        ``graph_size_error="…exceeded its Ns budget"`` with ``graph_size: 0`` for
+        a count that actually COMPLETED: an overrun that did not happen, against
+        an answer that exists. The sibling site ``_acquire_on_probe_worker``
+        (fixed earlier in this PR) answers this window the opposite way, so the
+        same window had two contrary answers.
+
+        RED on the pre-fix code: the budget ``TimeoutError`` is raised and this
+        test never sees ``7``.
+        """
+        class _LandedSuccessAfterTheWaitExpired:
+            """The ``done()`` window, with a successful outcome."""
+
+            def result(self, timeout=None):
+                if timeout is not None:
+                    raise concurrent.futures.TimeoutError()  # the BUDGET's expiry
+                return {"Point": 3, "Edge": 4}
+
+            def done(self):
+                return True
+
+            def cancelled(self):
+                return False
+
+            def exception(self):
+                return None
+
+        monkeypatch.setattr(
+            monitoring, "daemon_worker",
+            lambda name, **kw: SimpleNamespace(
+                submit=lambda fn: _LandedSuccessAfterTheWaitExpired()))
+
+        assert monitoring._bounded_graph_size(
+            SimpleNamespace(taxonomy=lambda: {}), 0.05) == 7
 
 
 class TestProbeNeverAskedStatus:
