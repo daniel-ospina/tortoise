@@ -1470,11 +1470,13 @@ class EpBreakdown:
     # point WHENEVER one is persisted — THOSE TWO READ α/β ONLY, so a readable
     # mirror is the first stated divergence (they answer the pair mean where
     # this field answers the mirror's value). The second is the pairs R1
-    # REJECTS: those two coalesce each MISSING operand to `1.0`, then divide
-    # bare, so where R1 answers ``None`` they answer whatever those defaults
-    # produce — α/(α+1) for a half pair, above 1 or below 0 for a negatively
-    # signed pair, 0.5 when the total is ≤ 0, `nan` for a present-but-NON-FINITE
-    # operand — and they RAISE only on an operand Python cannot coerce at all.
+    # REFUSES: those two coalesce each MISSING operand to `1.0`, then divide
+    # bare, so where R1 answers ``None`` they answer whatever `a / (a + b)`
+    # yields over the COALESCED operands — for a half pair that is α/(α+1), and
+    # on a negatively-signed or non-finite pair it can be negative, above 1,
+    # `0.0`, `0.5` or `nan` depending on the stored columns. ⛔ Compute it, do
+    # not predict it: the outcome is a property of the division, not of the
+    # defect class. They RAISE only on an operand Python cannot coerce at all.
     # A pair whose SUM OVERFLOWS is not one of those: R1 ACCEPTS it and answers
     # the overflow-free identity, so (1.7e308, 1e307) serves 0.944 here while
     # those two divide bare and answer 0.0 — a divergence in VALUE, not in
