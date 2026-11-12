@@ -669,6 +669,12 @@ def test_an_op_type_only_successor_is_refused_by_the_direct_arm(sdk):
     assert "OPERATOR-SHAPED" in fix, (
         "an op_type-only successor is operator-shaped for EP's direct arm: " + fix)
     assert "target a CLAIM successor" in fix, fix
+    # The quoted test must be the SHAPE, not the stored value: this node's
+    # ``is_operator`` is None/false and only ``op_type`` makes it shaped, so a
+    # reader checking the flag would find the warning "wrong".
+    assert "or an ``op_type`` is set" in fix, (
+        "the warning must name the fact that makes this node shaped: " + fix)
+
 
     # ...and the engine agrees the prescribed re-point loses the belief.
     sdk.create_direct_edge("IMPL", p["id"], _q(
@@ -1361,12 +1367,24 @@ def test_a_shaped_endpoint_with_no_successor_gets_no_edge_rewrite(sdk):
     # ⛔ The shape belongs to the ACTIVE endpoint, never to the superseded anchor: a
     # call on the anchor sets the flag on a node that never carried it, so APPLY the
     # emitted call and re-measure rather than string-matching it (#12111 review).
-    assert f"tortoise_update_entity('{actor['id']}', {{'is_operator': False}})" in fix, (
+    assert (f"tortoise_update_entity('{actor['id']}', "
+            "{'is_operator': False, 'op_type': None})") in fix, (
         "the repair must address the shaped endpoint: " + fix)
     assert f"tortoise_update_entity('{v1['id']}', {{'is_operator': False}})" not in fix
-    sdk.update_entity(actor["id"], is_operator=False)
-    assert _q(sdk, "MATCH (a {id:$i}) RETURN a.is_operator", {"i": actor["id"]}) == \
-        [[False]], "the emitted call did not clear the shape"
+    # ...and the call must clear BOTH halves of the shape: the flag alone is a
+    # no-op where ``op_type`` carries it (measured: the row came back verbatim).
+    sdk.update_entity(actor["id"], is_operator=False, op_type=None)
+    assert _q(sdk, "MATCH (a {id:$i}) RETURN a.is_operator, a.op_type",
+              {"i": actor["id"]}) == [[False, None]], \
+        "the emitted call did not clear BOTH halves of the shape"
+    # Clearing the shape does not clear the FINDING: the edge still ends at the
+    # superseded Object, so the row comes back — as a DIRECT row, not a neither-arm
+    # one (that is the half of the repair the string says is missing).
+    after = [i for i in _issues(sdk, "superseded_object_active_edges")
+             if i.node_id == v1["id"]]
+    assert after, "the stale edge is still there, so the finding must persist"
+    assert "in EITHER arm" not in after[0].fix, (
+        "the shape is cleared, so this row is a DIRECT row now: " + after[0].fix)
     # The archive sentence must not claim a strip that never happens either.
     assert "EP strips a terminal input either way" not in fix, fix
     # ⛔ §3.1's disposition on a neither-arm row is DROP: this fix says no edge
@@ -1906,7 +1924,7 @@ def test_clearing_the_shape_without_moving_the_edge_restores_nothing(sdk):
               if i.node_id == v1["id"]]
     assert issues
     fix = issues[0].fix
-    assert "clearing the flag alone restores nothing" in fix, fix
+    assert "clearing the FLAG alone restores nothing" in fix, fix
     assert "onto the successor" in fix, (
         "the repair must still move the edge: " + fix)
 

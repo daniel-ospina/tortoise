@@ -512,8 +512,10 @@ structure, not the return value.
   direction lives on the RELATIONSHIP, and a neutral (`-`) one carries no
   confidence in either direction. The check separates the row mechanisms and its
   emitted `detail` names which one this row is: a neutral edge, and a shaped
-  endpoint EP admits in neither arm (its operator arm needs `is_operator = true`
-  or an `op_type`; its direct-edge arm refuses either) are leftover wiring; the operator
+  endpoint EP admits in neither arm (its operator arm needs the `:Point` label
+  **and** `is_operator = true` or an `op_type`; its direct-edge arm refuses any
+  `op_type` and any `is_operator` that is not the boolean `false`) are leftover
+  wiring; the operator
   input and the direct edge whose direction flows are lost belief — they carried
   it while the endpoint was live. The `fix` differs for each for that reason.
   Severity is `high` on every row until #12154 (this module's aggregates carry one
