@@ -3866,13 +3866,13 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         "the alias is the only discovery signal, so over-crediting is the SAFE direction — dropping "
         "it measured `{}` (writer absent) where the parent had `unresolved_write`",
     ),
-    # ⛔ `#12020` round 8 review (P3): the builder arm mirrored only HALF of the rule the seam arm
-    # applies — the bare-`Name` half — because it carried its own `ast.walk` with no per-scope
-    # shadow. Measured: the nested `def helper(_set)` below REBINDS the builder alias inside its
-    # own scope, the writer stores nothing at all, and the arm still credited the OUTER writer as a
-    # writer that owes a declaration (the cry-wolf direction: a phantom declaration cannot honestly
-    # be written). Both reader arms now share `probe._named_callees`, so the shadow is threaded the
-    # same way for a clause builder as for the gate.
+    # ⛔ `#12020` round 8 review (P3) asked for the seam arm's per-scope shadow here too, and round
+    # 9 measured why it must NOT be given: for a clause builder the alias is the only discovery
+    # signal, so suppressing a shadowed call DELETES a real writer instead of demoting it. The
+    # residual is therefore the MIRROR one — the enclosing writer is over-credited (cry-wolf) — and
+    # it is NAMED in `_writes_an_embedding`'s builder-arm comment rather than hidden. The two rows
+    # below together ARE the decision: this one pins the over-credit, and the `PASSED_INTO` row pins
+    # the real write the shadow would delete.
     "builder_alias_inside_a_SHADOWING_nested_scope": (
         "from tortoise.vector_write import set_embedding_clause as _set\n"
         "\n"
@@ -3880,16 +3880,30 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         "    def helper(_set):\n"
         '        return _set("y")\n'
         '    return proj.g.query("MATCH (y) RETURN y")\n',
-        {"tortoise.m::helper": "unresolved_write"},
-        "the nested `helper` REBINDS the builder alias as its own parameter and stores nothing, so "
-        "the OUTER writer `w` must not be credited — that is what this row pins, and it measured "
-        "`{'tortoise.m::w': 'unresolved_write'}` before the shadow was threaded through the builder "
-        "arm (round 8 P3). ⛔ The row ALSO pins a NAMED residual: `helper` itself is still reported, "
-        "because `_keep_shadowed_aliases` keeps a shadowed BUILDER alias (dropping one DELETES a "
-        "real writer — the round-7 P2) and cannot tell a writer's own PARAMETER from a conditional "
-        "rebinding of the builder. Crediting `helper` costs a declaration nobody can write, which is "
-        "the cry-wolf direction and the lesser of the two: the day a resolver separates the two "
-        "shapes this row reds and this note must be retired with it",
+        {"tortoise.m::w": "unresolved_write", "tortoise.m::helper": "unresolved_write"},
+        "the nested `helper` binds the builder alias as its own PARAMETER and nothing is stored, so "
+        "both credits here are the cry-wolf direction (`w` is the NAMED residual: the builder arm "
+        "deliberately does not thread the shadow). ⛔ It is pinned as measured rather than silently "
+        "differs-from-ideal because the shadow-aware alternative is WORSE: see the `PASSED_INTO` "
+        "row, which the shadow-aware arm deletes",
+    ),
+    # ⛔ The row that makes reverting the shadow a DECISION instead of a preference (`#12020` round 9
+    # review, P2 — measured). `_EMBED_WRITE` cannot see `SET y += $p`, so the call inside `apply` is
+    # the writer's ONLY discovery signal. A shadow-aware builder arm drops it — measured at the
+    # round-8 head, `w` was ABSENT and only `apply` was credited — and a writer absent from the
+    # census owes no declaration at all, which is the fail-open direction `#11274` exists to close.
+    "builder_alias_PASSED_INTO_a_shadowing_nested_scope": (
+        "from tortoise.vector_write import set_embedding_clause as _set\n"
+        "\n"
+        "def w(proj):\n"
+        "    def apply(_set, name):\n"
+        "        return _set(name)\n"
+        '    return proj.g.query("MATCH (y) SET y += $p", {"p": apply(_set, "y")})\n',
+        {"tortoise.m::w": "unresolved_write", "tortoise.m::apply": "unresolved_write"},
+        "the caller passes the REAL alias into the nested scope, so the write is real even though "
+        "the callee's parameter rebinds the name: `w` MUST stay in the population. A shadow-aware "
+        "builder arm deleted it (measured at `715daef47a`: `{'tortoise.m::apply': ...}`, `w` gone) "
+        "— that is the deletion direction, so it is pinned",
     ),
     # …and its CONTROL, which must keep its credit: the same nested call with NO shadow really is
     # the closure reaching the imported builder, so the writer does perform the write through it.
