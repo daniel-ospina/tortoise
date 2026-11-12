@@ -5772,14 +5772,18 @@ def _mirror_is_named_affirmatively(sentence: str) -> bool:
     `lead`). Measured against that branch's own regex, the verb-keyed arm DOES
     catch `not` / `never` / `isn't` / `doesn't` in front of `lead` — it is
     better than this predicate on `doesn't`, and #11999 carries that residual
-    because this one leaves it open. What the verb-keyed arm MISSES is every
-    inversion whose verb is not `lead` ("the mirror loses to the pair", "the
-    pair outranks the mirror") and every denial with no `lead` in reach ("the
+    because this one leaves it open. Its verbs are WIDER than the bare word:
+    the pattern ends `\blead` with NO trailing `\b`, so `leads` / `leader` /
+    `leading` are caught as well (measured: "the mirror isn't the leader" and
+    "the mirror is not leading the pair" both match). What it MISSES is every
+    inversion whose verb does not BEGIN with `lead` — `led` is missed, because
+    the pattern matches the letters `lead` ("the mirror loses to the pair", "the
+    pair outranks the mirror") — and every denial with no `lead` in reach ("the
     mirror never is the value") — so it is the same class with a narrower KEY,
     not a superset. Neither arm is a superset of the other.
 
     RESIDUALS, disclosed and not closed here — tracked as #11999, measured
-    before it was filed, so neither is a silent gap:
+    before it was filed, so none is a silent gap:
       * a NEGATOR-FREE inversion ("the mirror loses to the pair", "the pair
         outranks the mirror") carries no denial word and is still certified.
         Closing it needs a positive-verb allow-list (#11993's options b/c),
