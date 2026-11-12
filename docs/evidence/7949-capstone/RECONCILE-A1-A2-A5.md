@@ -68,7 +68,7 @@ landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to ans
 no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
 **entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
 `hasPart` (`tortoise/extractor_v2.py:1771`). It does **not** discharge A1: it is **transport only** —
-nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:11533`, and
+nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:11524`, and
 `git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
 materialising them as Object→Object edges is **`#11237`** (OPEN). ⛔ **FALSE in this record's merged
 tree — see the fifth-landing amendment below:** the consumer landed as **`#11548`**, and that grep now
@@ -100,7 +100,7 @@ binding below is the result), fed **only** by
 the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
 taken on this merge:
 
-- `git grep -n 'result\["relations"\]' -- tortoise/` → **3** lines (`extractor_v2.py:11533`,
+- `git grep -n 'result\["relations"\]' -- tortoise/` → **3** lines (`extractor_v2.py:11524`,
   `relation_write.py:7`, `sdk.py:18308`), against the *"that comment and no consumer at all"* this
   record was written with.
 - `git grep -n 'plan_hierarchy_edges' -- tortoise/` → **8** lines, four of them in `relation_write.py`
@@ -716,15 +716,15 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
                                                           # sdk.create_operator) and 0 at this base — a
                                                           # count is only as good as the base it was taken at
 # ⛔ THREE hits in this record's merged tree since #11548 landed the consumer (#11237):
-# extractor_v2.py:11533 (the comment that WAS stale, corrected in place by #11001's lane),
+# extractor_v2.py:11524 (the comment that WAS stale, corrected in place by #11001's lane),
 # relation_write.py:7, sdk.py:18308.
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
 # `sdk.py:18321` (`_capture_session` reaches it at `sdk.py:16452`). Of the three hits only ONE was still prose-about-absence (the stale comment at
-# `extractor_v2.py:11533`); the other two are the consumer announcing itself. Read §0's amendment
+# `extractor_v2.py:11524`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
-# ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:11533` was
+# ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:11524` was
 # corrected IN PLACE — same line, and its block's line count was held at 13 so every cite in this
 # record keeps its number — to state the consumer (`apply_relation_edges`, called from
 # `_extract_session_v2`) and to leave only the EMISSION leg unmeasured. So the A1 paragraph's quote
@@ -737,7 +737,7 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # this record's base: ONE hit" was itself stale — that base predates #11205, whose comment is the
 # hit.) Re-measured at the merge.
 git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merged tree: THREE hits —
-                                                          # :11533 (was the stale "nothing
+                                                          # :11524 (was the stale "nothing
                                                           # consumes it" comment; CORRECTED in
                                                           # place — see the note above),
                                                           # relation_write.py:7 (the
