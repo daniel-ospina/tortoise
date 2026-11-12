@@ -33,7 +33,9 @@ other CI-surface guards cover:
    leg's own `export PATH=…` (a step-script assignment beats the prepend).
 4. **The pin fails closed**, as an ARMED branch: a single `if [ "$major" !=
    "<major>" ]; then … fi` unit that announces and stops, in a step that can
-   actually run and actually red the job (no `if:`, no `continue-on-error`).
+   actually run and actually red the job (no `if:`, no `continue-on-error`) —
+   and that is not sitting inside a block whose condition is a literal
+   constant, which is present and inert at the same time.
 5. **The pin runs BEFORE the leg**, because `$GITHUB_PATH` only affects
    subsequent steps: a pin placed after the pytest step is inert, and the job
    would red for a reason no diff explains.
@@ -208,6 +210,38 @@ FAIL_CLOSED_BRANCH_RE = re.compile(
 FAIL_CLOSED_ANNOUNCE_RE = re.compile(r'^[ \t]*echo[ \t]+["\']::error::', re.MULTILINE)
 FAIL_CLOSED_STOP_RE = re.compile(r"^[ \t]*exit 1[ \t]*$", re.MULTILINE)
 
+#: A guard whose CONDITION IS A LITERAL CONSTANT, so the block it controls can
+#: never run — or, for `until true`/`while true`, never stop (#12051 review
+#: round 8). `FAIL_CLOSED_BRANCH_RE` refuses nested structure INSIDE the branch,
+#: but nothing refused an ENCLOSING `if false; then … fi` around the prepend,
+#: around the install, or around the whole fail-closed `for` loop: measured, all
+#: five rows GREEN with the block body unchanged, step exit 0, leg on the
+#: inherited client — the #12051 defect carried back in one line, and a FALSE
+#: PASS of exactly the class this guard exists to prevent.
+#: The condition is read as a WHOLE LINE and only when it is a BARE constant
+#: (optionally negated). `if [ "$major" != "16" ]; then` is untouched, because
+#: its condition is a `[` test whose truth nobody can read off the text.
+#:
+#: STATED LIMIT: this refuses the literal spellings that were MEASURED, not
+#: reachability in general. Whether a shell block can run is not decidable by a
+#: line regex, and six review rounds each demonstrated that by closing one
+#: spelling and buying the next (`if false && [ … ]`, a nested `if false`, then
+#: this enclosing block). The armed-branch row is therefore a text guard with a
+#: named residual, not a proof; the in-job `pg_dump --version` assertion is what
+#: makes a surviving blind spot visible in the log.
+CONSTANT_GUARD_RE = re.compile(
+    r"^[ \t]*(?:if|elif|while|until)[ \t]+(?:![ \t]*)?(?:false|true)[ \t]*(?:;|$)",
+    re.MULTILINE,
+)
+
+#: A command chain that is dead BY CONSTRUCTION: `false && <cmd>` never runs
+#: `<cmd>`, and `true || <cmd>` never runs it either — both measured GREEN while
+#: the prepend they prefix never executed. The HARMLESS spellings are
+#: deliberately NOT matched: `<cmd> || true` and `<cmd> && true` still RUN
+#: `<cmd>` (they only choose the exit status), so refusing them would be a false
+#: RED on a correct tree.
+DEAD_CHAIN_RE = re.compile(r"(?:^|;|&&|\|\|)[ \t]*(?:false[ \t]*&&|true[ \t]*\|\|)")
+
 
 @pytest.fixture(scope="module")
 def job() -> dict:
@@ -345,6 +379,32 @@ def _leg_indexes(steps: list[dict]) -> list[int]:
     ]
 
 
+def _unreachable_guards(steps: list[dict], start: int, end: int) -> list[str]:
+    """Lines in `[start, end)` that cannot run, as `step N: <line>`.
+
+    The two rows that assert a construct is LIVE — the `$GITHUB_PATH` prepend and
+    the armed fail-closed branch — both read this, because a construct sitting
+    inside a block whose condition is a literal constant is PRESENT and INERT at
+    the same time. Measured (#12051 review round 8): an enclosing `if false;
+    then … fi` around the prepend, and again around the whole fail-closed `for`
+    loop, left all five rows green while the leg went back to the runner image's
+    client — i.e. #12051 restored in one line, with this guard's own message
+    insisting it had not been.
+
+    Read through `_run_commands()` like every other line-unit search here, so a
+    tombstone comment naming a constant guard is inert text, not an offender.
+    """
+
+    found: list[str] = []
+    for index in range(start, end):
+        if not 0 <= index < len(steps):
+            continue
+        for line in _run_commands(steps[index]).splitlines():
+            if CONSTANT_GUARD_RE.match(line) or DEAD_CHAIN_RE.search(line):
+                found.append(f"step {index}: {line.strip()}")
+    return found
+
+
 def _pin_step(steps: list[dict]) -> tuple[int, dict]:
     """The one step that INSTALLS a PostgreSQL client package.
 
@@ -353,11 +413,21 @@ def _pin_step(steps: list[dict]) -> tuple[int, dict]:
     diagnostic — a "second installer", which red four rows on a correct tree
     with a message that sends the reader hunting an installer that does not
     exist (measured).
+
+    Read through `_run_commands()`, like every other line-unit search here
+    (`_run_code()` only drops whole comment LINES). Measured: ONE trailing
+    comment in the leg step that names the install form — the capstone's own
+    "was: `apt-get install postgresql-client-17`" note — made the leg a second
+    installer and red the row with `found 2`, a false RED on a correct
+    workflow, whose message then sends the reader hunting an installer that does
+    not exist. The same read let an UNVERSIONED `apt-get install
+    postgresql-client` pass with the versioned name carried only by a comment
+    (`CLIENT_PKG_RE` found the comment, not the install).
     """
     hits = [
         (index, step)
         for index, step in enumerate(steps)
-        if CLIENT_PKG_RE.search(_run_code(step))
+        if CLIENT_PKG_RE.search(_run_commands(step))
     ]
     assert len(hits) == 1, (
         "expected exactly ONE PostgreSQL-client pin step in "
@@ -440,10 +510,26 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     server_major = image_majors[0]
 
     pin_index, pin = _pin_step(steps)
-    text = _run_code(pin)
+    text = _run_commands(pin)
     leg_indexes = _leg_indexes(steps)
     assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
     leg_start = min(leg_indexes)
+
+    # ⛔ A PREPEND INSIDE A CONSTANT-CONDITION BLOCK IS PRESENT AND INERT (#12051
+    # review round 8). Every rule below reads a line as a unit, so an enclosing
+    # `if false; then … fi` around the prepend satisfied all of them while the
+    # write never executed — measured, five rows GREEN, leg on the inherited
+    # client. Reachability is asserted before the construct.
+    unreachable = _unreachable_guards(steps, pin_index, leg_start)
+    assert not unreachable, (
+        "a step between the client install and the record leg cannot RUN the "
+        f"code it is graded on: {unreachable!r}. A guard whose condition is a "
+        "literal constant (`if false`, `elif true`, `while false`, `until "
+        "true`) or a dead chain (`false && …`, `true || …`) makes the prepend "
+        "and the fail-closed branch present AND inert, so the leg resolves on "
+        "the runner image's own client while every row here stays green "
+        "(#12051)"
+    )
 
     pkg = CLIENT_PKG_RE.search(text)
     assert pkg, f"the pin step does not install `postgresql-client-<major>`: {text!r}"
@@ -616,10 +702,31 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     `"::error::" in text and "exit 1" in text` cannot tell an ARMED branch from
     a disarmed one: measured, `if [ "$major" != "16" ]; then` → `if false; then`
     left all four tests green while the job would never fail closed. The
-    comparison literal is therefore pinned to the servers' major, and the "
+    comparison literal is therefore pinned to the servers' major, and the
     announce/stop pair is matched as WHOLE LINES rather than substrings (round
     7): `false && exit 1` and `bail() { exit 1; }` contain the stop and never
     take it.
+
+    ACCEPTED SPELLING: exactly one — the condition and `then` on the SAME line,
+    a single-bracket `[ … ]` test, a flat body, and `fi` alone on its own line:
+
+        if [ "$major" != "<major>" ]; then
+          echo "::error::…"
+          exit 1
+        fi
+
+    Three equivalents are REFUSED, each measured as a false RED at 4/5: `then`
+    on its own line, the whole branch on one line (`if …; then …; fi`), and the
+    bash-only `[[ … ]]`. That is the same deliberate polarity as the prepend's
+    accepted form — one spelling the guard can read beats a rule broad enough
+    to accept a spelling it cannot — and the refusal message names the accepted
+    form above.
+
+    ⛔ AND AN ARMED BRANCH IS NOT ARMED IF ITS ENCLOSING BLOCK CANNOT RUN
+    (#12051 review round 8). Nothing refused an ENCLOSING `if false; then … fi`
+    around the prepend or around the whole fail-closed `for` loop: measured,
+    all five rows GREEN with the branch itself untouched. `_unreachable_guards()`
+    is asserted here for that reason.
 
     STATED LIMIT: the branch must be FLAT (`FAIL_CLOSED_BRANCH_RE`) — a nested
     conditional inside it is refused rather than reasoned about, because a
@@ -647,11 +754,22 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     `False`, so a truthiness read sees "absent".
     """
     steps = _steps(job)
-    pin_index, pin = _pin_step(steps)
+    pin_index, _ = _pin_step(steps)
     server_major = _postgres_image_majors(job)[0]
     leg_indexes = _leg_indexes(steps)
     assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
     leg_start = min(leg_indexes)
+
+    # INERT-BUT-PRESENT first: an enclosing constant-condition block leaves every
+    # structural assertion below satisfied and the branch unable to fire.
+    unreachable = _unreachable_guards(steps, pin_index, leg_start)
+    assert not unreachable, (
+        "a step between the client install and the record leg cannot RUN the "
+        f"code it is graded on: {unreachable!r}. `if false; then … fi` around "
+        "this branch leaves its `::error::`/`exit 1` pair in the text and makes "
+        "it unreachable, so the job runs the leg on the inherited client and "
+        "exits 0 (#12051, measured round 8)"
+    )
 
     # The branch must be able to RUN and able to RED, or it is not armed. Every
     # step in the window is checked, not only the install step: splitting
@@ -733,7 +851,8 @@ def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
     """`$GITHUB_PATH` affects SUBSEQUENT steps only — position is part of the fix.
 
     The leg is located in the step's CODE, for the same reason every other
-    assertion here reads `_run_code` (#12051 review round 3): with the raw body
+    assertion here reads the step's shell with comment lines stripped
+    (`_run_code`, #12051 review round 3): with the raw body
     a commented-out `tests/test_9567_record_capstone.py` entry still counted as
     the leg (a false PASS — the pin's position would be graded against a
     line that never runs), and a stray COMMENT inside the pin step naming the

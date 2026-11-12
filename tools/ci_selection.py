@@ -679,6 +679,20 @@ SOURCE_PATTERNS = {
                    # source needs the same reachability guarantee as the docs it
                    # feeds (#8492).
                    "tests/test_embedded_concurrency.py",
+                   # #11767 review (P2): the price-of-record guard added by this PR
+                   # lives in `tests/test_website_static.py` and fails when the
+                   # dashboard e2e spec RESTATES a plan price that disagrees with
+                   # `product/pricing.json`. Without this entry a
+                   # `tests/e2e/test_dashboard_identity.py`-only diff selects
+                   # `['core']` and does NOT select the guard (measured), so the
+                   # 15-minute `dashboard-e2e` stayed the only detector on the one
+                   # diff the two-second static check exists to replace — the
+                   # #1349/#3332/#3616 silent-drop class, one level up.
+                   # ⛔ `product/pricing.json` is deliberately NOT added: a
+                   # pricing-artifact-only diff selects NO surface and that is the
+                   # declared #12006 gap, so encoding it here would decide an
+                   # ownership question rather than fix a reachability one.
+                   "tests/e2e/test_dashboard_identity.py",
                    # #3524: `test_oauth_consent_bridge.py` also pins the two auth
                    # records its subject is specified in — the consent bridge spec
                    # (`docs/engineering/auth/consent-identity-bridge.md`) and the
@@ -3072,6 +3086,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_product_root_marker_guard_runs_on_a_legal_pages_only_diff.
              "tests/e2e/test_legal_pages.py",
+             # #11767 review (P2): the SAME rule, applied to the row added above.
+             # `tests/e2e/test_dashboard_identity.py` is now a CONCRETE
+             # `onboarding` SOURCE_PATTERN so the price-of-record guard in
+             # `tests/test_website_static.py` fires on the spec-only diff whose
+             # restatement it fails — but a named-surface match REPLACES the
+             # `tests/` -> `core` fallback, so without THIS entry the same diff
+             # would silently drop every `core`-registered test (measured: 823 ->
+             # 171 files in the pool) and trade one silent drop for another.
+             "tests/e2e/test_dashboard_identity.py",
              # CLI-extraction lane (#9915): the flat `integrations/` prefix in
              # NON_PYTHON_PREFIXES swallows the extractor, so an
              # extractor-only diff comes back `changed=[]`, select() takes the

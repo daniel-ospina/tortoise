@@ -1600,9 +1600,23 @@ class TestDocsPageAndSkillConfig:
             "SKILL.md lost §2's terminator — the slice would run to EOF and the "
             "assertions below could be satisfied from any later section")
         note = skill.split(marker, 1)[1].split(terminator, 1)[0]
-        carrier = "https://tortoise.premiselabs.co/docs#chatgpt"
-        assert carrier in note, (
-            "§2's note must name the live ChatGPT carrier (the public docs page)")
+        # #11767: the note was re-aimed to the CANONICAL company origin, so this
+        # pin moves with it. It was missed when the sibling owner
+        # (`tests/test_onboarding_variants.py`) was re-aimed, which is why the suite
+        # was red on a required lane (`onboarding`) — the pin chain is split across
+        # two files and only one half was updated.
+        carrier = "https://premiselabs.co/docs#chatgpt"
+        # ⛔ BOTH spellings, matching `tests/test_onboarding_variants.py` — this is
+        # the second half of the same split pin chain, and see above for what it
+        # cost when only one half moved. `/docs` is a permanent same-host 301 onto
+        # `/tortoise/docs` (measured 2026-11-12), so pinning one spelling would
+        # red the 0-hop re-point #12049 owns on a REQUIRED lane instead of
+        # guarding the thing that matters: that the note names the reference copy
+        # on the CANONICAL origin at all.
+        assert (carrier in note
+                or "https://premiselabs.co/tortoise/docs#chatgpt" in note), (
+            "§2's note must name the live ChatGPT carrier (the public docs page) "
+            "on the canonical origin, at either accepted spelling")
         # Reachability: the note SENDS a user to that URL, so pin that the path
         # still resolves to the docs page and that the fragment it names exists
         # there. Either half being renamed leaves the note pointing at nothing
@@ -1610,9 +1624,30 @@ class TestDocsPageAndSkillConfig:
         docs = self.DOCS.read_text(encoding="utf-8")
         assert f'id="{carrier.rpartition("#")[2]}"' in docs, (
             "the note's carrier fragment must exist on the docs page")
+        # ⛔ The carrier's PATH is `/docs`, and `website/_redirects` has NO `/docs`
+        # rule (only `/docs/` and `/docs.html`), so pinning that file alone proved
+        # a SIBLING alias: dropping `/docs` from the middleware's `PRODUCT_PAGES`
+        # would have kept this green while the note pointed at nothing. `/docs` is
+        # served by `_middleware.ts`'s PRODUCT_PAGES block, which rewrites a
+        # product path onto the `/tortoise` prefix (measured 2026-11-12:
+        # `premiselabs.co/docs` -> 301 -> `/tortoise/docs`). Pin THAT set, and keep
+        # the `_redirects` assertion as what it actually is — the `.html` alias.
+        middleware = (REPO_ROOT / "website" / "functions" / "_middleware.ts").read_text(
+            encoding="utf-8")
+        product_pages = re.search(
+            r"const PRODUCT_PAGES = new Set\(\[(.*?)\]\)", middleware, re.S)
+        assert product_pages, (
+            "_middleware.ts must keep its PRODUCT_PAGES set — that is what serves "
+            "the carrier's path on the company origin")
+        path = "/" + carrier.split("://", 1)[1].split("/", 1)[1].partition("#")[0]
+        assert f'"{path}"' in product_pages.group(1), (
+            f"the carrier URL's path {path!r} must stay in PRODUCT_PAGES — that "
+            "is what serves premiselabs.co/docs; there is no `/docs` rule in "
+            "_redirects, so this is the set that decides whether the note's URL "
+            "resolves at all")
         redirects = (REPO_ROOT / "website" / "_redirects").read_text(encoding="utf-8")
         assert re.search(r"^/docs\.html\s+/docs(\s+\d+)?\s*$", redirects, re.M), (
-            "the carrier URL's path must keep resolving to docs.html")
+            "the `.html` ALIAS of the carrier path must keep resolving to it")
         assert "chatgpt.com/plugins" in note, (
             "§2's note must keep naming the ChatGPT connector surface")
         assert "ChatGPT tab" not in note, (
