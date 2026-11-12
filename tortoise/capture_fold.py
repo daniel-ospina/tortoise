@@ -108,7 +108,10 @@ lost and cannot be re-created:
   a writer-less `about*` predicate, and the reason the reads carry no rel-type
   filter (`type(r) IN [...]` answered only for the subset this module knew).
   `_PROVENANCE_RELS` (`extractedFrom`) is the one class handled on another axis:
-  its content is verified as a FIELD (the ref check) rather than carried;
+  its FIELD is checked as a source ref (`uncarried_source_ref`) and its EDGE is
+  checked against the CANONICAL's own edges (`unexpected_edge` when the canonical
+  has none to that target) rather than carried — the field check does not imply
+  the edge, which is why the two are separate;
 * anything else that raised (`internal_error`). The public entry point never
   raises: its caller sits inside the capture's single per-loop `try`, so a
   propagated error would abandon every remaining statement's resolution, and a
@@ -897,13 +900,19 @@ def _finish_date_conflict(out: dict, evidence: Any, outcome: str) -> None:
     """Say what happened to the duplicate's two dates, given what the WRITE did.
 
     ``outcome`` is one of:
-      * ``"landed"``   — the read-back saw the canonical's date slot filled;
-      * ``"unlanded"`` — the read-back did not;  * ``"unproven"`` — the canonical
-        could not be read back at all;
+      * ``"landed"``   — the write landed AND the fold SUCCEEDS, so the duplicate
+        is deleted and the losing value really does go with it;
+      * ``"refused"``  — the write landed but a LATER step refused
+        (`link_not_carried`), so the duplicate is KEPT: the value did not go
+        anywhere and nothing may say it did;
+      * ``"unlanded"`` — the read-back did not see the date; ``"unproven"`` — the
+        canonical could not be read back at all;
       * ``"raised"``   — `update_point` raised, so nothing landed.
 
-    ⚠️ Only ``"landed"`` may claim a travel. Every other arm says so explicitly,
-    because the residual is printed by `_already_written` on those arms too.
+    ⚠️ Only ``"landed"`` may say a value "went with the node". Every other arm
+    says so explicitly, because the residual is printed by `_already_written` on
+    those arms too — and a refusal CONTRADICTED the clause immediately before it
+    ("nothing removed from either node") by asserting the deletion.
     """
     if evidence.slot_conflict_values is None:
         return
@@ -912,9 +921,14 @@ def _finish_date_conflict(out: dict, evidence: Any, outcome: str) -> None:
         out,
         (f"so only {won!r} travelled; {lost!r} went with the node")
         if outcome == "landed" else
-        ("so neither spelling travelled — the write did not land"
-         if outcome in ("raised", "unlanded") else
-         "so no travel is claimed — the landing could not be verified"))
+        (f"so only {won!r} was written to the canonical — but the fold is "
+         f"REFUSED and the duplicate is kept, so {lost!r} stays on it"
+         if outcome == "refused" else
+         ("so neither spelling travelled — the date write did not land"
+          if outcome == "unlanded" else
+          ("so neither spelling travelled — the write did not land"
+           if outcome == "raised" else
+           "so no travel is claimed — the landing could not be verified"))))
 
 
 def _complete_slot_conflict(out: dict, sentence: str) -> None:
@@ -1350,7 +1364,7 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             _finish_date_conflict(
                 out, evidence,
                 "unproven" if after is None else
-                ("unlanded" if "validFrom" in unlanded else "landed"))
+                ("unlanded" if "validFrom" in unlanded else "refused"))
             out["blocked"] = (
                 "the canonical could not be read back after the evidence "
                 "write, so the carry is unproven" if after is None else
@@ -1359,7 +1373,9 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
             out["blocked"] += _already_written(out)
             return out
         out["copied"] = sorted(to_write)
-        _finish_date_conflict(out, evidence, "landed")
+        # ⚠️ NOT completed here: the LINK loop below can still refuse, and then
+        # the duplicate is kept. The travel verdict belongs to the `ok = True`
+        # arm, where the delete actually happens.
 
     # 7) Carry the attachment links (additive, journaled when the SDK has a
     #    journal), then COUNT what landed. Last, because a link write is the
@@ -1368,6 +1384,10 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
     #    "kept distinct" as "nothing changed".
     from .session_link import link_entity
     failures: list[str] = []
+    #: ⚠️ DISTINCT (rel, target): the read can return two PARALLEL edges to one
+    #: target, and `_carried` then sees the same canonical edge twice — so a raw
+    #: increment reported "2 attachment link(s) present" over a graph holding one.
+    seen_links: set[tuple[str, str]] = set()
     for rel, label, target_id, confidence in evidence.attachments:
         try:
             created = link_entity(
@@ -1400,7 +1420,9 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                 out["created"] -= 1
             failures.append(f"{rel}→{target_id} (did not land)")
             continue
-        out["carried"] += 1
+        if (rel, target_id) not in seen_links:
+            seen_links.add((rel, target_id))
+            out["carried"] += 1
         # ⚠️ The LINK is carried; its GRADING may not be. `link_entity`
         # short-circuits a pre-existing edge without re-grading it (#1370),
         # so when the canonical already held this link the duplicate's
@@ -1420,6 +1442,9 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                 out["residual"].append(f"confidence of {rel}→{target_id}")
     if failures:
         out["reason"] = "link_not_carried"
+        # The date slot may have been written; the node is KEPT, so the losing
+        # value does not go anywhere.
+        _finish_date_conflict(out, evidence, "refused")
         # The COUNT first: naming three of seven is a partial fact, and the rest
         # of this module counts what it cannot name (`unexpected_edges` names
         # every one, `created`/`carried` are counted, never assumed).
@@ -1430,6 +1455,7 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
                           + _already_written(out))
         return out
 
+    _finish_date_conflict(out, evidence, "landed")
     out["ok"] = True
     return out
 

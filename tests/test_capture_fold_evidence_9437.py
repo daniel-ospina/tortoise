@@ -2118,3 +2118,96 @@ def test_the_declared_bounds_are_named_on_the_arm_that_CARRIED_something(
     assert "1 attachment link(s)" in said, said          # something WAS carried
     assert "#12146" in said, said                        # …and the bound is named
     assert "createdAt" in said, said
+
+
+# ── 25) round 22: the verdict that must know whether the node is DELETED ──
+
+
+def test_a_date_that_LANDED_but_a_LINK_that_refused_does_not_claim_a_deletion(
+        sdk):
+    """The travel verdict was completed when the free-slot write landed — BEFORE
+    the link loop, which can still refuse. The refusal then printed "…so only X
+    travelled; Y went with the node" right after "nothing removed from either
+    node", over a duplicate the caller KEEPS."""
+    proj = sdk._get_proj()
+    for pid, content in (("pt_dd_dup", "the dual dated claim"),
+                         ("pt_dd_canon", "the canonical claim")):
+        sdk.create_point("statement", content, id=pid, dedup=False)
+    proj.g.query(
+        "MATCH (p:Point {id:'pt_dd_dup'}) "
+        "SET p.when = '2026-08-01', p.validFrom = '2026-08-02' "
+        "CREATE (p)-[:aboutSource]->(:Source {url:'doc:dual-9437'})")
+    out = capture_fold.carry_fold_evidence(proj, "pt_dd_dup", "pt_dd_canon",
+                                          sdk=sdk)
+    assert out["ok"] is False and out["reason"] == "link_not_carried", out
+    item = next(r for r in out["residual"]
+                if r.startswith("the duplicate's second validFrom"))
+    assert "the fold is REFUSED and the duplicate is kept" in item, item
+    assert "went with the node" not in item, item
+
+
+def test_an_UNLANDED_date_says_the_DATE_write_did_not_land(monkeypatch):
+    """The partial-landing state (other slots landed, the date did not) read "the
+    write did not land" over a `blocked` that reported the other slots as copied —
+    and no test reached this outcome at all."""
+    graph = _FakeGraph(
+        dup_row=("session:s", [], "q", 10, 40, "turn-1", None,
+                 "2026-08-01", "2026-08-02", None, None, None))
+
+    def _skip_date(props):
+        graph.apply_slot({k: v for k, v in props.items() if k != "validFrom"})
+
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon", sdk=_FakeSDK(on_update=_skip_date))
+    assert out["ok"] is False and out["reason"] == "slot_write_failed", out
+    item = next(r for r in out["residual"]
+                if r.startswith("the duplicate's second validFrom"))
+    assert "the date write did not land" in item, item
+    assert "so only " not in item, item
+
+
+def test_parallel_edges_count_as_ONE_link_present():
+    """`carried` is "attachment links PRESENT after the write", and two PARALLEL
+    edges to one target made it 2 over a graph holding one — the receipt then said
+    "2 attachment link(s) present" for a single canonical edge."""
+    edges = [("aboutObject", "Object", "obj_1", None),
+             ("aboutObject", "Object", "obj_1", None)]
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(_FakeGraph(edges=edges, carried={"obj_1": (1, None)})),
+        "pt_dup", "pt_canon")
+    assert out["ok"] is True, out
+    assert out["carried"] == 1, out
+
+
+def test_the_bounds_are_disclosed_in_the_two_states_the_module_calls_NORMAL(
+        sdk, monkeypatch):
+    """The note was gated on `carried or copied`, so the states the module itself
+    calls normal — every occurrence slot differs (residual-only), and a prop it
+    cannot carry (undeclared-only) — disclosed NOTHING about the two classes the
+    delete takes."""
+    # residual-only: every address part differs from the canonical's
+    _ex, meta = _extract(
+        sdk, monkeypatch,
+        canon_evidence={"quote": "canon words", "span_start": 0, "span_end": 11},
+        evidence={"quote": "dup words", "span_start": 30, "span_end": 42})
+    said = next(w for w in meta["warnings"] if "folded into canonical" in w)
+    assert "did not carry quote" in said, said
+    assert "#12146" in said and "createdAt" in said, said
+
+    # undeclared-only: a prop this fold does not declare
+    _ex2, meta2 = _extract(sdk, monkeypatch, evidence={"author": "someone"})
+    said2 = next(w for w in meta2["warnings"] if "folded into canonical" in w)
+    assert "author" in said2, said2
+    assert "#12146" in said2 and "createdAt" in said2, said2
+
+
+def test_a_COPIED_only_fold_says_what_was_copied_and_names_the_bounds(
+        sdk, monkeypatch):
+    """Pins the two arms a mutation could delete: `not copied` in the absence
+    clause (deleting it prints "copied quote" AND "no per-occurrence evidence …
+    to carry" in one sentence) and the `copied` half of the note's old guard."""
+    _ex, meta = _extract(sdk, monkeypatch, evidence={"quote": "the dup words"})
+    said = next(w for w in meta["warnings"] if "folded into canonical" in w)
+    assert "copied quote" in said, said
+    assert "no per-occurrence evidence" not in said, said
+    assert "#12146" in said and "createdAt" in said, said

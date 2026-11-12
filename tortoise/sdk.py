@@ -17081,16 +17081,19 @@ class TortoiseSDK:
                                 # the receipt asserted an absence over a node
                                 # that lost its own write time.
                                 + (", no per-occurrence evidence of its own "
-                                   "to carry beyond its write history — "
-                                   + _fold_declared_bounds_note()
+                                   "to carry beyond its write history"
                                    if (not carried and not copied and not residual
                                        and not undeclared)
                                    else "")
-                                # ⚠️ …and the same disclosure on the arm that DID
-                                # carry something: the bound is not a property of
-                                # an empty fold, it is a property of the delete.
-                                + (f"; {_fold_declared_bounds_note()}"
-                                   if (carried or copied) else ""))
+                                # ⚠️ UNCONDITIONAL. The bound is a property of
+                                # the DELETE, not of an empty fold: gating it on
+                                # `carried or copied` left the two states the
+                                # module itself calls normal — every slot
+                                # differs (residual-only), or a prop it cannot
+                                # carry (undeclared-only) — disclosing nothing
+                                # about `createdAt`/`updatedAt` or the attribute
+                                # bound, both of which the delete takes.
+                                + f"; {_fold_declared_bounds_note()}")
                             if residual:
                                 # ⚠️ NOT "kept the canonical's own …": a support
                                 # field the canonical does not hold at all (an
