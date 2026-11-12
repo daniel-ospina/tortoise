@@ -2688,8 +2688,10 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # DIRECTION IS THE OTHER WAY FROM WHAT IT LOOKS, and this comment got it wrong twice
         # (review P2/P1, rounds 12-14; all measured). A DELETION always reds, because the
         # exact-set pin above fires on any removal — this leg is NOT what catches one. What
-        # it would miss is a deletion of `still for`, whose pins are also carried by `has been
-        # still`; the other four tokens each carry a pin alone, so their deletion reds HERE.
+        # it would miss is a deletion of `still for`: NO REGISTERED PIN NAMES IT AT ALL, and
+        # the one `correct` entry that embeds a needle and leans on it is also carried by
+        # `has been still`. The other four tokens each carry a registered pin alone, so their
+        # deletion reds HERE.
         # Two legs, two failure modes, neither redundant. And an ADDITION is not
         # visible from any leg below: `at rest`, `not moving`, `unchanged for`, `quiescent`
         # and `has not moved` were each accepted in silence, and a one-half claim qualified

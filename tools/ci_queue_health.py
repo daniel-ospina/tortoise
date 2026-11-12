@@ -77,9 +77,13 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               here, which is a clean bill of health for a CI that is not running.)
   PR-UNWITNESSED
               per REPO — the PR WORK WAS NOT WITNESSED, for one of three reasons:
-              (a) the FEED WAS CUT AT ITS PAGE CAP, so the older runs — the end
-              the age clause needs — were never read (and no PR-event run is
-              executing); (b) a WAITING PR-EVENT RUN's current-attempt age is unmeasurable
+              (a) a FEED WAS CUT AT ITS PAGE CAP, so the older runs — the end the
+              age clause needs — were never read. ⛔ THE ``pr_running == 0`` QUALIFIER
+              BELONGS TO THE QUEUED LEG ONLY: the cut ``pending``/``requested`` legs
+              degrade here with PR runs EXECUTING (measured: ``pr_running=1`` with
+              ``pending_truncated=True``), so a reader who took the qualifier as part
+              of the cause would rule it out on exactly the shape that produces it;
+              (b) a WAITING PR-EVENT RUN's current-attempt age is unmeasurable
               (see QueuedRun.wait_age_seconds — not just its created_at); or (c) the
               RUNNING CENSUS IS UNWITNESSED — every run counted in ``pr_running``
               was UNMEASURED (the jobs probe could not read it, or the probe budget
@@ -276,7 +280,8 @@ PR_STARVED = "PR-STARVED"
 #: PR_STARVED (which means nothing of the PR work is executing at all): the two are
 #: true of different queues, and neither may be inferred from the other.
 PR_BACKLOGGED = "PR-BACKLOGGED"
-#: A truncated feed with no PR-event run executing, a WAITING PR-event run
+#: A truncated feed — the queued one with no PR-event run executing, OR a cut
+#: ``pending``/``requested`` leg, which needs no such qualifier — a WAITING PR-event run
 #: (queued/pending/requested) whose CURRENT-ATTEMPT age cannot be measured, OR a running
 #: census made entirely of unmeasured runs: the PR work is neither witnessed nor DISPROVED,
 #: so this is not ``OK``. ⛔ The age rule has ONE owner — `QueuedRun.wait_age_seconds` — and
