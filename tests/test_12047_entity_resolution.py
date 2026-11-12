@@ -1664,3 +1664,303 @@ class TestThirdReviewRound:
             params={"id": oid}).result_set
         assert rows[0][0] == "my own key", (
             "a no-op re-write replaced a caller-supplied canonical_name")
+
+
+# ── #12120: the readers that still asked the raw `name` ───────────────────
+#
+# The write path was widened to the FOLDED UNION (`name` · `canonical_name` ·
+# `aliases`, over the raw and the folded spelling). Four readers still asked the
+# old raw-`name` question, so each could describe a different node than the
+# write lands on. One pin per site; the first is the P1 (`derived ==
+# replay(journal)`).
+
+
+class TestThe12120RemainingReaders:
+    def test_a_variant_spelling_event_folds_and_replays(self, tmp_path):
+        """P1 — `resolve_fold_name` asked the raw name only.
+
+        `create_object("Acme Corp")` then `create_object("The Acme Corp")` is ONE
+        node that keeps the ORIGINAL raw name, so an event naming the variant no
+        longer resolved: `_fold_object_status` recorded the NON-EXEMPT
+        `unregistered-reference` and `rebuild_all` raised `NonFoldedEventsError`.
+        On `main` the variant minted its own node, so the exposure was CREATED by
+        widening the writer — legitimate public writes produced an un-rebuildable
+        journal.
+        """
+        from tortoise.sdk import TortoiseSDK
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t.db"),
+                          event_log_path=str(events / "events.jsonl"),
+                          namespace=f"test_suite_{os.urandom(4).hex()}")
+        try:
+            first = sdk.create_object("Acme Corp", "document")["id"]
+            # the PR's headline behaviour: the variant lands on the SAME node,
+            # which keeps the caller's original surface form as `name`.
+            assert sdk.create_object("The Acme Corp", "document")["id"] == first
+            assert _count(sdk, "Object") == 1
+
+            sdk.create_event("ev-1", "github.issue.open",
+                             object="The Acme Corp", objectType="Object")
+
+            g = sdk._get_proj().g
+            live = g.query("MATCH (o:Object {id:$id}) RETURN o.status",
+                           params={"id": first}).result_set
+            assert live and live[0][0] == "in_progress", (
+                "the variant spelling did not fold a status onto the node the "
+                "create resolved onto — the fold recorded an identity miss")
+
+            # A non-folded, non-exempt record makes the run boundary raise.
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+            replayed = g.query("MATCH (o:Object {id:$id}) RETURN o.status",
+                               params={"id": first}).result_set
+            assert replayed and replayed[0][0] == "in_progress", (
+                "derived != replay: the status folded live but not on replay")
+        finally:
+            sdk.close()
+
+    def test_the_docs_miner_resolves_a_fold_only_holder(self, sdk_factory):
+        """P2 — `docs_miner._ensure_entities` read the raw name only.
+
+        A fold-only holder was invisible to both of its probes, so the "minting
+        is for a genuinely unheld name only" guard passed and the miner wrote a
+        SECOND live node under the same folded key — after which
+        `create_object(<either spelling>)` raised `AmbiguousEntityName`: the
+        miner create-poisoned the name #12047 exists to make writable.
+        """
+        from tortoise.api import EventAPI
+        from tortoise.docs_miner import _ensure_entities
+
+        class _Log:
+            def __init__(self):
+                self.events = []
+
+            def append(self, event):
+                self.events.append(event)
+
+        sdk = sdk_factory()
+        proj = sdk._get_proj()
+        api = EventAPI(_Log(), initiated_by="extractor", agent_id="test",
+                       projection=proj)
+        held = api.add_object("Acme Corp", "document")
+
+        # "The Acme Corp" folds onto the existing node; the miner must NOT mint
+        # a twin beside it.
+        ids = _ensure_entities(api, proj, [{
+            "name": "The Acme Corp", "object_kind": "document",
+            "externalId": "docs:acme", "id": "mined-acme"}])
+        assert ids == [held], (
+            "the miner minted a twin beside a fold-only holder")
+        assert _count(sdk, "Object") == 1
+
+        # …and the name is still writable (the create-poisoning is the harm).
+        assert sdk.create_object("Acme Corp", "document")["id"] == held
+        assert sdk.create_object("the acme corp", "document")["id"] == held
+
+    def test_the_onboarding_anchor_guard_sees_a_fold_collision(self, sdk_factory):
+        """P2 — both anchor probes enumerated the raw `name` only.
+
+        The writer resolves the folded union, so a fold-colliding anchor name was
+        classified "safe to create" and the write landed on the OTHER org's node,
+        rewriting its `org_id` (measured `org-1` → `org-2` on one node).
+        """
+        from tortoise.onboarding.seed import find_subject_by_name
+        from tortoise.onboarding.state import _subject_anchor_name_taken
+
+        sdk = sdk_factory()
+        g = sdk._get_proj().g
+        first = sdk.create_subject("Acme", subjectKind="organization",
+                                   org_id="org-1")["id"]
+
+        # A fold-colliding spelling must resolve to the held anchor, not read as
+        # a free name.
+        props = find_subject_by_name(g, "ACME")
+        assert props is not None and props["id"] == first, (
+            "the anchor guard read a fold-colliding name as free")
+        assert _subject_anchor_name_taken(g, "ACME") is True, (
+            "the carry's existence probe read a fold-colliding name as free")
+
+        # The harm the guard prevents: the writer would have rewritten org_id.
+        sdk.create_subject("ACME", subjectKind="organization", org_id="org-2")
+        row = g.query("MATCH (s:Subject {id:$id}) RETURN s.org_id",
+                      params={"id": first}).result_set
+        assert row[0][0] == "org-2", (
+            "fixture drift: the write no longer resolves onto the held anchor")
+        assert _count(sdk, "Subject") == 1
+
+    def test_a_dual_labelled_content_reject_emits_dedupe_rejected(self, sdk_factory):
+        """P3 — the REJECT arm had no `None` sentinel fall-through.
+
+        For an id that BOTH labels carry, a content reject was diverted into the
+        entity branch: no `DedupeRejected` was emitted and `target_id` came back
+        `None` instead of the Point's `dedup_target_id`. The MERGE arm already
+        handed the verdict back.
+        """
+        sdk = sdk_factory()
+        g = sdk._get_proj().g
+        # A Point that is a dedup candidate, and an Object sharing its id.
+        _create_raw(sdk, "Point", "dual-1", "Dual one", "pointKind", "statement",
+                    dedup_candidate=True, dedup_target_id="prior-1", status="draft")
+        g.query(
+            "CREATE (o:Object {id:'dual-1', name:'Dual one', "
+            "objectKind:'document', status:'live'})")
+
+        # `_emit_event` writes a `:GraphEvent` row (the change feed), not an
+        # `:Event` — count the record the content branch owns.
+        before = g.query(
+            "MATCH (e:GraphEvent) WHERE e.type = 'DedupeRejected' "
+            "RETURN count(e)"
+        ).result_set[0][0]
+
+        out = sdk.approve_merge("dual-1", action="reject")
+
+        assert out is not None, (
+            "the content reject was swallowed by the entity branch")
+        assert out["target_id"] == "prior-1", (
+            f"the Point's dedup_target_id was not returned: {out}")
+        after = g.query(
+            "MATCH (e:GraphEvent) WHERE e.type = 'DedupeRejected' "
+            "RETURN count(e)"
+        ).result_set[0][0]
+        assert after == before + 1, (
+            "no DedupeRejected record was emitted for the content reject")
+
+
+class TestThe12120CollapseIsNotTheHeldQuestion:
+    """The V-GATE round on #12120 — two questions are not one.
+
+    `_collapse_resolved_holders` follows a `resolved_from` hop and then re-applies
+    a LIVE filter (round 9), so a **terminal survivor** reached through a
+    merged-away carrier disappears from a collapsing read. That is correct for
+    "which entity does this name land on" and WRONG for "is this name held at all
+    / is any incarnation live" — the second answered "unheld" and turned a held
+    name into a NON-exempt identity miss, failing `rebuild_all` on a journal the
+    SDK itself produced.
+    """
+
+    def _merged_then_retired(self, sdk):
+        """Two spellings merged onto one node, then BOTH incarnations retired."""
+        survivor = sdk.create_object("Acme Corp", "document")["id"]
+        candidate = sdk.create_object("Acme Corporaton", "document")["id"]
+        assert candidate != survivor, "fixture drift: no merge to set up"
+        sdk.approve_merge(candidate, action="merge")
+        sdk.update_entity(survivor, status="superseded")
+        sdk.update_entity(candidate, status="superseded")
+        return survivor, candidate
+
+    def test_a_retired_survivor_of_a_merge_keeps_the_bounded_exemption(self, tmp_path):
+        """The exact regression: collapsing `_held` made a retired survivor vanish."""
+        from tortoise.sdk import TortoiseSDK
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t.db"),
+                          event_log_path=str(events / "events.jsonl"),
+                          namespace=f"test_suite_{os.urandom(4).hex()}")
+        try:
+            survivor, _candidate = self._merged_then_retired(sdk)
+
+            # A status-fold event naming the merged-away spelling. No live entity
+            # may be resurrected (R5), so this is the bounded, non-fatal
+            # `unfolded-mention` — NOT a missing creation event.
+            sdk.create_event("ev-1", "github.issue.open",
+                             object="Acme Corporaton", objectType="Object")
+
+            # A non-exempt record would make the run boundary raise.
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+
+            row = sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) RETURN o.status",
+                params={"id": survivor}).result_set
+            assert row and row[0][0] == "superseded", (
+                "the retired incarnation was resurrected by the fold")
+        finally:
+            sdk.close()
+
+    def test_the_docs_miner_refuses_a_terminal_holder_reached_through_a_hop(
+            self, sdk_factory):
+        """The same blind spot in the miner's D2 refusal: it would MINT."""
+        from tortoise.api import EventAPI
+        from tortoise.docs_miner import _ensure_entities
+
+        class _Log:
+            def __init__(self):
+                self.events = []
+
+            def append(self, event):
+                self.events.append(event)
+
+        sdk = sdk_factory()
+        proj = sdk._get_proj()
+        api = EventAPI(_Log(), initiated_by="extractor", agent_id="test",
+                       projection=proj)
+        survivor = sdk.create_object("Acme Corp", "document")["id"]
+        candidate = sdk.create_object("Acme Corporaton", "document")["id"]
+        sdk.approve_merge(candidate, action="merge")
+        sdk.update_entity(survivor, status="superseded")
+        sdk.update_entity(candidate, status="superseded")
+        before = _count(sdk, "Object")
+
+        with pytest.raises(ValueError) as exc:
+            _ensure_entities(api, proj, [{
+                # ⛔ The MERGED-AWAY spelling, deliberately: for the survivor's
+                # own spelling the collapsing read still finds the survivor, so
+                # the collapse only loses the holder for the spelling whose ONLY
+                # carriers hopped away. Pinning the survivor spelling left this
+                # pin GREEN under the mutant (measured — a vacuous pin).
+                "name": "Acme Corporaton", "object_kind": "document",
+                "externalId": "docs:acme2", "id": "mined-acme2"}])
+        assert "terminal" in str(exc.value), (
+            f"the refusal did not name the terminal holder: {exc.value}")
+        assert _count(sdk, "Object") == before, (
+            "the miner minted a name-keyed Object beside a terminal holder")
+
+
+class TestThe12120RejectSentinelIsDefinitive:
+    def test_an_unavailable_scan_still_writes_the_entity_rejection(
+            self, sdk_factory, monkeypatch):
+        """A dual-labelled id + an un-runnable scan must NOT hand the verdict to
+        the content branch.
+
+        The sentinel means "the scan ANSWERED: no entity pair". Folding
+        `EntityScanUnavailable` / an ambiguous pair into it told the reject verb
+        to abandon its own row — the entity rejection was never written, so the
+        row stayed permanently re-offered and un-rejectable (the F1 class), and a
+        `DedupeRejected` was emitted about a Point the reviewer's row was not
+        about.
+        """
+        import tortoise.entity_resolver as er
+
+        sdk = sdk_factory()
+        g = sdk._get_proj().g
+        _create_raw(sdk, "Point", "dual-2", "Dual two", "pointKind", "statement",
+                    dedup_candidate=True, dedup_target_id="prior-2", status="draft")
+        g.query(
+            "CREATE (o:Object {id:'dual-2', name:'Dual two', "
+            "objectKind:'document', status:'live'})")
+
+        def boom(*_a, **_kw):
+            raise EntityScanUnavailable("scan unavailable (test)")
+
+        monkeypatch.setattr(er, "entity_candidates", boom, raising=False)
+
+        before = g.query(
+            "MATCH (e:GraphEvent) WHERE e.type = 'DedupeRejected' "
+            "RETURN count(e)").result_set[0][0]
+
+        out = sdk.approve_merge("dual-2", action="reject")
+
+        assert out["candidate_type"] == "entity", (
+            f"the entity rejection was diverted to the content branch: {out}")
+        row = g.query(
+            "MATCH (o:Object {id:'dual-2'}) RETURN o.dedup_reviewed"
+        ).result_set
+        assert row[0][0] == "reject", (
+            "the entity rejection was never written — the row stays un-rejectable")
+        after = g.query(
+            "MATCH (e:GraphEvent) WHERE e.type = 'DedupeRejected' "
+            "RETURN count(e)").result_set[0][0]
+        assert after == before, (
+            "a DedupeRejected was emitted about a Point the row was not about")

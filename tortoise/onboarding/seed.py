@@ -27,7 +27,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..entity_identity import AmbiguousEntityName, display_holder_ids, record_non_folded
+from ..entity_identity import (
+    AmbiguousEntityName,
+    _name_key_predicate,
+    display_holder_ids,
+    normalize_entity_name,
+    record_non_folded,
+)
 
 # ── ontology vocabulary (ONTOLOGY.md §4.2/§5, §3.6) ──────────
 
@@ -162,6 +168,28 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
         return handle.query(cypher, params=params)
 
 
+def _name_key_space(name: str) -> tuple[str, dict]:
+    """(WHERE clause, params) selecting EVERY holder of ``name`` — the writer's key space.
+
+    #12120 finding 3 (P2): ``create_subject`` — the write this module's collision
+    guard protects — resolves on the folded UNION (``name`` · ``canonical_name`` ·
+    ``aliases``, over the raw and the folded spelling). A guard that enumerates
+    only the raw ``name`` can therefore classify a fold-colliding anchor "safe to
+    create", and the write resolves onto the OTHER identity's node. The arms come
+    from ``entity_identity._name_key_predicate``, which is the ONE definition of
+    "who holds this name" — never a second copy of the predicate.
+
+    Returns ``("", {})`` for a blank name: nothing holds it, and a degenerate
+    ``WHERE ()`` would raise rather than answer.
+    """
+    folded = normalize_entity_name(name)
+    if not folded:
+        return _name_key_predicate("s", name)
+    return _name_key_predicate(
+        "s", name, name_props=("name", "canonical_name"),
+        also=(folded,), alias_of=(folded,))
+
+
 def find_subject_by_name(handle: Any, name: str) -> dict[str, Any] | None:
     """The single Subject props holding ``name`` (None when absent).
 
@@ -177,14 +205,21 @@ def find_subject_by_name(handle: Any, name: str) -> dict[str, Any] | None:
     holders out of the READ would make a retracted anchor invisible here and
     then silently ADOPTED by that MERGE for a DIFFERENT org — identity
     resurrection, the very thing this guard exists to prevent. A reader must
-    enumerate the key space its writer merges on, so a terminal same-name
-    holder must be counted (and, with any other holder, refused).
+    enumerate the key space its writer merges on — which since #12047 is the
+    FOLDED UNION (``name`` · ``canonical_name`` · ``aliases``), not the raw
+    ``name`` alone (#12120 finding 3) — so a terminal same-name holder must be
+    counted (and, with any other holder, refused).
 
     Subject-only: an Object/Statement with the same name is a different label
     and can never collide with an anchor (B1)."""
+    where, params = _name_key_space(name)
+    if not where:
+        # A blank name holds nothing — and `WHERE ()` would raise, not answer.
+        return None
     res = _run(handle,
-               "MATCH (s:Subject {name: $name}) RETURN properties(s)",
-               {"name": name})
+               f"MATCH (s:Subject) WHERE {where} "
+               "RETURN properties(s)",
+               params)
     rows = getattr(res, "result_set", None)
     if rows is None:
         # Fail CLOSED: an unrecognized handle shape must never read as "the

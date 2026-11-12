@@ -375,8 +375,8 @@ def _collapse_resolved_holders(g, label: str, holder_ids) -> list:
     # create MERGEd onto it instead of minting the new incarnation R5 requires.
     # The write path must therefore put a survivor through the same terminal
     # test every other read uses.
-    from .live import _terminal_excluded
     from .entity_resolver import follow_resolved_from
+    from .live import _terminal_excluded
     collapsed: list = []
     seen: set = set()
     hopped = False
@@ -407,27 +407,28 @@ def _collapse_resolved_holders(g, label: str, holder_ids) -> list:
     return collapsed
 
 
-def _live_holders_same_entity(g, label: str, name: str, *,
-                              any_status: bool = False) -> tuple[list, tuple]:
-    """The holders of ``name`` including the FOLDED spelling — and which props found them.
+def _name_holder_ids_same_entity(g, label: str, name: str, *,
+                                 any_status: bool = False) -> list:
+    """Every holder of ``name`` including the FOLDED spelling — ids, **NO collapse**.
 
-    #12047 review F1: the +hosted+ pre-flight probe
-    (:func:`refuse_ambiguous_create`) and the write (:func:`resolve_or_mint`) must
-    answer the same question. They did not: only the write consulted
-    ``canonical_name``, so a name held twice by folded spelling passed the probe
-    (everything before it had already been journaled) and then RAISED at the
-    write — a half-written commit and a retry-forever 500, which is precisely
-    what that probe exists to prevent.
+    #12120 (V-GATE finding 1/2): *"which entity does this name land on"* and
+    *"is this name held at all, and is any incarnation live?"* are DIFFERENT
+    questions, and the second one must not collapse.``_collapse_resolved_holders``
+    re-applies a LIVE filter the moment it follows a ``resolved_from`` hop (the
+    round-9 fix that stops a create MERGing onto a retired incarnation), so a
+    TERMINAL survivor reached through a merged-away carrier disappears entirely —
+    and a caller asking ``any_status`` then reads a held name as UNHELD. That is
+    the fail-open side: the fold would record a NON-exempt
+    ``unregistered-reference`` for a name the SDK itself created, and
+    ``rebuild_all`` would refuse its own journal.
 
-    Returns ``(holders, name_props)`` where ``name_props`` names the spelling that
-    FOUND them — :func:`_adopt_idless_holder` must match on the key that resolved
-    (review F4), or an id-less legacy row found via ``canonical_name`` is never
-    adopted and the create mints a twin beside it.
+    Collapsing callers want :func:`_live_holders_same_entity` (the answer to the
+    first question). This is the un-collapsed read.
     """
     folded = normalize_entity_name(name)
     _read = all_name_holder_ids if any_status else live_name_holder_ids
     if not folded:
-        return _read(g, label, name), ("name",)
+        return _read(g, label, name)
     # ⛔ ONE query over the UNION predicate — never two queries deduped in Python
     # (review F-B). The two-query form could not dedupe an ID-LESS row: the
     # primitive returns ``n.id``, which is ``None`` for every legacy row, so a
@@ -455,12 +456,40 @@ def _live_holders_same_entity(g, label: str, name: str, *,
     # One query, through the audited name-keyed primitive (`also=`), so a probe
     # for the lock/probe agreement (#3590) still sees every holder read and an
     # id-less row is counted per NODE (review F-B).
-    _read = all_name_holder_ids if any_status else live_name_holder_ids
-    rows = _read(
+    return _read(
         g, label, name,
         name_props=("name", "canonical_name"),
         also=(folded,),
         alias_of=(folded,))
+
+
+def _live_holders_same_entity(g, label: str, name: str, *,
+                              any_status: bool = False) -> tuple[list, tuple]:
+    """The holders of ``name`` including the FOLDED spelling — and which props found them.
+
+    #12047 review F1: the +hosted+ pre-flight probe
+    (:func:`refuse_ambiguous_create`) and the write (:func:`resolve_or_mint`) must
+    answer the same question. They did not: only the write consulted
+    ``canonical_name``, so a name held twice by folded spelling passed the probe
+    (everything before it had already been journaled) and then RAISED at the
+    write — a half-written commit and a retry-forever 500, which is precisely
+    what that probe exists to prevent.
+
+    Returns ``(holders, name_props)`` where ``name_props`` names the spelling that
+    FOUND them — :func:`_adopt_idless_holder` must match on the key that resolved
+    (review F4), or an id-less legacy row found via ``canonical_name`` is never
+    adopted and the create mints a twin beside it.
+
+    ⚠️ This COLLAPSES merged-away carriers onto their survivor, so it answers
+    "which ENTITY does this name land on". A caller asking "is this name held at
+    all / is any incarnation live" must use :func:`_name_holder_ids_same_entity`
+    instead — the collapse drops a TERMINAL survivor once it hops, which would
+    make a held name read as unheld (#12120 V-GATE finding 1).
+    """
+    folded = normalize_entity_name(name)
+    if not folded:
+        _read = all_name_holder_ids if any_status else live_name_holder_ids
+        return _read(g, label, name), ("name",)
     # ⛔ A MERGED-AWAY carrier is not an independent holder (round-4 finding 1):
     # `apply_entity_merge` leaves BOTH nodes live (the merge is non-destructive)
     # and stamps the candidate with the same folded key, so counting rows made the
@@ -470,7 +499,12 @@ def _live_holders_same_entity(g, label: str, name: str, *,
     # the `resolved_from` hop. Collapse each carrier onto its survivor and count
     # DISTINCT ids; an id-less row carries no `resolved_from` evidence and stays
     # a holder in its own right, per-row (F-B's node-exactness).
-    return _collapse_resolved_holders(g, label, rows), ("name", "canonical_name")
+    return (
+        _collapse_resolved_holders(
+            g, label,
+            _name_holder_ids_same_entity(g, label, name,
+                                         any_status=any_status)),
+        ("name", "canonical_name"))
 
 
 def resolve_or_mint(g, label: str, name: str, *,
@@ -674,8 +708,24 @@ def resolve_fold_name(g, label: str, name: str, *,
     # `ambiguous-entity-name` shape, which fails `rebuild_all` — i.e. the queue's
     # own repair made the journal un-rebuildable. One collapse, applied on every
     # resolver, is the rule the round-7 commit states.
+    # ⛔ #12120 finding 1 (P1): this is the resolver a FOLD uses, and the writer
+    # resolves on the FOLDED UNION (`name` · `canonical_name` · `aliases`, over
+    # the raw and the folded spelling). A raw-only read here disagreed with the
+    # write it describes: `create_object("Acme Corp")` then
+    # `create_object("The Acme Corp")` land on ONE node that keeps the ORIGINAL
+    # raw name, so an event naming "The Acme Corp" no longer resolved —
+    # `_fold_object_status` recorded the NON-EXEMPT `unregistered-reference`
+    # and `rebuild_all` raised `NonFoldedEventsError`. `derived ==
+    # replay(journal)` was broken by legitimate public writes (clean on `main`,
+    # where the variant minted its own node).
+    #
+    # The RAW arm stays FIRST so nothing that resolves today changes; the
+    # writer's union is the fallback when it returns nothing (the
+    # speculative-probe-then-retry shape `resolve_role_holder` already uses).
     holders = _collapse_resolved_holders(
         g, label, live_name_holder_ids(g, label, name))
+    if not holders:
+        holders, _key_props = _live_holders_same_entity(g, label, name)
     ids = [str(h) for h in holders if h]
     if len(holders) == 1 and ids:
         return ids[0]
@@ -754,6 +804,61 @@ def _name_predicate(case_insensitive: bool,
     return f"({name_pred})" if len(arms) > 1 else name_pred
 
 
+def _name_key_predicate(var: str, name: str, *,
+                        case_insensitive: bool = False,
+                        name_props: tuple = ("name",),
+                        also: tuple = (),
+                        alias_of: tuple = ()) -> tuple[str, dict]:
+    """THE key space for "who holds this name": a WHERE clause + its params.
+
+    #12120: one question — *which nodes hold this name* — is asked by readers
+    that want ids and by readers that want NODE PROPERTIES. When each spelled
+    its own MATCH, a reader could enumerate a narrower key space than the writer
+    merges on and silently describe a different node (that is the whole class of
+    #12120). The arms therefore live HERE, once, and both shapes consume them:
+    :func:`_name_holder_ids` returns ids, and a props-returning reader (the
+    onboarding seed's collision guard) asks for ``var``'s properties under the
+    same predicate.
+
+    Returns ``("", {})`` when there is nothing to match (a blank name with no
+    ``also``/``alias_of``) — a ZERO-ROW answer, never a degenerate ``WHERE ()``
+    (which the driver raises on, turning a read into a crash).
+    """
+    props = _require_name_properties(name_props)  # unknown prop → loud (as _name_predicate)
+    spellings = [s for s in dict.fromkeys((name, *also)) if s]
+    arms = []
+    params: dict = {}
+    # #12047 round-4 finding 3: the merge records the variant in the SURVIVOR's
+    # `aliases` (that is the non-destructive merge), so the write path must
+    # honour it — otherwise the promise "a later write of the variant resolves"
+    # holds only while the retired carrier is still LIVE, and dies the moment it
+    # is superseded (the terminal exclusion drops it), minting a twin.
+    for i, spelling in enumerate([s for s in dict.fromkeys(alias_of) if s]):
+        key = f"an{i}"
+        params[key] = spelling
+        arms.append(f"(typeof({var}.aliases) = 'List' AND ${key} IN {var}.aliases)")
+    for i, spelling in enumerate(spellings):
+        key = f"n{i}"
+        # `case_insensitive` lowercases BOTH sides (mirroring `_name_predicate`):
+        # lowercasing only the column made `toLower(n.name) = 'DUP'` — no match,
+        # so a two-live-carrier probe returned zero holders and refused nothing.
+        params[key] = spelling.lower() if case_insensitive else spelling
+        for prop in props:
+            col = (f"toLower({var}.{prop})" if case_insensitive
+                   else f"{var}.{prop}")
+            arms.append(f"{col} = ${key}")
+    if not arms:
+        # #12047 review F4: "no spelling to match" is a ZERO-ROW answer, never a
+        # degenerate predicate. `spellings` drops falsy names, so a blank `name`
+        # with no `also`/`alias_of` left `arms` empty and the query became
+        # `WHERE ()` — a raw driver error out of a READ surface that used to
+        # answer "no holder" (the pre-change `_name_predicate` always emitted
+        # `n.name = $name`). `scan_entities` refuses an empty label set for the
+        # same reason: a degenerate read must never masquerade as a measurement.
+        return "", {}
+    return f"({' OR '.join(arms)})", params
+
+
 def _name_holder_ids(g, label: str, name: str, *,
                      case_insensitive: bool,
                      live_only: bool,
@@ -767,43 +872,20 @@ def _name_holder_ids(g, label: str, name: str, *,
     MATCH, so each node contributes exactly ONE row: the holder count is the node
     count, and an id-less legacy row (``n.id IS NULL``) can never be collapsed
     into another by a Python dedupe keyed on ``id``.
+
+    The arms come from :func:`_name_key_predicate` — the ONE definition of the
+    name key space (#12120).
     """
     _require_identity_label(label)
     live_pred = f"AND {_terminal_excluded('n.status')} " if live_only else ""
-    props = _require_name_properties(name_props)  # unknown prop → loud (as _name_predicate)
-    spellings = [s for s in dict.fromkeys((name, *also)) if s]
-    arms = []
-    params: dict = {}
-    # #12047 round-4 finding 3: the merge records the variant in the SURVIVOR's
-    # `aliases` (that is the non-destructive merge), so the write path must
-    # honour it — otherwise the promise "a later write of the variant resolves"
-    # holds only while the retired carrier is still LIVE, and dies the moment it
-    # is superseded (the terminal exclusion drops it), minting a twin.
-    for i, spelling in enumerate([s for s in dict.fromkeys(alias_of) if s]):
-        key = f"an{i}"
-        params[key] = spelling
-        arms.append(f"(typeof(n.aliases) = 'List' AND ${key} IN n.aliases)")
-    for i, spelling in enumerate(spellings):
-        key = f"n{i}"
-        # `case_insensitive` lowercases BOTH sides (mirroring `_name_predicate`):
-        # lowercasing only the column made `toLower(n.name) = 'DUP'` — no match,
-        # so a two-live-carrier probe returned zero holders and refused nothing.
-        params[key] = spelling.lower() if case_insensitive else spelling
-        for prop in props:
-            col = f"toLower(n.{prop})" if case_insensitive else f"n.{prop}"
-            arms.append(f"{col} = ${key}")
-    if not arms:
-        # #12047 review F4: "no spelling to match" is a ZERO-ROW answer, never a
-        # degenerate predicate. `spellings` drops falsy names, so a blank `name`
-        # with no `also`/`alias_of` left `arms` empty and the query became
-        # `WHERE ()` — a raw driver error out of a READ surface that used to
-        # answer "no holder" (the pre-change `_name_predicate` always emitted
-        # `n.name = $name`). `scan_entities` refuses an empty label set for the
-        # same reason: a degenerate read must never masquerade as a measurement.
+    where, params = _name_key_predicate(
+        "n", name, case_insensitive=case_insensitive, name_props=name_props,
+        also=also, alias_of=alias_of)
+    if not where:
         return []
     rows = g.query(
         f"MATCH (n:{label}) "
-        f"WHERE ({' OR '.join(arms)}) "
+        f"WHERE {where} "
         f"{live_pred}"
         "RETURN n.id",
         params=params).result_set
@@ -985,17 +1067,23 @@ def _record_unaddressable(label: str, name: str) -> None:
 def _record_if_any_holder(g, label: str, value: str,
                           case_insensitive_name: bool,
                           *, predicate: str | None = None,
-                          name_props: tuple = ("name",)) -> None:
+                          name_props: tuple = ("name",),
+                          also: tuple = (),
+                          alias_of: tuple = ()) -> None:
     """Record a ``no-live-holder`` refusal iff ``value`` has ANY holder.
 
     Called only on the resolver's "no live holder" path: a name with at least
     one (necessarily terminal) holder is D2's refused terminal-only reference;
     a name with NO holder is simply absent and must NOT be recorded.
+
+    ``also``/``alias_of`` widen the probe to the same spellings the NAME arm
+    resolved over (#12120), so the recorded evidence names every holder the
+    resolution actually considered.
     """
     if predicate is None:
         holders = all_name_holder_ids(
             g, label, value, case_insensitive=case_insensitive_name,
-            name_props=name_props)
+            name_props=name_props, also=also, alias_of=alias_of)
     else:
         holders = [r[0] for r in g.query(
             f"MATCH (n) WHERE {predicate} "
@@ -1011,7 +1099,9 @@ def resolve_entity_id(g, label: str, value: str | None, *,
                       case_insensitive_name: bool = False,
                       addressing: str | None = None,
                       name_props: tuple = ("name",),
-                      record_misses: bool = True) -> str | None:
+                      record_misses: bool = True,
+                      also: tuple = (),
+                      alias_of: tuple = ()) -> str | None:
     """Route-then-refuse: the single live id for an id-or-name coordinate.
 
     Exact id match wins (returned regardless of status — an id is unambiguous
@@ -1040,6 +1130,16 @@ def resolve_entity_id(g, label: str, value: str | None, *,
     alias (``belief_timeline``'s ``canonical_name``) passes the wider set so the
     holder count — and therefore the refusal — is taken over the SAME key space
     the read used to union, instead of re-implementing a second resolution.
+
+    ``also``/``alias_of`` (#12120) widen the same NAME arm to more SPELLINGS of
+    one entity's key — the folded form, and the variants a non-destructive merge
+    recorded in ``aliases``. A caller whose write path resolves the folded union
+    (``resolve_or_mint``) must pass them here, or its READ enumerates a narrower
+    key space than the write and describes a different node. Every guarantee of
+    this resolver — the duplicate-id claimant check, the ambiguity refusal
+    (recorded before raising), the terminal-only ``no-live-holder`` record — is
+    taken over the widened key space, which is why a caller should use THIS
+    instead of a bare holder read.
     """
     if value is None:
         return None
@@ -1070,7 +1170,8 @@ def resolve_entity_id(g, label: str, value: str | None, *,
         g, label,
         live_name_holder_ids(g, label, value,
                              case_insensitive=case_insensitive_name,
-                             name_props=name_props))
+                             name_props=name_props, also=also,
+                             alias_of=alias_of))
     if len(by_name) > 1:
         # ⛔ `record_misses=False` suppresses the RECORD, never the refusal: an
         # ambiguous lookup is a real answer, and returning None would let a
@@ -1091,8 +1192,35 @@ def resolve_entity_id(g, label: str, value: str | None, *,
     # such name" — both return None, but only one is a refusal (#3633 §B.1).
     if record_misses:
         _record_if_any_holder(g, label, value, case_insensitive_name,
-                              name_props=name_props)
+                              name_props=name_props, also=also,
+                              alias_of=alias_of)
     return None
+
+
+def resolve_entity_id_same_entity(g, label: str, value: str | None, *,
+                                  addressing: str | None = None,
+                                  record_misses: bool = True) -> str | None:
+    """``resolve_entity_id`` over the WRITER's folded union — one call, one key space.
+
+    #12120: the write path (:func:`resolve_or_mint`) resolves ``name`` ·
+    ``canonical_name`` · ``aliases``, over the raw AND the folded spelling. A
+    reader that calls the raw resolver is enumerating a narrower key space and
+    can describe a different node — and, in the ``docs_miner`` case, mint a twin
+    beside a fold-only holder.
+
+    ⛔ Do NOT hand-roll this as a bare holder read: that is how ``docs_miner``
+    lost :func:`_require_unique_id`'s duplicate-id claimant check and the R8
+    evidence record for an ambiguous name (#12120 V-GATE finding 4). This keeps
+    every guarantee of the raw resolver, over the widened space.
+    """
+    folded = normalize_entity_name(value) if value else ""
+    if not folded:
+        return resolve_entity_id(g, label, value, addressing=addressing,
+                                 record_misses=record_misses)
+    return resolve_entity_id(
+        g, label, value, addressing=addressing, record_misses=record_misses,
+        name_props=("name", "canonical_name"), also=(folded,),
+        alias_of=(folded,))
 
 
 #: A document is a ``:Source`` carrying ``documentKind`` (D10, ONTOLOGY v3.15

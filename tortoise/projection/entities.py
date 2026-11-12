@@ -6023,12 +6023,25 @@ class _EntityHandlers:
             # identity miss (`ambiguous-entity-name` for 2+, or
             # `unregistered-reference` for a live-but-id-less carrier), which
             # fails the run.
-            from tortoise.entity_identity import (
-                all_name_holder_ids,
-                live_name_holder_ids,
-            )
-            _held = all_name_holder_ids(self.g, "Object", name)
-            _live_holders = live_name_holder_ids(self.g, "Object", name)
+            from tortoise.entity_identity import _name_holder_ids_same_entity
+            # #12120 finding 1: the mention / non-exempt classification must be
+            # taken over the SAME key space `resolve_fold_name` resolves on (the
+            # writer's folded union) — otherwise a fold-only TERMINAL carrier
+            # read as "no holder at all", the miss was recorded NON-exempt, and
+            # `rebuild_all` failed a journal the union could have folded. The
+            # live/any-status split is unchanged: `mention=True` is still granted
+            # only to the terminal-only arm.
+            # ⛔ The UN-COLLAPSED read, deliberately (#12120 V-GATE finding 1):
+            # `_live_holders_same_entity` collapses merged-away carriers onto
+            # their survivor and re-applies a LIVE filter once it hops, so a
+            # TERMINAL survivor reached through a hop vanished and a held name
+            # read as unheld — flipping `mention` False and failing the run on
+            # the SDK's own journal. "Is the name held / is any incarnation live"
+            # is not "which entity does it land on".
+            _held = _name_holder_ids_same_entity(
+                self.g, "Object", name, any_status=True)
+            _live_holders = _name_holder_ids_same_entity(
+                self.g, "Object", name)
             object_id = resolve_fold_name(
                 self.g, "Object", name, context="status fold object",
                 mention=bool(_held) and not _live_holders)

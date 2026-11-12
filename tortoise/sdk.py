@@ -24013,9 +24013,12 @@ class TortoiseSDK:
             # ("DedupeRejected event type OR reviewed: true property"); the
             # journaled EntityMutated carries it, so a rebuild keeps the verdict.
             target_id = None
+            pair_known = False
+            _pair = None
             try:
-                target_id = (entity_pair_for(proj.g, candidate_id) or {}).get(
-                    "survivor_id")
+                _pair = entity_pair_for(proj.g, candidate_id)
+                pair_known = True
+                target_id = (_pair or {}).get("survivor_id")
             except ValueError:
                 # An ambiguous candidate has no single survivor to record — the
                 # rejection still stands, it just names no target.
@@ -24027,6 +24030,35 @@ class TortoiseSDK:
                 # so a full window must not make the review surface's reject verb
                 # unavailable exactly when the queue is largest.
                 target_id = None
+            # ⛔ `pair_known and _pair is None` — a DEFINITIVE "no pair", never
+            # "the scan could not answer" (#12120 V-GATE finding 3). The two
+            # `except` arms above deliberately still write the rejection, so
+            # folding them into the sentinel told an ambiguous/truncated scan to
+            # hand the verdict to the content branch: the entity rejection was
+            # never written, the row stayed permanently re-offered and
+            # un-rejectable (the F1 class), and a `DedupeRejected` was emitted
+            # about a Point the reviewer's row was not about.
+            if pair_known and _pair is None:
+                # ⛔ #12120 finding 4 (P3): the MERGE arm below returns this
+                # method's ``None`` SENTINEL when the id is a Point with no
+                # entity pair, so a legitimate CONTENT verdict stays reachable
+                # for an id that carries BOTH labels. The REJECT arm had no such
+                # fall-through: it wrote an entity rejection with
+                # ``target_id=None``, emitted no ``DedupeRejected``, and left the
+                # content branch unreachable. Probe ``:Point`` exactly as the
+                # merge arm does, and hand the verdict back when the Point half
+                # is a dedup/temporal candidate.
+                _point = proj.g.query(
+                    "MATCH (n:Point {id:$id}) "
+                    "RETURN n.dedup_candidate, n.temporal_candidate",
+                    params={"id": candidate_id},
+                ).result_set
+                if _point:
+                    _row = _point[0]
+                    _dedup = _row[0] if len(_row) > 0 else None
+                    _temporal = _row[1] if len(_row) > 1 else None
+                    if _dedup or _temporal:
+                        return None
             # ⛔ SET-VALUED (#12047 review F1): one scalar`dedup_target_id` slot
             # could not hold two rejections, and overwriting it un-suppressed the
             # pair the reviewer had already answered. `dedup_rejected_targets` is
