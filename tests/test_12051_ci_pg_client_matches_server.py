@@ -101,9 +101,10 @@ def _run_code(step: dict) -> str:
     commented-out line is inert shell that reads identically to the live one.
     Measured: `# echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"` (with the
     in-step `export` kept) and a commented-out `if [ "$major" != "16" ] … fi`
-    block each left all four tests GREEN while the leg went back to resolving
-    the runner image's client — i.e. the guard could not distinguish the fix
-    from its tombstone. Assertions therefore read this, never the raw body.
+    block each left EVERY row green at the time it was measured (four then;
+    five since round 5) while the leg went back to resolving the runner image's
+    client — i.e. the guard could not distinguish the fix from its tombstone.
+    Assertions therefore read this, never the raw body.
 
     STATED LIMIT: this strips COMMENT LINES only (a line whose first non-space
     character is `#`), and the fail-closed branch is matched structurally by
