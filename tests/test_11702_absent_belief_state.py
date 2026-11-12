@@ -5717,6 +5717,25 @@ _NEGATED = re.compile(r"\b(?:not|never)\b|\bisn't\b", re.IGNORECASE)
 _CLAUSE_BREAK = re.compile(
     r"—|–|:|;|(?<=[.!?])\s|\bbut\b|\brather\b", re.IGNORECASE)
 
+#: The class-4 claim: a sentence that makes the `credibility` WORD yield
+#: `0.75`. Measured on `create_point` (see
+#: `test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair`):
+#: `0.75` is the #2199 system default with NO word (Beta(3,1)) and an EXPLICIT
+#: `set_point_baseline(3, 1)` pair, which the word never overwrites. The word
+#: itself ADDS one weak body on top of the #2199 provision (Beta(3.1,1) =
+#: 0.7561) or, with no provision at all, IS the whole baseline (Beta(1.1,1) =
+#: 0.5238). A note that hands `0.75` to the word therefore names a number
+#: nothing produces. Scope is one sentence and one direction: the ASSERTION
+#: forms (`is` / `reads` / `lands at` / `equals`) fire, while a sentence that
+#: merely prints both numbers passes, because the true sentence ("0.7561 for
+#: that default plus an author word") must. The `(?!\d)` keeps `0.7561` from
+#: matching as `0.75`, which is what makes that true sentence distinguishable
+#: at all.
+_CRED_WORD_YIELDS_075 = re.compile(
+    r"credibility[^.;]{0,60}?\b(?:is|reads|lands\s+at|equals)\b"
+    r"[^.;]{0,25}?0\.75(?!\d)",
+    re.IGNORECASE)
+
 
 def _belief_prose(rel: str) -> str:
     """One normalised string for a module: comment markers gone, whitespace
@@ -5787,6 +5806,15 @@ def _ep_pass_claims(text: str) -> list[str]:
             continue
         suspects.append(match.group(0))
     return suspects
+
+
+def _cred_word_claims(rel: str) -> list[str]:
+    """Sentences that hand `0.75` to the `credibility` word.
+
+    Sentence-scoped on purpose: the number and the word have to be read as one
+    assertion, and a sentence is the unit the corpus writes an assertion in.
+    """
+    return [s for s in _sentences(rel) if _CRED_WORD_YIELDS_075.search(s)]
 
 
 def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
@@ -5878,6 +5906,51 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
         assert _ep_pass_claims(mutant), (
             f"the EP-pass guard stays GREEN on the reverted denial ({what}) — "
             "it cannot fail on the tree it ships on")
+    # The credibility guard's discriminating power, measured in BOTH directions
+    # on the wordings this class actually produced. Each spelling below was an
+    # assertion somebody wrote (the second is the "correction" that replaced
+    # the first — and was itself false, since `0.7561` is what the word plus
+    # the default yields).
+    for spelling in (
+            "an author ``credibility='low'`` still reads 0.75 here",
+            "the same Beta(3,1) plus ``credibility='low'`` still reads 0.75",
+            "``credibility='low'`` lands at 0.75 on its own",
+            "Beta(3,1) with a ``credibility=`` word IS 0.75"):
+        assert _CRED_WORD_YIELDS_075.search(spelling), (
+            f"the credibility guard misses a rewording: {spelling!r}")
+    # …and it must NOT fire on the TRUE statement, or the next fixer is steered
+    # to "correct" prose that is already right.
+    assert not _CRED_WORD_YIELDS_075.search(
+        "the word ADDS to the #2199 default: Beta(3.1,1) = 0.7561, never 0.75."), \
+        "the credibility guard fires on the TRUE statement"
+    assert _cred_word_claims("tortoise/volunteer.py") == [], (
+        "the credibility guard reports the shipped `volunteer.py` note: "
+        + repr(_cred_word_claims("tortoise/volunteer.py")[:1]))
+    # …and, the check that stops this guard from being INERT: the corpus it
+    # ships on must carry a sentence holding BOTH facts (the word and 0.75),
+    # and MUTATING that shipped sentence into the false attribution must RED.
+    # A guard that matches nothing anywhere cannot fail — the defect PR #11933
+    # review round 4 found in the EP-pass guard, which passed on every tree it
+    # was ever run against.
+    shipped = next(
+        (s for s in _sentences("tortoise/volunteer.py")
+         if "credibility" in s and "0.75" in s), None)
+    assert shipped is not None, (
+        "the corpus no longer holds a sentence naming both the `credibility` "
+        "word and 0.75, so the class-4 guard has nothing to be checked "
+        "against — re-anchor this control before trusting the guard")
+    assert not _CRED_WORD_YIELDS_075.search(shipped), (
+        "the class-4 guard reports the SHIPPED sentence, which is true")
+    mutated = shipped.replace(
+        "the decide-part system default Beta(3,1) mean 0.75, or an author "
+        "``credibility=`` prior",
+        "an author ``credibility=`` prior IS 0.75")
+    assert mutated != shipped, (
+        "the shipped sentence was reworded, so this mutation no longer "
+        "applies — re-anchor it on the new wording rather than deleting it")
+    assert _CRED_WORD_YIELDS_075.search(mutated), (
+        "the class-4 guard stays GREEN when the shipped sentence is mutated "
+        "into the false attribution: " + repr(mutated[:200]))
 
 
 def test_a_prior_mean_claim_in_the_belief_prose_names_the_mirror():
@@ -5938,3 +6011,69 @@ def test_no_gloss_reads_has_ep_as_proof_of_an_ep_pass():
         "pass; it is a stored-column predicate (a direct `update_point` sets "
         "it, and a prior stamp sets the legacy arm):\n  "
         + "\n  ".join(problems))
+
+
+def test_the_credibility_note_never_hands_the_word_the_defaults_075():
+    """`0.75` belongs to the DEFAULT and to an EXPLICIT pair, never the word.
+
+    The belief prose explains why a prior-only claim clears a mean floor, and
+    one round of that explanation attributed the floor-clearing number to the
+    `credibility` word. It is the wrong number in both directions: the word
+    ADDS a weak body to the #2199 default (Beta(3.1,1) = 0.7561) and, alone,
+    is Beta(1.1,1) = 0.5238. Only the #2199 default itself and an explicit
+    `set_point_baseline(3, 1)` are 0.75, so a note that hands the word that
+    number misstates the value. The arithmetic is pinned behaviourally in
+    `test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair`.
+    """
+    problems = [f"{rel}: …{suspect[:180]}…"
+                for rel in _BELIEF_PROSE
+                for suspect in _cred_word_claims(rel)]
+    assert not problems, (
+        "a belief-prose sentence makes the `credibility` word yield 0.75. "
+        "Measured: the word ADDS to the #2199 default (Beta(3.1,1) = 0.7561), "
+        "is Beta(1.1,1) = 0.5238 alone, and loses only to an EXPLICIT pair:\n  "
+        + "\n  ".join(problems))
+
+
+def test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair(sdk):
+    """The four means a `credibility=` word can be part of, MEASURED.
+
+    These numbers are what the class-4 prose guard is ABOUT, and each one is a
+    shape the prose has at some point described wrongly, so they are asserted
+    through the real serving path (`annotate_ep_batch`) rather than a helper:
+
+    | shape | mean | why |
+    |---|---|---|
+    | #2199 default, no word | 0.7500 | Beta(3, 1) |
+    | #2199 default + word | 0.7561 | Beta(3.1, 1) — the word ADDS one body |
+    | word alone, no default | 0.5238 | Beta(1.1, 1) — the word IS the baseline |
+    | explicit pair + word | 0.7500 | the pair wins and the word is DROPPED |
+
+    The last row is what gives "loses to a pair" its name: the word is not
+    averaged and not weighed, it is discarded, so no label is stamped.
+    """
+    default = sdk.create_point("option", "cred word: default alone")["id"]
+    plus_word = sdk.create_point(
+        "option", "cred word: default plus word", credibility="low")["id"]
+    word_alone = sdk.create_point(
+        "option", "cred word: word alone", status="draft",
+        credibility="low")["id"]
+    content = "cred word: explicit pair"
+    pair = sdk.create_point("statement", content, dedup=True)["id"]
+    sdk.set_point_baseline(pair, 3, 1)
+    sdk.create_point("statement", content, dedup=True, credibility="low")
+
+    def served(pid: str):
+        return annotate_ep_batch(sdk._get_proj().g, [pid])[pid].confidence_mean
+
+    assert served(default) == pytest.approx(0.75, abs=1e-4), (
+        "the #2199 system default alone is Beta(3,1) -> 0.75")
+    assert served(plus_word) == pytest.approx(0.7561, abs=1e-4), (
+        "the word ADDS one weak body ON TOP of the #2199 default: 3.0 -> 3.1")
+    assert served(word_alone) == pytest.approx(0.5238, abs=1e-4), (
+        "with no #2199 default the word is the whole baseline: Beta(1.1,1)")
+    assert served(pair) == pytest.approx(0.75, abs=1e-4), (
+        "an EXPLICIT set_point_baseline pair is the one shape the word never "
+        "moves — dropping the word is why the note says it 'loses' here")
+    assert sdk.get_point(pair).get("credibility") is None, (
+        "the word is DROPPED against an explicit pair, so no label is stamped")
