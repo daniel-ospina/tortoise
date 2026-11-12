@@ -189,7 +189,7 @@ kind you merely know exists, because the catalog is a superset of what any one
 graph can legally write (#5163). `tortoise pack validate` refuses a guard that
 breaks that, and refuses a guard with no CORE `fallback`:
 
-```
+```text
 $ tortoise pack validate packs/mypack
   ✗ mypack:
       guards[0].onConfusion[0].redirect: 'other:thing' targets namespace
