@@ -39,11 +39,13 @@ the vector, and `RecordRelation` had no way to say so.
 
 ## What changes
 
-1. **One declaration** — `cache_projection.relation_vector_declined_properties()`, a
-   LIVE alias of `stored_vector_props()` (not an import-time snapshot: the rule is
-   unconditional, so a snapshot could only drift from the seam that defines which
-   properties are vectors). The node rule stays a set difference
-   (`UNSERVED_VECTOR_LABELS`); an edge has no label to subtract.
+1. **One declaration** — `cache_projection.relation_vector_declined_properties()`,
+   returning `stored_vector_props()` (an IMPORT-TIME snapshot of the store seam, exactly
+   like `UNSERVED_VECTOR_LABELS`; it is a function, not a constant, because there is no
+   arithmetic to compute, both edge doors should read one spelling, and the instrument's
+   falsifier needs a name to replace). The node rule stays a set difference; an edge has
+   no label to subtract. The report KEY format gets its own single owner too:
+   `relationship_target` / `is_relationship_target` / `RELATIONSHIP_TARGET_PREFIX`.
 2. **Both edge doors drop and RECORD it** —
    `relation_from_row` (row → view, so a record read cannot advertise bytes the writer
    refuses) and `relation_statement` (its own check, because `record_plan` is public and
@@ -63,12 +65,13 @@ the vector, and `RecordRelation` had no way to say so.
 
 ## Residue (stated, not discovered)
 
-`relation_statement` is additive (`SET r += $props`), so a legacy cache that already
-holds `r.embedding` keeps it across an incremental re-projection; it goes on a full
-`record-restore` (which wipes first) or when the edge is re-MERGEd from a view that no
-longer carries it. Nothing on the read side reports it — `record_serve` has no relation
-read (`NOT_SERVED`), `parity_difference` is label-scoped, `record_reconcile` compares
-nodes. Same residue as the `#11747` node rule.
+`relation_statement` is additive (`SET r += $props`), and `SET r += map` merges keys
+without REMOVIng one it no longer carries — so a legacy cache that already holds
+`r.embedding` keeps it across any number of incremental re-projections. The ONE remedy is
+a full `record-restore`, whose whole-graph wipe takes the edges with it. Nothing on the
+read side reports it — `record_serve` has no relation read (`NOT_SERVED`),
+`parity_difference` is label-scoped, `record_reconcile` compares nodes. Same residue as
+the `#11747` node rule.
 
 ## Out of scope
 

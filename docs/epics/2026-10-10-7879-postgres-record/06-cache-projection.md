@@ -223,24 +223,43 @@ So the projection refuses it the same way, at the same two doors:
   `RecordRelation` (`record_plan` is public), records it on `Statement.dropped_vectors`
   and never emits it in `params["props"]`;
 * `ProjectionPlan.dropped_vectors()` reports it as `<relationship:TYPE>` — `#11641`'s
-  spelling, so one defect has ONE vocabulary — and the operator's line names the right
-  survivor ("the edges are restored", not "the nodes").
+  spelling — and the operator's line names the right survivor ("the edges are restored",
+  not "the nodes"). ⛔ The KEY FORMAT has one owner:
+  `cache_projection.relationship_target` / `is_relationship_target` /
+  `RELATIONSHIP_TARGET_PREFIX`, because the operator line discriminates an edge entry
+  from a record label by that prefix and a format spelled out at each site can drift and
+  silently classify every entry as a node.
 
-The rule itself is `cache_projection.relation_vector_declined_properties`, a live alias
-of the store seam (`stored_vector_props`) rather than a snapshot: the node rule must
-COMPUTE a difference once, while this one is unconditional, so a live read cannot drift
-from the seam that defines which properties are vectors. ⛔ It is NOT an index decision
-and NOT a claim that an edge could never be searched — if an edge vector index ever
-exists, this is the one declaration to change, and the reason it says *no query path*
-rather than *no label* is that the absence is in the READ leg, not in the storage.
+The rule itself is `cache_projection.relation_vector_declined_properties`, which returns
+`stored_vector_props()` — and, stated precisely, that is **an import-time snapshot**, not
+something re-derived per call: `stored_vector_props()` returns this module's
+`STORED_VECTOR_PROPS`, bound once by `from .stored_form import …`. So the rule follows the
+store seam at the NEXT import, exactly as `UNSERVED_VECTOR_LABELS` does. It is a function
+rather than a constant for three narrower reasons: there is no arithmetic to compute (so
+a constant would be a plain copy), both edge doors read ONE spelling of it, and the
+instrument's falsifier needs a name to replace. Which properties are vectors is still the
+ONE owner's answer — there is no second list. ⛔ It is NOT an index decision and NOT a
+claim that an edge could never be searched — if an edge vector index ever exists, this is
+the one declaration to change, and the reason it says *no query path* rather than *no
+label* is that the absence is in the READ leg, not in the storage.
 
-⚠️ **Residue, stated rather than discovered:** `relation_statement` is additive
-(`MERGE … SET r += $props`), so a legacy cache that already holds `r.embedding` keeps it
-across an incremental re-projection. It goes only when the edge is re-MERGEd from a view
-that no longer carries it, or on a full `record-restore` (which wipes first). Nothing on
-the read side reports it — `record_serve` has no relation read (`NOT_SERVED`),
-`parity_difference` is label-scoped and `record_reconcile` compares nodes — the same
-residue §0.5b carries for nodes.
+⚠️ **The `embedding_verbatim` marker goes with the vector it described.** A relation
+row's tail is an open set, so `embedding` and `embedding_verbatim` can arrive together;
+both doors pop the marker when they withhold a vector, which is `node_statement`'s `and
+not dropped` rule (`#11747`) one object over. A marker with no vector asserts a storage
+FORM for a value the same statement did not write.
+
+⚠️ **Residue, stated rather than discovered — and an incremental re-projection CANNOT
+clear it.** `relation_statement` is additive (`MERGE … SET r += $props`): `SET r += map`
+merges the map's keys and never REMOVEs one it does not carry, so a legacy cache that
+already holds `r.embedding` keeps it however many times the edge is re-MERGEd from a view
+that no longer carries the vector. Nothing on the read side reports it either —
+`record_serve` has no relation read (`NOT_SERVED`), `parity_difference` is label-scoped
+and `record_reconcile` compares nodes. The ONE remedy is a full `record-restore`, whose
+whole-graph wipe takes the edges with it; that is the same residue §0.5b carries for
+nodes (there the module states it as "its write is additive … anything else needs an
+explicit property clear"), and an earlier draft of this section offered the root cause
+of the problem as the cure.
 
 ### 0.6 Verification
 

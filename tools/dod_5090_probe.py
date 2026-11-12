@@ -2848,6 +2848,19 @@ def _statement_stores_vector(stmt, vector_props) -> bool:
     return any(prop in bag for bag in bags for prop in vector_props)
 
 
+def _relationship_target(rel_type: str) -> str:
+    """`<relationship:TYPE>` — the ONE owner's spelling, read lazily (`#12015`).
+
+    Imported inside the call so this module keeps importing without a graph or a
+    projection available; `cache_projection.relationship_target` is the single place
+    the format is decided (the plan's report keys, the operator line and this row's
+    orphan set all read it).
+    """
+    from tortoise.cache_projection import relationship_target
+
+    return relationship_target(rel_type)
+
+
 def cache_projection_store_labels() -> dict:
     """The labels `cache_projection` can still put a vector on — MEASURED, not read.
 
@@ -2987,7 +3000,8 @@ def cache_projection_store_labels() -> dict:
         edge_types = sorted(KNOWN_REL_TYPES)
         vector_props = sorted(cp.stored_vector_props())
     except Exception as e:
-        unmeasured["<relationship>"] = f"{type(e).__name__}: {e}"
+        unmeasured[cp.RELATIONSHIP_TARGET_PREFIX + "ANY>"] = (
+            f"{type(e).__name__}: {e}")
         edge_types = []
     for rel_type in edge_types:
         vector = list(_CACHE_PROJECTION_PROBE_VECTOR)
@@ -3013,7 +3027,7 @@ def cache_projection_store_labels() -> dict:
         except Exception as e:
             edge_errors.append(f"direct edge: {type(e).__name__}: {e}")
         if not edge_statements:
-            unmeasured[f"<relationship:{rel_type}>"] = "; ".join(edge_errors)
+            unmeasured[cp.relationship_target(rel_type)] = "; ".join(edge_errors)
             continue
         for _door, stmt in edge_statements:
             if _statement_stores_vector(stmt, vector_props):
@@ -3178,7 +3192,7 @@ def score_path_bullet() -> Row:
     # unioned here rather than compared on its own so the row keeps a single answer:
     # a second comparison would be a second place for the verdict to disagree with
     # the line that prints it.
-    edge_orphans = {f"<relationship:{rel_type}>"
+    edge_orphans = {_relationship_target(rel_type)
                     for rel_type in (projection.get("relationships") or ())}
     orphans = (labels | set(projection["labels"]) | edge_orphans) - served
     notes = [
@@ -3209,9 +3223,10 @@ def score_path_bullet() -> Row:
         )
     if projection["unmeasured"]:
         notes.append(
-            "cache projection labels whose store could not be MEASURED (hold this row at "
-            "PARTIAL — not one of the three doors could be built): "
-            + "; ".join(f"{label}: {why}" for label, why in
+            "cache projection targets whose store could not be MEASURED (hold this row at "
+            "PARTIAL — no door could be built for it). A record label, or a "
+            "`<relationship:TYPE>` for an EDGE, which is NOT a label: "
+            + "; ".join(f"{target}: {why}" for target, why in
                         sorted(projection["unmeasured"].items()))
         )
     if resolved["error"]:
