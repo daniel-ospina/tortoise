@@ -5784,13 +5784,17 @@ _CRED_WORD_YIELDS_075 = re.compile(
     re.IGNORECASE)
 
 #: A NEGATED or DEMOTED attribution is the correct wording, not a finding.
-#: Measured before this exemption existed: four TRUE sentences fired —
-#: "it is NOT the credibility word that reads 0.75 — the explicit pair is",
-#: "the ``credibility=`` word is NOT 0.75 — … is 0.7561", "``credibility=``
-#: never reads 0.75: …", and "the credibility word is DROPPED against an
-#: explicit pair, which reads 0.75". A false BLOCK is this guard's expensive
-#: error, not a false pass: the failure text hands the next fixer a number, and
-#: that fixer will "correct" a sentence that is already right — the
+#: Measured before this exemption existed, TWO true sentences fired —
+#: "the ``credibility=`` word is NOT 0.75 — it is 0.7561" and
+#: "``credibility=`` never reads 0.75: the default plus the word is Beta(3.1,1)".
+#: ⚠️ An earlier revision of this note cited FOUR and included "it is NOT the
+#: credibility word that reads 0.75" and "the credibility word is DROPPED
+#: against an explicit pair, which reads 0.75" — neither EVER matched the regex
+#: (`that` stops the pre-verb window; `, which` stops the post-verb one), so
+#: neither could have fired and neither was evidence for this exemption. Only
+#: cite what the regex reaches. A false BLOCK is this guard's expensive error,
+#: not a false pass: the failure text hands the next fixer a number, and that
+#: fixer will "correct" a sentence that is already right — the
 #: false-correction failure this file documents for the mirror guards.
 #:
 #: `is no` is admitted but a bare `no` is NOT, for the reason `_NEGATED` gives:
@@ -5802,11 +5806,13 @@ _CRED_WORD_YIELDS_075 = re.compile(
 #: `ignored` / `discarded` / `overwritten` / `superseded` were added after they
 #: were MEASURED as false blocks; a synonym nobody has written yet is a
 #: false-block residual, not a claim of coverage. ⚠️ Their pins must use a
-#: spelling the WINDOW actually reaches — review cycle 5 found that the two
-#: demoter strings a previous revision cited were quiet for WINDOW reasons
-#: (a comma, and a pre-verb `that`), so deleting this whole list left the suite
-#: green. "the credibility word is dropped when a pair reads 0.75" is the pin
-#: that holds: it matches the regex, is quiet only because `dropped` is
+#: spelling the WINDOW actually reaches. Twice this went wrong: the first pair
+#: of citations was quiet for WINDOW reasons (a comma, and a pre-verb `that`),
+#: and the second batch named `ignored`/`discarded`/`overwritten` on strings that
+#: were quiet because a POST-VERB `that` stopped the window — so deleting either
+#: batch of alternatives left the suite green (review cycles 5 and 6). All four
+#: alternatives now have a pin in the `… is <demoter> when a pair reads 0.75`
+#: form: each MATCHES the regex, is quiet ONLY because its own demoter is
 #: exempted, and fires the moment that alternative is removed.
 #:
 #: ⚠️ NAMED RESIDUALS, both directions, stated rather than hidden. It does NOT
@@ -6086,9 +6092,15 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # (cycle 5, P1), so it pinned nothing.
             "it is not the case that the credibility word reads 0.75",
             # …a DEMOTER whose window really is reached, so deleting the demoter
-            # list reds here (cycle 5, P2): the two strings a previous revision
-            # relied on were quiet for window reasons instead.
+            # list reds here (cycles 5 and 6): earlier citations for this list
+            # were quiet for WINDOW reasons, which left every alternative
+            # deletable with a green suite. Each of the five below MATCHES the
+            # regex and is quiet ONLY via its own demoter.
             "the credibility word is dropped when a pair reads 0.75",
+            "the credibility word is ignored when a pair reads 0.75",
+            "the credibility word is discarded when a pair reads 0.75",
+            "the credibility word is overwritten when a pair reads 0.75",
+            "the credibility word is superseded when a pair reads 0.75",
             # …a POST-VERB relative pronoun, which crossed the window until
             # cycle 5 measured it (true prose, reported).
             "the credibility word reads a default which is 0.75",
