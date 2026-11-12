@@ -379,8 +379,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   set-union: a second complement sentence could assert a STILL-TRUE letter the real sentence does not,
   so the page could say *seven of the twelve no longer read as written* beside *only `**(a)**` still
   read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). Both arms count only a
-  sentence that carries a **letter LIST**, in any spelling — `**(x)**`, a parenthesised run
-  `(b), (c)`, or a plain run `b, c, d`: a single parenthetical letter in prose is not a list, and a
+  sentence that carries a **letter LIST** of two or more single letters — comma-joined
+  (`b, c, d`) or a pair (`b and c`), with each letter written bold, code, italic or bare, and every
+  form bounded to the twelve letters §3's table can name: a single parenthetical letter in prose is
+  not a list, and a
   sentence that merely QUOTES the phrase has no list to disagree with the table, so counting it reded
   a clarifying edit (measured) — the false-accusation class the neighbouring citation arms exist to
   avoid. Requiring **markup** rather than a list was itself fail-open, measured: a de-bolded stale

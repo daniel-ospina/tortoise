@@ -723,22 +723,30 @@ def check_verdict_tally(text: str) -> list[str]:
     # de-bolded stale list plus one compliant bolded decoy — the historical exploit,
     # re-shaped — read CLEAN where the parent refused it (measured). A letter list is
     # a letter list however it is marked up, and the page's own §3 spells its overtaken
-    # group in plain text, so four forms count: `**(x)**`, a parenthesised run
-    # `(b), (c)`, a plain run `b, c, d`, and a plain pair `b and c`. ⛔ EVERY alternative
-    # is bounded to the page's own single-letter alphabet `a`–`l`: unbounded, the pair
-    # form matched ordinary prose (`as and in`, `to and fro`) and red the arm on a
-    # legitimate sentence, while DROPPING the form instead re-opened the hole it covers
-    # — a stale list spelled `c and d …` then read CLEAN beside one compliant decoy
-    # (both measured). A sentence carrying none of the four cannot be the arm's subject
-    # — there is no list in it to disagree with the table — which keeps a quotation out.
-    #: A LETTER LIST in any spelling — and a LIST, not one stray parenthetical: a
-    #: single `(c)` in ordinary prose is not a list, so it is not a candidate (that is
-    #: what keeps a sentence QUOTING the phrase out, measured).
+    # group in plain text, so the markup does not decide candidacy — what counts is a
+    # LIST of two or more single letters, comma-joined (`b, c, d`) or in a pair
+    # (`b and c`), with each letter written bold, code, italic or bare. ⛔ EVERY
+    # alternative is bounded to the page's own single-letter alphabet `a`–`l`, the only
+    # letters §3's table can name: unbounded, the pair form matched ordinary prose
+    # (`as and in`, `to and fro`) and red the arm on a legitimate sentence; dropping the
+    # form instead re-opened the hole it covers (a stale `c and d …` list read CLEAN
+    # beside one compliant decoy); and requiring MARKUP (`**(x)**` only) let a
+    # de-bolded or backticked stale list ride out of the count. All three measured.
+    # A single stray parenthetical `(c)` in prose is still NOT a list, which is what
+    # keeps a sentence that merely QUOTES the phrase out of the count.
+    #: One letter, marked up the four ways this repo writes them: bold `**(a)**`,
+    #: code `\`a\``, italic `*a*`, and bare `(a)` / `a`.
+    #: One letter, in the four spellings this repo writes them.
+    MARKED = r"(?:\*\*\([a-l]\)\*\*`|`\(?[a-l]\)?`|\*\([a-l]\)\*)"
+    BARE = r"\b[a-l]\b"
+    ITEM = r"(?:" + MARKED + r"|" + BARE + r")"
     letter_sentence = re.compile(
-        r"\*\*\([a-l]\)\*\*"  # a bolded letter: **(a)**
-        r"|\([a-l]\)(?:\s*,\s*\([a-l]\))+"  # a parenthesised run: (b), (c)
-        r"|\b[a-l]\b(?:\s*,\s*\b[a-l]\b)+"  # a plain run: b, c, d
-        r"|\b[a-l]\b\s+and\s+\b[a-l]\b"  # a plain pair: b and c
+        # a MARKED single letter is always a candidate: `**(a)**` alone is a tally
+        # sentence that names one row, which the letter/attribution arms must read.
+        MARKED
+        + r"|\([a-l]\)"  # a bare parenthesised letter: (a)
+        + r"|" + ITEM + r"(?:\s*,\s*" + ITEM + r")+"  # a list: b, c, d
+        + r"|" + ITEM + r"\s+and\s+" + ITEM  # a two-item list: b and c
     )
     # ⛔ A SENTENCE THAT ONLY **QUOTES** THE PHRASE IS NOT ASSERTING IT. The page
     # discusses the phrase in §8 and in this very comment, so a sentence can contain it
