@@ -1649,9 +1649,12 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
                   embedding="abc")
 
     # 8. ⛔ THE SAME JUNK CARRIED ON THE RECORD, which is the shape the arms
-    #    above MISS (#12000 round-10 re-review, F1' — measured). The post-stamp
-    #    belt only inspects the ENVELOPE's own `embedding`, so a junk vector
-    #    inside `record` never meets it — and the grid arm alone called
+    #    above MISS (#12000 round-10 re-review, F1' — measured). This is NOT a
+    #    channel the belt cannot see: the belt is handed `event["point"]` as the
+    #    record and the merged view lets the record win, so it ran on this
+    #    vector too and let it through because it ran the SAME permissive
+    #    predicate (that is the defect arm 8 fixes, and the reason the two arms
+    #    are not duplicates of each other). The grid arm called
     #    `shortest_float32_vector(values)`, which reads its argument as
     #    `[float(x) for x in vector]`: a `str` is a sequence of CHARACTERS
     #    (`"123"` → `[1.0, 2.0, 3.0]`), `bytes` a sequence of INTS, a `dict` a

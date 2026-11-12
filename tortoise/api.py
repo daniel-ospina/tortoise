@@ -341,14 +341,21 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         # both ON the grid, so the arm answered "truthful" about the wrong
         # object, in the PERMISSIVE direction. `_is_shortest_f32_text` refuses
         # exactly these three types for exactly this reason; the grid arm must
-        # too. Measured at `0a86cb5a87`, with the junk on the RECORD (where the
-        # post-stamp belt cannot see it, because the stamp only touches the
-        # envelope's own `embedding`):
+        # too. Measured at `0a86cb5a87`, with the junk on the RECORD — where the
+        # post-stamp belt DID run and DID see it (it is handed `event["point"]`
+        # as the record, and the merged view lets the record win), and let it
+        # through because it ran the SAME permissive predicate this arm did:
         #
         #     _emit("PointAdded", {"id": "p", "content": "c",
         #                          "embedding": "123",
         #                          "embedding_width": "f32"})
         #       -> journalled, and the FOLD stored point.embedding = '123'
+        #
+        # ⛔ The belt is NOT a duplicate of this arm and must not be read as one
+        # (#12000 cycle-3 review, P3): an empty vector passes HERE (it is
+        # representable at every width) and only the belt refuses it once the
+        # stamp has made it absent. Both arms need the guard, and neither covers
+        # a different CHANNEL — they cover the same pair at two moments.
         if isinstance(values, (str, bytes, dict)):
             truthful = False
         else:
