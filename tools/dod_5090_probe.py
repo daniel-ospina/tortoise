@@ -432,6 +432,27 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "`clean.setdefault(\"embedding\", None)`, and `update_point`'s `emit_props` on the "
         "`PointRevised` record). Their gate-side half is `gated` and lies outside this "
         "census's population"),
+    "tortoise.api::_emit": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::_emit` — a CARRIER: the vector its record carries is stamped by the "
+        "seam (`stamp_journal_embedding`) and stored by the FOLD, so there is no store clause in "
+        "its own body (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`). The instrument's "
+        "match is COMMENT PROSE — `#12000`'s F1b note quotes the shape its guard REJECTS "
+        "(a non-numeric `embedding` on the keyword payload), and `_EMBED_WRITE` reads raw "
+        "source, so a comment naming the rejected shape enrols the function. The same "
+        "prose-match class as `tortoise.sdk::_update_entity` and "
+        "`tortoise.projection::_prewipe_synthetic_write_scope`"),
+    "tortoise.api::_verify_record_vector_width": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::_verify_record_vector_width` — a VERIFIER, not a producer: it reads "
+        "the record's declared `embedding_width` and the width's own vector and asks the seam "
+        "whether the declaration is truthful (`#11835` review round 9, P1). The instrument's "
+        "matches are its PROSE — the DOCSTRING reproducing the measured `_emit(...)` calls, and "
+        "the TWO BODY COMMENTS that record the later measured cases (a non-numeric "
+        "`embedding` and the fold storing the raw text); a lane that reworded only the "
+        "docstring is still in the population (measured). `_EMBED_WRITE` reads raw source, so "
+        "prose QUOTING the shape matches, as `tortoise.projection::_prewipe_synthetic_write_scope`'s "
+        "does. It issues no write at all (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`)"),
     "tortoise.consistency::_compare_views": (
         CENSUS_EXEMPT,
         "issues no write; the only WRITE-SHAPED text is a COMMENT in "
@@ -581,6 +602,27 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.api::add_point": (
         ("tortoise/api.py", "add_point",
          'p["embedding"] = fields["embedding"]'),),
+    "tortoise.api::_emit": (
+        ("tortoise/api.py", "_emit", 'embedding="abc"'),
+        # ⛔ NOT `stamp_journal_embedding =` — that needle matches the import-failure
+        # FALLBACK (`stamp_journal_embedding = None`), so it survived deleting the stamp
+        # call the row's premise rests on (cycle-3 review, measured). Cite the CALL.
+        ("tortoise/api.py", "_emit",
+         "event = stamp_journal_embedding(event, creating=False)"),),
+    "tortoise.api::_verify_record_vector_width": (
+        ("tortoise/api.py", "_verify_record_vector_width",
+         "embedding=[0.1234567890123, 1/3]"),
+        # ⛔ The DECISION, not the import that feeds it: `JOURNAL_VECTOR_WIDTH_F32 as _F32`
+        # survives turning the refusal into an abstention, so it proved less than the
+        # row's reason claims (cycle-4 review, measured).
+        ("tortoise/api.py", "_verify_record_vector_width",
+         "declared != _F32"),
+        # ⛔ And the REFUSAL's own sentence, because the decision line above survives turning
+        # the refusal into an abstention (`if not truthful: return`) — measured in cycle 5.
+        # This needle vanishes under exactly that mutation, which is the drift the row's
+        # reason promises against ("a declared f32 over it is refused").
+        ("tortoise/api.py", "_verify_record_vector_width",
+         "is not what the values say"),),
     "tortoise.consistency::_compare_views": (
         ("tortoise/consistency.py", "_compare_views",
          "n.embedding=vecf32($embedding)"),),

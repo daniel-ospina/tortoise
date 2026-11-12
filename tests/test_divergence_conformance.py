@@ -264,7 +264,7 @@ def test_d4_bulk_wipe_graph_guard(leg, tmp_path):
     # Server leg — explicit host= construction (never redirects).
     proj = FalkorProjection(host=_live_utils.service_host(),
                         port=_live_utils.docker_port(),
-                            password="falkordb",
+                            password=_live_utils.docker_password(),
                             graph_name="divergence_guard_probe")
     try:
         with pytest.raises(RuntimeError, match="Graph guard"):
@@ -278,7 +278,7 @@ def test_d4_bulk_wipe_graph_guard(leg, tmp_path):
     # A test_-prefixed graph passes the guard.
     proj2 = FalkorProjection(host=_live_utils.service_host(),
                         port=_live_utils.docker_port(),
-                             password="falkordb",
+                             password=_live_utils.docker_password(),
                              graph_name="test_d4_guard_probe")
     try:
         proj2.g.query("MATCH (n) DETACH DELETE n")  # allowed
@@ -376,7 +376,7 @@ def test_d7_boolean_index_purge(leg, tmp_path):
     # would otherwise read 0 forever).
     proj = FalkorProjection(host=_live_utils.service_host(),
                         port=_live_utils.docker_port(),
-                            password="falkordb",
+                            password=_live_utils.docker_password(),
                             graph_name="test_d7_sweep")
     try:
         proj.g.query("MATCH (n) DETACH DELETE n")
@@ -386,7 +386,7 @@ def test_d7_boolean_index_purge(leg, tmp_path):
         proj = None  # reopen below
         proj2 = FalkorProjection(host=_live_utils.service_host(),
                         port=_live_utils.docker_port(),
-                                 password="falkordb",
+                                 password=_live_utils.docker_password(),
                                  graph_name="test_d7_sweep")
         try:
             rows = proj2.g.query("CALL db.indexes()").result_set

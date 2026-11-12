@@ -359,7 +359,8 @@ def test_redirect_connection_boundedness(uri_env):
     assert len(live) <= 1, \
         f"close() leaked {len(live)} of 20 live ConnectionPool instances (weakref)"
     probe = redis.Redis(host=_live_utils.service_host(),
-                    port=_live_utils.docker_port(), password="falkordb",
+                    port=_live_utils.docker_port(),
+                        password=_live_utils.docker_password(),
                         socket_connect_timeout=5)
     try:
         before = int(probe.info("clients")["connected_clients"])
@@ -369,7 +370,8 @@ def test_redirect_connection_boundedness(uri_env):
         p = FalkorProjection(_tmp_db(f"seam-conn-{i}.db"))
         p.close()
     probe = redis.Redis(host=_live_utils.service_host(),
-                    port=_live_utils.docker_port(), password="falkordb",
+                    port=_live_utils.docker_port(),
+                        password=_live_utils.docker_password(),
                         socket_connect_timeout=5)
     try:
         after = int(probe.info("clients")["connected_clients"])

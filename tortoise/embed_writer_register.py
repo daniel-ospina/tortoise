@@ -388,9 +388,10 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #: tuple like `("Event",)`), or one of the two dispositions below.
 #: ⛔ "This writer's own body", NOT "where the value finally lands": a CARRIER writer whose value
 #: the FOLD later stores (a journal append — `tortoise.api::add_point`,
-#: `tortoise.sdk::_journal_event_raw_write`) declares :data:`NO_LIVE_VECTOR`, because the store is
+#: `tortoise.api::_emit`, `tortoise.sdk::_journal_event_raw_write`) declares
+#: :data:`NO_LIVE_VECTOR`, because the store is
 #: not in its body and a tuple here would attribute the fold's label to it. Reading the field as
-#: "where the vector ends up" re-declares those two entries and re-opens exactly the ambiguity
+#: "where the vector ends up" re-declares those three entries and re-opens exactly the ambiguity
 #: `#11492`'s first review round closed.
 #:
 #: ⛔ Why this belongs in the declaration and NOT in a derivation inside the instrument: of the
@@ -855,6 +856,39 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
         ),
     ),
     # ── Writers that store NO vector: the instrument's false positives and its passthroughs ──
+    (
+        "tortoise.api::_emit",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/api.py::_emit` — a CARRIER (its record's vector is stamped by the seam and "
+            "stored by the FOLD), so :data:`NO_LIVE_VECTOR` is the shape the two other carriers "
+            "(`tortoise.api::add_point`, `tortoise.sdk::_journal_event_raw_write`) already take. "
+            "The instrument's own match is COMMENT PROSE: `#12000`'s F1b note quotes the shape it "
+            "rejects (`embedding=\"abc\"` on the payload), and `_EMBED_WRITE` reads a function's "
+            "RAW SOURCE, so the quote enrols this function. The function itself writes no Cypher "
+            "and names no label — the fold's label is not this writer's to declare",
+            "#11835",
+            stores=NO_LIVE_VECTOR,  # the match is a COMMENT quoting a REJECTED shape
+        ),
+    ),
+    (
+        "tortoise.api::_verify_record_vector_width",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/api.py::_verify_record_vector_width` — a VERIFIER: it reads a record's "
+            "declared `embedding_width` and the width's own vector, asks the seam whether the "
+            "declaration is truthful, and stores nothing. The instrument's matches are its "
+            "PROSE — the DOCSTRING, which reproduces the measured `_emit(...)` calls (a literal "
+            "keyword payload is what was measured, `#11835` review round 9 P1), AND the two body "
+            "comments that record the later measured cases (`embedding=\"abc\"` and the fold "
+            "storing `'123'`); a third of the three is in the docstring, so a lane that reworded "
+            "only the docstring would still be in the population (measured). `_EMBED_WRITE` reads "
+            "raw SOURCE, so prose QUOTING a shape matches, as it does for "
+            "`tortoise.projection::_prewipe_synthetic_write_scope`",
+            "#11835",
+            stores=NO_LIVE_VECTOR,  # matches are its DOCSTRING + 2 body comments, all prose
+        ),
+    ),
     (
         "tortoise.consistency::_compare_views",
         WriterClass(

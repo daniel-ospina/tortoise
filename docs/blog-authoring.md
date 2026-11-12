@@ -302,13 +302,13 @@ exposure is one extra submission — not a flood — but it is not zero.
 ### The key file
 
 The key is a public value, checked in rather than a secret: the endpoint proves we own the host by
-fetching `https://tortoise.premiselabs.co/<key>.txt`, so the file must be readable by anyone. It is
+fetching `https://premiselabs.co/<key>.txt`, so the file must be readable by anyone. It is
 committed at `website/<key>.txt` (that directory is the deploy root) and its only content is the key.
 After a deploy, this must answer 200 with the key alone:
 
 ```bash
 KEY=$(grep -o 'INDEXNOW_KEY = "[a-f0-9]*"' website/functions/blog/_shared/indexnow.ts | cut -d'"' -f2)
-curl -sS -D- "https://tortoise.premiselabs.co/$KEY.txt"
+curl -sS -D- "https://premiselabs.co/$KEY.txt"
 ```
 
 That command is a spot check, not the gate. `deploy-pages` asserts the deployed surface in two
@@ -318,8 +318,12 @@ and a body byte-identical to the constant the submitter sends — a trailing new
 every submission, so the byte count is compared, not just the text. It reads the file through a
 per-run nonce and refuses a `cf-cache-status: HIT` answer, so a cached copy of the previous
 deployment cannot satisfy it (#4050), and then reads the canonical URL the endpoint is handed, which
-is where the file has to be intact as well. It also asserts that `/blog/api/notify-publish` at the
-marketing origin still refuses an anonymous caller with its admin gate. `deploy-dashboard`
+is where the file has to be intact as well — that URL is `https://premiselabs.co/<key>.txt`, because
+since #11765 the endpoint is told `host=premiselabs.co` and resolves `keyLocation` against it. It also
+asserts that `/blog/api/notify-publish` still refuses an anonymous caller with its admin gate — that
+probe is on the PRODUCT host (`tortoise.premiselabs.co`), not on the marketing origin: `/blog/api/*`
+is deliberately excluded from the `/blog*` 301, so it is the one blog surface the retired host still
+serves. `deploy-dashboard`
 (`Post-deploy — the app-origin IndexNow proxy answers its session gate (#9680)`) asserts the hop the
 console actually calls: that the app-origin proxy route exists and answers its own session gate. It is
 the route's presence that one proves, not the upstream handler — an anonymous call is refused at the
@@ -341,13 +345,13 @@ waiting for a retry.
 KEY=$(grep -o 'INDEXNOW_KEY = "[a-f0-9]*"' website/functions/blog/_shared/indexnow.ts | cut -d'"' -f2)
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://api.indexnow.org/indexnow \
   -H 'Content-Type: application/json; charset=utf-8' \
-  -d "{\"host\":\"tortoise.premiselabs.co\",\"key\":\"$KEY\",
-       \"keyLocation\":\"https://tortoise.premiselabs.co/$KEY.txt\",
-       \"urlList\":[\"https://tortoise.premiselabs.co/blog\",
-         \"https://tortoise.premiselabs.co/blog/state-of-agentic-memory-2026\",
-         \"https://tortoise.premiselabs.co/blog/agent-memory-software-engineering-bottleneck\",
-         \"https://tortoise.premiselabs.co/blog/types-of-agent-memory\",
-         \"https://tortoise.premiselabs.co/blog/agents-dont-need-more-memory-they-need-a-world-model\"]}"
+  -d "{\"host\":\"premiselabs.co\",\"key\":\"$KEY\",
+       \"keyLocation\":\"https://premiselabs.co/$KEY.txt\",
+       \"urlList\":[\"https://premiselabs.co/blog\",
+         \"https://premiselabs.co/blog/state-of-agentic-memory-2026\",
+         \"https://premiselabs.co/blog/agent-memory-software-engineering-bottleneck\",
+         \"https://premiselabs.co/blog/types-of-agent-memory\",
+         \"https://premiselabs.co/blog/agents-dont-need-more-memory-they-need-a-world-model\"]}"
 ```
 
 A `200` or `202` means accepted. A `403` means the key file was not found at the host root (deploy it
