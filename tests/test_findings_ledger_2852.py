@@ -190,11 +190,13 @@ def test_mutation_population_is_pinned():
     arm 8. An ordinal is a count, and this one was already wrong when the sentence that
     introduced it failed to bump the floor it had just moved (25 -> 26).
 
-    #11952 added the 29th: the GitHub permalink spelling (path, `#`, `L`, line number)
-    matched NO pattern in this module, so both an out-of-range and an in-range
-    permalink left the page CLEAN — the likeliest real-world citation form was also
-    the one shape that looked verified and was not. The population and the floor move
-    together.
+    #11952 added the `#L` permalink arm: the GitHub permalink spelling (path, `#`, `L`,
+    line number) matched NO pattern in this module, so both an out-of-range and an
+    in-range permalink left the page CLEAN — the likeliest real-world citation form was
+    also the one shape that looked verified and was not. The population and the floor
+    move together. ⛔ No ordinal here either, measured rather than assumed: the "29th"
+    that stood in this sentence named arm 29, which is `a citation separated from its
+    line by a pipe` — the permalink arm is 28.
 
     The #11902 re-verification added the 32nd–35th (the population was 31 at the head
     it re-measured), one per fail-open it found still
