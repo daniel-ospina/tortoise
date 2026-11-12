@@ -485,10 +485,19 @@ _UNRESOLVED = {
     # read; `_propagation_counts` is three aggregate counts over live `:Point`s
     # (`count(n)`, `sum(CASE …)`). Neither has a SET/CREATE/MERGE/DELETE/REMOVE,
     # neither calls a write procedure, and neither appends a journal record —
-    # they exist to REPORT the propagation state, never to change it. The
-    # `_reachable_claim_count` row that used to sit here moved to
-    # `_edged_claim_ids` when the query was hoisted out of it (the function no
-    # longer touches the handle, so its row became stale).
+    # they exist to REPORT the propagation state, never to change it.
+    #
+    # ⛔ `_reachable_claim_count` is NOT in this set, and its absence is NOT
+    # "it stopped touching the handle" (#12138 §7). It still runs a full
+    # live-`:Point` id scan (`MATCH (n:Point) WHERE <non-operator> RETURN n.id`)
+    # on every call, then `_window_closure(anchors, max_hops)` and
+    # `_edged_claim_ids()`. What the #11823 extraction actually moved out of it
+    # was its OWN statement: the remaining literal — the anchor scan — is
+    # provable, while the edged predicate it depends on lives in
+    # `_edged_claim_ids`, whose row is above. Dropping the row from an audit
+    # whose question is "does this reach the write handle, and is it provably a
+    # read" would answer a WRITE-door audit with the wrong fact: the function
+    # still performs one id scan per call.
     "_edged_claim_ids",
     "_propagation_counts",
     # #3590: `_refuse_ambiguous_rename` interpolates the LABEL into its probe

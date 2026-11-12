@@ -144,7 +144,10 @@ EMBEDDED_LATENCY_BUDGET_S = 0.5
 # — on a POLLED endpoint (#12116 review P2). The two therefore agree by VALUE,
 # not by text, and `tests/test_11823_propagation_cap_signal.py`
 # (`test_untested_operator_less_population_matches_trivial_stamp`) is what keeps
-# them equal.
+# them equal. ⛔ That test builds ITS query FROM this constant (#12138 §6), so a
+# drift in the constant reddens it — the block keeps deriving its own number
+# because the negated pattern is a production cost and a 5-node fixture is the
+# only place it is affordable.
 TRIVIAL_STAMP_PREDICATE = (
     "(n.is_operator IS NULL OR n.is_operator = false) "
     "AND (n.status IS NULL OR n.status <> 'draft') "
