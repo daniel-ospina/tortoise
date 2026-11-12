@@ -1,0 +1,69 @@
+LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
+    # The label and the vector clause in ONE statement.
+    "tortoise.projection.entities::_event_plain_merge": (
+        "tortoise/projection/entities.py", "_event_plain_merge",
+        'MERGE (e:Event {eventId: $eid})', frozenset({"Event"})),
+    "tortoise.sdk::_embedding_repair_attempt": (
+        "tortoise/sdk.py", "_embedding_repair_attempt",
+        'MATCH (e:Event {eventId:$eid})', frozenset({"Event"})),
+    "tortoise.sdk::_write_capture_turns": (
+        "tortoise/sdk.py", "_write_capture_turns",
+        "t.embedding=CASE WHEN turn.emb IS NOT NULL THEN vecf32(turn.emb)",
+        frozenset({"Point"})),
+    # The label is in the enclosing statement, the vector in the shared clause: the needle is the
+    # STORE STATEMENT, and the alias letter it passes is what ties the two together.
+    "tortoise.sdk::_session_event_write": (
+        "tortoise/sdk.py", "_session_event_write",
+        '"MERGE (e:Event {eventId:$eid}) "', frozenset({"Event"})),
+    "tortoise.sdk::ingest_corpus": (
+        "tortoise/sdk.py", "ingest_corpus",
+        '"SET e += $props, " + set_embedding_clause("e")', frozenset({"Event"})),
+    "tortoise.session_indexer::main": (
+        "tortoise/session_indexer.py", "main",
+        '"SET e += $props, " + set_embedding_clause("e")', frozenset({"Event"})),
+    # The two where the label is NOT the enclosing word: `Point` in the MATCH of the restore
+    # (`:Batch`/`:Session` appear in the same body but carry no vector — the pre-wipe snapshot),
+    # and the canonical-label constant for the generic update door (five labels, one tuple).
+    "tortoise.projection::_rebuild_all_replay": (
+        "tortoise/projection/__init__.py", "_rebuild_all_replay",
+        '"MATCH (n:Point {id:$pid}) " + restore_guard', frozenset({"Point"})),
+    # The needle names the per-label LOOP, not the loop's variable: `#11836`
+    # renamed the unused binding `prop` -> `_prop` and the name-sensitive
+    # `"for label, prop in …"` form redded on unchanged store evidence. What the
+    # declaration is derived FROM is the iteration over the canonical constant
+    # (the `SET n += $p` map-merge inside it is the store), so the variable is
+    # not part of the claim and a rename is not a store move.
+    # The code site states the same thing in its own terms, and says why the rename
+    # cannot reach the write: the primary key is derived THROUGH
+    # `_entity_identity_probes()` and never by naming the binding, and the same
+    # rename once turned the guarded path into a `NameError` with every test green
+    # (`#11836`, VGATE round 13). So a guard that reds on the rename is measuring
+    # the rename, not the store — and its message ("the store moved") is a wrong
+    # diagnosis of a declaration that is still true.
+    # ⛔ `#11954`: and the needle is only the SEARCH KEY, never the proof. `#11936`
+    # shortened it to `"in _CANONICAL_ENTITY_ID_PROPS:"`, which is a SUBSTRING:
+    # it said the text occurs in the body, not which statement carries it, so a
+    # re-targeted loop plus one surviving `if label in _CANONICAL_ENTITY_ID_PROPS:`
+    # kept this row green with the store moved (the issue carries the run). The
+    # row is therefore also a STRUCTURAL claim, declared in `ITERATED_STORE_CLAIM`
+    # and proved on the AST: a `for` whose ITERABLE is that constant, whose body
+    # stores, and whose binding the store clause is built from. Both arms must
+    # hold — the statement arm (`_carrying_statements`) and the iterated one —
+    # which is what a rename of the binding still passes and a re-target cannot.
+    "tortoise.sdk::_update_entity": (
+        "tortoise/sdk.py", "_update_entity",
+        "in _CANONICAL_ENTITY_ID_PROPS:",
+        frozenset({"Point", "Subject", "Object", "Source", "Event"})),
+    # `#11641`: the two writers whose label used to be decided at RUNTIME, so row 2 could not
+    # compare them to the served set. Each now OWNS the label at its own seam, and the needle is
+    # that seam — not the store clause, which is deliberately un-nameable in both writers (the dump
+    # interpolates its labels; the door executes its caller's statement).
+    "tortoise.hosted_backup::restore_graph": (
+        "tortoise/hosted_backup.py", "restore_graph",
+        "_require_served_restore_labels(",
+        frozenset({"Point", "Subject", "Object", "Source", "Event"})),
+    "tortoise.sdk::_event_raw_write_door": (
+        "tortoise/sdk.py", "_event_raw_write_door",
+        "_declared_labels = {label for label, _id_prop in _RAW_WRITE_DOOR_LABELS}",
+        frozenset({"Event"})),
+}

@@ -1,0 +1,122 @@
+UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
+    "map-merge (`SET n += $p`)": (
+        "whether the merged map carries an `embedding` is DATA FLOW, not syntax: "
+        "60 functions in `tortoise/` merge a props map and almost none can carry a "
+        "vector, so a syntactic rule would force dozens of declarations that assert "
+        "nothing. There are TWO live instances, and they are dispositioned differently: "
+        "`sdk._update_entity` carries the NAMED `#4094` exemption in the register, and "
+        "`sdk.update_point` merges through `n += $props` in its promote arm while ALSO "
+        "calling `encode_for_row` — so discovery classes it `gated` before any write "
+        "predicate runs and it owes (and carries) no declaration (#11398)"
+    ),
+    # ── The SHALLOW-BINDING forms of an alias that the `ImportFrom` resolver does NOT reach ──
+    # ⛔ `#12020` round 6. The alias bullet above closes `from … import X as Y`. These four are
+    # the same decision expressed other ways, they are BLIND today, and each is MEASURED (`{}` =
+    # absent from the population, `gated` = owes nothing) rather than inferred — the register's
+    # claim must not be read as "every aliasing spelling is resolved". Pinned by
+    # `tests/test_embed_writer_register.py::test_the_alias_forms_discovery_still_cannot_see_are_named`,
+    # which reds BOTH when the naming is deleted and when one of them stops being blind.
+    "assignment alias (`_set = set_embedding_clause`) ": (
+        "a bare `Name` bound from an imported name is the same DECLARED symbol as the `as` form, "
+        "but `_import_aliases` reads only `ast.ImportFrom`, so the writer below is ABSENT from the "
+        "population (measured `{}`) and no register row can ever be owed for it:"
+        "\n\n    from tortoise.vector_write import set_embedding_clause"
+        "\n    _set = set_embedding_clause"
+        "\n    def w(proj):"
+        "\n        return proj.g.query(\"MATCH (y) SET y += $p\", {\"p\": _set(\"y\")})"
+    ),
+    "assignment alias for the GATE (`_enc = encode_for_row`)": (
+        "the same shape reached at the seam instead of a clause builder: measured `{}` — the "
+        "writer is absent, so the row that says no write path embeds outside the gate cannot see "
+        "this one at all. Named rather than assumed absent."
+    ),
+    "module-qualified builder (`vw.clear_then_set_prefix`) ": (
+        "`import tortoise.vector_write as vw` then `vw.clear_then_set_prefix(\"n\")`: measured "
+        "`{}`. The TEXT pass knows only the literal spelling `set_embedding_clause(`, which is why "
+        "the SECOND clause builder is invisible in this form even unaliased."
+    ),
+    "`global` rebinding of an alias inside a nested scope": (
+        "`global _enc` + `_enc = lambda …` inside a nested `def` rebinds the module alias for the "
+        "whole writer, and the own-scope rule cannot see it: measured `gated` — the DANGEROUS "
+        "direction, because `gated` is outside the guard's population, so the writer owes no "
+        "declaration while never reaching the gate. ⛔ The KEYWORD is not the mechanism: "
+        "`globals()[\"_enc\"] = lambda …` from the nested scope rebinds the module binding by the "
+        "other route and measures the SAME `gated`, so this entry is about writing the module "
+        "binding from a nested scope by ANY route, not about the statement."
+    ),
+    # ⛔ `#12020` round 6 review (P3) — the ENCLOSING-scope axis, fifth blind spelling. Not a
+    # regression (`main` missed the nested writer too), but the register's alias bullet reads
+    # unqualified, so the residual is NAMED here rather than left to be inferred from it.
+    "closure-scoped alias (`def factory(): from … import encode_for_row as _enc; def w(): …`)": (
+        "the alias is imported in the ENCLOSING function and called in a NESTED one: "
+        "`_import_aliases` reads the MODULE and the WRITER's own scope only, so the nested writer "
+        "is never resolved and never discovered — measured `{}` for it — while the call walk "
+        "descends into the nested body and classes the ENCLOSING function `gated` (measured "
+        "`{'tortoise.m::factory': 'gated'}`). A writer that stores nothing therefore stands in the "
+        "population in place of the one that does. Naming the form is the honest statement: "
+        "closing it means threading the ENCLOSING chain through both the alias map and the "
+        "discovery walk — a widening of the model, not a spelling. Pinned by "
+        "`tests/test_embed_writer_register.py::test_the_alias_forms_discovery_still_cannot_see_are_named`."
+    ),
+    # ⛔ `#12020` — the REACHABILITY axis, which NONE of the entries above covers (they are scope,
+    # spelling and data-flow residuals between them, so naming this one "the" other axis would
+    # mis-taxonomise the rest). Found by re-measuring the round-7 fix at `b9a92e901a` rather than by
+    # reading it: the scope threading is correct and the shape below is what it does not cover.
+    "never-run call (`def`, `lambda`, class-body method, or an unreachable own-scope statement)": (
+        "a seam call the writer never RUNS — in a nested scope that is never entered, or behind an "
+        "`if False` / `while False` / a statement after `return` in the writer's OWN scope: the "
+        "call never executes, so `w` reaches no gate and `unresolved_write` is what the rule wants — "
+        "measured `gated`, i.e. outside `NEEDS_A_DECLARATION`, the DANGEROUS direction (the writer "
+        "owes nothing while it reaches nothing). ⛔ AND THE HARM IS WIDER THAN A PHANTOM CREDIT: the "
+        "`SEAM_CALL` branch is taken BEFORE the write predicate (`if SEAM_CALL in called: kind = "
+        "\"gated\"`, then `elif set(UNGATED_CALLS) & called`), so a never-run seam call MASKS a LIVE "
+        "ungated reach: a writer whose real `encode_for_store` write is fully ungated, plus one "
+        "`if False: _enc(text, 384)`, leaves `NEEDS_A_DECLARATION` entirely (measured `ungated` → "
+        "`gated`; the same composition with the dead call in a never-called nested `def` → `w` "
+        "`gated`). For that composition the repaired verdict is therefore `ungated`, NOT "
+        "`unresolved_write`, and this residual must not be described as only ever over-crediting a "
+        "phantom. ⛔ THE AXIS IS REACH, NOT SCOPE, and this must not "
+        "be read as \"own-scope reach is trustworthy\": an UNREACHABLE statement in the writer's "
+        "own scope over-credits identically (measured, one shape per process: `if False:` → `w` "
+        "`gated`, `while False:` → `w` `gated`, after `return` → `w` `gated`). All spellings "
+        "measured the same way, one shape per process: a never-called nested `def` (`w` `gated`), "
+        "a never-called `lambda` body (`w` `gated`), and a method of a class the writer defines "
+        "and never instantiates (`w` `gated`) — which is why the entry names the CLASS of shape "
+        "rather than one spelling. "
+        "Distinct from `closure-scoped alias` above, which is about where the ALIAS binds; here "
+        "the alias resolves correctly and only the REACH is wrong. Recorded rather than repaired "
+        "for the AMBIGUOUS subset only: the three nested rows are decidable WITHOUT a call graph "
+        "(their nested binding is never referenced in the writer's own scope, so a conservative "
+        "\"do not descend into an unreferenced nested scope\" filter would close them), while "
+        "the returned / passed-by-reference / called-only-from-another-nested-body subset needs "
+        "one — `getattr` among the ways in — which is why the sibling `#11337` arm DECLARED its "
+        "bound at name-resolved calls only (that arm's own `DECLARED BOUND (#11337)` note) rather "
+        "than guessing past it; its recorded failure was a resolved call READ AS a by-reference "
+        "reach, i.e. an over-claim in the report, not a closure broken by guessing. The "
+        "conservative filter is "
+        "therefore the recorded repair path, not a claim. The two bounding controls hold and are "
+        "pinned in `ALIASED_IMPORT_SHAPES` (`honest_closure_still_credits_the_gate`, "
+        "`plain_control`): a writer with NO seam reach is `unresolved_write`, and the honest "
+        "CLOSURE the writer does call keeps its `gated`."
+    ),
+    # ⛔ `#12020` — the SPELLING axis, and the widest one: on the literal path the gate credit is
+    # NAME-BASED, so neither the shadow model nor `_ALIAS_HOMES` is ever consulted.
+    "literal seam spelling (`encode_for_row`) bypasses the shadow model and `_ALIAS_HOMES`": (
+        "the caller builds its reach set as `_callees(node) | {aliases[name] for name in "
+        "_named_callees(node)}`, and `_callees` returns a call's `id`/`attr` with NO home check "
+        "and NO shadow check. Both guards therefore constrain the ALIASED spelling only, so the "
+        "same three shapes measure OPPOSITELY depending on a cosmetic `as`: a writer-local "
+        "`encode_for_row = lambda` REBINDING OF THE LITERAL NAME, a nested `def helper(…)` "
+        "parameter, and `from thirdparty.lib import encode_for_row` all measure `gated` — owed "
+        "nothing — while their aliased equivalents (the same three written `… as _enc`) measure "
+        "`unresolved_write`, so the `as` is the only difference between the two columns. Measured, "
+        "one shape per process. Pre-existing "
+        "(`_callees` is byte-identical on `main`) and with NO live-tree instance: a latent "
+        "spelling, not a landed bypass. Named rather than repaired because closing it means "
+        "deciding, for a bare name, \"which binding does this call reach\" — the same call-graph "
+        "question as the entry above, on the same walk — and getting that wrong manufactures "
+        "declarations across the whole population (the cry-wolf direction). ⛔ An ATTRIBUTE call "
+        "`other.encode_for_row(…)` reaches `gated` here too, which is why the register no longer "
+        "says \"a bare call\"."
+    ),
+}

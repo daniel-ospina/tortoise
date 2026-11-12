@@ -1,0 +1,176 @@
+WRITER_CENSUS: dict[str, tuple[str, str]] = {
+    "tortoise.api::add_point": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::add_point` — discovered by the CONTAINER-KEY shape "
+        "(`p[\"embedding\"] = fields[\"embedding\"]`, `_EMBED_WRITE` cannot see it; "
+        "`#11274`). It writes a CALLER-supplied vector OVER the server one into the "
+        "journal payload, and that is the `#5004` contract rather than a producer: "
+        "the key stays PRESENT so an explicit `None` means \"this id has no "
+        "vector\", and a foreign vector is CARRIED (restored verbatim on replay) "
+        "with NO attestation, because its origin is not ours to vouch for. The "
+        "server vector is stamped by `_point` (a different function, under its own "
+        "seam). ⛔ A caller-supplied `embedding` is NOT refused by the SDK: `create_point`/"
+        "`update_point` store one VERBATIM by a recorded decision (PR `#3018` review P2), so a "
+        "TENANT can supply one on those paths — but not through THIS function. Here the branch "
+        "guards a vector a DIRECT `EventAPI` caller hands to `add_point(fields=…)` "
+        "(`tests/test_write_path_unreachable_seam_5148.py` pins that the key is CARRIED — under "
+        "its unimportable seam it cannot tell this branch from `p.update(fields)`); the tenant "
+        "doors' journal half lives in `tortoise.sdk` "
+        "(`_journal_snapshot_from_create_map` → `_emit_event`'s "
+        "`clean.setdefault(\"embedding\", None)`, and `update_point`'s `emit_props` on the "
+        "`PointRevised` record). Their gate-side half is `gated` and lies outside this "
+        "census's population"),
+    "tortoise.api::_emit": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::_emit` — a CARRIER: the vector its record carries is stamped by the "
+        "seam (`stamp_journal_embedding`) and stored by the FOLD, so there is no store clause in "
+        "its own body (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`). The instrument's "
+        "match is COMMENT PROSE — `#12000`'s F1b note quotes the shape its guard REJECTS "
+        "(a non-numeric `embedding` on the keyword payload), and `_EMBED_WRITE` reads raw "
+        "source, so a comment naming the rejected shape enrols the function. The same "
+        "prose-match class as `tortoise.sdk::_update_entity` and "
+        "`tortoise.projection::_prewipe_synthetic_write_scope`"),
+    "tortoise.api::_verify_record_vector_width": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::_verify_record_vector_width` — a VERIFIER, not a producer: it reads "
+        "the record's declared `embedding_width` and the width's own vector and asks the seam "
+        "whether the declaration is truthful (`#11835` review round 9, P1). The instrument's "
+        "matches are its PROSE — the DOCSTRING reproducing the measured `_emit(...)` calls, and "
+        "the TWO BODY COMMENTS that record the later measured cases (a non-numeric "
+        "`embedding` and the fold storing the raw text); a lane that reworded only the "
+        "docstring is still in the population (measured). `_EMBED_WRITE` reads raw source, so "
+        "prose QUOTING the shape matches, as `tortoise.projection::_prewipe_synthetic_write_scope`'s "
+        "does. It issues no write at all (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`)"),
+    "tortoise.consistency::_compare_views": (
+        CENSUS_EXEMPT,
+        "issues no write; the only WRITE-SHAPED text is a COMMENT in "
+        "`tortoise/consistency.py::_compare_views` quoting what `replay(journal)` "
+        "cannot produce (`n.embedding=vecf32($embedding)`). The function reads "
+        "`\"embedding\"` off both sides and APPENDS it to a divergence field "
+        "list — reads and appends, never a write clause"),
+    "tortoise.consistency::_graph_fingerprint": (
+        CENSUS_EXEMPT,
+        "`tortoise/consistency.py::_graph_fingerprint` — discovered by the "
+        "CONTAINER-KEY shape (`view[\"embedding\"] = props[\"embedding\"]`, "
+        "`#11274`). It copies a vector READ OFF THE GRAPH (`props` comes from "
+        "`graph_view`) into a comparison view dict, so the write target is an "
+        "in-memory view and not a stored vector — a READ, the same direction as "
+        "`turn_prior_vectors`"),
+    "tortoise.hosted_backup::restore_graph": (
+        CENSUS_RECOGNISED,
+        "`tortoise/hosted_backup.py::restore_graph` writes through the canonical "
+        "clause builder (`set_embedding_clause(\"n\", \"r.v\")`) from the "
+        "backed-up row"),
+    "tortoise.projection.entities::_event_plain_merge": (
+        CENSUS_RECOGNISED,
+        "`tortoise/projection/entities.py::_event_plain_merge` — "
+        "`set_embedding_clause(\"e\", preserve_on_null=False)` / "
+        "`set_embedding_clause(\"e\")`, the canonical clause"),
+    "tortoise.projection::_apply_one": (
+        CENSUS_EXEMPT,
+        "`tortoise/projection/__init__.py::_apply_one` — the instrument's match "
+        "is COMMENT PROSE, and the class is not inferred from that: the fold "
+        "never writes the vector, which the same comment states in its own "
+        "words (`⛔ This fold never SETS a real value`). `#8488`/`#10523` "
+        "documented the caller-vector clear as `#   2. a CALLER-VECTOR write "
+        "(`embedding=[…]` / `embedding=None`)`, and that prose is what "
+        "`_EMBED_WRITE` matches; the vector write belongs to the CARRIER "
+        "(`_upsert_point_props`, `n.embeddingText=$et`), not to this replay. "
+        "The only property the function touches is the TEXT prop — "
+        "`p.pop(\"embeddingText\", None)` — on an in-memory `{id: point}` "
+        "dict. Exempt as a fold of state computed ELSEWHERE, the same "
+        "direction as `turn_prior_vectors` (a mirror), and NOT the map-merge "
+        "the `_update_entity` entry carries: there is no `SET n += $p` here"
+    ),
+    "tortoise.projection::_prewipe_synthetic_write_scope": (
+        CENSUS_EXEMPT,
+        "`tortoise/projection/__init__.py::_prewipe_synthetic_write_scope` — the "
+        "match is inside the scope's DOCSTRING and the statement NULLs the "
+        "vector (`SET n.embedding = NULL`); a wipe is not a producer"),
+    "tortoise.projection::_rebuild_all_replay": (
+        CENSUS_RECOGNISED,
+        "`tortoise/projection/__init__.py::_rebuild_all_replay` calls "
+        "`set_embedding_clause(\"n\", \"$emb\")` (canonical clause). Its labels "
+        "are LITERAL (`n:Point` in that function's own Cypher) — the label reads "
+        "UNKNOWN only because the `unresolved_write` branch hardcodes "
+        "`UNKNOWN(unresolved producer)` and never derives one. ⚠️ It also holds "
+        "two OTHER embedding statements this class does not rest on: "
+        "`SET n.embedding = NULL` (a wipe) and a DIRECT `n.embedding = $emb` "
+        "that bypasses the canonical builder"),
+    "tortoise.record_read::turn_prior_vectors": (
+        CENSUS_EXEMPT,
+        "`tortoise/record_read.py::turn_prior_vectors` — `embedding=row[2]` "
+        "populates a dataclass from a returned row: a READ, with no write clause"),
+    "tortoise.sdk::_embedding_repair_attempt": (
+        CENSUS_RECOGNISED,
+        "the repair helper DOES compute and store: "
+        "`tortoise/sdk.py::_embedding_repair_attempt` carries "
+        "`embedding = self._session_embedding(...)` and `set_embedding_clause(\"e\")` "
+        "in its own body. It is a producer on the #5008 session chain, and a "
+        "repair by ROLE — both, so `exempt` would contradict the classes above"),
+    "tortoise.sdk::_event_raw_write_door": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::_event_raw_write_door` — a TRANSPORT door: it forwards "
+        "an already-computed `embedding` into `query_params` and executes the "
+        "statement inside `_live_write_scope` (the §17.1 sanctioned live-write "
+        "lane); it never computes one"),
+    "tortoise.sdk::_index_gate_read": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::_index_gate_read` — discovered by the CONTAINER-KEY "
+        "shape (`g[\"embedding\"] = rows[0][0]`, `#11274`). It is the fast-path "
+        "ROUTER READ: every statement it issues is a `MATCH … RETURN`, and the "
+        "container it fills is its own `g` dict — the vector is read off a "
+        "returned row and never written, the `turn_prior_vectors` direction"),
+    "tortoise.sdk::_index_process_unit": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::_index_process_unit` — the instrument's match is the "
+        "DIAGNOSTIC STRING `\"error\": \"indexed with embedding=None \"`, not a "
+        "write clause. That line sits on the `merge_outcome == \"indexed\"` "
+        "branch of the unit-completion path, whose store is DELEGATED to "
+        "`_session_event_write` in the same module. Its other stores are both "
+        "DELEGATED to `_embedding_repair_attempt`, at TWO distinct sites: the "
+        "repair-only branch (`embedding_only_incomplete`), and the "
+        "post-full-write repair site — whose own comment records that the "
+        "repair-only branch is NOT re-entered. Every callee is a recognised "
+        "producer, so this function produces no vector of its own"),
+    "tortoise.sdk::_journal_event_raw_write": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::_journal_event_raw_write` — the instrument matches the "
+        "SIGNATURE DEFAULT (`embedding=None`), not a write clause: `_EMBED_WRITE` "
+        "cannot see the dict-key form `record[\"embedding\"] = embedding` in that "
+        "function. It stores no LIVE graph vector, but its journal IS the "
+        "sanctioned replay carrier (`_upsert_event` consumes `embedding` off the "
+        "record instead of recomputing it) — exempt as a sanctioned carrier, NOT "
+        "because no store is reachable through it"),
+    "tortoise.sdk::_session_event_write": (
+        CENSUS_RECOGNISED,
+        "`tortoise/sdk.py::_session_event_write` — `self._session_embedding(...)` "
+        "→ `compute_session_embedding` (the documented #5008 exemption) + "
+        "`set_embedding_clause`"),
+    "tortoise.sdk::_update_entity": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::_update_entity` — the instrument's match is a COMMENT, "
+        "but that is only what the regex MATCHED — the function DOES store: "
+        "`point_props = dict(props)` keeps a caller-supplied `embedding` through "
+        "the map-merge (`SET n += $p`). `_EMBED_WRITE` cannot see a map-merge. "
+        "Exempt on the NAMED #4094 exemption, not on absence of a write"),
+    "tortoise.sdk::_write_capture_turns": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::_write_capture_turns` — discovered by the "
+        "CONTAINER-KEY shape (`_turn_snapshot[\"embedding\"] = turn_embs[i] …`, "
+        "`#11274`). The vector is `turn_embs[i]` (or the already-stored one) and is "
+        "never computed here: no `encode_for_row`, no `set_embedding_clause` in the "
+        "body. Exempt as the SANCTIONED TURN-RECORD carrier of the `#5008` session "
+        "chain — the same direction, and for the same reason, as "
+        "`_journal_event_raw_write`: its record IS what the rebuild reads the "
+        "vector back from (`#8488`), not a store reached around the gate"),
+    "tortoise.sdk::ingest_corpus": (
+        CENSUS_RECOGNISED,
+        "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
+        "`set_embedding_clause(\"e\")`, the same canonical chain"),
+    "tortoise.vector_write::set_embedding_clause": (
+        CENSUS_EXEMPT,
+        "`tortoise/vector_write.py::set_embedding_clause` — the clause BUILDER "
+        "itself; it renders the `<alias>.embedding = …` clause and stores no "
+        "vector"),
+}
