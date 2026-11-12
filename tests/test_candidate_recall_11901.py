@@ -708,17 +708,6 @@ def test_the_briefs_restatements_all_recompute(report, control):
         "§2 does not state the artifact's population and sample sizes "
         f"({report['corpus']['population']:,} / {report['corpus']['sample']})")
 
-    # ── §2: the corpus SHAPE the artifacts record. Both are committed
-    # integers — the file count and the population size — so they are pinnable
-    # in one line each, and §9 has to be right about which corpus facts are
-    # pinned and which are the live-collapse material it cannot pin.
-    assert f"{report['corpus']['files']} daily files" in text, (
-        f"§2 does not state the artifact's file count ({report['corpus']['files']})")
-    assert (f"Population {report['corpus']['population']:,}, "
-            f"stratified sample {report['corpus']['sample']}.") in text, (
-        "§2 does not state the artifact's population and sample sizes "
-        f"({report['corpus']['population']:,} / {report['corpus']['sample']})")
-
     # ── §6: the headline restated in the external-findings section.
     exact = report["arms"]["exact"]
     n = report["corpus"]["sample"]
