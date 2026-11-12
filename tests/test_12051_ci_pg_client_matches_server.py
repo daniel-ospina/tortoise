@@ -86,6 +86,17 @@ _INSTALL_CMD_RE = re.compile(
     re.MULTILINE,
 )
 
+#: An `exit 1` is only a fail action when it is a STATEMENT — never inside a
+#: quoted message, and never inside a heredoc body (that is data). `_statements`
+#: blanks quoted spans before the match, so an apostrophe INSIDE a double-quoted
+#: message (`echo "the image's client is major $major"; exit 1`) no longer breaks
+#: a quote-parity count — MEASURED, review of `f34c4fb741`: that armed branch red
+#: "does not `exit 1`", and the step's own live messages are full of `'`
+#: (`this image's archive`, `the drill's client`).
+_DQUOTED_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"')
+_SQUOTED_RE = re.compile(r"'[^']*'")
+_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)(?P<tag>\w+)\1")
+
 #: A fail action's `exit 1`, ANCHORED at the start of its STATEMENT — line start,
 #: or just after `;` / `&&` / `||` / `{` / `(`. Enumerating what may FOLLOW it
 #: instead (`;`, `}`, `)`, end-of-string) red every nested or commented fail
@@ -93,26 +104,52 @@ _INSTALL_CMD_RE = re.compile(
 #: level deeper, and the `if true; then … fi` wrapper all failed "does not
 #: `exit 1`" over a guard that exits 1 (MEASURED, review of `bfb7af441a`), while
 #: the same text passed the EXECUTED arm — the most misleading failure this file
-#: can produce. Anchoring at the start also refuses a spoof in a message string
-#: (`echo "::error::… exit 1 …"` is preceded by a space, not a separator).
+#: can produce.
 _EXIT_1_RE = re.compile(r"(?:^|;|&&|\|\||\{|\()[ \t]*exit[ \t]+1\b", re.MULTILINE)
 
 
-def _has_exit_1(text: str) -> bool:
-    """`_EXIT_1_RE`, refusing a hit whose line prefix sits INSIDE a quote.
+def _statements(line: str) -> str:
+    """One shell line with its quoted spans blanked. Single quotes first: inside
+    double quotes a `'` is a literal, so the spans must be removed outer-first."""
+    return _SQUOTED_RE.sub("''", _DQUOTED_RE.sub('""', line))
 
-    A separator inside a message string is not a statement boundary: without this,
-    `echo "::error::major mismatch; exit 1"` answered as a fail action and the
-    version branch — which no test executes — stayed green with no fail action at
-    all (MEASURED, review of `3726d2f400`). Quote parity per line is the whole
-    test; the residual is an escaped `\\"`, which no step in this workflow uses.
+
+def _without_heredocs(text: str) -> str:
+    """Drop heredoc bodies and their terminator lines: they are DATA, not shell.
+
+    STATED LIMIT: the LAST heredoc opened on a line is the one tracked — one
+    heredoc per line is what this workflow uses, and tracking several needs a real
+    shell tokenizer.
     """
+    kept: list[str] = []
+    terminator: str | None = None
     for line in text.splitlines():
-        for match in _EXIT_1_RE.finditer(line):
-            prefix = line[: match.start()]
-            if prefix.count('"') % 2 == 0 and prefix.count("'") % 2 == 0:
-                return True
+        if terminator is not None:
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        kept.append(line)
+        opener = _HEREDOC_RE.search(line)
+        if opener:
+            terminator = opener.group("tag")
+    return "\n".join(kept)
+
+
+def _has_exit_1(text: str) -> bool:
+    """`_EXIT_1_RE`, over statements only.
+
+    A separator inside a message string, and an `exit 1` inside a heredoc body,
+    are both DATA. Without the quote masking, `echo "…mismatch; exit 1"` answered
+    as a fail action and the version branch — which no test executes — stayed
+    green with no fail action at all (MEASURED, review of `3726d2f400`); without
+    the heredoc pass, a `cat <<'EOF'` body answered the same way (MEASURED, review
+    of `f34c4fb741`).
+    """
+    for line in _without_heredocs(text).splitlines():
+        if _EXIT_1_RE.search(_statements(line)):
+            return True
     return False
+
 
 #: The `$GITHUB_PATH` write as ONE unit: the versioned dir IS the value written.
 #: `echo <dir> >> "$GITHUB_PATH"` — read the major from the
@@ -121,6 +158,13 @@ GITHUB_PATH_PREPEND_RE = re.compile(
     r"echo\s+(?P<quote>['\"]?)/usr/lib/postgresql/(?P<major>\d+)/bin(?P=quote)"
     r"\s*>>\s*['\"]?\$GITHUB_PATH"
 )
+
+#: Any write to `$GITHUB_PATH`. Each line written to it is PREPENDED, so the LAST
+#: write decides `PATH` — a second write is therefore the same revert the single-regex
+#: read was written to close, and a `search` for the first one cannot see it
+#: (MEASURED, review of `f34c4fb741`: `echo …/16/bin >> $GITHUB_PATH` followed by
+#: `echo /usr/bin >> $GITHUB_PATH` passed all six).
+_GITHUB_PATH_WRITE_RE = re.compile(r">>[ \t]*['\"]?\$\{?GITHUB_PATH\}?")
 
 
 @pytest.fixture(scope="module")
@@ -153,6 +197,20 @@ def _pin_step(steps: list[dict]) -> tuple[int, dict]:
         for index, step in enumerate(steps)
         if CLIENT_INSTALL_RE.search(_code_only(_run_text(step)))
     ]
+    # Exactly ONE `apt-get install postgresql-client-*` in the JOB — counted as
+    # LINES, not steps: every major-bearing read is a first match, so a second
+    # install in the SAME step is invisible to all of them, and composed with a
+    # second `$GITHUB_PATH` write it is the complete silent revert (MEASURED,
+    # review of `f34c4fb741`: an appended `… postgresql-client-18` line in the pin
+    # step passed all six).
+    install_lines = sum(
+        len(CLIENT_INSTALL_RE.findall(_code_only(_run_text(step)))) for step in steps
+    )
+    assert install_lines == 1, (
+        f"expected exactly ONE `apt-get install postgresql-client-*` in `{JOB}`; "
+        f"found {install_lines} — a second installer makes the client whichever "
+        "one ran last, which is the class #12051 closed"
+    )
     assert len(hits) == 1, (
         "expected exactly ONE PostgreSQL-client pin step in "
         f"`{JOB}`; found {len(hits)} — a second installer makes the client "
@@ -289,6 +347,15 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # ONE regex over the WHOLE command: the versioned dir must be the value
     # WRITTEN TO `$GITHUB_PATH`. A bare `CLIENT_PATH_RE`/`"GITHUB_PATH" in text`
     # pair is satisfiable by two different lines and by an inert `export`.
+    # ONE write to `$GITHUB_PATH`, then read it: a second write decides PATH and
+    # no assertion counts it (see `_GITHUB_PATH_WRITE_RE`).
+    writes = _GITHUB_PATH_WRITE_RE.findall(_code_only(text))
+    assert len(writes) == 1, (
+        f"the pin writes `$GITHUB_PATH` {len(writes)} times — each write is "
+        "PREPENDED, so the LAST one decides `PATH` and only this assertion's "
+        "matched line is read. A second write (e.g. `/usr/bin`) is the full "
+        "revert #12051 removed, with the guard green"
+    )
     prepend = GITHUB_PATH_PREPEND_RE.search(_code_only(text))
     assert prepend, (
         "the pin step never writes a `/usr/lib/postgresql/<major>/bin` entry to "
@@ -405,6 +472,34 @@ KNOWN_GOOD_IMAGE_MAJOR = {
 #: refuses a substring pin for the same reason: a substring pin is satisfied by
 #: commenting the body out.
 _COMMENT_ONLY_RE = re.compile(r"^\s*#")
+
+
+def _continuation_runs(lines: list[str]) -> list[tuple[int, str]]:
+    """`(index of the run's FIRST line, the run's lines joined)` per shell command.
+
+    A line ending in `\\` continues onto the next one, so a command's tokens can be
+    split across raw lines and no per-line matcher can see it whole.
+    """
+    runs: list[tuple[int, str]] = []
+    buffer: list[str] = []
+    start = 0
+    for index, line in enumerate(lines):
+        if not buffer:
+            start = index
+        stripped = line.rstrip()
+        if stripped.endswith("\\"):
+            # The continuation marker is SYNTAX, not a token: keep it and the
+            # joined run would read `apt-get \   install`, which is not the
+            # command (MEASURED — that is what made the continued-install case
+            # still report "no `apt-get install` line").
+            buffer.append(stripped[:-1])
+            continue
+        buffer.append(line)
+        runs.append((start, " ".join(buffer)))
+        buffer = []
+    if buffer:
+        runs.append((start, " ".join(buffer)))
+    return runs
 
 
 def _code_only(text: str) -> str:
@@ -724,12 +819,25 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     # `set -euo pipefail`, reported the precondition missing (MEASURED, review of
     # `7dc1da573a`).
     masked = ["" if _COMMENT_ONLY_RE.match(line) else line for line in lines]
+    # Located over CONTINUATION RUNS, not single lines: `sudo apt-get \` +
+    # `install -y …` is one command, and a per-line scan found no install and
+    # reported "the pin has no `apt-get install` line to run up to" over a step
+    # that has one (MEASURED, review of `f34c4fb741`). The run's FIRST raw line is
+    # the truncation point, so the whole continued command stays out of the prefix.
     install_at = next(
-        (i for i, line in enumerate(masked) if _INSTALL_CMD_RE.search(line)),
+        (
+            start
+            for start, joined in _continuation_runs(masked)
+            if _INSTALL_CMD_RE.search(joined)
+        ),
         None,
     )
     assert install_at is not None, "the pin has no `apt-get install` line to run up to"
     prefix = "\n".join(lines[:install_at]).rstrip()
+    # A prefix that still ends in a dangling `\` would swallow the appended marker
+    # into the next command, so it is stripped rather than left to eat `echo …`.
+    if prefix.endswith("\\"):
+        prefix = prefix[:-1].rstrip()
     assert "apt-cache" in prefix, (
         "the precondition is not before the install in the committed step, so "
         "there is nothing to execute ahead of it (the order assertion above "
