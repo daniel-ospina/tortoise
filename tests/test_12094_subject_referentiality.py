@@ -1,4 +1,10 @@
-"""#12094 — the referentiality cue reaches the ONE Subject mint that lacked it.
+"""#12094 — the referentiality cue reaches the S7 ``subjects`` mint, which lacked it.
+
+⛔ NOT "the one Subject mint": a SECOND ``:Subject`` mint runs on the same document
+``_run_document`` (each Point's ``aboutEntities`` → ``_create_about_edges`` →
+``_mint_subject_stub``) and this change does not gate it — ``#12247`` records it,
+with the ``#8398`` decision that keeps it open. The scope statement is the third
+paragraph below; this headline used to contradict it.
 
 **What was measured, and what this pins.** ``extractor_v2``'s Subject candidates
 ride ``entities[]``, so ``route_mentions`` (S2.2, ``#11021``/``#11211``) already
@@ -272,10 +278,36 @@ def test_an_identifier_subject_is_left_to_the_value_gate(monkeypatch):
     ``_referentiality_hold``'s call site. ``_referentiality_hold``'s docstring
     records that split; this comment exists so the setenv here does not read as
     "``judge`` needs the flag".
+
+    ⛔ AND THE CLASS MUST BE PINNED AT THE **EXTRACTOR BOUNDARY**, not only at
+    ``judge`` (``#12102`` review P2, measured). ``judge("#4118") is None`` is a
+    property of ``referentiality.py`` — a module this change barely touches — so
+    on its own it cannot red when the GATE is widened: an arm that holds whatever
+    ``value_gate.identifier_only`` claims (``#4118``, a path) left this suite
+    **24/24 green**, while that widening is exactly the *"unmeasured discard on a
+    live document ingest"* ``_referentiality_hold``'s docstring says it declines
+    to ship. The second half below drives ``extract_entities`` for real, so the
+    claim the docstring makes as *measured* — the ``issue:<repo>#<n>`` class still
+    mints on this path (``#12118``) — has an assertion behind it.
     """
     monkeypatch.setenv(FLAG, "1")
     assert referentiality.judge("#4118") is None
     assert referentiality.judge("config/ci-surfaces.yml") is None
+
+    api, proj, _log = _proj_api()
+    payload = {"subjects": [
+        {"name": "#4118", "subjectKind": "other"},
+    ], "objects": [], "aboutEntities": []}
+
+    result = _extract(monkeypatch, payload, api)
+
+    assert result["subjects"] == 1 and result["subjects_minted"] == 1
+    assert result["subjects_held"] == 0
+    rows = proj.g.query("MATCH (s:Subject) RETURN s.name").result_set
+    assert [r[0] for r in rows] == ["#4118"], (
+        "the identifier class must still mint on the S7 path — widening"
+        " _referentiality_hold to value_gate's class is a DIFFERENT decision"
+        " and would ship an unmeasured discard")
 
 
 def test_the_point_about_entities_door_is_declined_and_still_mints(monkeypatch):
