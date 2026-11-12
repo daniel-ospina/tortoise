@@ -2566,12 +2566,14 @@ to answer.
 > the handling is the one §10.17→§10.18 used: a new dated entry.
 
 - **Why this entry exists.** `#12067` inserts a net **+54** lines into
-  `tortoise/extractor_v2.py` in seven hunks, which is **above every cite in §11's block**: the
+  `tortoise/extractor_v2.py` in nine hunks, which is **above every cite in §11's block**: the
   `OUTPUT_CONTRACT` prose at `:1758` (`+7`), the relation builder's mechanism guard at `:9934`
-  (`+21`), and five smaller hunks in `execute_embed` below the collector (`+3` at `:11215`,
-  `+7` at `:11401`, `+14` at `:11438`, `+2` at `:11468`, plus two same-size hunks at `:11347` and
-  `:11356`). `git diff origin/main...HEAD -- tortoise/extractor_v2.py | grep -E '^@@'` prints
-  exactly those; `18172` → `18226` lines is the same `+54`.
+  (`+21`), and six smaller hunks in `execute_embed` below the collector (`+3` at `:11215`,
+  `+7` at `:11401`, `+14` at `:11438`, `+2` at `:11468`, plus two same-size hunks at `:11378` and
+  `:11387` — those two carry a replacement each, not an insert), with one further same-size hunk
+  below everything at `:13632`. `git diff origin/main...HEAD -- tortoise/extractor_v2.py |
+  grep -E '^@@'` prints all nine; `18172` → `18226` lines is the same `+54`. Positions here are
+  NEW-side starts, so they are the lines this tree carries.
 - **What moved, band by band — stated because the bands are NOT uniform.** A cite above `:1758`
   carries `0`, one between `:1758` and `:9934` carries `+7`, one between `:9934` and `:11215`
   carries `+28`, and everything below `:11468` carries the full `+54`. That is why the reads below

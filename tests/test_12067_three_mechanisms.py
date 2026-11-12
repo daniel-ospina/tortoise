@@ -1346,12 +1346,19 @@ def test_a_mechanism_on_a_TARGET_SUBPAIR_is_NOT_priced(sdk):
     ).result_set == [], "Phase 1 must refuse BEFORE the point is committed"
 
 
-def test_only_PRICED_pairs_count_measured_eight_ways(sdk):
-    """Every shape the factor knows, judged on the pair it prices (#12067 round 6, P1).
+def test_only_PRICED_pairs_count_measured_six_ways(sdk):
+    """Every shape the factor prices, judged on the PAIR rather than the endpoint
+    set (#12067 round 6, P1).
 
-    Measured on the pre-fix code, each of the four ACCEPTs was a false refusal
-    whose message asserted a shared pair the factor never prices, and each of the
-    four REFUSEs is the closure the pair-level invariant exists to enforce.
+    The count is six — two ACCEPTs and four REFUSEs — and the case that
+    DISCRIMINATES is the first one: a one-way NAND star `c→[a, b]` never prices
+    `(a, b)`, while the pre-fix door compared ENDPOINT SETS and refused it as a
+    false block. Measured: restoring `shared = eps & pair` (the endpoint-set unit)
+    reds case 1 only.
+    ⛔ The DISJOINT-stars case was already green before the fix (`shared` is empty
+    for two disjoint stars under the old unit too), so it does not discriminate
+    and is kept as an invariant, not as evidence of the fix. The four REFUSEs are
+    the closure the pair-level invariant exists to enforce.
     """
     # ACCEPT: a one-way NAND star `c→[a, b]` does not price `(a, b)`.
     c, a, b = _points(sdk, 3)
@@ -1377,7 +1384,11 @@ def test_only_PRICED_pairs_count_measured_eight_ways(sdk):
         sdk.create_operator("IMPL", cond, [dep])
     assert "coherence" in str(exc2.value), str(exc2.value)
 
-    # REFUSE: the plain two-input mirror, in both orders.
+    # REFUSE: the plain two-input mirror, ONE order here. The reverse
+    # (`NAND` first, then `IMPL` over the same pair) is pinned by
+    # `test_the_direct_edge_door_refuses_TOO`, which asserts the door does not
+    # care which mechanism came first — this file must not claim to cover both
+    # orders in one case, which is how a count came to be wrong before.
     x, y = _points(sdk)
     sdk.create_operator("IMPL", x, [y])
     with pytest.raises(ValueError) as exc3:

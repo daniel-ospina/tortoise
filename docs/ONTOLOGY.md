@@ -1275,9 +1275,13 @@ different functional forms, i.e. an over-statement that looks like strong suppor
 only because refusing them changes a shape the engine has always allowed, so this table does not
 claim they are refused and does not claim they are harmless. That shape needs the operator-less
 `relation` route: a connection that carries `operator` writes an OPERATOR on every route, and an
-operator whose endpoints SHARE two nodes with any existing mechanism — bare or operator, including a
-2-subset of an n-ary operator's endpoints — is refused, including through `ingest`, whose Phase 1
-reports the refusal as a `violations` entry instead of raising mid-bundle (#12067). Not
+operator that shares a **PRICED PAIR** with any existing mechanism — bare or operator — is refused,
+including through `ingest`, whose Phase 1 reports the refusal as a `violations` entry instead of
+raising mid-bundle (#12067). "Priced pair" is the unit the FACTOR prices, not the endpoint set
+(`TortoiseEP._factor_pairs`, read by `sdk._priced_pairs`): `IMPL` is a STAR — `inputs[0]` → every
+other input — so its TARGETS never price each other, and an n-ary `IMPL` does not conflict with a
+mechanism on a pair BETWEEN two of its targets. A `NAND` or `coherence` whose direction flows both
+ways prices a clique, so there the two units coincide. Not
 covered here at all: `EventAPI.add_operator` (which accepts `IMPL`/`NAND` only, so the third
 mechanism is unreachable there) and the projection's own edge fold (`#10306`).
 
