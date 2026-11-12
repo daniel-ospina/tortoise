@@ -6090,6 +6090,14 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         "echo ${x:+(a)#}",
         "echo @(b)#x",
         "echo ${x:-plain}#note",
+        # ⛔ AND THE `#`-INSIDE-`${…}` BRANCH NEEDS A `boundary == True` ROW
+        # (#12279 REVIEW 5, P2). Every other `${…}` row puts the `#` where the
+        # boundary is already False, so deleting that branch left the suite GREEN
+        # while `echo ${x:- # y}; <replacement>` went REFUSED→GREEN — the branch is
+        # the only thing between a space-derived boundary and a fail-open. Measured:
+        # bash prints ` # y` (or `a # b`) and runs the replacement.
+        "unset x; echo ${x:- # y}",
+        "unset x; echo ${x:-a # b}",
         # ⛔ A `#` AFTER AN OPENER THAT BEGINS NO WORD IS DATA TOO (#12279 REVIEW 4,
         # P0, measured RED→GREEN twice). The opener itself used to set the boundary,
         # so the line was truncated AT THE `(` and every rule arm went blind.
@@ -6121,6 +6129,13 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         assert any(_replaces_a_client_binary(line) for line in _executed_lines(None, step)), (
             f"the replacement after {opener!r} is not refused"
         )
+
+    # CONTROL: a `#` right after a SUBSTITUTION opener is still a comment (bash
+    # rejects `$(#…` on one line), so the `$(` opener's `boundary = True` is a pin,
+    # not an accident — the review measured that flipping it left the suite green.
+    assert _strip_trailing_comment("echo $(#note)") == "echo $(", (
+        "a comment after `$(` survived"
+    )
 
     # CONTROL: a GROUP-closing `)` IS an operator, so the rest of the line is a
     # comment and must be dropped (bash prints only `x` for the same line).
@@ -6981,9 +6996,16 @@ def _runs_on_labels(job: dict) -> list[str]:
 def _strip_trailing_comment(line: str) -> str:
     """`line` up to its first UNQUOTED `#` that opens a trailing comment.
 
-    A `#` starts a comment only where a WORD can begin — column 0, or after
-    unquoted, unescaped whitespace or a character of `COMMENT_START_CHARS` — and
-    never inside a single- or double-quoted span, so `echo "::error::…#12051 …"` is
+    A `#` starts a comment only where a WORD can begin, and this function is the
+    SINGLE OWNER of the complete rule: column 0; after unquoted, unescaped
+    whitespace or a character of `COMMENT_START_CHARS`; after a CONFIRMED
+    group-closing `)`; and after the openers that begin a word (`$(`, `<(`, `>(`,
+    `=(` — their closers ARE a boundary; an extglob or arithmetic opener's are
+    not). ⛔ THE ENUMERATION LIVES HERE, NOT IN TWO PLACES (#12279 REVIEW 5, P3):
+    an earlier version named only `COMMENT_START_CHARS`, which omits EVERY `)`
+    boundary — an implementation written from that sentence alone would fail this
+    module's own `(true)#` row. Never inside a single- or double-quoted span, so
+    `echo "::error::…#12051 …"` is
     ONE string, not a message followed by a comment (the issue number itself lives
     behind a `#`, and truncating there would hide the text under test).
     ⛔ THE CLASS IS NAMED, NOT RESTATED (#12279 review round 2, P3): this sentence
