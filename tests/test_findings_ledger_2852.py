@@ -212,9 +212,10 @@ def test_mutation_population_is_pinned():
     position is a count: it moves whenever an arm is inserted above it, and nothing tests
     it (the terminal count below IS tested, against `len(MUTATIONS)`, which is why it can
     stay). Name the arm by what it does, or read the position off `MUTATIONS`. This rule
-    is here because arm numbers were written in this paragraph repeatedly, and every one
-    of them became false — some shifted by a later insertion, some written from the
-    population size instead of a position, so wrong on arrival.
+    is here because arm numbers were written in this paragraph repeatedly: some shifted
+    when an arm was inserted above them, some were written from the population size
+    instead of a position so they were wrong on arrival, and the ones that were right had
+    nothing holding them true. Name the arm; do not number it.
 
     Two further arms close two holes the review of that pass found in the fixes
     themselves: a §1 row whose first cell merely BEGINS with `Verdict` (the header skip
