@@ -457,22 +457,39 @@ def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> 
     Nothing else in this file could see that: every other assertion only asks whether
     `::error::` and `exit 1` are PRESENT, so a mangled message passes all of them. This is
     the one property of the printed text no evidence-shaped assertion covers, so it is
-    asserted structurally, over every `echo` in the step: no backticks, and no unescaped
-    `$(…)` either (same substitution, same silent edit).
+    asserted structurally over the step's CODE:
+
+      · a BACKTICK anywhere is refused — there is no legitimate one in this step, and a
+        backtick in a double-quoted `echo` is the exact defect this test exists for;
+      · `$(` is refused when it appears in the text a line PRINTS — i.e. AFTER an
+        `echo`/`printf` on that line, at any indentation or position (`… && echo "…"`,
+        `printf '%s\n' "…"`), while staying legal where the step substitutes on purpose:
+        `major="$(printf '%s\n' "$version" | sed …)"` puts the `printf` INSIDE a
+        substitution whose output is wanted — the opposite case, and the first cut of this
+        test false-redded exactly that line (measured, cycle 6).
+
+    ⛔ A LINE-INITIAL `echo` SCAN IS NOT ENOUGH, and that is a correction this test needed: an
+    earlier version checked only lines whose stripped form BEGAN with `echo `, so a backticked
+    `… && echo "…"` or a `printf "…`cmd`…"` passed — MEASURED, review cycle 5 of
+    `850e25c349`: both spellings stayed GREEN with a live backtick in the step.
     """
     _, pin = _pin_step(_steps(job))
+    code = _code_only(_run_text(pin))
     offenders: list[str] = []
-    for line in _code_only(_run_text(pin)).splitlines():
+    for line in code.splitlines():
         stripped = line.strip()
-        if not stripped.startswith("echo "):
-            continue
-        if "`" in stripped or "$(" in stripped:
+        if "`" in stripped:
             offenders.append(stripped[:140])
+            continue
+        for match in re.finditer(r"\b(?:echo|printf)\b", stripped):
+            if "$(" in stripped[match.end():]:
+                offenders.append(stripped[:140])
+                break
     assert not offenders, (
         "a message this step PRINTS asks the shell to substitute something — a backtick "
-        "or `$(` inside a double-quoted `echo` runs as a command and its output replaces "
-        "the text, so the diagnostic silently loses (or executes) that span. Name the "
-        "thing in plain words or single quotes: " + repr(offenders)
+        "(anywhere in the step) or `$(` on a printing line runs as a command and its "
+        "output replaces the text, so the diagnostic silently loses (or executes) that "
+        "span. Name the thing in plain words or single quotes: " + repr(offenders)
     )
 
 
@@ -654,9 +671,17 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     # does not appear on the key-install line, so `D` alone is the discriminator.
     creates_dirs = re.search(r"(?:^|\s)-[A-Za-z]*D", key_install.group(0))
     if not creates_dirs:
-        # Without `-D` the directory must be created FIRST, and that ordering is the fact.
+        # Without `-D` the parent must be created FIRST, and that ordering is the fact.
+        # Every equivalent spelling is accepted — `install -d` (options on either side of
+        # `-d`) and `mkdir -p` — because the runtime fact is "the directory exists before
+        # the file is written", not which verb created it. MEASURED, review cycle 5 of
+        # `850e25c349`: a `mkdir -p` rewrite and `install -d -m 0755` both FALSE-REDDED
+        # under the previous spelling-only match, and `mkdir` was missing from the
+        # executed arm's stub set, so that arm redded with it.
         mkdir = re.search(
-            r"install\s+(?:-[A-Za-z]+\s+)*-d\s+/usr/share/postgresql-common/pgdg", code
+            r"(?:install\b[^\n]*?-d\b[^\n]*|mkdir\b[^\n]*)"
+            r"/usr/share/postgresql-common/pgdg",
+            code,
         )
         assert mkdir, (
             "the keyring's DIRECTORY is not created before the key is written into it "
@@ -682,6 +707,34 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     assert code.index("apt-get update") < code.index("apt-get install"), (
         "`apt-get install` runs BEFORE `apt-get update`, so it installs against a "
         "stale index that predates the PGDG source"
+    )
+
+    # ⛔ AND THE INSTALL ITSELF IS NAMED. It is the one pre-version branch the executable
+    # arm cannot reach (that arm stops at the install line by construction), so text is all
+    # there is — and without this assertion adding the guard would itself be the
+    # unguarded-claim class: the branch could be deleted and every test would stay green.
+    # MEASURED, review cycle 5 of `850e25c349`: a POOL box can hold the dpkg frontend lock or
+    # run out of disk, failing the INSTALL after a clean probe — which would otherwise surface
+    # as apt's own text, i.e. the un-named class these guards replace.
+    guarded_install = re.search(
+        r"^(\s*)if\s+!\s*(?:sudo\s+)?apt-get\s+install[^\n]*;\s*then(?P<body>.*?)^\1fi\s*$",
+        code,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert guarded_install, (
+        "the install itself is unguarded: `apt-get install` must be wrapped in an "
+        "`if ! … then … exit 1; fi` that NAMES the failure, because a resolved package "
+        "that cannot be installed (dpkg frontend lock, .deb fetch, disk) is not the same "
+        "defect as a missing one"
+    )
+    install_body = guarded_install.group("body")
+    assert "::error::" in install_body, (
+        "the install guard stops the step but names nothing, so a dpkg-lock or disk "
+        f"failure still reads as apt's own text: {install_body!r}"
+    )
+    assert re.search(r"\bexit\s+1\s*(?:;|\}|\)|$)", install_body), (
+        "the install guard does not `exit 1`, so a failed install carries on into the "
+        f"version assertion with no client at all: {install_body!r}"
     )
 
 
@@ -733,10 +786,12 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     substitution asserts it matched exactly once, so a future rename reds here
     instead of silently restoring the host dependency.
 
-    Three arms, because the step now has TWO named-failure branches: an
-    `apt-get update` that cannot resolve the repo, and a probe that cannot find
-    the package in a repo that DID resolve. A branch nothing executes is the
-    unguarded-claim class this file exists to refuse.
+    Five arms over the step's FOUR named pre-install branches — the key fetch, the
+    codename, `apt-get update`, and the probe — plus the version branch, which no arm
+    executes (its reachability is a stated limit, see `_version_branch`). A branch
+    nothing executes is the unguarded-claim class this file exists to refuse, so every
+    NEW branch added one: this sentence is the audit of that, and it is re-cut whenever
+    the arm count moves rather than left to drift.
     """
     _, pin = _pin_step(_steps(job))
     lines = _run_text(pin).splitlines()
@@ -787,6 +842,7 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
             'sudo() { "$@"; }\n'
             f"{apt_get}\n{curl_stub}\n"
             "install() { return 0; }\n"
+            "mkdir() { return 0; }\n"
             "tee() { cat >/dev/null; }\n"
             f"{stub}\n{prefix}\n"
             "echo REACHED_PAST_PRECONDITION\n",

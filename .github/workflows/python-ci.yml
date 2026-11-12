@@ -4753,7 +4753,7 @@ jobs:
           if [ -n "${ImageOS:-}" ]; then
             identity="$identity hosted-image=${ImageOS}/${ImageVersion:-unknown}"
           fi
-          # ⛔ FOUR WAYS THIS STEP CAN FAIL TO GET A pg16 CLIENT, AND EACH ONE IS NAMED.
+          # ⛔ FIVE WAYS THIS STEP CAN FAIL TO GET A pg16 CLIENT, AND EACH ONE IS NAMED.
           # Under `set -e`/`set -u` every one of them would otherwise surface as apt's, curl's
           # or the shell's own text — which reads as a typo in THIS step rather than as the
           # client's SOURCE failing under a drill whose artifact depends on the client's major
@@ -4761,10 +4761,15 @@ jobs:
           #   1. the signing key cannot be FETCHED (egress/DNS/503) — guarded at the fetch;
           #   2. the box carries no VERSION_CODENAME, so there is no suite to name — guarded below;
           #   3. the repo does not RESOLVE once added (suite name, key, archive) — `apt-get update`;
-          #   4. the repo resolves but has no `postgresql-client-<major>` — the probe below.
-          # ⚠️ The key fetch and the `apt-get update` are BOTH fatal on purpose: swallowing
-          # either would let the install fall back to the DISTRO archive, which carries whatever
-          # major the release ships and is the mechanism #12051 round 1 died on.
+          #   4. the repo resolves but has no `postgresql-client-<major>` — the probe below;
+          #   5. the package RESOLVES but cannot be INSTALLED — the install itself, named below.
+          # ⛔ (5) IS NOT PEDANTRY on a POOL box: this job is pool-eligible, and a shared box
+          # can hold the dpkg frontend lock (the image's own unattended-upgrades) or run out of
+          # disk, both of which fail the INSTALL after a clean probe — and would otherwise
+          # surface as apt's text, i.e. as the un-named class these guards exist to replace.
+          # ⚠️ The key fetch, the `apt-get update` and the install are ALL fatal on purpose:
+          # swallowing any of them would let the step fall back to the DISTRO archive, which
+          # carries whatever major the release ships and is the mechanism #12051 round 1 died on.
           if ! curl -fsSL -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc; then
             echo "::error::could not FETCH the PGDG signing key (ACCC4CF8.asc) [$identity] — the client this drill needs comes from apt.postgresql.org, so without the key nothing can be installed and BOTH provisioned servers are pg16 (#12051). Check network egress from this runner to www.postgresql.org."
             exit 1
@@ -4799,7 +4804,10 @@ jobs:
             echo "::error::a PGDG suite RESOLVED but carries no postgresql-client-16 for this codename [$identity] — apt-get update succeeded and the probe still found nothing, so this is the PACKAGE, not the repo. BOTH provisioned servers are pg16, so this job cannot run here (#12051): either the pin and the two 'pgvector/pgvector:pg16' servers must move together, or '${VERSION_CODENAME:-this release}' is one PGDG no longer publishes PG16 for (it keeps a rolling window of versions). Check 'apt-cache policy postgresql-client-16' and the suite derived from /etc/os-release."
             exit 1
           fi
-          sudo apt-get install -y --no-install-recommends postgresql-client-16
+          if ! sudo apt-get install -y --no-install-recommends postgresql-client-16; then
+            echo "::error::postgresql-client-16 RESOLVED but could not be INSTALLED [$identity] — the probe above succeeded, so this is apt/dpkg failing at the install (a shared box holding the dpkg frontend lock, a .deb fetch that broke mid-run, or disk exhaustion), not a missing package. BOTH provisioned servers are pg16, so this drill cannot run without the client (#12051)."
+            exit 1
+          fi
           # PREPENDED: the versioned binaries must win over the image's own
           # client and over `postgresql-common`'s unversioned wrapper.
           echo "/usr/lib/postgresql/16/bin" >> "$GITHUB_PATH"
