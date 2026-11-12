@@ -700,6 +700,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # a :Point/:Subject/:Event as readily as another :Object.
         f"WHERE {epistemic_disjunction('active')} "
         "AND (active.status IS NULL OR active.status = 'live')\n"
+        # EP's own liveness for the source is ``_live_only('o.status')``, which also
+        # requires the legacy flag to be false — so an ``outdated`` source is EP-dead
+        # and the row would describe it as "active" over a factor EP never builds
+        # (``invalidate_point`` is a door into that state).
+        "AND coalesce(active.outdated, false) = false\n"
         "RETURN count(DISTINCT r)",
     )
     rows4b = _rows(
@@ -710,6 +715,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "MATCH (sup)<-[r:IMPL|NAND]-(active) "
         f"WHERE {epistemic_disjunction('active')} "
         "AND (active.status IS NULL OR active.status = 'live')\n"
+        # EP's own liveness for the source — see the count4b note. ⛔ Check 4 (the
+        # ``:Point`` orientation) keeps the older filter; that divergence is a
+        # recorded follow-up rather than half-fixed here.
+        "AND coalesce(active.outdated, false) = false\n"
         # ⛔ CARRIER COUNT, in the same statement, because the repair's arm turns on
         # whether the pointer RESOLVES — not on whether it is merely SET. A
         # `supersededBy` naming a renamed successor, or the node itself, is present
@@ -761,7 +770,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "     carrier_sb, carrier_is_operator, carrier_outdated, "
         "     count(nxt) AS next_count, "
         "     head(collect(nxt.status)) AS next_status, "
-        "     head(collect(coalesce(nxt.outdated, false))) AS next_outdated\n"
+        "     head(collect(coalesce(nxt.outdated, false))) AS next_outdated, "
+        # ⛔ The next hop's NON-PARTICIPATION, for the same reason hop 1 carries it:
+        # ``draft`` is NOT terminal (so ``next_terminal`` is False) and an
+        # operator-shaped node is excluded from the input selection entirely, yet
+        # both were announced as "which is LIVE — target THAT". Measured: the
+        # prescribed re-point left the factor producing NO belief (confidences
+        # empty) while a re-audit read CLEAN. Reachable through the sanctioned fold
+        # lane — ``apply_supersessions`` admits a DRAFT successor.
+        "     head(collect(coalesce(nxt.is_operator, false))) AS next_is_operator\n"
         # ``r.idx`` and the OPERATOR's ``direction`` are projected because the repair
         # differs in the idx-0 source slot (ep.py's ``source_stripped`` hazard),
         # ``op_type`` because EP's operator predicate is the flag OR ``op_type``
@@ -785,7 +802,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "labels(active), "
         f"{epistemic_identity('active')}, active.id, carrier_count, "
         "carrier_id, carrier_status, carrier_sb, carrier_is_operator, "
-        "carrier_outdated, next_count, next_status, next_outdated "
+        "carrier_outdated, next_count, next_status, next_outdated, "
+        "next_is_operator "
         f"LIMIT {SAMPLE_LIMIT}",
     )
 
@@ -804,7 +822,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         (sup_id, sup_name, sup_sb, edge_type, idx, is_op_flag, op_type,
          direction, active_labels, active_id, _active_nid, carrier_count,
          _carrier_id, carrier_status, carrier_sb, carrier_is_operator,
-         carrier_outdated, next_count, next_status, next_outdated) = row
+         carrier_outdated, next_count, next_status, next_outdated,
+         next_is_operator) = row
         return {
             "sup_id": sup_id, "sup_name": sup_name, "sup_sb": sup_sb,
             "edge_type": edge_type, "idx": idx,
@@ -823,6 +842,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                                                    bool(carrier_outdated)),
             "next_count": next_count, "next_status": next_status,
             "next_terminal": is_terminal_status(next_status, bool(next_outdated)),
+            "next_is_operator": bool(next_is_operator),
         }
 
     def _successor_note(s: dict) -> str:
@@ -909,6 +929,23 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "resolve that chain to a live Object before writing, and if it "
                     "ends with none, re-point onto whatever now carries the claim or "
                     "delete the edge")
+        # ⛔ The SAME two non-participating shapes hop 1 knows about, at hop 2: a
+        # ``draft`` is not terminal (``is_terminal_status`` is False) and an
+        # operator-shaped node is excluded from the input selection, so neither is a
+        # head — and both were announced as "which is LIVE — target THAT" (measured:
+        # the prescribed re-point leaves the factor producing NO belief, and a
+        # re-audit reads CLEAN).
+        if s["next_is_operator"]:
+            return (f"names the next link ({_quoted(s['carrier_sb'])}), which is "
+                    "OPERATOR-SHAPED (is_operator=true) — EP excludes it from a "
+                    "factor's inputs (#9269), so targeting it leaves the operator "
+                    "with NO factor and a re-audit reading CLEAN: target a CLAIM "
+                    "successor")
+        if (s["next_status"] or "") == DRAFT_STATUS:
+            return (f"names the next link ({_quoted(s['carrier_sb'])}), which is "
+                    f"'{DRAFT_STATUS}' — EP strips a draft input like a terminal one "
+                    "(#780), so targeting it leaves the factor degenerate: it needs "
+                    "promoting to live as well")
         return (f"names the next link ({_quoted(s['carrier_sb'])}), which is LIVE — "
                 "target THAT, not the immediate successor")
 

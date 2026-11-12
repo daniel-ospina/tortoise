@@ -882,6 +882,91 @@ def test_a_neutral_operator_does_not_claim_lost_belief(sdk):
             f"{before[node_id]} -> {value}")
 
 
+def test_a_draft_next_hop_is_not_announced_as_the_live_head(sdk):
+    """``draft`` is NOT terminal, so hop 2's live arm caught it and called it LIVE.
+
+    Measured: V1->V2->V3 with V3 draft, target V3 as the fix says, and the factor
+    produces NO belief (confidences empty) while a re-audit reads CLEAN. Reachable
+    through the sanctioned lane — ``apply_supersessions`` admits a draft successor.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    _obj(sdk, "PolicyV3", status="draft")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV3'}) RETURN o.status", {}) == \
+        [["draft"]], "fixture drifted"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    for text in (issues[0].detail, issues[0].fix):
+        assert "is LIVE" not in text, (
+            "a draft input is stripped, so it is not a head: " + text)
+        assert "EP strips a draft input like a terminal one" in text, text
+
+    # The clause is load-bearing: target the draft as the LIVE arm said, and the
+    # factor produces nothing while the audit reads CLEAN.
+    _q(sdk, "MATCH (o {id:$i})-[r:IMPL]->() MATCH (s:Object {name:$s}) "
+            "MERGE (o)-[nr:IMPL]->(s) SET nr.idx = r.idx DELETE r",
+       {"i": op["id"], "s": "PolicyV3"})
+    run = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert run["confidences"] == {}, (
+        "targeting the draft tail left a belief, so this arm is over-strict: "
+        f"{run['confidences']}")
+    assert [i for i in _issues(sdk, "superseded_object_active_edges")] == [], (
+        "the prescribed repair must leave the check reading CLEAN — that is why the "
+        "string has to refuse it")
+
+
+def test_an_operator_shaped_next_hop_is_not_announced_as_the_live_head(sdk):
+    """Same one-hop-short ladder: an operator-shaped hop 2 is excluded, not LIVE."""
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    _obj(sdk, "PolicyV3", is_operator=True)
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV3'}) RETURN o.is_operator", {}) == \
+        [[True]], "fixture drifted"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    for text in (issues[0].detail, issues[0].fix):
+        assert "is LIVE" not in text, (
+            "an operator-shaped node is not a factor input: " + text)
+        assert "OPERATOR-SHAPED" in text, text
+        assert "target a CLAIM successor" in text, text
+
+
+def test_an_ep_dead_source_does_not_claim_belief_was_active(sdk):
+    """EP's source liveness is ``_live_only``, which also requires ``outdated`` false.
+
+    ``invalidate_point`` is a door into that state, and the row described it as an
+    "active" edge — a finding over a factor EP never builds.
+    """
+    src = sdk.create_point("statement", "the gateway is audited")
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_direct_edge("IMPL", src["id"], v1["id"])
+    corrected = sdk.create_point("statement", "the gateway was never audited")
+    sdk.invalidate_point(src["id"], corrected["id"])
+    assert _q(sdk, "MATCH (p {id:$i}) RETURN p.status, p.outdated",
+              {"i": src["id"]}) == [["live", True]], \
+        "fixture drifted: invalidate_point flags outdated and leaves status alone"
+    from tortoise.live import is_terminal_status
+    assert is_terminal_status("live", True), \
+        "EP's source liveness is _live_only, which is terminal for a flagged node"
+    sdk.update_entity(v1["id"], status="superseded", **{"supersededBy": "Gone"})
+
+    assert [i for i in _issues(sdk, "superseded_object_active_edges")
+            if i.node_id == v1["id"]] == [], (
+        "the source is EP-dead, so no belief was lost from this edge")
+
+
 def test_the_remaining_input_threshold_is_eps_one_not_two(sdk):
     """EP skips the factor when FEWER THAN TWO inputs REMAIN — i.e. one left.
 
