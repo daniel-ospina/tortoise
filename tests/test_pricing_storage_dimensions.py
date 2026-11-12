@@ -128,6 +128,38 @@ class TestTheUnitTrap:
         assert basis != pytest.approx(43.75)
         assert basis != pytest.approx(73.0)
 
+    def test_hot_capacity_overage_is_priced_through_the_MB_factor(self):
+        """⛔ THE DIMENSION WHOSE UNIT FACTOR CARRIES REAL MONEY.
+
+        `graph_storage` is denominated in DECIMAL MB, so its overage crosses a
+        factor of 1,000 before the $85/GB rate applies. Every other arithmetic
+        test in this file uses `postgres_storage`, whose factor is 1 — so
+        without this case the MB→GB conversion could be wrong by 10^3–10^6 with
+        the whole suite green (measured: changing `_bytes_per_unit('MB')` to
+        `return 1`, and separately to `BYTES_PER_GB // 1024`, both left the
+        suite green).
+
+        177 MB used against solo's 77 MB included = 100 MB over = 0.1 GB
+        at $85/GB-month = $8.50.
+        """
+        from tortoise.metering import storage_overage_cost_usd
+
+        over = storage_overage_cost_usd("solo", "graph_storage", 177)
+        assert over["overage_quantity"] == pytest.approx(100.0)
+        assert over["overage_gb"] == pytest.approx(0.1)
+        assert over["overage_cost_usd"] == pytest.approx(8.50)
+
+        # A full GB of hot capacity over the allowance is the rate itself — the
+        # anchor that no factor error can survive.
+        one_gb_over = storage_overage_cost_usd("solo", "graph_storage", 77 + 1000)
+        assert one_gb_over["overage_gb"] == pytest.approx(1.0)
+        assert one_gb_over["overage_cost_usd"] == pytest.approx(85.0)
+
+        # And under the allowance nothing is owed.
+        under = storage_overage_cost_usd("solo", "graph_storage", 10)
+        assert under["overage_quantity"] == 0.0
+        assert under["overage_cost_usd"] == 0.0
+
     def test_the_rate_sits_above_our_cost_and_below_the_market_effective_rate(self):
         """1.46x margin, and deliberately a DISCOUNT to the market's ~$87.6
         per GB of hot data (Neo4j Aura provisioned x 1.33)."""
@@ -144,20 +176,46 @@ class TestTheUnitTrap:
 
         A MiB/decimal mix is the measured 3.59x error class in
         docs/architecture/STORAGE-ARCHITECTURE.md, so the conversion lives in
-        exactly one constant and the artifact restates it.
+        exactly one constant and the artifact restates it NUMERICALLY.
+
+        ⛔ The artifact side is asserted by VALUE, not by grepping the prose for
+        a substring: a disjunction over prose passes on a sentence that
+        CONTRADICTS the constant (e.g. "1 GB = 1,073,741,824 bytes (1000 MiB)"
+        contains "1000"), which would leave the one property this pair exists to
+        protect unpinned.
         """
         assert pricing.BYTES_PER_GB == 1_000_000_000
-        gb_def = json.loads(_CANONICAL.read_text(encoding="utf-8"))[
-            "billing"]["storage"]["gb_definition"]
-        assert "1,000,000,000" in gb_def or "1e9" in gb_def or "1000" in gb_def
+        storage = json.loads(_CANONICAL.read_text(encoding="utf-8"))[
+            "billing"]["storage"]
+        assert storage["bytes_per_gb"] == pricing.BYTES_PER_GB, (
+            "the artifact's bytes_per_gb and pricing.BYTES_PER_GB have diverged "
+            "— one of the two changed without the other")
+        assert "1,000 decimal MB" in storage["gb_definition"]
 
     def test_each_dimensions_unit_is_the_one_its_meter_publishes(self):
         """`postgres_storage` is bytes (#5331's ruled base); `graph_storage` is
         MB because that is what GRAPH.MEMORY USAGE publishes. Converting either
-        at the artifact would force a presentation factor into a rate."""
+        at the artifact would force a presentation factor into a rate.
+
+        ⛔ AND IT MUST BE THE **DECLARED** UNIT, not a fourth spelling. The
+        allowance gate derives its own unit from `cost_dimensions` and states
+        the rule outright: *"The unit of every entry is READ from the declared
+        row … never restated here — two copies of a unit is how a unit factor
+        goes wrong."* Without this leg, a re-denomination in `cost_dimensions`
+        moves the gate's unit while the artifact (and `metering._bytes_per_unit`
+        literal list) keep the old one, and nothing reds.
+        """
+        from tortoise.cost_dimensions import by_name
+
         dims = pricing.storage_dimensions()
         assert dims["postgres_storage"]["unit"] == "bytes"
         assert dims["graph_storage"]["unit"] == "MB"
+        for name in pricing.STORAGE_DIMENSIONS:
+            declared = str(by_name(name).unit).split()[0]
+            assert dims[name]["unit"] == declared, (
+                f"{name}: artifact unit {dims[name]['unit']!r} != the declared "
+                f"cost_dimensions unit {declared!r} — the artifact may not be "
+                f"a third copy of a unit")
 
 
 # ── ONE registry: the artifact's keys ARE the gate's keys ───────────────────
@@ -263,13 +321,15 @@ class TestPerAccountNotPerGraph:
 
 class TestFreeCannotPurchasePaidCan:
     def test_only_paid_tiers_can_be_billed_for_storage_overage(self):
-        """#4815 + the decision record's point 4: free/anon are not refused —
-        they simply cannot be BILLED (there is no overage for them to buy),
-        while every paid tier bills and continues.
+        """#4815 + the decision record's point 4.
 
-        ⛔ This is the billing semantic. The REFUSAL half is the allowance
-        gate, which is BLOCKED for both storage dimensions — see the module
-        docstring; asserting a live refusal here would be a fiction.
+        ⛔ THE RECORD SAYS *"Free / anon refuse at the included amount; paid
+        tiers are never refused — bill and continue."* The REFUSAL half is
+        BLOCKED, not absent: it is the allowance gate, and both storage
+        dimensions are blocked there on instrument defects (see the module
+        docstring). What this test pins is the OTHER half — the BILLING one:
+        free/anon cannot be billed for storage overage, while every paid tier
+        bills and continues.
         """
         from tortoise.metering import storage_overage_cost_usd
 
@@ -349,10 +409,24 @@ class TestIncludedAmounts:
         assert "SEARCH-ARCHITECTURE" in status
 
     def test_storage_allowances_scale_with_the_price_under_the_30_percent_rule(self):
-        """The record allowance is ~5.26% of the tier price's 30% budget (it is
-        467x cheaper per byte, §8) — so it must be monotonically increasing
-        with price without being the thing that binds. This pins the SHAPE; the
-        exact bytes are pinned above."""
+        """The record allowance is ~2.2% of the tier price's 30% budget at our
+        $0.125/GB cost ($0.13 of $5.70 at solo, §8) — 467x cheaper per byte than
+        hot, which is why it is *"a rounding choice"* rather than the thing that
+        binds. ⚠️ Do NOT quote the SALE rate here (0.30/5.70 = 5.26%): that is a
+        price share, not a cost share, and mixing the two bases is the error §8
+        spends a paragraph correcting.
+
+        This pins the SHAPE — increasing with price without being what binds;
+        the exact bytes are pinned above.
+        """
+        from tortoise.pricing import storage_dimensions
+
+        basis = storage_dimensions()["postgres_storage"][
+            "cost_basis_usd_per_gb_month"]
+        solo_budget = 0.30 * pricing.tier_price("solo")
+        assert basis / solo_budget == pytest.approx(0.022, abs=0.001), (
+            "the 1 GB record allowance should cost ~2.2% of solo's 30% budget")
+
         paid = [t for t in pricing.all_tiers() if pricing.tier_price(t) > 0]
         by_price = sorted(paid, key=pricing.tier_price)
         allowances = [pricing.storage_limits(t)["max_postgres_storage_bytes"]
@@ -395,12 +469,18 @@ class TestTheLoaderContract:
 
     def test_a_tier_missing_a_storage_key_fails_closed(self, tmp_path,
                                                       monkeypatch):
-        """A tier that publishes no storage allowance must fail LOUDLY rather
-        than read as "unlimited storage, free" (see ``_REQUIRED_LIMIT_KEYS``).
+        """A tier that publishes no storage allowance must fail LOUDLY on BOTH
+        readers, not read as "unlimited storage, free".
 
-        Mutation this REDs: dropping either storage key from
-        ``_REQUIRED_LIMIT_KEYS`` — the artifact would then be free to ship a
-        tier with no storage allowance at all.
+        ⛔ `storage_limits()` is the one the MONEY reads, and an absent key
+        there reads as UNCONFIGURED = unlimited, so `storage_overage_cost_usd`
+        would report `$0.00` for unbounded hot capacity while every check stayed
+        green. Pinned separately from `tier_limits()` because they are separate
+        scans — the first version of this file only pinned `tier_limits()` and
+        the fail-open survived.
+
+        Mutations this REDs: dropping either storage key from
+        `_REQUIRED_LIMIT_KEYS`; reverting `storage_limits` to a bare `t.get()`.
         """
         data = json.loads(_CANONICAL.read_text(encoding="utf-8"))
         del data["tiers"]["solo"]["max_graph_storage_mb"]
@@ -410,6 +490,17 @@ class TestTheLoaderContract:
         pricing.reload()
         with pytest.raises(KeyError, match="max_graph_storage_mb"):
             pricing.tier_limits("solo")
+        with pytest.raises(KeyError, match="max_graph_storage_mb"):
+            pricing.storage_limits("solo")
+        from tortoise.metering import storage_overage_cost_usd
+        with pytest.raises(KeyError, match="max_graph_storage_mb"):
+            storage_overage_cost_usd("solo", "graph_storage", 10_000_000)
+
+    def test_an_explicit_null_still_passes_the_fail_closed_scan(self):
+        """`null` is the RECORDED free/anon state, not drift — only an ABSENT
+        key may raise. A check that refused `null` would refuse the decision."""
+        assert pricing.storage_limits("free") == {
+            "max_postgres_storage_bytes": None, "max_graph_storage_mb": 0}
 
     def test_the_storage_keys_are_NOT_in_tier_limits(self):
         """⛔ THE ANTI-ARMING INVARIANT. `allowance_gate.enforce_allowances`

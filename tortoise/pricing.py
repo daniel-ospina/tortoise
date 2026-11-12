@@ -23,20 +23,23 @@ _PRICING_PATH = os.environ.get(
 
 _cache: dict | None = None
 
-# Keys tier_limits must expose; a tier missing any of these is a config drift
-# bug and must fail loudly (KeyError), not silently degrade to None/unlimited
-# (#750.8).
+# Keys every tier must DECLARE. ⚠️ This does NOT mean `tier_limits` EXPOSES all
+# of them: it returns a SUBSET. The two storage allowances are declared-only on
+# purpose (see `storage_limits` — exposing them would arm a BLOCKED dimension in
+# the allowance gate and answer HTTP 500 on every gated write). A tier missing
+# any of these is a config drift bug and must fail loudly (KeyError), not
+# silently degrade to None/unlimited (#750.8).
 _REQUIRED_LIMIT_KEYS = (
     "max_graphs_per_team",
     "max_users_per_team",
     "max_api_keys",
     "included_write_ops_per_month",
     "max_graph_nodes",
-    # #11758: the two purchasable storage dimensions. REQUIRED — a tier that
-    # publishes no storage allowance must fail LOUDLY here rather than read as
-    # "unlimited storage, free", which is the false-PASS this tuple exists to
-    # stop. `null` is an ALLOWED value (it is the recorded state for the
-    # free/anon record allowance); a MISSING key is not.
+    # #11758: the two purchasable storage dimensions. REQUIRED TO BE DECLARED — a
+    # tier that publishes no storage allowance must fail LOUDLY here rather than
+    # read as "unlimited storage, free", which is the false-PASS this tuple
+    # exists to stop. `null` is an ALLOWED value (it is the recorded state for
+    # the free/anon record allowance); a MISSING key is not.
     "max_postgres_storage_bytes",
     "max_graph_storage_mb",
 )
@@ -46,18 +49,25 @@ _REQUIRED_LIMIT_KEYS = (
 #: DECLARED registry names from ``tortoise.cost_dimensions.DIMENSIONS`` — not a
 #: second vocabulary. The customer-facing words live beside them in ``label``.
 #: Declared here as the artifact's contract; ``tests/test_pricing_storage_
-#: dimensions.py`` pins them to ``allowance_gate.ALLOWANCE_KEYS``, so the artifact,
-#: the loader and the gate cannot drift into three spellings. ⚠ A RUNTIME import
-#: of ``allowance_gate`` here is deliberately avoided: it imports ``quota``, which
-#: imports this module — the pin belongs in a test, not in a cycle.
+#: dimensions.py`` pins them to ``allowance_gate.ALLOWANCE_KEYS`` (the keys) and
+#: to ``cost_dimensions.by_name`` (the names, units), so the artifact, the loader,
+#: the gate and the arithmetic cannot drift into four spellings.
+#: ⚠ The pin is a TEST rather than a runtime import for IMPORT-WEIGHT, not because
+#: a cycle makes it impossible — ``quota`` imports this module only inside
+#: function bodies, so ``pricing -> allowance_gate`` would in fact import cleanly.
+#: It is not taken because ``allowance_gate`` pulls in ``quota``; ``pricing`` is
+#: imported by tools, graph scripts and the `pricing-artifact` CI parity check,
+#: which must stay dependency-light. If that cost ever stops mattering, making
+#: the import real is the better fix and this note should be deleted.
 STORAGE_DIMENSIONS = ("postgres_storage", "graph_storage")
 
 #: Decimal, and it is pinned ON PURPOSE. The two meters publish DIFFERENT units
 #: (``postgres_storage`` in bytes, ``graph_storage`` in decimal MB), so a silent
 #: MiB/decimal mix is the measured error class
 #: ``docs/architecture/STORAGE-ARCHITECTURE.md`` records. One definition, one
-#: conversion, no per-caller factor. The artifact restates it in
-#: ``billing.storage.gb_definition`` and a test pins the two agree.
+#: conversion, no per-caller factor. The artifact restates it NUMERICALLY in
+#: ``billing.storage.bytes_per_gb`` and a test asserts the two are EQUAL — not
+#: that some prose mentions a number, which a contradictory sentence would pass.
 BYTES_PER_GB = 1_000_000_000
 
 
@@ -124,12 +134,29 @@ def storage_limits(tier: str) -> dict:
     Returns ``{<allowance_key>: value | None}`` for every STORAGE dimension —
     ``None`` meaning UNCONFIGURED (the gate's own reading of it), never 0-by-0.
     Unknown tiers fall back to free, exactly like :func:`tier_limits`.
+
+    ⛔ FAIL-CLOSED ON A MISSING KEY, exactly like :func:`tier_limits`. This is
+    the accessor the money arithmetic reads, so a tier that omits a storage key
+    must raise here rather than read as UNCONFIGURED: unconfigured means
+    UNLIMITED downstream (``metering.storage_overage_cost_usd`` then reports
+    ``allowance_configured: False`` and a $0.00 overage), so a silently dropped
+    key would bill $0 for unbounded hot capacity while every check stayed green.
+    An explicit ``null`` still passes — that is the RECORDED free/anon state —
+    only an ABSENT key raises.
     """
     data = _load()
     tiers = data.get("tiers", {})
     t = tiers.get(tier) or tiers.get("free", {})
-    return {dim["allowance_key"]: t.get(dim["allowance_key"])
-            for dim in storage_dimensions().values()}
+    dims = storage_dimensions()
+    missing = [dim["allowance_key"] for dim in dims.values()
+               if dim["allowance_key"] not in t]
+    if missing:
+        raise KeyError(
+            f"pricing.json tier {tier!r} missing required storage allowance "
+            f"key(s): {missing} — an absent allowance reads as UNCONFIGURED "
+            f"(= unlimited) in the overage arithmetic")
+    return {dim["allowance_key"]: t[dim["allowance_key"]]
+            for dim in dims.values()}
 
 
 def storage_dimensions() -> dict:
