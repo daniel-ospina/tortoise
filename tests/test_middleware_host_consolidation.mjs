@@ -78,8 +78,13 @@ const ROOT_HTML = new Set(
 
 // …and the CRAWLER surface is served from root FILES too: `robots.txt` and the sitemaps
 // are static assets, not pages, so no page branch in the middleware matches them. Derived
-// from disk like `ROOT_HTML`, so a row that lands on one of them is falsifiable: delete
-// `sitemap-product.xml` and the row that must land on a 200 reds (#11766).
+// from disk like `ROOT_HTML`, which means this suite reds on a row that is SERVED BUT NOT
+// 301'd, or that 301s in a CHAIN — and NOT on a file that is DELETED: measured 2026-11-12,
+// deleting `website/sitemap-product.xml` leaves this suite green (`pass 1, fail 0`) because
+// the row disappears together with the file (#12097 review P3). The pin for the DELETION is
+// `test_the_retired_hosts_crawler_surface_covers_every_sitemap_in_the_tree` in
+// `tests/test_website_docs_consistency.py`, which names `CRAWLER_SURFACE` members explicitly
+// and reds `served but not 301'd off the retired host` — not this file.
 // ⛔ `*.xml` IS NOT "A SITEMAP" — the predicate is the ROOT ELEMENT, mirroring
 // `_is_sitemap_document` in `tests/test_website_docs_consistency.py`. A plain root
 // `feed.xml` is served, but it is not a crawler surface: keying the rows on the extension

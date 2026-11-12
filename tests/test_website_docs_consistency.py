@@ -1541,6 +1541,15 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     deletes its own only case (review finding, #3962). These paths are therefore
     pinned explicitly here.
 
+    ⛔ TWO OF THEM ARE SYNTHETIC (#12097 review P2). `website/sitemap-events.xml` and
+    `website/functions/events/sitemap.xml.ts` do not exist — they are the FUTURE MEMBER of
+    the `website/sitemap-` prefix row and of the `is_function_sitemap_path` predicate. Those
+    two rows were added for exactly that member, so a ratchet derived from the tree cannot
+    pin them: measured 2026-11-12, deleting either row left 585 tests green while
+    `select(["website/sitemap-events.xml"])` (and the Function path) returned
+    `surfaces: []` with this guard absent. Naming the synthetic probe is what makes the
+    row's deletion RED instead of silent.
+
     ⚠️ Known remaining hole in this ratchet, measured: the two committed legal
     drafts this file mirrors (`docs/drafts/2026-08-08-657-privacy-draft.md`,
     `...-tos-draft.md`) are also select-no-surface inputs — a draft-only edit runs
@@ -1572,6 +1581,20 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
             # this path was a pattern, the file selected NO surface, so that diff merged
             # with the guard absent: a false PASS, not a missing convenience.
             "website/apps/dashboard/public/robots.txt",
+            # ⛔ THE FUTURE-MEMBER PROBES (#12097 review P2). The two rows that close the
+            # `website/sitemap-` prefix and the `is_function_sitemap_path` predicate exist
+            # ONLY for members that are not in the tree yet, so a ratchet derived from the
+            # tree (or from `SOURCE_PATTERNS` itself) cannot pin them: measured 2026-11-12,
+            # deleting the `"website/sitemap-"` row leaves 585 tests passing across this
+            # file and `test_ci_selection.py`, while `select(["website/sitemap-events.xml"])`
+            # returns `surfaces: []` with this guard ABSENT — and the same is true of the
+            # predicate when both of its branches are deleted. Both paths below are
+            # deliberately SYNTHETIC: nothing on disk answers to them, which is the point —
+            # they are the member the row must cover tomorrow, so mutating the row reds here.
+            # Without this, the two P1 rows this PR adds can be deleted silently and the
+            # false PASS they close re-opens with a green suite (review P2 on d5264ad7b109).
+            "website/sitemap-events.xml",
+            "website/functions/events/sitemap.xml.ts",
         )
         if not _guard_reachable_for(path)
     ]
@@ -2849,8 +2872,15 @@ def test_the_product_prefix_resolves_to_the_served_document() -> None:
     # ⛔ A FILE ON DISK IS NOT A SERVED URL UNDER THE PREFIX. The middleware 404s every
     # name outside `PRODUCT_PAGES`, and the legal pages that govern the BUSINESS stay at
     # the company ROOT (`LEGAL_AT_ROOT`) — measured live 2026-11-12: `/privacy` → 200,
-    # `/tortoise/privacy` → 404. Without this pair, a sitemap could advertise the dead
-    # spelling and every walk in this file stays green.
+    # `/tortoise/privacy` → 404. This pair is the DIRECT resolution assertion for the dead
+    # spelling. ⛔ It is NOT the only defence in this file, and an earlier wording said it
+    # was ("every walk in this file stays green" — #12097 review P3, measured 2026-11-12):
+    # with the gate reverted AND `<loc>https://premiselabs.co/tortoise/privacy</loc>` added
+    # to `sitemap-product.xml`, TWO rows red — this one, and
+    # `test_every_page_loc_is_the_canonical_url_for_its_document` ("resolves to
+    # privacy.html, whose canonical URL is …/privacy"). So the canonical walk catches the
+    # dead spelling too; what these two lines add is the resolution answer a reader (and
+    # the mutation attribution) can point at directly, not the last line of defence.
     assert _document_for_loc("https://premiselabs.co/privacy") == WEBSITE / "privacy.html"
     assert _document_for_loc("https://premiselabs.co/tortoise/privacy") is None
     # …and the mirror above must BE the middleware's own set, or widening it here is how
