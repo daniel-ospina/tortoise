@@ -38061,17 +38061,21 @@ class TortoiseSDK:
         (tortoise/retrieval.py::resolve_pool_size).
 
         Point results annotated with EP breakdown. confidence_mean is THE
-        point's confidence (issue #2206 contract): the belief mean α/(α+β) of
-        the persisted posterior when EP has run, else the persisted prior
-        mean — and ``null`` + ``ep_state: "absent"`` when nothing YIELDS a mean
-        and no readable ``n.confidence`` mirror supplies one:
-        nothing persisted, a half pair, a 0/0 pair, a negative operand, or an
-        operand this process cannot read (#11702: there is then no belief
-        to report; the neutral Beta(1,1) 0.5 was indistinguishable from a
-        measured symmetric coin flip, so it is no longer substituted anywhere
-        on a read/rank surface — ``get_confidence`` remains the EP prior read
-        and still answers 0.5 there). contention/evidence stay
-        the structural edge-ratio family (a different quantity). Non-Point
+        point's confidence (issue #2206 contract), and the contract is stated
+        ONCE — as R1/R2/R3 in ``tortoise/search_engine.py``, above
+        :func:`ep_measured_cypher`, where :class:`EpBreakdown` points: a
+        readable ``n.confidence`` MIRROR leads, else α/(α+β) of the persisted
+        pair, else ``null`` + ``ep_state: "absent"``. Do NOT re-derive it from
+        shapes here: this line used to say "else the persisted prior mean",
+        which is the wrong answer for a declared Beta(3,1) beside a stored 0.9
+        (the mirror serves 0.9 — and ``update``/``update_entity`` clear a
+        stale mirror precisely so the two cannot disagree), and every list of
+        shapes this comment has carried was later falsified by a shape beside
+        it (#11702: with nothing to report the neutral Beta(1,1) 0.5 was
+        indistinguishable from a measured symmetric coin flip, so it is no
+        longer substituted on a read/rank surface — ``get_confidence`` remains
+        the EP prior read and still answers 0.5 there). contention/evidence
+        stay the structural edge-ratio family (a different quantity). Non-Point
         entities skip EP annotation. min_confidence filters on
         confidence_mean (belief); defaults to 0.0 (no filter).
 
