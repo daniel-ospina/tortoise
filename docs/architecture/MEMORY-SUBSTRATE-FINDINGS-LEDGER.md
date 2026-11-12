@@ -91,13 +91,13 @@ this re-cut keeps them *and* records which ones the tree has since overtaken.
 
 | # | The retracted claim | The correction (2026-09-10) | Verdict at `f70d884b7` | Evidence now |
 |---|---|---|---|---|
-| **a** | The commit `extra="forbid"` gate is the binding gate for extraction | **False.** Extraction writes through the SDK doors (`_extract_session_v2`), not the Layer-1 commit contract. The gate binds *external* callers only. | **STILL-TRUE** | `tortoise/sdk.py:16962` — its own docstring says the payload is written "entities via create_entity, points via create_point … events via create_event"; the call is `tortoise/sdk.py:17361` |
+| **a** | The commit `extra="forbid"` gate is the binding gate for extraction | **False.** Extraction writes through the SDK doors (`_extract_session_v2`), not the Layer-1 commit contract. The gate binds *external* callers only. | **STILL-TRUE** | `tortoise/sdk.py:17045` — its own docstring says the payload is written "entities via create_entity, points via create_point … events via create_event"; the call is `tortoise/sdk.py:17478` |
 | **b** | `CommitEvent` has 8 fields; `Point` has 15; `Entity` has 3 | Counts corrected to 10 / 15 / 3 — the prep #1418/#1533 additions were missed | **DRIFTED** — `Entity` 3 ✓, `CommitEvent` 10 ✓, **`Point` is now 18** (+`id`, `mentions`, `span_start`/`span_end` moved on) | `.venv/bin/python -c "from tortoise.commit_schema import Entity, Point, CommitEvent; print([len(c.model_fields) for c in (Entity, Point, CommitEvent)])"` → `[3, 18, 10]`; classes at `tortoise/commit_schema.py:395`, `:792`, `:1002` (the old `:429-438` cite now lands in `ParticipantSlots`) |
-| **c** | "Props are not durable by construction" | **Too broad.** The journal carries them; only the **Point** fold dropped them. Subject/Object/Event/Document/Source extras survived rebuild. | **SUPERSEDED-BY-FIX** — the Point fold now persists and restores extras, so *no* label drops them | `tortoise/projection/entities.py:2648` (`_upsert_point_props`) calls `_persist_extra_props` at `:3131` and returns `persisted_extra_keys`; #2795 CLOSED |
-| **d** | Route all doors through `sdk.ingest` and the loss class cannot recur | **`sdk.ingest` itself lost Point extras on replay** — the canonical bundle contract inherited #2795 | **SUPERSEDED-BY-FIX** — replay restores Point extras; `content_hash` is now recomputed from replayed content, so a rebuild is self-healing | `tortoise/sdk.py:36042-36046` states the rebuild case is "NOT … any more — `projection/entities.py::_upsert_point_props` (#2795 D2) now RECOMPUTES `content_hash`"; pin `tests/test_ingest_rebuild_durability.py` |
+| **c** | "Props are not durable by construction" | **Too broad.** The journal carries them; only the **Point** fold dropped them. Subject/Object/Event/Document/Source extras survived rebuild. | **SUPERSEDED-BY-FIX** — the Point fold now persists and restores extras, so *no* label drops them | `tortoise/projection/entities.py:2661` (`_upsert_point_props`) calls `_persist_extra_props` at `:3144` and returns `persisted_extra_keys`; #2795 CLOSED |
+| **d** | Route all doors through `sdk.ingest` and the loss class cannot recur | **`sdk.ingest` itself lost Point extras on replay** — the canonical bundle contract inherited #2795 | **SUPERSEDED-BY-FIX** — replay restores Point extras; `content_hash` is now recomputed from replayed content, so a rebuild is self-healing | `tortoise/sdk.py:36163-36166` states the rebuild case is "NOT … any more — `projection/entities.py::_upsert_point_props` (#2795 D2) now RECOMPUTES `content_hash`"; pin `tests/test_ingest_rebuild_durability.py` |
 | **e** | The terminal outcome set `{won, lost, withdrawn, completed}` is fine | **Narrowed** — split the **outcome axis** from the **completion axis** (#2826 C9/C14) | **ADOPTED** — both axes are shipped properties, and the code names the separation | `tortoise/pipeline.py:16` carries the props (`pipelineStageId` / `pipelineSlot` / `pipelineOutcome`), and `:27` is where the separation #2826's C14 recommends is stated; `:66` holds both axes in `STAGE_PROPS`; #2792 CLOSED COMPLETED 2026-10-15 |
 | **f** | `tortoise/semantic_extractor.py` exists | **False** — verified absent | **STILL-TRUE** | `ls tortoise/semantic_extractor.py` → *No such file or directory* at `f70d884b7` |
-| **g** | #2795's prop loss is a **journal** gap | **False.** The journal carries the full snapshot; the loss was the **replay fold** (`_upsert_point_props` never called `_persist_extra_props`). Fix = one code path. | **SUPERSEDED-BY-FIX** — that one code path was added | same evidence as **(c)**: `tortoise/projection/entities.py:3131` |
+| **g** | #2795's prop loss is a **journal** gap | **False.** The journal carries the full snapshot; the loss was the **replay fold** (`_upsert_point_props` never called `_persist_extra_props`). Fix = one code path. | **SUPERSEDED-BY-FIX** — that one code path was added | same evidence as **(c)**: `tortoise/projection/entities.py:3144` |
 | **h** | The write-path benchmark exercises the **eval** lane, so it cannot see this class | **False.** It runs the **product** lane (`sdk.capture_session` → `_extract_session_v2`); it was blind because its graded vocabulary never asserted those props exist | **STILL-TRUE** (citation relocated — the 2026-09-10 `runner.py` line citation no longer resolves at this head) | `tests/eval/write_path/test_write_path_relation_lane.py:9` ("**capture commit** (`sdk.capture_session` → `_extract_session_v2`)") |
 | **i** | The pack-fit brief forward-referenced filing M1 as `#2697` | **Wrong.** #2697 is a merged executor/envelope PR; M1 was filed as **#2714** | **STILL-TRUE**, and now spent — `#2714` CLOSED COMPLETED | `gh issue view 2714` → `CLOSED`; `gh pr view 2697` → `MERGED` "fix(executor): #1416 — robust envelope extraction" |
 | **j** | The pilot corpus is "sanitized" | **Unverified / inconsistent** — it carried customer-identifying names and a work email in provenance metadata. Treat as private regardless of the label. | **STILL-TRUE as a rule; MOOT-BY-LOSS as an object** — the corpus is no longer on this machine (§5), so nothing here can be re-measured. **The rule outlives the object: never commit corpus material to this public repo.** | `ls -d ~/.swarm` → *No such file or directory* |
@@ -263,11 +263,14 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
 - every **`path:line` citation** in §3 and §5 resolves in the tree, and the line number is in range —
   a citation that points at nothing is the doc's own "declared ≠ stored" defect, and it looks exactly
   like evidence. ⛔ **In range is not ON TARGET**: this arm cannot tell a citation that lands on its
-  symbol from one that lands on a comment above it once the file shifts. Measured at this head: rows
+  symbol from one that lands on a comment above it once the file shifts. Measured on this page's path: rows
   (c) and (g) cited `_upsert_point_props` at line 2632 and its `_persist_extra_props` call at line
-  3115 — correct at `f70d884b7`, until `43db5c0f55` inserted 16 lines into that file and both landed on
-  a `#2958` comment and a `#2795` comment while `--check` stayed at exit 0. Re-measured by hand to
-  lines 2648 and 3131; `tests/test_substrate_map.py::test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names`
+  3115 — correct at `f70d884b7`. `main` then added 16 lines to that file (`43db5c0f55`) and 13 more
+  (`927c24e233`); at 2648 and 3131 the citations had slid onto a `#2958` comment and a `#2795`
+  comment while `--check` stayed at exit 0. Re-measured by hand to lines 2661 and 3144 — and it will
+  rot again the moment the file moves, which is why the symbol arm is the missing half. The same
+  commit moved `sdk.py` by 168 lines, taking `_extract_session_v2`, `create_point` and row (d)'s
+  quoted range with it; `tests/test_substrate_map.py::test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names`
   is the sibling that pins symbol identity, and no such arm exists here. That includes the
   **shorthand `:LINE`** form used inside a cell — in row (b),
   `tortoise/commit_schema.py:395` is followed by `:792` and `:1002`. A shorthand resolves against the
@@ -297,12 +300,20 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   `path:L LINE` and `path:L16` (the `#L16` sibling of a permalink) are **named carve-outs**, exactly as the rest are, because a rule that refuses
   this page's own issue refs and paths is the false-accusation class one arm over — and so is
   **`path N --flag`** (a numeric ARGUMENT rather than a line, indistinguishable from a command that
-  does not start with a recognised program name) and an **HTTP-status line** in the ONE form the code
-  measures — a `.html`/`.htm` page name followed by a 3-digit status, with the literals left
-  unspanned on purpose because this scan refuses them. Error text is NOT a carve-out of its own: a
-  status following a path-shaped token is refused wherever it appears, so neither a METHOD-and-path
-  request line nor a bare upstream path qualifies, and an HTTP example on this page belongs in a form
-  the resolver can read or outside a code span. The rest of this
+  does not start with a recognised program name) and an **HTTP-status line**, in exactly the form the
+  code measures: **any token ending `.html`/`.htm` followed by a status in 100–599**, METHOD prefix
+  or not, with the literals left unspanned on purpose because this scan refuses them. Measured with
+  `check_citation_shapes`, not assumed — the skipped forms, which may be written in backticks:
+  `index.html 200`, `GET /index.html 200` (a METHOD prefix does **not** disqualify it, which an
+  earlier revision of this section got backwards), `x.html 100`, `x.html 599`. And the refused ones,
+  which must therefore stay OUT of backticks: page.html 600 and page.html 099 are refused because the
+  band is 100–599, and so is any status after an upstream path or after a METHOD-and-path line whose
+  path does not end in `.html`/`.htm` — error text is NOT a carve-out of its own, so a status inside
+  running prose is refused wherever it appears.
+  ⚠️ The exemption is a SUFFIX test on the token, so it also swallows `website/404.html 200` — a real
+  118-line file, i.e. an out-of-range citation the arm skips. That is the carve-out's recorded cost,
+  not an oversight: narrowing it to tracked files would make the exemption depend on the very tree it
+  is meant to check independently. The rest of this
   paragraph is what IS measured. Skipping it was a hole with
   three doors — a `.txt` path, an extension-less path, and a leading-dot path like
   `.github/workflows/ci.yml:892` matched nothing, so reformatting a citation was enough to defuse a
@@ -422,7 +433,7 @@ follows `SUBSTRATE-REBUILD-MAP.md`'s ruling: *the tracker half is deliberately n
 dated and its command is recorded.* The command for §6 is `gh issue view <N> --json state`, and it
 was run per issue, not sampled.
 
-⚠️ **Seven more are unguarded, and none is out-of-repo — they are simply not armed yet (#11902, #11957).**
+⚠️ **Eight more are unguarded, and none is out-of-repo — they are simply not armed yet (#11902, #11957).**
 Every one is derivable from **this page or the page it points at**, so the ruling above does not reach
 them and a guard for them could not pass by not looking:
 §4's row population (count its rows: 14) and its `**No copy of its content in-repo**` cells among the
@@ -433,7 +444,11 @@ parses, so an arm could compare the two rather than trusting this prose (that cl
 `main`'s re-cut and nothing noticed); and **the copies of §3's tally outside this page**
 (`docs/00_index.md`, `ci.yml`, `config/ci-surfaces.yml` and the two module docstrings), because
 `check_registration()` is a SUBSTRING presence test — an index row whose counts are falsified still
-passes, where the sibling `problem_map_check.check_registration` derives its headline instead. §4's two come straight out of its own table, the same way the §6
+passes, where the sibling `problem_map_check.check_registration` derives its headline instead; and
+**the `26`-entry problem-map population quoted three times on this page**, which is derivable from
+`MEMORY-SUBSTRATE-PROBLEM-MAP.md` exactly as item 6's claim is — `tools/problem_map_check.py` prints
+`26 row(s) parsed` on every run and nothing re-derives 26 here, so adding a row to that map leaves
+this page asserting 26 at exit 0. §4's two come straight out of its own table, the same way the §6
 arithmetic is already re-derived rather than trusted. Until arms are added they are **hand-derived and
 unmeasured**, and that was measured: deleting the `<corpus>/2026-09-09-ontology-evidence.md` row —
 after which §4 has 13 rows and covers 14 of the 15 artefacts `#2852` §3 lists — reverting the
@@ -441,7 +456,7 @@ opening to *"six of the eight"*, restating §7 as `11 of 40 have moved`, and fol
 section's own §6 re-read workflow (OPEN 4→3, one row to CLOSED COMPLETED 32→33, survivors
 `four`→`three` so every CHECKED number reconciles) each leave `--check` at exit 0 and the test file
 green — the last one while §7 still reads `36 of 40`, i.e. it goes stale silently on the update
-this section prescribes. Re-derive all seven from their own tables before quoting them; `#2852` §3 is
+this section prescribes. Re-derive all eight from their own tables before quoting them; `#2852` §3 is
 the population source, not the derivation.
 
 ---
