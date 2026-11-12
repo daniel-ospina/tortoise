@@ -210,10 +210,16 @@ def test_the_census_reports_minted_and_held_separately(monkeypatch):
         "'unanswerable', never an empty list that reads as clean")
 
 
-# ── 4. unarmed is byte-identical (the recorded default) ────────────────────
+# ── 4. unarmed makes the same MINT DECISIONS (the recorded default) ────────
 
 def test_unarmed_the_predicate_does_not_run(monkeypatch):
-    """``#5087`` plan R1: *unmeasured ⇒ fail open*. Unarmed changes nothing."""
+    """``#5087`` plan R1: *unmeasured ⇒ fail open*. Unarmed MINTS unchanged.
+
+    ⛔ Not "byte-identical": the census keys (``subjects_minted`` … ``mentions``)
+    are returned unconditionally, so the dict has seven keys the pre-#12094
+    return did not. What the recorded default promises — and what this test
+    pins — is that no surface's MINT DECISION changes.
+    """
     api, proj, _log = _proj_api()
     payload = {"subjects": [{"name": "it", "subjectKind": "other"}],
                "objects": [], "aboutEntities": []}
@@ -288,12 +294,17 @@ def test_a_non_document_input_returns_the_full_disposition_shape(monkeypatch):
 
     documented = {"subjects", "objects", "subject_names", "entities",
                   "failed_sections", "subjects_minted", "subjects_held",
-                  "held_subjects", "subjects_held_by_rule", "mentions"}
+                  "held_subjects", "subjects_held_by_rule", "mentions",
+                  "subjects_hold_failed", "hold_failures"}
     assert documented <= set(out), (
         f"the non-document return is missing {sorted(documented - set(out))}; "
         "the docstring documents these as always present")
     assert out["subjects_minted"] == 0 and out["subjects_held"] == 0
     assert out["held_subjects"] == [] and out["subjects_held_by_rule"] == {}
+    # #12102 review cycle 2: the FAIL-OPEN keys are part of the documented
+    # contract too, and a `documented` set that omits them lets them vanish
+    # silently — the same KeyError class this test exists to prevent.
+    assert out["subjects_hold_failed"] == 0 and out["hold_failures"] == []
     assert out["mentions"] is None, (
         "mentions must be None (unanswerable here), never [] which reads clean")
 
