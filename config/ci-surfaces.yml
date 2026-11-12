@@ -2235,15 +2235,15 @@ surfaces:
   # #11758/#11981: the two purchasable storage dimensions — `graph_storage`
   # (`hot capacity`) and `postgres_storage` (`stored data`) — and the `solo` $19
   # tier that first sells them. The pins drive
-  # `metering.storage_overage_cost_usd`, which reads
-  # `pricing.storage_dimensions` / `storage_limits` / `storage_overage_rate` /
-  # `BYTES_PER_GB` — all four from `product/pricing.json` — and they cross-check
-  # the unit `cost_dimensions.by_name` declares and the keys
-  # `allowance_gate.ALLOWANCE_KEYS` owns. Neither of those two prices anything —
-  # `cost_dimensions` declares no rate, tier boundary or overage and does not
-  # import `product/pricing.json`, and `allowance_gate` sets no allowance or rate.
-  # Hermetic — arithmetic and table shape only, no
-  # DB, no graph, no network. DUAL-REGISTERED with `api`: the
+  # `metering.storage_overage_cost_usd`, whose rates, allowances and purchasability
+  # gate come from `product/pricing.json` (`pricing.storage_dimensions` /
+  # `storage_limits` / `storage_overage_rate` / `has_overage`, the last via
+  # `_overage_eligible`); `pricing.BYTES_PER_GB` is a CODE CONSTANT, and the pins
+  # assert it EQUAL to `billing.storage.bytes_per_gb`, so an artifact-only edit of
+  # that field still reds them. They also cross-check the unit
+  # `cost_dimensions.by_name` declares and the keys `allowance_gate.ALLOWANCE_KEYS`
+  # owns — neither of those two prices anything. Hermetic — no DB, no graph, no
+  # network. DUAL-REGISTERED with `api`: the
   # pins read sources in BOTH the `api` and `core` surfaces, and neither arm is
   # redundant — `tortoise/metering.py` is an exact `api` SOURCE_PATTERN (a
   # metering.py-only diff resolves `['api']`, where a named-surface match REPLACES
