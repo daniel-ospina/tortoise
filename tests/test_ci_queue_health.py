@@ -1699,8 +1699,23 @@ def test_a_counters_met_queue_with_an_executing_PR_run_reaches_OK_with_no_PRWITN
     with an executing PR run can never carry that verdict however many runs it has. Both
     halves are asserted here, so neither the sentence nor its negation can drift.
 
-    Discriminating: forcing `pr_wait_measured` to carry `truncated` reds the second arm;
-    making the flood block reachable from `pr_running != 0` reds the first.
+    ⛔ WHAT THIS TEST DOES **NOT** PIN (round 24, measured — an earlier draft of this
+    docstring claimed both and both were GREEN): conjoining `and not truncated` into the
+    constructor's `pr_wait_measured` derivation does not red it, because `bool(wait_runs)`
+    is already `False` when the PR wait is empty and no added conjunct can change that
+    (the test that reds on that mutation is
+    `test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence`); and neutering
+    the `pr_running != 0` clause does not red it either, because with no PR wait the
+    `not wait_runs` clause answers `OK` first. THIS test pins the route's OUTPUT — the
+    third emitter route (`pr_running != 0` → `healthy()` → the constructor's
+    derivation) leaves `OK` / `pr_wait_measured=False` / `congests_pr is None` — so it is
+    the behavioural anchor for `healthy()`'s sentence, not a discriminator of the clauses
+    that sentence describes.
+
+    Discriminating (both measured at this head): returning this shape as `FLOOD` from
+    `healthy()`'s `pr_running != 0` arm reds the first assertion — which is exactly the
+    retracted wording the sentence replaced; and making the constructor's derivation
+    `bool(wait_runs) or not pending_truncated` reds the second.
     """
     executing = run(1, "Python CI", event="pull_request", age_seconds=60,
                     has_live_job=True)
@@ -2958,13 +2973,18 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # the old universal "`OK` — but only when the PR wait was MEASURED …" measured
         # GREEN, so the claim could come back silently.
         ("module", "the PR wait was MEASURED and inside the budget, OR nothing was waiting"),
+        # ⛔ AND THE CLAUSE ITSELF, not just the headline above it (round 24): reverting the
+        # corrected wording to the retracted "a flood with an executing PR run …" measured
+        # fully GREEN, because a behavioural test pins behaviour and never a sentence.
+        ("module", "whose offender clears the flood counters but has an executing PR run"),
         # ⛔ AND THE GLOSSES THAT ONLY A MAINTAINER READS — pinned because the delta's own rule
         # is that a corrected claim needs a leg, and these had none (#12166 review round 16).
         # The `--help` one is EMITTED (argparse's description), i.e. operator-visible; the rest
         # are property and inline comments. ⛔ NO COUNT IS GIVEN HERE: a numeral in this comment
-        # goes stale before the list it describes does, which is the same reason no other count
-        # in this file is quoted. Every read-only gloss the one-half correction touched has an
-        # entry below, and reverting any ONE of them REDs.
+        # goes stale before the list it describes does. (That is a rule for THIS list, not a
+        # claim about the file — other comments quote counts where the count is the point.)
+        # Every read-only gloss the one-half correction touched has an entry below, and
+        # reverting any ONE of them REDs.
         ("module", "read, or whose read did not PROVE them idle — a count, not a proof"),
         ("module", "whose jobs were never read, or whose read did not PROVE them idle) but the oldest"),
         ("module", "that count may be runs whose jobs could not be read, or"),
