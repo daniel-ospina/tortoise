@@ -45,8 +45,10 @@ A row is a markdown table row at **0-3 leading spaces** (`MAX_TABLE_INDENT`):
 markdown renders a `|` line as part of the table up to three spaces in, so those
 are rows a reader sees and every arm grades them — blocks, seam discovery, the
 presence arm, the §1/§3/§4 row anchors. `--self-test` runs its whole population
-against BOTH the shipped map and an indented copy, so a harness or an arm that can
-only reach column-0 rows is caught rather than silent. #11415 measured the pre-fix
+against BOTH the shipped map and an indented copy, and pins how many of its cases
+actually EMIT an indented row (`MIN_INDENTED_MUTATIONS`, measured on each mutator's
+output), so a harness, an arm **or a mutator** that can only reach column-0 rows is
+caught rather than silent. #11415 measured the pre-fix
 shape: `line.startswith("|")` put an indented row in no block at all, so the
 identical blanked crosswalk row graded `VIOLATION R5 zzz: names no surface` at
 column 0 and **CLEAN, exit 0**, with one leading space.
@@ -185,6 +187,19 @@ def _is_table_line(line: str) -> bool:
     """
     indent = len(line) - len(line.lstrip(" "))
     return indent <= MAX_TABLE_INDENT and line[indent:].startswith("|")
+
+
+def _is_indented_table_line(line: str) -> bool:
+    """True when ``line`` is a table row that is INDENTED (1..`MAX_TABLE_INDENT`).
+
+    The `#11415` shape, measured at the MUTATOR's output rather than declared by it.
+    `_self_test_indentation_floor` counts the rows this predicate sees in the text each
+    mutator produces, so a mutator whose injected row is written at column 0 is caught
+    even though it still *runs* — which is exactly how this case was lost once already
+    (see `MIN_INDENTED_MUTATIONS`).
+    """
+    indent = len(line) - len(line.lstrip(" "))
+    return 1 <= indent <= MAX_TABLE_INDENT and line[indent:].startswith("|")
 
 
 def _line_matches(line: str, prefix: str) -> bool:
@@ -1199,6 +1214,21 @@ SELF_TEST_MUTATIONS: tuple[tuple[str, object, str], ...] = (
 #: the shrink that is two places short of that must still be loud.
 MIN_SELF_TEST_MUTATIONS = 22
 
+#: How many of those mutations must actually EMIT an indented row. A floor over the
+#: mutators' measured OUTPUT, not a declaration they make about themselves (the P2
+#: this branch was offered on PR #12016 and had not adopted — comment 6813885079).
+#: `_indent_and_blank_inserted_row` ends with
+#: `return _insert_before(text, "| §6.4 |", " " * spaces + row)`, and dropping
+#: `" " * spaces +` is a ONE-token edit: `spaces` stays in range so the mutator's own
+#: guard still passes, the mutation is still applied and still expects a violation,
+#: and it is now a column-0 row every other case already covers — measured, `--self-test`
+#: printed 22/22 on BOTH shapes. With the block builder reverted as well the harness
+#: stayed green while `check()` graded a blanked, one-space-indented crosswalk row
+#: `CLEAN` (exit 0) — the false PASS this PR exists to close, re-opened by an edit
+#: nothing measured. The population would then hold NO case that can express the
+#: #11415 shape, which is the rubber stamp this file exists to prevent.
+MIN_INDENTED_MUTATIONS = 1
+
 #: How many SHAPES `--self-test` must run the population against. A floor for the
 #: same reason as `MIN_SELF_TEST_MUTATIONS`: deleting the indented entry is a
 #: ONE-place edit that otherwise leaves `--self-test` green with its second arm
@@ -1337,11 +1367,15 @@ def _run_mutation_pass(text: str, label: str, *, verbose: bool) -> tuple[int, in
     for name, mutate, expected in SELF_TEST_MUTATIONS:
         try:
             mutated = mutate(text)  # type: ignore[operator]
-        except AssertionError as exc:
+        except (AssertionError, Refusal) as exc:
             # A mutation that could not be APPLIED is not the same finding as one
             # that was applied and not caught: reporting it as "the checker is a
             # rubber stamp" misdiagnoses a correct document whose row was merely
             # reformatted (measured — a reworded §4 heading did exactly that).
+            # `Refusal` belongs here for the same reason: a mutator can refuse the
+            # DOCUMENT (the duplicate-section decoy calls `split_sections`, which
+            # refuses two `## 1.` sections), and an escaped `Refusal` replaced this
+            # pass's honest UNTESTABLE report with a traceback (measured).
             print(f"  UNTESTABLE [{label}] {name}: {exc}", file=sys.stderr)
             untestable += 1
             continue
@@ -1375,6 +1409,42 @@ def _run_mutation_pass(text: str, label: str, *, verbose: bool) -> tuple[int, in
     return failures, untestable
 
 
+def _self_test_indentation_floor(text: str) -> int | None:
+    """How many registered mutations ADD an indented row THIS document did not have.
+
+    Measured by applying each mutator to the document's COLUMN-0 normalisation
+    (`_indented_tables(text, 0)`) and counting the `_is_indented_table_line` rows it
+    produces, so the answer is a property of what the population DOES, independent of
+    how the document under test happens to be indented. The NORMALISATION is
+    load-bearing (measured): on a document AS GIVEN, a mutator that DUPLICATES a
+    section adds every indented row it copies — the duplicate-section decoy
+    contributes `+17` where the case that emits the shape contributes `+1` — so a
+    floor measured there reads 2 on an already-indented map and stays satisfied with
+    the shape-emitting case DE-INDENTED (exit 0, the false PASS). On the column-0 copy
+    only an EMITTED row raises the count.
+
+    ⛔ A mutator that could not be APPLIED to that copy returns ``None``: it raises
+    `AssertionError` (its target row is missing from THIS document) or `Refusal` (the
+    mutator itself refuses the document — the duplicate-section decoy on a document
+    that already carries two `## 1.` sections). Either way the capability cannot be
+    measured here, and that is a finding about the DOCUMENT, which the pass itself
+    reports as UNTESTABLE / refusal (`_run_mutation_pass`). Returning a count in that
+    state would report the document's gap as a missing case in the population.
+    """
+    base = _indented_tables(text, 0)
+    emitted = 0
+    for _name, mutate, _expected in SELF_TEST_MUTATIONS:
+        try:
+            mutated = mutate(base)  # type: ignore[operator]
+        except (AssertionError, Refusal):
+            return None
+        # `base` carries no INDENTED row by construction (every row sits at column 0),
+        # so a count of indented rows in the output IS the number the mutator emitted.
+        if any(_is_indented_table_line(line) for line in mutated.splitlines()):
+            emitted += 1
+    return emitted
+
+
 def self_test(text: str) -> int:
     """Prove the checker is not a rubber stamp.
 
@@ -1391,6 +1461,22 @@ def self_test(text: str) -> int:
         print(
             f"self-test: {len(SELF_TEST_MUTATIONS)} mutation(s) registered, at least "
             f"{MIN_SELF_TEST_MUTATIONS} required — a shrunk mutation population proves nothing",
+            file=sys.stderr,
+        )
+        return 1
+    # ⛔ The SECOND SHAPE is only half the arm: the population must also be able to
+    # EXPRESS the shape it is meant to catch. A mutator that writes its injected row at
+    # column 0 still runs, still expects a violation and still passes on a column-0
+    # document — so the shape floor alone stays satisfied while no case exercises
+    # indentation at all (measured; see `MIN_INDENTED_MUTATIONS`). Checked here, on the
+    # mutators' measured output, before the shapes are trusted.
+    indented = _self_test_indentation_floor(text)
+    if indented is not None and indented < MIN_INDENTED_MUTATIONS:
+        print(
+            f"self-test: {indented} mutation(s) emit an INDENTED row, at least "
+            f"{MIN_INDENTED_MUTATIONS} required — no case in the population can "
+            "express the #11415 shape (a row the block builder never reached), so "
+            "the indentation arms are unexercised even though every case runs",
             file=sys.stderr,
         )
         return 1
