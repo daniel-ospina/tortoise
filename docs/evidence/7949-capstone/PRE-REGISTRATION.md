@@ -520,7 +520,7 @@ option A (2026-09-25) put the version anchor on the **derivation** link, and the
 names those classes: `_DERIVATION_REFERENCES_LABELS = frozenset({"Event", "Document"})`
 (`tortoise/projection/edges.py:843`) — `:Object` links are identity/mention links and are pinned
 property-free by `tests/test_source_version_references_5199.py::test_identity_link_stays_property_free`
-(`tortoise/projection/edges.py:817-819`, `docs/architecture/STORAGE-ARCHITECTURE.md:763`). Counting `:Object` mentions in
+(`tortoise/projection/edges.py:817-819`, `docs/architecture/STORAGE-ARCHITECTURE.md:789`). Counting `:Object` mentions in
 E3's denominator therefore made `= 1.000` **unreachable as registered**: every mention link is
 unanchored by rule, so a run would have reported the decision as a defect. `:Point` carries the anchor
 on the node itself (`#5038`), which is why the derivation set is those two link labels **plus**
