@@ -136,9 +136,10 @@ _NESTED_RECORD_KEYS = frozenset({"point"})
 #: The journal ENVELOPE names — the shape `_emit` itself builds, not a payload.
 #: #11948: a payload key that collides with one of these does not ADD a field,
 #: it REWRITES the record's identity. `_emit` builds
-#: `{"event_id", "ts", "type", "initiated_by", "agent_id", **payload}`, so a
-#: caller `type=` re-TYPES the record (`add_object(..., type="PointAdded")`
-#: journalled a `PointAdded` no record door built, and the replay folds by
+#: `{"event_id", "ts", "type", "initiated_by", "agent_id", "corrects",
+#: **payload}`, so a caller `type=` re-TYPES the record
+#: (`add_object(..., type="PointAdded")` journalled a `PointAdded` no record
+#: door built, and the replay folds by
 #: `ev["type"]`), and `ts` / `initiated_by` / `agent_id` / `actor_user_id`
 #: forge who wrote the record and when. The collision — not `point=` — is what
 #: lets a caller re-type a record, and it was open at every splatting door.
@@ -190,8 +191,11 @@ def _verify_record_vector_width(record: dict, type_: str) -> None:
     through `stamp_journal_embedding` (``_point`` with ``creating=True``;
     ``add_point`` with ``creating=False`` after popping a stale width). Refusing
     `_SERVER_MANAGED_EMBEDDING_KEYS` on this channel breaks every vector-bearing
-    ``PointAdded``/``OperatorAdded`` — the reviewer who found the gap proposed
-    exactly that, and it reds the whole width suite.
+    ``PointAdded`` — the reviewer who found the gap proposed exactly that, and
+    it reds the whole width suite. (``add_operator``'s record is the one that
+    carries neither: `_point` builds a vector only on the operator-less,
+    non-empty-content path, so there is no marker on it to verify or to lie —
+    see the header above.)
 
     So this VERIFIES instead. The harm the marker rule exists to prevent is a
     marker that LIES — a declared ``f32`` over values it does not describe,
