@@ -51,10 +51,14 @@ that is exactly how the count was briefly "re-measured" from 449 to 450.
 
 ⛔ A cite target is a TOKEN that IS ``hosted_api.py:<n>``. ``tests/test_hosted_api.py:22``
 is a cite of the TEST file, not of `hosted_api.py` line 22, and counting those
-overstated the population by 16 distinct targets and 6 citing files while quoting
-a floor (``22``) that no bare cite targets (#11850). The boundary is applied with
-``fullmatch`` in `census`, and the tokens it declines are counted into
-``non_cite_tokens`` so the definition's cost is reported rather than silent.
+overstated the population in BOTH dimensions the two notes state — distinct
+targets AND citing files — while quoting a floor (``22``) that no bare cite
+targets (#11850). ⛔ Neither size is frozen in this paragraph: they move as
+lookalikes are written (the citing-file overstatement is 6 at #11850's filing head
+and 8 once lookalike-bearing files landed), so `census()` is the only thing that
+answers "how big is it right now". The boundary is applied with ``fullmatch`` in
+`census`, and the tokens it declines are counted into ``non_cite_tokens`` so the
+definition's cost is reported rather than silent.
 """
 from __future__ import annotations
 
@@ -78,10 +82,21 @@ REPO = Path(__file__).resolve().parent.parent
 #: The DEFINITION of a cite target: a token that IS ``hosted_api.py:<n>``.
 #:
 #: ⛔ A token that merely ENDS with it — ``tests/test_hosted_api.py:22`` — is a cite
-#: of a DIFFERENT file. Counting those overstated the population by 16 distinct
-#: targets (456 for 440) and 6 citing files, and it quoted a floor of ``22`` that
-#: named a line no bare cite targets (#11850). The boundary is enforced by
-#: ``fullmatch`` in `census`, never by suffix-matching the file name.
+#: of a DIFFERENT file, and counting those overstated the "measured" population in
+#: BOTH dimensions the notes state: distinct targets, and citing files (a file can
+#: carry only lookalikes and no bare cite at all — this change's own two files do
+#: exactly that). It also quoted a floor naming a line no bare cite targets (#11850).
+#: The boundary is enforced by ``fullmatch`` in `census`, never by suffix-matching.
+#:
+#: ⛔ NO COUNT IS FROZEN HERE ON PURPOSE, and that is a correction, not a style
+#: choice: an earlier draft of this comment quoted the overstatement as a bracket of
+#: measured figures and asserted the delta could not drift — and both halves were
+#: falsified before the change landed. Measured at #11850's filing head the pair was
+#: 456 → 440; re-measured at ``8300c102c8`` it is 458 → 442; and the citing-file
+#: delta moved from 6 to 8 on the very commit that introduced lookalike-bearing
+#: files. `census()` is the only thing that answers "how big is it right now" —
+#: every figure written here is a measurement of a PAST tree, which is precisely the
+#: hand-paste class this module exists to end.
 #:
 #: ⚠️ TWO patterns, and the split is FORCED: ``git grep -E`` is POSIX ERE, which
 #: has NO lookbehind, so the left boundary cannot be expressed on the grep side.
@@ -175,8 +190,16 @@ def census(pivot: int = DEFAULT_PIVOT, repo: Path = REPO) -> dict:
     # separates it from the token (no tracked path contains a colon — measured, and
     # a path that did would yield a token failing `fullmatch` below, i.e. an
     # undercount this function reports as `non_cite_tokens`, never a miscount).
+    #
+    # ⛔ `-a` IS REQUIRED, not decoration: without it a BINARY carrier makes git
+    # print `Binary file <path> matches` — a colon-less line, which this parse would
+    # drop before either counter, so the file would vanish from `citing_files` with
+    # nothing reported (measured on a throwaway repo: old `-l` listed the file, the
+    # colon-less line yields no token). With `-a` the line is `path:token` and the
+    # parse stays total. Today no tracked file is a binary carrier, so the figures
+    # do not move; the flag is what keeps that from becoming a silent undercount.
     proc = subprocess.run(
-        ["git", "grep", "-o", "-E", _CITE_CANDIDATE_RE],
+        ["git", "grep", "-a", "-o", "-E", _CITE_CANDIDATE_RE],
         cwd=str(repo), capture_output=True, text=True, check=False,
     )
     if proc.returncode > 1:

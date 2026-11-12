@@ -824,10 +824,15 @@ def test_the_census_counts_cites_of_this_file_and_not_of_its_lookalikes(tmp_path
 
     Why this exists (#11850): ``CITE_RE`` was ``hosted_api\\.py:[0-9]+`` with no
     left boundary, so ``tests/test_hosted_api.py:22`` counted as a cite of
-    ``hosted_api.py`` line 22. That overstated the shipped population by 16
-    distinct targets and 6 citing files, and it quoted a floor (``22``) naming a
-    line no bare cite targets — in two prose notes whose whole justification is
-    that their figures are MEASURED.
+    ``hosted_api.py`` line 22. That overstated the shipped population in BOTH
+    dimensions the two prose notes state — distinct targets and citing files — and
+    it quoted a floor (``22``) naming a line no bare cite targets, in notes whose
+    whole justification is that their figures are MEASURED.
+
+    ⛔ The sizes are NOT restated here: they move as lookalikes are written (the
+    citing-file overstatement is 6 at #11850's filing head and 8 once
+    lookalike-bearing files landed — including this one), so `census()` is the only
+    thing that answers "how big it is now".
 
     The boundary cannot be expressed on the grep side (``git grep -E`` is POSIX
     ERE: no lookbehind), so the tool greps PERMISSIVELY and decides with
