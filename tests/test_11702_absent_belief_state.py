@@ -5738,15 +5738,31 @@ _CLAUSE_BREAK = re.compile(
 #:     with the number as the subject (`0.75 is what the credibility word
 #:     reads`), is not reported. Declared, not hidden: that is the grammar this
 #:     guard covers and no more.
-#:   • FALSE BLOCK — a TRUE sentence can be reported whenever the word and the
-#:     number share a clause with no exemptor. The window therefore stops at a
-#:     COMMA and at a RELATIVE PRONOUN (`which`/`that`/`whose`/`where`/`who`):
-#:     measured before that, "the ``credibility=`` word raises the Beta(3,1)
-#:     default, which reads 0.75" and "the credibility word raises a default
-#:     whose mean is 0.75" both fired. This is the direction that costs — the
-#:     failure text hands the next fixer a number and that fixer then
-#:     "corrects" a correct sentence, the false-correction failure this file
-#:     documents for the mirror guards.
+#:   • FALSE BLOCK — a TRUE sentence is reported whenever the word and the
+#:     number share the WINDOW, and the window is NOT a clause: it stops at
+#:     `.` `;` `,` `—` `–`, at a relative pronoun (`which`/`that`/`whose`/
+#:     `where`/`who`) and at `but`/`rather`. It CROSSES
+#:       - a COLON,
+#:       - a parenthetical `( … )`,
+#:       - a coordinating `and`,
+#:     and the exemption span ENDS at the number, so a negator placed AFTER the
+#:     number is not read. Measured, every one of these TRUE sentences is
+#:     reported: "the credibility word adds one weak body: the #2199 default
+#:     alone reads 0.75"; the same with ( … ), with "and", and "the credibility
+#:     word reads 0.75, which is not true". All four are pinned in the control
+#:     test as KNOWN FALSE BLOCKS so a later tightening is measured, not
+#:     guessed. (The `—`/`–`/`but` forms WERE false blocks and are closed; the
+#:     colon cannot be closed, because the pinned must-fire
+#:     "the credibility word is not just an added body: it reads 0.75" is a
+#:     false claim that depends on the window crossing a colon.)
+#:     This is the direction that costs — the failure text hands the next fixer
+#:     a number and that fixer then "corrects" a correct sentence, the
+#:     false-correction failure this file documents for the mirror guards.
+#:     ⚠️ Say "window", never "clause": the file's own `_CLAUSE_BREAK` ends a
+#:     clause at `:` `—` `–` `but` `rather`, so a comment calling this trigger
+#:     "same clause" understates it and a verifier auditing that sentence reads
+#:     colon- and dash-joined prose as safe when dash-joined only became safe in
+#:     the same commit (review cycle 4).
 #:
 #: `0\.750*` and NOT plain `0\.75` — measured: the lookahead alone let the same
 #: false claim written at 3 or 4 dp (`reads 0.750`, `reads 0.7500`) pass
@@ -5755,8 +5771,10 @@ _CLAUSE_BREAK = re.compile(
 #: `0.7561` — the TRUE figure — from matching as `0.75`, and the control test
 #: pins that in both directions.
 _CRED_WORD_YIELDS_075 = re.compile(
-    r"credibility(?:(?!\b(?:which|that|whose|where|who)\b)[^.;,]){0,60}?"
-    r"\b(?:is|reads|lands\s+at|equals)\b[^.;,]{0,25}?"
+    r"credibility(?:(?!\b(?:which|that|whose|where|who|but|rather)\b)"
+    r"[^.;,–—]){0,60}?"
+    r"\b(?:is|reads|lands\s+at|equals)\b"
+    r"(?:(?!\b(?:but|rather)\b)[^.;,–—]){0,25}?"
     r"(?:0?\.750*|75\s*%)(?!\d)",
     re.IGNORECASE)
 
@@ -6056,12 +6074,38 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             "the credibility word raises a default whose mean is 0.75",
             "the credibility word is ignored against a pair that reads 0.75",
             "the credibility word is discarded against a pair that reads 0.75",
-            "the credibility word is overwritten by a pair that reads 0.75"):
+            "the credibility word is overwritten by a pair that reads 0.75",
+            # …the DASH and `but` forms, which the window now stops at (cycle 4).
+            "the credibility word adds one weak body — the #2199 default "
+            "alone reads 0.75",
+            "the credibility word adds one weak body – the #2199 default "
+            "alone reads 0.75",
+            "the credibility word is not used here but the #2199 default "
+            "alone reads 0.75"):
         assert not _cred_word_yields_075(true_sentence), (
             f"the credibility guard fires on TRUE prose: {true_sentence!r}")
     assert _cred_word_claims("tortoise/volunteer.py") == [], (
         "the credibility guard reports the shipped `volunteer.py` note: "
         + repr(_cred_word_claims("tortoise/volunteer.py")[:1]))
+    # ⛔ KNOWN FALSE BLOCKS — asserted to FIRE today, not to be right. They are
+    # TRUE sentences the guard reports, kept here so the next tightening is
+    # MEASURED instead of guessed: flip each to `assert not` as the exemption
+    # learns to read past the number / across a colon. The colon one cannot be
+    # closed while the must-fire "… not just an added body: it reads 0.75" is a
+    # false claim that depends on crossing it, which is why these are pinned
+    # rather than fixed (review cycle 4).
+    for known_false_block in (
+            "the credibility word adds one weak body: the #2199 default "
+            "alone reads 0.75",
+            "the credibility word adds one weak body (the #2199 default "
+            "alone reads 0.75)",
+            "the credibility word adds one weak body and the #2199 default "
+            "alone reads 0.75",
+            "the credibility word reads 0.75, which is not true"):
+        assert _cred_word_yields_075(known_false_block), (
+            "a KNOWN FALSE BLOCK stopped firing — the guard was tightened; if "
+            "that was deliberate, move this string to the `must not fire` loop "
+            "above instead of deleting it: " + repr(known_false_block))
     # …and, the check that stops this guard from being INERT: the corpus it
     # ships on must carry a sentence holding BOTH facts (the word and 0.75),
     # and MUTATING that shipped sentence into the false attribution must RED.
