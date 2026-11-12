@@ -529,14 +529,34 @@ def test_a_block_count_mismatch_is_reported(tree: Path) -> None:
     assert any("the index cannot say what this file holds" in problem for problem in problems)
 
 
-def test_the_writer_refuses_to_freeze_a_dirty_source(tree: Path) -> None:
-    """The anchor is the commit; the body is read from the working tree. They must agree."""
-    (tree / "tortoise" / "tool_registry.py").write_text(
-        (tree / "tortoise" / "tool_registry.py").read_text(encoding="utf-8") + "# edit\n",
+def test_the_writer_refuses_to_freeze_an_EDITED_block(tree: Path) -> None:
+    """The block is the body that gets archived, so THAT is what must match the anchor."""
+    path = tree / "tortoise" / "tool_registry.py"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "name='tortoise_search',", "name='tortoise_search',\n        id='surface.x',"
+        ),
         encoding="utf-8",
     )
-    with pytest.raises(arch.ArchiveRefused, match="does not hold"):
+    with pytest.raises(arch.ArchiveRefused, match="differs from"):
         arch.archive_symbol(arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree)
+
+
+def test_an_unrelated_edit_elsewhere_in_the_file_does_not_block_the_archive(tree: Path) -> None:
+    """The normal batch flow: the lane's file is its merge-base state, main moved on.
+
+    Comparing the WHOLE file refused this with "land the source on the default branch first",
+    describing an edit the lane had not made — every archive from a lane that had not rebased
+    (measured in review cycle 6). The block is identical, so the body is exactly what the
+    citation says and there is nothing to refuse.
+    """
+    path = tree / "tortoise" / "tool_registry.py"
+    path.write_text(
+        path.read_text(encoding="utf-8") + "\n# a comment landed by another lane\n",
+        encoding="utf-8",
+    )
+    entry = arch.archive_symbol(arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree)
+    assert arch.file_violations([entry], tree / "archive", tree) == []
 
 
 # ── 8. remaining manifest/file refusals ──────────────────────────────────────
@@ -624,13 +644,22 @@ def test_a_tortoise_archive_stub_module_is_reported(tree: Path) -> None:
     assert any("REAPPEARED as an importable module" in problem for problem in problems)
 
 
-def test_the_live_module_scan_sees_pyi_stubs() -> None:
-    surf = arch.live_surface(arch.ROOT)
-    assert isinstance(surf["modules"], set)
-    assert all(p.endswith((".py", ".pyi")) for p in surf["modules"]), (
-        "a `.py`-only scan cannot see a stub, so the `module` detector's `.pyi` candidate is "
-        "unreachable by construction"
+def test_the_package_module_scan_sees_pyi_stubs(tree: Path) -> None:
+    """The PRODUCER, on a tree that actually carries a stub.
+
+    The previous form asserted over the real repo's modules, which are all `.py` (`rg --files -g
+    '*.pyi'` → 0), so a `*.py`-only scan satisfied it and reverting the scan left every test
+    green (review cycle 6). A `.pyi` file has to exist for the arm to be exercised.
+    """
+    (tree / "tortoise" / "archived").mkdir()
+    (tree / "tortoise" / "archived" / "legacy.pyi").write_text("def old(q): ...\n", encoding="utf-8")
+    (tree / "tortoise" / "plain.py").write_text("X = 1\n", encoding="utf-8")
+    modules = arch._package_modules(tree)
+    assert "tortoise/archived/legacy.pyi" in modules, (
+        "a `.pyi` stub under the shipped package is importable surface, so the scan must see it"
     )
+    assert "tortoise/plain.py" in modules
+    assert arch.live_surface(arch.ROOT)["modules"] == arch._package_modules(arch.ROOT)
 
 
 def test_ci_proves_the_anchors_on_a_full_history_checkout() -> None:

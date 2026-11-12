@@ -241,14 +241,21 @@ def live_surface(root: Path | None = None) -> dict:
         # Every module the package tree carries (`tortoise/**/*.py`), repo-relative. An
         # archived `module` symbol must not appear here: a file under `tortoise/` is
         # importable and ships in the wheel.
-        # `*.py*` and not `*.py`: a `.pyi` stub under `tortoise/` is importable surface too, and
-        # the `module` detector's `.pyi` candidate could never match a `*.py` scan (measured in
-        # review — the arm was unreachable by construction).
-        "modules": {
-            path.relative_to(root).as_posix()
-            for path in (root / "tortoise").rglob("*.py*")
-            if path.suffix in (".py", ".pyi")
-        },
+        "modules": _package_modules(root),
+    }
+
+
+def _package_modules(root: Path) -> set[str]:
+    """Every module file the shipped package tree carries, repo-relative.
+
+    `*.py*` and not `*.py`: a `.pyi` stub under `tortoise/` is importable surface too, and the
+    `module` detector's `.pyi` candidate could never match a `*.py` scan (measured in review —
+    the arm was unreachable by construction).
+    """
+    return {
+        path.relative_to(root).as_posix()
+        for path in (root / "tortoise").rglob("*.py*")
+        if path.suffix in (".py", ".pyi")
     }
 
 
@@ -443,7 +450,15 @@ def anchor_unverified(root: Path | None = None) -> list[str]:
     for entry in entries:
         sha = str(entry.get("archived_at") or "")
         ref = default_branch_ref(root)
-        if ref is not None and _git_has_commit(root, sha):
+        if ref is None:
+            # Answering nothing here would be the shape this module condemns: a durability arm
+            # that is skipped exactly where it cannot answer. The strict verb fails closed.
+            out.append(
+                f"{entry.get('symbol')}: cannot name a default-branch ref in this clone — the "
+                "durability of the anchor is UNPROVEN (fetch the remote, or run in a checkout "
+                "that has one)"
+            )
+        elif _git_has_commit(root, sha):
             code, _out = _git(root, "merge-base", "--is-ancestor", sha, ref)
             if code != 0:
                 out.append(
@@ -866,8 +881,8 @@ def _git(root: Path, *args: str) -> tuple[int, str]:
 def default_branch_ref(root: Path) -> str | None:
     """The ref that names this repo's default branch, as this clone knows it.
 
-    `origin/main` first: a lane worktree always has it, and it is the ref a squash-merge lands
-    on. The local branch names are the fallback for a plain clone or a test fixture.
+    git's own `refs/remotes/origin/HEAD` first, then the conventional names (`origin/main`,
+    `main`, `origin/master`, `master`) for a clone or a test fixture that has no remote HEAD.
     """
     # git's OWN answer first: a repo whose default branch is `develop` but which still carries a
     # `main` ref (mirror, legacy branch, tooling) would otherwise be anchored to `main`, which
@@ -883,13 +898,20 @@ def default_branch_ref(root: Path) -> str | None:
 
 
 def anchor_sha(root: Path, paths: list[str]) -> tuple[str, str]:
-    """(commit on the default branch that last held *paths*, the ref it came from).
+    """(commit on the default branch that last HELD *paths*, the ref it came from).
 
     ⛔ NOT `git rev-parse HEAD`. This repo lands by squash, so a batch PR's own commit never
     reaches `main`; an archive that cites it is unreadable from `main` the moment it merges,
     and `verify-anchors` (which the required `surface-guard` job runs on a depth-0 clone) would
     red every later run. The durable citation is the commit on the default branch that held the
     source, which is also the state a restore would want.
+
+    ⛔ AND NOT `git rev-list -1 <ref> -- <paths>`, which answers "the newest commit that
+    MODIFIED these paths" — a commit that DELETED them answers too, and holds nothing. That is
+    not hypothetical: the batch PR itself deletes the source, so the squash-merge commit touches
+    every archived path and would become the anchor, naming a commit that never contained the
+    code (measured in review cycle 6). The candidate list is walked newest-first and the first
+    commit that holds EVERY path wins; a deletion commit simply is not a candidate.
     """
     ref = default_branch_ref(root)
     if ref is None:
@@ -898,14 +920,16 @@ def anchor_sha(root: Path, paths: list[str]) -> tuple[str, str]:
             "origin/master, master, origin/HEAD) — the archive records the commit on the "
             "default branch that held the code, so it must be able to name one"
         )
-    code, out = _git(root, "rev-list", "-1", ref, "--", *paths)
-    sha = out.strip()
-    if code != 0 or not _SHA_RE.match(sha):
-        raise ArchiveRefused(
-            f"{', '.join(paths)} is not on {ref} — this code never landed on the default "
-            "branch, so there is no released state to restore. Delete it; do not archive it"
-        )
-    return sha, ref
+    code, out = _git(root, "rev-list", ref, "--", *paths)
+    for candidate in (out.split() if code == 0 else []):
+        if _SHA_RE.match(candidate) and all(
+            _git_blob(root, candidate, path) is not None for path in paths
+        ):
+            return candidate, ref
+    raise ArchiveRefused(
+        f"{', '.join(paths)} is not on {ref} — this code never landed on the default branch, "
+        "so there is no released state to restore. Delete it; do not archive it"
+    )
 
 
 def _segment(source: str, node: ast.AST) -> str:
@@ -1116,30 +1140,36 @@ def render_archive_file(
     return "\n".join(header + body), frozen
 
 
-def _require_sources_match_anchor(root: Path, sha: str, paths: list[str]) -> None:
-    """Refuse to freeze source that the ANCHOR commit does not hold, byte for byte.
+def _require_sources_match_anchor(
+    root: Path, kind: str, symbol: str, sha: str, blocks: list[tuple[str, str, str | None]]
+) -> None:
+    """Refuse to freeze a BLOCK the anchor commit does not hold, byte for byte.
 
-    The anchor is a commit; the body is read from the WORKING TREE. If they differ, the archived
-    body is not what the recorded commit contains, so "copy this back and it is as it was" would
-    be false. Comparing CONTENT to the anchor (rather than asking `git status`) is what makes
-    that a proof: `git status` is blind to a `skip-worktree`/`assume-unchanged` bit, and it says
-    nothing about whether the anchor commit holds the file at all.
+    The anchor is a commit; the body is read from the WORKING TREE. What must match is the block
+    being archived — which is exactly the property `_anchor_violations` enforces on the way back
+    out, so the writer and the gate answer the same question.
+
+    ⛔ NOT the whole file. A lane branches from `main`; another lane lands a commit that touches
+    `tortoise/sdk.py` without touching this method; the anchor moves to that commit and the whole
+    file legitimately differs by an unrelated hunk. Refusing that blocked every archive from a
+    lane that had not rebased, with a message describing an edit it had not made (measured in
+    review cycle 6). A *block* difference is the real fault: the archived body would not be what
+    the citation says.
     """
-    differing: list[str] = []
-    for path in paths:
-        code, blob = _git(root, "show", f"{sha}:{path}")
-        try:
-            on_disk = (root / path).read_text(encoding="utf-8")
-        except OSError:
-            on_disk = ""
-        if code != 0 or blob != on_disk:
-            differing.append(path)
-    if differing:
-        raise ArchiveRefused(
-            "refusing to freeze source the recorded commit does not hold: "
-            f"{', '.join(differing)} differ from {sha} — land the source on the default branch "
-            "first (or revert the edit), so the archived body is exactly what the citation says"
-        )
+    for path, segment, node_key in blocks:
+        blob = _git_blob(root, sha, path)
+        if blob is None:
+            raise ArchiveRefused(
+                f"refusing to freeze {symbol}: {sha}:{path} does not exist — the recorded "
+                "commit does not hold this code"
+            )
+        expected = expected_block(kind, symbol, path, blob, node_key)
+        if expected is None or expected.rstrip() != segment.strip("\n"):
+            raise ArchiveRefused(
+                f"refusing to freeze {symbol}: the block from {path} differs from {sha} — commit "
+                "the source, or rebase onto the default branch, so the archived body is exactly "
+                "what the citation says"
+            )
 
 
 def archive_rel(kind: str, batch: str, symbol: str) -> str:
@@ -1213,7 +1243,7 @@ def archive_symbol(
     # ⛔ THE ANCHOR IS A COMMIT ON THE DEFAULT BRANCH, not this branch's HEAD (see
     # `anchor_sha`): a squash merge would otherwise orphan the citation the archive rests on.
     sha, _ref = anchor_sha(root, sorted({p for p, _s, _n in blocks}))
-    _require_sources_match_anchor(root, sha, sorted({p for p, _s, _n in blocks}))
+    _require_sources_match_anchor(root, kind, symbol, sha, blocks)
     rel = archive_rel(kind, batch, symbol)
     path = root / rel
     # Containment, belt-and-braces after the slug/symbol validation: resolve and refuse

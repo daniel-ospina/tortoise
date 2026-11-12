@@ -126,7 +126,7 @@ uv run python tools/surface-guard.py
 
 # 4. Assert the archive and the live surface agree.
 uv run python tools/archive_surface.py check
-uv run python tools/archive_surface.py check --require-entries   # CI's form: never "0 entries, OK"
+uv run python tools/archive_surface.py check --require-entries   # never "0 entries, OK"
 uv run python tools/test_lane.py run -- tests/test_archive.py -q
 #    (a bare `pytest` refuses without TORTOISE_DB_URI — epic #1647 P4 — so use the lane runner
 #     even though this file is hermetic)
@@ -143,10 +143,12 @@ uv run python tools/archive_surface.py verify-anchors
 
 **The archived file is the source of record** — reading it needs no git history. Two things do
 need history, and both are checked: `verify-anchors` proves each file's cited commit is readable
-here AND holds the block exactly (it runs on a full-history clone in CI), and `check` refuses an
-archive with **no entries at all** so an emptied manifest cannot pass vacuously. What no gate
-sees is an entry **removed** from a non-empty manifest — a shrink guard is not built; that
-direction is part of [#12237](https://github.com/daniel-ospina/tortoise/issues/12237).
+here, holds the block exactly, and is an ancestor of the default branch (that verb runs in CI on
+a full-history clone), and it refuses an archive with **no entries at all** so an emptied
+manifest cannot pass vacuously. `check` itself is green at zero entries on purpose, because the
+restore path legitimately ends there; pass `--require-entries` when zero must be a failure. What
+no gate sees is ONE entry **removed** from a non-empty manifest — a shrink guard is not built;
+that direction is part of [#12237](https://github.com/daniel-ospina/tortoise/issues/12237).
 
 1. open `archive/mcp-tools/<batch>/<tool>.py` (or `sdk-methods/…`, `modules/…`) and copy **each**
    verbatim block back into the file named in **its own** `verbatim from <path>` banner — one
