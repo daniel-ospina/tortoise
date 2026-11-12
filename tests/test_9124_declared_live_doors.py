@@ -485,10 +485,20 @@ _UNRESOLVED = {
     # read; `_propagation_counts` is three aggregate counts over live `:Point`s
     # (`count(n)`, `sum(CASE …)`). Neither has a SET/CREATE/MERGE/DELETE/REMOVE,
     # neither calls a write procedure, and neither appends a journal record —
-    # they exist to REPORT the propagation state, never to change it. The
-    # `_reachable_claim_count` row that used to sit here moved to
-    # `_edged_claim_ids` when the query was hoisted out of it (the function no
-    # longer touches the handle, so its row became stale).
+    # they exist to REPORT the propagation state, never to change it.
+    # ⛔ #12138 §7: the `_reachable_claim_count` row that used to sit here was
+    # dropped with the note "the function no longer touches the handle" — that
+    # note is FALSE and is corrected here. It STILL reaches the handle on every
+    # call: a full non-operator `:Point` id scan (`MATCH (n:Point) WHERE
+    # <non-operator> RETURN n.id` — DRAFTS INCLUDED, the closure seed applies the
+    # live predicate), then `_window_closure(anchors, max_hops)` and
+    # `_edged_claim_ids()`. What actually changed when the edged query was hoisted
+    # out is narrower: its OWN statement is now the literal anchor scan
+    # (resolvable, i.e. provably a read), while the unresolved edged predicate
+    # lives in `_edged_claim_ids` (the row BELOW this note). So the row moved
+    # because the UNRESOLVED TEXT moved, not because the handle reach went away —
+    # a write-door audit reading the old note would conclude this function does
+    # not query at all.
     "_edged_claim_ids",
     "_propagation_counts",
     # #3590: `_refuse_ambiguous_rename` interpolates the LABEL into its probe

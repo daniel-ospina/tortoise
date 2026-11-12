@@ -32579,8 +32579,22 @@ class TortoiseSDK:
         # arithmetic: the block's `no_belief` is read from the graph AFTER this
         # pass, so it IS the uncovered count — "6 of 20" is
         # `belief_present` of `ep_reachable_claims`, and 14 uncovered is
-        # `no_belief`. `graph_ep_reachable` is reported as the denominator this
-        # pass ran against, with no cross-population sum.
+        # `no_belief`.
+        #
+        # ⛔ #12138 §1 — `graph_ep_reachable` is NOT the denominator the pass ran
+        # against; this comment said it was, and a consumer following it computed
+        # a coverage the pass never reported (measured: `affected=3`,
+        # `window_reachable=4`, `graph_ep_reachable=8` → the pass reports
+        # `3/4 = 0.75`, the misreading gives `3/8 = 0.375`). The pass's OWN
+        # denominator is `window_reachable`, recorded beside `affected` by
+        # `_record_pass_reach`; `graph_ep_reachable` is the GRAPH-scoped
+        # `ep_reachable_claims` — a DIFFERENT population, and not a conservative
+        # one: it can be SMALLER than the window's (operator-less claims are in
+        # the window but not in it; measured on
+        # `test_an_operator_less_pass_does_not_report_full_coverage`:
+        # `affected=5, window_reachable=5, graph_ep_reachable=3`, so
+        # `5/3 = 1.67`). Published here so a reader can compare the pass's radius
+        # with the graph's — never divided into `affected`.
         reachable = out.get("ep_reachable_claims")
         if reachable is not None:
             last["graph_ep_reachable"] = int(reachable)

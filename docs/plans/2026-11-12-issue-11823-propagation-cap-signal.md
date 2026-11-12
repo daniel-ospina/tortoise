@@ -172,11 +172,19 @@ not a fix (D2-5).
      the claims that satisfy neither are `unclassified_claims`.
    - Invariants (asserted, not merely documented): `0 ≤ no_belief ≤ ep_reachable_claims` and
      `0 ≤ belief_coverage_pct ≤ 1`.
-   - ⚠️ `ep_reachable_claims` INCLUDES anchor-less epistemic components (`:Subject-[:IMPL]->:Object`,
-     #7902) that a `:Point`-anchored pass can never clear, so `no_belief` may be non-zero on a
-     converged graph — **a true statement** (no belief is stored), and the instrument may over-report,
-     never under-report. Tests: `test_operator_less_claims_are_not_in_the_denominator` +
-     `test_no_belief_stays_inside_its_invariants` (range, not identity).
+   - ⚠️ `ep_reachable_claims` INCLUDES live claims whose only `IMPL|NAND` edge reaches an
+     operator with no usable factor — the operator's far endpoint is DRAFT, so EP excludes the
+     factor and no pass can recompute the claim, yet the claim IS in the `:Point`-anchored
+     denominator (measured) — so `no_belief` may be non-zero on a converged graph. **A true
+     statement** (no belief is stored), and the instrument may over-report, never under-report.
+     ⛔ #12138 §3: this bullet used to name an ANCHOR-LESS `:Subject-[:IMPL]->:Object`
+     component as that benign non-zero — it cannot be: the denominator query anchors `n:Point`,
+     so such a component never matches it (measured: adding one leaves `ep_reachable_claims` at
+     3 while `_edged_claim_ids()` goes 3→5). The R6 bullet below carries the same correction;
+     the two used to contradict each other inside one section. Tests:
+     `test_operator_less_claims_are_not_in_the_denominator` +
+     `test_no_belief_stays_inside_its_invariants` (range, not identity) +
+     `test_counts_match_an_independent_query` (the denominator counted separately, #12138 §2).
 3. **`_propagation_counts()`** — live non-operator `:Point`s, their `lastDreamedAt` stamps, and their
    **`belief_present` count via the SHARED predicate** `ep_has_belief_cypher` (`search_engine.py:1181`)
    — never a private `IS NOT NULL`, per `analyze.py:41-45` (*"The presence gate is
@@ -288,8 +296,14 @@ unreadable test goes red; drop the closure term from `_reachable_claim_count` wh
   `test_the_three_counts_partition_the_live_points` (the remainder is `unclassified_claims`, and the
   partition is exact).
 - R10 (added after review, #12116 C-P3) a mixed population is silently corrected by a clamp instead
-  of being visible → the clamp is gone; the ranges are asserted in the tests
-  (`test_no_belief_stays_inside_its_invariants`), so a negative `no_belief` reddens CI.
+  of being visible → the clamp is gone, and the ranges are asserted in
+  `test_no_belief_stays_inside_its_invariants`. ⛔ #12138 §2: *which* defect those ranges see is
+  direction-specific, and this bullet named only ONE of the two directions while reading as a general
+  control. A NARROWER denominator (or a label-blind numerator, measured -8.0) pushes `no_belief`
+  negative or the ratio above 1.0 → the ranges catch it. A WIDER denominator with `belief_present`
+  fixed LOWERS the ratio and RAISES `no_belief` (measured 0.2 / +4) — both in range, invisible to the
+  ranges. That direction is pinned by `test_counts_match_an_independent_query`, which counts the
+  denominator itself; the ranges are the clamp's replacement, not a general mixed-population control.
 - R7 the new reads make a polled endpoint expensive (`GET /v1/dream/health` is per-request; the
   census traverses every live `:Point` and its `IMPL|NAND` edges) → **two** controls, because the
   first one alone was inadequate:

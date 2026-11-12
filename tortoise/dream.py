@@ -144,7 +144,14 @@ EMBEDDED_LATENCY_BUDGET_S = 0.5
 # — on a POLLED endpoint (#12116 review P2). The two therefore agree by VALUE,
 # not by text, and `tests/test_11823_propagation_cap_signal.py`
 # (`test_untested_operator_less_population_matches_trivial_stamp`) is what keeps
-# them equal.
+# them equal — it builds its query FROM THIS CONSTANT (#12138 §6) and its
+# fixture carries an UNEDGED draft point, so a drift that moves the population
+# reddens that test instead of forking the population silently (measured:
+# dropping the status clause 2→3, dropping the negated-edge term 2→6; before
+# #12138 it compared against a third hand-copied literal and could not see this
+# constant move at all). An additive widening of the excluded vocabulary is not
+# observable on that fixture — it needs a node of the new status — and is pinned
+# by the `_trivial_stamp` behaviour tests instead.
 TRIVIAL_STAMP_PREDICATE = (
     "(n.is_operator IS NULL OR n.is_operator = false) "
     "AND (n.status IS NULL OR n.status <> 'draft') "
