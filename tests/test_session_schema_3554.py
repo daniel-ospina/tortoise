@@ -1343,10 +1343,20 @@ def test_the_newest_block_discharges_its_approval_with_a_comment_id() -> None:
         # approval citation. (A release that CHANGES §4.3 is caught by the sibling
         # pin: it must quote the new sentence, and then this arm applies.)
         return
-    # Accept every form the fleet actually writes: ``comment 1234567890``,
-    # ``comment `1234567890` ``, ``comment-id: 1234567890``, ``(1234567890)``,
-    # and the permalink ``#issuecomment-1234567890``.
-    cited = re.findall(r"(?:#issuecomment-|comment)\D{0,12}(\d{6,})", block)
+    # Accept the forms the fleet actually writes: ``comment 1234567890``,
+    # ``comment `1234567890` ``, ``comment-id: 1234567890``, and the permalink
+    # ``#issuecomment-1234567890``. A BARE ``(1234567890)`` is deliberately NOT
+    # accepted — the pin cannot tell it from a version or an issue number, and a
+    # citation a reader cannot resolve is the state this pin exists to refuse.
+    # ⛔ THE TOKEN MUST BE ADJACENT TO THE DIGITS. An earlier cut allowed up to 12
+    # non-digits between them, which accepted *"the discussion comments 118245"*
+    # — an ISSUE number read as a comment citation, i.e. fail-open on exactly the
+    # "approval with no readable home" shape this pin refuses.
+    cited = [
+        permalink or inline
+        for permalink, inline in re.findall(
+            r"#issuecomment-(\d{6,})|comment(?:-id)?\s*[:`]?\s*(\d{6,})", block)
+    ]
     assert cited, (
         "the newest changelog block records the §4.3 clause but names no comment "
         "id, so its owner approval has no home a reader can verify — cite the "
