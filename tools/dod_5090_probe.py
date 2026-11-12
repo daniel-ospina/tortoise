@@ -2806,7 +2806,7 @@ def score_rule_bullet() -> Row:
             f"{deployment['silent']} declare no gate. Read from that file ALONE the "
             "deployment is unarmed; a compose file that builds from an ARMED image "
             "build file INHERITS that image's `ENV`, so this is a per-FILE reading and "
-            f"not the merged view's. {armed_clause}. This is the `#11455` reading: one "
+            f"not the merged view's; {armed_clause}. This is the `#11455` reading: one "
             "armed TEMPLATE is not a shipped default)"
         )
     if not stated or not shared or not gated:

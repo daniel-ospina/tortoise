@@ -333,7 +333,7 @@ close review findings on that change: the falsifier for the probe's DIRECT-WRITE
 guard on a node the CALLER builds, which the probe had not measured — the pin that a record label
 with no `KEY_PROPERTY` HOLDS the row instead of taking the whole report down with a `KeyError`, and
 the falsifier for the PLANTED property set, without which reverting that derivation to the literal
-`embedding` red no row at all), seven by `#11455`, and one by this PR's round-9 fresh review,
+`embedding` red no row at all), seven by `#11455` (all seven are row-1 shipped-default tests), and one by this PR's round-9 fresh review,
 which SCORES the `#11455` clause itself (`test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool`
 — reverting `on_by_default = deployment["on"]` to the any-surface bool left every other row-1 test
 green, so the artefact `#11086` item 4 is ticked on was pinned nowhere)
