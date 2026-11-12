@@ -725,6 +725,14 @@ def check_verdict_tally(text: str) -> list[str]:
     already checks its own summary against its own table.
     """
     problems: list[str] = []
+    #: Quoted spans, removed before each PHRASE test in this function. A sentence that
+    #: only QUOTES a phrase is naming the words, not asserting them — the rule the letter
+    #: arms have always carried, and it was missing from both FIGURE arms: measured,
+    #: `They wrote "seven of the twelve rows no longer read as written" verbatim.` red the
+    #: figure arm with "2 sentence(s) state a figure" over prose that asserts nothing.
+    #: The apostrophe-aware form matters: treating every `'` as a delimiter blanked the
+    #: span between two possessives and hid a whole second tally (measured).
+    quoted = re.compile(r'"[^"]*"|(?<![A-Za-z])\x27[^\x27]*\x27(?![A-Za-z])')
     verdicts = _verdicts_by_label(text)
     if not verdicts:
         return ["§3: no correction rows — the tally has nothing to be derived from"]
@@ -774,7 +782,9 @@ def check_verdict_tally(text: str) -> list[str]:
     # `docs/00_index.md` and both module docstrings, so a false one propagates past the
     # page. Both figures therefore have to live in EXACTLY ONE sentence.
     figure_sentences = [
-        s for s in re.split(r"(?<=\.)\s+", paragraph) if FIGURE_RE.search(s)
+        s
+        for s in re.split(r"(?<=\.)\s+", paragraph)
+        if FIGURE_RE.search(quoted.sub(" ", s))
     ]
     if len(figure_sentences) != 1:
         problems.append(
@@ -875,7 +885,6 @@ def check_verdict_tally(text: str) -> list[str]:
     # the double quote needs no such guard because prose does not use `"` as an
     # apostrophe. Pinned by
     # `test_a_possessive_apostrophe_cannot_hide_a_second_tally`.
-    quoted = re.compile(r'"[^"]*"|(?<![A-Za-z])\x27[^\x27]*\x27(?![A-Za-z])')
     # ⛔ THE STRIP APPLIES TO THE PHRASE, NOT TO THE LETTERS. Removing quoted spans from
     # the LETTER test as well let a quoted letter list ride out of the count — measured:
     # `Six of the twelve rows no longer read as written: "**(b)**, **(k)** and **(l)**".`
@@ -1104,7 +1113,9 @@ def check_verdict_tally(text: str) -> list[str]:
     # The same rule as the count above, for the same measured reason: the figure is
     # compared against the ONE sentence that states it, never against the paragraph.
     overtaken_sentences = [
-        s for s in re.split(r"(?<=\.)\s+", paragraph) if OVERTAKEN_FIGURE_RE.search(s)
+        s
+        for s in re.split(r"(?<=\.)\s+", paragraph)
+        if OVERTAKEN_FIGURE_RE.search(quoted.sub(" ", s))
     ]
     if len(overtaken_sentences) != 1:
         problems.append(
