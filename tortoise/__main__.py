@@ -247,6 +247,16 @@ def _cmd_rebuild(args):
         # "reported (`pack_selection_gap`, never a silent success)" — true of
         # the returned dict, false of this surface until now.
         pack_selection_expected = counts.get("pack_selection_expected", 0)
+        # ⛔ WHY THIS ORDER CANNOT CONTRADICT `pack_selection_shape`'s
+        # CONFLICT-FIRST RULE (#9752 review r13). The helper tests CONFLICT
+        # before UNKNOWN because a live marker is an OBSERVATION and the two can
+        # be true at once. Here UNVERIFIED is tested first, and that is sound
+        # only because the two are MUTUALLY EXCLUSIVE BY CONSTRUCTION on this
+        # surface: `live_markers` is assigned inside the verify `try`, so a
+        # raised read leaves it empty and `pack_selection_conflict` is
+        # necessarily False. Stated here so the divergence is a reasoned
+        # invariant rather than a second copy of the rule drifting from the
+        # first (which is what happened to this block across rounds 3-5).
         pack_selection_unverified = (
             counts.get("pack_selection_verified") is False)
         if pack_selection_unverified:
