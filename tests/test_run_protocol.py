@@ -153,13 +153,16 @@ def test_build_command_uses_base_runner_flags(tmp_path):
     state = _fresh_state(tmp_path)
     for s in (rp.STEPS_BY_NUMBER[3], rp.STEPS_BY_NUMBER[5]):
         cmd = rp.build_command(s, [], state=state)
-        # The interpreter is `sys.executable`, whose BASENAME is the only stable
-        # part: a CI hosted runner spells it `python`, a venv spells it
-        # `python3` — both are the base runner's own interpreter, which is the
-        # property this line pins (what it must catch is a runner WRAPPER, e.g.
-        # `uv` or `bash`). `.endswith("python")` pinned the hosted spelling and
+        # `_run_cmd` builds `[sys.executable, "-B", "-m", …]` with no
+        # override seam, so the property to pin is IDENTITY, not a spelling:
+        # the command runs under THIS process's own interpreter, never a
+        # runner WRAPPER (`uv`, `bash`) and never a different Python. The
+        # basename is not a stable stand-in for that — a venv may expose
+        # `python`, `python3`, `python3.12`, or `python.exe`, and
+        # `startswith("python")` would also pass a wrapper merely NAMED
+        # `python-…`. `.endswith("python")` pinned the hosted spelling and
         # failed on every `python3` venv, i.e. on every private test lane.
-        assert Path(cmd[0]).name.startswith("python"), cmd[0]
+        assert cmd[0] == sys.executable, cmd[0]
         joined = " ".join(cmd)
         assert "--ingest-mode v2" in joined
         assert "--checkpoint" in joined and "--output" in joined
