@@ -150,9 +150,11 @@ PLAN_SEAMS = (
 #: How many leading spaces a line may carry and still be a TABLE ROW.
 #:
 #: Markdown renders a `|` line as part of the table with up to THREE leading
-#: spaces; FOUR or more makes it an indented code block (`CommonMark` §5.1, and
-#: GFM tables inherit it). So 0-3 is the population of "rows a reader sees as
-#: rows", and it is the population this checker must grade. #11415: the builder
+#: spaces; FOUR or more makes it an indented code block (`CommonMark` §4.4
+#: "Indented code blocks", a distinct leaf-block class — GFM tables inherit that
+#: block structure, so an indented code block ends the table). So 0-3 is the
+#: population of "rows a reader sees as rows", and it is the population this
+#: checker must grade. #11415: the builder
 #: used `line.startswith("|")`, so a row indented 1-3 spaces belonged to no block
 #: and reached no rule — measured, an identical 4-cell row appended inside §5
 #: graded `VIOLATION R5 zzz: names no surface` at column 0 and **CLEAN, exit 0**
