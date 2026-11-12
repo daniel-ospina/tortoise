@@ -2923,6 +2923,13 @@ class PackRegistry:
           ``depends_on``. A target resolved from the catalog instead would name
           a kind the graph cannot legally write, because the catalog is a
           SUPERSET of any one graph's partition (#5163).
+        ⛔ AND R3a HERE CHECKS THE TARGET’S NAMESPACE, NOT ITS KIND. A core typo
+        (``redirect: core:WrokItem``) is caught by ``guard_table_problems()`` —
+        “not routed to one layer by kind_layers” — which runs in the SAME install
+        verdict (``ok: false``, exit 1). One defect, one gate: the kind question
+        needs the table and the layer authority, and answering it twice is how a
+        message stops matching its mechanism (measured, round-7 review).
+
         * **R3b a core fallback** — every ``onConfusion`` entry must declare a
           ``fallback`` that is a CORE kind. The fallback is what the write-time
           ladder degrades to when the target's pack is not installed (R4), so a
@@ -2945,19 +2952,36 @@ class PackRegistry:
             core_kind_names,
             kind_forms,
         )
-        from tortoise.kind_layers import LAYERS, SECTION_LAYERS, core_sections
+        from tortoise.kind_layers import (
+            LAYERS,
+            NIL_KINDS,
+            SECTION_LAYERS,
+            core_sections,
+        )
 
         # The CLOSED key sets of a guard entry and of one `onConfusion` entry —
         # exactly the keys `pack_guards` reads, so "parsed" and "accepted" cannot
         # drift. `message` is there because `pack_guards` takes it as an alias of
         # `reason`; anything NOT here is a typo that would otherwise be read as
         # absent (see the loud refusal at both levels).
-        # Every core kind ANY axis declares (`CORE_KINDS`), in both spellings:
-        # the vocabulary a `fromKinds` scope may name. `core_kind_names()` — the
-        # entity axes + `other` — is the FALLBACK vocabulary and is deliberately
-        # narrower, so it must not be reused here (round-6 review: it refused
-        # `core:brief`, a scope that fires).
-        _CORE_ANY_FORM = {f"core:{k}" for k in CORE_KINDS} | set(CORE_KINDS)
+        # ⛔ EVERY CORE KIND A WRITE MAY NAME — the UNION of both sources, and
+        # neither alone. `CORE_KINDS` misses the entire §5 SUBJECT vocabulary
+        # (`organization`, `team`, `role`, `naturalPerson`, `legalPerson`, …):
+        # measured, 33 forms live only in `core_kind_names()`. `core_kind_names()`
+        # in turn misses the SECTION names (`Object`, `Subject`, `Document`, …):
+        # measured, 44 forms live only in `CORE_KINDS`. Round 6 used `CORE_KINDS`
+        # alone and therefore REFUSED `fromKinds: [core:organization]` — a live
+        # scope, and precisely the misfiling vocabulary this feature exists to fix
+        # (round-7 review P1, measured: the redirect fires and the same file
+        # accepts `core:organization` as a `fallback`).
+        # ⛔ AND NOT THE NIL BUCKET. `other`/`core:other` are in the vocabulary but
+        # no write can DECLARE one — `_named_layer_kinds({'objectKind': 'other'})`
+        # is empty, so the door hands the guard NO declared kind — which means a
+        # scope on it can never fire. It is refused below, with the empty-list
+        # form named as the way an author actually asks for the NIL mode.
+        _CORE_ANY_FORM = ({f"core:{k}" for k in CORE_KINDS} | set(CORE_KINDS)
+                          | set(core_kind_names()))
+        _NIL_FORMS = frozenset(NIL_KINDS)
         _GUARD_KEYS = frozenset({"kind", "layer", "onConfusion"})
         _CONFUSION_KEYS = frozenset({
             "rule", "when", "pattern", "redirect", "fallback", "reason",
@@ -3138,6 +3162,16 @@ class PackRegistry:
                             f"'{tns}', which this pack neither owns nor declares "
                             f"in depends_on — either add the dependency or "
                             f"redirect to a core kind (R1/R3)")
+                    # ⛔ THE TARGET'S *KIND* IS NOT CHECKED HERE, DELIBERATELY —
+                    # and the docstring used to claim otherwise. `redirect:
+                    # core:WrokItem` is caught by `guard_table_problems()`
+                    # ("not routed to one layer by kind_layers"), which runs in the
+                    # SAME install verdict: `pack validate` reports `ok: false`
+                    # and exits 1 (measured, round-7 review). The round briefly
+                    # added a hard schema error here as well; it was redundant and
+                    # it displaced the table-level diagnostic the shipped tests
+                    # pin, so it is not here. Two gates for one defect is how a
+                    # message stops matching its mechanism.
                 fb = c.get("fallback")
                 if not isinstance(fb, str) or not fb.strip():
                     errors.append(
@@ -3193,19 +3227,33 @@ class PackRegistry:
                             f"namespace but no kind it declares — a scope no "
                             f"write to this pack can ever match")
                     # ⛔ AND A CORE SCOPE THAT NAMES NO CORE KIND — against the
-                    # FULL core vocabulary (`CORE_KINDS`, every declared axis,
-                    # the same set `core_kind_names()` narrows), not the entity
-                    # subset: `core:brief` is a declared core kind, so a scope on
-                    # it can fire, and refusing it would be the same false block
-                    # as the arm above. ``ns`` must be non-empty or `_resolve_ref`
-                    # answers `":kind"` for a bare name and this arm would report
-                    # a missing namespace as a core typo (round-6 review P3).
+                    # UNION of both core vocabularies (`_CORE_ANY_FORM`), never
+                    # one of them: `core:brief` and `core:organization` are both
+                    # declared core kinds, so a scope on either can fire and
+                    # refusing it would be the same false block as the arm above.
+                    # ``ns`` must be non-empty or `_resolve_ref` answers `":kind"`
+                    # for a bare name and this arm would report a missing
+                    # namespace as a core typo (round-6 review P3).
                     elif (_fkns is None and ns
                           and _fkq not in _CORE_ANY_FORM
                           and _fkq.split(":", 1)[-1] not in _CORE_ANY_FORM):
                         errors.append(
                             f"{cw}.fromKinds: '{fk}' is a core scope but names "
                             f"no core kind — a scope no write can ever match")
+                    # ⛔ AND THE NIL BUCKET IS NOT A SCOPE. `other`/`core:other`
+                    # ARE in the vocabulary, so the arm above accepts them — but
+                    # no write can DECLARE one: `_named_layer_kinds` drops the NIL
+                    # and the door hands the guard no declared kind, so a scope on
+                    # it can NEVER fire (measured, round-7 review P2). The author
+                    # who wanted the NIL mode wrote the wrong thing sympathetically:
+                    # the empty list IS that mode, so the refusal names it.
+                    elif (_fkq.split(":", 1)[-1] in _NIL_FORMS
+                          or _fkq in _NIL_FORMS):
+                        errors.append(
+                            f"{cw}.fromKinds: '{fk}' is the NIL bucket — no write "
+                            f"can DECLARE 'other', so this scope can never fire; "
+                            f"an empty fromKinds is how a guard asks for the "
+                            f"unnamed/NIL mode")
                 # ⛔ A `linkPredicate` the runtime does not know is a guard that
                 # abstains for ever, and one that names no key of
                 # `LINK_PREDICATES` at all is a typo the install gate used to

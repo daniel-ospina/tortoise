@@ -1844,6 +1844,72 @@ class TestReviewRound4Closed:
         )
         assert errs and "fromKinds" in " ".join(errs), errs
 
+    def test_the_whole_CORE_vocabulary_is_accepted_as_a_scope(self):
+        """⛔ NEITHER core source alone is the vocabulary — the UNION is.
+
+        Round-7 review P1: the arm was built from `CORE_KINDS` alone, which
+        contains NO §5 Subject kind (`organization`, `team`, `role`,
+        `naturalPerson`, `legalPerson`) — those live only in `core_kind_names()`
+        (measured: 33 forms outside `CORE_KINDS`, and 44 outside
+        `core_kind_names()`). So `fromKinds: [core:organization]` was REFUSED as
+        dead while the scope demonstrably fires — and the Subject vocabulary is
+        precisely the misfiling this feature exists to fix (a document filed as
+        `core:role`). The same file already accepted `core:organization` as a
+        `fallback`, so it refused as a scope what it accepted one field over.
+        """
+        for kind in ("core:organization", "core:role", "core:team",
+                     "core:naturalPerson", "core:legalPerson", "core:Project",
+                     "core:WorkItem", "core:brief"):
+            errs = self._validate(
+                {"rule": "acme:vocab", "pattern": r"^v-[0-9]+$",
+                 "redirect": "core:WorkItem", "fallback": "core:WorkItem",
+                 "reason": "x", "fromKinds": [kind]},
+                all_pack_kinds={"concept"},
+            )
+            assert errs == [], f"{kind} is a declared core kind: {errs}"
+
+    def test_the_NIL_bucket_is_not_a_scope(self):
+        """`other` is IN the vocabulary but no write can DECLARE it.
+
+        Round-7 review P2: `other`/`core:other` sat inside the accepted
+        vocabulary, so a scope on it installed clean — and could never fire,
+        because `_named_layer_kinds` drops the NIL and the door hands the guard no
+        declared kind. The empty list IS the NIL mode, so the refusal names it.
+        """
+        for nil in ("other", "core:other"):
+            errs = self._validate(
+                {"rule": "acme:nil", "pattern": r"^n-[0-9]+$",
+                 "redirect": "core:WorkItem", "fallback": "core:WorkItem",
+                 "reason": "x", "fromKinds": [nil]},
+                all_pack_kinds={"concept"},
+            )
+            assert errs and "NIL bucket" in " ".join(errs), (nil, errs)
+
+    def test_a_redirect_typo_is_caught_by_the_TABLE_not_a_second_gate(self):
+        """One defect, one gate: the KIND question belongs to `guard_table_problems`.
+
+        Round-7 review P2 claimed `redirect: core:WrokItem` "installs ✓ Clean"
+        and asked for a hard schema error here. Measured: it installs `ok: false`
+        and exits 1, because `guard_table_problems()` reports "not routed to one
+        layer by kind_layers" — the SAME verdict, from the gate that has the layer
+        authority. A hard error beside it was redundant AND displaced the
+        table-level diagnostic two shipped tests pin, so the fix is the DOCSTRING
+        (R3a closes the namespace) plus this pin, not a second gate.
+        """
+        c = Confusion(
+            rule="acme:red-typo", when="nameMatches", pattern=r"^r-[0-9]+$",
+            redirect="acme:konpekt", fallback="core:WorkItem", reason="x",
+            guarded_kind="acme:concept", guarded_layer="object")
+        problems = kg.guard_table_problems((c,), include_catalog=False)
+        assert problems and any("not routed to one layer" in p for p in problems), (
+            problems)
+        # the real spelling is silent, so the report discriminates
+        ok = Confusion(
+            rule="acme:red-ok", when="nameMatches", pattern=r"^r-[0-9]+$",
+            redirect="core:Project", fallback="core:WorkItem", reason="x",
+            guarded_kind="acme:concept", guarded_layer="object")
+        assert kg.guard_table_problems((ok,), include_catalog=False) == []
+
     def test_a_fromKinds_scope_naming_no_CORE_kind_is_refused(self):
         """`core:WrokItem` is a typo the own-namespace arm cannot see.
 
