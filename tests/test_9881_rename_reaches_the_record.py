@@ -285,7 +285,13 @@ def test_the_public_rename_door_moves_the_records_name_live_and_on_replay(
             "the rename was not journaled as `EntityMutated op=rename` on the "
             f"stable id — journal types: "
             f"{[(r.get('type'), r.get('op')) for r in records]}")
-        assert renames[0]["state"] == {"name": "AcmeRenamed"}, renames[0]
+        # #12120: a rename APPLIES the fold beside the surface name (the writer's
+        # key space is the folded union), so the record carries both — and the
+        # replay leg below is what proves that is right rather than noise: the
+        # same map lands the same row on a fresh tenant.
+        assert renames[0]["state"] == {"name": "AcmeRenamed",
+                                       "canonical_name": "acmerenamed"}, \
+            renames[0]
         assert renames[0]["label"] == "Object", renames[0]
 
         # ── (b) LIVE: the name moved, the key did not, the old name is GONE ──
