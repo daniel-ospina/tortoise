@@ -1935,54 +1935,74 @@ def test_the_RUN_level_refusal_names_a_NULL_mechanism_without_raising(monkeypatc
     discriminand: TWO refused keys, one of them `None`, which is the shape the
     comparison is on and the shape no test produced.
 
-    It is deliberately ALL-refused (no IMPL/NAND factor): passing one would route
-    the call into `_update_factor`, and that path dies `SIGFPE` inside
-    `jax`/`pjit` on this box on BOTH the pre- and post-fix tree (environmental,
-    reproduces on the pre-delta commit). With nothing priced, `run()` exercises
-    the sort/format/logger line and returns without touching the jax path — so
-    the gate reddens on the defect it is about, not on the environment.
+    It is deliberately ALL-refused (no IMPL/NAND factor), which keeps the
+    assertion on the sort/format/logger line: nothing is priced, so `_update_factor`
+    is never called and no message passing happens.
+
+    ⛔ THE `SIGFPE` IS REAL BUT NOT WHAT THIS AVOIDS (#12221 review, measured).
+    Pricing a factor dies `Fatal Python error: Floating point exception` inside
+    `jax`/`pjit` at `_tilt` on this box **only below 8 particles** — measured
+    exit `-8` at `n_particles` 4 and 7, clean at 8, 16 and 50 — so it is
+    CONFIG-dependent, not environmental, and it is why the SIBLING test
+    (`n_particles=4`) kills the pytest process. This engine uses the default 50,
+    where pricing works; the all-refused shape is chosen to keep the pin on one
+    line, not to dodge that crash. Do not restate the earlier "environmental /
+    both trees" framing: it was wrong about the cause.
 
     ⛔ WHAT MAKES EACH ASSERTION DISCRIMINATE (#12221 review, both reviewers,
-    measured). Two details are load-bearing and must not be "tidied":
+    measured). These details are load-bearing and must not be "tidied":
 
-      * `coherence` is passed FIRST and `None` second, because `"None" <
+      * `coherence` is passed FIRST and `None` LAST, because `"None" <
         "coherence"` — with the natural order the sorted string would EQUAL the
         dict's insertion order, and the whole sort could be deleted
         (`list(refused.items())`) while this still passed.
-      * `coherence` is refused TWICE and `None` once (`_n == 3`), not once each,
-        because with equal counts `sum(refused.values())` and `len(refused)` are
-        indistinguishable and a `_n` collapse would go unnoticed.
-      * every factor carries TWO `input_ids`, because `_update_factor` early-
-        returns below two (`svbp.py:269`) — with one id, deleting `factors =
-        priced` reaches no message passing and the "must not be priced"
-        assertion is inert.
+      * THREE refused mechanisms with counts 2/3/1, not one each: equal counts
+        would make `sum(refused.values())` and `len(refused)` indistinguishable,
+        and one mechanism per count would make sorting by COUNT
+        (`key=lambda kv: kv[1]`) indistinguishable from sorting by NAME.
+      * every refused factor carries TWO `input_ids`, because `_update_factor`
+        early-returns below two (`svbp.py:269`). With one id, deleting
+        `factors = priced` reaches no message passing and the pin stays green.
+        NOTE which assertion actually fires for that mutant: `converged`
+        (`False`, because the priced factors then iterate to `max_iter`);
+        `messages`/`posteriors` are the END-STATE corroboration behind it.
+
+    The companion assertion pins the other half of the block: with nothing
+    refused (`if refused:` removed) `run()` must stay SILENT, or every clean
+    belief read logs a bogus `0 factor(s) REFUSED`.
     """
     svbp_module = pytest.importorskip("tortoise.svbp")
 
-    seen: dict = {}
+    seen: list = []
 
-    def _warn(fmt, *args):
-        seen["fmt"], seen["args"] = fmt, args
+    def _warn(fmt, *args, **_kw):
+        # `**_kw`: a production call that later adds `stacklevel=`/`extra=` must
+        # not fail this pin with a TypeError about THIS helper (#12221 review).
+        seen.append(args)
 
     monkeypatch.setattr(svbp_module.logger, "warning", _warn)
 
     eng = svbp_module.TortoiseSVBP()
     _iters, converged = eng.run([
         ("op-coh-a", "coherence", ["c1", "c2"], 0.5),
-        ("op-null", None, ["c3", "c4"], 0.5),
+        ("op-attack", "attack", ["c3", "c4"], 0.5),
         ("op-coh-b", "coherence", ["c5", "c6"], 0.5),
+        ("op-null", None, ["c7", "c8"], 0.5),
+        ("op-attack-b", "attack", ["c9", "c10"], 0.5),
+        ("op-attack-c", "attack", ["c11", "c12"], 0.5),
     ])
 
     assert seen, (
         "the refusal never warned — either the factors were not refused or the "
         "warning path was lost entirely"
     )
-    # `_n` is a SUM of the counts (3, not 2 distinct mechanisms), and the list is
-    # sorted by `str(op_type)` — NOT insertion order, which is the reverse here.
-    assert seen["args"] == (3, "None×1, coherence×2"), (
+    # `_n` is a SUM of the counts (6, not 3 distinct mechanisms). The list is
+    # sorted by `str(op_type)` — NOT insertion order (which is the reverse here),
+    # and NOT by count (which would put `attack` last).
+    assert seen[-1] == (6, "None×1, attack×3, coherence×2"), (
         "the refused-mechanism list must count every factor and sort by "
         "str(op_type), so a NULL and a named mechanism can share one warning: "
-        + repr(seen["args"])
+        + repr(seen[-1])
     )
     # `converged` is the property worth pinning. `iters` is deliberately NOT
     # asserted: it is an emergent property of the convergence loop (empty
@@ -1991,3 +2011,21 @@ def test_the_RUN_level_refusal_names_a_NULL_mechanism_without_raising(monkeypatc
     assert converged is True, "nothing was priced, so the reduced problem converges"
     assert eng.messages == {}, "a refused factor must not reach message passing"
     assert eng.posteriors == {}, "a refused factor must not create a posterior"
+
+    # ── the other half of the block: silence when nothing is refused ──────
+    # One `input_id` per PRICEABLE factor: `_update_factor` early-returns below
+    # two (`svbp.py:269`), so this run prices nothing, warns nothing and never
+    # enters the jax path. Removing `if refused:` makes it log a bogus
+    # `0 factor(s) REFUSED — ` on every clean belief read.
+    seen.clear()
+    clean = svbp_module.TortoiseSVBP()
+    clean_converged = clean.run([
+        ("op-impl", "IMPL", ["c1"], 1.0),
+        ("op-nand", "NAND", ["c2"], 1.0),
+    ])[1]
+    assert seen == [], (
+        "a refused-only warning must not fire when every factor is priceable: "
+        + repr(seen)
+    )
+    assert clean_converged is True
+    assert clean.messages == {}, "an unpriced single-input factor must not write"
