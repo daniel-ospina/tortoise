@@ -346,7 +346,7 @@ reproducible, weaker claim about the fleet's graph), say so and I will swap the 
 question.)* **Both readings are scored, against ground truth labelled both ways** — which is exactly what
 research A-g asks for. **The transitive reading, with an explicit cycle guard, carries A1's verdict**, because
 *"which **work items** serve this goal"* is **two hops** over the declared hierarchy
-(`packs/dev/manifest.yaml:148,193`: `Theme→Epic`, `Epic→Issue`, both `hasPart`) — a direct-part walk from a goal
+(`packs/dev/manifest.yaml:148,239-243`: `Theme→Epic`, `Epic→Issue`, both `hasPart`) — a direct-part walk from a goal
 returns Epics, not work items, so a direct default could go green on an answer that is not the question asked.
 The **direct** reading is reported as the corroborating arm (it is what makes the transitive answer
 falsifiable: a claimed inherited part must be reachable through declared intermediates).
