@@ -424,6 +424,13 @@ class ConversationMiner:
             "dedup_deferred": (dedup_report or {}).get("deferred_live_prior", 0),
             "dedup_error": dedup_error,
             "temporal_wired": (temporal_report or {}).get("wired_nand", 0),
+            # #12067: the temporal NANDs the CLOSED MECHANISM SET refused (the
+            # pair already carried another mechanism). Surfaced next to the
+            # count it subtracts from, so a caller reading `temporal_wired: 0`
+            # can tell "no contradiction found" from "the contradiction was
+            # refused" — the same reason `dedup_error` sits beside `dedup_hits`.
+            "temporal_nand_refused": (temporal_report or {}).get(
+                "nand_refused_pairs", []),
             "temporal_candidates": (temporal_report or {}).get("candidates", 0),
             "temporal_replacements": (temporal_report or {}).get(
                 "replacement_candidates", 0),
@@ -579,9 +586,31 @@ class ConversationMiner:
                         continue
                     wired_pairs.add(pair)
                     if sdk is not None:
-                        sdk.create_operator("NAND", pid, [prior_id],
-                                            promote_source=False)
-                        report["wired_nand"] += 1
+                        # ⛔ #12067: the pair may ALREADY carry a mechanism (an IMPL
+                        # from the same mining pass, or a pre-closure graph), and
+                        # the closed set refuses a second one. The refusal is a
+                        # `ValueError` — before this arm it unwound out of
+                        # `mine_conversation` (measured: the call site is bare, and
+                        # the failure surfaced only as a logged traceback while the
+                        # report still said `wired_nand: 0`), which reads exactly
+                        # like "there was no contradiction to wire". Counted and
+                        # named instead, so the drop is visible in the report; a
+                        # non-closure `ValueError` still propagates exactly as
+                        # before.
+                        try:
+                            sdk.create_operator("NAND", pid, [prior_id],
+                                                promote_source=False)
+                        except ValueError as _exc:
+                            if "mechanism set is CLOSED" not in str(_exc):
+                                raise
+                            logger.warning(
+                                "mining: temporal NAND %s→%s NOT wired — the "
+                                "pair already carries another mechanism "
+                                "(#12067 closed set): %s", pid, prior_id, _exc)
+                            report.setdefault("nand_refused_pairs", []).append(
+                                [pid, prior_id])
+                        else:
+                            report["wired_nand"] += 1
                 else:
                     # Live prior → review-queue candidate, wire at promotion.
                     # Target list (a single slot would silently drop earlier

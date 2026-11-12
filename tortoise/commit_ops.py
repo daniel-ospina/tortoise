@@ -295,7 +295,8 @@ def remap_supersession_point_refs(records: list, id_map: dict) -> list:
 
 
 def apply_payload_operators(proj, sdk, operators: list, *,
-                            point_content_by_id=None) -> list[str]:
+                            point_content_by_id=None,
+                            warn=None) -> list[str]:
     """Apply Layer-1 payload operators with commit semantics (#1532 D3).
 
     IMPL/NAND first via ``sdk.create_operator`` (promote_source=False, #780);
@@ -343,6 +344,13 @@ def apply_payload_operators(proj, sdk, operators: list, *,
     never claim a node a prior session created. The derived-commit call site
     (``hosted_api._execute_commit_writes`` §7) ignores the value — it has no
     capture eventId to stamp.
+
+    ``warn`` (optional) is the caller's warning sink — the same bounded channel
+    ``apply_supersessions`` takes (#5654). It carries the one outcome the return
+    list CANNOT express: an operator the #12067 CLOSED MECHANISM SET refused,
+    which is not a provenance question (the node was never created) but a
+    caller-visible DROP — without it, a capture whose payload asserted a second
+    mechanism on one pair reports success and silently loses the operator.
 
     ⛔ The return is a plain LIST, never ``target_op_ids.values()``: that
     dict is the MITIGATES same-call lookup and is keyed on
@@ -458,11 +466,29 @@ def apply_payload_operators(proj, sdk, operators: list, *,
             # #12067: a CLOSED-SET refusal is not a missing-input problem, and
             # reporting it as one sends the caller to the wrong cause while the
             # operator silently vanishes from the commit.
+            #
+            # ⛔ AND A LOG LINE IS NOT A SIGNAL (#12067 review round 5). The
+            # return is CREATED ids only (#4936 — deliberately a plain list), so
+            # a refused operator leaves `created_ids` short with nothing that
+            # distinguishes "already present" from "refused": a capture whose
+            # payload asserted a second mechanism on a pair reported SUCCESS and
+            # dropped the operator. The reachable population is every graph that
+            # already carries the pre-#12067 shape, which this change
+            # deliberately does not backfill. `warn` is the same bounded channel
+            # the supersession leg below uses (#5654) — the caller passes
+            # `meta["warnings"].append`, so the refusal reaches the caller's
+            # result structure instead of stopping at the logger.
             if "mechanism set is CLOSED" in str(e):
                 _logger.warning(
                     "operator write REFUSED by the closed mechanism set "
                     "(#12067) — the pair already carries another mechanism: %s",
                     e)
+                if warn is not None:
+                    warn(
+                        f"operator ({op_type!r}, {src!r} → {dst!r}) REFUSED by "
+                        f"the closed mechanism set (#12067): the pair already "
+                        f"carries another mechanism, so this operator was NOT "
+                        f"written. {e}")
             else:
                 _logger.warning(
                     "operator write skipped (inputs missing?): %s", e)

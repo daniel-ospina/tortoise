@@ -330,15 +330,33 @@ class TestDe2e6ReviewFixes:
     def test_no_double_nand_same_session(self, sdk, tmp_path):
         """P2: both sides of a contradictory pair carrying refute cues →
         exactly ONE NAND operator (was: wired twice, doubling the EP
-        penalty)."""
-        _mine(sdk,
-              "Alice: We decided to use port 16379.\nBob: We decided to revert to port 16380 because the port 16379 decision was wrong.\n",
-              "s-dbl", T1, str(tmp_path))
-        rows = sdk._get_proj().g.query(
+        penalty).
+
+        ⛔ #12067 UPDATE, and the reason the old expectation is now false: the
+        pair already carries an IMPL from the SAME mining pass, and the CLOSED
+        MECHANISM SET refuses a second mechanism on one pair — so the NAND is not
+        written at all (measured at the PR head: 0 NAND, 1 IMPL, 1 failed here).
+        The "wired twice" defect is now structurally impossible rather than
+        deduped, which is a STRONGER guarantee for this test's own concern, and
+        the refusal is named in the mining report instead of unwinding as a bare
+        `ValueError` into a logged traceback. Asserted as the truth: the pair
+        carries exactly ONE mechanism, and the drop is reported.
+        """
+        report = _mine(
+            sdk,
+            "Alice: We decided to use port 16379.\nBob: We decided to revert to port 16380 because the port 16379 decision was wrong.\n",
+            "s-dbl", T1, str(tmp_path))
+        nand_rows = sdk._get_proj().g.query(
             "MATCH (op:Point {is_operator:true})-[:NAND]->(:Point) "
             "RETURN count(DISTINCT op)"
         ).result_set
-        assert rows[0][0] == 1, f"exactly one NAND operator expected, got {rows}"
+        assert nand_rows[0][0] == 0, nand_rows
+        mech = sdk._get_proj().g.query(
+            "MATCH (op:Point {is_operator:true}) RETURN op.op_type"
+        ).result_set
+        assert [r[0] for r in mech] == ["IMPL"], mech
+        assert report["temporal_wired"] == 0, report
+        assert report.get("temporal_nand_refused"), report
 
     def test_yaml_date_object_no_crash(self, sdk, tmp_path):
         """P2: unquoted YAML date (datetime.date) must not crash the pass —

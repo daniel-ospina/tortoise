@@ -110,14 +110,25 @@ def test_control_distinct_src_dst_still_written(tmp_path):
 
 
 def test_control_distinct_op_type_still_written(tmp_path):
-    """``op_type`` is part of the key: an IMPL A->B does not suppress NAND A->B."""
+    """``op_type`` is part of the key: an IMPL A→B does not suppress a NAND on a
+    DIFFERENT pair.
+
+    ⛔ #12067: this control was written as IMPL A→B then NAND A→B. One pair now
+    carries at most ONE mechanism, so the closure refused that NAND and the pin
+    went red at the PR head (measured on `eba2c1f6` in a clean worktree: 1 failed,
+    23 passed) — the control was testing the closure instead of the key. The KEY
+    property is preserved on its own pair, and the refusal is asserted BESIDE it
+    so the two rules cannot be confused in either direction.
+    """
     sdk = _sdk(tmp_path)
     proj = sdk._get_proj()
     a = sdk.create_point("statement", "claim a")["id"]
     b = sdk.create_point("statement", "claim b")["id"]
+    c = sdk.create_point("statement", "claim c")["id"]
+    d = sdk.create_point("statement", "claim d")["id"]
 
     apply_payload_operators(proj, sdk, [_raw_op(a, b, "IMPL")])
-    apply_payload_operators(proj, sdk, [_raw_op(a, b, "NAND")])
+    apply_payload_operators(proj, sdk, [_raw_op(c, d, "NAND")])
     apply_payload_operators(proj, sdk, [_raw_op(a, b, "IMPL")])  # repeat
 
     impl = proj.g.query(
@@ -127,6 +138,19 @@ def test_control_distinct_op_type_still_written(tmp_path):
         "MATCH (o:Point {is_operator:true, op_type:'NAND'}) "
         "RETURN count(o)").result_set[0][0]
     assert (impl, nand) == (1, 1)
+
+    # ... and the SAME pair's second mechanism is refused by the closed set,
+    # reported through the caller's sink rather than dropping silently.
+    refused: list[str] = []
+    apply_payload_operators(proj, sdk, [_raw_op(a, b, "NAND")],
+                            warn=refused.append)
+    assert len(refused) == 1, refused
+    assert "closed mechanism set" in refused[0], refused
+    on_pair = proj.g.query(
+        "MATCH (o:Point {is_operator:true, op_type:'NAND'})-[:NAND]->(t:Point) "
+        "WHERE t.id = $b RETURN count(o)",
+        params={"b": b}).result_set[0][0]
+    assert on_pair == 0, on_pair
 
 
 def test_part_whole_ops_collapse_on_repeat_and_stay_distinct_by_op_type(tmp_path):

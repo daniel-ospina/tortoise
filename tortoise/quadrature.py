@@ -180,5 +180,14 @@ def phi_coherence(ca, cb, w=1.0):
     bounded, monotone, and 0.06 % of the belief; driving it to zero would need
     a different functional form (a reopen of the "product vs difference" ruling
     recorded on #855/#11935), not a constant.
+
+    TWO-WAY (`<->`) IS TWO OF THESE, not one factor read both ways. Mutual
+    necessity is the CONJUNCTION `S_N(a,b) ∧ S_N(b,a)`, so the message each
+    endpoint receives must be priced with THAT endpoint as the dependent — each
+    direction is an independent one-corner loss (#12067 review round 5). Both
+    messages priced from one slot order instead make the necessary-condition
+    endpoint RISE whenever the other side is present, which is the "they move
+    together" reading this mechanism exists to rule out; the joint product
+    `φ(ca,cb)·φ(cb,ca)` is that agreement form and is NOT used.
     """
     return np.exp(-w * (1.0 - ca) * cb)

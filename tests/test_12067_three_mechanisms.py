@@ -238,8 +238,12 @@ def test_the_extraction_contract_states_the_coherence_SLOT_ORDER():
 
     head = OUTPUT_CONTRACT[:OUTPUT_CONTRACT.index('"relations":')]
     op_block = head[head.index('"operators":'):]
-    assert "NECESSARY CONDITION" in op_block, op_block
-    assert "src" in op_block and "NECESSARY" in op_block.upper(), op_block
+    # ⛔ Pin the ORDER, not the presence of the words (#12067 review round 5):
+    # `"NECESSARY CONDITION" in op_block` passed for a contract that said the
+    # order was `dst` — and WHICH ENDPOINT is the condition is the whole
+    # property, so the pin has to name it.
+    assert "coherence = src is the NECESSARY CONDITION" in op_block, op_block
+    assert "Emit the condition as `src`" in op_block, op_block
 
 
 def test_the_mechanism_never_reaches_the_cypher_rel_position(monkeypatch):
@@ -283,7 +287,17 @@ def test_the_mechanism_never_reaches_the_cypher_rel_position(monkeypatch):
 def test_the_three_potentials_are_distinct():
     """A mechanism that reuses another's potential is not a mechanism — it is a
     second name for one behaviour, which is how meanings get priced as if they
-    were the same relation (#12067's premise)."""
+    were the same relation (#12067's premise).
+
+    ⛔ Assert the DISPATCH TABLE, not three module-level functions (#12067 review
+    round 5). `id()` on the imported names cannot see the map the factor reads:
+    `_MECHANISM_POTENTIALS["coherence"] = phi_impl` — the exact mutant the
+    module docstring claims this test catches — left all three `id()`s distinct
+    and this assertion green.
+    """
+    assert len({id(f) for f in _MECHANISM_POTENTIALS.values()}) == 3
+    expected = {"IMPL": phi_impl, "NAND": phi_nand, "coherence": phi_coherence}
+    assert expected == _MECHANISM_POTENTIALS
     assert len({id(phi_impl), id(phi_nand), id(phi_coherence)}) == 3
 
 
@@ -323,6 +337,45 @@ def test_coherence_survives_the_direction_gate():
     assert _delta("coherence", _beta(0.05), HELD, direction="<->") < 0
     # `-`: exists, transfers nothing.
     assert _delta("coherence", _beta(0.05), HELD, direction="-") == pytest.approx(0.0)
+
+
+def test_mutual_coherence_is_TWO_ONE_WAY_CONSTRAINTS():
+    """⛔ `<->`: EACH endpoint's message uses ITS OWN slot order (#12067 review
+    round 5).
+
+    Measured on the pre-fix head, one marginals pair under `_phi` gave the second
+    input a loss and the FIRST an upward push: the pair (0.05, 0.909) RAISED the
+    necessary-condition endpoint by +0.00418 (and +0.00643 at (0.909, 0.909)),
+    and the pair (0.909, 0.05) did not make it fall at all (+0.00037) — so mutual
+    coherence never propagated a loss INTO the condition endpoint and could only
+    raise it. That violates ONTOLOGY §8 ("a met one never raises either side") and
+    #12067's own recorded two-way design ("B falls when A is absent, and A falls
+    when B is absent"). Mutual necessity is the conjunction S_N(a,b) ∧ S_N(b,a),
+    so both properties are asserted here — and the second one is what a
+    single-slot-order factor cannot satisfy.
+    """
+    held = HELD[0] / (HELD[0] + HELD[1])
+    # (1) each side FALLS when the other is absent — symmetrically.
+    a, b = _means_after("coherence", HELD, _beta(0.05), direction="<->")
+    assert a < held - 1e-4, (a, b)
+    a2, b2 = _means_after("coherence", _beta(0.05), HELD, direction="<->")
+    assert b2 < held - 1e-4, (a2, b2)
+    # (2) NEITHER side is ever RAISED — swept over both priors and both orders.
+    for s_conf in (0.05, 0.30, 0.5238, 0.909):
+        for t_conf in (0.05, 0.30, 0.5238, 0.909):
+            sa, tb = _means_after("coherence", _beta(s_conf), _beta(t_conf),
+                                  direction="<->")
+            assert sa <= s_conf + 1e-12, (s_conf, t_conf, "source rose", sa)
+            assert tb <= t_conf + 1e-12, (s_conf, t_conf, "target rose", tb)
+    # (3) the two one-way constraints are mirror images: swapping the endpoints
+    # swaps the pair of results (a single slot order cannot be symmetric).
+    left = _means_after("coherence", _beta(0.2), _beta(0.8), direction="<->")
+    right = _means_after("coherence", _beta(0.8), _beta(0.2), direction="<->")
+    assert left[0] == pytest.approx(right[1]), (left, right)
+    assert left[1] == pytest.approx(right[0]), (left, right)
+    # (4) `->` is untouched by the fix: the source receives nothing.
+    assert _means_after("coherence", _beta(0.2), _beta(0.8),
+                        direction="->")[0] == pytest.approx(0.2)
 
 
 def _raw_message(mechanism: str, source: tuple[float, float],
@@ -616,18 +669,270 @@ def test_a_DRAFT_operator_is_part_of_the_population(sdk):
     `promote_source=False` is the ordinary posture of the commit/ingest paths —
     so two drafts over one pair become two LIVE mechanisms on one pair. Measured
     before the fix: both writes were accepted.
+
+    ⛔ The SECOND half of this test used to assert `len(ops) == 1` under a comment
+    claiming it showed "the promotion really does keep both live" — it showed the
+    opposite, and nothing failed if the promotion stopped happening at all
+    (#12067 review round 5). The tail now asserts what is true and load-bearing:
+    the write that WOULD have produced the two-draft state was refused, and the
+    surviving draft's promotion is a real, unguarded `draft → live` transition —
+    which is why the invariant can only be enforced at the WRITE.
     """
     a, b = _points(sdk)
-    sdk.create_operator("IMPL", a, [b], promote_source=False)
+    first = sdk.create_operator("IMPL", a, [b], promote_source=False)
     with pytest.raises(ValueError):
         sdk.create_operator("coherence", a, [b], promote_source=False)
-    # ... and the promotion really does keep both live, which is why the refusal
-    # has to happen at the WRITE, not at the promotion.
+    rows = sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$id}) RETURN o.op_type, o.status",
+        params={"id": first["id"]}).result_set
+    assert rows == [["IMPL", "draft"]], rows
     sdk._promote_incident_operators(sdk._get_proj(), a, "2026-01-01T00:00:00Z")
     ops = sdk._get_proj().g.query(
         "MATCH (o:Point) WHERE o.is_operator = true "
-        "RETURN o.id, o.op_type").result_set
+        "RETURN o.id, o.op_type, o.status").result_set
+    assert ops == [[first["id"], "IMPL", "live"]], ops
+
+
+def test_an_ingest_retry_dedups_a_coherence_operator_that_SPELLS_the_default(sdk):
+    """⛔ The write and the DEDUPE KEY disagreed about the default spelling
+    (#12067 review round 5).
+
+    `create_operator` rewrites `direction="bidirectional"` to `->` for
+    coherence (the signature default means "the caller stated nothing"), while
+    `_find_operator` passed the raw token through `_canonical_direction`, which
+    returns an explicit value VERBATIM — so the probe searched
+    `{"<->", "bidirectional"}`, missed the `->` it had just written, and minted a
+    SECOND coherence operator over the pair on EVERY retry. Measured on the
+    pre-fix head: `second.created == 1`, two operators, one pair — the double
+    count the closure exists to make unwritable. The direction-omitting case
+    below is NOT this case: there both readers happened to agree.
+    """
+    a = sdk.create_point("statement", "a")["id"]
+    b = sdk.create_point("statement", "b")["id"]
+    payload = {"connections": [{"operator": "coherence", "from": a, "to": b,
+                                "direction": "bidirectional"}]}
+    first = sdk.ingest(payload)
+    second = sdk.ingest(payload)
+    assert first["created"]["connections"] == 1, first
+    assert second["created"]["connections"] == 0, second
+    ops = sdk._get_proj().g.query(
+        "MATCH (o:Point) WHERE o.is_operator = true "
+        "RETURN o.id, o.direction").result_set
     assert len(ops) == 1, ops
+    assert ops[0][1] == "->", ops
+
+
+def test_two_coherence_connections_that_WRITE_the_same_direction_are_not_a_conflict(sdk):
+    """⛔ Two spellings of ONE write are not a conflicting duplicate (#12067
+    review round 5).
+
+    An absent direction and the signature-default spelling `bidirectional` both
+    WRITE `->` for coherence, but `_connections_conflict` compared the raw
+    tokens — measured before the fix: the bundle raised
+    `BundleValidationError … conflicting duplicates` and wrote NOTHING, a false
+    block on a legal bundle. The second half pins the other side of the same
+    predicate: an explicit `<->` really is a different write, so it must still be
+    refused.
+    """
+    from tortoise.exceptions import BundleValidationError
+
+    a, b = _points(sdk)
+    res = sdk.ingest({"connections": [
+        {"operator": "coherence", "from": a, "to": b},
+        {"operator": "coherence", "from": a, "to": b,
+         "direction": "bidirectional"},
+    ]})
+    assert res["created"]["connections"] == 1, res
+    ops = sdk._get_proj().g.query(
+        "MATCH (o:Point) WHERE o.is_operator = true "
+        "RETURN o.direction").result_set
+    assert ops == [["->"]], ops
+
+    c, d = _points(sdk)
+    with pytest.raises(BundleValidationError):
+        sdk.ingest({"connections": [
+            {"operator": "coherence", "from": c, "to": d},
+            {"operator": "coherence", "from": c, "to": d,
+             "direction": "<->"},
+        ]})
+
+
+def test_a_commit_SURFACES_the_closed_set_refusal_to_its_caller(sdk):
+    """⛔ A refused operator must not vanish into the log (#12067 review round 5).
+
+    `apply_payload_operators` returns CREATED ids only (#4936 — a list, on
+    purpose), so a closed-set refusal left `created_ids` short with nothing to
+    distinguish it from "already present": a capture whose payload asserted a
+    second mechanism on a pair reported SUCCESS and dropped the operator, on
+    exactly the population the closure's no-backfill ruling leaves in place. The
+    refusal now rides the caller's `warn` sink (the same bounded channel
+    `apply_supersessions` uses, #5654).
+    """
+    from tortoise.commit_ops import apply_payload_operators
+
+    a, b = _points(sdk)
+    sdk.create_operator("IMPL", a, [b])
+    warned: list[str] = []
+    created = apply_payload_operators(
+        sdk._get_proj(), sdk,
+        [{"op_type": "coherence", "src": a, "dst": b,
+          "direction": "unidirectional"}],
+        point_content_by_id=lambda _p: "", warn=warned.append)
+    assert created == [], created
+    assert len(warned) == 1, warned
+    assert "REFUSED" in warned[0] and "closed mechanism set" in warned[0], warned
+    # ... and it is DISCRIMINATING: a write the closure accepts stays silent, so
+    # the channel is not a blanket warning on every operator.
+    c, d = _points(sdk)
+    warned.clear()
+    created2 = apply_payload_operators(
+        sdk._get_proj(), sdk,
+        [{"op_type": "IMPL", "src": c, "dst": d,
+          "direction": "unidirectional"}],
+        point_content_by_id=lambda _p: "", warn=warned.append)
+    assert len(created2) == 1 and warned == [], (created2, warned)
+
+
+def test_a_STAR_operators_targets_do_not_price_each_other(sdk):
+    """⛔ The closed set's unit is the PAIR THE FACTOR PRICES (#12067 review
+    round 6, P1).
+
+    `TortoiseEP._factor_pairs` is the one declaration of that decomposition: an
+    `IMPL` operator is a STAR (its targets never price each other) and so is a
+    one-way `NAND`/`coherence`; only an operator whose direction flows BOTH ways
+    is a clique. Judging coverage on the operator's endpoint SET refused legal
+    writes — measured: `NAND c→[a,b]` (unidirectional) refused an `IMPL` over
+    `{a,b}` with a message claiming `{a,b}` "already carries the 'NAND'
+    mechanism", a pair that operator prices at no point. Both directions of the
+    fix are asserted, so the gate cannot become a blanket allow.
+    """
+    c, a, b = _points(sdk, 3)
+    sdk.create_operator("NAND", c, [a, b], direction="unidirectional")
+    # The star prices (c,a) and (c,b) only — a second mechanism over the two
+    # TARGETS is a different pair and must stay writable.
+    sdk.create_operator("IMPL", a, [b])
+
+    # ... and the pair a star DOES price is still refused.
+    h, i, j = _points(sdk, 3)
+    sdk.create_operator("coherence", h, [i, j])
+    with pytest.raises(ValueError):
+        sdk.create_operator("IMPL", h, [i])
+
+    # A MUTUAL operator is a CLIQUE: its target pair IS priced.
+    d, e, f = _points(sdk, 3)
+    sdk.create_operator("NAND", d, [e, f], direction="<->")
+    with pytest.raises(ValueError):
+        sdk.create_operator("IMPL", e, [f])
+
+    # Two fully disjoint stars share no priced pair at all.
+    p, q, r, s2, _t = _points(sdk, 5)
+    sdk.create_operator("NAND", p, [q, r], direction="unidirectional")
+    sdk.create_operator("IMPL", s2, [q, r], direction="unidirectional")
+
+
+def test_a_LEGACY_operator_with_no_idx_still_blocks_its_pair(sdk):
+    """⛔ A slot layout the gate cannot READ must fall back to CONSERVATIVE, never
+    to the empty set (#12067 review round 7, P1 — measured, and it was a
+    FAIL-OPEN).
+
+    The priced-pair reader keys each operator's edges by `r.idx`. A legacy
+    operator carries no `idx` on its edges (documented twice: `#913`'s "a dict
+    keyed by None collapses them", and "an operator edge may carry NO `idx` at
+    all"), so every edge collapsed into slot 0: the slot sequence had length 1,
+    `_priced_pairs` answered the EMPTY set, and a NAND over the very pair that
+    IMPL already priced went THROUGH — two mechanisms on one pair, the state the
+    closure exists to forbid.
+
+    An unreadable layout is therefore read the OLD way — every pair among the
+    operator's endpoints — so an unmeasured shape can only over-refuse, which a
+    caller can see, and never silently allow.
+    """
+    a, b = _points(sdk)
+    sdk.create_operator("IMPL", a, [b])
+    # Strip the slot marker: exactly the pre-#9750 edge shape.
+    sdk._get_proj().g.query(
+        "MATCH (o:Point {is_operator:true})-[r:IMPL]->(t:Point) "
+        "REMOVE r.idx")
+    with pytest.raises(ValueError) as exc:
+        sdk.create_operator("NAND", a, [b])
+    assert "already carries" in str(exc.value), str(exc.value)
+    ops = sdk._get_proj().g.query(
+        "MATCH (o:Point {is_operator:true, op_type:'NAND'}) "
+        "RETURN count(o)").result_set[0][0]
+    assert ops == 0, ops
+
+
+def test_two_refs_that_FOLD_onto_one_node_are_ONE_pair(sdk):
+    """⛔ Phase 1 must judge the node the bundle will FOLD onto, not the ref name
+    (#12067 review round 6, P1 — measured).
+
+    `create_point` is content-addressed, so two `points` items with the same
+    content and different refs become ONE node — but the landing probe only asked
+    the GRAPH, so both refs read as "this bundle mints it" and got DIFFERENT
+    bundle-local identities. Phase 1 therefore saw no conflict, committed the
+    point and the first operator, and the second `create_operator` raised a bare
+    `ValueError` MID-WRITE (partial mutation); the identical retry is then refused
+    as a `BundleValidationError`, so the bundle could never complete. The mint
+    identity is now the CONTENT fold key Phase 1 already simulates.
+    """
+    from tortoise.exceptions import BundleValidationError
+
+    q = sdk.create_point("statement", "Q")["id"]
+    payload = {
+        "points": [{"content": "same content", "ref": "rA"},
+                   {"content": "same content", "ref": "rB"}],
+        "connections": [
+            {"operator": "coherence", "from": "rA", "to": q},
+            {"operator": "IMPL", "from": "rB", "to": q},
+        ],
+    }
+    with pytest.raises(BundleValidationError) as exc:
+        sdk.ingest(payload)
+    violations = getattr(exc.value, "violations", []) or []
+    assert any("SECOND mechanism" in (v.get("message") or "")
+               for v in violations), violations
+    # NOTHING committed — not the point, not the first operator.
+    proj = sdk._get_proj()
+    assert proj.g.query(
+        "MATCH (o:Point) WHERE o.is_operator = true RETURN count(o)"
+    ).result_set[0][0] == 0
+    assert proj.g.query(
+        "MATCH (n:Point) WHERE n.content = 'same content' RETURN count(n)"
+    ).result_set[0][0] == 0
+    # ... and the refusal is IDEMPOTENT: the same bundle says the same thing.
+    with pytest.raises(BundleValidationError):
+        sdk.ingest(payload)
+
+
+def test_an_explicit_MUTUAL_coherence_is_not_downgraded(sdk):
+    """⛔ For `coherence` the default is `->`, so `<->` is a REAL statement —
+    and the global "not declared" predicate said otherwise (#12067 review round
+    6, P2 — measured both ways).
+
+    (a) `direction="<->"` recorded basis `default`, i.e. the graph claimed the
+    caller stated nothing; (b) with a declared `semantics` the explicit mutual
+    request was silently REPLACED by the meaning's one-way direction — against
+    `create_operator`'s own contract that a non-default explicit value outranks
+    `semantics`. The global default spellings (`bidirectional`, absent) still
+    mean "not declared", which is what keeps the semantics step alive.
+    """
+    def stored(op):
+        return sdk._get_proj().g.query(
+            "MATCH (o:Point {id:$i}) RETURN o.direction",
+            params={"i": op["id"]}).result_set[0][0]
+
+    a, b = _points(sdk)
+    op = sdk.create_operator("coherence", a, [b], direction="<->")
+    assert (op.get("direction_basis"), stored(op)) == ("explicit", "<->"), op
+
+    c, d = _points(sdk)
+    op2 = sdk.create_operator("coherence", c, [d], direction="<->",
+                              semantics="dependsOn")
+    assert (op2.get("direction_basis"), stored(op2)) == ("explicit", "<->"), op2
+
+    e, f = _points(sdk)
+    op3 = sdk.create_operator("coherence", e, [f], direction="bidirectional")
+    assert (op3.get("direction_basis"), stored(op3)) == ("default", "->"), op3
 
 
 def test_coherence_has_its_OWN_direction_default(sdk):
@@ -731,8 +1036,12 @@ def test_an_INTRA_BUNDLE_conflict_is_a_VIOLATION(sdk):
             {"operator": "coherence", "from": a, "to": b},
         ]})
     violations = getattr(exc.value, "violations", []) or []
-    assert any("SECOND mechanism" in (v.get("message") or "")
-               and "THIS bundle" in (v.get("message") or "")
+    # ⛔ Pin the PHRASING — index and mechanism in their own places (#12067
+    # review round 6: `seen` holds `(mechanism, index)` and the message read it
+    # backwards, so it said `connections[coherence] already states the '0'
+    # mechanism`, and a membership assertion like the one below stayed green).
+    assert any("connections[0] of THIS bundle already states the 'IMPL' "
+               "mechanism" in (v.get("message") or "")
                for v in violations), violations
     # ⛔ The message must NAME the prior connection and its mechanism, not just
     # say "a conflict" — they are what a caller acts on, and a swapped unpack in
@@ -775,14 +1084,20 @@ def test_a_REF_endpoint_resolves_to_its_LANDING_node(sdk):
 
 
 def test_an_NARY_sibling_pair_is_judged_at_Phase_1(sdk):
-    """⛔ The DOOR judges every 2-subset of the operator's endpoint set, so Phase 1
-    must too (#12067 review round 5, P1 — measured).
+    """⛔ Phase 1 judges the SAME pairs the door judges — priced pairs.
 
-    `create_operator` tests an existing operator's endpoints against
-    `set(inputs)` with `len(shared) >= 2`, so for `coherence a→[b, c]` the pair
-    `(b, c)` is a pair it refuses — but Phase 1 derived only `(a, b)` and `(a, c)`.
-    A conflict on the sibling pair therefore passed validation, committed the
-    operator, and then raised mid-write with no violation to skip.
+    The two doors once disagreed about an n-ary shape (#12067 review round 5,
+    measured): Phase 1 derived only `(a, b)` and `(a, c)`, so a conflict on a
+    SIBLING pair passed validation, committed the operator, and then raised
+    mid-write with no violation to skip.
+
+    ⛔ WHICH sibling pairs count is `TortoiseEP._factor_pairs`' question, and the
+    answer depends on the direction (#12067 review round 7): a MUTUAL coherence
+    (`<->`) is a CLIQUE, so `(b, c)` is priced and the door and Phase 1 must both
+    refuse this bundle; a ONE-WAY coherence is a STAR, so `(b, c)` is a
+    different pair and both doors must ACCEPT it (pinned by
+    `test_a_STAR_operators_targets_do_not_price_each_other`). Endpoint overlap
+    refused both.
     """
     from tortoise.exceptions import BundleValidationError
 
@@ -790,7 +1105,8 @@ def test_an_NARY_sibling_pair_is_judged_at_Phase_1(sdk):
     sdk.create_operator("IMPL", b, [c])
     with pytest.raises(BundleValidationError) as exc:
         sdk.ingest({"connections": [
-            {"operator": "coherence", "from": a, "to": [b, c]}]})
+            {"operator": "coherence", "from": a, "to": [b, c],
+             "direction": "<->"}]})
     violations = getattr(exc.value, "violations", []) or []
     assert any("SECOND mechanism" in (v.get("message") or "")
                for v in violations), violations
@@ -834,26 +1150,34 @@ def test_two_REFS_that_fold_onto_one_minted_node_are_ONE_pair(sdk):
 
 
 def test_a_bare_edge_on_an_NARY_SUBPAIR_is_refused_by_BOTH_doors(sdk):
-    """⛔ The door's rule is "share ≥2 endpoints", and the bare-edge arm must use
-    it too (#12067 review round 6, P2 — measured).
+    """⛔ One shared reader, one rule — and the rule is the pair the FACTOR prices.
 
-    The bare arm required the bare edge's endpoints to EQUAL the whole endpoint
-    set, so a bare `NAND b→c` sat beside `coherence a→[b, c]` — two mechanisms on
-    the pair (b, c) — while the mirrored `ingest` refused the same state. The
-    doc's claim ("one shared reader, one rule") has to be true of both arms, so
-    this pins the SAME shape through `create_operator` and through `ingest`.
+    The two arms once disagreed about the same shape, so a bare edge sat beside
+    an operator through one door while `ingest` refused the mirror (#12067
+    review round 6, P2).
+
+    ⛔ The SUBPAIR here is a MUTUAL coherence (`<->`), because that is the shape
+    whose factor genuinely prices `(b, c)`: a mutual necessity is a clique, so
+    every pair among `{a, b, c}` is priced. A ONE-WAY coherence is a star —
+    `_factor_pairs` says `a` is the necessary condition and the targets never
+    price each other — so a bare edge between two of its targets is a DIFFERENT
+    pair and is legal (pinned by
+    `test_a_STAR_operators_targets_do_not_price_each_other`). Judging the
+    subpair by endpoint overlap instead is what refused that legal write, with a
+    refusal claiming a pair the operator never prices (#12067 rounds 6-7).
     """
     from tortoise.exceptions import BundleValidationError
 
     a, b, c = _points(sdk, 3)
     sdk.create_direct_edge("NAND", b, c)
     with pytest.raises(ValueError) as exc:
-        sdk.create_operator("coherence", a, [b, c])
+        sdk.create_operator("coherence", a, [b, c], direction="<->")
     assert "NAND" in str(exc.value), str(exc.value)
     # ... and the ingest door reports the mirror instead of raising mid-bundle.
     with pytest.raises(BundleValidationError) as exc2:
         sdk.ingest({"connections": [
-            {"operator": "coherence", "from": a, "to": [b, c]}]})
+            {"operator": "coherence", "from": a, "to": [b, c],
+             "direction": "<->"}]})
     violations = getattr(exc2.value, "violations", []) or []
     assert any("direct edge" in (v.get("message") or "") for v in violations),         violations
 
@@ -1277,18 +1601,20 @@ def test_mutual_coherence_never_RAISES_the_necessary_condition():
 
 
 def test_a_mechanism_on_a_TARGET_SUBPAIR_is_a_Phase1_violation(sdk):
-    """THE DOOR JUDGES THE WHOLE INPUT SET; PHASE 1 JUDGED ONE TARGET AT A TIME.
+    """PHASE 1 JUDGES THE PAIRS THE DOOR JUDGES — and BOTH sides read
+    `TortoiseEP._factor_pairs` (#12067 review rounds 4 and 7).
 
-    (#12067 review round 4, P1.) `_mechanism_pair_conflicts` fires on any pair
-    sharing two or more endpoints, and `create_operator` passes its FULL input
-    set. `_check_pair_mechanisms` asked per `{src, tgt}`, so an existing
-    mechanism on a TARGET-TO-TARGET sub-pair was invisible to it and fatal at
-    the door.
+    The shape that matters here is a conflict on a pair that is NOT `(from, target)`:
+    an n-ary operator carries several pairs, and Phase 1 judged only `{src, tgt}`,
+    so a conflict on a TARGET sub-pair passed validation, the bundle's point
+    COMMITTED, and then the door raised with no violation to skip.
 
-    Measured before the fix — existing NAND on (B,C), then
-    `ingest({points:[new], connections:[{IMPL, from:A, to:[B,C]}]})`:
-    Phase 1 passed clean, the bundle's new point COMMITTED, then
-    `create_operator` raised with no violation to skip.
+    ⛔ WHICH sub-pairs exist is the factor's answer, not an overlap test
+    (#12067 review round 7): a MUTUAL coherence (`<->`) is a CLIQUE — `(b, c)` is
+    priced, so this conflict is real — while `IMPL` is a STAR at ANY direction
+    (`_factor_pairs` branches on the op_type first), so `IMPL a→[b, c]` never
+    prices `(b, c)` and the same NAND beside it is a DIFFERENT, legal pair. Both
+    halves are asserted, so the check cannot become a blanket allow.
     """
     from tortoise.exceptions import BundleValidationError
 
@@ -1296,7 +1622,8 @@ def test_a_mechanism_on_a_TARGET_SUBPAIR_is_a_Phase1_violation(sdk):
     sdk.create_operator("NAND", b, [c])
     payload = {
         "points": [{"content": "queued ahead of a target sub-pair conflict"}],
-        "connections": [{"operator": "IMPL", "from": a, "to": [b, c]}],
+        "connections": [{"operator": "coherence", "from": a, "to": [b, c],
+                         "direction": "<->"}],
     }
     with pytest.raises(BundleValidationError) as exc:
         sdk.ingest(payload)
@@ -1307,6 +1634,14 @@ def test_a_mechanism_on_a_TARGET_SUBPAIR_is_a_Phase1_violation(sdk):
         "MATCH (n:Point) WHERE n.content = $c RETURN n.id",
         params={"c": "queued ahead of a target sub-pair conflict"}).result_set
     assert rows == [], rows
+
+    # The STAR reading: `IMPL a→[b, c]` prices `(a,b)` and `(a,c)`, never `(b,c)`,
+    # so this is a different pair and BOTH doors must accept it.
+    d, e, f = _points(sdk, 3)
+    sdk.create_operator("NAND", e, [f])
+    sdk.create_operator("IMPL", d, [e, f])
+    sdk.ingest({"connections": [
+        {"operator": "IMPL", "from": d, "to": [e, f]}]})
 
 
 def test_the_mechanism_set_is_one_tuple_everywhere():

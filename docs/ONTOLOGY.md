@@ -1235,7 +1235,7 @@ Every epistemic relation between two beliefs is exactly one of three mechanisms.
 |---|---|---|---|---|
 | **support** | this is evidence for that | raises the other where it sits above it, and **lowers it where it sits below** (difference coupling — the one documented case where a SUPPORT edge lowers a belief, see below) | A is evidence for B | each is evidence for the other |
 | **attack** | this counts against that | lowers the other, **never raises it** | A counts against B | mutually exclusive |
-| **coherence** | A is a necessary condition for B | an unmet condition propagates **loss** to the dependent; a met one never raises either side | A is necessary for B (A falls ⇒ B falls) | both directions of necessity, priced in the stated order |
+| **coherence** | A is a necessary condition for B | an unmet condition propagates **loss** to the dependent; a met one never raises either side | A is necessary for B (A falls ⇒ B falls) | both directions of necessity — **two one-way constraints**, so the message EACH endpoint receives prices that endpoint as the dependent (A falls when B is absent, and B falls when A is absent). ⛔ Not one factor read twice: pricing both messages from one slot order turns the necessary-condition endpoint into a RAISED one, which is the "they move together" reading this row rejects |
 
 `IMPL` and `NAND` are the first two. **Coherence is the third**, and it is what a necessity
 meaning (`dependsOn`, `hasPart`) is asking for. Both are still written as `IMPL` on the
@@ -1275,9 +1275,11 @@ different functional forms, i.e. an over-statement that looks like strong suppor
 only because refusing them changes a shape the engine has always allowed, so this table does not
 claim they are refused and does not claim they are harmless. That shape needs the operator-less
 `relation` route: a connection that carries `operator` writes an OPERATOR on every route, and an
-operator whose endpoints SHARE two nodes with any existing mechanism — bare or operator, including a
-2-subset of an n-ary operator's endpoints — is refused, including through `ingest`, whose Phase 1
-reports the refusal as a `violations` entry instead of raising mid-bundle (#12067). Not
+operator that would price a pair an existing mechanism already prices — bare or operator, the pair
+being the one `TortoiseEP._factor_pairs` says the factor prices (a one-way n-ary operator is a STAR,
+so its TARGETS never price each other, while a both-ways one is a clique and every pair counts) — is
+refused, including through `ingest`, whose Phase 1 reports the refusal as a `violations` entry
+instead of raising mid-bundle (#12067). Not
 covered here at all: `EventAPI.add_operator` (which accepts `IMPL`/`NAND` only, so the third
 mechanism is unreachable there) and the projection's own edge fold (`#10306`).
 

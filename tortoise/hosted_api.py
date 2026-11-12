@@ -21974,6 +21974,13 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             [op_rec.operator for op_rec in reconcile.operators
              if op_rec.action == "new"],
             point_resolved_ids),
+        # #12067: a closed-set refusal DROPS the operator, and the helper's
+        # return is created ids only (#4936) — so on this leg it was log-only
+        # while `_write_advisories` (folded into the response's `warnings[]`)
+        # sat one argument away. Same channel, same shape as the narrative
+        # advisory above; the commit still succeeds, which is the contract.
+        warn=lambda msg: _write_advisories.append(
+            {"code": "mechanism_closed_set_refused", "message": msg}),
         point_content_by_id=lambda pid: _point_content_by_id(
             payload, _commit_reverse_id_map.get(pid, pid)),
     )
