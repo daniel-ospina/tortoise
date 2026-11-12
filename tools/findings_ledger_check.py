@@ -686,16 +686,28 @@ _NAMED_LETTER_RE = re.compile(
     r"|\*\(([a-l]{1,2})\)\*"  # *(a)*
     r"|\*([a-l]{1,2})\*"  # *a*
     r"|\(([a-l]{1,2})\)"  # (a) / (a), (b)
-    r"|(?:,\s*|\b(?:and|or|also|plus)\s+)([a-l])\b"  # ", f" / "and f" / "also f"
+    r"|(?:,\s*|\b(?:and|or|also|plus|&)\s+|&\s+|,\s*also\s+)([a-l])\b"  # ", f" / "and f" / "also f" / "& f"
+    # ⛔ THE HEAD OF A PLAIN LIST. Matching a member only by its SEPARATOR (`, f` /
+    # `and f`) never reads the FIRST member, so an honest `Only a, f, h, i and j still
+    # read as written.` was compared as `['f','h','i','j']` — a false accusation that
+    # names the wrong set, which §8 declares is an accepted spelling (#11902 review,
+    # round 4). The head rule pairs the first member with the separator after it, and
+    # letters are read case-insensitively, because `**(A)**` is the same claim.
+    r"|\b([a-l])\b\s*(?:,\s*(?:also\s+)?|(?:,?\s+)(?:and|or|also|plus|&)\s*)\b([a-l])\b"
+    , re.IGNORECASE
 )
 
 
 def _named_letters(sentence: str) -> set[str]:
     """The letters a sentence names as list members, in any accepted spelling."""
-    return {
-        next(g for g in m.groups() if g)
-        for m in _NAMED_LETTER_RE.finditer(sentence)
-    }
+    # ⛔ EVERY GROUP, NOT THE FIRST: the plain head rule is ONE match that carries BOTH
+    # members (`j or a`), so taking only the first non-empty group read a two-member
+    # list as one member and the candidacy gate (`>= 2 named letters`) never fired —
+    # measured, `Note: j or a no longer read as written.` left `--check` at rc 0.
+    out: set[str] = set()
+    for m in _NAMED_LETTER_RE.finditer(sentence):
+        out.update(g.lower() for g in m.groups() if g)
+    return out
 
 
 def check_verdict_tally(text: str) -> list[str]:
@@ -828,6 +840,17 @@ def check_verdict_tally(text: str) -> list[str]:
     PAREN = r"\([a-l]\)"  # a parenthesised letter — a LIST ITEM only
     BARE = r"\b[a-l]\b"
     ITEM = r"(?:" + MARKED + r"|" + PAREN + r"|" + BARE + r")"
+    #: ⛔ CANDIDACY IS THE EXTRACTOR, NOT A SECOND REGEX. `letter_sentence` below is a
+    #: NARROWER four-form gate than `_NAMED_LETTER_RE`, so a second tally spelled in a
+    #: form the extractor reads but the gate did not was no candidate at all — measured,
+    #: `Note: **a**, **f** and **h** no longer read as written.` (and the plain-run,
+    #: `or`/`also`/`plus`/`&`, code-span, italic and uppercase spellings) left `--check`
+    #: at rc 0 while the page asserted a list the table contradicts. A sentence is a
+    #: candidate when the extractor finds TWO OR MORE named letters in it (one letter is
+    #: not a list), which is the predicate the comparison itself uses.
+    def _is_letter_list(sentence: str) -> bool:
+        return bool(letter_sentence.search(sentence)) or len(_named_letters(sentence)) >= 2
+
     letter_sentence = re.compile(
         MARKED
         + r"|" + ITEM + r"(?:\s*,\s*" + ITEM + r")+"  # a list: b, c, d
@@ -861,7 +884,7 @@ def check_verdict_tally(text: str) -> list[str]:
     # words; a quote around a LETTER still names that letter.
     tally_sentences = [
         s for s in sentences
-        if "no longer read as written" in quoted.sub(" ", s) and letter_sentence.search(s)
+        if "no longer read as written" in quoted.sub(" ", s) and _is_letter_list(s)
     ]
     if len(tally_sentences) > 1:
         return [
@@ -882,7 +905,7 @@ def check_verdict_tally(text: str) -> list[str]:
         s for s in sentences
         if "still read as written" in quoted.sub(" ", s)
         and "no longer" not in quoted.sub(" ", s)
-        and letter_sentence.search(s)
+        and _is_letter_list(s)
     ]
     if len(still_sentences) > 1:
         problems.append(
