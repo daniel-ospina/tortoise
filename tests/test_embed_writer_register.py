@@ -478,15 +478,14 @@ def test_NEEDS_A_DECLARATION_is_the_scope_the_guard_is_scored_on(tmp_path):
                 owed.add(key)
     assert owed, "no kind reached the guard's population — the pin proves nothing"
 
-    # …the population the guard DERIVES on the real tree is NON-EMPTY and every member is declared.
-    # ⛔ The pin that used to sit here — `outside == {k for k, e in probe.embedding_writers()
-    # .items() if e["kind"] in NEEDS_A_DECLARATION}` — was a TAUTOLOGY: `_writers_outside_the_gate()`
-    # is that same comprehension over the same pure function, so it could not fail for any value of
-    # `NEEDS_A_DECLARATION` or any discovery output, while its docstring claimed it caught a dead
-    # kind or a hole (`#12020` review, P3). The two directions it claimed are the literal
-    # `set(NEEDS_A_DECLARATION) == {…}` pin and the `DECLARATION_OWED_BY_KIND` loop above; what is
-    # left here is the part that is not self-referential — the population is real, and every member
-    # of it reaches the register's refusal.
+    # ⛔ The assertion that used to sit here ("`outside` equals the instrument's
+    # `NEEDS_A_DECLARATION` members") was a TAUTOLOGY: `_writers_outside_the_gate()` IS that
+    # comprehension over the same call, so it could not fail while claiming to establish that "the
+    # population the guard derives on the real tree is the one it scores, not a subset of its own
+    # kinds" (`#12020` round 5). Do not re-add it in that form. What can fail is what follows — the
+    # population is non-empty, and every member is DECLARED — and what the kind→scored direction is
+    # carried by is the per-shape pins above, each asserted against a real scratch module rather
+    # than against set arithmetic over a derived population.
     outside = _writers_outside_the_gate()
     assert outside, "the outside-gate population is empty — re-measure the guard, do not pass it"
     undeclared = sorted(k for k in outside if not register.is_declared(k))
@@ -2024,8 +2023,16 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> s
     (`"MATCH (n:" + label`): the claim it checks is the interpolated form the writers on this tree
     use, and a rewritten spelling would red here — a false hold whose repair is to restate the claim,
     never to loosen this arm.
+
+    ⛔ The LOOP SEARCH applies the same scope rule as the store half (`_walk_own_scope`, `#12020`
+    round 5). While it was a bare `ast.walk`, the ENTIRE claim could be moved into a nested function
+    the writer never calls and both arms still held — measured on the real `tortoise/sdk.py`: the
+    control held, and `_update_entity`'s declared `for` re-indented into `def _never_called():` held
+    too, so the row asserted "the writer's own loop iterates the constant" about a loop it never
+    runs. The store half had carried this rule since round 4; the search that finds the loop is the
+    other half of the same claim.
     """
-    for sub in ast.walk(node):
+    for sub in _walk_own_scope(node):
         if isinstance(sub, ast.For):
             iterable, body = sub.iter, [sub]
             target = sub.target
@@ -2044,12 +2051,25 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str]) -> s
         # body's first statement — while every store still interpolates `{label}`, so the row
         # declared five labels and the code wrote one (`_Point`) with the whole guard green.
         bound = {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+        # ⛔ A COMPREHENSION'S OWN TARGET is not a RE-BINDING of the loop variable: `[x for label in
+        # rows]` binds `label` in the COMPREHENSION's scope, which is the rule `_shadowed_names`
+        # applies on the probe side. Counting it red'd a legitimate refactor (measured: a source
+        # whose loop is otherwise unchanged plus `_ = [x for label in rows]` returned "RE-BOUND",
+        # so the arm failed a writer that still derives every label it stores).
+        comprehension_targets = {
+            id(elt)
+            for b in body_nodes
+            for sub in _walk_own_scope(b)
+            if isinstance(sub, _COMPREHENSION_LIKE)
+            for gen in sub.generators
+            for elt in ast.walk(gen.target)
+        }
         # …and a RE-BINDING of that name inside the loop body means the store is no longer built
         # from the ITERATED value. This is the half that sees the mutation above: the binding stops
         # holding what the loop produced, so the claim `the labels come from <constant>` is false.
         rebound = {n.id for b in body_nodes for n in _walk_own_scope(b)
                    if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
-                   and n.id in bound}
+                   and n.id in bound and id(n) not in comprehension_targets}
         if rebound:
             return (
                 f"`{'`, `'.join(sorted(rebound))}` is RE-BOUND inside the loop over {constant}, so "
@@ -2271,6 +2291,56 @@ def test_the_iterated_arm_does_not_credit_a_store_in_a_NESTED_scope() -> None:
     assert nested_class is not None, (
         "a nested CLASS BODY satisfies the iterated arm — a class attribute is not a per-iteration "
         "store")
+
+    # ⛔ The FALSE-RED direction of the same scope rule (`#12020` round 5): a comprehension binds its
+    # own target in its own scope, so `[x for label in rows]` inside the loop body rebinds NOTHING
+    # the loop's store reads. Counting it as a re-binding red'd a writer that still derives every
+    # label it stores — the probe's `_shadowed_names` already skips comprehension targets.
+    comprehension = problem(
+        '        _ = [x for label in ("C",)]\n'
+        '        proj.g.query(f"MATCH (n:{label}) SET n += $p")\n')
+    assert comprehension is None, (
+        "a comprehension's OWN target counted as a re-binding of the loop variable — `[x for label "
+        "in rows]` binds in the comprehension's scope, so this reds correct code")
+
+
+def test_the_iterated_arm_finds_its_loop_in_the_WRITERS_own_scope() -> None:
+    """`#12020` round 5: the arm's LOOP SEARCH must apply the scope rule its store half already has.
+
+    `_iterated_store_problem` located the `for` with a bare `ast.walk(node)`, which descends into
+    nested `def`/`class`/`lambda`. So the WHOLE claim could be moved one level down and both arms
+    still held: measured on the real `tortoise/sdk.py` at the reviewed head, the control
+    (`_evidence_violation(..., iterated="_CANONICAL_ENTITY_ID_PROPS")`) returned `None` (holds) and
+    the same source with `_update_entity`'s declared `for` re-indented into `def _never_called():`
+    ALSO returned `None` — a row that cannot fail, about a loop the writer never runs.
+
+    Synthetic, for the reason the sibling test states: a 10-line fixture pins the helper's scope
+    rule without a `replace()` that could silently no-op, and the real tree stays covered by the row
+    pin (`test_every_declared_label_re_derives_at_this_head`).
+    """
+
+    def problem(loop_indent: str, body: str) -> str | None:
+        source = ('_KEYS = ("A", "B")\n\n\ndef w(proj):\n' + loop_indent + body)
+        tree = ast.parse(source)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "w")
+        return _iterated_store_problem(fn, "_KEYS", source.splitlines())
+
+    loop = ('for label, _prop in _KEYS:\n'
+            '            proj.g.query(f"MATCH (n:{label}) SET n += $p")\n')
+
+    # CONTROL — a loop in the writer's OWN body holds, so the arm below reds for the SCOPE and not
+    # because the helper has become always-red.
+    assert problem('    ', loop) is None, (
+        "the control no longer holds — the nested-scope arm below would pass for the wrong reason")
+
+    nested = problem('    def _never_called():\n        ',
+                     'for label, _prop in _KEYS:\n'
+                     '                proj.g.query(f"MATCH (n:{label}) SET n += $p")\n')
+    assert nested is not None, (
+        "a loop inside a nested function the writer never calls satisfies the iterated arm — the "
+        "row would assert that the writer's own loop iterates the constant, about a loop it never "
+        "runs")
 
 
 def test_the_store_carrier_does_not_credit_a_comparison_or_a_wipe() -> None:
