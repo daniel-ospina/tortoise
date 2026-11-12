@@ -305,12 +305,15 @@ def _resolve_target(proj, label: str, name: str) -> tuple[str | None, str | None
     from tortoise.entity_identity import (
         AmbiguousEntityName,
         UnaddressableEntityName,
-        resolve_entity_id,
+        resolve_entity_id_same_entity,
     )
 
     kind_prop = "subjectKind" if label == "Subject" else "objectKind"
     try:
-        target_id = resolve_entity_id(proj.g, label, name)
+        # #12120: over the WRITER's folded union. The raw resolver missed a
+        # spelling the create door had resolved onto this entity, so the slot
+        # was left unbound and journaled as unresolved.
+        target_id = resolve_entity_id_same_entity(proj.g, label, name)
     except (AmbiguousEntityName, UnaddressableEntityName):
         # Ambiguous (2+ live carriers) or a single id-less holder: both are
         # refusals the resolver already recorded; the slot is unbound.
