@@ -2085,6 +2085,9 @@ class PackRegistry:
         # kindDefs + extraction validation). Empty when ontology is absent.
         all_pack_kinds: set[str] = set()
         seen_chain_ids: set[str] = set()
+        # names an axis declared but REFUSED as invalid (see the element loop);
+        # consumed by the relation self-reference message below.
+        _refused_axis_names: set[str] = set()
 
         # Validate ontology section
         if ont:
@@ -2103,6 +2106,20 @@ class PackRegistry:
                 for k in kinds:
                     if not isinstance(k, str) or not k:
                         errors.append(f"ontology.{kind_field}: invalid kind value: {k}")
+                        # ⛔ REMEMBER WHAT WAS REFUSED (round-16 review P3,
+                        # measured): the relation self-reference check re-derived
+                        # "declared badly" by SHAPE, which is type-sensitive, so
+                        # the scalar spellings (`objectKinds: [1]` + a relation to
+                        # `acme:1`) still got the false "not declared in this pack"
+                        # beside the real error. Recording the name here is exact
+                        # and shape-independent.
+                        if isinstance(k, str):
+                            _refused_axis_names.add(k)
+                        elif isinstance(k, list):
+                            _refused_axis_names.update(
+                                x for x in k if isinstance(x, str))
+                        else:
+                            _refused_axis_names.add(str(k))
                         continue
                     if k[0].isupper():
                         errors.append(
@@ -2253,13 +2270,8 @@ class PackRegistry:
                                     # alongside the real `invalid kind value`
                                     # error, sending the author to look for a
                                     # missing declaration that is right there.
-                                    _declared_badly = any(
-                                        _v == ref_kind
-                                        or (isinstance(_v, list)
-                                            and ref_kind in _v)
-                                        for _kf in KIND_FIELDS
-                                        if isinstance(ont.get(_kf), list)
-                                        for _v in ont[_kf])
+                                    _declared_badly = ref_kind in \
+                                        _refused_axis_names
                                     errors.append(
                                         f"relation '{pred}': {direction} '{kind_val}' "
                                         f"references '{ref_kind}' "
@@ -3238,8 +3250,15 @@ class PackRegistry:
                 if not isinstance(c, dict):
                     errors.append(f"{cw}: expected a map")
                     continue
-                rule = c.get("rule") or f"{ns}:{kind_ref}:{j}"
-                if not isinstance(rule, str) or not rule.strip():
+                # ⛔ `is None`, NOT `or` (round-16 review P3, measured): `or`
+                # conflated ABSENT with FALSY, so `rule: []` / `{}` / `0` / `false`
+                # slipped past the refusal below and silently got the synthetic id
+                # — 4 of 7 malformed shapes bypassing a guard whose own message
+                # says "must be a non-empty string".
+                rule = c.get("rule")
+                if rule is None:
+                    rule = f"{ns}:{kind_ref}:{j}"
+                elif not isinstance(rule, str) or not rule.strip():
                     # ⛔ `rule: [r1]` raised `TypeError: unhashable type: 'list'`
                     # out of `_validate` — on THIS feature's own surface, one
                     # side of the seen_rules dedupe (round-15 review P2,

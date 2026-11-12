@@ -2395,6 +2395,20 @@ depends_on: []
              "      enforcement: [warn]\n",
              "chains: 'c1': 'enforcement'"),
             (guard("[r1]"), "onConfusion[0].rule: must be a non-empty string"),
+            (guard("7"), "got int"),
+            # ⛔ FALSY ≠ ABSENT: `c.get("rule") or default` let these four
+            # through and silently installed the synthetic id (round-16 P3).
+            (guard("[]"), "got list"),
+            (guard("{}"), "got dict"),
+            (guard("0"), "got int"),
+            (guard("false"), "got bool"),
+            (guard("'   '"), "got str"),
+            # the SCALAR non-string axis kind, where the relation arm's
+            # shape-based re-derivation missed the refusal (round-16 P3)
+            ("ontology:\n  extends: core\n  objectKinds: [1]\n"
+             "  relations:\n    - predicate: usesThing\n      mechanism: IMPL\n"
+             "      fromKind: acme:1\n      toKind: acme:widget\n",
+             "references '1' which is declared on a *Kinds axis"),
         )
         for body, token in cases:
             joined = errors(body)
