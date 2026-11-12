@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from tortoise.entity_identity import resolve_entity_id
+from tortoise.entity_identity import resolve_entity_id_same_entity
 
 log = logging.getLogger(__name__)
 
@@ -408,7 +408,10 @@ def current_stage(graph, object_ref: str) -> dict:
     legal (#3590 D2), and the bare ``LIMIT 1`` silently picked one carrier, so
     this read could answer from the wrong Object.
     """
-    oid = resolve_entity_id(graph, "Object", object_ref)
+    # #12120: over the WRITER's folded union — the raw resolver missed a
+    # spelling the write door had resolved onto this Object, so the stage read
+    # answered from no node.
+    oid = resolve_entity_id_same_entity(graph, "Object", object_ref)
     if oid is None:
         return {}
     cols = ", ".join(f"o.{p}" for p in STAGE_PROPS)
@@ -781,7 +784,8 @@ def _resolve_object(graph, ref: str) -> tuple[str, dict] | None:
     against the wrong current stage. The resolver routes a name to exactly one
     id and REFUSES on ambiguity; the props are then read by that id.
     """
-    oid = resolve_entity_id(graph, "Object", ref)
+    # #12120: over the WRITER's folded union (see the note on the sibling site).
+    oid = resolve_entity_id_same_entity(graph, "Object", ref)
     if oid is None:
         return None
     rows = graph.query(

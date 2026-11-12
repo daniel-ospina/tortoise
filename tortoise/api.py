@@ -333,17 +333,22 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         #
         # ⛔ NOT generalised to "any width" (#12059 review, P3 — measured). A
         # declared width that is neither of the seam's two (`"f16"`, say) is
-        # ALSO returned here, and that is a named RESIDUAL, not a truthfulness
-        # claim: measured at this head, `embedding_width="f16"` beside a vector
-        # is ACCEPTED and journalled. No PRODUCER writes a third width (the seam
-        # mints only `f32`/`f64`), but that is not the same as unobservable — a
-        # caller can SUPPLY one, and `TortoiseSDK.create_source(**props)` takes
-        # `embedding_width` through its `_skip_sanitize` carve-out with no
-        # width verifier behind it, so a live caller can still journal a
-        # declared width over NO vector through the SDK funnel (#11948 records
-        # that unguarded-door class; this channel closes the EventAPI funnel
-        # only). The sentence above would become false only if someone widened
-        # it to "any other declared width is truthful".
+        # ALSO returned here, and that is a named RESIDUAL for THIS channel: on
+        # the EventAPI funnel, measured at this head, `embedding_width="f16"`
+        # beside a vector is ACCEPTED and journalled. No PRODUCER writes a third
+        # width (the seam mints only `f32`/`f64`), but that is not the same as
+        # unobservable — a caller can SUPPLY one.
+        #
+        # #11858: the SDK half of that residual is now CLOSED. `create_source`
+        # used to take `embedding_width` through its `_skip_sanitize` carve-out
+        # with no verifier behind it, so a live caller could journal a declared
+        # width over NO vector through that funnel (measured at `7e6baffc5d`: it
+        # did). It now refuses the whole marker family before it writes — see
+        # `sdk._SERVER_MANAGED_EMBEDDING_MARKERS` — and refuses beside a vector
+        # too. What remains open here is acceptance of a THIRD width on the
+        # EventAPI channel, which is #11948's class, not the SDK funnel's. The
+        # sentence above would become false only if someone widened it to "any
+        # other declared width is truthful".
         return
     try:
         truthful = _is_shortest_f32_text(values)
@@ -1427,7 +1432,12 @@ class EventAPI:
         from .entity_identity import entity_create_lock
         with entity_create_lock("Subject", name):
             sid = self._registration_id("Subject", name)
-            ev: dict = {"id": sid, "name": name, "createdAt": now_iso()}
+            # #12047 review F6b: this door wrote no matching key at all, so a
+            # Subject registered through EventAPI could never be resolved by the
+            # deterministic rung — the resolver would mint a twin beside it.
+            from .entity_resolver import normalize_entity_name
+            ev: dict = {"id": sid, "name": name, "createdAt": now_iso(),
+                        "canonical_name": normalize_entity_name(name)}
             subject_kind = named_kind(subject_kind)
             if subject_kind is not None:
                 ev["subject_kind"] = subject_kind
@@ -1469,6 +1479,8 @@ class EventAPI:
         from .entity_identity import entity_create_lock
         with entity_create_lock("Object", name):
             oid = self._registration_id("Object", name, explicit_id=id)
+            from .entity_resolver import normalize_entity_name
+            props.setdefault("canonical_name", normalize_entity_name(name))
             ev: dict = {"id": oid, "name": name, "createdAt": now_iso(), **props}
             object_kind = named_kind(object_kind)
             if object_kind is not None:

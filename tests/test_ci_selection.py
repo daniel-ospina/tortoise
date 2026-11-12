@@ -1503,19 +1503,33 @@ def test_the_crawler_surface_selects_the_guard_that_reads_it():
         "website/sitemap.xml",  # the conventional index (#11615)
     }
     crawler |= {f"website/{p.name}" for p in (REPO / "website").glob("sitemap-*.xml")}
-    # The app origin serves its OWN sitemap out of the dashboard project (#11615).
-    # `robots.txt` advertises it and `test_every_advertised_sitemap_is_servable_from_this_tree`
-    # resolves it, so it is a subject of the same contract even though it is not a
-    # top-level `website/sitemap-*.xml` — the glob above cannot reach it, and leaving it
+    # The app origin serves its OWN sitemap out of the dashboard project (#11615) — not a
+    # top-level `website/sitemap-*.xml`, so the glob above cannot reach it, and leaving it
     # out is how "every sitemap the tree serves" would quietly mean "the ones we listed".
+    # It is advertised by the app project's OWN `apps/dashboard/public/robots.txt`, and
+    # `test_every_advertised_sitemap_is_servable_from_this_tree` resolves it — that is what
+    # makes it a subject of the same contract. ⛔ NOT the marketing `website/robots.txt`:
+    # since #11766 that file names only the index on its own host, so a reader expecting the
+    # cross-submission there would be reading a claim about a shape this repo no longer ships.
     crawler |= {
         str(p.relative_to(REPO))
-        for p in (REPO / "website").glob("apps/*/public/sitemap*.xml")
+        for pattern in (
+            "apps/*/public/sitemap*.xml",
+            # ⛔ The app project's own `robots.txt` is a GUARD INPUT: since #11766 the
+            # marketing index may not name a foreign host, so this file carries the app
+            # sitemap's ONLY remaining `Sitemap:` line and BOTH tree-side guards read it.
+            # A glob that derived only the sitemaps would leave the file `select()`-able by
+            # nothing, so a PR deleting that line would merge with the guard ABSENT — the
+            # guard failing to run on the one mutation it was written for.
+            "apps/*/public/robots.txt",
+        )
+        for p in (REPO / "website").glob(pattern)
     }
     assert {
         "website/sitemap-company.xml",
         "website/sitemap-product.xml",
         "website/apps/dashboard/public/sitemap.xml",
+        "website/apps/dashboard/public/robots.txt",
     } <= crawler, (
         f"the sitemap population collapsed (found {sorted(crawler)}) — a glob stopped "
         "matching a file this surface exists to cover")
@@ -2267,25 +2281,29 @@ def test_source_patterns_all_name_something_real():
     `test_website_docs_consistency.py::test_every_guard_input_is_selectable_by_ci`).
     The reverse direction remains the open half of this class.
 
-    Existence is checked against the tracked set, in the two shapes
-    SOURCE_PATTERNS actually uses. No glob branch: no entry is a glob, and
-    `select()` itself has no glob support, so a glob-shaped entry satisfied here
-    would still select nothing — the test would bless a dead entry.
+    Existence is checked against the tracked set with the SAME predicate `select()`
+    uses — `startswith`. That is the whole point of a forward check: an entry is
+    LIVE exactly when some tracked path begins with it.
+
+    ⛔ #11766 review P1: this used to accept only two shapes — an exact tracked path,
+    or a SUBTREE anchored on the separator (`pattern.rstrip("/") + "/"`) — because
+    "no entry is a glob". A bare PREFIX is not a glob: `website/sitemap-` selects every
+    `sitemap-*.xml` under `startswith`, and it is the only way to register a population
+    the guards police from the TREE (they enumerate sitemaps; a hand-kept list of today's
+    members is how tomorrow's member ships unguarded). Refusing the prefix forced those
+    entries to be enumerated one by one, which is what left `website/sitemap-events.xml`
+    selecting NOTHING. The old shape also mis-stated the risk: a dead glob still matches
+    its own pattern (that is `test_every_source_pattern_is_selectable`'s half), while a
+    dead PREFIX matches no tracked path and is caught here.
     """
     root = Path(__file__).resolve().parents[1]
     tracked = set(_tracked_files(root))
 
     def names_something_real(pattern: str) -> bool:
-        # A real tracked path is always live.
-        if pattern in tracked:
-            return True
-        # Otherwise it must name a SUBTREE, anchored on the separator. `select()`
-        # matches with `startswith`, so a directory entry is live with OR without
-        # its trailing slash (`tortoise/onboarding` and `tortoise/onboarding/`
-        # both match). Reporting the slash-less form as "names NOTHING" would be
-        # false — it IS live — and would disagree with
-        # `test_every_source_pattern_is_selectable`, which accepts it.
-        return any(f.startswith(pattern.rstrip("/") + "/") for f in tracked)
+        # `select()` matches with `startswith`, so "live" IS "some tracked path starts
+        # with it". Exact paths, directory entries and prefixes are all one case here:
+        # the separator shape needs no special arm, and a dead entry of any shape reds.
+        return any(f.startswith(pattern) for f in tracked)
 
     dead = sorted(
         f"[{surface}] {pat}"
@@ -9732,7 +9750,7 @@ def test_the_changes_job_carries_no_job_scope_env():
     `env: {CI_SHARD_ROUTING: ...}` and NEITHER emitter step carried it, so both
     assertions below fail on that tree.
 
-    ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:869`
+    ⛔ THE NAME IS A REFERENCE SURFACE, not decoration. `docs/ops/ci-runner-x64.md:902`
     and the capstone pin's re-cut history (in `tests/test_capstone_preregistration_9075.py`,
     the comment ending "… and job scope is now forbidden by
     `test_the_changes_job_carries_no_job_scope_env`.") both send an operator here by name, and

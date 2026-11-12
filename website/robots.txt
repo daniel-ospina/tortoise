@@ -1,14 +1,30 @@
-# robots.txt — premiselabs.co + tortoise.premiselabs.co (Cloudflare Pages, premise-labs project)
+# robots.txt — premiselabs.co (Cloudflare Pages, premise-labs project)
 #
-# Multi-host sitemap submission (Google "cross-submission" pattern):
-# each sitemap file contains ONLY URLs for its own host; this robots.txt is
-# served identically on both hosts (shared Pages project) and lists every
-# sitemap location so every host discovers the correct one.
+# ONE MARKETING HOST (epic #11762): company at `/`, product at `/tortoise`, blog at
+# `/blog`. `tortoise.premiselabs.co` is a permanent 301 onto those paths for the surfaces
+# this project owns (the product and legal pages, `/blog`, and the crawler surface it
+# serves below), so there is no second host to cross-submit to any more — this file
+# names the sitemaps of the host it is served from, and nothing else. The one company page
+# it does not own, `/contact`, still answers there as a 200; it carries its canonical on
+# THIS host, and `website_architecture.md` §6.5 records the residual (#11766).
 #
-#   premiselabs.co          → company page       (sitemap-company.xml)
-#   tortoise.premiselabs.co → product + docs + faq + legal + auth (sitemap-product.xml)
-#   tortoise.premiselabs.co → blog               (/blog/sitemap.xml — dynamic, published only)
-#   app.premiselabs.co      → dashboard          (separate tortoise-dashboard project)
+# Each advertised sitemap is a document on THIS host and declares only URLs on it,
+# which is the Sitemaps protocol's same-site rule (a subdomain is the spec's own
+# counterexample). `website/sitemap.xml` names the three same-host children, so it is
+# the one advertisement a crawler needs — which is what Google documents for an index
+# ("you don't need to include each individual sitemap"):
+#
+#   /sitemap.xml  →  sitemap-company.xml, sitemap-product.xml, /blog/sitemap.xml
+#
+# The reachability itself is asserted (`_advertised_sitemaps`, held by
+# `test_the_sitemap_index_and_robots_advertise_the_same_set`), so a child that stops
+# being reachable from this file still reds the suite.
+#
+# ⛔ `app.premiselabs.co/sitemap.xml` is deliberately NOT listed. That sitemap belongs
+# to the separate `tortoise-dashboard` Pages project, behind auth, with its own Search
+# Console property, and is advertised by that project's own
+# `apps/dashboard/public/robots.txt`. Listing it here is what made a marketing index
+# claim a foreign host (#11623).
 #
 # Auth-gated pages (welcome, invite-accept) are excluded from sitemaps and
 # carry <meta name="robots" content="noindex"> — no Disallow needed.
@@ -17,7 +33,4 @@ User-agent: *
 Allow: /
 Disallow: /admin
 
-Sitemap: https://premiselabs.co/sitemap-company.xml
-Sitemap: https://tortoise.premiselabs.co/sitemap-product.xml
-Sitemap: https://app.premiselabs.co/sitemap.xml
-Sitemap: https://tortoise.premiselabs.co/blog/sitemap.xml
+Sitemap: https://premiselabs.co/sitemap.xml

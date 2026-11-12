@@ -548,9 +548,9 @@ def test_a_foreign_arch_marker_is_dropped_so_the_repair_still_heals(tmp_path: Pa
 
     `is_host_label` deliberately excludes `self-hosted-x64`/`self-hosted-arm64` (they are CUSTOM
     labels GitHub lets you remove), so a literal union leaves `self-hosted-arm64` on an x86 box —
-    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:593-595`) — and the runbook still sells
+    the measured pre-#2327 stamp (`docs/ops/ci-runner-x64.md:626-628`) — and the runbook still sells
     `--repair-labels` as the manual heal that "re-applies this arch's marker"
-    (`docs/ops/ci-runner-x64.md:749-750`). Keeping
+    (`docs/ops/ci-runner-x64.md:782-783`). Keeping
     the alien marker makes an arm64-specific job routable to an x86 box and produce a wrong
     artifact: a false PASS, not a queue delay (this file's own header).
     `tools/runner_autoscale.py::_preserve_labels` re-derives the arch marker rather than preserving
@@ -3404,15 +3404,15 @@ def test_every_runbook_citation_in_this_file_lands_on_what_it_names():
     # cited start line -> a regex the CITED RANGE must match, i.e. the sentence quoted here
     anchors: dict[int, str] = {
         95: r"DROPS the whole class on re-registration",
-        593: r"A foreign arch marker",
-        749: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
+        626: r"A foreign arch marker",
+        782: r"install-ci-runner-x64\.sh --repair-labels` re-applies\s+this arch's marker",
         # 8g's docstring quotes the phantom-test-name relay; anchored on the TEST NAME it names,
         # so a future shift of that sentence reds here instead of leaving the quotation adrift.
-        869: r"test_the_changes_job_carries_no_job_scope_env",
+        902: r"test_the_changes_job_carries_no_job_scope_env",
         # 8h-bis quotes the label-contract table for the pre-mitigation absolute it pins: the two
         # rows a comment about what the pool CLAIMS must land on (the pair, and `:26` alone).
         25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
-        26: r"^\| `ubuntu-24\.04` \| 9 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
+        26: r"^\| `ubuntu-24\.04` \| 10 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
     }
 
     ref = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
@@ -3460,7 +3460,7 @@ _RUNBOOK_TEST_REF = re.compile(r"(tests/[A-Za-z0-9_/]+\.py)::(test_[A-Za-z0-9_]+
 def test_every_test_name_the_runbook_names_exists():
     """⛔ A RUNBOOK REFERENCE TO A TEST THAT DOES NOT EXIST READS AS CONFIRMATION.
 
-    `docs/ops/ci-runner-x64.md:869` told the operator the job-scope lever is a red check
+    `docs/ops/ci-runner-x64.md:902` told the operator the job-scope lever is a red check
     "`tests/test_ci_selection.py::test_the_changes_job_carries_no_job_scope_env`" — and no test of
     that name existed in the tree (the guard was
     `test_the_opt_in_is_step_scoped_so_no_env_sits_above_the_capstone_gate`). Nothing redded: the
@@ -3512,16 +3512,25 @@ def test_every_test_name_the_runbook_names_exists():
 
 
 # ── 8h. `tools/` citations INTO the runbook ────────────────────────────────────────────────
-_TOOLS_CITING_THE_RUNBOOK = ("tools/install-ci-runner-x64.sh", "tools/runner_autoscale.py")
+_TOOLS_CITING_THE_RUNBOOK = (
+    "tools/install-ci-runner-x64.sh",
+    "tools/runner_autoscale.py",
+    # #12071: `tools/ci_selection.py` cites the runbook's split-matrix measurement
+    # row and the watchdog-kill sentence. It was OUTSIDE every pin, so the +10-line
+    # insert in this PR left both cites pointing at a heading and a blank line and
+    # nothing reded. Registered so the next shift does.
+    "tools/ci_selection.py",
+)
 
 # cited landing line -> a regex the cited line (or range) must match, i.e. the sentence the
 # citing comment names. Keyed by the runbook line the citation must point at at THIS head.
 _TOOLS_RUNBOOK_ANCHORS: dict[int, str] = {
     13: r"^# x86_64 CI runners",
     25: r"\*\*GitHub-hosted, plus — as a temporary mitigation",
-    26: r"^\| `ubuntu-24\.04` \| 9 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
+    26: r"^\| `ubuntu-24\.04` \| 10 \| \*\*GitHub-hosted, plus — as a temporary mitigation",
     90: r"still does \*\*not\*\* claim any",
     95: r"DROPS the whole class on re-registration",
+    880: r"^\| `40986603502`",
 }
 
 
@@ -3588,6 +3597,105 @@ def test_every_tools_citation_into_the_runbook_lands_on_what_it_names():
             wrong.append(f"{where} cites :{start} but that is {text.strip()!r} (the sentence is at {actual})")
     assert not wrong, (
         "a `tools/` comment sends a reader to a runbook line that does not say what the comment "
+        "claims — re-derive the number from the runbook at this head: " + "; ".join(wrong)
+    )
+
+
+# ── 8h-ter. the BARE runbook shorthand (`:NNN` after the file is named) ─────────────
+
+_SHORTHAND_CITING_FILES = (*_TOOLS_CITING_THE_RUNBOOK, "docs/ops/batch-integration.md")
+
+#: The runbook's own name; its presence BEFORE a shorthand handle on the same line is what makes
+#: that handle unambiguous (see `_last_md_ref`).
+_RUNBOOK_NAME = "ci-runner-x64.md"
+
+#: A backticked BARE handle — `:54-55`, `:806-812`. No file name, no digits before the colon.
+_SHORTHAND_RE = re.compile(r"`:(?P<start>\d+)(?:-(?P<end>\d+))?`")
+
+#: shorthand start line -> a regex the cited window must match (the sentence it names).
+_SHORTHAND_RUNBOOK_ANCHORS: dict[int, str] = {
+    54: r"the ARM64 VMs register `self-hosted, Linux, ARM64",
+    806: r"The OPT-IN split \(`CI_SHARD_ROUTING=pool-split`\)",
+    921: r"three pool legs were killed at their own watchdogs",
+}
+
+
+def _last_md_ref(before: str) -> str | None:
+    """The last `*.md` file named in `before`, so a shorthand handle resolves to ONE document."""
+    names = re.findall(r"([A-Za-z0-9_./-]+\.md)", before)
+    return names[-1].rsplit("/", 1)[-1] if names else None
+
+
+def test_the_bare_runbook_shorthand_lands_on_what_it_names():
+    """⛔ #12071's OWN +10-LINE INSERT MADE A BARE `:NNN` HANDLE STALE, AND NOTHING REDDED.
+
+    `docs/ops/batch-integration.md` cites the runbook's "every pool-only departure" paragraph as a
+    BARE `:773-779` after naming the file in prose — the shorthand form. The pin above explicitly
+    leaves that shape unscanned ("a bare `:NN` is ambiguous"), so when this PR inserted ten lines at
+    `:278` of the runbook, that handle kept pointing at `:773-779`, which is now item 2 (*"The pool
+    is still the slower class for long legs"*) instead of item 4 (the pool-outage/pool-split
+    exposure the sentence exists to name). A lane choosing a `runs-on:` class would have read the
+    SPEED paragraph as the reason a pool-only label is refused — the wrong trade, from the
+    paragraph cited to forbid it.
+
+    Resolution is unambiguous here and only here: the handle is resolved against the LAST `*.md`
+    named earlier on the same line. Two arms, both two-way — an unanchored handle reds until it is
+    anchored, an anchor nothing cites reds (a pin quietly shrunk to nothing), and each handle must
+    land on the sentence it names, with the message reporting where that sentence actually is.
+
+    Non-vacuity, measured: with the pre-fix handle (`:773-779`) the COVERAGE arm (`assert not
+    unknown`) reds first and names `[773]` — `773` is not a key of `_SHORTHAND_RUNBOOK_ANCHORS`, so
+    the LANDING loop is never reached. The STALE arm is the second reporter: anchor `773` without
+    re-citing it and it reds on `[783]`. The LANDING loop reports this revert in NEITHER
+    configuration — which is why the attribution matters, and why "the LANDING arm reds" would have
+    sent a fixer to an assert that cannot fire for the change they made. With the fixed handle all
+    three arms pass.
+    """
+    doc = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
+
+    cited: dict[tuple[str, int], int] = {}
+    for rel in _SHORTHAND_CITING_FILES:
+        for i, line in enumerate((REPO_ROOT / rel).read_text().splitlines()):
+            for m in _SHORTHAND_RE.finditer(line):
+                if _last_md_ref(line[: m.start()]) != _RUNBOOK_NAME:
+                    continue  # the handle belongs to a different document — out of scope
+                start = int(m.group("start"))
+                cited[(f"{rel}:{i + 1}", start)] = int(m.group("end") or start)
+
+    assert cited, (
+        "no file cites the runbook by BARE handle any more — re-anchor this pin rather than "
+        "deleting it, because the shape returning silently is exactly what it guards"
+    )
+
+    unknown = sorted({start for _, start in cited} - _SHORTHAND_RUNBOOK_ANCHORS.keys())
+    assert not unknown, (
+        "a bare runbook handle points at a line this pin does not anchor — read that line, "
+        f"re-derive the number, and add it to `_SHORTHAND_RUNBOOK_ANCHORS`: {unknown}"
+    )
+    stale = sorted(_SHORTHAND_RUNBOOK_ANCHORS.keys() - {start for _, start in cited})
+    assert not stale, (
+        "this pin anchors runbook line(s) nothing cites by bare handle any more — a pin over "
+        f"refs that were re-worded or removed is pinning nothing: {stale}"
+    )
+
+    wrong: list[str] = []
+    for (where, start), end in sorted(cited.items()):
+        assert 1 <= start <= end <= len(doc), (
+            f"{where} cites docs/ops/ci-runner-x64.md:{start}-{end}, past EOF ({len(doc)} lines)"
+        )
+        text = "\n".join(doc[start - 1:end])
+        if not re.search(_SHORTHAND_RUNBOOK_ANCHORS[start], text):
+            actual = [
+                i + 1
+                for i, line in enumerate(doc)
+                if re.search(_SHORTHAND_RUNBOOK_ANCHORS[start], line)
+            ]
+            wrong.append(
+                f"{where} cites :{start} but that window is {text.strip()[:120]!r} "
+                f"(the sentence is at {actual})"
+            )
+    assert not wrong, (
+        "a BARE runbook handle sends a reader to a line that does not say what the sentence "
         "claims — re-derive the number from the runbook at this head: " + "; ".join(wrong)
     )
 
@@ -3765,19 +3873,23 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: POSTs on falkor and the carve-out.)
 #: ⚠ Named by ROW, not by section: every one sits in §2 today, and a §-number would re-stale on the
 #: next section this doc gains — the same failure mode as the citations themselves.
-#: ⚠ The four numbers the register STARTED with were re-anchored TWICE: once when #10962's merge
-#: first brought the workflow forward, and again after `origin/main`'s 113 further commits moved
+#: ⚠ The four numbers the register STARTED with were re-anchored THREE times: once when #10962's merge
+#: first brought the workflow forward, again after `origin/main`'s 113 further commits moved
 #: every one of them (the falkor/torch row by −59, the three `test-record-postgres`-era rows by
-#: +48…+56 — measured, not guessed). ⛔ NOT "every number": the three cache-step spans #11273
+#: +48…+56 — measured, not guessed), and again by #12051's PGDG step, which grew that job above both
+#: `test-record-postgres` citations. ⛔ That last delta is deliberately NOT restated as a number: an
+#: earlier draft of this very sentence said "+9 each" and the value at the merged head was +22, i.e.
+#: the sentence re-staled exactly like the citations it describes. The numbers are re-derived from the
+#: live file at each head; the COUNT of re-anchors is not a fact worth pinning. ⛔ NOT "every number": the three cache-step spans #11273
 #: registered were ADDED by this correction in post-`origin/main` coordinates, so they were never
 #: re-anchored at all (round-3 review, P3). The doc ALSO names the same constructs in prose (`Install package + the postgres extra`,
 #: the `Cache pip dependency caches (#7612)` step's `with:` block, `install-cpu-torch` in the
 #: `test-concurrency-falkor` install step) so a reader has a grep-able handle that outlives any
 #: number — the number is the checkable claim, the construct name is the map.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("python-ci.yml:4672", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:4726", ("pip install -e '.[test,postgres]'",)),
     ("python-ci.yml:2949-2954", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
-    ("python-ci.yml:4664-4666", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:4718-4720", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
     ("python-ci.yml:3230", ("cache: pip",)),
     # #11273 review (P1): the three citations that PR's correction ADDED. A citation outside this
     # register is an unchecked claim — the doc's arms only ever resolved the registered ones — so
@@ -4263,7 +4375,7 @@ def test_the_runbook_names_every_leg_the_mitigation_makes_pool_eligible():
     }
     pinned = {name: n for name, n in pinned.items() if n}
     total = sum(pinned.values())
-    assert total == 9, (
+    assert total == 10, (
         "the `runs-on: ubuntu-24.04` job count moved — re-derive the runbook's accepted-cost list "
         f"and this pin together, do not assume {total} is right: {pinned}"
     )
@@ -4272,7 +4384,7 @@ def test_the_runbook_names_every_leg_the_mitigation_makes_pool_eligible():
     start = runbook.index("⛔ **The mitigation is label-WIDE")
     section = runbook[start : runbook.index("These are **accepted costs", start)]
 
-    words = {6: "six", 8: "eight", 9: "nine"}
+    words = {6: "six", 8: "eight", 9: "nine", 10: "ten"}
     assert f"all **{words[total]}**" in section, (
         "the runbook no longer states the measured number of legs the mitigation makes servable, or "
         f"states a different one than the tree has ({total}): {section[:400]!r}"
@@ -4346,11 +4458,11 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
                 if label in counts:
                     counts[label] += 1
 
-    assert counts["ubuntu-24.04"] == 9, (
+    assert counts["ubuntu-24.04"] == 10, (
         "the `ubuntu-24.04` job count moved — re-derive the runbook's table with this pin: "
         f"{counts}"
     )
-    assert counts["ubuntu-latest"] == 77, (
+    assert counts["ubuntu-latest"] == 76, (
         "the `ubuntu-latest` job count moved (the runbook states it as a dated measurement, and "
         "this arm is what makes 'dated' honest) — re-derive the table and this number together, do "
         f"not assume {counts['ubuntu-latest']} is right: {counts}"
@@ -4921,12 +5033,11 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
         # reason is in this test's docstring and in `symbol_citations` below, where the sentinel
         # that replaced the number lives.
         # the reference-surface relay that drifted: the runbook sentence naming the test
-        # ⛔ 869, not 866: this merge took `main`'s CORRECTED prose in that bullet (#10237's
-        # canary really does name the class, `ci.yml:1473 repo-harnesses`) and this branch's
-        # python-ci.yml line pins (1903 / 1875-1877 — true on the merged tree, since this branch
-        # inserts 12 lines the other side does not have). Both sides moved this relay, so the
-        # number was re-derived from the merged head rather than taken from either side.
-        ("docs/ops/ci-runner-x64.md", 869): r"test_the_changes_job_carries_no_job_scope_env",
+        # ⛔ 879, not 869: this PR inserts ten lines in the accepted-cost list above this
+        # sentence (the fifth reason, `test-record-postgres`'s client-major pin), so the
+        # relay was re-derived from THIS head rather than carried forward — the same
+        # discipline this comment already records for the 866 → 869 move.
+        ("docs/ops/ci-runner-x64.md", 902): r"test_the_changes_job_carries_no_job_scope_env",
         # ⛔ the capstone pin's re-cut history is NOT here, and its absence is the fix, not a gap:
         # it used to be ("tests/test_capstone_preregistration_9075.py", 1703), and that number was
         # re-derived SEVEN times (1590 → 1596 → 1673 → 1682 → 1693 → 1701 → 1703) because the

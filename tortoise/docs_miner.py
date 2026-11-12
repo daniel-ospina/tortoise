@@ -81,8 +81,8 @@ import re
 from pathlib import Path
 
 from tortoise.entity_identity import (  # #3633 route-then-refuse
-    all_name_holder_ids,
-    resolve_entity_id,
+    _name_holder_ids_same_entity,
+    resolve_entity_id_same_entity,
 )
 
 logger = logging.getLogger(__name__)
@@ -461,13 +461,20 @@ def _ensure_entities(api, proj, entities: list[dict]) -> list[str]:
     """Mint/merge entity Objects; return their ids (order preserved).
 
     Resolution is by the STABLE external anchor first (``externalId``) and by
-    the ROUTED name resolver second — the ``session_link`` rule, resolved
-    through #3633's ``resolve_entity_id`` rather than a raw
+    the ROUTED name resolver second, over the WRITER's key space — the folded
+    union (``name`` · ``canonical_name`` · the folded spelling), the one
+    ``entity_identity._live_holders_same_entity`` defines — rather than a raw
     ``MATCH (o:Object {name:$name})`` read. A raw read silently picks the first
     of N same-name carriers, so a name held by two live Objects would attach
-    every claim to an arbitrary one; the resolver returns the single live id
-    and REFUSES (:class:`~tortoise.entity_identity.AmbiguousEntityName`) on two
-    or more.
+    every claim to an arbitrary one; over the union, two or more live holders
+    REFUSES (:class:`~tortoise.entity_identity.AmbiguousEntityName`).
+
+    ⛔ #12120 finding 2 (P2): this probe read the RAW name only, while the write
+    path it fronts resolves the folded union. A fold-only holder was invisible,
+    the guard below passed, and ``api.add_object(..., id=…)`` wrote a SECOND
+    live node under the same folded key — after which ``create_object(<either
+    spelling>)`` raised ``AmbiguousEntityName``. The miner create-poisoned the
+    very name #12047 exists to make writable.
 
     MINTING IS FOR A GENUINELY UNHELD NAME ONLY. The resolver returns ``None``
     both for a name with NO holder and for one whose holder(s) are all
@@ -494,19 +501,55 @@ def _ensure_entities(api, proj, entities: list[dict]) -> list[str]:
         if rows:
             ids.append(rows[0][0])
             continue
-        resolved = resolve_entity_id(proj.g, "Object", name)
+        # ⛔ The ROUTED resolver, over the writer's folded union (#12120
+        # finding 2 + V-GATE finding 4). A bare holder read here — which a
+        # first cut of this fix used — silently drops TWO guarantees the router
+        # owns: `_require_unique_id`'s duplicate-id claimant check (two `:Object`
+        # nodes claiming one id is raw corruption this probe is the only gate
+        # on, since no entity write runs) and the R8 evidence record for an
+        # ambiguous name. `resolve_entity_id_same_entity` keeps both, over the
+        # widened key space, so this site is still "the ROUTED name resolver".
+        resolved = resolve_entity_id_same_entity(proj.g, "Object", name)
         if resolved is not None:
             ids.append(resolved)
             continue
-        if all_name_holder_ids(proj.g, "Object", name):
+        # No LIVE addressable holder. Two shapes must NOT mint, and they are
+        # distinguished so the refusal names the real cause: a live carrier with
+        # no id (or one whose survivor is not addressable), and a name whose
+        # only holders are TERMINAL (D2's refusal).
+        #
+        # ⛔ UN-COLLAPSED and ANY-status (#12120 V-GATE findings 1/2): the
+        # collapsing helper re-applies a LIVE filter once it follows a
+        # `resolved_from` hop, so a TERMINAL survivor reached through a
+        # merged-away carrier vanished and this probe answered "no holder" —
+        # the refusal was skipped and the miner minted a name-keyed Object
+        # beside carriers the projection's MERGE stamps onto, which is the exact
+        # harm the refusal exists to prevent.
+        if _name_holder_ids_same_entity(proj.g, "Object", name):
+            raise ValueError(
+                f"docs miner: Object {name!r} is held by a LIVE carrier that "
+                f"does not resolve to a single addressable id — refusing to "
+                f"mint a name-keyed replacement beside it, which would open a "
+                f"second carrier (#3633)")
+        terminal_holders = _name_holder_ids_same_entity(
+            proj.g, "Object", name, any_status=True)
+        if terminal_holders:
             raise ValueError(
                 f"docs miner: Object {name!r} is held only by terminal "
                 f"node(s) — refusing to mint a name-keyed replacement that "
                 f"the projection's MERGE would stamp onto every holder "
                 f"(#3633)")
         oid = ent["id"]
+        # ⛔ No `canonical_name=` here (review N8/P0). `EventAPI.add_object` now
+        # supplies the FOLD itself, and this door used to pass the RAW surface
+        # form — a second key space in one property. A docs-mined Object named
+        # "The Owner" then carried `canonical_name="The Owner"`, the resolver's
+        # folded probe missed it, and the very next write of "owner" minted the
+        # twin #12047 exists to prevent. Passing nothing leaves the fold to the
+        # ONE writer, which is the invariant ("one fold, one key"). `id` is still
+        # `ent["id"]` — the opaque id is not derived from the name (#3590).
         api.add_object(name, ent["object_kind"], id=oid,
-                       canonical_name=name, title=name,
+                       title=name,
                        externalId=ent["externalId"])
         ids.append(oid)
     return ids

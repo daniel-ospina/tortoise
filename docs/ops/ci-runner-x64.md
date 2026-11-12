@@ -22,11 +22,11 @@ Every pool-eligible job in this repo asks for a **label**, never an architecture
 
 | `runs-on:` | count | who claims it |
 | --- | --- | --- |
-| `ubuntu-latest` | 77 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
-| `ubuntu-24.04` | 9 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
+| `ubuntu-latest` | 76 | GitHub-hosted **and** (while the fallback is engaged) the self-hosted pool |
+| `ubuntu-24.04` | 10 | **GitHub-hosted, plus — as a temporary mitigation since 2026-10-29 — the self-hosted pool.** Pinned to hosted on purpose (#6897/#7867); the pin deadlocks while hosted is unavailable, so the pool now claims it too (see the label contract). |
 
-Counts are JOBS (not files), re-measured 2026-11-09 at this head (`yaml.safe_load` each workflow,
-count each job's `runs-on`): **77 / 9** — the label classes `--status`'s `label-coverage` block
+Counts are JOBS (not files), re-measured 2026-11-12 at this head (`yaml.safe_load` each workflow,
+count each job's `runs-on`): **76 / 10** — the label classes `--status`'s `label-coverage` block
 measures, though that block reports RUNNER counts per label, not job counts: measured on the live
 pool on 2026-10-29 it printed `ubuntu-24.04 = 7 of 7
 online runner(s)` (a bare version pin is measured against the x64 sub-pool, its own denominator,
@@ -236,9 +236,9 @@ side.** Three consequences a reader must not miss:
 If the owner takes the recorded recommendation instead, the pool revert is
 `CI_RUNNER_OS_LABEL=off` plus `--repair-labels` — still one command.
 
-⛔ **The mitigation is label-WIDE, and EIGHT of the nine legs it now makes servable are pinned for
+⛔ **The mitigation is label-WIDE, and NINE of the ten legs it now makes servable are pinned for
 reasons that are NOT speed.** A label cannot be scoped to "the legs it starves": the moment the pool
-carries `ubuntu-24.04`, all **nine** `runs-on: ubuntu-24.04` jobs become eligible for it. Eight of
+carries `ubuntu-24.04`, all **ten** `runs-on: ubuntu-24.04` jobs become eligible for it. Eight of
 those pins exist to keep the job OFF the fleet, and none is about the watchdog — `test-slow` is the
 only leg whose pin is about speed, and the mitigation buys it nothing (above):
 
@@ -275,10 +275,43 @@ only leg whose pin is about speed, and the mitigation buys it nothing (above):
   invariant as current ("a version-pinned label no self-hosted runner claims") and was corrected in
   the same change.
 
-These are **accepted costs of the temporary mitigation, stated as costs**, and all eight revert with
+- `.github/workflows/python-ci.yml` (`test-record-postgres`) — pinned on a **fifth** reason:
+  **artifact determinism — not egress, quota, topology or the runner tool contract.** The job's
+  PostgreSQL **client major** is part of the drill's artifact contract: the D8 archive is dumped by
+  whatever `pg_dump` PATH resolves, and that major must equal the
+  `pgvector/pgvector:pg16` servers' (#12051). MEASURED 2026-11-12: `ubuntu-latest` had moved to
+  `ubuntu-26.04`, whose archive ships only `postgresql-client-18`, so the pin's install died with an
+  opaque `E: Unable to locate package` (exit 100) before a single test ran. The job now names 24.04 and
+  installs the client from PGDG (`16.15-1.pgdg24.04+2` measured on noble), and asserts that
+  apt.postgresql.org LISTS this major — because `apt-get update` only WARNS (exit 0) when a repo cannot
+  be fetched, so without that origin check an egress failure would quietly fall back to the image's
+  archive. ⚠️ It proves apt KNOWS apt.postgresql.org and carries the major — not that this run
+  FETCHED that index (a failed fetch keeps the previous lists), and not that PGDG's build is the one
+  installed: on a release whose own archive carries a higher revision of the same major, apt takes the
+  archive's build — a valid state, since the contract is the major (held by the in-step assertion). ⛔ It does NOT fail closed on a release that is not the one the label names: MEASURED, the step exits 0 on `ubuntu-26.04` (`16.15-1.pgdg26.04+2`), because PGDG publishes PG16 for every supported release, so a supported box simply RUNS (that is the fix).
+  What still fails closed with a NAMED `::error::` is AMONG: a key fetch that fails (egress/DNS/503, or
+  no `curl`), an `/etc/os-release` that cannot be READ or carries no codename (two states, two
+  messages — the SOURCE itself is guarded, because `.` on a box without the file aborts with bash's
+  own text and no `::error::`), a release PGDG does not publish (a HARD `apt-get update` failure), an
+  index that never loaded (a SOFT failure, which the update's own exit status cannot see — the ORIGIN
+  check catches it), and a suite that resolves without this major — the `=on` routing drift that can
+  put an unexpected box here is #10289.
+
+  The step also undoes its own apt configuration: an `EXIT` trap removes the
+  `/etc/apt/sources.list.d/pgdg.list` entry, its keyring and the `mktemp`'d key file — but ONLY the
+  ones this step created (a pre-existing operator file at that path is NOT deleted). ⚠️ Two limits,
+  stated because the trap is not a restore: a pre-existing sources file's CONTENTS are replaced by this
+  step's line (the `tee` truncates, so only its existence survives), and the installed
+  `postgresql-client-16` plus its dependency closure STAY on the box, so a later job on it keeps a
+  pg16 client available. The trap exists because
+  the job is POOL-ELIGIBLE, and a leftover sources file changes apt resolution for every later job on
+  the same box; outliving its keyring, it would turn the next job's `apt-get update` into the very
+  soft failure the ORIGIN check exists to catch.
+
+These are **accepted costs of the temporary mitigation, stated as costs**, and all nine revert with
 it. If the mitigation becomes permanent, the scoping fix is to put the starved required legs on a
 label the pool answers and leave `mirror-images` / `workflow-lint` / the four observers /
-`finding-provenance` on one only hosted answers.
+`finding-provenance` / `test-record-postgres` on one only hosted answers.
 
 **The escape hatch, and the proof it works.** `ubuntu-24.04` is an **OS fact**, not a fallback label:
 `CI_RUNNER_OS_LABEL=on` (or `=auto`, which derives it from `/etc/os-release`) rides it on every label
@@ -948,7 +981,7 @@ job itself:
   self-hosted runner lost communication with the server"*. The zero-step count is the
   discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
   investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
-  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5083`) buys no landing:
+  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5288`) buys no landing:
   the rail blocks on any red on the PR's tree, so this one costs a re-run.
 
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to ONE job whose red costs a
