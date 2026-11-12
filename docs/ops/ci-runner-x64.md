@@ -285,7 +285,8 @@ only leg whose pin is about speed, and the mitigation buys it nothing (above):
   installs the client from PGDG (`16.15-1.pgdg24.04+2` measured on noble), and asserts that
   apt.postgresql.org LISTS this major — because `apt-get update` only WARNS (exit 0) when a repo cannot
   be fetched, so without that origin check an egress failure would quietly fall back to the image's
-  archive. ⚠️ It proves the index loaded and carries the major, not that PGDG's build is the one
+  archive. ⚠️ It proves apt KNOWS apt.postgresql.org and carries the major — not that this run
+  FETCHED that index (a failed fetch keeps the previous lists), and not that PGDG's build is the one
   installed: on a release whose own archive carries a higher revision of the same major, apt takes the
   archive's build — a valid state, since the contract is the major (held by the in-step assertion). ⛔ It does NOT fail closed on a release that is not the one the label names: MEASURED, the step exits 0 on `ubuntu-26.04` (`16.15-1.pgdg26.04+2`), because PGDG publishes PG16 for every supported release, so a supported box simply RUNS (that is the fix).
   What still fails closed with a NAMED `::error::` is AMONG: a key fetch that fails (egress/DNS/503, or
@@ -967,7 +968,7 @@ job itself:
   self-hosted runner lost communication with the server"*. The zero-step count is the
   discriminator: none of the job's own steps ran, so none of them caused it. Re-run before
   investigating a harness — a red here READS as a harness defect, which is #9018's misdiagnosis one
-  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5237`) buys no landing:
+  layer up. Absence from the required aggregate's `needs:` (`python-ci.yml:5241`) buys no landing:
   the rail blocks on any red on the PR's tree, so this one costs a re-run.
 
 ⛔ **Do not copy this pin onto a required leg.** The override is scoped to ONE job whose red costs a

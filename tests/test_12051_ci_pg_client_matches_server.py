@@ -451,14 +451,14 @@ def _runs_on_labels(job: dict) -> list[str]:
 
 
 def _has_live_substitution(text: str) -> bool:
-    """True when `text` runs a command substitution rather than printing the span.
+    r"""True when `text` runs a command substitution rather than printing the span.
 
     ⛔ `\\$(` IS LIVE, and this is why a substring test for `\\$(` is wrong: bash
-    consumes one backslash, prints one, and then executes the substitution.
-    Only an ODD number of preceding backslashes escapes it. MEASURED, review
-    cycle 8: `echo "value: \\$(uname -s)"` stayed GREEN under the substring
-    version of this guard while bash executed `uname -s` and printed its output.
-    The run is counted, so `$(` (0), `\\$(` (2) are live and `\\$(` (1) is not.
+    consumes one backslash, prints one, and then executes the substitution. Only an
+    ODD number of preceding backslashes escapes it. MEASURED, review cycle 8:
+    `echo "value: \\$(uname -s)"` stayed GREEN under the substring version of this
+    guard while bash executed `uname -s` and printed its output. The run is counted,
+    so `$(` (0) and `\\$(` (2) are LIVE, while `\$(` (1) is not.
     """
     index = 0
     while True:
@@ -474,7 +474,7 @@ def _has_live_substitution(text: str) -> bool:
 
 
 def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> None:
-    """⛔ A BACKTICK INSIDE `echo "…"` IS COMMAND SUBSTITUTION, WHICH SILENTLY EDITS THE MESSAGE.
+    r"""⛔ A BACKTICK INSIDE `echo "…"` IS COMMAND SUBSTITUTION, WHICH SILENTLY EDITS THE MESSAGE.
 
     MEASURED TWICE WHILE BUILDING #12051 — cycle 1 and again in cycle 5. A message like
     ``echo "::error::… via `/etc/os-release`'s …"`` does not print the filename: bash RUNS
@@ -495,8 +495,9 @@ def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> 
         substitution whose output is wanted — the opposite case, and the first cut of this
         test false-redded exactly that line (measured, cycle 6).
       · DELIBERATELY CONSERVATIVE, and said so here so it reads as a choice rather than a
-        bug: an ESCAPED `\\$(…)` (an ODD run of backslashes) prints literally and is
-        exempted — `\\$(…)` is NOT, because bash consumes one backslash and then runs it
+        bug: an ESCAPED `\$(` (an ODD run of backslashes) prints literally and is
+        exempted — `\\$(` is NOT, because bash consumes one backslash, prints it, and then
+        runs the substitution
         (MEASURED, review cycle 8) — but text after a trailing `#` on a printing line is
         still refused (the scan cannot tell a comment from a `#` inside quotes without a
         parser, and this step has no legitimate `$(` in any printed message). A future
@@ -907,6 +908,22 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "fall back to reading the HOST's file"
     )
     prefix = prefix.replace(". /etc/os-release", f". {os_release}")
+
+    # The key file is `mktemp` too (a shared box can pre-create a FIXED `/tmp` path as a
+    # symlink and `curl -o` follows symlinks), so that call is substituted the same way.
+    key_file = tmp_path / "pgdg.asc"
+    key_sites = _code_only(prefix).count('key_file="$(mktemp)"')
+    assert key_sites == 1, (
+        "the key file is expected to be created by exactly one `key_file=\"$(mktemp)\"` in "
+        f"the prefix's CODE; found {key_sites}. Re-derive the substitution rather than letting "
+        "the arm write the HOST's temp dir"
+    )
+    prefix = prefix.replace('key_file="$(mktemp)"', f'key_file="{key_file}"')
+    for use in ('-o "$key_file"', 'install -m 0644 "$key_file"'):
+        assert use in _code_only(prefix), (
+            f"expected `{use}` in the committed step — the key file must be the one `curl` "
+            "wrote and the one `install` copies"
+        )
 
     policy_file = tmp_path / "pgdg-policy.txt"
     mktemp_sites = _code_only(prefix).count('policy_file="$(mktemp)"')
