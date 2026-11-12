@@ -290,9 +290,12 @@ CONSTANT_GUARD_RE = re.compile(
 #: A command chain that is dead BY CONSTRUCTION, at the position where the dead
 #: command sits (#12069 review corrected the first cut TWICE, each time on a
 #: correct line):
-#:   * `false && <cmd>` — `<cmd>` never runs. Refused after `^`, `;` or `&&`: those
-#:     are the positions where the `false` is the LEFT operand of the `&&` that
-#:     guards `<cmd>`, so the short-circuit is unconditional.
+#:   * `false && <cmd>` — `<cmd>` never runs. Refused after `^`, `;` or `&&`:
+#:     these are positions where the `false` is the LEFT operand of the `&&` that
+#:     guards `<cmd>`, so the short-circuit is unconditional. (NOT an exhaustive
+#:     list of such positions — `( false && <cmd> )`, `{ false && <cmd>; }` and
+#:     `if false && …` are read as their own lines and are not refused; the guard
+#:     scans line text, and rounding those up is the widening this branch stopped.)
 #:     ⛔ NOT refused after `||`. `A || false && B` parses as `(A || false) && B`
 #:     (`&&` and `||` are the same precedence, left-associative), so `B` RUNS
 #:     whenever `A` succeeds — measured: `true || false && echo BODY` prints BODY.
@@ -1116,7 +1119,7 @@ def test_the_refusal_polarity_is_never_runs(line: str, must_be_refused: bool, wh
         f"({why}), but the scan {'refused' if refused else 'allowed'} it. "
         "`CONSTANT_GUARD_RE` refuses only a body that is NEVER ENTERED — "
         "`if`/`elif`/`while` + `false` or `! true`, `until` + `true` or `! false` — "
-        "and `DEAD_CHAIN_RE` only `false && …` (any position) and a "
+        "and `DEAD_CHAIN_RE` only `false && …` (after `^`, `;` or `&&`) and a "
         "statement-position `true || …`. Widening either to 'any bare constant' "
         "reds `while true; do … break; done`, which is the ordinary retry loop "
         "(#12069 review)"
