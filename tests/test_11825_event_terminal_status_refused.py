@@ -206,6 +206,75 @@ class TestTheCreateDoors:
 
 
 class TestTheUpdateDoor:
+    """The update door, including the MULTI-LABEL shape review cycle 10 measured.
+
+    A node can carry `:Point` and `:Event` at once (`#3311`'s `retype`, migrated
+    graphs). The `:Event` guard used to sit AFTER the Point status arm, whose
+    `SET n += $s` writes and then drops `status` from `props` — so on such a node
+    the guard saw no declaration and the terminal status landed. It also probed
+    reachability by `eventId` alone, so the label without that key was invisible.
+    Both halves are pinned here, because either one alone leaves the state the
+    change exists to prevent reachable.
+    """
+
+    def _multi_label(self, sdk, name, *, event_id: bool):
+        node = sdk.create_point("statement", name)
+        pid = (node.get("node") or {}).get("id") or node.get("id")
+        g = sdk._get_proj().g
+        g.query("MATCH (p:Point {id:$p}) SET p:Event", params={"p": pid})
+        if event_id:
+            g.query("MATCH (n {id:$p}) SET n.eventId = $p", params={"p": pid})
+        return pid
+
+    def _state(self, sdk, pid):
+        rows = sdk._get_proj().g.query(
+            "MATCH (n {id:$p}) RETURN [n.status, labels(n)]",
+            params={"p": pid}).result_set
+        assert rows, f"no node for {pid!r}"
+        return rows[0][0]
+
+    @pytest.mark.parametrize("event_id", [False, True])
+    def test_a_terminal_update_is_refused_on_a_multi_label_event(
+            self, sdk, event_id):
+        pid = self._multi_label(sdk, f"Multi-{event_id}", event_id=event_id)
+        before = self._state(sdk, pid)
+        records_before = len(_journal_lines(sdk._test_log))
+        with pytest.raises(ValueError, match=":Event"):
+            sdk.update_entity(pid, status="superseded")
+        assert self._state(sdk, pid) == before, (
+            "the Point arm wrote before the :Event guard could refuse")
+        assert len(_journal_lines(sdk._test_log)) == records_before, (
+            "a refused update must not journal a restatus the fold would replay")
+
+    def test_a_non_terminal_update_still_lands_on_a_multi_label_event(self, sdk):
+        """No over-block: `live` is a legal `:Event` prop-lane write (#2788)."""
+        pid = self._multi_label(sdk, "Multi-live", event_id=False)
+        sdk.update_entity(pid, status="live")
+        assert self._state(sdk, pid)[0] == "live"
+
+    def test_a_refused_rename_costs_no_status_write(self, sdk):
+        """#12222: every refusal on this surface precedes every write.
+
+        Measured before the fix, on a `:Point:Object` in `draft` whose target
+        name a live `:Object` already holds: `update_entity(<id>,
+        status="live", name=<held>)` raised `NameAlreadyHeld` and STILL left
+        `status='live'` on the node with a journaled `restatus` — the fold
+        would replay a status the caller was told had not been applied.
+        """
+        holder = sdk.create_entity("object", "taken-name")["node"]["id"]
+        assert holder
+        pid = sdk.create_point("statement", "rename-target", status="draft")["id"]
+        g = sdk._get_proj().g
+        g.query("MATCH (p:Point {id:$p}) SET p:Object", params={"p": pid})
+        before = self._state(sdk, pid)
+        records_before = len(_journal_lines(sdk._test_log))
+        with pytest.raises(ValueError, match="taken-name|NameAlreadyHeld"):
+            sdk.update_entity(pid, status="live", name="taken-name")
+        assert self._state(sdk, pid) == before, (
+            "the status arm wrote before the rename guard refused")
+        assert len(_journal_lines(sdk._test_log)) == records_before, (
+            "a refused rename must not journal the restatus it refused to pair")
+
     @pytest.mark.parametrize("status", _TERMINAL)
     def test_update_entity_refuses_a_terminal_status(self, sdk, status):
         eid = _event(sdk, name=f"Upd-{status}")
@@ -936,6 +1005,44 @@ class TestTheBundleValidationDoor:
         assert sdk._validate_bundle(renders_as_event) == [], (
             "Phase 1 refused an :Object because of a __str__ the writer never calls")
 
+    def test_every_phase_1_arm_resolves_the_type_by_content(self, sdk):
+        """Review cycle 10, P1 — the rule is per-ARM, and four arms still used `str()`.
+
+        The Event arm above was fixed first and the other arms kept comparing
+        `str(item.get("type") or "")`, i.e. the `__str__` RENDERING. Measured: a
+        `:Subject` item whose content is `subject` and whose `__str__` is
+        `harmless` passed Phase 1, and `ingest` then raised in step 3 with one
+        point ALREADY committed — the #2422/#7925 partial-mutation class this
+        arm exists to prevent, reached through a different label. Each tuple is
+        (item, why the writer treats it as an item of that label).
+        """
+        class Lie(str):
+            def __str__(self):
+                return "harmless"
+
+        cases = (
+            ({"type": Lie("subject"), "name": "LieSubject",
+              "subjectKind": "organization", "status": "dead"},
+             "the Subject vocabulary arm: content 'subject', renders 'harmless'"),
+            ({"type": Lie("object"), "name": "LieObject",
+              "objectKind": "policy", "status": "superseded"},
+             "the Object/Event mint arm: content 'object', renders 'harmless'"),
+        )
+        for item, why in cases:
+            bundle = {"points": [{"content": "must-not-commit"}],
+                      "entities": [item]}
+            violations = sdk._validate_bundle(bundle)
+            # `:Object` has a lifecycle (T5) so a terminal status is legal for it;
+            # what must hold for BOTH is that the arm SAW the item at all — a
+            # `__str__`-only read skips it silently, and that silence is the bug.
+            if str.__str__(item["type"]) == "subject":
+                assert violations, (
+                    f"{why}: the item passed Phase 1 and step 3 would then raise "
+                    "with the points already committed")
+            else:
+                assert violations == [], (
+                    f"{why}: Phase 1 refused an :Object the writer files by content")
+
     def test_a_non_terminal_event_item_is_not_a_violation(self, sdk):
         """No over-block: the door accepts `scheduled`, so Phase 1 must too."""
         assert sdk._validate_bundle({
@@ -1158,7 +1265,7 @@ class TestTheGuardDoesNotOverBlock:
             sdk.update_entity(pid, status="dead")
 
     def test_a_subject_still_takes_a_terminal_status(self, sdk):
-        """The `:Subject` arm sits immediately above the new `:Event` arm."""
+        """`#1423`'s `:Subject` vocabulary is its own arm and is untouched."""
         sid = sdk.create_entity("subject", "Acme Corp", subjectKind="organization")["node"]["id"]
         sdk.update_entity(sid, status="superseded")
         row = sdk._get_proj().g.query(

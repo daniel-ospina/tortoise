@@ -8184,6 +8184,22 @@ def _endpoint_is_terminal(info: dict) -> bool:
     )
 
 
+def _item_type_text(item: dict) -> str:
+    """The item's `type` as its WRITER reads it: content, lowercased.
+
+    ⛔ One rule, applied by EVERY Phase-1 arm that asks what an item IS. The
+    writer is `(type or "").strip().lower()`, and `str.strip` builds a PLAIN
+    `str` from a `str` subclass's CONTENT — no `__str__` is consulted on that
+    path. An arm that compared `str(item.get("type") or "")` was asking a
+    DIFFERENT question (the `__str__` rendering), so a subclass whose content is
+    a real label and whose `__str__` differs passed Phase 1 and step 3 then
+    raised with the point items already committed — the #2422/#7925
+    partial-mutation class, measured for four arms at review cycle 10.
+    """
+    value = item.get("type")
+    return (str.__str__(value) if isinstance(value, str) else "").strip().lower()
+
+
 _ENTITY_ITEM_LABELS = {"subject": "Subject", "object": "Object",
                        "event": "Event", "document": "Source"}
 
@@ -8243,8 +8259,7 @@ def _bundle_entity_name_outcomes(
     for item in bundle.get("entities") or []:
         if not isinstance(item, dict):
             continue
-        elabel = _ENTITY_ITEM_LABELS.get(
-            str(item.get("type") or "").strip().lower())
+        elabel = _ENTITY_ITEM_LABELS.get(_item_type_text(item))
         name = item.get("name")
         if elabel not in ("Subject", "Object") \
                 or not isinstance(name, str) or not name:
@@ -27409,8 +27424,7 @@ class TortoiseSDK:
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            if _ENTITY_ITEM_LABELS.get(
-                    str(item.get("type") or "").strip().lower()) != "Subject":
+            if _ENTITY_ITEM_LABELS.get(_item_type_text(item)) != "Subject":
                 continue
             _declares_status, own_status = _item_declared_status(
                 item, _item_flatten_depth(item, "entities"))
@@ -27463,10 +27477,7 @@ class TortoiseSDK:
             # item that the writer files as an `:Object` — an over-block with a
             # wrong diagnosis (measured, review cycle 9 P2). One rule per side:
             # the LABEL is a two-renderer name, the TYPE is a content string.
-            _item_type = item.get("type")
-            _type_text = (str.__str__(_item_type)
-                          if isinstance(_item_type, str) else "")
-            if _ENTITY_ITEM_LABELS.get(_type_text.strip().lower()) != "Event":
+            if _ENTITY_ITEM_LABELS.get(_item_type_text(item)) != "Event":
                 continue
             # ⛔ THE KEY AXIS, and the `None` value, are part of this arm too
             # (review cycle 5: one P1, one P2, both measured). `_item_declared_status`
@@ -27637,7 +27648,7 @@ class TortoiseSDK:
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            _etype = str(item.get("type") or "").strip().lower()
+            _etype = _item_type_text(item)
             _name = item.get("name")
             if _etype not in _ENTITY_LAYER_LABEL \
                     or not isinstance(_name, str) or not _name:
@@ -27703,8 +27714,7 @@ class TortoiseSDK:
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            _elabel = _ENTITY_ITEM_LABELS.get(
-                str(item.get("type") or "").strip().lower())
+            _elabel = _ENTITY_ITEM_LABELS.get(_item_type_text(item))
             if _elabel not in ("Object", "Event"):
                 continue
             if _elabel == "Event":
@@ -45780,8 +45790,23 @@ class TortoiseSDK:
         # shifts every ``sdk.py`` line the capstone documentation cites.
         from .live import declares_event_state_key
 
-        if (declares_event_state_key(props)
-                and self._label_reachable_by(proj.g, "Event", id_val)):
+        # ⛔ The reachability probe matches the label by BOTH identity keys, not
+        # by the Event primary alone. `_label_reachable_by("Event", ...)` asks
+        # `{eventId:$id}` (Event's primary) and has no secondary, so a node that
+        # carries the `:Event` LABEL while its identity sits on `id` — the
+        # `:Point:Event` shape `#3311`'s `retype` and migrated graphs produce —
+        # was invisible: the guard skipped, the Point arm wrote, and the terminal
+        # status landed on an `:Event` (measured, review cycle 10 P1: labels
+        # `['Point','Event']` with `eventId` ABSENT accepted `status='superseded'`
+        # and journaled it; the same node WITH `eventId` was refused). The probe
+        # is the sibling `#2104` guard's own text (`e.eventId = $id OR e.id = $id`
+        # a few blocks above) — one form for one question, so the two cannot
+        # disagree about which nodes are Events.
+        if declares_event_state_key(props) and proj.g.query(
+                "MATCH (e:Event) WHERE e.eventId = $id OR e.id = $id "
+                "RETURN count(e)",
+                params={"id": id_val},
+        ).result_set[0][0]:
             refuse_terminal_event_state(props, door="update_entity")
             # ⛔ No `props` surgery here on purpose: a NON-terminal status is a
             # legal write on an `:Event` target (#2788's prop lane), and on a
@@ -45789,6 +45814,23 @@ class TortoiseSDK:
             # to keep it away from. The guard's whole job is the TERMINAL half,
             # and it has it — measured: dropping the key here red 9 pins that
             # legitimately land `draft`/`live` through this door.
+
+        # ⛔ A REFUSAL MUST NOT COST A WRITE (#12222, review cycle 10 P1). The
+        # rename-ambiguity guard lives BELOW, inside its lock and ahead of the
+        # label write loop — but the Point STATUS arm below writes
+        # `SET n += $s` and journals before that guard can run. Measured on a
+        # `:Point:Object` in `draft` with a live `:Object` already holding the
+        # target name: `update_entity(<id>, status="live", name="taken-name")`
+        # raised `NameAlreadyHeld` and STILL left `status='live'` with a
+        # journaled `restatus` — a refusal that cost a write, the atomicity
+        # rule #9287/#10192 state. So the predicate is asked HERE first, before
+        # anything is written. It is a pure read; the locked call below keeps
+        # being the authoritative one under `entity_create_lock` (the #9876
+        # check-then-act), so this pre-check can only refuse EARLIER, never
+        # differently — both calls ask the same read-only question of the same
+        # graph, and the second is the one inside the critical section.
+        if isinstance(props.get("name"), str) and props["name"].strip():
+            self._refuse_ambiguous_rename(id_val, props["name"])
 
         if "status" in props:
             _pt_hits = proj.g.query(
@@ -45855,34 +45897,6 @@ class TortoiseSDK:
                         f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
                     )
 
-        # ── #11825: an :Event carries no lifecycle, so it is not a status door ──
-        # The two arms above are LABEL-SCOPED and this generic surface's non-Point
-        # branch then writes caller props with a live ``SET n += $p`` — so a
-        # terminal status on an :Event was ACCEPTED and stored (measured at
-        # #11825's head: `update_entity(<event>, status='superseded')` ->
-        # ``event.status == 'superseded'``), while `ep.py`'s terminal strip is
-        # label-blind and NO retrieval leg filters an Event
-        # (``search_engine._STATUS_FILTERED_LABELS`` omits it). That is a node the
-        # belief layer treats as dead and every read serves as live — #11825.
-        #
-        # Target-aware by the SAME key enumeration the write loop below uses
-        # (``_label_reachable_by``: an :Event resolves on ``eventId``, and a
-        # guard that matched only ``id`` would be inert on it — the failure
-        # `tests/test_commit_endpoint.py` caught for the #10000 guard and
-        # #11836's Finding 1 records). ⛔ ``_entity_identity_probes()`` (what the
-        # write's own probe derivation uses) and this helper answer the same
-        # question TODAY; the equivalence is stated rather than assumed, because
-        # a secondary identity key added to :Event would separate them (#11836
-        # review round 5). The key PRESENCE test comes first so an ordinary
-        # ``update_entity(<event>, name=…)`` pays no extra round trip.
-        #
-        # The ``outdated`` half of the predicate is NOT re-tested here: the
-        # ``_sanitize_props`` call at the top of this method already refuses the
-        # flag on EVERY label (sdk.py, 'server-managed lifecycle flag'), so it
-        # cannot be in ``props`` by now — the shared helper tests it for the
-        # doors that never pass through `_sanitize_props` (`EventAPI.add_event`,
-        # and `create_entity`, whose Event branch runs before `_create_entity`).
-        #
         # #4649: a write can MOVE the node it addressed. The only identity key a
         # caller may rewrite is `url` (a :Source's identity): `id` is refused by
         # `_sanitize_props` above, and `eventId` is refused for every EVENT
