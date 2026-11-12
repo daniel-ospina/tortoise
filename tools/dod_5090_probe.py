@@ -1262,6 +1262,18 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "chain — the same direction, and for the same reason, as "
         "`_journal_event_raw_write`: its record IS what the rebuild reads the "
         "vector back from (`#8488`), not a store reached around the gate"),
+    "tortoise.sdk::create_source": (
+        CENSUS_EXEMPT,
+        "`tortoise/sdk.py::create_source` — the instrument's match is an operator-facing "
+        "REFUSAL message, not a write clause: the only `embedding=` in the body is the "
+        "`#11858` guard's own sentence, which names the keyword to say the "
+        "`_SERVER_MANAGED_EMBEDDING_MARKERS` family may NOT be set by hand. The door "
+        "computes no vector of its own: a caller-supplied `embedding` is CARRIED into "
+        "`_create_entity`'s `:Source` write — the `#5004` caller-vector contract, the same "
+        "disposition `tortoise.api::add_point` carries, and the reason "
+        "`tortoise/projection/entities.py::_upsert_source`'s passthrough legitimately stores "
+        "`s.embedding` for the vector retrieval leg to read. Exempt as a CARRIER — NOT "
+        "because no store is reachable through it"),
     "tortoise.sdk::ingest_corpus": (
         CENSUS_RECOGNISED,
         "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
@@ -1361,6 +1373,15 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.sdk::_write_capture_turns": (
         ("tortoise/sdk.py", "_write_capture_turns",
          '_turn_snapshot["embedding"] ='),),
+    "tortoise.sdk::create_source": (
+        # ⛔ The needle is the REFUSAL's own prose, which is what `_EMBED_WRITE` reads:
+        # re-deriving it is re-deriving the instrument's match. Deleting the guard (the
+        # `raise`) takes the needle AND the population entry away together, so a stale
+        # exemption cannot outlive what it exempts.
+        ("tortoise/sdk.py", "create_source",
+         "pass `embedding=` and it declares the truth"),
+        ("tortoise/sdk.py", "create_source",
+         "_SERVER_MANAGED_EMBEDDING_MARKERS"),),
     "tortoise.sdk::ingest_corpus": (
         ("tortoise/sdk.py", "ingest_corpus", "self._session_embedding("),
         ("tortoise/sdk.py", "ingest_corpus", "set_embedding_clause("),),
