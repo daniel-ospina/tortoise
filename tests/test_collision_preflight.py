@@ -9659,6 +9659,39 @@ class CollisionPreflightTest(unittest.TestCase):
         self.fail("the process census never saw the fake pi lane — the test cannot "
                   "discriminate process-cwd liveness")
 
+    def _wait_cwd_attributable(self, pid: int, wt: Path, timeout: float = 10.0) -> None:
+        """Block until the TOOL's OWN cwd reader can attribute `pid` to `wt` (#12039).
+
+        ⛔ THE SAME-PREDICATE RULE. The tool decides "this lane stands in that worktree"
+        with `fleet_state.process_cwds`, and a fixture that proves its own precondition
+        with ANY OTHER probe can disagree with it in a state the fixture never ruled out —
+        that is exactly how `test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone` red at
+        `tests/test_ci_preview_isolation.py:422` (one predicate said alive, the SUT's said
+        not-running, same pid, same millisecond). Here the harness serves the CENSUS row
+        from a seam, so the only part of the tool's read that is REAL is `/proc/<pid>/cwd`:
+        between the fork and the child's `chdir`/`execve` that path can be missing or still
+        name the parent's directory, and the tool then reports
+        `process-cwd-unreadable` -> surface INCOMPLETE -> no `working directory names #N`
+        line. MEASURED on CI run 43208342526 (`test (h)`): this test failed on precisely
+        that missing line while the census row was correctly served.
+
+        A deadline, not a sample: the failure this removes is a RACE, so a single attempt
+        reproduces it at whatever rate the runner happens to have.
+        """
+        mod = _tool_module()
+        want = os.path.realpath(str(wt))
+        deadline = time.time() + timeout
+        last: str = "never read"
+        while time.time() < deadline:
+            cwds, cerr = mod.fleet_state.process_cwds([pid])
+            last = cerr or repr(dict(cwds))
+            if not cerr and os.path.realpath(str(cwds.get(pid, ""))) == want:
+                return
+            time.sleep(0.05)
+        self.fail(f"the tool's own cwd reader could not attribute pid {pid} to {want!r} "
+                  f"within {timeout:.0f}s (last read: {last}) — the tool would report "
+                  f"process-cwd-unreadable and the assertion below could not fire")
+
 
 # ══ the four bunded tool defects (agent-infra #1233 + tortoise #9976 #10684
 #    #9251 #8881) ═════════════════════════════════════════════════════════
@@ -10310,6 +10343,15 @@ exec {real} "$@"
             env={**os.environ, "PATH": f"{pi}:{os.environ.get('PATH', '')}"},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
+            # ⛔ WAIT ON THE TOOL'S OWN READER BEFORE ASKING THE TOOL (#12039). The
+            # census row below is served from a seam, so the tool's only REAL input is
+            # `/proc/<pid>/cwd`; sampled in the fork->`chdir`/`execve` window it is
+            # missing or still the parent's, the tool reports `process-cwd-unreadable`
+            # and emits no `working directory names #3061` line. MEASURED on CI run
+            # 43208342526 `test (h)`: this assertion failed on exactly that, with the
+            # row correctly served — a single-shot probe against a table this test had
+            # just mutated, the #12039 class.
+            self._wait_cwd_attributable(proc.pid, peer_wt)
             # The table SEAM declares the row (`pi` + this pid); its cwd comes
             # from /proc for the REAL process, which is the point.
             table = self.tmp / "table-sibling.txt"
@@ -10323,6 +10365,28 @@ exec {real} "$@"
         self.assertEqual(rc, 1, out)
         self.assertIn("VERDICT: COLLISION", out)
         self.assertIn("working directory names #3061", out)
+
+    def test_the_attributability_wait_refuses_a_worktree_the_lane_is_not_in(self):
+        """The precondition above is a PREDICATE, not a sleep (#12039).
+
+        `_wait_cwd_attributable` gates a required assertion, so it must be able to FAIL:
+        a helper that returned unconditionally would make the cwd-arm test's
+        `working directory names #…` assertion fire against a lane standing somewhere
+        else, which is the inverse of the flake it removes. Measured here against a
+        DIFFERENT worktree: the wait must exhaust its deadline and refuse.
+        """
+        elsewhere = self.repo / ".worktrees" / "elsewhere-3061"
+        elsewhere.parent.mkdir(exist_ok=True)
+        elsewhere.mkdir(exist_ok=True)
+        proc = self._start_fake_pi(self.repo)
+        try:
+            with self.assertRaises(AssertionError) as ctx:
+                self._wait_cwd_attributable(proc.pid, elsewhere, timeout=1.0)
+        finally:
+            proc.terminate()
+            proc.wait(timeout=10)
+        self.assertIn(str(proc.pid), str(ctx.exception))
+        self.assertIn("could not attribute", str(ctx.exception))
 
     def test_the_self_pid_exemption_covers_the_callers_own_queue_entry(self):
         """A lane's own live dispatch entry must not collide with it (#10684).
