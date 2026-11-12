@@ -1473,11 +1473,13 @@ class EpBreakdown:
     # REJECTS: those two coalesce each MISSING operand to `1.0` and then divide
     # bare, so where R1 answers ``None`` they answer a number built from those
     # defaults — α/(α+1) for a half pair, above 1 for a negative β, below 0 for
-    # a negative α, 0.5 when the total is ≤ 0, a bare 0.0 when the sum
-    # overflows — or they RAISE on an operand Python cannot coerce at all (a
-    # Boolean is coercible, so it is silently served as 1.0). ⛔ Do not assume
-    # the two readers agree on a shape because they agree on the pairs R1
-    # ACCEPTS. A claim with NO operands at all also answers 0.5 there (the
+    # a negative α, 0.5 when the total is ≤ 0 — or they RAISE on an operand
+    # Python cannot coerce at all (a Boolean is coercible, so it is silently
+    # served as 1.0). ⛔ A pair whose SUM OVERFLOWS is not one of those: R1
+    # ACCEPTS it and answers the overflow-free identity, so (1.7e308, 1e307)
+    # serves 0.944 here while those two divide bare and answer 0.0 — a
+    # divergence in VALUE, not in presence. ⛔ Do not assume the two readers
+    # agree on a shape because they agree on the pairs R1 accepts. A claim with NO operands at all also answers 0.5 there (the
     # per-operand defaults); that is the divergence recorded in the #11702
     # decision
     # comment (issuecomment-6781252637) — it is the one place a claim with NO
@@ -5449,9 +5451,10 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     with ``ep_state: "absent"``, never 0.5. A claim that DOES carry a
     persisted belief keeps its number: a computed posterior of 0.5 still
     reads 0.5 — the distinction is presence, not value. contention is computed
-    from EDGES, not from the belief: a matched Point with no belief keeps its
-    edge-derived NAND fraction, and 0.0 is only for an ID this read did not
-    match. variance/contested are computed from the PERSISTED posterior
+    from EDGES, not from the belief: a matched Point keeps its edge-derived NAND
+    fraction, and 0.0 means there is no NAND fraction to report — an ID this
+    read did not MATCH, or a matched Point with no IMPL/NAND edge at all.
+    variance/contested are computed from the PERSISTED posterior
     (posterior_alpha/beta, falling back to ep_alpha/beta priors) (posterior
     stability), not from edge ratios.
 
