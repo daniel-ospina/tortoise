@@ -440,14 +440,18 @@ same step with the same tail is the investigation.
   document's own §1 measurement (max first-job wait 81.9 min → 90 min), so it fires past the
   measured-normal population rather than on it. `PR-UNWITNESSED` is reported rather than `OK`
   whenever the PR work is neither witnessed nor disproved, and it has THREE causes on different
-  dimensions, each with its own lever: the queued feed was cut at its page cap (raise
-  `--max-pages`); the queued PR runs carry no readable `created_at` (the wait cannot be measured
-  at all); or the RUNNING CENSUS is unwitnessed — every run counted in `pr_running` was
-  unmeasured, because the jobs probe could not read it or the probe budget did not reach it
-  (#12037 — frozen `in_progress` runs GitHub has stopped driving, whose jobs are all `completed`),
-  which shows on the state line as `census=unmeasured` and is
-  cleared by repairing those runs or raising `--max-job-probes`, NOT by `--max-pages`. In every
-  case an unmeasured dimension is not a measured-healthy one.
+  dimensions:
+  - the queued feed was cut at its page cap **and no PR-event run is executing** — raise
+    `--max-pages` to read further back;
+  - the queued PR runs carry no readable `created_at`, so the wait cannot be measured at all —
+    there is no lever here; a stamp GitHub never wrote cannot be recovered, so retry the reading;
+  - the RUNNING CENSUS is unwitnessed — every run counted in `pr_running` was unmeasured,
+    because the jobs probe could not read it or the probe budget did not reach it (#12037:
+    frozen `in_progress` runs GitHub has stopped driving, whose jobs are all `completed`). This
+    shows on the state line as `census=unmeasured`, and its lever is repairing those runs or
+    raising `--max-job-probes`, **NOT `--max-pages`**.
+
+  In every case an unmeasured dimension is not a measured-healthy one.
 - **It does not reduce jobs per run.** A `python-ci` run is 22 jobs (max 30) by construction; with
   ~17 concurrent PR heads that is the arithmetic behind the p95 77-minute first-job wait, and it
   is a sharding/capacity question (#5215, #9539), not a timeout question. It does now bound how

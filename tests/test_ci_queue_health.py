@@ -3097,11 +3097,24 @@ def test_an_unparseable_stamp_is_probed_LAST_even_under_budget_pressure(monkeypa
                     "created_at": (NOW - timedelta(seconds=1000)).strftime("%Y-%m-%dT%H:%M:%SZ")}]
 
     def fake_read_runs(repo, status, max_pages=5):
-        return (queued_rows if status == "queued" else rows), False
+        # ⛔ `rows` ARE THE IN-PROGRESS RUNS AND MUST NOT LEAK INTO THE WAIT LEGS (#12037
+        # review round 7). An earlier version returned them for every non-`queued` status,
+        # so the drifted-stamp run also landed in `pending` and `requested` — which made the
+        # reading hit cause (b) (an unreadable `created_at` in the wait population) and
+        # return `PR-UNWITNESSED` before the census clause was ever consulted. The verdict
+        # assertion was then satisfied by the WRONG cause (deleting the whole degradation
+        # left this test green), and the docstring's mutant reproduction was unreachable.
+        if status == "queued":
+            return queued_rows, False
+        if status == "in_progress":
+            return rows, False
+        return [], False
 
     def fake_probe(repo, rid, attempt=None):
         seen.append(rid)
-        return False if rid == 2 else None
+        # The drifted-stamp run's jobs read EXECUTING — that is what makes probing it first
+        # (the mutant) hand back `OK`, instead of merely re-labelling an abstention.
+        return rid == 1
 
     monkeypatch.setattr(Q, "read_runs", fake_read_runs)
     monkeypatch.setattr(Q, "read_run_live_job", fake_probe)
@@ -3114,5 +3127,32 @@ def test_an_unparseable_stamp_is_probed_LAST_even_under_budget_pressure(monkeypa
     )
     assert health.pr_running_excluded == (2,)
     assert health.pr_running == 2 and health.pr_running_unmeasured == 2
+    # ⛔ THE VERDICT ASSERTIONS NOW DEPEND ON THE SENTINEL DIRECTION, not on cause (b) doing
+    # the work for them: probing the drifted run instead leaves it counted as EXECUTING, so
+    # `pr_running` (3) no longer equals `pr_running_unmeasured` (2), the degradation cannot
+    # fire, and the reading is `OK` with `congests_pr is False` — the pre-#12037 output.
     assert health.verdict == Q.PR_UNWITNESSED, "one proved-idle run left two unmeasured"
+    assert health.pr_running_census_unwitnessed is True
     assert health.congests_pr is None
+
+
+def test_a_starved_reading_still_names_its_WITNESS():
+    """Nit from round 7: `witness_threshold`'s key survived being pointed at the OLD census.
+
+    `witness_threshold = min_age_seconds if pr_running == 0 else max_pr_wait_seconds`, and its
+    own comment states the invariant — the threshold is the one the deciding clause compares
+    against, so the two cannot drift. This change gives `pr_running` a NEW meaning, so keying
+    it on the pre-fix count (the raw number of PR-event `in_progress` runs) must be caught: with
+    three frozen runs proving themselves idle and one PR run waiting 1000 s, the shipped code
+    reaches `PR-STARVED` with a witness, while the mutant empties `wait_witness_ids` on the very
+    reading whose verdict rests on that witness.
+    """
+    queued = [run(1, "python-ci", event="pull_request", age_seconds=1000)]
+    health = classify(queued, in_progress=_frozen(3, probed=3))
+    assert health.pr_running == 0, "every in-progress run was proved idle"
+    assert health.verdict == Q.PR_STARVED
+    assert health.wait_witness_ids, (
+        "a PR-STARVED reading is decided by the age floor, so its witness must be the run that "
+        "satisfies that floor — an empty witness set contradicts the verdict beside it"
+    )
+    assert 1 in health.wait_witness_ids
