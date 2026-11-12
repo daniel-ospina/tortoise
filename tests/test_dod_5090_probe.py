@@ -2340,6 +2340,46 @@ def test_the_gate_is_not_read_True_off_ONE_armed_surface(tmp_path, monkeypatch):
     assert "SCOPED to the surface(s) that arm it (.env.example)" in note, note
 
 
+def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
+        tmp_path, monkeypatch):
+    """The `#11455` CLAUSE, SCORED — one armed TEMPLATE must not complete row 1.
+
+    ⛔ Fresh review of PR #12016 (P2): every OTHER row-1 test feeds a reading in which
+    `shipped["on"]` and `shipped["deployment"]["on"]` AGREE — `_fake_shipped` sets
+    both from one argument, and `_row_one_fixture` arms `docker-compose.yml`, which is
+    both an any-surface and a deployment surface. So reverting the one line
+    `on_by_default = deployment["on"]` to `shipped["on"]`, or folding `ambient` back
+    into it, left the WHOLE suite green. The divergent shape existed only in
+    `test_the_gate_is_not_read_True_off_ONE_armed_surface`, which asserts the NOTE and
+    never scores the row — and `row.verdict` is the artefact `#11086` item 4 is ticked
+    on, so the clause that `#11455` exists for was pinned nowhere.
+    """
+    _row_one_fixture(tmp_path, monkeypatch)
+    # The divergent shape: the TEMPLATE arms the flag, the deployment surface does not.
+    (tmp_path / ".env.example").write_text("TORTOISE_EMBED_GATE=1\n", encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    _no_register(monkeypatch)
+    monkeypatch.setattr(probe, "embedding_writers",
+                        lambda: _gated_writer("tortoise.a::_w"))
+    monkeypatch.delenv("TORTOISE_EMBED_GATE", raising=False)
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["on"] is True, shipped
+    assert shipped["deployment"]["on"] is False, shipped
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert "docker-compose.yml" in hold, hold
+
+    # …and the `ambient` HALF of the same clause: a lane's exported flag is not a
+    # DEFAULT. With the switch armed in the ENVIRONMENT and the deployment still
+    # silent, an `ambient or deployment["on"]` reading turns this row `MET` — the
+    # `#11455` defect in its other direction, which is why `measure()` pins the
+    # switches OFF before scoring.
+    monkeypatch.setenv("TORTOISE_EMBED_GATE", "1")
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+
+
 def test_every_shipped_surface_is_named_with_a_state(tmp_path, monkeypatch):
     """ON / OFF / ABSENT / UNMEASURED per surface — never a single bool.
 
@@ -7520,11 +7560,14 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `177 passed, 1 skipped`
-    (the skip is the `<3.12` re-derive) and the carve-out lane reads
-    `176 passed, 2 skipped` (that skip plus `tests/_live_utils.py`'s live-graph
-    fixture, which only a lane with a `TORTOISE_DB_URI` satisfies). Both splits add
-    to the `178` re-derived below, which is why the doc states its split as
+    defect. Measured at this tree: the docker lane reads `178 passed, 1 skipped`
+    (the skip is the `<3.12` re-derive; the three `main` reds this docstring used
+    to record — `#12045`'s undeclared `tortoise.api::_emit` /
+    `_verify_record_vector_width` writers — are cleared by `#12042`, landed as
+    `b367c54214a2`) and the carve-out lane reads `177 passed, 2 skipped` (that
+    skip plus `tests/_live_utils.py`'s live-graph fixture, which only a lane with
+    a `TORTOISE_DB_URI` satisfies). Both splits add to the `179` re-derived
+    below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
     root = Path(probe.__file__).resolve().parent.parent

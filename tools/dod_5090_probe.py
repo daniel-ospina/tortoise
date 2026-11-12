@@ -1096,6 +1096,18 @@ CONFIG_SURFACES: tuple[str, ...] = (
 #:   Twenty CRM stack) — deploy OTHER services; nothing in them runs the Tortoise
 #:   image or reaches `encode_for_row`, so they are not in the population. Named here
 #:   so the boundary is a decision rather than a missed glob.
+#: * The COMPOSE OVERRIDE family (`docker-compose.override.yml`, and any
+#:   `docker-compose.<stage>.yml`). Compose auto-merges it over the base, so it is a
+#:   deployment input — but it is a PATCH, not a second independent file: an override
+#:   that sets nothing INHERITS the base's `ENV` instead of disarming it. This walk
+#:   reads every deployment file as an independent "does this file arm it" question
+#:   (the reading the compose→image INHERITANCE above also needs), which is the wrong
+#:   question for a patch — globbing the family in would make a SILENT override red
+#:   the deployment reading while the merged view is armed. Doing it right needs
+#:   compose merge semantics, which is `#12022`'s shape (it already owns the other
+#:   channels a deployed process's environment comes from), so it is a named gap here
+#:   rather than a half-implemented glob. Latent today: `git ls-files | grep -iE
+#:   'compose\.(override|prod|dev|local)'` is empty.
 DEPLOYMENT_SURFACES: tuple[str, ...] = (
     "docker-compose.yml",
     "docker-compose.yaml",
@@ -1508,9 +1520,7 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
             "deployment built from that file ALONE runs with the gate OFF. It is not "
             "the OFF on every build: a compose file that builds from an image build "
             "file INHERITS that image's `ENV`, so a silent compose file does not "
-            "unset what an armed `Dockerfile*` sets (fresh review of PR #12016, P3 — "
-            "a per-file fact stated as a deployment consequence claimed more than "
-            "the walk measured). This condition is "
+            "unset what an armed `Dockerfile*` sets. This condition is "
             "SCOPED to the surface(s) that arm it "
             f"({', '.join(shipped['armed']) or 'none'}) and is NOT a claim about a "
             "deployment built from the silent path(s)"
