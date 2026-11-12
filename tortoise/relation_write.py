@@ -428,23 +428,31 @@ def _mechanism_for(predicate: str, semantics: str | None,
 
 def _uncarriable_reason(predicate: str, semantics: str | None,
                         registry: object = None) -> str | None:
-    """The drop reason for a verb whose OWN declaration this leg cannot carry.
+    """The reason to report for a verb whose OWN declaration this leg cannot carry.
 
     ``None`` when the declaration is carriable (or absent) — the caller then
-    falls back to its generic reason. Exists so the silent-drop reason names the
-    real cause: the old text said the verb "is neither in the structural
-    writer's predicate set nor bound to a mechanism", which is FALSE for a row
-    that declares ``coherence`` — it IS bound to a mechanism, just not to one a
-    bare edge can carry.
+    falls back to its generic reason. Exists so the silence names the real
+    cause: the old text said the verb "is neither in the structural writer's
+    predicate set nor bound to a mechanism", which is FALSE for a row that
+    declares ``coherence`` — it IS bound to a mechanism, just not to one a bare
+    edge can carry.
+
+    ⛔ ONE ARM CONSUMES THIS: the ``not paths`` arm, where NOTHING could carry the
+    relation, so it is DROPPED with this text and every clause above is true of
+    it (#12067 review round 15, VGATE). The STRUCTURAL arm writes its own bare
+    edge and records NOTHING — that edge's rel type IS the predicate, it carries
+    no mechanism and is never priced, and the drop channel's receipt
+    (``written + dropped + folded``) plus the "relation not written" prefix make
+    it the wrong place to describe a write. Bare-edge carriage is the open
+    follow-up on #12067; until then the mechanism is simply not carried there.
     """
     declared = _declared_mechanism_for(predicate, semantics, registry)
     if declared is None or declared in _DIRECT_MECHANISMS:
         return None
     return (
-        f"`{predicate}` declares mechanism {declared!r}, which the "
-        f"operator-less direct-edge leg cannot carry (#12067): a bare edge's "
-        f"mechanism IS its rel type and there are two (IMPL, NAND), so this "
-        f"relation is NOT written. It is NOT silently re-spelled as IMPL "
+        f"`{predicate}` declares mechanism {declared!r}, which no operator-less "
+        f"edge can CARRY (#12067): a bare edge's mechanism IS its rel type and "
+        f"there are two (IMPL, NAND). It is NOT silently re-spelled as IMPL "
         f"either — that would price a necessity as support, which is the "
         f"inheritance #12067 closes. Reach this relation as an operator "
         f"(`create_operator(op_type={declared!r})`), or declare it IMPL/NAND. "
@@ -762,25 +770,36 @@ def plan_relation_edges(
                         f"inferred in its place")))
             continue
         if RELATION_STRUCTURAL in paths and predicate in _VALID_EDGE_PREDICATES:
-            # ⛔ A DECLARED MECHANISM THIS LEG CANNOT CARRY DROPS THE RELATION,
-            # EVEN WHEN THE STRUCTURAL PATH EXISTS (#12067 review round 14, P2).
-            # The check below only ran on the `not paths` branch, so
-            # `dependsOn` / `hasPart` — the two verbs ONTOLOGY §8 itself names as
-            # necessity — took the structural arm and wrote a MECHANISM-LESS bare
-            # edge for a relation that DECLARES `coherence`: not carried, not
-            # dropped, not warned, which is the exact silence
-            # `_uncarriable_reason` exists to end (measured: `predicate='gatedBy'
-            # mech='coherence'` → dropped with a reason; `dependsOn` → an edge and
-            # an EMPTY drops list). The docstring and the pack template both
-            # promise the relation is NOT written, so the code moves to the
-            # promise, not the other way round.
-            _uncarriable = _uncarriable_reason(
-                predicate, semantics, registry)
-            if _uncarriable:
-                _drop_once(drops, seen_drops, src=src, dst=dst,
-                           predicate=predicate, semantics=semantics,
-                           reason=_uncarriable)
-                continue
+            # ⛔ THE STRUCTURAL ARM KEEPS THE EDGE AND RECORDS NOTHING (#12067
+            # review rounds 14 and 15). Round 14 made it DROP a verb whose
+            # declaration is uncarriable; round 15 measured two reasons that is
+            # wrong, and one reason a DISCLOSURE on the drop channel is wrong too:
+            #
+            #   * this arm writes the PREDICATE's own structural edge, whose rel
+            #     type IS the predicate (`dependsOn`, `hasPart`). It carries no
+            #     mechanism and is never priced (`ep._factor_pairs` reads operator
+            #     points and `:IMPL|:NAND` only), so nothing is "re-spelled as
+            #     IMPL" that a drop would be protecting us from;
+            #   * dropping made the DECLARATION decide whether a structural FACT
+            #     is recorded, for a difference that changes no belief — and the
+            #     fact has no other carrier (entity→entity relations have no
+            #     operator route). `mechanism: IMPL`/`NAND` over the same
+            #     predicate still write the edge (measured), so the drop was the
+            #     only asymmetry;
+            #   * ⛔ AND THE DROP CHANNEL CANNOT SAY "WRITTEN" (review round 15,
+            #     VGATE). `plan_relation_edges`' receipt counts `written +
+            #     dropped + folded` against the stated population on EVERY arm
+            #     (:136, :907), and the capture path prefixes every drop row with
+            #     "narrative relation not written (#11237)". Recording a WRITTEN
+            #     edge there made the receipt `written=1, dropped=1` for one
+            #     statement, and emitted a warning asserting both "not written"
+            #     and "EDGE WRITTEN" — the same false-record failure this was
+            #     fixing, moved rather than removed.
+            #
+            # So the edge lands, the mechanism is not carried, and nothing is
+            # recorded per write: the mechanism's absence is an OPEN FOLLOW-UP
+            # (bare-edge carriage, #12067), disclosed once where a pack author
+            # reads it (`packs/_template/manifest.yaml`), not as a per-write drop.
             key = (predicate, src_id, dst_id)
             kept_at = structural_at.get(key)
             if kept_at is not None:
