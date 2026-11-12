@@ -6163,14 +6163,16 @@ def _mirror_sources_the_value(sentence: str) -> bool:
       a qualifier. No corpus sentence carries two constructs, so requiring all
       of them to be clean cannot false-block today.
 
-      The construct's OWN text is in the span because the `supplies` shape
-      used to admit filler (`mirror never supplies` matched the construct with
-      the negator inside it, in neither window). With the tightened patterns
-      that case is closed by ADJACENCY — no negator fits between the noun and
-      its verb — so including the construct changes no current outcome
-      (measured: removing it leaves every control row green). It is kept as a
-      guard against a future widening that admits filler again, not because it
-      is load-bearing today.
+      The construct's OWN text is in the span for SYMMETRY only — it is a NO-OP
+      today and will stay one. Measured: removing it changes 0 verdicts across
+      12,675 sentences (the corpus plus 648 constructed negator × break ×
+      mention-form × order combinations), because the span is built from
+      `_MIRROR_MENTION` match positions and the AFTER window already runs from
+      the noun to the next break, so any filler and negator sit inside it. In
+      particular it does NOT guard against "a future widening that admits
+      filler" — that clause was FALSE: `_MIRROR_SOURCE`'s adjacency is what
+      closes the fillered negation, and widening `_MIRROR_SOURCE` to admit
+      filler leaves those sentences REFUSED anyway (measured).
 
     ⛔ NAMED RESIDUALS — this is a tripwire on the WORDING the tree uses, not a
     grammar proof. FOUR are known and deliberate — and the count is a
@@ -6723,9 +6725,18 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
             "mirror's value cf. not the value the field serves.",
             # the STANDARD negators that are not contractions: `neither`/`nor`
             # and `no longer` certify without them, at zero corpus cost
-            # (review, measured) — so they are carried, not disclosed.
+            # (review, measured) — so they are carried, not disclosed. ⛔ ONE ROW
+            # PER ARM: `neither … nor` in a SINGLE sentence pins the sentence,
+            # not either arm — a mutant dropping `neither` and a mutant dropping
+            # `nor` each left the whole file GREEN while a real inversion started
+            # certifying (measured), which is the `cannot`-row defect this file
+            # already documents elsewhere. `nor` gets an INVERTED sentence
+            # (negator first) because `nor` can open a clause; `neither` gets the
+            # in-clause form.
             "Its confidence_mean IS the declared PRIOR mean — the mirror's "
-            "value is neither the served one nor the pair's.",
+            "value is neither the served one.",
+            "Its confidence_mean IS the declared PRIOR mean; nor does the "
+            "mirror's value lead it.",
             "Its confidence_mean IS the declared PRIOR mean — the mirror's "
             "value is no longer the served one.",
             # NEGATIVE PREPOSITIONS: a denial with no negator WORD, sitting
@@ -7029,6 +7040,18 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch(monkeypatch):
                   "value is real but it is never the served one."),
             ("2", "Its confidence_mean IS the declared PRIOR mean — the mirror's "
                   "value — is not the value the field reads."),
+            # ⛔ ONE ROW PER BREAK ARM that can carry a denial past the scan. Only
+            # `—` and `but` were exercised, so dropping `:`, `;` or `–` from
+            # `_MIRROR_CLAUSE_BREAK` left the whole file GREEN while these three
+            # sentences — the disclosed residual-2 class, which these breaks are
+            # what CREATE — kept certifying silently (review, measured). Each row
+            # reds when its arm is removed.
+            ("2", "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+                  "value: never the prior's."),
+            ("2", "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+                  "value; never the prior's."),
+            ("2", "Its confidence_mean IS the declared PRIOR mean — the mirror's "
+                  "value – never the prior's."),
             # residual 3's own two examples, pinned so the disclosure cannot go
             # stale: adding `irrelevant|ignored` to `_MIRROR_NEGATED` would
             # close them, and that must red here first (review, measured).
