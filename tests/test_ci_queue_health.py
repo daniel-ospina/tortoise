@@ -2823,8 +2823,20 @@ def test_an_invalid_probe_budget_is_a_measured_error_not_a_crash(monkeypatch):
 
     `main()` catches only `MeasureError`, so a `TypeError` here would exit with a traceback and
     no state line — the failure the budget's own rationale exists to prevent.
+
+    ⛔ AND IT MUST BE REFUSED **BEFORE THE FIRST READ** (#12037 review round 12). The refusal's
+    own rationale says "an argument error should not cost two request-quota reads", and nothing
+    pinned it: moving the validation below the two `read_runs(...)` calls left this suite GREEN,
+    because the assertions below only ever see the exception. A counting stub is the guard —
+    the rule is about reads NOT spent, so it cannot be asserted from the outcome.
     """
-    monkeypatch.setattr(Q, "read_runs", lambda repo, status, max_pages=5: ([], False))
+    calls: list[str] = []
+
+    def counting_read_runs(repo, status, max_pages=5):
+        calls.append(status)
+        return [], False
+
+    monkeypatch.setattr(Q, "read_runs", counting_read_runs)
     # `"eight"` and `object()` must not crash; `2.9` must not be SILENTLY TRUNCATED to 2
     # probes (`int(2.9)` succeeds, which is how a float budget used to pass unnoticed);
     # `True` is an `int` to `isinstance` and would become a budget of 1; and any budget
@@ -2834,6 +2846,10 @@ def test_an_invalid_probe_budget_is_a_measured_error_not_a_crash(monkeypatch):
         with pytest.raises(Q.MeasureError) as exc:
             Q.read_health("o/r", NOW, max_job_probes=bad)
         assert "max_job_probes" in str(exc.value)
+    assert calls == [], (
+        "a refused budget must spend NO API reads — the refusal's own rationale — but "
+        f"read_runs was called for {calls}"
+    )
 
 
 def test_a_bool_is_not_accepted_as_an_attempt_or_a_job_count(monkeypatch):
