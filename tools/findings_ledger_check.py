@@ -1380,6 +1380,46 @@ def check_verdict_tally(text: str) -> list[str]:
             "one can assert a letter the real sentence does not; keep exactly one"
         )
     still_sentence = still_sentences[0] if still_sentences else ""
+    # ⛔ ONE PARAGRAPH IS NOT ONE SECTION (#11902 review, `ab6ce5d6ab` P2 — open through
+    # rounds 7, 8 and this one). Every arm above takes its subject from ONE PARAGRAPH, so a
+    # second tally one blank line away was CLEAN while the same-paragraph form reds:
+    # measured, appending a `\n\n`-separated
+    # `Only **(a)** and **(f)** still read as written.` after the takeaway paragraph left
+    # `--check` at exit 0. §3's PROSE carries exactly one sentence naming either phrase (the
+    # takeaway paragraph states both halves); the table rows are excluded because they carry
+    # verdicts, not the tally. Anything past that is an assertion the arms never see. A
+    # paragraph that only QUOTES either phrase stays exempt — `quoted` runs first.
+    section_prose = " ".join(
+        line
+        for line in _region(
+            text, "## 3. The corrections log", "## 4. The artefact index"
+        ).splitlines()
+        if not line.lstrip().startswith("|")
+    )
+    section_prose = re.sub(r"\s+", " ", section_prose)
+    #: The paragraph subject begins at the MARKER TEXT, which on this page sits INSIDE a
+    #: bold run (`**The one thing to take away:**`), so its first sentence carries no
+    #: leading `**` while the section prose does. Strip the bold opener from both sides
+    #: before comparing, or the paragraph's own tally reads as a stray.
+    paragraph_sentences = {
+        s.lstrip("* ") for s in re.split(r"(?<=\.)\s+", paragraph)
+    }
+    stray_tallies = [
+        s
+        for s in re.split(r"(?<=\.)\s+", section_prose)
+        if (
+            "still read as written" in quoted.sub(" ", s)
+            or "no longer read as written" in quoted.sub(" ", s)
+        )
+        and s.lstrip("* ") not in paragraph_sentences
+    ]
+    if stray_tallies:
+        problems.append(
+            f"§3 prose carries {len(stray_tallies)} tally sentence(s) OUTSIDE the "
+            "takeaway paragraph — the guard reads ONE paragraph, so a second tally a "
+            "blank line away can supply or contradict the list unwatched; keep exactly "
+            "one"
+        )
     named = _named_letters(non_still_sentence)
     if named != set(non_still):
         problems.append(

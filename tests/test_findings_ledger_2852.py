@@ -3853,3 +3853,31 @@ def test_a_shorthand_cannot_resolve_across_a_section_boundary(tmp_path, monkeypa
     )
     problems = _doc_problems()
     assert any("shorthand with no preceding" in p for p in problems), problems
+
+
+def test_a_second_tally_cannot_hide_one_blank_line_away(tmp_path, monkeypatch):
+    """FAILS open if a tally outside the takeaway PARAGRAPH goes unread.
+
+    Every §3 arm takes its subject from `TAKEAWAY_MARKER`'s paragraph, so a second
+    complement list one blank line away was CLEAN while the same-paragraph form reds —
+    measured, appending a `\\n\\n`-separated `Only **(a)** and **(f)** still read as written.`
+    left `--check` at exit 0. §3's PROSE carries exactly one sentence naming either phrase;
+    the table rows are excluded (they carry verdicts, not the tally), and anything past
+    that is an assertion the paragraph-scoped arms never see. A paragraph that only
+    QUOTES either phrase stays exempt — the quote mask runs first, which is the control.
+    """
+    anchor = "is the exact defect #2795 D2 fixed. "
+    decoy = "\n\nOnly **(a)** and **(f)** still read as written."
+    with monkeypatch.context() as patch:
+        _mutated(tmp_path, patch, lambda t: t.replace(anchor, f"{anchor}{decoy}", 1))
+        problems = _doc_problems()
+        assert any("OUTSIDE the takeaway paragraph" in p for p in problems), (
+            f"a second tally one blank line away must red: {problems}"
+        )
+    quoted = '\n\nThey wrote "only **(a)** still read as written" verbatim.'
+    with monkeypatch.context() as patch:
+        _mutated(tmp_path, patch, lambda t: t.replace(anchor, f"{anchor}{quoted}", 1))
+        problems = _doc_problems()
+        assert not any("OUTSIDE the takeaway paragraph" in p for p in problems), (
+            f"a QUOTED phrase asserts nothing and must stay CLEAN: {problems}"
+        )

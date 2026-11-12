@@ -606,9 +606,14 @@ follows `SUBSTRATE-REBUILD-MAP.md`'s ruling: *the tracker half is deliberately n
 dated and its command is recorded.* The command for §6 is `gh issue view <N> --json state`, and it
 was run per issue, not sampled.
 
-⚠️ **Eight more are unguarded, and none is out-of-repo — they are simply not armed yet (#11902, #11957).**
+⚠️ **Ten more are unguarded, and none is out-of-repo — they are simply not armed yet (#11902, #11957).**
 Every one is derivable from **this page or the page it points at**, so the ruling above does not reach
 them and a guard for them could not pass by not looking:
+**the two derived figures the OPENING restates** — `seven of its twelve rows no longer read as written`
+and `three of the seven research briefs … have no in-repo mirror at all` — which are copies of §3's and
+§4's counts and are re-derivable from the same tables: measured, rewriting the opening to
+`six of its twelve` leaves `--check` at exit 0, because both figure arms require the literal
+`of the <number>` and the opening says `of its twelve` (#11902 review, open through three rounds);
 §4's row population (count its rows: 14) and its `**No copy of its content in-repo**` cells among the
 `research/` rows (3); §6's own heading count (`4 of 40 open`); §7's `36 of 40 have moved` and
 `two of the four survivors`; **§6's statement about the problem map's survivors and `#2782`'s status**,
