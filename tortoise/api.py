@@ -421,10 +421,14 @@ class EventAPI:
               actor: str | None = None, **payload) -> dict:
         # ⛔ THE RECORD PAYLOAD IS POSITIONAL (`*record`), and only
         # `add_point` / `add_operator` pass one. See `_NESTED_RECORD_KEYS` for
-        # why: a kwargs splat cannot bind a positional slot, so this is the one
-        # channel a caller cannot reach from ANY door. Both refusals run before
-        # the append below (the commit point) and therefore leave nothing to
-        # replay.
+        # why: a kwargs splat cannot bind the positional SLOT, so a caller's
+        # `record=` lands on the envelope as an inert key and this one stays
+        # empty. ⚠️ THE CONTENTS ARE CALLER-REACHABLE ALL THE SAME — `add_point`
+        # does `p.update(fields)` and hands `p` positionally, which is how the
+        # envelope family got in one nesting level down (#11948 review at
+        # `95b98e6cf1`). So the record is checked against BOTH families, and
+        # ALL THREE refusals run before the append below (the commit point),
+        # which therefore leaves nothing to replay.
         _refuse_caller_named_record_keys(payload, f"the `{type_}` envelope")
         if record:
             if len(record) > 1:
