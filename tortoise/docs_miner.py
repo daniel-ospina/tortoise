@@ -506,7 +506,7 @@ def _ensure_entities(api, proj, entities: list[dict]) -> list[str]:
                 f"(#3633)")
         oid = ent["id"]
         api.add_object(name, ent["object_kind"], id=oid,
-                       canonical_name=name, title=name,
+                       title=name,
                        externalId=ent["externalId"])
         ids.append(oid)
     return ids

@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
+from tortoise.entity_identity import AmbiguousEntityName
 from tortoise.entity_resolver import (
     EntityScanUnavailable,
     apply_entity_merge,
@@ -46,6 +47,7 @@ from tortoise.entity_resolver import (
     resolve_entity_name,
     similarity,
 )
+from tortoise.exceptions import NameAlreadyHeld
 
 # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -543,7 +545,9 @@ class TestHoldsRoleProduction:
     def test_the_holder_may_be_addressed_by_id(self, sdk_factory):
         sdk = sdk_factory()
         person = sdk.create_subject("Operator", "naturalPerson")
-        sdk.create_subject("the operator", "role", roleHolder=person["id"])
+        # Distinct role name: a role whose fold collides with the holder's would
+        # resolve ONTO the holder — a self edge, refused by `wire_holds_role` (N7).
+        sdk.create_subject("the operator role", "role", roleHolder=person["id"])
         assert sdk._get_proj().g.query(
             "MATCH (:Subject)-[r:holdsRole]->(:Subject) RETURN count(r)"
         ).result_set[0][0] == 1
@@ -570,3 +574,175 @@ class TestHoldsRoleProduction:
             "MATCH (s:Subject {id:$id}) RETURN properties(s)",
             params={"id": role["id"]}).result_set[0][0]
         assert "roleHolder" not in props and "role_holder" not in props
+
+
+class TestSecondReviewRound:
+    """Regression pins for the second review round (all were measured defects)."""
+
+    # ── N1: one folded identity, TWO carriers, EVERY spelling refuses ────
+
+    def _two_folded_carriers(self, sdk):
+        """Two LIVE carriers of ONE folded identity: `an owner` (canonical_name
+        `owner`) and the raw node `owner` (name only) — the pre-#3590 shape."""
+        sdk.create_subject("an owner", "role")          # stamps canonical_name
+        _create_raw(sdk, "Subject", "sub-raw", "owner", "subjectKind", "role")
+
+    def test_the_raw_spelling_does_not_evade_the_folded_count(self, sdk_factory):
+        """N1: a raw hit short-circuited the folded count, so the create that
+        spelled the name in its folded form silently picked one of two carriers
+        while the same create spelled differently refused."""
+        sdk = sdk_factory()
+        self._two_folded_carriers(sdk)
+        for spelling in ("owner", "the owner", "OWNER", "an owner"):
+            with pytest.raises(AmbiguousEntityName):
+                sdk.create_subject(spelling, "role")
+        assert _count(sdk, "Subject", subjectKind="role") == 2
+
+    def test_a_single_entity_matching_both_arms_is_not_ambiguous(self, sdk_factory):
+        """The union must dedupe: one node holding both spellings is ONE holder."""
+        sdk = sdk_factory()
+        sdk.create_subject("owner", "role")
+        again = sdk.create_subject("the owner", "role")  # idempotent re-mention
+        assert _count(sdk, "Subject", subjectKind="role") == 1
+        assert again["id"]
+
+    def test_the_role_door_sees_the_same_ambiguity(self, sdk_factory):
+        self._two_folded_carriers(sdk := sdk_factory())
+        with pytest.raises(AmbiguousEntityName):
+            sdk.create_subject("a role", "role", roleHolder="owner")
+
+    # ── N2: a `semantic` queue row is mergeable ──────────────────────────
+
+    def test_a_semantic_row_can_be_merged_back(self, sdk_factory, monkeypatch):
+        """N2: `entity_pair_for` hard-coded `include_semantic=False`, so the queue
+        offered a semantic row the merge then refused as "no pair"."""
+        import tortoise.entity_resolver as er
+
+        class _Enc:
+            def encode(self, texts):  # identical vectors → similarity 1.0
+                return [[1.0, 0.0] for _ in texts]
+
+            def dimensions(self):  # pragma: no cover - shape only
+                return 2
+
+        monkeypatch.setattr(er, "_encoder", lambda: _Enc(), raising=False)
+        sdk = sdk_factory()
+        # Names that do NOT fold or fuzz together: the semantic rung is the only
+        # one that can pair them.
+        _create_raw(sdk, "Subject", "sub-a", "quarterly revenue", "subjectKind", "other")
+        _create_raw(sdk, "Subject", "sub-b", "annual income", "subjectKind", "other")
+
+        rows = sdk.list_dedup_candidates(candidate_type="entity")
+        semantic = [r for r in rows if r["method"] == "semantic"]
+        if not semantic:  # encoder seam not reachable in this build → not a defect
+            pytest.skip("semantic rung did not produce a row here")
+        pair = entity_pair_for(sdk._get_proj().g, semantic[0]["candidate_id"])
+        assert pair, "the merge could not re-derive a row the queue just displayed"
+
+    # ── N3: a rename maintains the folded key, and collides loudly ───────
+
+    def test_a_rename_maintains_the_folded_key(self, sdk_factory):
+        """N3: `canonical_name` was written once at create and never again, so a
+        rename left the NEW spelling invisible to the deterministic rung — and a
+        create of it minted a twin, the damage this issue removes."""
+        sdk = sdk_factory()
+        obj = sdk.create_object("Acme Corp", "document")
+        oid = obj["id"]
+        sdk.update_entity(oid, name="Acme Corporation")
+        props = sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$id}) RETURN properties(o)",
+            params={"id": oid}).result_set[0][0]
+        assert props["name"] == "Acme Corporation"
+        assert props["canonical_name"] == "acme corporation"
+        # …so the loud spelling resolves onto the renamed entity, not a twin.
+        again = sdk.create_object("ACME CORPORATION", "document")
+        assert again["id"] == oid
+        assert _count(sdk, "Object") == 1
+
+    def test_a_rename_onto_a_folded_collision_refuses(self, sdk_factory):
+        sdk = sdk_factory()
+        first = sdk.create_object("Acme Corp", "document")
+        second = sdk.create_object("Beta Inc", "document")
+        with pytest.raises(NameAlreadyHeld):
+            sdk.update_entity(second["id"], name="the acme corp")
+        props = sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$id}) RETURN properties(o)",
+            params={"id": second["id"]}).result_set[0][0]
+        assert props["name"] == "Beta Inc", "the refused rename must not have landed"
+        assert first["id"] != second["id"]
+
+    # ── N4: a truncated pair window REFUSES, it does not answer "no pair" ─
+
+    def test_a_full_pair_window_refuses_rather_than_reporting_no_pair(
+            self, sdk_factory, monkeypatch):
+        import tortoise.entity_resolver as er
+        sdk = sdk_factory()
+        sdk.create_object("Acme Corp", "document")
+        monkeypatch.setattr(er, "PAIR_WINDOW", 1, raising=False)
+        _create_raw(sdk, "Object", "obj-x", "Acme Corporation", "objectKind", "document")
+        _create_raw(sdk, "Object", "obj-y", "Acme Corporaton", "objectKind", "document")
+        with pytest.raises(EntityScanUnavailable, match="truncated"):
+            entity_pair_for(sdk._get_proj().g, "obj-x")
+
+    # ── N6: a successful folded resolve leaves NO phantom refusal ────────
+
+    def test_a_successful_folded_holder_leaves_no_refusal_behind(self, sdk_factory):
+        """N6: the speculative raw-name probe recorded `no-live-holder` before the
+        folded retry succeeded, so the R8 record held a refusal for a resolve
+        that did not fail."""
+        from tortoise.entity_identity import non_folded_entries
+
+        sdk = sdk_factory()
+        sdk.create_subject("owner", "naturalPerson")
+        role = sdk.create_subject("the operator", "role")
+        from tortoise.entity_resolver import wire_holds_role
+
+        wire_holds_role(sdk, "the owner", role["id"])  # raw spelling misses, fold hits
+        entries = non_folded_entries()
+        phantom = [e for e in entries
+                   if e[0] in {"no-live-holder", "unaddressable"}
+                   and "the owner" in str(e[1])]
+        assert not phantom, f"a successful resolve recorded a refusal: {phantom}"
+
+    # ── N7: a role is not its own holder ─────────────────────────────────
+
+    def test_a_role_cannot_hold_itself(self, sdk_factory):
+        sdk = sdk_factory()
+        sdk.create_subject("Dana", "naturalPerson")
+        # `Dana` names the person, so the role create resolves ONTO the person and
+        # the holder is that same node — the self edge the guard exists for.
+        with pytest.raises(ValueError, match="cannot hold itself"):
+            sdk.create_subject("Dana", "role", roleHolder="Dana")
+        assert sdk._get_proj().g.query(
+            "MATCH (:Subject)-[r:holdsRole]->(:Subject) RETURN count(r)"
+        ).result_set[0][0] == 0
+
+    # ── N8: every producer folds the key it writes ───────────────────────
+
+    def test_the_docs_miner_producer_folds_canonical_name(self, sdk_factory):
+        """N8: `docs_miner` passed the raw surface form as `canonical_name`, so a
+        docs-mined Object was invisible to the folded rung and a create of the
+        folded spelling minted a twin."""
+        from tortoise.api import EventAPI
+
+        class _Log:
+            def __init__(self):
+                self.events = []
+
+            def append(self, event):  # pragma: no cover - shape only
+                self.events.append(event)
+
+        sdk = sdk_factory()
+        proj = sdk._get_proj()
+        api = EventAPI(_Log(), initiated_by="extractor", agent_id="test",
+                       projection=proj)
+        oid = api.add_object("The Pricing Memo", "document")
+        props = proj.g.query(
+            "MATCH (o:Object {id:$id}) RETURN properties(o)",
+            params={"id": oid}).result_set[0][0]
+        assert props["name"] == "The Pricing Memo"      # surface form preserved
+        assert props["canonical_name"] == "pricing memo"  # one fold for the key
+        # …so the folded spelling resolves onto it instead of minting a twin.
+        again = sdk.create_object("the pricing memo", "document")
+        assert again["id"] == oid
+        assert _count(sdk, "Object") == 1

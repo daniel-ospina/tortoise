@@ -6780,8 +6780,15 @@ _POINT_RANGE_INDEX_PROPS: tuple[str, ...] = (
 )
 
 _RANGE_INDEX_LABEL_PROPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Subject", ("id", "name")),
-    ("Object", ("id", "name")),
+    # #12047 review N5: ``canonical_name`` is the FOLDED key entity resolution
+    # queries on every create (`entity_identity._live_holders_same_entity`, the
+    # folded arm), and it was un-indexed — so that arm was a FULL LABEL SCAN
+    # (~0.23 µs/node, measured 5.6 ms/query at 20k Subjects) on the write path,
+    # i.e. quadratic over a 44k re-file, for a lookup its own docstring called an
+    # indexed equality. Indexed it is flat (0.90–0.95 ms at every population
+    # measured 5k→40k). Same single-prop class as ``name`` beside it.
+    ("Subject", ("id", "name", "canonical_name")),
+    ("Object", ("id", "name", "canonical_name")),
     # #7927: ``id`` added to Event. Every epistemic read anchors on ``id``
     # (``live.epistemic_labels_of``, the ranker sweeps, the BFS frontier legs),
     # and Event carried only an ``eventId`` index — so the id-anchored Event
@@ -20230,8 +20237,16 @@ class FalkorProjection(
         ("Point", "lastDreamedAt", "RANGE"),
         ("Subject", "id", "RANGE"),
         ("Subject", "name", "RANGE"),
+        # #12047 review N5: ``canonical_name`` must be REQUIRED, not merely
+        # created — the #8400 trap documented three entries above. Entity
+        # resolution queries it on EVERY create (the folded arm of
+        # ``_live_holders_same_entity``); without this entry every pre-#12047
+        # graph (both hosted ones included) reads current, the sweep is skipped
+        # forever, and that arm stays the full-label scan this index removes.
+        ("Subject", "canonical_name", "RANGE"),
         ("Object", "id", "RANGE"),
         ("Object", "name", "RANGE"),
+        ("Object", "canonical_name", "RANGE"),
         ("Event", "eventId", "RANGE"),
         # #7927: ``:Event(id)`` must be REQUIRED, not merely created — the
         # exact #8400 trap three entries above. Every epistemic read anchors a

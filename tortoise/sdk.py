@@ -44442,7 +44442,7 @@ class TortoiseSDK:
         ``_update_entity`` takes both identity labels' locks (fixed order) around
         both.
         """
-        from .entity_identity import live_name_holder_ids
+        from .entity_identity import _live_holders_same_entity
         from .exceptions import NameAlreadyHeld
         g = self._get_proj().g
         # ⛔ LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id AND
@@ -44466,7 +44466,12 @@ class TortoiseSDK:
             stored = rows[0][0] if rows[0] else None
             if isinstance(stored, str) and stored == new_name:
                 continue
-            holders = live_name_holder_ids(g, label, new_name)
+            # #12047 review N3: count over the FOLDED key as well. Once the
+            # rename maintains `canonical_name` (below), two entities whose
+            # folded names collide are as create-poisoned as two whose raw names
+            # do — and `resolve_or_mint` will refuse every create of either
+            # spelling. Same evidence the create and the pre-flight probe use.
+            holders, _props = _live_holders_same_entity(g, label, new_name)
             # ⛔ Count HOLDERS (live rows), not truthy ids (#9876 review F1).
             # That list is deliberately row-per-holder and yields ``None`` for
             # an id-less LIVE row — the legacy / raw shape the create ADOPTS —
@@ -45075,6 +45080,17 @@ class TortoiseSDK:
                     entity_create_lock(*_lock_key))
             if _rename_locks:
                 self._refuse_ambiguous_rename(id_val, props["name"])
+                # #12047 review N3: `canonical_name` is the FOLDED key the
+                # deterministic resolution rung queries, so a rename that does
+                # not maintain it leaves the entity invisible under its new
+                # spelling — and a later create of that spelling mints a twin,
+                # the exact damage this issue removes. It rides the SAME applied
+                # map, so `EntityMutated` replays it. A caller that supplied the
+                # key explicitly keeps their value (`setdefault`).
+                from .entity_resolver import normalize_entity_name
+                _folded_new = normalize_entity_name(props["name"])
+                if _folded_new:
+                    props.setdefault("canonical_name", _folded_new)
             for label, _prop in _CANONICAL_ENTITY_ID_PROPS:
                 # #4649: a canonical label's identity is an OR-SET, not one key.
                 # NOTE: the primary key is not read here any more — `id_keys` below
@@ -45510,7 +45526,7 @@ class TortoiseSDK:
                 # is a Subject id or name, and an unresolvable/ambiguous holder
                 # RAISES rather than wiring the role to a guess (#1370).
                 # ⛔ Every refusal above was checked BEFORE the write (review F5):
-                # `_role_holder_id` runs first, so a bad holder or a non-role kind
+                # `resolve_role_holder` runs first, so a bad holder or a non-role kind
                 # cannot leave a node + a `SubjectAdded` journal line behind while
                 # telling the caller the call failed — the atomicity rule
                 # `_update_entity` states for its own status change.

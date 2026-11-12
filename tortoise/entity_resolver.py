@@ -107,6 +107,11 @@ ENTITY_LABELS = ("Object", "Subject")
 #: label → the kind property ONTOLOGY §4.1/§4.2 declares for it.
 _KIND_PROP = {"Object": "objectKind", "Subject": "subjectKind"}
 
+#: How many pair rows `entity_pair_for` (the merge's re-derivation) will consider.
+#: A FULL window is treated as truncated and REFUSES (never "no pair") — see
+#: `entity_pair_for`.
+PAIR_WINDOW = 5000
+
 #: Above this many scanned entities the semantic rung is skipped (logged), because
 #: encoding every name on a read path is unbounded work. The fuzzy + exact rungs
 #: still run; the skip is named rather than silent.
@@ -675,8 +680,20 @@ def entity_pair_for(graph, candidate_id: str, *,
     pair (two equally-good survivors) RAISES: a merge must never pick one for
     the reviewer (route-then-refuse, #3590 R8).
     """
-    rows = entity_candidates(graph, limit=1000, include_semantic=False,
+    # SAME knobs as the queue (review N2): the queue defaults to
+    # `include_semantic=True`, so a merge that excluded it could not re-derive a
+    # `semantic` row it had just shown — the review surface would offer a
+    # decision and then refuse it with "no pair exists".
+    rows = entity_candidates(graph, limit=PAIR_WINDOW, include_semantic=True,
                              review_threshold=review_threshold)
+    if len(rows) >= PAIR_WINDOW:
+        # Fail CLOSED on a truncated window (review N4): answering "no pair"
+        # from a window that may have cut the candidate is the #8018 class — a
+        # report false for the graph it describes.
+        raise EntityScanUnavailable(
+            f"the pair window ({PAIR_WINDOW}) was filled, so the candidate may "
+            f"lie outside it — refusing to answer 'no pair' from a truncated "
+            f"scan; re-list the queue and review a candidate from that page")
     mine = [r for r in rows if r["candidate_id"] == candidate_id]
     if not mine:
         return None
@@ -723,7 +740,11 @@ def resolve_role_holder(sdk, holder: str, *, required: bool = True) -> str | Non
         raise ValueError("holdsRole needs a holder (a Subject id or name)")
     g = sdk._get_proj().g
     usable = ("name", "canonical_name")
-    entity_id = resolve_entity_id(g, "Subject", holder, name_props=usable)
+    # `record_misses=False` on the first, speculative attempt (review N6): the
+    # folded second call is the retry, and a success there must not leave a
+    # phantom `no-live-holder` refusal in the R8 record.
+    entity_id = resolve_entity_id(g, "Subject", holder, name_props=usable,
+                                  record_misses=False)
     if entity_id is None:
         # The raw spelling may not be the stored one; try the folded key over the
         # SAME props before concluding "no such Subject" (never a second query
@@ -754,4 +775,12 @@ def wire_holds_role(sdk, holder: str, role_id: str) -> dict:
     DECLARED by the caller (``create_subject(..., roleHolder=…)``).
     """
     holder_id = resolve_role_holder(sdk, holder)
+    if holder_id == role_id:
+        # A role is not its own holder (#1370's "no subject > wrong subject"):
+        # writing it would assert a category error as a fact, reported as success.
+        raise ValueError(
+            f"holdsRole: {role_id!r} cannot hold itself — a role needs a "
+            f"DIFFERENT person Subject as its holder. The role's name resolved "
+            f"onto the holder itself (the two folds collide), so give the role "
+            f"its own name (e.g. 'the owner role') rather than the person's")
     return sdk.create_edge("holdsRole", holder_id, role_id)
