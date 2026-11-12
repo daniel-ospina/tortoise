@@ -2283,10 +2283,15 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
 
     WHY A TEXT GUARD EXISTS IN A SUITE OTHERWISE BUILT ON EXECUTED ASSERTIONS. The
     settle gate made exclusion require every job `completed` AND `updated_at` still for
-    `JOB_SETTLE_SECONDS`. That rule is stated in prose in TEN places — three module
-    comments, two `#:` field docs, two workflow comment blocks, the ops doc, and two test
-    headers — and prose cannot be executed, so a revert to the one-half wording is
-    invisible to every behavioural test. It has ALREADY happened four times: round 17
+    `JOB_SETTLE_SECONDS`. That rule is stated in prose at MANY sites — module comments and
+    `#:` field docs in `tools/ci_queue_health.py`, two comment blocks in the workflow, the
+    ops doc, and headers in this file — and prose cannot be executed, so a revert to the
+    one-half wording is invisible to every behavioural test. ⛔ NO COUNT IS GIVEN HERE ON
+    PURPOSE: an earlier revision said "TEN places — three module comments, TWO `#:` field
+    docs", while this change corrects FOUR field docs, and the miscount is how two of them
+    came to be claimed without a needle (review P3). An inventory in a docstring is itself
+    an unpinned claim; what is pinned is the NEEDLES, and every site a needle was written
+    for is listed in the list below rather than counted here. It has ALREADY happened four times: round 17
     corrected one twin and left the other contradicting it in the same file; the workflow
     block claiming an all-completed run "can never make the census unmeasured" is FALSE for
     the population the gate creates; the first version of this guard missed
@@ -2308,12 +2313,14 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     are likewise avoided where the fragment is legitimate: "therefore NOT counted in" is
     correct prose in the corrected field doc, so the retracted PAIR is one needle.
 
-    ⛔ EVERY SITE THIS RULE IS STATED ON NEEDS A NEEDLE THAT MATCHES WHAT IT ACTUALLY
-    SHIPPED (review P2-1). The ops doc was ONE of the ten places named above while no
-    needle matched its own retracted paragraph, so that paragraph reverted to its pre-fix
-    text — BOTH errors back, the merged cancelled-avenue claim and the wrong lever — with
-    the whole suite green (measured: 4 passed). A site listed here and unguarded below is
-    worse than an unlisted one: the docstring then asserts coverage the test lacks.
+    ⛔ TWO OF THE NEEDLES BELOW ARE NOT RETRACTED PHRASINGS BUT DISCLOSURE DELETIONS (review
+    P3). A blocklist can only catch a claim that came BACK; it cannot see a site that went
+    SILENT — the sentence simply deleted, leaving the retracted statement unstated rather
+    than contradicted. Two corrected field docs were exactly that: dropping the stillness
+    clause from `has_live_job`'s `None` bullet, or restoring `pr_running_unmeasured_unprobed`'s
+    "the CANONICAL list lives in `read_run_live_job`'s Returns block", both left the suite
+    green (measured). Their needles match the pre-fix JOIN the deletion recreates, so the
+    silence and the revert are the same failure and are both caught.
 
     RESIDUAL, stated plainly: this catches the phrasings that have actually shipped, not a
     novel paraphrase — a NEW wrong wording, or a revert that keeps the wrong claim but
@@ -2376,19 +2383,33 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # the hyphen-joined form, which the wrap-free needle carries.
         "all-jobs -completed is the PROOF that EXCLUDES a run from `pr_running`",
         "all-jobs-completed is the PROOF that EXCLUDES a run from `pr_running`",
+        # the `classify_queue` RETURNED-DICT twin of the comment above (review P2). It was
+        # corrected by this change and NO needle matched it: silencing its stillness clause
+        # left the suite green. Anchored on the join the silence recreates; "read as
+        # `completed`" alone is retained by the corrected sentence and would collide.
+        "read as `completed` — a run GitHub has stopped driving",
+        # the has_live_job `None` bullet's stillness clause (review P3) — a DISCLOSURE
+        # deletion: dropping the clause re-joins "not provably complete" to the budget arm.
+        "that is not provably complete, or a run the probe BUDGET",
+        # the CANONICAL-list claim this change RETRACTED (review P3): a single list cannot
+        # own a set that spans the callee, the caller's settle gate, and the budget split.
+        "The CANONICAL list lives in `read_run_live_job`'s Returns block",
         # the merged claim that either state is a CLOSED avenue: for a settle-downgraded
         # run /cancel is ACCEPTED and destructive
         "accepts a run in either state",
         "accepts a repair in either state",
-        # the OPS DOC's own shipped paragraph (review P2-1). It is one of the ten sites
-        # this rule is stated on, and NO other needle matched what it actually shipped,
-        # so reverting it put both errors back — the wrong lever AND the merged
-        # cancelled-avenue claim — with the suite green. Clause-level, not a fragment:
-        # "by being probed" alone now collides with the corrected workflow block.
+        # the OPS DOC's own shipped paragraph (review P2-1). NO other needle matched what
+        # it actually shipped, so reverting it put both errors back — the wrong lever AND
+        # the merged cancelled-avenue claim — with the suite green. Clause-level, not a
+        # fragment: "by being probed" alone now collides with the corrected workflow block.
         "i.e. by the budget lever above, and neither `/cancel` nor `/force-cancel` "
         "accepts a repair",
-        # the merged-avenue claim on EITHER surface, in the wording both shipped
-        "neither `/cancel` nor `/force-cancel` accepts a repair",
+        # ⛔ AND THE STANDALONE "neither `/cancel` nor `/force-cancel` accepts a repair" IS
+        # NOT HERE (review P3): it is TRUE of the frozen population the corrected doc
+        # describes (both endpoints answer 409 there), so with case and `*` normalised it
+        # reds CORRECT prose — measured. The shipped doc wording is caught by the
+        # clause-anchored needle above and the workflow's by "accepts a repair in either
+        # state", so nothing that shipped loses coverage.
         # a COUNT claim that contradicts this module's own emitted sentence: the field
         # counts the budget-unreached runs too (the split is emitted separately). Anchored
         # to the CLAIM, not to the bare count: "three causes, one bucket" alone is a true
