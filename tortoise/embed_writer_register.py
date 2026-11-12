@@ -993,9 +993,14 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: `update_point`, which skips its own derive for the same key (`"embedding" in props`) and merges
 #: it verbatim. So on the create path the gate RUNS and its verdict is OVERWRITTEN, and where the
 #: caller supplied a vector on the update path it is not called at all — including `create_point`'s
-#: own `dedup=True` delegation, which is the MCP door's default. A content-only revise DOES reach
-#: `encode_for_row` (`update_point` derives when `content` arrives without `embedding`), which is
-#: part of why `update_point` classes as `gated`; neither outcome is "the gate decides this vector".
+#: own `dedup=True` delegation, which is the MCP door's default. A content-only revise WITH
+#: NON-EMPTY `content` DOES reach `encode_for_row` (`update_point` derives when `content` arrives
+#: without `embedding`), which is part of why `update_point` classes as `gated`; ⛔ a `content=""`
+#: revise takes the SAME branch and does NOT reach the seam — the derive is guarded by
+#: `if _new_content else None`, so it sets `props["embedding"] = None` and WIPES the vector with no
+#: `encode_for_row` call (pinned by `tests/test_update_point_none_content_5240.py`). An enforcement
+#: author reading "every content revise is gated" misses exactly that path; neither outcome is "the
+#: gate decides this vector".
 #: ⛔ Symbols only, never a line number: this block is comment prose
 #: and nothing re-derives it, which is the rot `WriterClass.reason`'s rule exists to prevent.
 #: ⛔ The difference between those two sentences is load-bearing and is stated in the module
@@ -1005,8 +1010,10 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: or an INTERPOLATED property name) are found BY SHAPE in no case — where one of them does reach the
 #: population it is for ANOTHER reason, and the live instances named here differ exactly so:
 #: `sdk::_update_entity` (a map-merge) arrives as an `unresolved_write` and is declared here as
-#: `exempt` under the named `#4094` exemption, `sdk::update_point`'s computed key arrives as `gated`
-#: and is therefore declared nowhere, and `cache_projection::node_statement`'s interpolated property
+#: `exempt` under the named `#4094` exemption, `sdk::update_point` — the SECOND map-merge instance,
+#: `SET n += $props` — arrives as `gated` (it also calls `encode_for_row`, which classes it before
+#: any write predicate runs) and is therefore declared nowhere, and
+#: `cache_projection::node_statement`'s interpolated property
 #: arrives not at all. `#11274` NAMES the shape discovery will not decide
 #: (`UNDECIDABLE_WRITE_SHAPES`) instead of guessing at it.
 #: Forward — every writer DISCOVERY FINDS outside the gate is declared (never "every writer", see the

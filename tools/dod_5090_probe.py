@@ -318,8 +318,11 @@ UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
         "whether the merged map carries an `embedding` is DATA FLOW, not syntax: "
         "60 functions in `tortoise/` merge a props map and almost none can carry a "
         "vector, so a syntactic rule would force dozens of declarations that assert "
-        "nothing. The live instance is `sdk._update_entity`, which is DECLARED as an "
-        "exempt writer under the NAMED `#4094` exemption instead"
+        "nothing. There are TWO live instances, and they are dispositioned differently: "
+        "`sdk._update_entity` carries the NAMED `#4094` exemption in the register, and "
+        "`sdk.update_point` merges through `n += $props` in its promote arm while ALSO "
+        "calling `encode_for_row` — so discovery classes it `gated` before any write "
+        "predicate runs and it owes (and carries) no declaration (#11398)"
     ),
 }
 

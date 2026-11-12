@@ -456,8 +456,12 @@ def test_the_register_names_the_shapes_its_discovery_cannot_see():
     * CONTAINER KEYS are decided on the AST (`probe._writes_an_embedding`), so they must NOT be in
       the blind list any more;
     * MAP-MERGES (`SET n += $p`) are data flow, not syntax, so they stay blind — and the live
-      instance (`sdk._update_entity`) is DECLARED under a named exemption instead of being read
-      as "no write". That is the difference between a scoped claim and a slogan.
+      instances are dispositioned, each in its own way instead of being read as "no write":
+      `sdk::_update_entity` is DECLARED here under the named `#4094` exemption, and
+      `sdk::update_point` merges through `n += $props` while also calling `encode_for_row`, so
+      discovery classes it `gated` and it owes no declaration. ⛔ Singular wording here was the
+      `#11398` defect: one instance named for a shape that has two reads as "this is the whole
+      population". That is the difference between a scoped claim and a slogan.
     """
     blind = probe.UNDECIDABLE_WRITE_SHAPES
     assert blind, "discovery's blind spot must be NAMED in the instrument, never implied"
@@ -470,6 +474,22 @@ def test_the_register_names_the_shapes_its_discovery_cannot_see():
     )
     live = register.classify("tortoise.sdk::_update_entity")
     assert (live.cls, live.owner_issue) == (EXEMPT, "#4094"), live
+    # ⛔ TWO instances, dispositioned DIFFERENTLY, and both named in the published Blind spot note
+    # (`#11398`): the singular wording read as "this is the whole population", while the second
+    # instance — `sdk::update_point`, `n += $props` in its promote arm — is `gated` because it also
+    # calls the seam, so it owes (and carries) no declaration. Re-derived from the instrument here
+    # rather than trusted from the prose.
+    shape_note = probe.UNDECIDABLE_WRITE_SHAPES["map-merge (`SET n += $p`)"]
+    for instance in ("_update_entity", "update_point"):
+        assert instance in shape_note, (
+            f"the map-merge blind-spot note names no {instance} — a live instance a reader of the "
+            f"row cannot find is the #11398 defect: {shape_note!r}")
+    assert not register.is_declared("tortoise.sdk::update_point"), (
+        "a `gated` writer owes no declaration, and declaring one would misreport WHERE its vector "
+        "lands as an outside-gate judgement")
+    assert probe.embedding_writers()["tortoise.sdk::update_point"]["kind"] == "gated", (
+        "the second map-merge instance is only dispositioned as 'gated, declared nowhere' while it "
+        "classes that way — re-derive it instead of asserting the sentence")
     assert "UNDECIDABLE_WRITE_SHAPES" in (register.__doc__ or ""), (
         "the register's own docstring must scope its claim to what discovery can decide — a "
         "measured limitation nobody reading the register can see is the claim being wider than "
