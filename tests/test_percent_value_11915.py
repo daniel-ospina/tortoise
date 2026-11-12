@@ -221,6 +221,49 @@ class TestThePayloadWalk:
         assert refuse_malformed_percent_in_payload(
             {"a": node, "b": loop}) is None
 
+    @pytest.mark.parametrize("offset", [0, 1], ids=["at-the-bound", "one-past"])
+    def test_the_bound_itself_still_grades(self, offset):
+        """The END of the range is pinned, not only ``bound + 1`` (#11992).
+
+        ⛔ ``test_a_payload_deeper_than_the_bound_is_refused_not_skipped`` builds
+        its payload ``PAYLOAD_MAX_DEPTH + 1`` deep, so ``>`` and ``>=`` BOTH
+        raise and the mutant is invisible — measured: flipping the comparison to
+        ``>=`` left the whole suite green (239 passed), i.e. the bound was
+        unfalsifiable while money's equivalent guard was pinned. The
+        discriminating half is the payload AT the bound: the walk must GRADE it,
+        not refuse it, because refusing it would be a false block on a write the
+        gate exists to let through. Money's sibling pin
+        (``test_the_bound_itself_still_grades``) is parametrised the same way.
+
+        ``depth == PAYLOAD_MAX_DEPTH`` is accepted, ``depth == MAX + 1`` is
+        refused — both halves are asserted, so neither ``>`` nor ``>=`` can
+        satisfy the pair.
+        """
+        from tortoise.money import PAYLOAD_MAX_DEPTH
+
+        depth = PAYLOAD_MAX_DEPTH + offset
+        # ⛔ A FLAT base, so the wrap count IS the depth the walk sees (it seeds
+        # `(payload, 0)` and pushes children at `depth + 1`): the sibling test's
+        # `{"leaf": {"content": ...}}` base contributes one level of its own,
+        # which is why it can only be run one-past and never AT the bound.
+        payload: dict = {"content": "no percent anywhere"}
+        for _ in range(depth):
+            payload = {"nest": payload}
+
+        if offset == 0:
+            assert refuse_malformed_percent_in_payload(payload) is None, (
+                f"a percent-free payload exactly at the bound (depth {depth}, "
+                f"bound {PAYLOAD_MAX_DEPTH}) was refused by the DEPTH rule — the "
+                "bound is inclusive, so `depth > PAYLOAD_MAX_DEPTH` must not "
+                "fire at the bound itself")
+            return
+
+        with pytest.raises(PercentValueError) as caught:
+            refuse_malformed_percent_in_payload(payload)
+        assert "nests deeper than" in str(caught.value), (
+            f"a payload one level PAST the bound (depth {depth}) was not refused "
+            f"by the depth rule: {caught.value!r}")
+
     def test_a_payload_deeper_than_the_bound_is_refused_not_skipped(self):
         """A skip would be a silent fail-open: the walk stops looking and the
         gate reports clean. It refuses instead, and the message reports the
