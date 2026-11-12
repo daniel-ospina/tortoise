@@ -585,21 +585,46 @@ customer-facing territory that owns per-graph permissions.
 > zero records (a tombstone counts; the catalog arm of `available` does not).
 > ⚠️ The predicate derives the record set from the two lists the payload carries
 > rather than from the resolved set itself, so it cannot see a tombstone the
-> catalog arm offers as `available` instead of `removed`. **That shape is
-> reachable today, and a REBUILD produces it:** `:PackSelection` is not enrolled
-> in the projection's `_config_classes()`, so `rebuild_all` keeps the
-> tombstoned `:PackInstall` row and drops the marker. Measured — before
-> `configured: true, revision: 1`; after `configured: false, revision: 0` with a
-> `removed` row, which reads as the catalog union while the resolved set is that
-> one removed namespace. The same marker loss silently RE-ADMITS a pack an admin
-> removed and resets `revision`. Preserving the marker fixes both — #9752 — and
-> the SHAPE of that fix matters: `:PackSelection` is ONE node per graph with no
-> identity property, so it is a SECTION like `:TeamMeta`, NOT a
-> `_config_classes()` row. The registry keys on a single string identity property
-> and `_capture_config_snapshot` silently skips a class whose identity value is
-> not a string, so "enrol it as a config class" would capture nothing and leave
-> both defects in place. Surfacing the record count — or `namespaces is None`
-> itself — on the payload would make the client exact in the meantime. Separately,
+> catalog arm offers as `available` instead of `removed`. **A REBUILD used to
+> produce exactly that shape** — `:PackSelection` was not carried by the
+> projection, so `rebuild_all` kept the tombstoned `:PackInstall` row and
+> dropped the marker. Measured before the fix: `configured: true, revision: 1`
+> → `configured: false, revision: 0` with a `removed` row, which reads as the
+> catalog union while the resolved set is that one removed namespace; the same
+> marker loss silently RE-ADMITTED a pack an admin removed and reset `revision`.
+> **Fixed by #9752** — the marker now rides a `pack_selection` sidecar SECTION
+> (`projection`, snapshot v7), so the JOURNAL rebuild (`rebuild_all` / `rebuild`)
+> preserves `configured` and `revision` and cannot re-admit a removed pack — on a
+> graph rebuilt IN PLACE. ⚠️ The in-memory `rebuild()` engine restores the MARKER
+> but not the `:PackInstall` registry (only `rebuild_all` captures that), so there
+> the approved set resolves over an empty registry — data leg only — and a write of
+> a previously-approved kind can refuse until the packs are re-pinned; the engine
+> reports that at WARNING instead of logging that the pack set survived.
+> **One journal route does not**: `tortoise migrate-db`
+> replays the legacy graph's journal into a freshly created target, and the
+> preservation sections are captured from the graph that is about to be wiped —
+> the empty target — so it drops the marker (and the `:PackInstall` rows with it)
+> and the migrated graph reads as the catalog union. That route now reports an
+> UNKNOWN state on `pack_selection_gap` instead of a verified success — and the
+> label it prints names the right cause: the CAPTURE SOURCE (this route's own
+> empty capture), never `pre-preservation/UNKNOWN`, which is reserved for a pre-v7
+> rescue file beside the SOURCE's event log. Re-checking the approved set after a
+> migration is the safe habit until **#11866** gives the route a capture source
+> that is not the target. The
+> scope is deliberate: the RECORD-sourced `rebuild_from_record` still DROPS the
+> class (it reads no cache — *"the cache is a destination, never an input"*),
+> and that drop is named rather than silent in `tortoise/cache_projection.py`
+> and `docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md` §0.5,
+> where `:PackSelection` is the eighth graph-only class. The SHAPE of that fix matters:
+> `:PackSelection` is ONE node per graph with no identity property, so it is a
+> SECTION like `:TeamMeta`, NOT a `_config_classes()` row (the registry keys on
+> a single string identity property and `_capture_config_snapshot` silently
+> skips a class whose identity value is not a string, so "enrol it as a config
+> class" would capture nothing and leave both defects in place). The predicate's
+> own inexactness survives that fix and is narrower: it still derives the record
+> set from two lossy lists, so surfacing the record count — or
+> `namespaces is None` itself — on the payload is what would make the client
+> exact. Separately,
 > `pack_manifest_store.delete_tenant_manifest` sets `removed` without moving the
 > marker and has no caller or route today — latent, and the same preservation
 > covers it.
