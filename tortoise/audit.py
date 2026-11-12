@@ -1161,17 +1161,33 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             return lead + (
                 "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: this operator's "
                 "direction transfers NO confidence by design, so archiving loses "
-                "no belief — but " + anchor + " over a stale edge that is still "
-                "there, and the successor inherits nothing until this input is "
-                "deleted or re-pointed onto it")
+                "no belief — and re-pointing or deleting the input restores none "
+                "either, because a neutral operator carries nothing in either "
+                "direction. But " + anchor + " over a stale edge that is still "
+                "there, which is leftover wiring to clean up")
         return lead + (
             "SILENCES THIS CHECK WITHOUT CLEARING THE DEFICIT: EP still strips that "
-            "terminal input, so the factor is re-scored over its REMAINING inputs "
-            "— ONE left is skipped as degenerate, two or more run without it, and a "
-            "directional operator is skipped outright when this input is its idx-0 "
-            "source (``source_stripped``) — and " + anchor + " over a factor this "
-            "claim still does not fund. The edge must still be deleted or "
-            "re-pointed onto whatever now carries it")
+            "terminal input and re-scores the operator over its REMAINING inputs — "
+            "ONE left is skipped as degenerate (``source_stripped`` instead where "
+            "the input edges carry an ``idx`` and the one taken is a directional "
+            "operator's idx-0 source), TWO OR MORE run without it, and an operator "
+            "whose ONLY input this was has no factor to begin with — so either way "
+            "the claim funds nothing through this edge, while " + anchor + ". The "
+            "edge must still be deleted or re-pointed onto whatever now carries it")
+
+    def _active_edge_severity(s: dict) -> str:
+        """HIGH for a row where belief is at stake, MEDIUM for leftover wiring.
+
+        ⛔ The check's own rationale ("on an :Object the successor inherits nothing
+        BY CONSTRUCTION, so every finding here is the measured defect") is VOID for a
+        NEUTRAL operator (``direction='-'``): ``_update_nary_factor`` returns before
+        any pair math, so nothing is transferred, nothing is lost, and the stale
+        edge is the leftover-wiring reading check 4 uses ``medium`` for. Emitting
+        ``high`` there is a false alarm the same finding's ``detail`` argues against
+        in its own words ("no belief is lost here … safe to delete").
+        """
+        fwd, bwd = direction_flows(s["direction"])
+        return "high" if (fwd or bwd) else "medium"
 
     def _active_edge_fix(s: dict) -> str:
         """The repair for this row, chosen by the state the row carries.
@@ -1196,9 +1212,20 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             only the delete.
         """
         q = _quoted(s["sup_id"]) if s["sup_id"] is not None else _quoted(s["sup_name"])
-        # The endpoint that CARRIES the operator shape — never the superseded anchor.
-        _shaped = (_quoted(s["active_id"]) if s["active_id"] is not None
-                   else _quoted(s["sup_name"]))
+        # ⛔ The endpoint that CARRIES the operator shape — never the superseded
+        # anchor, and never a NAME standing in for one. ``tortoise_update_entity``
+        # keys on the ID, so with no ``active_id`` there is no call to emit: the
+        # same arm already says so in its ``detail`` ("that endpoint carries no
+        # identity, so it cannot be named by the repair"). Emitting the superseded
+        # Object's NAME here addressed the wrong node AND could not resolve — a
+        # repair that always fails is worse than none (#7819).
+        if s["active_id"] is not None:
+            _shape_repair = ("clearing the shape — tortoise_update_entity("
+                             f"{_quoted(s['active_id'])}, {{'is_operator': False}}) —")
+        else:
+            _shape_repair = ("clearing the shape on the endpoint that carries it "
+                             "(which carries no identity, so no repair can name "
+                             "it)")
         if s["sup_id"] is None:
             # ⛔ ``tortoise_update_entity`` keys on the ID, so embedding a NAME in its
             # first argument addresses a key that does not exist. Only a raw
@@ -1246,8 +1273,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 fix += ("; and no edge rewrite repairs this — EP builds NO factor "
                         "in EITHER arm (the operator arm needs the :Point label, the "
                         "direct-edge arm refuses an operator-shaped endpoint): "
-                        f"clearing the shape — tortoise_update_entity({_shaped}, "
-                        "{'is_operator': False}) — or wiring this claim through a "
+                        f"{_shape_repair} or wiring this claim through a "
                         ":Point operator is what restores the support")
             elif not s["is_operator"]:
                 fix += ("; and this is a DIRECT edge, so there is no factor to "
@@ -1273,10 +1299,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             return prefix + (
                 "No edge rewrite repairs this: EP builds NO factor in either arm "
                 "(the operator arm needs the :Point label, the direct-edge arm "
-                "refuses an operator-shaped endpoint), so clearing the shape — "
-                f"tortoise_update_entity({_shaped}, {{'is_operator': False}}) — or "
-                "wiring this claim through a :Point operator is what restores the "
-                "support" + tail)
+                "refuses an operator-shaped endpoint), so "
+                f"{_shape_repair} or wiring this claim through a :Point operator "
+                "is what restores the support" + tail)
         if not s["is_operator"]:
             return prefix + (
                 f"Re-point this {s['edge_type']} edge off {q} onto the successor "
@@ -1327,7 +1352,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     _record("superseded_object_active_edges", [
         AuditIssue(
             issue_type="superseded_object_active_edges",
-            severity="high",
+            severity=_active_edge_severity(s),
             node_id=str(s["sup_id"]) if s["sup_id"] is not None else str(s["sup_name"]),
             detail=_active_edge_detail(s),
             # ⛔ The §3.1 disposition is appended HERE, once, so no arm added

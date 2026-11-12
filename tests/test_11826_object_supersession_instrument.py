@@ -396,7 +396,7 @@ def test_a_successorless_direct_edge_names_the_wiring_it_silences(sdk):
     the first loses a belief EP had actually assembled. One sentence covering both
     was FALSE on one of them, so the clause branches and this pins the second arm
     (the first is pinned by
-    ``test_a_successorless_object_is_repaired_by_naming_the_successor``, which
+    ``test_a_successorless_supersede_still_gets_a_performable_repair``, which
     measures ``skipped_factors == ['degenerate']``).
     """
     o = _obj(sdk, "PolicyV1")
@@ -417,8 +417,16 @@ def test_a_successorless_direct_edge_names_the_wiring_it_silences(sdk):
     fix = issues[0].fix
     assert "No :Object answers the successor name" in fix, fix
     assert "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING" in fix, fix
-    assert "EP still strips the terminal input" not in fix, (
-        "a direct edge builds no factor, so nothing is stripped: " + fix)
+    # ⛔ The property the docstring is about: no deficit is claimed on this row.
+    # An assertion on a phrase only ONE arm emits would stay green if the direct
+    # row took the operator arm (#12111 review).
+    assert "CLEARING THE DEFICIT" not in fix, (
+        "a direct edge builds no factor, so no deficit is at stake: " + fix)
+    assert "EP still strips" not in fix, fix
+    # The §3.1 triage rides the emission site, so a successorless row carries it
+    # too — this is the arm that would go silent if `+ _triage(s)` were moved into
+    # the resolvable branch (#12111 review).
+    assert "ONTOLOGY §3.1's per-edge triage" in fix, fix
     # Archiving does silence the CHECK (the finding goes away) — the clause says
     # so, and this measures it rather than trusting the sentence.
     sdk.update_entity(o["id"], status="archived")
@@ -456,9 +464,50 @@ def test_a_successorless_neutral_operator_loses_no_belief_by_archiving(sdk):
     assert "degenerate" not in fix, (
         "neither leg flows, so no factor is stripped and nothing is degenerate: "
         + fix)
+    # ⛔ A high row would assert a lost belief the same finding's detail denies; the
+    # neutral arm is leftover wiring, the reading check 4 uses `medium` for.
+    assert issues[0].severity == "medium", issues[0].severity
+    assert "ONTOLOGY §3.1's per-edge triage" in fix, fix
     sdk.update_entity(v1["id"], status="archived")
     assert _issues(sdk, "superseded_object_active_edges") == [], \
         "archiving did not clear the finding — the clause's premise is wrong"
+
+
+def test_a_unary_operator_claims_no_degenerate_skip(sdk):
+    """An operator whose ONLY input is the superseded endpoint loses NOTHING.
+
+    ``ep.py`` records the degenerate skip behind ``elif len(input_ids) < 2 <=
+    len(full_inputs)``, so with a one-input operator the ``2 <=`` half is false and
+    no record is appended. A clause asserting a ``degenerate`` skip on that row
+    would send the reader to a diagnostic that cannot exist — the same contradiction
+    the mechanism split exists to remove (#12111 review). The fixture form is the
+    one ``test_an_operators_arity_is_not_asserted`` already establishes.
+    """
+    v1 = _obj(sdk, "PolicyV1")
+    sdk.create_operator("IMPL", v1["id"], [], direction="->")
+    assert _q(sdk, "MATCH ()-[r:IMPL]->() RETURN count(r)", {}) == [[1]], \
+        "fixture drifted: the operator has more than one input"
+    # SUPERSEDED with a successor name no Object answers: the successorless arm.
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
+            "o.supersededBy = 'PolicyGone'", {"i": v1["id"]})
+
+    run = sdk.compute_confidence(require_calibration=False)
+    assert not run.get("skipped_factors"), (
+        "a one-input operator going terminal records no skip: "
+        + repr(run.get("skipped_factors")))
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues, "the one-input operator's stale edge is still wiring"
+    fix = issues[0].fix
+    assert "SILENCES THIS CHECK WITHOUT CLEARING THE DEFICIT" in fix, fix
+    # The clause must NAME the zero-remaining case rather than assert a skip the
+    # engine measured as absent.
+    assert "has no factor to begin with" in fix, (
+        "a one-input operator's strip records no skip, so the clause must say so: "
+        + fix)
+    assert "TWO OR MORE run without it" in fix, fix
+    assert "ONTOLOGY §3.1's per-edge triage" in fix, fix
 
 
 def test_a_supersession_chain_points_the_repair_at_the_live_head(sdk):
