@@ -1590,19 +1590,21 @@ def test_an_op_type_only_successor_is_read_by_the_operator_arm(sdk):
     """The two EP successor predicates disagree, so the row's LANE picks the test.
 
     ``_non_operator`` (the OPERATOR-INPUT arm) refuses only the FLAG, so an
-    ``op_type``-only successor IS read there — measured on a TWO-input operator:
-    ``iterations`` 11 after the prescribed re-point, the successor in
-    ``confidences``, ``skipped_factors: None``. Applying the direct arm's stricter
-    ``_non_op`` to this lane announced "OPERATOR-SHAPED … target a CLAIM successor"
-    about a successor EP reads perfectly, i.e. it told the reader to abandon a
-    repair that works. ⛔ Without this test the per-lane split can be reverted
-    (``_succ_refused``/``_next_refused`` back to the shape test) with the whole
-    file still green — measured.
+    ``op_type``-only successor IS read there — measured after the prescribed
+    re-point: ``iterations`` 12, the successor among the ``confidences``,
+    ``skipped_factors`` absent. Applying the direct arm's stricter ``_non_op`` to
+    this lane announced "OPERATOR-SHAPED … target a CLAIM successor" about a
+    successor EP reads perfectly, i.e. it told the reader to abandon a repair that
+    works. ⛔ Without this test the per-lane split can be reverted
+    (``_succ_refused``/``_next_refused`` back to the shape test) with the whole file
+    still green — measured.
 
-    ⛔ TWO inputs on purpose: an operator left with ONE is below EP's floor
-    (``len(input_ids) < 2``) and returns a hydrated 0.5 STUB, so a one-input fixture
-    passes a bare ``assert run["confidences"]`` whether or not the successor was
-    read at all.
+    ⛔ THREE input edges, not two: ``create_operator`` promotes its source Point into
+    ``idx 0`` (``inputs = [source_id] + target_ids``, measured — ``count(r)`` is 3
+    here), so dropping the successor leaves TWO live inputs. That is why
+    ``iterations``/``skipped_factors`` do NOT move on this fixture and only the
+    MEMBERSHIP assertion discriminates — a one-input operator would instead return a
+    hydrated 0.5 stub, which passes a bare ``assert run["confidences"]`` either way.
     """
     p = sdk.create_point("statement", "the gateway enforces the policy")
     v1 = _obj(sdk, "PolicyA")
@@ -1922,8 +1924,9 @@ def test_a_zero_flag_successor_is_operator_shaped(sdk):
     # ⛔ The quoted test follows the ROW's lane: this row is an OPERATOR input, so
     # it is ``_non_operator`` — which is why a stored ``0`` makes the successor
     # operator-SHAPED (it is present and not the boolean ``false``).
-    assert ("EP's operator-input test: ``is_operator`` is present and not "
-            "``false``") in issues[0].detail, issues[0].detail
+    assert ("EP's operator-input test admits ``is_operator`` absent or "
+            "``false``; this one is present and not ``false``") in \
+        issues[0].detail, issues[0].detail
 
 
 # ── 5. a consequence is the LADDER, never an arity (#12111 round 13) ──

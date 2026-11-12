@@ -1070,8 +1070,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # absent flag — so "is_operator is not false" alone would read as a positive
         # match on a flagless successor — and calling it EP's "shape test" is the
         # conflation of SHAPE and PREDICATE that ``_4b_state`` warns against.
-        return ("(EP's operator-input test: ``is_operator`` is present and not "
-                "``false``)" if s["is_operator"]
+        return ("(EP's operator-input test admits ``is_operator`` absent or "
+                "``false``; this one is present and not ``false``)"
+                if s["is_operator"]
                 else "(EP's shape test: ``is_operator`` is not ``false`` — or an "
                      "``op_type`` is set)")
 
