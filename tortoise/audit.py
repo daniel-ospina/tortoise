@@ -1093,6 +1093,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             only the delete.
         """
         q = _quoted(s["sup_id"]) if s["sup_id"] is not None else _quoted(s["sup_name"])
+        # The endpoint that CARRIES the operator shape — never the superseded anchor.
+        _shaped = (_quoted(s["active_id"]) if s["active_id"] is not None
+                   else _quoted(s["sup_name"]))
         if s["sup_id"] is None:
             # ⛔ ``tortoise_update_entity`` keys on the ID, so embedding a NAME in its
             # first argument addresses a key that does not exist. Only a raw
@@ -1128,9 +1131,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                    ":Point operator (or the shape cleared) regardless"
                    if (s["shape"] and not s["is_operator"]) else
                    f"Archiving it instead — tortoise_update_entity({q}, {{'status': "
-                   f"'archived'}}) — does NOT clear this: EP strips a terminal input "
-                   f"either way, so the edge must still be deleted or re-pointed onto "
-                   f"whatever now carries the claim"))
+                   f"'archived'}}) — does NOT clear this: the direct-edge row is "
+                   f"excluded BEFORE evaluation while the endpoint is terminal, so no "
+                   f"factor is built and no skipped-factor record appears either way. "
+                   f"The edge must still be deleted or re-pointed onto whatever now "
+                   f"carries the claim"))
             if s["shape"] and not s["is_operator"]:
                 # ⛔ The SAME neither-arm fact the resolvable path states, in the
                 # successorless one: a shaped non-``:Point`` endpoint is in neither
@@ -1138,12 +1143,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # changes nothing and a re-audit reads CLEAN over a claim whose
                 # support was never there.
                 fix += ("; and no edge rewrite repairs this — EP builds NO factor "
-                        f"for {q} in EITHER arm (the operator arm needs the :Point "
-                        "label, the direct-edge arm refuses an operator-shaped "
-                        f"endpoint): clearing the shape — "
-                        f"tortoise_update_entity({q}, {{'is_operator': False}}) — or "
-                        "wiring this claim through a :Point operator is what "
-                        "restores the support")
+                        "in EITHER arm (the operator arm needs the :Point label, the "
+                        "direct-edge arm refuses an operator-shaped endpoint): "
+                        f"clearing the shape — tortoise_update_entity({_shaped}, "
+                        "{'is_operator': False}) — or wiring this claim through a "
+                        ":Point operator is what restores the support")
             elif not s["is_operator"]:
                 fix += ("; and this is a DIRECT edge, so there is no factor to "
                         "re-point — write the equivalent edge onto that successor "
@@ -1161,13 +1165,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # ⛔ NEITHER arm: "write the equivalent edge" would change nothing, so the
             # repair is to clear the SHAPE or route the claim through a :Point
             # operator — measured: re-pointing leaves EP building no factor at all.
+            # ⛔ The shape belongs to the ACTIVE ENDPOINT, never to the superseded
+            # anchor ``q`` (``active_id`` differs by construction: the anchor is
+            # ``status='superseded'`` while ``active`` must be live), so a call on
+            # ``q`` would set the flag on a node that never carried it.
             return prefix + (
-                f"No edge rewrite repairs this: EP builds NO factor for {q} in "
-                "either arm (the operator arm needs the :Point label, the "
-                "direct-edge arm refuses an operator-shaped endpoint), so clearing "
-                f"the shape — tortoise_update_entity({q}, {{'is_operator': False}}) "
-                "— or wiring this claim through a :Point operator is what restores "
-                "the support" + tail)
+                "No edge rewrite repairs this: EP builds NO factor in either arm "
+                "(the operator arm needs the :Point label, the direct-edge arm "
+                "refuses an operator-shaped endpoint), so clearing the shape — "
+                f"tortoise_update_entity({_shaped}, {{'is_operator': False}}) — or "
+                "wiring this claim through a :Point operator is what restores the "
+                "support" + tail)
         if not s["is_operator"]:
             return prefix + (
                 f"Re-point this {s['edge_type']} edge off {q} onto the successor "

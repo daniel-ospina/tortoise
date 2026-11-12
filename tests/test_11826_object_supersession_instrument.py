@@ -1053,7 +1053,15 @@ def test_a_shaped_endpoint_with_no_successor_gets_no_edge_rewrite(sdk):
         "the detail says no factor exists in either arm, so an edge rewrite cannot "
         "help: " + fix)
     assert "no edge rewrite repairs this" in fix, fix
-    assert "'is_operator': False" in fix, fix
+    # ⛔ The shape belongs to the ACTIVE endpoint, never to the superseded anchor: a
+    # call on the anchor sets the flag on a node that never carried it, so APPLY the
+    # emitted call and re-measure rather than string-matching it (#12111 review).
+    assert f"tortoise_update_entity('{actor['id']}', {{'is_operator': False}})" in fix, (
+        "the repair must address the shaped endpoint: " + fix)
+    assert f"tortoise_update_entity('{v1['id']}', {{'is_operator': False}})" not in fix
+    sdk.update_entity(actor["id"], is_operator=False)
+    assert _q(sdk, "MATCH (a {id:$i}) RETURN a.is_operator", {"i": actor["id"]}) == \
+        [[False]], "the emitted call did not clear the shape"
     # The archive sentence must not claim a strip that never happens either.
     assert "EP strips a terminal input either way" not in fix, fix
 
