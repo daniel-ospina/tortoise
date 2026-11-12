@@ -112,10 +112,15 @@ _BLOG_HOSTS_DIFFER = COMPANY != TORTISE
 # blog — it 301s /blog* to the company origin (`_middleware.ts:513-521`,
 # `_lib.ts:63-68`) — because it is the host robots.txt names TODAY, and grading it is
 # the whole point of the as-written arm. Keep this list in step with #11766's repoint.
+# ⛔ EXACTLY the origins that SERVE the blog, and no `www.` member (#11976 review, round
+# 7): `www.premiselabs.co` was listed and does not exist — NXDOMAIN, absent from
+# `_middleware.ts`'s own `COMPANY_HOSTS` (`{"premiselabs.co"}`, line 265) and absent
+# from the rest of the repo — so a lane that read the list as "these are production
+# origins", pointed `BASE_URL` at it, and got a DNS failure would read that as a broken
+# blog rather than a bogus target. A host nothing deploys does not belong in a
+# production-origin allowlist.
 # Membership is tested against `.hostname` (lower-case, port-stripped), not `.netloc`.
-_PRODUCTION_ORIGIN_HOSTS = frozenset(
-    {"premiselabs.co", "www.premiselabs.co", "tortoise.premiselabs.co"}
-)
+_PRODUCTION_ORIGIN_HOSTS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
 if os.environ.get("ALLOW_PROD") != "1" and any(
     h.startswith("https://") for h in (COMPANY, TORTISE, APP)
 ):
