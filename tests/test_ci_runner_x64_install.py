@@ -3645,10 +3645,11 @@ def test_the_bare_runbook_shorthand_lands_on_what_it_names():
 
     Non-vacuity, measured: with the pre-fix handle (`:773-779`) the COVERAGE arm (`assert not
     unknown`) reds first and names `[773]` — `773` is not a key of `_SHORTHAND_RUNBOOK_ANCHORS`, so
-    the LANDING loop is never reached; with the fixed handle all three arms pass. Every arm reds
-    the same revert, so the guard's power does not vary by which one reports it — but the
-    attribution is what a fixer mutating this pin will look for, and "the LANDING arm reds" would
-    have sent them to the wrong assert.
+    the LANDING loop is never reached. The STALE arm is the second reporter: anchor `773` without
+    re-citing it and it reds on `[783]`. The LANDING loop reports this revert in NEITHER
+    configuration — which is why the attribution matters, and why "the LANDING arm reds" would have
+    sent a fixer to an assert that cannot fire for the change they made. With the fixed handle all
+    three arms pass.
     """
     doc = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
 
