@@ -2559,6 +2559,64 @@ def test_a_letter_added_to_either_tally_list_is_compared_in_every_spelling(
             ), f"the complement list must be compared too: {new!r} -> {problems}"
 
 
+def test_a_code_or_italic_letter_is_read_like_every_other_markup(
+    tmp_path, monkeypatch
+):
+    """FAILS if a sentence can QUALIFY on its markup and then contribute no letters.
+
+    The candidate gate has always accepted a letter written bold, code, italic or bare,
+    but the extractor read only `**(x)**`, `**x**`, `(x)` and a bare member. So
+    `, and `a` too` (code) and `, and *a* too` (italic) made the sentence a candidate and
+    then contributed NOTHING, and the comparison silently under-counted.
+
+    Measured identical at two heads, on four spellings — so this was never introduced by
+    one lane: appending `, and ` + backtick-a-backtick + ` too` or `, and *a* too` to the
+    tally sentence returned `--check` rc 0 over a page naming a STILL-TRUE row as
+    overtaken, and `**(j)**, and ` + backtick-c-backtick + ` still read as written` did
+    the same on the complement arm. §8 of the page promises a letter may be written
+    "bold, code, italic or bare", so the doc described a comparison the code did not make.
+
+    The four spellings that already worked are asserted beside them: this pin must not be
+    satisfiable by a fix that trades one hole for another.
+    """
+    tally_edits = [
+        "and **(l)** are **DRIFTED**, and `a` too.",
+        "and **(l)** are **DRIFTED**, and *a* too.",
+        "and **(l)** are **DRIFTED**, and **(a)** too.",
+        "and **(l)** are **DRIFTED**, and a, f too.",
+    ]
+    for new in tally_edits:
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _n=new: t.replace("and **(l)** are **DRIFTED**.", _n, 1),
+            )
+            problems = _doc_problems()
+            assert any(
+                "as no longer reading as written" in p or "STILL-TRUE list names" in p
+                for p in problems
+            ), f"a letter in any markup must be counted: {new!r} -> {problems}"
+
+    complement_edits = [
+        "**(j)**, and `c` still read as written.",
+        "**(j)**, and *c* still read as written.",
+        "**(j)**, and **(c)** still read as written.",
+        "**(j)**, also c still read as written.",
+    ]
+    for new in complement_edits:
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _n=new: t.replace("**(j)** still read as written.", _n, 1),
+            )
+            problems = _doc_problems()
+            assert any(
+                "STILL-TRUE list names" in p for p in problems
+            ), f"the complement must count every markup too: {new!r} -> {problems}"
+
+
 def test_a_second_still_read_as_written_sentence_is_refused(tmp_path, monkeypatch):
     """FAILS if the tally's COMPLEMENT list can be joined across sentences.
 

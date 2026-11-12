@@ -670,9 +670,21 @@ def _verdicts_by_label(text: str) -> dict[str, str]:
 #: The cue set is the words that INTRODUCE a member (`and`, `or`, `also`, `plus`, or a
 #: comma): a bare letter elsewhere in prose is not collected, which is what keeps
 #: `as a rule` out while still reaching `, also c`.
+#:
+#: ⛔ CODE AND ITALIC ARE MARKUP THE CANDIDATE GATE ACCEPTS, so the extractor must read
+#: them too — otherwise a sentence can QUALIFY on its markup and then contribute no
+#: letters, and the comparison silently under-counts. Measured at `96cfa33c86` and
+#: `b12cd02f33` (independent probes, same result): appending `, and `a` too` or
+#: `, and *a* too` to the tally sentence left `--check` at rc 0 over a page naming a
+#: STILL-TRUE row as overtaken, and `**(j)**, and `c` still read as written` did the
+#: same on the complement arm. §8 of the page says a letter may be written "bold, code,
+#: italic or bare", so the doc promised a comparison the code did not make.
 _NAMED_LETTER_RE = re.compile(
     r"\*\*\(([a-l]{1,2})\)\*\*"  # **(a)**
     r"|\*\*([a-l]{1,2})\*\*"  # **a**
+    r"|`\(?([a-l]{1,2})\)?`"  # `a` / `(a)`
+    r"|\*\(([a-l]{1,2})\)\*"  # *(a)*
+    r"|\*([a-l]{1,2})\*"  # *a*
     r"|\(([a-l]{1,2})\)"  # (a) / (a), (b)
     r"|(?:,\s*|\b(?:and|or|also|plus)\s+)([a-l])\b"  # ", f" / "and f" / "also f"
 )
