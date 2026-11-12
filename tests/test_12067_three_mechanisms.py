@@ -1384,11 +1384,12 @@ def test_only_PRICED_pairs_count_measured_six_ways(sdk):
         sdk.create_operator("IMPL", cond, [dep])
     assert "coherence" in str(exc2.value), str(exc2.value)
 
-    # REFUSE: the plain two-input mirror, ONE order here. The reverse
-    # (`NAND` first, then `IMPL` over the same pair) is pinned by
-    # `test_the_direct_edge_door_refuses_TOO`, which asserts the door does not
-    # care which mechanism came first — this file must not claim to cover both
-    # orders in one case, which is how a count came to be wrong before.
+    # REFUSE: the plain two-input mirror, ONE order here. The reverse — `NAND`
+    # first, then `IMPL` over the same pair — is pinned by
+    # `test_a_non_point_endpoint_is_still_checked` (it reaches the pair through a
+    # `:Subject` endpoint, which is incidental to the order it writes). This file
+    # must not claim to cover both orders in one case: that is how a count came
+    # to be wrong here before.
     x, y = _points(sdk)
     sdk.create_operator("IMPL", x, [y])
     with pytest.raises(ValueError) as exc3:
