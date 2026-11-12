@@ -366,6 +366,24 @@ _ALIAS_HOMES: dict[str, frozenset[str]] = {
     "compute_session_embedding": frozenset({"tortoise.session_indexer", "session_indexer"}),
 }
 
+
+def _accepted_homes(alias_name: str, level: int) -> frozenset[str]:
+    """The `_ALIAS_HOMES` spellings a given import's `level` can legitimately name.
+
+    ⛔ ONE definition, TWO readers: `_import_aliases` (does this import RESOLVE to the seam?) and
+    `_imports_that_REBIND` (does it SHADOW the seam?). They were two copies of the same predicate
+    once, and the `level` rule landed in only the first: measured, a writer-scope
+    `from embeddings import encode_for_row as _enc` — a FOREIGN absolute module — was still read as
+    "resolves to the seam" by the shadow reader, so it was not counted as a rebinding at all, the
+    honest module alias it shadows survived, and the writer measured `gated` while reaching a
+    different function (`unresolved_write` on `main`). That is the same two-copies leak this file
+    already records for `_own_scope_bindings` (rounds 4/5), so the predicate is shared rather than
+    restated.
+    """
+    return frozenset(
+        home for home in _ALIAS_HOMES.get(alias_name, frozenset())
+        if ("." not in home) == bool(level))
+
 #: Write shapes discovery CANNOT decide, with the reason — named so the
 #: register's claim can be scoped to the mechanism rather than wider than it
 #: (`tests/test_embed_writer_register.py::test_the_register_names_the_shapes_its_discovery_cannot_see`).
@@ -572,8 +590,7 @@ def _imports_that_REBIND(root_children) -> set[str]:
             for alias in sub.names:
                 if alias.name == "*":
                     continue
-                resolves = (alias.name in _ALIASABLE_CALL_NAMES
-                            and module in _ALIAS_HOMES.get(alias.name, frozenset()))
+                resolves = module in _accepted_homes(alias.name, sub.level)
                 if not resolves:
                     rebound.add(alias.asname or alias.name)
     return rebound
@@ -689,7 +706,6 @@ def _import_aliases(*roots: ast.AST, own_scope_only: bool) -> dict[str, str]:
             for alias in sub.names:
                 if alias.name not in _ALIASABLE_CALL_NAMES:
                     continue
-                homes = _ALIAS_HOMES.get(alias.name, frozenset())
                 # ⛔ `level` decides WHICH spelling of the home can match (`#12020`). The BARE
                 # spelling exists so a RELATIVE import (`from .embeddings import … as _enc`,
                 # `level > 0`) still resolves, and only then is it this seam's home. An ABSOLUTE
@@ -698,9 +714,9 @@ def _import_aliases(*roots: ast.AST, own_scope_only: bool) -> dict[str, str]:
                 # measured `gated` — owing nothing while reaching a different function (measured;
                 # `unresolved_write` on `main`), the exact false PASS `_ALIAS_HOMES` exists to
                 # prevent. Dropping a relative import is the safe direction; crediting a foreign
-                # absolute one is the dangerous one.
-                accepted = frozenset(
-                    home for home in homes if ("." not in home) == bool(sub.level))
+                # absolute one is the dangerous one. `_accepted_homes` is the ONE implementation
+                # of that rule — `_imports_that_REBIND` asks the same question from the other side.
+                accepted = _accepted_homes(alias.name, sub.level)
                 if module not in accepted:
                     continue  # a same-named function from somewhere else is not this seam
                 found[alias.asname or alias.name] = alias.name

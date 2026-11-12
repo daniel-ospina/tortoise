@@ -917,12 +917,25 @@ def test_the_never_run_call_entry_NAMES_every_spelling_it_was_measured_on():
     # ⛔ The THIRD copy: the register's SUMMARY sentence. The clause pin above deliberately anchors
     # away from it (it carries no enumeration), and round 11 measured that reverting that sentence
     # to the narrow "are `gated` while reaching nothing" wording left this whole file GREEN (45
-    # passed). The false claim is a two-word reversion away, so it is pinned directly — an absence,
-    # which cannot be satisfied by an unrelated sentence the way a token can.
-    assert "reaching nothing" not in (register.__doc__ or "").lower(), (
-        "the register docstring says a residual reaches nothing — the `SEAM_CALL` branch pre-empts "
-        "the write predicate, so `gated` can also mean a LIVE ungated reach was MASKED. Name what "
-        "it masks instead; the sibling bullet carries the measured composition (round 11)")
+    # passed).
+    # ⛔ Round 12 measured that pinning it as an ABSENCE over the whole docstring was the wrong
+    # instrument: it red a CORRECT sentence that negates the claim ("`gated` does not mean the
+    # writer is reaching nothing, because…") and a sentence about an UNRELATED residual, while a
+    # paraphrase of the narrow claim ("`gated` on a reach they do not actually make") stayed green.
+    # So the summary clause is read the same way as the other copies: slice it out, then require the
+    # WIDE harm to be present rather than a phrase to be absent.
+    summary = re.sub(r"\s+", " ", (register.__doc__ or "").lower())
+    start = summary.find("`gated` means exactly that")
+    stop = summary.find("the scope of that sentence")
+    assert start != -1 and stop > start, (
+        "the register's `gated` summary paragraph moved — the clause this pin reads is not "
+        "locatable, so re-anchor it deliberately rather than letting the pin cover nothing")
+    summary_clause = summary[start:stop]
+    assert "mask" in summary_clause or "ungated" in summary_clause, (
+        "the register's summary of `gated` no longer states the wide harm — the `SEAM_CALL` branch "
+        "pre-empts the write predicate, so `gated` can also mean a LIVE ungated reach was MASKED; "
+        "say that in this clause instead of claiming the writer reaches nothing: "
+        f"{summary_clause[:240]!r}…")
 
 
 def test_the_seam_CALL_population_is_the_one_the_register_names():
@@ -3697,6 +3710,25 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         {"tortoise.m::w": "gated"},
         "the control for the row above: `level > 0` is exactly the spelling the bare home is for, "
         "so this DOES reach the gate — dropping it would be the over-correction direction",
+    ),
+    # ⛔ The same `level` rule asked from the OTHER side. `_import_aliases` asks "does this import
+    # RESOLVE to the seam"; `_imports_that_REBIND` asks "does it SHADOW the seam". The rule landed
+    # in the first only: measured, this writer's own-scope FOREIGN ABSOLUTE import was not counted
+    # as a rebinding at all, so the honest module alias it shadows survived, and the writer
+    # measured `gated` while reaching a different function (`unresolved_write` on `main`). Both
+    # readers now share `probe._accepted_homes`.
+    "foreign_ABSOLUTE_import_SHADOWS_an_honest_module_alias": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    from embeddings import encode_for_row as _enc\n"
+        "    e = _enc(text)\n"
+        '    proj.g.query("MATCH (n:Point) SET n.embedding = $e", {"e": e})\n'
+        "    return _enc(text)\n",
+        {"tortoise.m::w": "unresolved_write"},
+        "the writer's own scope rebinds the seam alias to a FOREIGN absolute module, so nothing it "
+        "calls is the gate: the shadow reader must count that binding (level-aware), or the honest "
+        "module alias it shadows survives and the writer owes nothing while reaching elsewhere",
     ),
     "aliased_gate_call": (
         "from tortoise.embeddings import encode_for_row as _enc\n"
