@@ -754,24 +754,64 @@ _INERT_MESSAGE = re.compile(
     r"\s*$"
 )
 
-#: Quoted spans removed WHOLE (not replaced), so a bare-message line reads as
-#: `echo   ` and nothing else. This is a SHAPE TEST, NOT A PARSER: a span it removes is
-#: text that is believed to be inert, so a removal is only ever as safe as this regex —
-#: and it can be wrong in the LENIENT direction, which is why the two guards below exist
-#: rather than a claim that it cannot be.
-#:
-#: ⛔ TWO FAIL-OPENS THIS REGEX CAUSED, both found by review and both pinned by tests.
-#:
-#:   1. DELETING A LEADING WORD MOVES COMMAND POSITION. On `"bash" "tools/h.sh" echo`
-#:      it deletes both quoted words and leaves ` echo`, satisfying the anchored
-#:      question while bash runs `bash tools/h.sh`. `_MESSAGE_WORD` — the message command
-#:      must be the first word of the RAW line — is the guard.
-#:   2. AN ESCAPED QUOTE IS NOT AN OPENER. Bash treats `\"` as a LITERAL quote, so
-#:      `echo>\" ; bash tools/h.sh ; \"` is an `echo` with a redirect, then a REAL `;`
-#:      separator, then a real `bash`. A naive `"[^"]*"` started a span at that escaped
-#:      quote and swallowed the separator, leaving `echo>\` — which reads as a bare
-#:      message with one redirect. The lookbehind is the guard.
-_STRIP_QUOTED = re.compile(r"(?<!\\)'[^']*'|(?<!\\)\"[^\"]*\"")
+#: The quote characters bash treats as span delimiters.
+_QUOTE_CHARS = frozenset({"'", '"'})
+
+
+def _blank_quoted(line: str) -> str:
+    """Replace every QUOTED SPAN with ONE space; return the line unchanged if a span
+    never closes (so an unterminated quote can never read as bare).
+
+    This is the guard that decides which text a message can only PRINT, so it is written
+    as a small LEXICAL WALK rather than a regex, because a regex got this wrong three
+    times, each time in the LENIENT direction, each time found only by running bash:
+
+      1. DELETING A SPAN MOVES COMMAND POSITION. `"bash" "tools/h.sh" echo` lost both
+         quoted words and left ` echo`, satisfying the anchored question while bash ran
+         `bash tools/h.sh`. `_MESSAGE_WORD` (below) guards command position.
+      2. A BACKSLASH IS AN ESCAPE, NOT A PREVIOUS CHARACTER. `echo>\" ; bash h.sh ; \"`
+         — bash reads `\"` as a LITERAL quote, so the `;` is a REAL separator; a regex
+         that treated the escaped quote as an opener swallowed the separator.
+      3. …AND ESCAPES PAIR, so "not preceded by a backslash" is the wrong test too:
+         `echo>a\\'~'; bash 'tools/h.sh'` has an ESCAPED BACKSLASH followed by a REAL
+         opener, and a lookbehind skipped it and shifted the whole pairing.
+      4. DELETING A SPAN MANUFACTURES AN OPERATOR. `echo>"x"&bash 'tools/h.sh'` welded
+         `>` and `&` into `>&`, which the redirect arm read as one redirect.
+
+    So: walk left to right, consume `\\X` as a PAIR (which is exactly bash's parity rule:
+    an odd run escapes, an even run does not), and replace a span — the two delimiters and
+    everything between — with a SINGLE SPACE. A space cannot be mistaken for an operator
+    and cannot fuse with its neighbours, so (4) is impossible; walking the escapes closes
+    (2) and (3); `_MESSAGE_WORD` closes (1).
+    """
+    out: list[str] = []
+    i, n = 0, len(line)
+    quote = ""
+    while i < n:
+        ch = line[i]
+        if ch == "\\" and i + 1 < n:
+            # An escape consumes BOTH characters — inside a span it is skipped, outside it
+            # is kept, and either way the byte after it can never open or close a span.
+            if not quote:
+                out.append(line[i : i + 2])
+            i += 2
+            continue
+        if quote:
+            if ch == quote:
+                quote = ""
+                out.append(" ")
+            i += 1
+            continue
+        if ch in _QUOTE_CHARS:
+            quote = ch
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    if quote:
+        return line  # unterminated: nothing about this line is proved
+    return "".join(out)
+
 
 #: The message command must be the FIRST WORD OF THE RAW LINE — i.e. in command
 #: position, not brought into command position by `_STRIP_QUOTED` deleting a quoted word
@@ -801,10 +841,10 @@ def _message_line_is_inert(line: str) -> bool:
         handling, so a quoted `)` or a `case` pattern cannot desync anything. This is what
         closes the `printf ')'; bash …` shape without tracking the substitution at all.
       * a separator (`;` `&` `|`), a pipe, a redirect, a second command, an unquoted
-        argument, or an UNTERMINATED quote → the stripped text is not bare
+        argument, or an UNTERMINATED quote → the blanked text is not bare
         `echo`/`printf` → False.
       * the first word of the RAW line is not the message command → False, even when the
-        stripped text looks bare. `"bash" "tools/h.sh" echo` strips to ` echo` and would
+        blanked text looks bare. `"bash" "tools/h.sh" echo` strips to ` echo` and would
         otherwise answer `True` for a line that RUNS `bash tools/h.sh`.
 
     WHAT THE CODE ACTUALLY GUARANTEES, stated without the monotone claim two earlier
@@ -829,7 +869,7 @@ def _message_line_is_inert(line: str) -> bool:
         return False
     if _MESSAGE_WORD.match(line) is None:
         return False
-    return _INERT_MESSAGE.match(_STRIP_QUOTED.sub("", line)) is not None
+    return _INERT_MESSAGE.match(_blank_quoted(line)) is not None
 
 
 def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
@@ -1050,7 +1090,7 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     #     swallows the separator, leaving a shape that reads as a bare message. Found by
     #     review on this cut — 256 spellings executed the helper while the scan was silent,
     #     and BOTH baselines flagged them, so this was the strongest form of regression.
-    #     `_STRIP_QUOTED`'s `(?<!\\)` lookbehind is the guard.
+    #     `_blank_quoted`'s escape-parity walk is the guard.
     assert _gh_hazards([f'            echo>\\" ; bash tools/{helper} ; \\"'], scripts)
     assert _gh_hazards([f'            echo>2\\" ; bash tools/{helper} ; \\"'], scripts)
     assert _gh_hazards([f"            echo>\\' ; bash tools/{helper} ; \\'"], scripts)
@@ -1059,6 +1099,16 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
         [f'            echo "run it by hand" > /tmp/log\\" ; bash tools/{helper} ; \\"'], scripts
     )
     assert _gh_hazards([f'            echo -e "note" >&2\\" ; bash tools/{helper} ; \\"'], scripts)
+
+    # 10 — ESCAPE PARITY, and a span that DELETION would have welded to an operator.
+    #      `\\'` is an escaped BACKSLASH then a REAL opener (not a lookbehind case), and
+    #      `>"x"&` must not become `>&`. Both ran the helper while the scan was silent;
+    #      both are flagged by both baselines, so both were regressions.
+    assert _gh_hazards([f"            echo>a\\\\'~'; bash 'tools/{helper}'"], scripts)
+    assert _gh_hazards([f'            echo>a\\\\"~"; bash "tools/{helper}"'], scripts)
+    assert _gh_hazards([f"            echo>\"x\"&bash 'tools/{helper}'"], scripts)
+    assert _gh_hazards([f"            echo>\"\"&bash 'tools/{helper}'"], scripts)
+    assert _gh_hazards([f"            echo>\";\"&bash 'tools/{helper}'"], scripts)
 
     # 7 — the helper as the ARGUMENT-EXECUTING end of a pipeline
     assert _gh_hazards([f"            printf x | bash tools/{helper}"], scripts)
