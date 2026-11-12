@@ -3721,13 +3721,57 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
         proc = subprocess.Popen([str(pi), "60"],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            procs, err = fs.pi_processes()
-            if err:
+            # ⛔ A BOUNDED POLL, NOT ONE SAMPLE (#12039). `Popen` returns at FORK
+            # time, and until the child reaches `execve` the process table still
+            # reports the PYTEST WORKER's argv — whose basename is `python`, so a
+            # single `pi_processes()` call issued in that window answers "no pi
+            # process" about a perfectly healthy spawn. Measured as
+            # `pids seen: []` on `test (b)` for PRs #11968, #12007 and #12106 — on
+            # tests whose diffs cannot reach the census.
+            #
+            # THE PIN IS UNCHANGED: a missing `-ww` still never matches at
+            # COLUMNS=80, it just takes the whole deadline instead of one sample,
+            # and the failure message below still names the census. Verified red
+            # with `-ww` removed from `tools/fleet_state.py::pi_processes`.
+            deadline = time.time() + 15
+            pids: list[int] = []
+            err = ""
+            readable = 0
+            while time.time() < deadline:
+                procs, err = fs.pi_processes()
+                if err:
+                    # ⛔ RETRY A TRANSIENT READ FAILURE (#12039 review, F1). `_run`
+                    # returns "" on ANY exception, including its own 30 s timeout, so
+                    # one load-induced `ps` hiccup would exit before the first sample,
+                    # leave `readable == 0` and SKIP — a PASS on a required check from
+                    # a probe that measured nothing. Retrying absorbs the hiccup; a
+                    # PERSISTENTLY unreadable table still skips below.
+                    time.sleep(0.05)
+                    continue
+                readable += 1
+                pids = [p["pid"] for p in procs]
+                if proc.pid in pids:
+                    return
+                time.sleep(0.05)
+            # ⛔ SKIP ONLY WHEN NOTHING WAS EVER READ (#12039 review). A single
+            # transient `ps` error AFTER several clean samples each answered "the
+            # census cannot see this lane" used to discard them and skip — and a
+            # skip on a required check is a PASS, which is the false-PASS half of
+            # this issue. Measured: 3 clean invisible samples + one EAGAIN → SKIPPED
+            # on the pre-fix shape of this poll.
+            if err and readable == 0:
                 pytest.skip(f"the process table is unreadable here: {err}")
-            pids = [p["pid"] for p in procs]
-            assert proc.pid in pids, (
+            # Distinguish the two causes, so a real regression here is not read as
+            # flake: did the LANE die, or can the census genuinely not see a lane
+            # that is still running?
+            lane_alive = proc.poll() is None
+            pytest.fail(
                 f"a lane whose argv[0] is {str(pi)!r} was invisible to the census "
-                f"(pids seen: {pids})")
+                f"for 15s ({readable} readable sample(s); pids seen: {pids}; the lane "
+                f"itself {'is STILL RUNNING — the census cannot see it' if lane_alive else f'EXITED meanwhile, rc={proc.returncode} — the fixture never established the lane'}"
+                + (f"; the last read then errored: {err}" if err else "")
+                + ")"
+            )
         finally:
             proc.terminate()
             proc.wait(timeout=10)
