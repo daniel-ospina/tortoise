@@ -1427,7 +1427,12 @@ class EventAPI:
         from .entity_identity import entity_create_lock
         with entity_create_lock("Subject", name):
             sid = self._registration_id("Subject", name)
-            ev: dict = {"id": sid, "name": name, "createdAt": now_iso()}
+            # #12047 review F6b: this door wrote no matching key at all, so a
+            # Subject registered through EventAPI could never be resolved by the
+            # deterministic rung — the resolver would mint a twin beside it.
+            from .entity_resolver import normalize_entity_name
+            ev: dict = {"id": sid, "name": name, "createdAt": now_iso(),
+                        "canonical_name": normalize_entity_name(name)}
             subject_kind = named_kind(subject_kind)
             if subject_kind is not None:
                 ev["subject_kind"] = subject_kind
@@ -1469,6 +1474,8 @@ class EventAPI:
         from .entity_identity import entity_create_lock
         with entity_create_lock("Object", name):
             oid = self._registration_id("Object", name, explicit_id=id)
+            from .entity_resolver import normalize_entity_name
+            props.setdefault("canonical_name", normalize_entity_name(name))
             ev: dict = {"id": oid, "name": name, "createdAt": now_iso(), **props}
             object_kind = named_kind(object_kind)
             if object_kind is not None:
