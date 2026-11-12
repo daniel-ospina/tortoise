@@ -206,7 +206,7 @@ not a tenth spelling — it is the one a text guard cannot reach:
   command position.
 - **The directory arm reads a text, and a text can be laundered.** The destination
   is taken as the last POSITIONAL path token of the owning verb's command
-  segment, with redirect targets and `-`-prefixed options skipped. SEVEN
+  segment, with redirect targets and `-`-prefixed options skipped. EIGHT
   residuals
   are stated rather than claimed closed, and each spares or refuses for its OWN
   mechanism — they are not one: an option whose value is a SEPARATE token written
@@ -216,12 +216,26 @@ not a tenth spelling — it is the one a text guard cannot reach:
   quoted separately from its token
   (`"$b"/16/bin/`, `"${b}"/17/bin/`) is never MATCHED, so the last-path
   machinery is not reached at all; a quoted command word (`sh -c 'rsync …'`) puts
-  both mentions in COMMAND position, so the arm is skipped; a destination whose
-  VERSION component is itself a variable (`rsync -a "$b/17/bin/" "$d/"`) names
-  no token the pattern can read, so again the arm is not reached — a
-  `$var/<digits>/bin` destination IS matched and refused (next residual), and a
-  preceding `d=…` assignment on the same line is itself spared by COMMAND
-  POSITION, like the residual above; a versioned path under a VARIABLE base is
+  both mentions in COMMAND position, so the arm is skipped; a destination that
+  names NO token at all (`rsync -a "$b/17/bin/" "$d/"`) is not reached —
+  ⛔ the mirror of that spelling is the OPPOSITE direction and is REFUSED: a
+  destination whose VERSION component is ITSELF a variable under a variable base
+  (`"$b/$v/bin"`, `"$b/${v}/bin"`, `"${b}/${v}/bin"`) IS matched on the `$v`
+  token and refused, fail-closed, which puts it in the same family as the
+  variable-base residual below rather than in this one; a `$var/<digits>/bin`
+  destination IS matched and refused (that same residual), and a preceding
+  `d=…` assignment on the same line is itself spared by COMMAND POSITION, like
+  the residual above; a braced base carrying a PARAMETER MODIFIER is not matched
+  at all — `${b%x}`, `${b[0]}`, `${b:-$X}` and `${b…}` all leave the braced-word
+  arm behind, so `b=/usr/lib/postgresql/; sudo rsync -a "${b%x}17/bin/"
+  "${b%x}16/bin/"` is the COMPLETE #12051 directory replacement and is GREEN
+  (measured; pre-existing, not introduced by the round-29 widening — the
+  literal-default spelling `${b:-/usr/lib/postgresql/}17/bin/` reds only
+  incidentally, through `CLIENT_DIR_RE`'s unreadable-token arm). Declared rather
+  than closed deliberately: widening the braced-word arm to admit `}`-less
+  expansions is
+  how a text guard starts accepting `${anything}` as a base, which costs more
+  than the spelling it buys; a versioned path under a VARIABLE base is
   the OPPOSITE direction —
   it is REFUSED (`d=$RUNNER_TEMP/tools; sudo chmod -R a+rX "$d/16/bin"` red, the
   same act on a literal path with an extra component green), which is fail-closed
@@ -4841,10 +4855,33 @@ BINARY_MUTATION_POLARITY = [
     (
         'b=/usr/lib/postgresql; sudo rsync -a "$b/17/bin/" "$d/"',
         False,
-        "STATED RESIDUAL (#12069 round-29, measured): the VERSION component is "
-        "itself a variable, so the destination names no token this guard can "
-        "place. Declared in the docstring's residual list; pinned so closing it "
-        "is a deliberate edit rather than an accident.",
+        "STATED RESIDUAL (#12069 round-29, measured): the destination names NO "
+        "token at all, so the dir arm is not reached. Declared in the docstring's "
+        "residual list; pinned so closing it is a deliberate edit rather than an "
+        "accident.",
+    ),
+    (
+        'b=/usr/lib/postgresql/; sudo rsync -a "${b%x}17/bin/" "${b%x}16/bin/"',
+        False,
+        "STATED RESIDUAL (#12069 review round-30, measured): a braced base "
+        "carrying a PARAMETER MODIFIER leaves the `\\$\\{\\w+\\}` arm behind, so "
+        "this is the COMPLETE #12051 directory replacement and it is GREEN. "
+        "Pre-existing — not introduced by the round-29 widening. Declared rather "
+        "than closed on purpose: widening to admit `}`-less expansions is how a "
+        "text guard starts accepting `${anything}` as a base.",
+    ),
+    (
+        'b=/usr/lib/postgresql; v=16; sudo rsync -a "$b/17/bin/" "$b/$v/bin"',
+        True,
+        "#12069 review round-30: a destination whose VERSION component is ITSELF a "
+        "variable IS matched (on the `$v` token) and refused — fail-closed, and it "
+        "is the OPPOSITE direction from the residual above. Pinned so the "
+        "docstring's restated residual 4 cannot drift back.",
+    ),
+    (
+        'b=/usr/lib/postgresql; v=16; sudo rsync -a "$b/17/bin/" "${b}/${v}/bin"',
+        True,
+        "#12069 review round-30: same act, braced-base and braced-token spelling",
     ),
     (
         'b=/usr/lib/postgresql; sudo sh -c \'rsync -a "$b/17/bin/" "$b/16/bin/"\'',
