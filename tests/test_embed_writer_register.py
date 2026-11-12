@@ -2384,8 +2384,20 @@ def _carrying_statements(universe: list[ast.AST], lines: list[str],
     docstring — and minimality then returned the FUNCTION as "the statement that carries it",
     whose slice obviously contains a store. Measured on the reviewed head: a needle left only in a
     docstring satisfied the row. Excluding the roots is what makes the prose rule observable at all.
-    The residual that remains is a TRAILING comment, which this cannot strip without cutting a `#`
-    inside a Cypher string.
+
+    ⚠️ WHAT THIS STILL DOES NOT DECIDE (`#12020` round 10). A carrier is selected by SOURCE TEXT, so
+    a statement that holds the clause without issuing it is still a candidate here. Two spellings
+    were measured GREEN on the reviewed head with no vector written, and they are closed/declared
+    separately rather than waved at:
+
+    * a bare expression statement holding the text — `f"… {{set_embedding_clause('e')}}"` — is
+      DECIDED against by `_carrier_issues_a_call` in `_evidence_violation`'s `store`/`merge` arms;
+    * a clause built into an assignment and never issued is NOT decidable by syntax and is the named
+      residual `_carrier_issues_a_call` states (`UNDECIDABLE_WRITE_SHAPES` names the same class for
+      the map merge).
+
+    The residual that remains on the TEXT side is a TRAILING comment, which this cannot strip
+    without cutting a `#` inside a Cypher string.
     """
     # The cited symbol is the RANGE the claim is bounded TO, never the statement that carries it:
     # `ast.FunctionDef`/`AsyncFunctionDef`/`ClassDef` are `ast.stmt` subclasses, so without this a
@@ -2617,6 +2629,39 @@ def _executes_a_call(statement: ast.AST) -> bool:
     return any(isinstance(sub, ast.Call) for sub in _walk_own_scope(statement))
 
 
+def _carrier_issues_a_call(statement: ast.stmt) -> bool:
+    """Does this CARRIER issue something, rather than only HOLD the store text?
+
+    ⛔ A DIFFERENT question from `_executes_a_call`, and it has to be asked separately or the
+    fail-open survives (`#12020` review round 10, P1). `_executes_a_call` asks "does anything in this
+    statement's own scope call a function", so it answers YES to
+
+        f"MERGE (e:Event {{eventId: $eid}}) ON MATCH SET e += $props, {{set_embedding_clause('e')}}"
+
+    whose VALUE is an `ast.JoinedStr`, not a call: the interpolated marker is evaluated, the string
+    is discarded, and the writer issues no write at all. Measured on the reviewed head — that
+    statement, put in place of `_event_plain_merge`'s `self.g.query(...)`, left the row GREEN. The
+    rule that separates the genuine shape from it is what a bare expression statement's own VALUE
+    is: a store is ISSUED by a call (`proj.g.query(…)`, `clear_embedding(…)`), so an `ast.Expr`
+    whose value is not a call holds text and issues nothing.
+
+    Applies to the "does this store" arms only (`store`, `merge`) — the same scope `_executes_a_call`
+    claims. `bound`/`bound_store`/`assembly` ask about a LABEL statement, which legitimately issues
+    no write of its own.
+
+    ⚠️ Residual, stated (`#12020` round 10): this does not reach a store clause built into an
+    ASSIGNMENT that is never issued — `_unused = "…" + set_embedding_clause("e")`. An `ast.Assign`
+    is not a bare expression, and proving the built string never reaches a `query(…)` is DATA FLOW,
+    the same limit `UNDECIDABLE_WRITE_SHAPES` names for the map merge. Measured on the reviewed
+    head: that mutation also stayed GREEN. It is pinned as a named residual by
+    `test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual`, so the blind spot can
+    narrow in neither direction silently.
+    """
+    if isinstance(statement, ast.Expr):
+        return isinstance(statement.value, ast.Call)
+    return True
+
+
 def _symbol_stores_in_own_scope(node: ast.AST, lines: list[str]) -> bool:
     """Does `node`'s OWN scope execute a store anywhere?
 
@@ -2730,7 +2775,8 @@ def _evidence_violation(source: str, symbol: str, needle: str,
             view = text + "\n" + "\n".join(
                 constant_text[name] for name in _constant_names_named_by(statement, constant_text)
             )
-            if claim == "bound" or _STORE_CARRIER.search(view):
+            if claim == "bound" or (
+                    _STORE_CARRIER.search(view) and _carrier_issues_a_call(statement)):
                 carried.append(text)
             elif claim == "bound_store":
                 # `BOUND_STORE_LABEL_EVIDENCE`: the label is bounded by a constant seam, but the
@@ -2739,7 +2785,8 @@ def _evidence_violation(source: str, symbol: str, needle: str,
                 # the own-scope store is checked once, below, over the whole cited symbol.
                 if _symbol_stores_in_own_scope(node, lines):
                     carried.append(text)
-            elif claim == "merge" and _MERGE_STORE_CARRIER.search(view):
+            elif (claim == "merge" and _MERGE_STORE_CARRIER.search(view)
+                    and _carrier_issues_a_call(statement)):
                 # The declared weaker kind (`MERGE_STORE_CLAIM`): the store IS the map merge, whose
                 # vector content no syntax can attribute (`UNDECIDABLE_WRITE_SHAPES`). Kept as a
                 # NAMED claim so every other row is scored by the narrower `_STORE_CARRIER`.
@@ -3120,6 +3167,101 @@ def test_a_store_has_to_be_EXECUTED_and_the_symbol_is_not_its_own_store() -> Non
     assert problem('        proj.g.query(f"MATCH (n:{label}) SET n += $p")\n') is None
     assert problem('        f"MATCH (n:{label}) SET n += $p"\n') is not None, (
         "a bare f-string holding the store shape satisfies the iterated arm — nothing is executed")
+
+
+def test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual() -> None:
+    """`#12020` review round 10 (P1): the statement arm still credits a carrier that only HOLDS the
+    clause instead of ISSUING it.
+
+    A carrier is selected by SOURCE TEXT, so "this statement's text mentions
+    `set_embedding_clause(`" is not "this statement writes a vector". Two spellings were measured
+    GREEN on the reviewed head with the vector write REPLACED BY TEXT that is evaluated and thrown
+    away — `#11954`'s own class (the row proves a string, not an executed store), one level down.
+
+    Only one of the two is decidable by syntax, and this test pins BOTH directions so neither can
+    move silently:
+
+    * a BARE EXPRESSION statement that holds the text (`f"… {set_embedding_clause('e')}"`, or the
+      derived grouping mutant below) is DECIDED against by `_carrier_issues_a_call` — its VALUE is
+      not a call, so it issues nothing. `_executes_a_call` cannot do this: the marker sits inside a
+      `FormattedValue`, so that weaker gate answers True (asserted here, or the pin would not prove
+      which rule reds it);
+    * a clause built into an ASSIGNMENT that is never issued is DATA FLOW, not syntax, and is the
+      residual `_carrier_issues_a_call` NAMES. Asserted here as still-permitted, so the disclosure
+      cannot be deleted while the hole exists — and cannot silently become a hole if it is closed.
+
+    Both mutants are DERIVED from the live carrier statement and each transformation is ASSERTED to
+    have applied: a hand-copied mutant that silently no-ops is how rounds 2 and 3 measured nothing.
+    """
+    key = "tortoise.projection.entities::_event_plain_merge"
+    rel, symbol, needle, _labels = LABEL_EVIDENCE[key]
+    source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+    claim = _claim_for(key)
+
+    def violation(text: str) -> str | None:
+        return _evidence_violation(text, symbol, needle, claim=claim)
+
+    assert violation(source) is None, violation(source)
+
+    # ── the carrier, DERIVED (never hand-copied) ─────────────────────────────────────────────────
+    fn = next(n for n in ast.walk(ast.parse(source))
+              if isinstance(n, ast.FunctionDef) and n.name == symbol)
+    carrier = next(st for st, _text in _carrying_statements([fn], source.splitlines(), needle)
+                   if isinstance(st, ast.Expr) and isinstance(st.value, ast.Call))
+    assert carrier.end_lineno is not None
+    issued = "\n".join(source.splitlines()[carrier.lineno - 1:carrier.end_lineno])
+    assert needle in issued and "set_embedding_clause(" in issued, (
+        f"the carrier derived from {key} no longer holds both halves of the claim — re-derive: "
+        f"{issued!r}")
+    head = "self.g.query("
+    assert head in issued, "the store is no longer issued by a `.query(…)` call — re-derive this pin"
+    params = next(line for line in issued.splitlines() if line.strip().startswith("params="))
+
+    def strip_params(text: str) -> str:
+        """The same statement with its `params=…` argument dropped, so its value is a bare expr."""
+        return "\n".join(line for line in text.splitlines() if line != params)
+
+    # ── (a) a BARE EXPRESSION that holds the text: DECIDED against ──────────────────────────────
+    grouped = strip_params(issued.replace(head, "(", 1))
+    assert grouped != issued and params not in grouped
+    # The mutant is a STATEMENT, so it is parsed inside a body — `ast.parse` at module level
+    # rejects its indentation, and a fixture that does not parse proves nothing about the arm.
+    ast.parse("def _fixture(proj):\n" + grouped)
+    problem_grouped = violation(source.replace(issued, grouped, 1))
+    assert problem_grouped is not None, (
+        "a statement that only HOLDS the clause (a grouped expression, discarded) satisfied the "
+        "store half — the row proves a string, not an executed store")
+    assert "stores anything" in problem_grouped, (
+        f"the red is not the statement arm's, so this arm does not pin the rule: {problem_grouped}")
+
+    # The spelling the finding was measured on, stated directly: its VALUE is an `ast.JoinedStr` and
+    # the marker sits in a `FormattedValue` — so the WEAKER gate answers True and cannot close it.
+    joined = ast.parse('f"MERGE (e:Event) {set_embedding_clause(\'e\')}"').body[0]
+    assert isinstance(joined, ast.Expr)
+    assert _executes_a_call(joined), (
+        "`_executes_a_call` must still pass the f-string, or this pin does not show WHICH rule reds it")
+    assert not _carrier_issues_a_call(joined), (
+        "a bare f-string holding the store marker still counts as issuing a store")
+
+    # ── (b) a clause ASSIGNED and never issued: the NAMED residual ──────────────────────────────
+    assigned = strip_params(issued.replace(head, "_unused = (", 1))
+    assert assigned != issued and params not in assigned
+    ast.parse("def _fixture(proj):\n" + assigned)
+    assigned_tree = ast.parse(source.replace(issued, assigned, 1))
+    assigned_carrier = next(
+        st for st, _t in _carrying_statements(
+            [next(n for n in ast.walk(assigned_tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == symbol)],
+            source.replace(issued, assigned, 1).splitlines(), needle)
+        if isinstance(st, ast.Assign))
+    assert _carrier_issues_a_call(assigned_carrier), (
+        "the residual must be the ASSIGN shape: the assignment is blamed by nothing here")
+    assert violation(source.replace(issued, assigned, 1)) is None, (
+        "the assigned-never-issued residual is CLOSED now — delete the residual note in "
+        "`_carrier_issues_a_call` and make this raise instead")
+    assert "never issued" in (_carrier_issues_a_call.__doc__ or ""), (
+        "the residual is measured-OPEN here, so `_carrier_issues_a_call` must NAME it — an "
+        "undisclosed fail-open is the claim being wider than the mechanism")
 
 
 def test_a_deleted_vector_write_reds_the_BOUND_STORE_row() -> None:
