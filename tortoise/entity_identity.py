@@ -347,6 +347,39 @@ def entity_create_lock(label: str, name: str):
         yield
 
 
+def _collapse_resolved_holders(g, label: str, holder_ids) -> list:
+    """Collapse MERGED-AWAY carriers onto their survivor — one definition.
+
+    #12047 round-4 finding 1, extracted by review F2. ``apply_entity_merge`` is
+    NON-DESTRUCTIVE: it leaves both nodes live and stamps the candidate with
+    ``resolved_from`` plus the survivor's folded key, so a raw holder read
+    counts two carriers for one name. Counting those rows made the verb that
+    REPAIRS a name the verb that POISONS it — after ``approve_merge`` every
+    later create of that name raised ``AmbiguousEntityName``.
+
+    ⛔ ONE implementation, because the create path and the read path must not
+    disagree about who holds a name (review F2): ``_live_holders_same_entity``
+    had this collapse and ``resolve_entity_id`` did not, so after a merge the
+    create verb accepted the name while every by-name read (and the
+    ``roleHolder`` resolution this PR adds) refused it as ambiguous.
+
+    Each carrier maps to its survivor and counts once; an id-less legacy row
+    carries no ``resolved_from`` evidence and stays a holder in its own right,
+    per-row (F-B's node-exactness).
+    """
+    from .entity_resolver import follow_resolved_from
+    collapsed: list = []
+    seen: set = set()
+    for holder in holder_ids:
+        resolved = follow_resolved_from(g, label, holder) if holder else None
+        key = resolved if resolved else f"id-less:{len(collapsed)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        collapsed.append(resolved)
+    return collapsed
+
+
 def _live_holders_same_entity(g, label: str, name: str) -> tuple[list, tuple]:
     """The holders of ``name`` including the FOLDED spelling — and which props found them.
 
@@ -407,17 +440,7 @@ def _live_holders_same_entity(g, label: str, name: str) -> tuple[list, tuple]:
     # the `resolved_from` hop. Collapse each carrier onto its survivor and count
     # DISTINCT ids; an id-less row carries no `resolved_from` evidence and stays
     # a holder in its own right, per-row (F-B's node-exactness).
-    from .entity_resolver import follow_resolved_from
-    collapsed: list = []
-    seen: set = set()
-    for holder in rows:
-        resolved = follow_resolved_from(g, label, holder) if holder else None
-        key = resolved if resolved else f"id-less:{len(collapsed)}"
-        if key in seen:
-            continue
-        seen.add(key)
-        collapsed.append(resolved)
-    return collapsed, ("name", "canonical_name")
+    return _collapse_resolved_holders(g, label, rows), ("name", "canonical_name")
 
 
 def resolve_or_mint(g, label: str, name: str, *,
@@ -989,6 +1012,17 @@ def resolve_entity_id(g, label: str, value: str | None, *,
     by_name = live_name_holder_ids(g, label, value,
                                   case_insensitive=case_insensitive_name,
                                   name_props=name_props)
+    if len(by_name) > 1:
+        # ⛔ A MERGED-AWAY carrier is not an independent holder (#12047 review
+        # F2). `apply_entity_merge` is non-destructive, so a merged pair keeps
+        # BOTH nodes matching the raw name; counting rows here made a name the
+        # merge had just unified answer `AmbiguousEntityName` on every by-name
+        # read — including `resolve_role_holder`, the `roleHolder` verb this PR
+        # adds, and the exact-duplicate case the queue marks `auto_mergeable`.
+        # That is the same "the verb that REPAIRS a name is the verb that
+        # POISONS it" defect round-4 finding 1 fixed on the CREATE path; the
+        # two paths now share ONE collapse so they cannot disagree again.
+        by_name = _collapse_resolved_holders(g, label, by_name)
     if len(by_name) > 1:
         # ⛔ `record_misses=False` suppresses the RECORD, never the refusal: an
         # ambiguous lookup is a real answer, and returning None would let a

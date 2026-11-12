@@ -23963,23 +23963,25 @@ class TortoiseSDK:
 
         _labels, props = row
         reviewed = str(props.get("dedup_reviewed") or "")
-        if reviewed == action:
+        # ⛔ #12047 review F1: a REJECT verdict is PAIR-scoped, so "the candidate
+        # is already rejected" is NOT the same question as "THIS pair is already
+        # rejected". The queue's suppression filter (`_pair_reviewed`) suppresses
+        # only the reviewed combination, so the scan legitimately re-offers the
+        # candidate against a different survivor — and a candidate-scoped early
+        # return answered that fresh row with `already_reviewed` about a pair
+        # nobody had reviewed, leaving it permanently displayed and permanently
+        # un-rejectable. The MERGE arm keeps the plain early return (a merge is
+        # final for the candidate); the reject arm decides below, once the pair
+        # is known.
+        if reviewed == action and action != "reject":
             return {"candidate_id": candidate_id, "action": action,
                     "candidate_type": "entity", "already_reviewed": True,
                     "survived_id": props.get("resolved_from"),
                     "target_id": props.get("resolved_from")}
-        if reviewed and action == "reject":
+        if reviewed == "merge":
             # A verdict is a decision, not a toggle: flip-flopping one candidate
             # between merge and reject would leave the survivor's alias written
-            # by the merge and the node rejected by the second call. A reject on
-            # top of ANY prior verdict is that flip, so it is refused here.
-            # ⛔ The MERGE half is decided AFTER the pair is re-derived (#12047
-            # review F1): the queue's suppression filter is PAIR-scoped
-            # (`_pair_reviewed`), so a candidate rejected against one survivor is
-            # legitimately re-offered against another — and a candidate-scoped
-            # refusal here made every such row permanently un-actionable while
-            # the queue kept displaying it (reject answered `already_reviewed`,
-            # merge raised). See the pair-scoped guard below.
+            # by the merge and the node rejected by the second call.
             raise ValueError(
                 f"Entity {candidate_id!r} was already reviewed as {reviewed!r} — "
                 f"refusing to overwrite that verdict with {action!r}")
@@ -24003,10 +24005,36 @@ class TortoiseSDK:
                 # so a full window must not make the review surface's reject verb
                 # unavailable exactly when the queue is largest.
                 target_id = None
+            # ⛔ SET-VALUED (#12047 review F1): one scalar`dedup_target_id` slot
+            # could not hold two rejections, and overwriting it un-suppressed the
+            # pair the reviewer had already answered. `dedup_rejected_targets` is
+            # the authoritative list; the scalar is kept for readers written
+            # before it existed.
+            prior_targets = [str(t) for t in
+                             (props.get("dedup_rejected_targets") or [])
+                             if t is not None]
+            prior_scalar = props.get("dedup_target_id")
+            if prior_scalar is not None and str(prior_scalar) not in prior_targets:
+                prior_targets.append(str(prior_scalar))
+            if reviewed == "reject" and (
+                    target_id is None or str(target_id) in prior_targets):
+                # Already answered: either there is no pair left to act on (the
+                # earlier rejection named no survivor — an ambiguous set — or the
+                # queue now suppresses every pair for this candidate), or THIS
+                # pair is the one already rejected. Both are idempotent no-ops.
+                return {"candidate_id": candidate_id, "action": "reject",
+                        "candidate_type": "entity", "already_reviewed": True,
+                        "survived_id": target_id, "target_id": target_id}
+            new_targets = prior_targets + ([str(target_id)]
+                                           if target_id is not None else [])
+            write: dict = {}
+            if new_targets:
+                write["dedup_rejected_targets"] = new_targets
+            if target_id is not None:
+                write["dedup_target_id"] = target_id
             self.update_entity(candidate_id, dedup_reviewed="reject",
                                reviewed=True,
-                               **({"dedup_target_id": target_id}
-                                  if target_id else {}))
+                               **write)
             return {"candidate_id": candidate_id, "action": "reject",
                     "candidate_type": "entity", "wired": False,
                     "deferred_to_promotion": False, "target_id": None}
@@ -24034,14 +24062,19 @@ class TortoiseSDK:
         if reviewed:
             # #12047 review F1: the flip refusal is PAIR-scoped, like the filter
             # that decides what the queue offers. A `reject` records the survivor
-            # it was decided against (`dedup_target_id`) and suppresses ONLY that
-            # combination, so the scan re-offers the candidate against a
-            # DIFFERENT survivor — a different question, not a flip. Refuse only
-            # when this merge would overwrite the verdict on the SAME pair, or
-            # when the rejection named no survivor (it was decided against an
-            # ambiguous set, so no specific pair carries the verdict).
+            # it was decided against (`dedup_target_id` / `dedup_rejected_targets`)
+            # and suppresses ONLY that combination, so the scan re-offers the
+            # candidate against a DIFFERENT survivor — a different question, not a
+            # flip. Refuse only when this merge would overwrite the verdict on the
+            # SAME pair, or when the rejection named no survivor (it was decided
+            # against an ambiguous set, so no specific pair carries the verdict).
+            rejected = {str(t) for t in
+                        (props.get("dedup_rejected_targets") or [])
+                        if t is not None}
             prior_target = props.get("dedup_target_id")
-            if prior_target is None or str(prior_target) == str(pair["survivor_id"]):
+            if prior_target is not None:
+                rejected.add(str(prior_target))
+            if not rejected or str(pair["survivor_id"]) in rejected:
                 raise ValueError(
                     f"Entity {candidate_id!r} was already reviewed as {reviewed!r} "
                     f"against {prior_target!r} — refusing to overwrite that "

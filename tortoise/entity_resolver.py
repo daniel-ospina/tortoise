@@ -208,7 +208,8 @@ _ENTITY_READ = (
     "AND (n.status IS NULL OR NOT n.status IN ['superseded','deprecated',"
     "     'archived','retracted']) "
     "RETURN n.id, n.name, n.canonical_name, n.{kind}, n.createdAt, "
-    "       coalesce(n.dedup_reviewed, ''), n.dedup_target_id"
+    "       coalesce(n.dedup_reviewed, ''), n.dedup_target_id, "
+    "       n.dedup_rejected_targets"
 )
 
 
@@ -226,12 +227,21 @@ def _pair_reviewed(survivor: dict, candidate: dict) -> bool:
     if verdict == "merge":
         return True
     if verdict == "reject":
+        # ⛔ The verdict is SET-VALUED (#12047 review F1): `dedup_rejected_targets`
+        # is the authoritative list, because one scalar slot could not hold two
+        # rejections and overwriting it un-suppressed the pair the reviewer had
+        # already answered. The scalar `dedup_target_id` stays as the legacy /
+        # single-verdict fallback for rows written before the list existed.
+        targets = candidate.get("dedup_rejected_targets")
+        wanted = str(survivor.get("id"))
+        if targets:
+            return any(str(t) == wanted for t in targets if t is not None)
         target = candidate.get("dedup_target_id")
         # A rejection that recorded NO target was decided against an ambiguous
         # set (`approve_merge` cannot name one survivor), so it suppresses the
         # candidate outright — re-offering it against a different survivor would
         # re-ask a question the reviewer already answered.
-        return target is None or str(target) == str(survivor.get("id"))
+        return target is None or str(target) == wanted
     return False
 
 
@@ -247,7 +257,8 @@ def _read_entities(graph, label: str) -> list[dict]:
             f"empty queue ({type(exc).__name__}: {exc})") from exc
     out = []
     for row in rows:
-        node_id, name, canonical, kind, created_at, reviewed, reviewed_target = row
+        (node_id, name, canonical, kind, created_at, reviewed, reviewed_target,
+         rejected_targets) = row
         if not name:
             continue
         folded = normalize_entity_name(canonical or name)
@@ -261,6 +272,7 @@ def _read_entities(graph, label: str) -> list[dict]:
             "createdAt": created_at,
             "dedup_reviewed": reviewed or "",
             "dedup_target_id": reviewed_target,
+            "dedup_rejected_targets": rejected_targets,
         })
     return out
 

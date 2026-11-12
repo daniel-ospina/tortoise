@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from tortoise.entity_identity import AmbiguousEntityName
+from tortoise.entity_identity import AmbiguousEntityName, resolve_entity_id
 from tortoise.entity_resolver import (
     EntityScanUnavailable,
     apply_entity_merge,
@@ -497,6 +497,42 @@ class TestMergeIsDurable:
         finally:
             sdk.close()
 
+    def test_a_reject_verdict_survives_a_full_wipe_and_replay(self, tmp_path):
+        """`derived == replay(journal)` for the SET-VALUED reject verdict (F1).
+
+        The verdict became a LIST (`dedup_rejected_targets`), and that list is NEW
+        state: if it existed only on the node, a rebuild would drop every
+        rejection and the pairs the reviewer had answered would come back as
+        fresh candidates — the queue reporting a decision it no longer holds.
+        """
+        from tortoise.sdk import TortoiseSDK
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t.db"),
+                          event_log_path=str(events / "events.jsonl"),
+                          namespace=f"test_suite_{os.urandom(4).hex()}")
+        try:
+            sdk.create_subject("plate one", "other")
+            sdk.create_subject("plate wun", "other")
+            row = sdk.list_dedup_candidates(candidate_type="entity")[0]
+            sdk.approve_merge(row["candidate_id"], action="reject")
+            g = sdk._get_proj().g
+            q = ("MATCH (s:Subject) RETURN s.id, s.dedup_reviewed, "
+                 "s.dedup_rejected_targets ORDER BY s.id")
+            before = [list(r) for r in g.query(q).result_set]
+            assert any(r[1] == "reject" for r in before), (
+                "the reject wrote no verdict — nothing to replay")
+            assert any(r[2] for r in before), (
+                "the reject wrote no pair list — nothing to replay")
+
+            sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+            after = [list(r) for r in g.query(q).result_set]
+            assert after == before, (
+                "the reject verdict did not replay: dedup_rejected_targets is "
+                "live-only state and a rebuild drops the answered pairs")
+        finally:
+            sdk.close()
 
 class TestReviewFixes:
     """Regression pins for the first review round (all were measured defects)."""
@@ -738,6 +774,70 @@ class TestSecondReviewRoundBounded:
         ).result_set[0][0]
         assert folded == "sub-b", (
             f"the merge folded into {folded!r}, not the survivor the queue showed")
+
+    def test_rejecting_the_re_offered_pair_records_that_pair(self, sdk_factory):
+        """P2: the reject early return was CANDIDATE-scoped (#12047 review F1).
+
+        `_pair_reviewed` suppresses one COMBINATION, so after rejecting (c,a) the
+        queue re-offers (c,b). The `reviewed == action` short-circuit answered
+        that fresh row `already_reviewed` about a pair nobody had reviewed and
+        left it queued forever. The verdict is set-valued now, so both pairs stay
+        suppressed without the second rejection un-suppressing the first.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "aaa one", "subjectKind", "other",
+                    ts="2026-01-01")
+        _create_raw(sdk, "Subject", "sub-b", "aaa wun", "subjectKind", "other",
+                    ts="2026-01-02")
+        _create_raw(sdk, "Subject", "sub-c", "aaa one", "subjectKind", "other",
+                    ts="2026-01-03", dedup_reviewed="reject",
+                    dedup_target_id="sub-a")
+        pairs = {(r["candidate_id"], r["existing_id"]) for r in
+                 sdk.list_dedup_candidates(candidate_type="entity")}
+        assert ("sub-c", "sub-b") in pairs, pairs
+        verdict = sdk.approve_merge("sub-c", action="reject")
+        assert not verdict.get("already_reviewed"), (
+            f"a pair nobody had reviewed answered 'already reviewed': {verdict}")
+        after = {(r["candidate_id"], r["existing_id"]) for r in
+                 sdk.list_dedup_candidates(candidate_type="entity")}
+        assert ("sub-c", "sub-b") not in after, (
+            f"the pair just rejected is still offered: {after}")
+        assert ("sub-c", "sub-a") not in after, (
+            "recording the second rejection un-suppressed the first one")
+        again = sdk.approve_merge("sub-c", action="reject")
+        assert again.get("already_reviewed"), (
+            f"re-rejecting with no pair left is not idempotent: {again}")
+
+    def test_a_merged_name_resolves_on_the_read_path_too(self, sdk_factory):
+        """P2: `resolve_entity_id` counted merged-away carriers (#12047 review F2).
+
+        The merge is non-destructive, so both nodes keep matching the raw name.
+        The CREATE path collapsed them (round-4 finding 1) and the READ path did
+        not, so after merging an exact twin every by-name read — including the
+        `roleHolder` verb this PR adds — refused the name the merge had just
+        unified as ambiguous.
+        """
+        sdk = sdk_factory()
+        _create_raw(sdk, "Subject", "sub-a", "Acme Owner", "subjectKind",
+                    "naturalPerson", ts="2026-01-01")
+        _create_raw(sdk, "Subject", "sub-b", "Acme Owner", "subjectKind",
+                    "naturalPerson", ts="2026-01-02")
+        row = next(r for r in sdk.list_dedup_candidates(candidate_type="entity")
+                   if r["candidate_id"] == "sub-b")
+        assert row["existing_id"] == "sub-a", row
+        sdk.approve_merge("sub-b", action="merge")
+        g = sdk._get_proj().g
+        assert resolve_entity_id(
+            g, "Subject", "Acme Owner",
+            name_props=("name", "canonical_name")) == "sub-a", (
+            "a name the merge just unified still answers 'ambiguous' on the read path")
+        role = sdk.create_subject("owner role", "role", roleHolder="Acme Owner")
+        assert role["id"]
+        wired = g.query(
+            "MATCH (:Subject {id:'sub-a'})-[r:holdsRole]->(:Subject) "
+            "RETURN count(r)").result_set[0][0]
+        assert wired >= 1, (
+            "roleHolder did not resolve the merged name onto its survivor")
 
     def test_a_merge_does_not_rewrite_the_candidate_s_caller_key(self, sdk_factory):
         """P2: the survivor's `canonical_name` was fill-only; the candidate's was not.
