@@ -653,23 +653,15 @@ def _verdicts_by_label(text: str) -> dict[str, str]:
     return out
 
 
-#: A letter a sentence names as a LIST MEMBER, in every spelling the candidate filter
-#: accepts — plus the two markdown shapes it does not use for candidacy but a writer
-#: does use for a list member: a bolded letter WITHOUT parentheses (`**a**`). ⛔ ONE
-#: extractor for all of them, never `parens or plain`: `set(findall(parens)) or
-#: set(findall(plain))` short-circuits, and the shipped tally sentence always carries
-#: `**(c)**`, so the plain branch was DEAD — measured: appending `, and a, f too` to the
-#: tally sentence left `--check` at rc 0 over a page naming two STILL-TRUE rows as
-#: overtaken. The same dead-branch shape hid `**a**` and the complement arm entirely
-#: (which read `\*\*\(x\)\*\*` only).
-#:
-#: Letters are restricted to `[a-l]` — the page's own twelve rows — which is what keeps
-#: ordinary prose out: `is and`, `or a` and `to and fro` contain no `a`..`l` single-letter
-#: form. The plain alternative is matched by its SEPARATOR (`,\s*` or `and\s+`) rather
-#: than by lookahead so that the LAST member of a list (`… and a.`) is caught too.
-#: The cue set is the words that INTRODUCE a member (`and`, `or`, `also`, `plus`, or a
-#: comma): a bare letter elsewhere in prose is not collected, which is what keeps
-#: `as a rule` out while still reaching `, also c`.
+#: A letter a sentence names as a list member IN UNAMBIGUOUS MARKUP — bold, code,
+#: italic, or parentheses. Here the MARKUP IS THE CLAIM: nothing about the surrounding
+#: prose decides whether `**(a)**` or `` `a` `` is a member, so these forms are read
+#: unconditionally. ⛔ ONE extractor for all of them, never `parens or plain`:
+#: `set(findall(parens)) or set(findall(plain))` short-circuits, and the shipped tally
+#: sentence always carries `**(c)**`, so the plain branch was DEAD — measured: appending
+#: `, and a, f too` to the tally sentence left `--check` at rc 0 over a page naming two
+#: STILL-TRUE rows as overtaken. The same dead-branch shape hid `**a**` and the
+#: complement arm entirely (which read `\*\*\(x\)\*\*` only).
 #:
 #: ⛔ CODE AND ITALIC ARE MARKUP THE CANDIDATE GATE ACCEPTS, so the extractor must read
 #: them too — otherwise a sentence can QUALIFY on its markup and then contribute no
@@ -679,44 +671,119 @@ def _verdicts_by_label(text: str) -> dict[str, str]:
 #: STILL-TRUE row as overtaken, and `**(j)**, and `c` still read as written` did the
 #: same on the complement arm. §8 of the page says a letter may be written "bold, code,
 #: italic or bare", so the doc promised a comparison the code did not make.
+#:
+#: Letters are restricted to `[a-l]` — the page's own twelve rows.
 _NAMED_LETTER_RE = re.compile(
     r"\*\*\(([a-l]{1,2})\)\*\*"  # **(a)**
     r"|\*\*([a-l]{1,2})\*\*"  # **a**
     r"|`\(?([a-l]{1,2})\)?`"  # `a` / `(a)`
     r"|\*\(([a-l]{1,2})\)\*"  # *(a)*
     r"|\*([a-l]{1,2})\*"  # *a*
-    r"|\(([a-l]{1,2})\)"  # (a) / (a), (b)
-    # ⛔ A BARE MEMBER INTRODUCED BY A CONNECTOR IS EVIDENCE IN ITSELF; one introduced by
-    # a COMMA is not. Read the comma form with no further condition and English prose
-    # supplies row letters: measured, the shipped still-list with `(a)` removed and
-    # `, a claim §1 supports.` appended read CLEAN — a STALE complement list passing the
-    # arm's only comparison — and `, I think.` / `, e.g. today.` did the same for `i` and
-    # `e`. So every COMMA/`&`-introduced member must end like a list member (list
-    # punctuation or the end of the sentence), while `and` / `or` / `also` / `plus` keep
-    # the permissive form, because a connector is what makes `… **(j)**, also c still
-    # read as written.` a member rather than an article.
-    r"|(?:,\s*|&\s+)([a-l])\b(?=\s*(?:[,.;:)\u2014\u2013]|$))"  # ", f" / "& f"
-    r"|\b(?:and|or|also|plus|as well as|followed by|namely)\s+([a-l])\b"  # "and f"
-    # ⛔ THE HEAD OF A PLAIN LIST. Matching a member only by its SEPARATOR (`, f` /
-    # `and f`) never reads the FIRST member, so an honest `Only a, f, h, i and j still
-    # read as written.` was compared as `['f','h','i','j']` — a false accusation that
-    # names the wrong set, which §8 declares is an accepted spelling (#11902 review,
-    # round 4). The head rule pairs the first member with the separator after it, and
-    # letters are read case-insensitively, because `**(A)**` is the same claim.
-    r"|\b([a-l])\b\s*(?:,\s*(?:also\s+)?|(?:,?\s+)(?:and|or|also|plus|&)\s*)\b([a-l])\b"
-    , re.IGNORECASE
+    r"|\(([a-l]{1,2})\)",  # (a) / (a), (b)
+    re.IGNORECASE,
 )
+
+#: The placeholder that stands in for a member `_NAMED_LETTER_RE` already read, so the
+#: BARE scan below cannot re-read the letter inside `(a)` and so a marked member still
+#: COUNTS as one item of a list run (it is a `\u0000`, not a letter — it contributes no
+#: member itself, it only holds the run together).
+_MEMBER_MASK = "\u0000"
+
+#: One item of a list run: a masked member, or a BARE single letter — no markup at all,
+#: outside any word and outside any markup.
+_RUN_ITEM_RE = re.compile(r"\u0000|(?<![\w*`])([a-l])(?![\w*`])", re.IGNORECASE)
+
+#: What may stand BETWEEN two items of the SAME list — separators and whitespace only,
+#: the whole span. A word of any other kind ends the run, which is what keeps prose out:
+#: in `… and **(j)** still read as written, and I think so.` the span between the last
+#: member and the `I` carries `still read as written, and`, so the `I` starts a run of
+#: its own and is never a member.
+_LIST_SEP_RE = re.compile(
+    r"\s*(?:(?:,|;|&)\s*"
+    r"|\b(?:and|or|also|plus|as\s+well\s+as|followed\s+by|namely)\b\s*)+",
+    re.IGNORECASE,
+)
+
+#: A bare letter at the END of a run has nothing after it to prove membership, so `a`
+#: and `i` — the only single letters that are also ENGLISH WORDS — are read there only
+#: when the next thing is list punctuation, the end of the sentence, or a word the arm's
+#: own predicates use. ⛔ THE ENDING RULE IS SCOPED TO `a`/`i` ON PURPOSE. Applying it
+#: to every bare letter is what DROPPED a written member (`Only a, f, h, i, j still read
+#: as written.` lost its `j`, #12028), and applying no ending rule at all is what let
+#: prose SUPPLY one (`, and I think so.` / `, and a claim §1 supports.` closed a stale
+#: complement list, #12028). The other ten letters are not English words, so their run
+#: membership is evidence enough. `(?![-\w])` refuses `still-unsolved`, where `still`
+#: begins a hyphenated adjective rather than the list's predicate.
+#: ⚠️ STATED RESIDUAL: prose of the exact shape `, and a <predicate> …` — a verb phrase
+#: that STARTS with one of those words, placed directly after a list run — can still
+#: supply `a`/`i`. Closing it needs either a WIDER word list (the false-accusation risk
+#: #12028 rejects, and §8's accepted-spelling contract forbids) or refusing a documented
+#: trailing member; both trade a contrived false PASS for a false ACCUSATION on correct
+#: prose, and the residual additionally needs the phantom to be exactly the row the stale
+#: list omits.
+_PROSELIKE_LETTERS = frozenset("ai")
+_MEMBER_END_RE = re.compile(
+    r"\s*(?:[,;:)\u2014\u2013]"
+    r"|\.(?![A-Za-z])"
+    r"|$"
+    r"|(?:still|only|no\s+longer|read|reads|remain|remains|stand|stands|stood"
+    r"|are|is|was|were|do|does|did|have|has|had)(?![-\w]))",
+    re.IGNORECASE,
+)
+
+
+def _bare_list_members(masked: str) -> set[str]:
+    """Bare letters that are members of a LIST — a run of two or more items.
+
+    ⛔ MEMBERSHIP IS RUN MEMBERSHIP, NOT A LOOKAHEAD. The earlier shape tried to decide
+    a bare letter's membership from the characters immediately after it, and that rule
+    was wrong in BOTH directions at once (#12028): too tight, it dropped a member the
+    sentence writes (`Only a, f, h, i, j still read as written.` → `['a','f','h','i']`,
+    a false accusation on a spelling §8 accepts); too loose, it took any `.` as a list
+    ending, so `, i.e. today.` supplied `i` and closed a STALE complement list — and the
+    connector branch had no ending rule at all, so `, and I think so.` supplied `i` and
+    `, and a claim §1 supports.` supplied `a`. Both were measured CLEAN over a page whose
+    complement list contradicts its own table.
+
+    A list is a RUN: items joined by separators and nothing else. English prose appended
+    to a sentence starts a new run (`still read as written, and I …` has words between),
+    and a run of one item is not a list. `masked` must already have every marked member
+    replaced by `_MEMBER_MASK`; those are counted by the caller and are item anchors here.
+    """
+    out: set[str] = set()
+    items = [(m.start(), m.end(), m.group(1)) for m in _RUN_ITEM_RE.finditer(masked)]
+    runs: list[list[tuple[int, int, str | None]]] = []
+    for item in items:
+        if runs and _LIST_SEP_RE.fullmatch(masked[runs[-1][-1][1] : item[0]]):
+            runs[-1].append(item)
+        else:
+            runs.append([item])
+    for run in runs:
+        if len(run) < 2:
+            continue
+        for pos, (_start, end, letter) in enumerate(run):
+            if letter is None:  # a masked marked member — already counted
+                continue
+            if (
+                letter.lower() in _PROSELIKE_LETTERS
+                and pos == len(run) - 1
+                and not _MEMBER_END_RE.match(masked[end:])
+            ):
+                continue
+            out.add(letter.lower())
+    return out
 
 
 def _named_letters(sentence: str) -> set[str]:
     """The letters a sentence names as list members, in any accepted spelling."""
-    # ⛔ EVERY GROUP, NOT THE FIRST: the plain head rule is ONE match that carries BOTH
-    # members (`j or a`), so taking only the first non-empty group read a two-member
-    # list as one member and the candidacy gate (`>= 2 named letters`) never fired —
-    # measured, `Note: j or a no longer read as written.` left `--check` at rc 0.
     out: set[str] = set()
-    for m in _NAMED_LETTER_RE.finditer(sentence):
-        out.update(g.lower() for g in m.groups() if g)
+
+    def _take(match: re.Match[str]) -> str:
+        out.update(g.lower() for g in match.groups() if g)
+        return _MEMBER_MASK
+
+    masked = _NAMED_LETTER_RE.sub(_take, sentence)
+    out |= _bare_list_members(masked)
     return out
 
 
@@ -1133,9 +1200,15 @@ def check_verdict_tally(text: str) -> list[str]:
     )
     # The same rule as the count above, for the same measured reason: the figure is
     # compared against the ONE sentence that states it, never against the paragraph.
+    # ⛔ THE SAME SENTENCES TOO (#12029): this arm re-split the RAW `paragraph`, so the
+    # quote mask that ended the figure arm's false accusation was live in only one of two
+    # structural twins. Measured, appending `They wrote "four of the seven were overtaken.
+    # It is wrong." verbatim.` red this arm with "2 sentence(s) state a 'N of the M were'
+    # overtaken figure" while the no-full-stop decoy stayed CLEAN — and §3 of the page
+    # asserts "a quoted full stop does not end a sentence", which the arm contradicted.
     overtaken_sentences = [
         s
-        for s in re.split(r"(?<=\.)\s+", paragraph)
+        for s in sentences
         if OVERTAKEN_FIGURE_RE.search(quoted.sub(" ", s))
     ]
     if len(overtaken_sentences) != 1:
