@@ -2293,19 +2293,35 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     `classify_queue`'s comment; and the second missed the two test headers that shipped the
     same inference in this very file.
 
-    SO THE MATCH IS CLAIM-LEVEL AND WHITESPACE-INSENSITIVE. Line-literal matching let a
+    SO THE MATCH IS CLAIM-LEVEL AND FORMATTING-INSENSITIVE. Line-literal matching let a
     re-wrap at a comment boundary through (routine at ~72 columns here), so leading
-    comment markers are stripped and all whitespace flattened on both sides. The needles
-    are the retracted CLAIM, never a fragment: "can never make the census" alone is TRUE
-    when stated over both halves — the ops doc states exactly that — so a fragment needle
-    both over-triggers on correct prose and cannot be pointed at the doc at all. Half
-    needles are likewise avoided where the fragment is legitimate: "therefore NOT counted
-    in" is correct prose in the corrected field doc, so the retracted PAIR is one needle.
+    comment markers are stripped and all whitespace flattened on both sides — and CASE
+    and BACKTICKS are normalised away too (review P2-2), because a revert is re-TYPED,
+    not pasted: "the PROOF that EXCLUDES" returns as "the proof that excludes" the moment
+    it is re-wrapped into a sentence, and re-typing routinely drops inline-code
+    backticks. Both were MEASURED to walk through a case- and backtick-sensitive scan.
+    The lower-casing precedent is this repo's own: `tests/test_10000_source_prose.py`
+    scans case-INSENSITIVELY for exactly this reason. The needles are the retracted
+    CLAIM, never a fragment: "can never make the census" alone is TRUE when stated over
+    both halves — the ops doc states exactly that — so a fragment needle both
+    over-triggers on correct prose and cannot be pointed at the doc at all. Half needles
+    are likewise avoided where the fragment is legitimate: "therefore NOT counted in" is
+    correct prose in the corrected field doc, so the retracted PAIR is one needle.
+
+    ⛔ EVERY SITE THIS RULE IS STATED ON NEEDS A NEEDLE THAT MATCHES WHAT IT ACTUALLY
+    SHIPPED (review P2-1). The ops doc was ONE of the ten places named above while no
+    needle matched its own retracted paragraph, so that paragraph reverted to its pre-fix
+    text — BOTH errors back, the merged cancelled-avenue claim and the wrong lever — with
+    the whole suite green (measured: 4 passed). A site listed here and unguarded below is
+    worse than an unlisted one: the docstring then asserts coverage the test lacks.
 
     RESIDUAL, stated plainly: this catches the phrasings that have actually shipped, not a
-    novel paraphrase, and a revert that ALSO mangles a backticked token or drops the
-    backticks altogether is not caught either. It is a regression guard, not a proof of
-    the prose.
+    novel paraphrase — a NEW wrong wording, or a revert that keeps the wrong claim but
+    rephrases it, is not caught. Widening the match is not free either: once case and
+    backticks are ignored every needle must stay long enough to be unambiguous ("by being
+    probed" alone would now collide with the corrected "reachable only BY being probed"),
+    which is why the doc needles below carry their clause and not a fragment. It is a
+    regression guard, not a proof of the prose.
     """
     root = Path(__file__).resolve().parents[1]
     scanned = {
@@ -2322,9 +2338,15 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         comment boundary flattens to a token split across the marker and slips past the
         needle. The leading comment marker of every line is stripped first, so the
         comparison is on the prose an operator reads, however it is wrapped or indented.
+
+        ⛔ NOR ARE CASE, BACKTICKS AND EMPHASIS CONTENT (review P2-2, P3-1). All three were
+        MEASURED to hide a revert: the same retracted claim, re-typed lower-case, passed the
+        whole suite, and these docs emphasise tokens INSIDE the very sentences guarded here
+        ("is the *proof* that EXCLUDES", and the pre-fix doc's "*by being probed*"), so a
+        revert that bolds a word inside a needle span would otherwise be invisible.
         """
         lines = [re.sub(r"^\s*(?:#:|#)\s?", "", ln) for ln in text.splitlines()]
-        return re.sub(r"\s+", " ", " ".join(lines))
+        return re.sub(r"\s+", " ", " ".join(lines)).replace("`", "").replace("*", "").lower()
 
     retracted = [
         # the module sites that shipped uncorrected
@@ -2342,12 +2364,31 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # needle is the claim that ONE half suffices.
         "every job is `completed` is the PROOF that excludes it from `pr_running`",
         "every job `completed` is the PROOF that EXCLUDES a run from `pr_running`",
-        "PROOF that excludes it from `pr_running`, so it can never make the census",
+        # ⛔ THE SUBJECT IS PART OF THE NEEDLE (review P3-1). Without it, dropping `*`
+        # (above) turns this needle into a false positive on the ops doc's CORRECT
+        # paragraph the moment its "(see the `excluded` sentence)" cross-reference is
+        # tightened — measured: 4 passed pristine, RED on correct prose after the tidy.
+        "every job is `completed` is the PROOF that excludes it from `pr_running`, so it "
+        "can never make the census",
+        # the wrap artifact is NOT the claim (review P3-2): `flat()` turns the shipped
+        # "all-jobs" / newline / "-completed" into "all-jobs -completed", so a needle that
+        # hard-codes that space only catches a PASTE. The re-typed revert (no space) needs
+        # the hyphen-joined form, which the wrap-free needle carries.
         "all-jobs -completed is the PROOF that EXCLUDES a run from `pr_running`",
+        "all-jobs-completed is the PROOF that EXCLUDES a run from `pr_running`",
         # the merged claim that either state is a CLOSED avenue: for a settle-downgraded
         # run /cancel is ACCEPTED and destructive
         "accepts a run in either state",
         "accepts a repair in either state",
+        # the OPS DOC's own shipped paragraph (review P2-1). It is one of the ten sites
+        # this rule is stated on, and NO other needle matched what it actually shipped,
+        # so reverting it put both errors back — the wrong lever AND the merged
+        # cancelled-avenue claim — with the suite green. Clause-level, not a fragment:
+        # "by being probed" alone now collides with the corrected workflow block.
+        "i.e. by the budget lever above, and neither `/cancel` nor `/force-cancel` "
+        "accepts a repair",
+        # the merged-avenue claim on EITHER surface, in the wording both shipped
+        "neither `/cancel` nor `/force-cancel` accepts a repair",
         # a COUNT claim that contradicts this module's own emitted sentence: the field
         # counts the budget-unreached runs too (the split is emitted separately). Anchored
         # to the CLAIM, not to the bare count: "three causes, one bucket" alone is a true
