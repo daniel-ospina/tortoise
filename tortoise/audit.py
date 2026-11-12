@@ -1568,8 +1568,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # is readable the disposition is CARRY, matching the repair the same string
         # prescribes. Only a neither-arm row with nothing readable to carry onto is
         # DROP (#12210 review, P3).
-        neither_drops = (neither_arm
-                         and (unread or s["carrier_count"] != 1))
+        # ⛔ …and a LIVE HEAD of the successor's chain is a readable destination too:
+        # measured on a neither-arm row whose successor is archived but whose chain
+        # ends in a live Object — clearing the shape and moving the edge onto that head
+        # restores the belief (`effective_n 2.5255` from a bare prior), while the same
+        # string said "the disposition here is DROP" (#12210 review, P2). An ambiguous
+        # name (N≥2) has no single head to test, and the prefix already demands the
+        # reader pick a live one, so it is not a DROP either.
+        live_head = (s["next_count"] == 1 and not s["next_terminal"]
+                     and not _next_refused(s))
+        neither_drops = (neither_arm and not live_head
+                         and (s["carrier_count"] == 0 or unread))
         if s["carrier_count"] == 1 and _succ_refused(s):
             # ⛔ A CARRY needs a successor EP actually reads — and the check may only
             # say so when the name resolves to ONE carrier (an ambiguous name is the
@@ -1616,12 +1625,26 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # restores nothing (measured ``effective_n 2.0``, the bare prior, versus
             # ``2.5236`` for the flowing control), so the DROP sentence stands
             # (#12210 review, P2).
+            # ⛔ …and on a NEITHER-arm row the promotion ALONE is not the repair: with
+            # the endpoint still shaped, promoting and moving the edge builds NO factor
+            # either (measured ``confidences {}``, ``iterations 0``); the belief needs
+            # the shape cleared too (``effective_n 2.5255`` after both). Naming only the
+            # promotion put a true instruction beside a false one in one string
+            # (#12210 review, P2).
+            _shape_too = (" AND clear the shape on the endpoint EP refuses "
+                          "(``tortoise_update_entity(<the active endpoint>, "
+                          "{'is_operator': False, 'op_type': None})``) — promoting it "
+                          "and moving the edge WHILE that endpoint is still shaped "
+                          "builds no factor either (measured ``confidences {}``), and "
+                          "only both steps together restore it"
+                          if neither_arm else "")
             disposal = (
                 "a DRAFT successor is the destination ONCE PROMOTED: set it "
                 "``status='live'`` first, then CARRY the IMPL (and any NAND that "
                 "STILL APPLIES) onto it — measured, the same edge write builds the "
                 "factor after the promotion (``effective_n 2.263``) and builds none "
-                "before it. Drop only a refutation that MOTIVATED the correction")
+                "before it" + _shape_too + ". Drop only a refutation that MOTIVATED "
+                "the correction")
         elif unread and not neutral:
             # ⛔ …and NOT on a NEUTRAL row, which transfers nothing: a CARRY there is
             # false (measured: carrying a neutral input onto a live node leaves both
@@ -1640,9 +1663,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 ", which EP reads no input through — so CARRY the IMPL (or the NAND "
                 "that STILL APPLIES) onto whatever node now carries the claim (a "
                 "live one, named by ID), and drop only a refutation that MOTIVATED "
-                "the correction. A carry onto the dead name itself builds no factor "
-                "(measured: same posteriors as before the supersession once the edge "
-                "lands on the node that carries it)")
+                "the correction. A carry onto the dead name itself changes nothing: "
+                + _dropped_input(s)
+                + " (measured: the same posteriors as before the supersession once "
+                "the edge lands on the node that carries it)")
         else:
             disposal = (
                 "an IMPL may CARRY to the successor, and so may a NAND that STILL "

@@ -3038,3 +3038,80 @@ def test_a_draft_successor_carrying_the_legacy_outdated_flag_is_not_promoted(sdk
     # returns only once `outdated` is cleared too (#12210 review, P2).
     assert "promot" not in fix.lower(), (
         "a promotion cannot repair a successor the legacy flag keeps terminal: " + fix)
+
+
+def test_a_neither_arm_row_with_a_LIVE_head_is_told_to_carry(sdk):
+    """A dead successor whose chain ends LIVE is a readable destination.
+
+    Measured: clear the shape and move the edge onto that live head →
+    `effective_n 2.5255` from a bare prior — so "the disposition here is DROP" beside
+    the tail's "target THAT" denied the repair the same string ordered
+    (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    v3 = _obj(sdk, "PolicyV3")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _supersede_object(sdk, "PolicyV2", "PolicyV3")
+    sdk.update_entity(v2["id"], status="archived")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='live'", {"i": v3["id"]})
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.status", {"i": v3["id"]}) == [["live"]]
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "target THAT" in fix, fix
+    assert "the disposition here is DROP" not in fix, (
+        "a live head is a readable destination, so the disposition is CARRY: " + fix)
+
+
+def test_a_neither_arm_draft_row_is_told_to_clear_the_shape_too(sdk):
+    """Promotion alone is not the repair when the ROW's own endpoint is shaped.
+
+    Measured: promote the draft and move the edge onto it with the endpoint still
+    shaped → `confidences {}`, `iterations 0`; both steps (promote AND clear the
+    shape) → `effective_n 2.5255`. The disposition named only the promotion
+    (#12210 review, P2).
+    """
+    actor = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_direct_edge("IMPL", actor["id"], v1["id"])
+    sdk.update_entity(actor["id"], is_operator=True)
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "ONCE PROMOTED" in fix, fix
+    assert "clear the shape on the endpoint EP refuses" in fix, (
+        "the promotion alone builds no factor while the endpoint is shaped: " + fix)
+
+
+def test_a_dead_input_on_a_three_input_operator_is_not_told_it_builds_no_factor(sdk):
+    """ "Builds no factor" is an ARITY claim: two surviving inputs still run.
+
+    Measured on `create_operator("IMPL", p, [v1, p2])` with `v1 → v2('archived')`:
+    carrying the input onto the archived `v2` leaves the factor running over the two
+    survivors (`effective_n 2.5255` each, `skipped: None`), so the absolute claim was
+    false there (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    p2 = sdk.create_entity("subject", "AcmeCorp")["node"]
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"], p2["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "CARRY the IMPL" in fix, fix
+    assert "builds no factor" not in fix, (
+        "with two inputs left the factor still runs, so the absolute claim is false: "
+        + fix)
