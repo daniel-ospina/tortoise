@@ -112,8 +112,21 @@ SESSION.headers["User-Agent"] = "tortoise-blog-e2e"
 
 
 def test_blog_index_ssr() -> None:
-    """E2E-1: /blog is server-rendered HTML with the blog chrome."""
-    r = SESSION.get(f"{TORTISE}/blog", timeout=20)
+    """E2E-1: /blog is server-rendered HTML with the blog chrome.
+
+    Fetched on the CANONICAL origin (#11762/#11763, landed as #12031). The retired
+    product host now 301s every /blog path here, and `requests` follows redirects
+    by default — so probing TORTISE would still return this document while grading
+    the redirect rather than the SSR, and would stop being a test of the host the
+    epic declares. Repointed when #12031's inversion landed (review P2).
+
+    Until #12031's Pages DEPLOY completes, `{COMPANY}/blog` still answers 301 and
+    this request follows one hop onto the same document; that is left to resolve on
+    its own rather than asserted here, because the destination contract is owned in
+    ONE place — `test_host_isolation_blog`, which asserts it strictly and is the
+    reason a half-applied move cannot pass silently. This test grades the DOCUMENT.
+    """
+    r = SESSION.get(f"{COMPANY}/blog", timeout=20)
     assert r.status_code == 200
     assert "text/html" in r.headers.get("content-type", "")
     body = r.text
@@ -125,7 +138,7 @@ def test_blog_index_ssr() -> None:
 def test_blog_article_ssr() -> None:
     """E2E-1: an article page (when a published post exists) renders SSR +
     sanitized (E2E-14) + JSON-LD."""
-    r = SESSION.get(f"{TORTISE}/blog", timeout=20)
+    r = SESSION.get(f"{COMPANY}/blog", timeout=20)
     if r.status_code != 200:
         pytest.skip("blog index unavailable")
 
@@ -134,7 +147,7 @@ def test_blog_article_ssr() -> None:
     if not slugs:
         pytest.skip("no published posts seeded")
     slug = slugs[0]
-    a = SESSION.get(f"{TORTISE}/blog/{slug}", timeout=20)
+    a = SESSION.get(f"{COMPANY}/blog/{slug}", timeout=20)
     assert a.status_code == 200
     body = a.text
     assert "application/ld+json" in body  # BlogPosting schema
@@ -267,14 +280,43 @@ def test_blog_feed_and_sitemap() -> None:
 
 
 def test_robots_txt_lists_blog_sitemap() -> None:
-    """robots.txt cross-submission includes the blog sitemap."""
+    """robots.txt cross-submission includes the blog sitemap, and it RESOLVES.
+
+    #11766 owns the HOST the sitemap is named on: `website/robots.txt` still ships
+    `Sitemap: https://tortoise.premiselabs.co/blog/sitemap.xml`, and the retired
+    host 301s it onto the canonical one, so naming either origin is legal today.
+    That makes a host EQUALITY here wrong (it would red on a correct system until
+    #11766 lands), which was previously resolved by dropping the host entirely and
+    asserting only the path — which is what removed the last assertion that could
+    catch a sitemap pointing at a document that does not answer at all (review P2).
+
+    So keep the host-agnostic shape and assert the property that actually matters
+    and that no deferral can invalidate: every blog-sitemap URL the file names
+    resolves to a 200. A wrong-host typo, a path that moved, or a sitemap removed
+    from its own host each red here, while #11766 can repoint freely.
+    """
     r = SESSION.get(f"{COMPANY}/robots.txt", timeout=20)
     assert r.status_code == 200
-    # The HOST of the named sitemap is #11766's to change; this asserts the path is
-    # cross-submitted at all, and is deliberately host-agnostic because a robots.txt
-    # that names the sitemap on either origin still points at a document that
-    # resolves (the retired host 301s to the canonical one).
-    assert "/blog/sitemap.xml" in r.text
+    named = [
+        line.split("Sitemap:", 1)[1].strip()
+        for line in r.text.splitlines()
+        if line.lower().startswith("sitemap:")
+    ]
+    blog_sitemaps = [u for u in named if "/blog/sitemap.xml" in u]
+    assert blog_sitemaps, (
+        f"robots.txt must cross-submit the blog sitemap; it names {named}"
+    )
+    for sitemap_url in blog_sitemaps:
+        # Follow redirects: the retired host legitimately 301s to the canonical
+        # one, and a robots.txt entry is correct as long as the document answers.
+        got = SESSION.get(sitemap_url, timeout=20)
+        assert got.status_code == 200, (
+            f"robots.txt names {sitemap_url}, which resolves to {got.status_code} "
+            f"(final url {got.url!r}) — a sitemap entry that does not answer is dead weight"
+        )
+        assert "<urlset" in got.text or "<sitemapindex" in got.text, (
+            f"{sitemap_url} answered {got.status_code} but is not a sitemap document"
+        )
 
 
 @pytest.mark.skipif(
@@ -572,12 +614,14 @@ def test_publish_lifecycle_crawler_visibility() -> None:
         assert r.status_code == 200, f"publish → {r.status_code} {r.text[:200]}"
 
     def article_visible() -> tuple[int, str]:
-        a = SESSION.get(f"{TORTISE}/blog/{slug}", timeout=20)
+        # Document probe → the CANONICAL origin. On the retired product host every
+        # /blog path is a 301 now, so probing it here would grade the redirect.
+        a = SESSION.get(f"{COMPANY}/blog/{slug}", timeout=20)
         return a.status_code, a.headers.get("x-robots-tag", "")
 
     def article_in_feed_sitemap() -> tuple[bool, bool]:
-        feed = SESSION.get(f"{TORTISE}/blog/feed.xml", timeout=20).text
-        sitemap = SESSION.get(f"{TORTISE}/blog/sitemap.xml", timeout=20).text
+        feed = SESSION.get(f"{COMPANY}/blog/feed.xml", timeout=20).text
+        sitemap = SESSION.get(f"{COMPANY}/blog/sitemap.xml", timeout=20).text
         return slug in feed, slug in sitemap
 
     try:
@@ -660,7 +704,7 @@ def test_delete_refuses_a_published_post() -> None:
         assert refused.json().get("error") == "published", refused.text[:200]
 
         # The refusal must be REAL: the published article is still served.
-        live = SESSION.get(f"{TORTISE}/blog/{slug}", timeout=20)
+        live = SESSION.get(f"{COMPANY}/blog/{slug}", timeout=20)
         assert live.status_code == 200, (
             f"published post gone after a refused DELETE ({live.status_code}) — the guard deleted it anyway"
         )

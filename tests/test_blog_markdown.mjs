@@ -16,7 +16,7 @@
 
 import { readFileSync, statSync } from "node:fs";
 
-import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd, extractVideo, validHref, authorBylineHtml, authorJsonLd, DEFAULT_AUTHOR, DEFAULT_AUTHOR_IMAGE_URL, SITE_URL, RETIRED_SITE_HOSTS, normaliseRetiredHostUrl } from "../website/functions/blog/_lib.ts";
+import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd, extractVideo, validHref, authorBylineHtml, authorJsonLd, DEFAULT_AUTHOR, DEFAULT_AUTHOR_IMAGE_URL, SITE_URL, normaliseRetiredHostUrl } from "../website/functions/blog/_lib.ts";
 import { VIDEO_EMBED_ORIGINS } from "../website/functions/blog/_shared/video.ts";
 // The marketing project's policy — the one `blog/_lib.ts` `ok()` stamps on every
 // article response, so it is the policy that decides whether the embed displays.

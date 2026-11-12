@@ -2278,9 +2278,20 @@ console.log("no rendered blog page names the retired host (#11765)");
     "the guard's own matcher detects a retired-host URL (it is not a regex that matches nothing)",
   );
   assertNoRetiredHost("the nav alone", navHtml("blog"), { allowNav: true });
+  // ⛔ AN UPPER BOUND, never an equality (#11976 review F1). The claim this row
+  // carries is "no FOURTH retired-host href appeared" — it must NOT also claim
+  // "all three are still retired", because the comment above says the plan is for
+  // #11764 to repoint them. With `===` the count would fall to 0 while the
+  // allowlist stayed at 3, so `0 === 3` reds the whole suite on the CORRECT next
+  // step — in a file #11764's lane has no reason to open. `<=` keeps the invariant
+  // and survives the repoint; the "no fourth" property is separately carried by
+  // the `unexpected.length === 0` filter above, which names any href outside the
+  // allowlist wherever the count lands.
+  const navRetired = [...new Set([...navHtml("blog").matchAll(RETIRED_URL_RE)].map((m) => m[0]))];
   assert(
-    [...new Set([...navHtml("blog").matchAll(RETIRED_URL_RE)].map((m) => m[0]))].length === NAV_PRODUCT_HREFS.length,
-    "the nav's retired-host hrefs are exactly the three product links #11764 owns — no fourth appeared",
+    navRetired.length <= NAV_PRODUCT_HREFS.length,
+    "the nav carries AT MOST the three retired-host product links #11764 owns — no fourth appeared " +
+      `(found ${navRetired.length}: ${JSON.stringify(navRetired)})`,
   );
 
   // ── ONE WRITER FOR THE ORIGIN ───────────────────────────────────────────
