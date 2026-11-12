@@ -4745,6 +4745,7 @@ surfaces:
   # `core` only), where it ran ZERO times on that diff class. Hermetic: one file
   # read, no fixture, no DB, no network, no model.
   - test_pack_selection_durability_doc_pin_9752.py
+  # #3819: the Cursor sessionEnd capture hook — the shipped artifact, its
   # detach/argv behavior, the agent-transcript parser, and the CLI install
   # into the HOME-scoped ~/.cursor. Same dual registration as
   # test_capture_install.py.

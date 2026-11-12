@@ -276,9 +276,9 @@ def migrate(force: bool = False) -> dict:
             # `state_unknown` on its own, and that answer is not overridden —
             # it is the same verdict. The sidecar is keyed to `log_dir`, never
             # to the DB's directory: `prewipe_snapshot_path(log_dir)`
-            # (`projection/__init__.py:2656`, read at `:14524`) is handed the
+            # (`projection/__init__.py:2656`, read at `:14527`) is handed the
             # SOURCE's `events_dir` below (`:241`), and the rebuild warns
-            # explicitly when the two directories differ (`:14525-14535`).
+            # explicitly when the two directories differ (`:14528-14538`).
             #
             # `not pack_selection_expected` makes this the EXACT empty-capture
             # signature, so the override retires itself: the day #11866 gives

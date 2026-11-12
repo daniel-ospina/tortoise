@@ -1070,3 +1070,16 @@ def test_the_lane_constants_match_the_pinned_literals():
 
     assert _PREWIPE_RESTORE_LANE == RESTORE
     assert _PREWIPE_SYNTHETIC_LANE == SYNTHETIC
+    # ⛔ THE TABLE'S COMPLETENESS, pinned here because nothing else can see it:
+    # `_leg_of` classifies BY `_LEGS`, so deleting a row removes the leg from
+    # both sides of `assert set(observed) == set(_LEGS)` in
+    # `test_every_snapshot_restore_leg_declares_itself` and that guard stays
+    # GREEN — as does the shape rule, which skips the `pre-wipe-restore:`
+    # reason prefix. Measured (#9752 review r12): deleting the
+    # `"pack-selection"` row left the file green; the seed mutation reds, so
+    # today's coverage is real, and this set makes tomorrow's deletion loud.
+    assert set(_LEGS) == {
+        "batch-marker", "batch-link", "session", "session-link",
+        "onboarding", "onboarding-onboards", "onboarding-step",
+        "team-meta", "pack-selection", "watermark", "config", "point-derived",
+    }, f"a snapshot-restore leg was added or removed without re-pinning: {sorted(_LEGS)}" 
