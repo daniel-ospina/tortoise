@@ -847,6 +847,50 @@ def _ensure_judgement_edge(sdk: Any, point_id: str, goal_id: str) -> str | None:
     return (operator or {}).get("id")
 
 
+def _cache_then_arrow(
+    sdk: Any, point_id: str, goal_id: str, state: str
+) -> tuple[str | None, str | None]:
+    """Write the ``goalState`` cache and the IMPL arrow — NEITHER suppressing the other.
+
+    ORDER: the cache goes FIRST. A cache word left contradicting a live claim is
+    what a reader sees, and measured, an ``update_entity`` refusal on a flip left
+    the claim ``unmet`` while ``goalState`` still said ``met``.
+
+    ⛔ BUT THE ARROW IS WRITTEN EITHER WAY, and that is the half a plain reorder
+    gets wrong: with the two writes merely SEQUENCED, a refused cache write skips
+    ``_ensure_judgement_edge`` entirely, so the judgement is live with NO belief
+    arrow — and the self-healing path cannot repair it, because the unchanged arm
+    writes the cache first too (measured: with ``update_entity`` raising, the goal
+    ended with ZERO IMPL arrows while a live ``met`` judgement existed). Ordering
+    two writes must therefore not make one a precondition of the other: the cache
+    refusal is captured, the arrow is written regardless, and only then is the
+    original exception re-raised so the caller still sees it. A failed ARROW is
+    the branch the unchanged arm repairs on the next pass (it re-asserts the
+    edge); a failed CACHE has no such arm, which is why it may never cost the
+    arrow.
+
+    Neither step has a compensating delete: the claim and its prior are correct,
+    and removing them would destroy the judgement.
+    """
+    cache_exc: Exception | None = None
+    cached: str | None = None
+    try:
+        cached = _write_goal_state_cache(sdk, goal_id, state)
+    except Exception as exc:  # captured, never swallowed: re-raised below
+        cache_exc = exc
+    try:
+        operator_id = _ensure_judgement_edge(sdk, point_id, goal_id)
+    except Exception as arrow_exc:
+        if cache_exc is not None:
+            # BOTH writes failed. The arrow error is the more actionable one, but
+            # the cache refusal came first; keep both traces on the way out.
+            raise cache_exc from arrow_exc
+        raise
+    if cache_exc is not None:
+        raise cache_exc
+    return cached, operator_id
+
+
 def _extra_operators(
     sdk: Any, point_id: str, goal_id: str, chosen: str | None
 ) -> list[str]:
@@ -989,8 +1033,8 @@ def record_judgement(
         #     because the state never changes again);
         #   * the IMPL arrow is re-asserted when it is missing, which is the
         #     self-healing arm for a write that failed after its point landed.
-        cached = _write_goal_state_cache(sdk, goal_id, judgement.state)
-        wired = _ensure_judgement_edge(sdk, previous_point_id, goal_id)
+        cached, wired = _cache_then_arrow(sdk, previous_point_id, goal_id,
+                                          judgement.state)
         return {
             "written": False,
             "point_id": previous_point_id,
@@ -1119,15 +1163,11 @@ def record_judgement(
                 raise exc from cleanup_exc
             raise
 
-    # The cache is written BEFORE the arrow, deliberately: a failed arrow is the
-    # one failure the unchanged arm repairs on the next pass (it re-asserts it),
-    # while a cache word left contradicting a live claim is what a reader sees —
-    # measured, an `update_entity` refusal on a flip left the claim `unmet` and
-    # `goalState` still `met`. Neither step has a compensating delete: the claim
-    # and its prior are correct, and removing them would destroy the judgement.
-    cached = _write_goal_state_cache(sdk, goal_id, judgement.state)
-
-    operator_id = _ensure_judgement_edge(sdk, point_id, goal_id)
+    # The cache is written BEFORE the arrow, deliberately — but neither write is
+    # a precondition of the other; see `_cache_then_arrow` for why the ordering
+    # alone was not enough.
+    cached, operator_id = _cache_then_arrow(sdk, point_id, goal_id,
+                                            judgement.state)
     extra_operators = _extra_operators(sdk, point_id, goal_id, operator_id)
 
     return {

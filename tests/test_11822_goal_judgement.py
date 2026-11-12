@@ -1370,6 +1370,10 @@ def test_the_scope_guard_checks_the_INDICATOR_leg(sdk):
     indicator_b, _, _ = _world(sdk, tag="b")
     target = Target.from_node(target_node)
     _reading(sdk, indicator_a, 9.0, at="2026-11-11T10:00:00Z")
+    # indicator B needs its own reading for the write path below: an `unknown`
+    # judgement mints nothing and returns BEFORE the scope guard, so without it
+    # the seam arm would be pinning the wrong arm.
+    _reading(sdk, indicator_b, 9.0, at="2026-11-11T10:00:00Z")
     a = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator_a["id"],
                         target=target)
     # a predecessor carrying indicator A, superseded from indicator B's chain
@@ -1377,7 +1381,20 @@ def test_the_scope_guard_checks_the_INDICATOR_leg(sdk):
         _assert_supersession_scope(sdk, a["point_id"], goal["id"],
                                    indicator_b["id"], target.target_id)
     assert "indicatorId" in str(exc.value)
+    # ⛔ The DIRECT call above pins the leg (drop it from the loop tuple and
+    # nothing raises), but it cannot pin the wiring, and it cannot pin that the
+    # predecessor survived: `_assert_supersession_scope` is READ-ONLY, so a
+    # status assertion here could not fail. Drive the WRITE path for both.
+    with pytest.raises(ValueError) as seam_exc:
+        record_judgement(sdk, goal_id=goal["id"],
+                         judgement=judge(sdk, goal_id=goal["id"],
+                                         indicator_id=indicator_b["id"],
+                                         target=target),
+                         target=target, indicator_id=indicator_b["id"],
+                         previous_point_id=a["point_id"])
+    assert "indicatorId" in str(seam_exc.value)
     assert sdk.get_entity(a["point_id"])["status"] == "live"
+    assert _impl_into(sdk, a["point_id"], goal["id"]) == 1
 
 
 def test_the_scope_guard_checks_the_TARGET_leg(sdk):
@@ -1393,7 +1410,20 @@ def test_the_scope_guard_checks_the_TARGET_leg(sdk):
         _assert_supersession_scope(sdk, a["point_id"], goal["id"],
                                    indicator["id"], other_node["id"])
     assert "targetId" in str(exc.value)
+    # Same reasoning as the INDICATOR leg: assert the refusal through the write
+    # path, where the survivor and its arrow are things the call could have
+    # changed, rather than after a read-only helper that cannot touch them.
+    with pytest.raises(ValueError) as seam_exc:
+        record_judgement(sdk, goal_id=goal["id"],
+                         judgement=judge(sdk, goal_id=goal["id"],
+                                         indicator_id=indicator["id"],
+                                         target=Target.from_node(other_node)),
+                         target=Target.from_node(other_node),
+                         indicator_id=indicator["id"],
+                         previous_point_id=a["point_id"])
+    assert "targetId" in str(seam_exc.value)
     assert sdk.get_entity(a["point_id"])["status"] == "live"
+    assert _impl_into(sdk, a["point_id"], goal["id"]) == 1
 
 
 def test_the_scope_guard_refuses_a_dimension_the_caller_did_not_declare(sdk):
@@ -1440,6 +1470,43 @@ def test_a_failed_arrow_leaves_the_cache_agreeing_with_the_claim(sdk, monkeypatc
     assert sdk.get_entity(goal["id"])["goalState"] == "unmet", (
         "the cache write ran after the arrow, so a failed arrow left the cache "
         "contradicting the live claim"
+    )
+
+
+def test_a_refused_cache_write_does_not_cost_the_arrow(sdk, monkeypatch):
+    """A stale cache must not take the belief path with it.
+
+    MEASURED with the two writes merely SEQUENCED (cache, then arrow): refusing
+    `update_entity` skipped `_ensure_judgement_edge` entirely, leaving a LIVE
+    `met` judgement with ZERO IMPL arrows into the goal — and the self-healing
+    unchanged arm writes the cache first too, so a persistent refusal could never
+    repair it. Before the reorder (arrow first) the same refusal left the belief
+    moving and only the cache stale, so the sequenced form traded one unhandled
+    branch for another. Neither write may be a precondition of the other.
+    """
+    import tortoise.goal_judgement as gj
+
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 12.0, at="2026-11-11T10:00:00Z")
+
+    def boom(*a, **kw):
+        raise RuntimeError("update_entity refused")
+
+    monkeypatch.setattr(gj, "_write_goal_state_cache", boom)
+    with pytest.raises(RuntimeError, match="update_entity refused"):
+        judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
+                         target=target)
+    monkeypatch.undo()
+
+    live = latest_judgement(sdk, goal_id=goal["id"],
+                            indicator_id=indicator["id"],
+                            target_id=target.target_id)
+    assert live is not None, "the judgement itself landed; only the cache refused"
+    assert _impl_into(sdk, live["id"], goal["id"]) == 1, (
+        "a refused cache write cost the IMPL arrow: the judgement is live with no "
+        "belief path, and the unchanged arm cannot repair it — it writes the "
+        "cache first as well"
     )
 
 
