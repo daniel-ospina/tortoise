@@ -274,7 +274,7 @@ export const HARNESS_STEPS = (harness, key) => ({
     { label: 'Server URL — paste this into the dialog', code: CHATGPT_MCP_URL, copy: CHATGPT_MCP_URL },
     'Now tick "I understand and want to continue" and click Create as a plugin.',
     'Open chatgpt.com/settings/plugins-settings → Tortoise → View details → Connect, then confirm Connect Tortoise in the dialog it opens. Sign in to Tortoise, pick the Organization you are onboarding — the page names it, or asks you to choose when your account can use more than one — then click Authorize. That Organization is the one the connector writes to.',
-    'Install the Tortoise skills once — on tortoise.premiselabs.co/docs#chatgpt download the three files (how-to-use-tortoise, tortoise-decide, tortoise-file-finding), then open chatgpt.com/skills → Add → Upload from your computer and pick them together. To update one, upload that file again and choose Replace existing. Rather not install? Paste the document below into one chat instead.',
+    'Install the Tortoise skills once — on premiselabs.co/tortoise/docs#chatgpt download the three files (how-to-use-tortoise, tortoise-decide, tortoise-file-finding), then open chatgpt.com/skills → Add → Upload from your computer and pick them together. To update one, upload that file again and choose Replace existing. Rather not install? Paste the document below into one chat instead.',
     'The tortoise_* tools follow that connection — if they do not appear, re-open chatgpt.com/settings/plugins-settings and check Tortoise shows as connected, then ask the chat which tools it can call. Write actions ask for confirmation in chat.',
   ],
 })[harness]
