@@ -379,6 +379,12 @@ def precompute(proj, point_ids: list[str], *, now: datetime | None = None,
     also blockless and a transient read error must not delete a good snapshot
     set — ``purge``'s retention, not a live error, is what reaps snapshots.
 
+    ⛔ #11928: ``assemble_why_blocks`` returns a block for every epistemic label
+    now, but this cache serves ``:Point`` snapshots only (its read half and
+    ``_vanished`` are Point-anchored), so the id set is intersected with the
+    existence read BEFORE the assembly. Do not "fix" that filter by widening
+    the assembly alone — that produces a snapshot the push path can never serve.
+
     ⛔ It raises ONLY for a §17.1 REFUSAL of its own write
     (``DirectCacheWriteRefused``): that is not a transient graph error, it means
     the statement never landed, and folding it into ``reason="write_failed"``
@@ -403,9 +409,27 @@ def precompute(proj, point_ids: list[str], *, now: datetime | None = None,
     # `assemble_why_blocks` is internally fail-open (a graph error returns {}),
     # but this function's own contract is "NEVER raises", so a raise from the
     # assembly is absorbed HERE too — and, critically, an absorbed failure is
-    # NOT a reason to drop anything: `_vanished` below decides that, from the
-    # existence read, precisely because "no block" and "the assembly broke"
-    # look identical (#8099 review F4).
+    # NOT a reason to drop anything: the existence read below decides that,
+    # precisely because "no block" and "the assembly broke" look identical
+    # (#8099 review F4).
+    #
+    # ⛔ #11928 — THE ID SET IS INTERSECTED WITH WHAT THIS CACHE CAN SERVE, and
+    # the intersection is the SAME existence read that decides the drop, so the
+    # pass pays for it once. `assemble_why_blocks` now returns a block for every
+    # epistemic label (a goal ``:Object`` is explainable), but this cache's READ
+    # half (``read_blocks``, and ``_vanished`` itself) is still ``:Point``-anchored
+    # — widening it is a separate decision with its own cost (a per-label sweep
+    # on the PUSH path, whose whole point is one bounded read). Writing a
+    # snapshot the read half will never serve AND this function would then
+    # delete again — on every pass, for every non-Point id the EP pass moved —
+    # is churn with no reader at the end of it. So a non-Point id is dropped
+    # BEFORE the assembly rather than written and reaped. On a read ERROR
+    # ``_vanished`` returns ``[]`` ("nothing provably gone"), so this filter is
+    # a no-op and today's behaviour is preserved.
+    gone = _vanished(proj, ids)
+    if gone:
+        _gone_set = set(gone)
+        ids = [pid for pid in ids if pid not in _gone_set]
     try:
         blocks = assemble_why_blocks(proj, ids)
     except Exception as e:  # noqa: BLE001, RUF100 — contract: never raises
@@ -463,8 +487,8 @@ def precompute(proj, point_ids: list[str], *, now: datetime | None = None,
     # whether or not this drop ever ran, because `dispatch_pending` also runs
     # from the retry sweep and on demand (neither precomputes) and this pass
     # only ever sees a bounded id set. Driven by an existence read, never by a
-    # missing block — see `_vanished`.
-    gone = _vanished(proj, ids)
+    # missing block — see `_vanished`. #11928: the read was already taken above
+    # (it also gates the id set), so it is not repeated here.
     if gone:
         summary["dropped"] = _drop(proj, gone)
     if purge:

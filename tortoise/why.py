@@ -5,13 +5,20 @@ ONE read-only, bounded, zero-LLM assembly feeds every enriched surface
 delivery contract (D1/D2 shared implementation). The canonical why-block
 (plan §3.1.4) is::
 
-    {point_id, support_chain, ep, conflicts, supersession, tradeoffs,
-     dig_deeper}
+    {point_id, support_chain, ep, conflicts, supersession, assessment,
+     tradeoffs, dig_deeper}
+
+``assessment`` is #11928's dimension: the DERIVED judgement(s) that decide the
+belief, each with the reading, the target and the comparison that produced it —
+the answer to "why is this goal green?". Every read here is swept over the four
+epistemic labels (``live.EPISTEMIC_LABELS``), so a goal written as an ``:Object``
+and a reading written as an ``:Event`` are explainable, not only the ``:Point``
+lane (the block note above the queries states what is still not widened, and why).
 
 The enriched-item projection (plan §3.1.1 / §6.1) nests ``support_chain``
 under a top-level ``why`` key and promotes ``conflicts``/``supersession``/
-``tradeoffs``/``dig_deeper`` to top-level additive item keys (dropping the
-redundant ``ep`` copy — the item's flat ``ep`` stays canonical).
+``assessment``/``tradeoffs``/``dig_deeper`` to top-level additive item keys
+(dropping the redundant ``ep`` copy — the item's flat ``ep`` stays canonical).
 
 Contract invariants (plan §3.1.1/§3.1.3/§3.1.4/§6.1 + #2101):
 
@@ -55,7 +62,10 @@ import re
 
 from .env_truthy import is_truthy  # #4097: the declared truthy contract
 from .live import (
+    EPISTEMIC_LABELS,  # #11928: the ONE label-set declaration (four labels)
     _live_only,  # #9962: the dampener's own predicate
+    epistemic_disjunction,  # #11928: the traversal-position widening
+    epistemic_identity,  # #11928: coalesce(id, eventId) — NOT a bare id
     is_terminal_status,  # #2490: terminal rows override has_ep
 )
 from .search_engine import (  # type: ignore[import-not-found]
@@ -95,6 +105,12 @@ W4_MAX_SUPPORT = 3
 W4_MAX_CONFLICTS = 2
 W4_MAX_TRADEOFFS = 5
 W4_MAX_DIG_DEEPER = 3
+#: #11928 — ≤ how many DERIVED assessments one point's block carries. A goal may
+#: legitimately hold one live judgement PER TARGET (#7860's D4: one indicator,
+#: several targets — "two marks on the same ruler"), so the dimension is a
+#: bounded LIST, not a single object, and it needs its own budget rather than
+#: riding the ≤2 conflict cap.
+W4_MAX_ASSESSMENTS = 3
 
 # ── Dig-deeper deterministic label registry (UXD 4 + ONTOLOGY §5) ─────────
 # kind → label verb phrase. NEVER LLM prose — the label is derived from the
@@ -608,43 +624,102 @@ def _assemble_dig_deeper(by_id: dict[str, dict]) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# #7927 RESIDUAL — THE ``:Point``-ONLY SCOPE OF THIS FILE IS DELIBERATE AND
-# PENDING A LANE, NOT AN ACCIDENT OF HISTORY. EVERY read in this block is
-# Point-anchored: the two support reads below, the conflicts read, the
-# tradeoffs read, and the supersession read
-# (``search_engine.fetch_point_epistemic_state``). The EXISTENCE ANCHOR among
-# them is ``_EP_CYPHER``.
+# #11928 — THE ``:Point``-ONLY SCOPE OF THIS BLOCK IS CLOSED. Every anchored read
+# below is expanded once per PRESENT epistemic label (``live.EPISTEMIC_LABELS``:
+# Point, Subject, Object, Event) and every TRAVERSAL position admits all four, so
+# a goal written as an ``:Object`` and a reading written as an ``:Event`` are
+# explainable — the shape the reasoning loop produces (#11822's judgement is an
+# IMPL arrow INTO a goal Object; a reading is an ``:Event``).
 #
-# WHAT A PARTIAL WIDENING DOES, stated as the mechanism rather than as a maxim,
-# because the mechanism is what a reader will test their observation against.
-# ``_EP_CYPHER`` runs FIRST and its ids become ``existing_ids``. Every dependent
-# read still runs and still folds its rows into ``blocks`` — so a widened
-# conflicts read DOES return rows. They are discarded at the END: the output
-# loop in ``assemble_why_blocks`` skips every id absent from ``existing_ids``.
-# So widening one dependent read alone changes no output, and it can look like
-# the widening "did not work" rather than like the anchor was not widened.
+# HOW THE SWEEP STAYS BOUNDED:
 #
-# CONSEQUENCE, recorded rather than implied: a non-Point belief is absent from
-# the why layer, while ``ranking.resolve_contested_relevance`` — widened by
-# #7927 — can fire ``W4_CONTESTED_BOOST`` on a conflict this file will not
-# render. The same note lives on that function, which is where the divergence is
-# actually experienced. The residual is the anchor plus those five dependent
-# reads, tracked on #7927 as its own lane: widening the anchor is a new
-# why-layer contract (block shape, per-label text fields, the ``:Event``
-# ``eventStatus`` vocabulary), not a read widening.
+#  * ``_EP_CYPHER`` is STILL THE EXISTENCE ANCHOR and it still runs FIRST. It runs
+#    once per label, FIRST-WINS in ``EPISTEMIC_LABELS`` order over the ids not yet
+#    resolved (``live.epistemic_labels_of``' rule), and it RETURNS the resolution
+#    (``{label: ids}``) so no separate label-resolution query is needed. A
+#    Point-only batch — the overwhelming majority of enriched recalls — still
+#    costs exactly ONE anchored existence read.
+#  * The five dependent reads run once per RESOLVED label, over that label's ids
+#    only. The count is therefore bounded by the number of distinct labels in the
+#    BATCH, never by its size and never per result.
+#  * The output loop still skips every id absent from ``existing_ids``: the anchor
+#    is what makes a non-Point block exist. Widening a dependent read alone is
+#    still a no-op, which is why the anchor moved with them.
+#
+# THREE TRAPS THE WIDENING MUST NOT STEP IN — each is a MEASURED #7927 defect in
+# ``ranking``'s sibling conflict read, and this file mirrors that read's answers
+# rather than re-deriving them:
+#
+#  1. IDENTITY. ``id`` is the Point lane's key; a legacy / out-of-tree ``:Event``
+#     may carry ``eventId`` ONLY. A bare ``x.id <> y.id`` then evaluates NULL and
+#     DROPS the row, and ``RETURN x.id`` hands back NULL. So identities are
+#     RETURNED through ``live.epistemic_identity`` (``coalesce(id, eventId)``) and
+#     compared on the INTERNAL node id (``id(x) <> id(y)``) — the coalesced value
+#     is NOT unique (``_event_guarded_merge``'s suffix arm leaves two distinct
+#     Events coalescing to one value), so it may be displayed but never compared.
+#  2. TEXT. A ``:Point`` carries ``content``; an Object/Event carries ``name``. A
+#     bare ``x.content`` therefore emits an EMPTY snippet for exactly the labels
+#     this widening adds — "inert on the message path", the defect #8169 exists
+#     to make un-repeatable. ``_text_expr`` is the one chain, and it matches
+#     ``ranking``'s so the two surfaces name the same node the same way. It is
+#     byte-identical on the Point lane: ``content`` is never NULL there
+#     (``create_point`` requires it) and ``coalesce`` skips NULL only.
+#  3. THE STATUS VOCABULARY STAYS THE POINT ONE, deliberately — this is the
+#     #7927 bound RESTATED, not re-decided. ``_exclude_status_clause`` applies
+#     ``TERMINAL_EXCLUDED_STATUSES`` (the superset) on every widened arm, bypassing
+#     ``search_engine._status_vocab_for``. Behaviour-preserving today
+#     (``live.STATUS_CARRYING_EPISTEMIC_LABELS``' families are subsets of the Point
+#     set, and no entity writer sets the legacy ``outdated`` flag), but a
+#     family-ONLY terminal word would be admitted as LIVE — wire the arms through
+#     ``_status_vocab_for`` then.
+#
+# WHAT IS STILL NOT WIDENED, recorded rather than implied: the SUPERSESSION read
+# (``search_engine.fetch_point_epistemic_state``) stays ``:Point``-only, because
+# the entity-supersession READ GATE is #11824's open work and not a why-layer
+# decision. A non-Point block therefore carries no ``supersession`` key —
+# absent-means-not-computed (§3.1.3), never a fabricated ``live``.
 # ══════════════════════════════════════════════════════════════════════════
+
+
+def _for_label(template: str, label: str) -> str:
+    """Instantiate an ID-ANCHORED template for ONE epistemic label.
+
+    ``{label}`` sits in an id-anchored node's label position, so each
+    instantiation keeps using that label's ``(id)`` range index — the reason
+    ``live.epistemic_label_queries`` exists, and the same substitution it makes.
+    """
+    return template.replace("{label}", label)
+
+
+def _text_expr(alias: str) -> str:
+    """Cypher: the display text of an epistemic node, for ANY of the four labels.
+
+    ``:Point`` stores ``content``; ``:Object``/``:Event``/``:Subject`` store
+    ``name`` (and an Object usually carries an EMPTY ``title``). Read in that
+    order — never a bare ``content``, which is empty for every node the
+    #11928 widening adds. ``label`` stays in the chain because it is what a
+    NAND operator's counter-claim is named by when it has no source.
+    """
+    return (f"coalesce({alias}.content, {alias}.name, {alias}.title, "
+            f"{alias}.label, '')")
+
 
 # Support-chain queries (bounded). Operator-mediated: the operator's INPUT
 # source at idx 0 (the evidence/statement that implies the target through the
 # operator — create_operator writes source → INPUT idx0 → op → IMPL → target).
 # Direct: a bare statement→statement IMPL edge (the reification rule).
+#
+# #11928: ``{label}`` is the ANCHOR's label (substituted per present label);
+# ``sup`` is a TRAVERSAL position reached from that anchor, so it is widened with
+# ``epistemic_disjunction``. The operator itself stays ``:Point`` — every operator
+# is one, and an operator-shaped Object would be a different model.
 _SUPPORT_OP_CYPHER = (
-    "MATCH (n:Point) WHERE n.id IN $ids "
+    "MATCH (n:{label}) WHERE n.id IN $ids "
     # #6976: load-bearing `WITH n` — without it FalkorDB 6.0.0 drops the id
     # predicate at the re-binding MATCH below (foreign rows).
     "WITH n "
-    "MATCH (sup:Point)-[r:INPUT]->(op:Point {is_operator:true})-[:IMPL]->(n) "
-    f"WHERE r.idx = 0 AND sup.id <> n.id "
+    "MATCH (sup)-[r:INPUT]->(op:Point {is_operator:true})-[:IMPL]->(n) "
+    f"WHERE r.idx = 0 AND id(sup) <> id(n) AND {epistemic_disjunction('sup')} "
     f"AND (sup.is_operator = false OR sup.is_operator IS NULL) AND {_exclude_status_clause('sup')} "
     # #3990: the operator that mediates THIS support rides the same traversal
     # — objective 4 requires the operator (id + kind) plus any mitigation on
@@ -663,7 +738,7 @@ _SUPPORT_OP_CYPHER = (
     # keeps the surfaced text and the arithmetic the same object.
     "OPTIONAL MATCH (op)-[:mitigated_by]->(mit:Point) "
     f"WHERE {_live_only('mit.status')} "
-    "RETURN n.id, sup.id, sup.content, "
+    f"RETURN n.id, {epistemic_identity('sup')}, {_text_expr('sup')}, "
     # #11702: the RAW belief columns, not `coalesce(…, 1.0)` -- the default
     # supplied a missing operand and made an ABSENT supporter weigh 0.5 (and a
     # β-only one 0.25), which then ordered the ≤3 cap. `belief_value` is the
@@ -677,12 +752,12 @@ _SUPPORT_OP_CYPHER = (
     "  op.id, op.op_type, op.label, mit.content, mit.id"
 )
 _SUPPORT_DIRECT_CYPHER = (
-    "MATCH (n:Point) WHERE n.id IN $ids "
+    "MATCH (n:{label}) WHERE n.id IN $ids "
     "WITH n "
-    "MATCH (sup:Point)-[r:IMPL]->(n) "
-    f"WHERE sup.id <> n.id "
+    "MATCH (sup)-[r:IMPL]->(n) "
+    f"WHERE id(sup) <> id(n) AND {epistemic_disjunction('sup')} "
     f"AND (sup.is_operator = false OR sup.is_operator IS NULL) AND {_exclude_status_clause('sup')} "
-    "RETURN n.id, sup.id, sup.content, "
+    f"RETURN n.id, {epistemic_identity('sup')}, {_text_expr('sup')}, "
     "  sup.confidence, sup.posterior_alpha, sup.posterior_beta, "
     "  sup.ep_alpha, sup.ep_beta"
 )
@@ -694,17 +769,34 @@ _SUPPORT_DIRECT_CYPHER = (
 # surface the actual counterargument statement; the snippet prefers the
 # counterargument's own content over the operator label).
 _CONFLICTS_CYPHER = (
-    "MATCH (n:Point) WHERE n.id IN $ids "
+    "MATCH (n:{label}) WHERE n.id IN $ids "
     "WITH n "
-    "MATCH (c:Point)-[r:NAND]->(n) "
-    "OPTIONAL MATCH (src:Point)-[ri:INPUT]->(c) "
+    "MATCH (c)-[r:NAND]->(n) "
+    "OPTIONAL MATCH (src)-[ri:INPUT]->(c) "
     "WITH n, c, r, src, ri "
-    "WHERE c.id <> n.id AND ("
+    # ⛔ #11928: BOTH widened positions are filtered in ONE WHERE after the WITH,
+    # NOT in the OPTIONAL MATCH's own WHERE. A predicate there belongs to the
+    # optional pattern, so a failing one leaves src/ri NULL instead of dropping
+    # the row — and the `c` half attached there would be LOST entirely, admitting
+    # a non-epistemic NANDer. Here, `src` is widened NULL-TOLERANTLY (a direct
+    # operator-less NAND has no source, and an unconditional disjunction would
+    # filter that arm away — the trap ``ranking`` records) and `c` strictly
+    # (#7813 admits all four labels as operator endpoints).
+    f"WHERE (src IS NULL OR {epistemic_disjunction('src')}) "
+    f"AND {epistemic_disjunction('c')} "
+    "AND id(c) <> id(n) AND ("
     "  (c.is_operator = true AND r.idx > 0 AND ri.idx = 0) OR "
     "  (c.is_operator = false OR c.is_operator IS NULL)) "
     f"AND {_exclude_status_clause('c')} "
-    "RETURN n.id, coalesce(src.id, c.id), "
-    "  coalesce(src.content, c.label, c.content, ''), "
+    f"RETURN n.id, coalesce({epistemic_identity('src')}, {epistemic_identity('c')}), "
+    # The counter-claim TEXT comes from the node that actually carries it. A
+    # src that did not match is NULL, so the chain must fall THROUGH to the
+    # NANDer (`c.label` first — that is the operator's Layer-3 name, and the
+    # counterargument is its INPUT source), never stop at a ``''`` that would
+    # make every direct operator-less NAND render an empty snippet (#11928;
+    # the same chain ``ranking.resolve_contested_relevance`` reads).
+    "  coalesce(src.content, src.name, src.title, c.label, "
+    "           c.content, c.name, c.title, ''), "
     # #11702: the RAW belief columns of the counter-claim (mirror first, then
     # its own posterior/prior pair), NOT `coalesce(…, 1.0)` -- the 1.0 default
     # supplied a missing operand, so an ABSENT nander weighed the neutral 0.5
@@ -713,14 +805,16 @@ _CONFLICTS_CYPHER = (
     "  src.ep_alpha, src.ep_beta, "
     "  c.confidence, c.posterior_alpha, c.posterior_beta, c.ep_alpha, c.ep_beta"
 )
-# Dedicated persisted ep read for every requested Point (single-node α/β —
+# Dedicated persisted ep read for every requested node (single-node α/β —
 # never full propagation). Runs unconditionally so the canonical ``ep`` block
-# is REAL for every existing point — including points with zero active
-# NANDers (a fabricated zeroed ep for a measured point would be wrong data).
-# Also serves as the existence anchor: only ids returned here are existing
-# :Point nodes (non-Point ids never get a fabricated block).
+# is REAL for every existing node — including nodes with zero active NANDers (a
+# fabricated zeroed ep for a measured node would be wrong data).
+# Also serves as the EXISTENCE ANCHOR: only ids returned here are existing
+# epistemic nodes (a non-existent id never gets a fabricated block). #11928: run
+# once per PRESENT label (``assemble_why_blocks``), which is also what narrows
+# the dependent reads.
 _EP_CYPHER = (
-    "MATCH (n:Point) WHERE n.id IN $ids "
+    "MATCH (n:{label}) WHERE n.id IN $ids "
     "RETURN n.id, "
     "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0), "
     "  coalesce(n.posterior_beta, n.ep_beta, 1.0), "
@@ -750,10 +844,10 @@ _EP_CYPHER = (
 # file_decision / option structure — idx 0 is the operator's source self-link,
 # never an alternative); mitigations ride the connecting operator.
 _TRADEOFFS_CYPHER = (
-    "MATCH (n:Point) WHERE n.id IN $ids "
+    "MATCH (n:{label}) WHERE n.id IN $ids "
     "WITH n "
-    "MATCH (n)-[ri:INPUT]->(op:Point {is_operator:true})-[r2:IMPL]->(alt:Point) "
-    f"WHERE ri.idx = 0 AND r2.idx > 0 "
+    "MATCH (n)-[ri:INPUT]->(op:Point {is_operator:true})-[r2:IMPL]->(alt) "
+    f"WHERE ri.idx = 0 AND r2.idx > 0 AND {epistemic_disjunction('alt')} "
     f"AND (alt.is_operator = false OR alt.is_operator IS NULL) AND {_exclude_status_clause('alt')} "
     # #9962 — the SAME liveness predicate the support leg above applies, for
     # the same reason: a withdrawn (or draft) mitigation computes no dampening,
@@ -767,13 +861,124 @@ _TRADEOFFS_CYPHER = (
     # alternative); no SDK door mints that shape.
     "OPTIONAL MATCH (op)-[:mitigated_by]->(m:Point) "
     f"WHERE {_live_only('m.status')} "
-    "RETURN n.id, n.pointKind, alt.id, alt.content, alt.pointKind, op.id, m.content, "
+    f"RETURN n.id, n.pointKind, {epistemic_identity('alt')}, {_text_expr('alt')}, "
+    "  alt.pointKind, op.id, m.content, "
     # #11702: raw columns (see `_CONFLICTS_CYPHER`) -- `coalesce(…, 1.0)` gave
     # an absent alternative `ep_weight` 0.5, which then SORTED it above a
     # measured 0.4 one (the same inversion the support chain just had fixed).
     "  alt.confidence, alt.posterior_alpha, alt.posterior_beta, "
     "  alt.ep_alpha, alt.ep_beta"
 )
+# Assessment (#11928): the DERIVED judgement that decides this belief, WITH the
+# reading, the target and the comparison that produced it. Without it a goal's
+# block answers "some claim moved it" and not "a reading crossed a target", and
+# the loop's verdicts stay uninspectable — the same trust failure as a silent
+# propagation cap (#11823).
+#
+# It is a SEPARATE read rather than extra columns on the support leg, for two
+# reasons that are both contracts: (a) the ≤3 support budget shows the STRONGEST
+# supporters, so the judgement can legitimately be evicted from the chain even
+# though it is the verdict, and (b) a support entry's key set is a pinned
+# contract (exactly 8 keys) — the comparison does not belong to the supporter,
+# it belongs to the verdict.
+#
+# The wiring read is ``record_judgement``'s own shape (``goal_judgement.py``):
+# ``(judgement:Point)-[:INPUT {idx:0}]->(op:Point:operator)-[:IMPL]->(anchor)``.
+# The claim is identified by ``claimClass = 'derived'`` AND a non-null
+# ``judgementState`` — the DURABLE marker that writer leaves — not by goal id or
+# node kind, so a judgement recorded against any anchor label is found here.
+# That marker is what keeps the dimension from claiming the support chain's
+# ordinary IMPL arrows: a derived statement that is not a judgement has
+# ``judgementState`` NULL.
+#
+# ``:Event`` and ``:Object`` are the reading's and the target's labels — a
+# reading is an Event wired ``aboutObject`` (``goal_judgement.latest_readings``),
+# a target is a ``target`` Object. Both legs are OPTIONAL and keyed on the
+# judgement's OWN ids, so the dimension never carries an invented relationship;
+# a target or reading written as another label degrades its text to null and
+# keeps its id rather than dropping the whole assessment.
+_ASSESSMENTS_CYPHER = (
+    "MATCH (n:{label}) WHERE n.id IN $ids "
+    "WITH n "
+    "MATCH (j:Point)-[ri:INPUT]->(op:Point {is_operator:true})-[:IMPL]->(n) "
+    "WHERE ri.idx = 0 AND id(j) <> id(n) "
+    "  AND j.claimClass = 'derived' AND j.judgementState IS NOT NULL "
+    f"  AND {_live_only('j.status')} "
+    "OPTIONAL MATCH (rd:Event {id: j.readingId}) "
+    "OPTIONAL MATCH (tg:Object {id: j.targetId}) "
+    "RETURN n.id, j.id, j.judgementState, j.judgementReason, j.comparator, "
+    "  j.threshold, j.dwell, j.indicatorId, j.targetId, j.evaluatedAt, "
+    "  j.readingId, j.readingValue, "
+    f"  {epistemic_identity('rd')}, {_text_expr('rd')}, rd.value, rd.unit, "
+    "  rd.startedAt, "
+    f"  {_text_expr('tg')}"
+)
+
+
+def _assemble_assessments(rows: list, by_id: dict[str, dict]) -> None:
+    """Fold derived-judgement rows into the block's ``assessment`` dimension.
+
+    Bounded and deterministic: ≤ ``W4_MAX_ASSESSMENTS`` per point, NEWEST first
+    (``evaluatedAt`` desc, then judgement id desc — an ISO-8601 UTC instant
+    sorts lexicographically as it sorts chronologically, and an absent instant
+    sorts after every stamped one). Dedup is by judgement id, so one judgement
+    reached by two rows cannot be counted twice.
+
+    Absent-means-not-computed (§3.1.3): a point with no live derived judgement
+    gets NO ``assessment`` key at all. Inside an entry every key is PRESENT: an
+    unavailable reading is ``reading: null`` (a measured "this judgement had no
+    usable reading", which ``_judgement_content`` also reports) and an
+    undeclared target is ``target: null`` — never an absent key that a consumer
+    would read as "not computed".
+    """
+    pending: dict[str, dict[str, dict]] = {}
+    for row in rows:
+        if not row or not row[0] or not row[1]:
+            continue
+        pid, jid = row[0], row[1]
+        if jid in pending.setdefault(pid, {}):
+            continue
+        (_nid, _jid, state, reason, comparator, threshold, dwell, indicator_id,
+         target_id, evaluated_at, reading_id, reading_value, rd_id, rd_text,
+         rd_value, rd_unit, rd_started_at, tg_text) = row
+        # The reading's OWN columns win when the Event resolved; the judgement's
+        # stored ``readingValue`` is the fallback, because a reading Event that
+        # was later corrected/retired still leaves the value the judgement
+        # compared against ON the judgement.
+        value = rd_value if rd_value is not None else reading_value
+        reading = None
+        if reading_id or rd_id:
+            reading = {
+                "point_id": reading_id or rd_id,
+                "content_snippet": _snippet(rd_text),
+                "value": value,
+                "unit": rd_unit,
+                "as_of": rd_started_at,
+            }
+        target = None
+        if target_id:
+            target = {
+                "point_id": target_id,
+                "content_snippet": _snippet(tg_text),
+            }
+        pending[pid][jid] = {
+            "judgement_id": jid,
+            "state": state,
+            "reason": reason,
+            "comparator": comparator,
+            "threshold": threshold,
+            "dwell": dwell,
+            "indicator_id": indicator_id or None,
+            "reading": reading,
+            "target": target,
+            "evaluated_at": evaluated_at,
+        }
+    for pid, judgements in pending.items():
+        ordered = sorted(
+            judgements.values(),
+            key=lambda a: (a["evaluated_at"] or "", a["judgement_id"]),
+            reverse=True)
+        by_id[pid]["assessment"] = ordered[:W4_MAX_ASSESSMENTS]
 
 
 def assemble_why_blocks(
@@ -784,25 +989,33 @@ def assemble_why_blocks(
     max_conflicts: int = W4_MAX_CONFLICTS,
     max_dig_deeper: int = W4_MAX_DIG_DEEPER,
 ) -> dict[str, dict]:
-    """Assemble canonical §3.1.4 why-blocks for a batch of Point ids.
+    """Assemble canonical §3.1.4 why-blocks for a batch of epistemic ids.
 
-    ONE read-only, bounded, zero-LLM assembly: a fixed number of batch
-    Cypher queries (supports×2 / conflicts / supersession / tradeoffs /
-    dedicated persisted ep read), persisted single-node α/β reads only —
-    never full EP propagation, never a per-result loop. Fail-open: any
-    graph error logs and returns ``{}``
+    ONE read-only, bounded, zero-LLM assembly: a per-PRESENT-LABEL number of
+    batch Cypher queries (ep anchor / supports×2 / conflicts / tradeoffs /
+    assessments, each run once per distinct label in the batch — ONE for a
+    Point-only batch, as before #11928) plus the supersession read. Persisted
+    single-node α/β reads only — never full EP propagation, never a per-result
+    loop. Fail-open: any graph error logs and returns ``{}``
     (the caller degrades to "no enrichment", never breaks the recall turn).
 
-    Only ids that exist as :Point nodes get a block (the ep read is the
-    existence anchor — a non-Point id never receives a fabricated block).
+    #11928: an id may be ANY of the four epistemic labels
+    (``live.EPISTEMIC_LABELS``), which is what makes a goal (``:Object``) and a
+    reading (``:Event``) explainable. Only ids that exist as an epistemic node
+    get a block (the ep read is the existence anchor — a non-existent id never
+    receives a fabricated block).
 
     Returns ``{point_id: canonical_block}`` where the canonical block is::
 
         {point_id, support_chain: [...], ep: {...}, conflicts: {...}?,
-         supersession: {...}, tradeoffs: [...]?, dig_deeper: [...]?}
+         supersession: {...}?, assessment: [...]?, tradeoffs: [...]?,
+         dig_deeper: [...]?}
 
-    ``conflicts`` / ``tradeoffs`` / ``dig_deeper`` are absent when their
-    dimension is not computed / empty (uncontested / non-decision points).
+    ``conflicts`` / ``tradeoffs`` / ``dig_deeper`` / ``assessment`` are absent
+    when their dimension is not computed / empty (uncontested / non-decision /
+    never-judged). ``supersession`` is absent for a NON-Point anchor: its read
+    is still ``:Point``-only (#11824's gate), and absent-means-not-computed is
+    honest where a fabricated ``live`` would not be.
     """
     ids = [pid for pid in (point_ids or []) if pid]
     if not ids:
@@ -810,43 +1023,74 @@ def assemble_why_blocks(
     blocks: dict[str, dict] = {pid: {} for pid in ids}
     try:
         g = proj.g
-        # 1. Persisted ep read + existence anchor (single-node α/β — the
-        #    dedicated query guarantees a REAL ep for EVERY point, including
-        #    points with zero active NANDers; only existing :Point ids
-        #    return rows).
+        # 1. Persisted ep read + existence anchor, swept per PRESENT label
+        #    (single-node α/β — the dedicated query guarantees a REAL ep for
+        #    EVERY node, including nodes with zero active NANDers; only
+        #    existing epistemic ids return rows). FIRST-WINS over the ids each
+        #    leg has not resolved, so a multi-labelled ``:Point:Object`` node
+        #    resolves ONCE, as Point — ``live.epistemic_labels_of``' rule —
+        #    and its ids are never re-read on a second label.
+        #
+        #    The resolution is RETURNED by this read rather than probed by a
+        #    separate query: the hot path (a Point-only batch) keeps exactly
+        #    one anchored existence read, and the dependent reads below narrow
+        #    to the labels that actually resolved.
         try:
-            ep_rows = g.query(_EP_CYPHER, params={"ids": ids}).result_set
+            ep_rows: list = []
+            resolved: dict[str, list[str]] = {}
+            unresolved = list(dict.fromkeys(ids))
+            for _label in EPISTEMIC_LABELS:
+                if not unresolved:
+                    break
+                _rows = g.query(_for_label(_EP_CYPHER, _label),
+                                params={"ids": unresolved}).result_set
+                _found = {r[0] for r in _rows if r and r[0]}
+                if not _found:
+                    continue
+                resolved[_label] = [i for i in unresolved if i in _found]
+                ep_rows.extend(_rows)
+                unresolved = [i for i in unresolved if i not in _found]
             existing_ids = {row[0] for row in ep_rows}
             _assemble_ep_rows(ep_rows, blocks)
         except Exception as e:  # noqa: BLE001, RUF100 — whole-assembly fail-open
             logger.warning("W4 ep read failed: %s", e)
             return {}
-        # 2. Support chain (≤ max_support per point) — bounded traversal.
-        #    Two legs (operator-mediated + direct statement→statement IMPL);
-        #    the SECOND leg MERGES into the first (a mixed-edge point keeps
-        #    both legs' supports — never a silent clobber of one leg).
+        # 2. Support chain (≤ max_support per point) — bounded traversal, once
+        #    per RESOLVED label over that label's ids. Two legs (operator-
+        #    mediated + direct statement→statement IMPL); the SECOND leg MERGES
+        #    into the first (a mixed-edge point keeps both legs' supports —
+        #    never a silent clobber of one leg). Cross-label legs can never
+        #    collide: ``resolved`` groups are disjoint by construction, so no
+        #    id is assembled twice.
         try:
-            _assemble_supports(
-                g.query(_SUPPORT_OP_CYPHER, params={"ids": ids}).result_set,
-                blocks,
-                operator_leg=True,
-            )
-            _assemble_supports(
-                g.query(_SUPPORT_DIRECT_CYPHER, params={"ids": ids}).result_set,
-                blocks,
-                merge=True,
-            )
+            for _label, _ids in resolved.items():
+                _assemble_supports(
+                    g.query(_for_label(_SUPPORT_OP_CYPHER, _label),
+                            params={"ids": _ids}).result_set,
+                    blocks,
+                    operator_leg=True,
+                )
+                _assemble_supports(
+                    g.query(_for_label(_SUPPORT_DIRECT_CYPHER, _label),
+                            params={"ids": _ids}).result_set,
+                    blocks,
+                    merge=True,
+                )
         except Exception as e:  # noqa: BLE001, RUF100 — fail-open per dimension
             logger.warning("W4 support-chain read failed: %s", e)
         # 3. NAND conflicts (≤ max_conflicts) — NANDer-only query.
         try:
-            _assemble_conflicts(
-                g.query(_CONFLICTS_CYPHER, params={"ids": ids}).result_set,
-                blocks,
-            )
+            for _label, _ids in resolved.items():
+                _assemble_conflicts(
+                    g.query(_for_label(_CONFLICTS_CYPHER, _label),
+                            params={"ids": _ids}).result_set,
+                    blocks,
+                )
         except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("W4 conflict read failed: %s", e)
-        # 4. Supersession view — persisted flat state projection.
+        # 4. Supersession view — persisted flat state projection. STAYS
+        #    ``:Point``-only (#11824's read gate, see the block note above), so
+        #    a non-Point anchor simply has no ``supersession`` dimension.
         try:
             _assemble_supersession(
                 blocks,
@@ -856,13 +1100,27 @@ def assemble_why_blocks(
             logger.warning("W4 supersession read failed: %s", e)
         # 5. Tradeoffs — decision points only (≥ 2 alternatives).
         try:
-            _assemble_tradeoffs(
-                g.query(_TRADEOFFS_CYPHER, params={"ids": ids}).result_set,
-                blocks,
-            )
+            for _label, _ids in resolved.items():
+                _assemble_tradeoffs(
+                    g.query(_for_label(_TRADEOFFS_CYPHER, _label),
+                            params={"ids": _ids}).result_set,
+                    blocks,
+                )
         except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("W4 tradeoff read failed: %s", e)
-        # 6. Pure projections (no reads): conflicts + dig_deeper.
+        # 6. Assessments — the derived judgement that decides the belief, with
+        #    the reading/target/comparison it compared (#11928). This is what
+        #    makes "why is this goal green?" answerable at all.
+        try:
+            for _label, _ids in resolved.items():
+                _assemble_assessments(
+                    g.query(_for_label(_ASSESSMENTS_CYPHER, _label),
+                            params={"ids": _ids}).result_set,
+                    blocks,
+                )
+        except Exception as e:  # noqa: BLE001, RUF100
+            logger.warning("W4 assessment read failed: %s", e)
+        # 7. Pure projections (no reads): conflicts + dig_deeper.
         _materialize_conflicts(blocks)
         _assemble_dig_deeper(blocks)
     except Exception as e:  # noqa: BLE001, RUF100 — whole-assembly fail-open
@@ -871,7 +1129,7 @@ def assemble_why_blocks(
     out: dict[str, dict] = {}
     for pid, block in blocks.items():
         if pid not in existing_ids:
-            # Not an existing :Point node (e.g. an Event/Subject ULID that a
+            # Not an existing epistemic node (e.g. an Event/Subject ULID that a
             # raw-row regex happened to match) — never fabricate a block.
             continue
         block = dict(block)
@@ -912,8 +1170,8 @@ def enrich_items(proj, items: list[dict]) -> list[dict]:
     canonical — only the NEW keys are added. ``warnings`` is inserted
     TOP-OF-ITEM (after ``content`` — flag-first, UXD 3); the W4 keys are
     appended at the tail in contract order (why → conflicts → supersession
-    → tradeoffs → dig_deeper). Fail-open: any assembly error returns the
-    items unchanged (never breaks the recall turn).
+    → assessment → tradeoffs → dig_deeper). Fail-open: any assembly error
+    returns the items unchanged (never breaks the recall turn).
     """
     if not items:
         return items
@@ -956,6 +1214,10 @@ def project_item(item: dict, block: dict) -> dict:
         (an uncontested point carries no conflict noise);
       - ``supersession`` — the §3.1.4 VIEW ({line, successor_label} — the
         flat status/superseded_by/supersedes keys stay canonical);
+      - ``assessment`` — #11928: the derived judgement(s) that decide this
+        belief, with the reading, the target and the comparison; present only
+        when one is wired, because "not judged by the loop" is a different
+        fact from "judged and unknown";
       - ``tradeoffs`` — decision points only;
       - ``dig_deeper`` — when ≥ 1 pointer exists.
     """
@@ -1018,6 +1280,8 @@ def project_item(item: dict, block: dict) -> dict:
         "line": line,
         "successor_label": successor_label,
     }
+    if block.get("assessment"):
+        out["assessment"] = block["assessment"]
     if block.get("tradeoffs"):
         out["tradeoffs"] = block["tradeoffs"]
     if block.get("dig_deeper"):
@@ -1033,7 +1297,8 @@ def item_to_why_entry(item: dict) -> dict | None:
     not enriched (no W4 data).
     """
     if "why" not in item and "conflicts" not in item and \
-            "dig_deeper" not in item and "tradeoffs" not in item:
+            "dig_deeper" not in item and "tradeoffs" not in item and \
+            "assessment" not in item:
         return None
     why = item.get("why") or {}
     entry: dict = {
@@ -1079,6 +1344,8 @@ def item_to_why_entry(item: dict) -> dict | None:
         ],
         "successor_label": (item.get("supersession") or {}).get("successor_label"),
     }
+    if "assessment" in item:
+        entry["assessment"] = item["assessment"]
     if "tradeoffs" in item:
         entry["tradeoffs"] = item["tradeoffs"]
     if "dig_deeper" in item:

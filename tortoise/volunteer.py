@@ -536,6 +536,12 @@ def why_entry(block: dict) -> dict:
     ss = block.get("supersession")
     if ss:
         entry["supersession"] = ss
+    # #11928: the derived judgement(s) that decided this belief — the reading,
+    # the target and the comparison. Emitted here rather than projected from a
+    # second read so the pushed envelope, /v1/context and the recalled item
+    # answer "why is this goal green?" with the SAME shape (indicator 1).
+    if block.get("assessment"):
+        entry["assessment"] = block["assessment"]
     if block.get("tradeoffs"):
         entry["tradeoffs"] = block["tradeoffs"]
     if block.get("dig_deeper"):

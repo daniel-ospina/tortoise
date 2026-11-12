@@ -2559,13 +2559,17 @@ class TortoiseEP:
         # RECORDED ENTITY DIVERGENCES (so the "agreement" claimed above is not
         # read as covering them). A MEASURED :Subject/:Object/:Event belief
         # lists HERE and cannot list on: ``sdk._review_prune`` (``MATCH
-        # (n:Point)``, noted in place), ``why.py``'s cyphers (``:Point``-only,
-        # noted in place at the ranking read that depends on them), and
-        # ``search_engine.annotate_ep_batch`` (``:Point``-anchored for both the
-        # id anchor and the evidence reads, additionally gated at its only
-        # search call site by ``entity_type == "point"``). Each is a separate
-        # read surface outside #7927's six; do NOT "harmonize" one of them by
-        # analogy without deciding which surface the entity belongs on.
+        # (n:Point)``, noted in place) and ``search_engine.annotate_ep_batch``
+        # (``:Point``-anchored for both the id anchor and the evidence reads,
+        # additionally gated at its only search call site by ``entity_type ==
+        # "point"``). Each is a separate read surface outside #7927's six; do NOT
+        # "harmonize" one of them by analogy without deciding which surface the
+        # entity belongs on. ⚠️ ``why.py`` WAS on this list and is NOT any more:
+        # #11928 swept every why-layer anchor and traversal position over the
+        # four labels (a goal ``:Object`` and a reading ``:Event`` are now
+        # explainable), keeping the supersession read ``:Point``-only because
+        # that gate is #11824's. Do not cite this paragraph as evidence that the
+        # why layer is Point-bound.
         #
         # NON-OPERATOR predicate (review, P2 — two reviewers). ``is_operator``
         # ALONE now lies on the Point leg: the pre-#7927 form was a bare

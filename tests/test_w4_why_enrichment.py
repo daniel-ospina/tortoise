@@ -63,7 +63,8 @@ from tortoise.why import (
     w4_enrichment_enabled,
 )
 
-W4_KEYS = ("warnings", "why", "conflicts", "supersession", "tradeoffs", "dig_deeper")
+W4_KEYS = ("warnings", "why", "conflicts", "supersession", "tradeoffs",
+           "dig_deeper", "assessment")
 
 # Canonical ask-lane response keys (the flag-OFF byte-identical shape; the
 # flag-ON shape adds ONLY the "why" key — additive-only, #1353 D8).
@@ -1030,16 +1031,25 @@ def test_assembly_bounded_batch_reads(monkeypatch):
             assert len(blocks) == len(batch)
             return len(calls)
 
-        # Exactly 6 assembly queries (ep read, supports×2, conflicts,
-        # supersession, tradeoffs) — fixed regardless of batch size. The
-        # exact count is the structural pin: a per-point loop over a
-        # 10-claim fixture would need ≥15 calls AND a merged/dropped read
-        # (e.g. folding the dedicated ep read back into the conflict query)
-        # would drop below 6 — both directions of drift trip the == 6 pin.
+        # Exactly 7 assembly queries for a POINT-ONLY batch (ep read,
+        # supports×2, conflicts, supersession, tradeoffs, assessments) — fixed
+        # regardless of batch size. The exact count is the structural pin: a
+        # per-point loop over a 10-claim fixture would need ≥15 calls AND a
+        # merged/dropped read (e.g. folding the dedicated ep read back into the
+        # conflict query) would drop below 7 — both directions of drift trip the
+        # == 7 pin.
+        #
+        # #11928: 6 → 7, and the ONE added read is named: the `assessment`
+        # dimension (the derived judgement + the reading/target/comparison
+        # that produced it) is its own batch read, because a support entry's
+        # key set is a pinned contract and the ≤3 support budget may evict the
+        # judgement from the chain. The batch is still ONE anchored ep read:
+        # the per-label sweep only widens when ids resolve on another label,
+        # and this fixture is Point-only.
         n10 = _count_for(ids)
         n15 = _count_for(ids2)
-        assert n10 == 6, f"10-claim batch issued {n10} queries — expected exactly 6"
-        assert n15 == 6, f"15-claim batch issued {n15} queries — count must be size-independent"
+        assert n10 == 7, f"10-claim batch issued {n10} queries — expected exactly 7"
+        assert n15 == 7, f"15-claim batch issued {n15} queries — count must be size-independent"
     finally:
         sdk.close()
 
@@ -1078,7 +1088,12 @@ def test_assembly_partial_dimension_fail_open(w4_flag, monkeypatch):
             # carries a `mitigated_by` optional match, so a substring selector
             # would fail both dimensions and the test would no longer be able
             # to tell "tradeoffs degraded alone" from "two legs broke".
-            if cypher == _TRADEOFFS_CYPHER:
+            if cypher == _TRADEOFFS_CYPHER.replace("{label}", "Point"):
+                # #11928: the tradeoffs read is now an ID-ANCHORED TEMPLATE
+                # (``{label}``), instantiated once per present label — this
+                # fixture is Point-only, so its one leg is the Point
+                # instantiation. Matched by IDENTITY still: the identity is
+                # now the substituted query, not the template.
                 fired.append(cypher)
                 raise RuntimeError("forced tradeoffs failure")
             return real_query(cypher, params=params, timeout=timeout)
