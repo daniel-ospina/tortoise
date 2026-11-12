@@ -154,8 +154,12 @@ The capture prior is the **fused** read. A venv without the `embeddings` extra h
 `battery/runner/retrieval_preflight.py` names (*"the numbers were published as product measurements"*). So both
 modes were measured and both artifacts are committed; each records which mode ran in its `retrieval` block
 (`has_embedder`, `legs_seen`), and the note there is derived from the **legs that actually ran**, not from the
-embedder being available — a model that loads and whose leg then fails to answer is labelled
-`KEYWORD-ONLY DESPITE AN EMBEDDER`, because that is a different measurement again. The two runs sampled the same
+embedder being available — a run whose dense leg never answered a single query is labelled
+`KEYWORD-ONLY DESPITE AN EMBEDDER`, because that is a different measurement again. ⚠️ `legs_seen` answers *did this
+leg run at all during the sweep*, not *on how many queries*: the harness accumulates each leg once-True across
+every query of the sweep, so a leg that answers the first few and then fails (an encode failure, an open breaker)
+still labels the whole run `hybrid`, and `retrieval` carries no per-query failure count to see it. The label is a
+floor, not a certificate; a per-query denominator would need the artifacts regenerated. The two runs sampled the same
 live corpus but not the identical population (§2).
 
 ⚠️ **What the committed `retrieval.note` can and cannot prove.** The artifacts' label is derived from
