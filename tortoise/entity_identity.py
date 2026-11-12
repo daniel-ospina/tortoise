@@ -365,8 +365,13 @@ def resolve_or_mint(g, label: str, name: str, *,
             # identity. This is the DETERMINISTIC rung only — a similarity score
             # never resolves here (#2730 §6.7: auto-link only on an asserted or
             # unambiguous deterministic transform; the review queue owns the rest).
+            # ⛔ NOT guarded on ``folded != name``: creating "owner" after
+            # "the owner" was written must find the holder whose FOLDED key is
+            # "owner" and whose name is "the owner" — the exact pair #12047
+            # measured on the hosted graphs. That guard made this branch inert
+            # for every already-folded spelling, which is the common case.
             folded = normalize_entity_name(name)
-            if folded and folded != name:
+            if folded:
                 holders = live_name_holder_ids(
                     g, label, folded, name_props=("canonical_name",))
         # COUNT holders, REPORT holders (#9876 review, this head): the

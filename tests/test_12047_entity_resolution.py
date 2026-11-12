@@ -192,6 +192,19 @@ class TestDeterministicResolutionReusesTheEntity:
         assert a["id"] == b["id"]
         assert _count(sdk, "Object") == 1
 
+    def test_the_folded_spelling_written_second_still_resolves(self, sdk_factory):
+        """The measured damage pair, in the direction that has no fold delta.
+
+        Write "the owner" first (name carries the article), then "owner" — whose
+        own spelling IS already folded. A guard on ``folded != name`` made the
+        folded lookup inert exactly here, minting the twin the issue is about.
+        """
+        sdk = sdk_factory()
+        first = sdk.create_subject("the owner", "naturalPerson")
+        second = sdk.create_subject("owner", "naturalPerson")
+        assert second["id"] == first["id"]
+        assert _count(sdk, "Subject") == 1
+
     def test_a_genuinely_different_name_still_mints(self, sdk_factory):
         sdk = sdk_factory()
         sdk.create_subject("the founder", "naturalPerson")

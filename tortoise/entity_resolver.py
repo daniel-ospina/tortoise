@@ -561,12 +561,13 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
         raise ValueError("a merge needs two distinct entities")
     graph = sdk._get_proj().g
     rows = graph.query(
-        "MATCH (s) WHERE s.id = $sid RETURN s.name, coalesce(s.aliases, [])",
+        "MATCH (s) WHERE s.id = $sid "
+        "RETURN s.name, coalesce(s.aliases, []), s.canonical_name",
         params={"sid": survivor_id},
     ).result_set
     if not rows:
         raise ValueError(f"No entity {survivor_id!r}")
-    survivor_name, aliases = rows[0]
+    survivor_name, aliases, survivor_canonical = rows[0]
     rows = graph.query(
         "MATCH (c) WHERE c.id = $cid RETURN c.name, c.canonical_name",
         params={"cid": candidate_id},
@@ -576,11 +577,14 @@ def apply_entity_merge(sdk, candidate_id: str, survivor_id: str, *,
     candidate_name, candidate_canonical = rows[0]
     folded = normalize_entity_name(candidate_canonical or candidate_name)
     alias_list = sorted({a for a in (aliases or []) if isinstance(a, str)} | {folded})
-    sdk.update_entity(
-        survivor_id,
-        canonical_name=normalize_entity_name(survivor_name),
-        aliases=alias_list,
-    )
+    # The survivor's folded key is only FILLED, never rewritten: a caller may
+    # have supplied its own `canonical_name` (`_with_folded_entity_name`
+    # setdefaults), and a merge has no business overwriting what the caller
+    # wrote. Its absence is the only case this write repairs.
+    if not survivor_canonical:
+        sdk.update_entity(survivor_id,
+                          canonical_name=normalize_entity_name(survivor_name))
+    sdk.update_entity(survivor_id, aliases=alias_list)
     sdk.update_entity(
         candidate_id,
         resolved_from=survivor_id,

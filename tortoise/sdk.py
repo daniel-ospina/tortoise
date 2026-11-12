@@ -23745,9 +23745,11 @@ class TortoiseSDK:
         if candidate_type == "entity":
             # #12047: real pairs or a loud failure. Never the ``[]`` stub.
             from .entity_resolver import entity_candidates
-            pairs = entity_candidates(proj.g, limit=limit)
-            # A reviewed candidate is not re-surfaced (same contract as content).
-            return [p for p in pairs if not p.get("reviewed")]
+            # A reviewed PAIR is already suppressed inside the scan
+            # (`entity_resolver._pair_reviewed`), so what comes back is the
+            # pending queue — the same contract as the content branch, without a
+            # second filter that would silently disagree with the first.
+            return entity_candidates(proj.g, limit=limit)
         if candidate_type == "content":
             rows = proj.g.query(
                 "MATCH (n:Point) "
