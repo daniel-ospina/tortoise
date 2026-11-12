@@ -575,6 +575,118 @@ def test_the_PLANTED_property_set_is_DERIVED_not_the_literal_embedding(monkeypat
     assert literal.params["props"]["embedding"] == [0.5, 0.25]
 
 
+def test_the_row_two_MEASURES_the_EDGE_vector_door(monkeypatch):
+    """`#12015` — the projection's EDGE store is measured, not assumed away.
+
+    `#11747` made row 2 measure the projection's NODE doors by running them. The same
+    writer has an EDGE door (`relation_from_row` → `relation_statement`, plus a
+    directly-built `RecordRelation`), and a node-only measurement keeps printing
+    `stored-without-a-query-path: none` over an edge vector — the identical blind spot,
+    one object over.
+
+    ⛔ Non-vacuity is the load-bearing half, and it is asserted by the FALSIFIER below
+    (`test_re_introducing_an_EDGE_vector…`), not here: on the fixed tree the correct
+    answer IS the empty set, so "nothing seen" and "nothing measurable" look alike. What
+    this test can assert is that the doors were actually BUILT for every allowlisted
+    predicate — an unbuildable door is reported as unmeasured, and unmeasured is not
+    clean.
+    """
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert measured["relationships"] == frozenset(), sorted(measured["relationships"])
+    edge_unmeasured = {k: v for k, v in measured["unmeasured"].items()
+                       if k.startswith("<relationship")}
+    assert edge_unmeasured == {}, (
+        "an edge door could not be built, so the empty set above is not a measurement: "
+        f"{edge_unmeasured}")
+    # ⛔ The POSITIVE signal (`#12015` review): an empty `relationships` is the SAME value
+    # an arm that planted on nothing would return, so the population itself is asserted —
+    # deleting the edge block now reds here instead of leaving this pin green.
+    from tortoise.security import KNOWN_REL_TYPES
+
+    assert measured["relationships_probed"] == frozenset(KNOWN_REL_TYPES), (
+        "the edge arm did not run over every allowlisted predicate: "
+        f"{sorted(measured['relationships_probed'])}")
+    row = probe.score_path_bullet()
+    assert row.verdict == "MET", row.observed
+    assert "cache projection RELATIONSHIP vector targets" in row.observed, row.observed
+    assert "stored-without-a-query-path: none" in row.observed, row.observed
+    # ⛔ The POPULATION is PRINTED and an EMPTY one holds the row at PARTIAL — and both
+    # halves are pinned here (`#12015` round 4: measured UNPINNED by removing the
+    # `not projection["relationships_probed"]` arm and watching this file stay 172/172
+    # green). Without it, "41 edge types measured, none stores a vector" and "the edge
+    # arm never ran" are the SAME printed evidence — `stored-without-a-query-path: none`
+    # / `MET` — which is the rule the neighbouring notes already state: a `MET` must not
+    # rest on an unprinted (or unmeasured) set.
+    assert "PLANTED ON and saw REFUSE" in row.observed, row.observed
+    assert "BELONGS_TO" in row.observed, row.observed
+
+    empty = dict(measured, relationships=frozenset(), relationships_probed=frozenset())
+    monkeypatch.setattr(probe, "cache_projection_store_labels", lambda: empty)
+    unrun = probe.score_path_bullet()
+    assert unrun.verdict != "MET", (
+        "an edge arm that measured NOTHING reported the row clean — 'no edge stores a "
+        f"vector' and 'no edge was probed' are indistinguishable: {unrun.observed}")
+    assert unrun.verdict == "PARTIAL", unrun.observed
+
+
+def test_re_introducing_an_EDGE_vector_flips_row_two_to_NOT_MET(monkeypatch):
+    """The falsifier: restore the old edge writer's behaviour and row 2 must go red.
+
+    ⛔ Mutating the GATE (not the probe's inputs) is the point, exactly as the `#11747`
+    pin above does: the real derivation path runs end to end — `relation_from_row` →
+    `relation_statement` → `stmt.params["props"]` → the orphan comparison — so this
+    reds on the failure a future lane would actually introduce.
+
+    It is ALSO the non-vacuity proof for the test above: a probe that could not see an
+    edge store at all would report `relationships: []` here too, and this assertion
+    would fail.
+    """
+    import tortoise.cache_projection as cp
+
+    monkeypatch.setattr(cp, "relation_vector_declined_properties", lambda: frozenset())
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert "IMPL" in measured["relationships"], (
+        "the EDGE door is unmeasured: with the decline removed, the planted vector reaches "
+        f"`SET r += $props` and must be seen. Measured: {sorted(measured['relationships'])}")
+    assert "IMPL" not in measured["labels"], (
+        "a relationship type is NOT a node label — it must be reported under its own key")
+    row = probe.score_path_bullet()
+    assert row.verdict == "NOT MET", row.observed
+    assert "<relationship:IMPL>" in row.observed, row.observed
+    assert "stored-without-a-query-path: none" not in row.observed, row.observed
+
+
+def test_an_edge_arm_that_stops_PLANTING_cannot_report_full_coverage(monkeypatch):
+    """The population is DROP-derived, not INPUT-derived (#12015 review, finding C).
+
+    `cache_projection_store_labels` documents that `relationships_probed` is *"recorded only
+    where a door RECORDED A DROP"*, so that an arm which stops planting cannot still report
+    full coverage. That promise was pinned by NOTHING: deriving the population from the input
+    list (`edge_probed.add(rel_type)` at the top of the per-type loop — the exact variant the
+    probe's own comment calls MEASURED wrong) left this file **171 passed, 2 skipped**. Only
+    the empty-the-integer direction was pinned by the test above.
+
+    So this disables the PLANT: with no stored-vector property to plant, no door can record a
+    drop, and the population must collapse — while the shipped code stays green (the plant is
+    empty, not the door missing).
+    """
+    import tortoise.cache_projection as cp
+
+    monkeypatch.setattr(cp, "stored_vector_props", frozenset)
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert measured["relationships_probed"] == frozenset(), (
+        "an arm that planted nothing still reported a PROBED population, so the population "
+        "is derived from its input rather than from an observed refusal: "
+        f"{sorted(measured['relationships_probed'])}")
+    # …and the row must not then rest on that emptiness as if it were a measurement.
+    monkeypatch.setattr(probe, "cache_projection_store_labels", lambda: measured)
+    assert probe.score_path_bullet().verdict != "MET", (
+        "a row reported MET over an edge arm that never planted a vector")
+
+
 def test_a_record_label_without_a_key_HOLDS_the_row_instead_of_crashing(monkeypatch):
     """`#11747` review, finding 4 — the per-label derivation is inside the envelope.
 
@@ -7792,7 +7904,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # existed, but the note that enrols it did not until `#12000`'s F1b note),
     # and a provenance asserted here would be the false record this note exists
     # to prevent. ⛔ The count is SCOPED
-    # to that head rather than re-cut, because this file collects 180 now and no
+    # to that head rather than re-cut, because this file collects 183 now and no
     # run of it can report
     # 152; an unscoped figure here would be the stale-measurement defect §6 of the
     # census doc exists to forbid. What closed the gap is the AST guard below —
@@ -7880,13 +7992,13 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `179 passed, 1 skipped`
+    defect. Measured at this tree: the docker lane reads `182 passed, 1 skipped`
     (the skip is the `<3.12` re-derive; the three `main` reds this docstring used
     to record — `#12045`'s undeclared `tortoise.api::_emit` /
     `_verify_record_vector_width` writers — are cleared by `#12042`, landed as
-    `b367c54214a2`) and the carve-out lane reads `178 passed, 2 skipped` (that
+    `b367c54214a2`) and the carve-out lane reads `181 passed, 2 skipped` (that
     skip plus `tests/_live_utils.py`'s live-graph fixture, which only a lane with
-    a `TORTOISE_DB_URI` satisfies). Both splits add to the `180` re-derived
+    a `TORTOISE_DB_URI` satisfies). Both splits add to the `183` re-derived
     below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
@@ -7910,15 +8022,40 @@ def test_the_census_doc_collects_what_the_file_collects():
         f"nothing: {run.stdout[-2000:]}")
     actual = int(match.group(1))
 
-    stated = re.search(r"this tree: (\d+) collected", text)
-    assert stated, (
-        "§6's run record no longer states the collected count of THIS tree. A "
-        "count stated against a branch head ('at #11337's head') describes a "
-        "measurement the row no longer matches as soon as a test is added")
-    assert int(stated.group(1)) == actual, (
-        f"§6 states this tree collects {stated.group(1)} and the file collects "
-        f"{actual}: the row describes a measurement it no longer matches — re-cut "
-        f"the figure, or delete it and let this pin stand alone")
+    # ⛔ EVERY statement of the count, not just the transcript line (`#12015` review):
+    # §6 states the figure FOUR times (the run line, the bold prose total, the
+    # `122 + … = N` arithmetic, and the `to the same `N` the pin re-derives` clause).
+    # Pinning one left the rest free to be re-cut to a different number with this gate
+    # green — a doc contradicting itself, which is the defect this pin exists to
+    # prevent. ⚠️ The fourth arm was added by a `#12015` review that MEASURED the gap:
+    # §6 named `999` at that line and this pin still passed with `3` statements found,
+    # so the comment's claim to cover every statement was itself false — the exact
+    # "a guard that cannot see the shape it exists for" class this file keeps citing.
+    statements = [int(n) for n in re.findall(r"this tree: (\d+) collected", text)]
+    statements += [int(n) for n in
+                   re.findall(r"collects \*\*(\d+) in the tree", text)]
+    # ⛔ The arithmetic total is written ``(`122 + … = 183`)`` — a BACKTICK follows the
+    # digits, never a paren (`#12015` review MEASURED the first spelling: it matched
+    # nothing, and a dead arm shrinks to the arms that still match, so `= 999` stayed
+    # green while the comment claimed all three were pinned).
+    statements += [int(n) for n in re.findall(r"= (\d+)`", text)]
+    # The splits paragraph's `to the same `183` the pin re-derives` clause — the fourth
+    # statement of the same figure, and the one an earlier revision of this pin missed.
+    statements += [int(n) for n in
+                   re.findall(r"to the same `(\d+)` the pin re-derives", text)]
+    assert len(statements) == 4, (
+        f"§6 states the collected count of THIS tree four times — the run line, the "
+        f"bold prose total, the `122 + … = N` arithmetic, and the `to the same `N` the "
+        f"pin re-derives` clause — and this pin found "
+        f"{len(statements)}: {statements}. A pattern that matches nothing is a DEAD ARM "
+        f"(it shrinks to the arms that still match), and a count stated against a branch "
+        f"head ('at #11337's head') describes a measurement the row no longer matches as "
+        f"soon as a test is added")
+    wrong = [n for n in statements if n != actual]
+    assert not wrong, (
+        f"§6 states {wrong} where the file collects {actual} (every statement must "
+        f"agree: {statements}): the row describes a measurement it no longer matches "
+        f"— re-cut EVERY figure, or delete them and let this pin stand alone")
 
 
 def test_a_pass_through_tool_changes_NOTHING_when_the_affected_set_is_EMPTY():
