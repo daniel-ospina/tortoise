@@ -6018,6 +6018,13 @@ _CRED_WORD_EXEMPT_ALTERNATIVES = (
 _CRED_WORD_ANCHOR_HALVES = (("leading anchor", "(?<![A-Za-z_])"),
                             ("trailing anchor", "(?!\\w)"))
 _CRED_WORD_LOOKAHEAD = ("digit lookahead", "(?!\\d)")
+#: The two window MAXIMA — a boundary like any other, and the one direction the
+#: rest of this table did not cover: every mutation above WIDENS what the window
+#: may cross (a stop char, a relativizer, an exempting alternative), while these
+#: two are what BOUND it. Lifting one turns TRUE prose into a report, which is
+#: this guard's expensive direction — and before these mutants existed, lifting
+#: either (or both) left the whole file GREEN (measured, review cycle 16).
+_CRED_WORD_WINDOW_MAXIMA = (("pre", "{0,60}"), ("post", "{0,25}"))
 
 
 def _cred_word_mutants() -> list[tuple[str, re.Pattern[str], re.Pattern[str]]]:
@@ -6075,6 +6082,15 @@ def _cred_word_mutants() -> list[tuple[str, re.Pattern[str], re.Pattern[str]]]:
             + repr(window))
         mutants.append((f"{label} removed",
                         re.compile(window.replace(piece, ""), re.IGNORECASE),
+                        _CRED_WORD_EXEMPT))
+    for segment, maximum in _CRED_WORD_WINDOW_MAXIMA:
+        assert window.count(maximum) == 1, (
+            f"the {segment}-verb window maximum {maximum!r} is not spelled "
+            "once in _CRED_WORD_YIELDS_075 any more — a blind substitution "
+            "here would be a no-op mutant: " + repr(window))
+        mutants.append((f"{segment}-verb window maximum {maximum} lifted",
+                        re.compile(window.replace(maximum, "*"),
+                                   re.IGNORECASE),
                         _CRED_WORD_EXEMPT))
     return mutants
 
@@ -6360,13 +6376,32 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             "the credibility word is one body. The default alone reads 0.75",
             "the credibility word reads a body; 0.75 is the default's",
             "the credibility word reads a body – 0.75 is the default's",
-            "the credibility word reads a body — 0.75 is the default's"):
+            "the credibility word reads a body — 0.75 is the default's",
+            # ⛔ THE WINDOW MAXIMA (review cycle 16, P3). `_cred_word_mutants`
+            # lifts `{0,60}`/`{0,25}` to `*` and these two rows are what rings:
+            # each is TRUE prose that the guard reports ONLY once its own
+            # maximum no longer bounds the window, so neither a deletion nor a
+            # widening of either maximum is silent. Measured gaps, not guessed,
+            # and each row is isolated from the OTHER maximum (that is what
+            # makes it a pin for its own bound):
+            #   • the first row's `credibility`→`reads` gap is 76 chars — quiet at
+            #     `{0,60}`, fires at `{0,76}`, and still quiet when only the POST
+            #     maximum is lifted;
+            #   • the second row's post-verb gap is 29 — quiet at `{0,25}`, fires
+            #     at `{0,29}`, and still quiet when only the PRE maximum is
+            #     lifted.
+            # `_cred_word_pins_a_boundary` enforces that attribution for both.
+            "the credibility word carries a label on the author's assertion "
+            "and the #2199 default alone reads 0.75",
+            "the credibility word reads one weak body on top of the 0.75 "
+            "default"):
         assert not _cred_word_yields_075(true_sentence), (
             f"the credibility guard fires on TRUE prose: {true_sentence!r}")
         assert _cred_word_pins_a_boundary(true_sentence), (
             "this must-not-fire row pins NO boundary: no single removal — a "
             "stop char from one window segment, a relativizer from one "
-            "segment, an exemption alternative, an anchor half, or the "
+            "segment, an exemption alternative, an anchor half, a window "
+            "maximum, or the "
             "`(?!\\d)` lookahead — makes the guard report it, so the row is "
             "quiet twice over and asserts a tautology. Move it to the "
             "MULTI-MASKED WORDING RECORD below with the boundaries that mask "
