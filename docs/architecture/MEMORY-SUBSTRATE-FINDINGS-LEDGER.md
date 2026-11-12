@@ -451,18 +451,20 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   stored* defect, inside the correction that exists to stop it — and the reason two reviewers could
   each "prove" the other side was the stale one.
 
-The self-test that proves the document-level arms still fire has its own **population floor**
-(`MIN_SELF_TEST_MUTATIONS`). An emptied arm set used to print `PASS (0 failing arm(s))` and exit 0 —
-a gate reporting OK when it cannot run — so a shrunk population now reds instead. ⛔ **The letter-list
-rules above are NOT in that population, and the floor does not stand in for them**: all 41 mutations
-edit the PAGE (a falsified tally, a deleted correction row, a second survivor sentence), so none of
-them can exercise a rule that decides which letters a sentence names, and a lane that deleted
-`_MEMBER_END_RE` or the list-RUN membership would leave `--self-test` reporting `PASS` with exit 0
-(measured, both). Their mechanism is the pytest arms instead: `test_english_prose_cannot_supply_a_missing_member`
-reds for each of those two deletions (measured), and `test_a_written_bare_member_is_still_read` with
-`test_a_letter_added_to_either_tally_list_is_compared_in_every_spelling` pin the other direction —
+The self-test that proves the arms its 41 mutations exercise still fire has its own **population
+floor** (`MIN_SELF_TEST_MUTATIONS`). An emptied arm set used to print `PASS (0 failing arm(s))` and
+exit 0 — a gate reporting OK when it cannot run — so a shrunk population now reds instead. ⛔ **The
+population is those 41 mutations, not the guard**, and every one of them edits the page's CONTENT (a
+falsified tally, a deleted correction row, a second survivor sentence), so two arms sit outside it:
+the STRUCTURAL arm (`check_section_presence`, the FIRST thing `check_document()` runs) and the §3
+letter-list rules above, which decide which letters a sentence names. Making either a no-op leaves
+`--self-test` reporting `PASS` with exit 0 (measured, all three). Their mechanism is the pytest arms
+instead: `test_every_section_is_required_not_just_the_bounded_ones` reds for the structural arm, and
+`test_english_prose_cannot_supply_a_missing_member` reds for each of the two letter-rule deletions
+(measured), while `test_a_written_bare_member_is_still_read` and
+`test_a_letter_added_to_either_tally_list_is_compared_in_every_spelling` pin the opposite direction —
 that a spelling §8 accepts is still READ, so a guard cannot buy a green by refusing correct prose. All
-three run in the `test` jobs on both change classes this guard exists for (`core` for a `tools/` edit,
+four run in the `test` jobs on both change classes this guard exists for (`core` for a `tools/` edit,
 `tier1` for a `docs/` one).
 Two mechanisms, stated separately, for the same reason the ancestry arm below states its own.
 
