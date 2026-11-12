@@ -708,10 +708,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # self-exclusion is what makes "resolvable" mean a DIFFERENT node: a
         # self-pointer is not a successor, and an in-place `supersededBy` that names
         # a same-named OTHER Object still counts (1 carrier, silent).
+        # ⛔ ``id(carrier) <> id(sup)``, NOT ``carrier.id <> sup.id``: a NULL id on
+        # either side makes the comparison NULL, the OPTIONAL MATCH binds NOTHING,
+        # and both checks then state the opposite of the graph (measured: an
+        # id-less superseded Object with a resolvable successor emitted "NO Object
+        # carries that name" and "there is nothing to re-point this input onto").
+        # Internal node identity is always present, so the exclusion is null-safe.
         "OPTIONAL MATCH (carrier:Object) WHERE carrier.name = sup.supersededBy "
-        "AND carrier.id <> sup.id\n"
+        "AND id(carrier) <> id(sup)\n"
         "WITH sup, r, active, count(carrier) AS carrier_count, "
-        "     head(collect(carrier.id)) AS carrier_id, "
+        "     head(collect(id(carrier))) AS carrier_id, "
         "     head(collect(carrier.status)) AS carrier_status, "
         "     head(collect(carrier.supersededBy)) AS carrier_sb\n"
         # ⛔ ONE HOP OF LOOKAHEAD, because "the successor is itself terminal" is NOT
@@ -725,7 +731,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # whose own ``supersededBy`` is its own name would otherwise find
         # ITSELF and the string would tell the reader to walk a chain with no
         # live head.
-        "AND nxt.id <> sup.id AND nxt.id <> carrier_id\n"
+        "AND id(nxt) <> id(sup) AND id(nxt) <> carrier_id\n"
         "WITH sup, r, active, carrier_count, carrier_id, carrier_status, "
         "     carrier_sb, count(nxt) AS next_count, "
         "     head(collect(nxt.status)) AS next_status\n"
@@ -734,6 +740,12 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # ``op_type`` because EP's operator predicate is the flag OR ``op_type``
         # (see ``_4b_state``), and the two lookahead columns because a terminal
         # successor is not necessarily a chain.
+        # ⛔ The operator's ARITY is deliberately NOT projected: a fourth
+        # ``OPTIONAL MATCH`` would multiply each row by the operator's input count
+        # and SAMPLE_LIMIT would then truncate a different set of rows than
+        # ``count4b`` counts. The strings therefore do not assert an arity — the
+        # detail states the consequence as a ladder over whatever inputs remain
+        # (including none, where EP builds no factor at all).
         "RETURN DISTINCT sup.id, sup.name, sup.supersededBy, type(r), r.idx, "
         "coalesce(active.is_operator, false), active.op_type, active.direction, "
         f"{epistemic_identity('active')}, active.id, carrier_count, "
@@ -816,14 +828,31 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         detail = (f"Superseded Object '{s['sup_name']}' still carries an active "
                   f"{s['edge_type']} edge from {source}")
         if s["is_operator"]:
-            detail += (
-                " — the Object lane moved no edges on supersession, so EP strips "
-                "that terminal input: a two-input factor is then skipped as "
-                "degenerate (#780/#2422), a wider one runs without it, and a "
-                "DIRECTIONAL operator is skipped outright when the stripped input "
-                "is its idx-0 source (source_stripped). The successor inherits no "
-                "belief from this edge unless it was separately rewired into a "
-                "slot EP reads (#11826)")
+            fwd, bwd = direction_flows(s["direction"])
+            if not (fwd or bwd):
+                # ⛔ A NEUTRAL operator (``direction='-'``, e.g.
+                # ``create_operator(..., semantics='related')``) transfers NO
+                # confidence **by design**, so no belief is lost when its input goes
+                # terminal — and the belief-loss ladder below would report a HIGH
+                # finding whose rationale is void (measured: posteriors identical
+                # before and after the supersession, successor rewired or not).
+                detail += (
+                    " — the Object lane moved no edges on supersession, but this "
+                    "operator is '-' (neutral): the connection transfers NO "
+                    "confidence by design, so no belief is lost here and rewiring "
+                    "the successor restores nothing that was ever carried. The "
+                    "stale edge is leftover wiring, safe to delete (#11826)")
+            else:
+                detail += (
+                    " — the Object lane moved no edges on supersession, so EP "
+                    "strips that terminal input: the factor over its REMAINING "
+                    "inputs is then re-scored without it — two left is skipped as "
+                    "degenerate (#780/#2422), more runs without it, and an operator "
+                    "whose ONLY input this is has no factor to begin with, so "
+                    "nothing is lost. A DIRECTIONAL operator is skipped outright "
+                    "when the stripped input is its idx-0 source (source_stripped). "
+                    "The successor inherits no belief from this edge unless it was "
+                    "separately rewired into a slot EP reads (#11826)")
         else:
             detail += (
                 " — the Object lane moved no edges on supersession, and EP builds "
@@ -957,13 +986,28 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 f"re-point and no edge idx to preserve — write the equivalent "
                 f"edge from the same source onto the successor and delete this "
                 f"one." + tail)
-        if s["idx"] == 0 and not all(direction_flows(s["direction"])):
+        fwd, bwd = direction_flows(s["direction"])
+        if not (fwd or bwd):
+            # ⛔ A NEUTRAL operator transfers NO confidence **by design**, so
+            # nothing is lost here and the belief-loss arms below (the SOURCE-slot
+            # warning in particular) would assert a mechanism EP never runs:
+            # ``_update_nary_factor`` returns at ``if not (fwd or bwd)`` before any
+            # renumbering (measured: posteriors identical before and after, with
+            # the successor rewired and with the stale edge deleted).
+            return prefix + (
+                f"Re-point this {s['edge_type']} input from {q} onto the "
+                f"successor ({successor}) if the claim should still be wired "
+                f"there, then delete the edge into {q}. ⛔ Nothing was LOST by "
+                f"leaving it: this operator is '-' (neutral), so no confidence "
+                f"transferred through this edge either way (measured: posteriors "
+                f"identical before and after the supersession)" + tail)
+        if s["idx"] == 0 and fwd != bwd:
             return prefix + (
                 f"Write the successor ({successor}) into the SOURCE slot: this "
                 f"{s['edge_type']} edge is the operator's idx-0 source and the "
                 f"operator is {_quoted(s['direction'])}-directional, so EP drops "
                 f"the whole factor while that slot is terminal — and DELETING the "
-                f"edge alone is not the repair: the surviving input is renumbered "
+                f"edge alone is not the repair: any SURVIVING input is renumbered "
                 f"into idx 0 and the factor's direction inverts (ep.py's "
                 f"source_stripped note). Re-point idx 0 onto the successor, then "
                 f"delete the edge into {q}." + tail)
@@ -1016,7 +1060,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # vs. re-pointing). N≥1 means the name still addresses something, so this
     # check stays silent even where a read path would refuse to pick one.
     #
-    # ⛔ A CARRIER IS ANOTHER NODE (`carrier.id <> sup.id`), and that exclusion is
+    # ⛔ A CARRIER IS ANOTHER NODE (`id(carrier) <> id(sup)` — internal identity,
+    # because a NULL `id` property would make the comparison NULL and bind
+    # nothing), and that exclusion is
     # the whole reason a SELF-pointer is visible at all: `supersededBy` naming the
     # superseded Object itself satisfies a plain name match (the node carries that
     # name by definition), so without it the pointer resolves to itself and NOTHING
@@ -1037,7 +1083,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         # carriers yield two non-NULL rows that the WHERE then drops. So the
         # filter is `carrier IS NULL` (zero carriers), never "fewer than two".
         "OPTIONAL MATCH (carrier:Object) WHERE carrier.name = sup.supersededBy "
-        "AND carrier.id <> sup.id\n"
+        "AND id(carrier) <> id(sup)\n"
         "WITH sup, carrier WHERE carrier IS NULL\n"
         "RETURN count(DISTINCT sup)",
     )
@@ -1048,7 +1094,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "AND sup.supersededBy <> ''\n"
         "WITH sup\n"
         "OPTIONAL MATCH (carrier:Object) WHERE carrier.name = sup.supersededBy "
-        "AND carrier.id <> sup.id\n"
+        "AND id(carrier) <> id(sup)\n"
         "WITH sup, carrier WHERE carrier IS NULL\n"
         "RETURN DISTINCT sup.id, sup.name, sup.supersededBy "
         f"LIMIT {SAMPLE_LIMIT}",

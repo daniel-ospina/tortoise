@@ -780,6 +780,108 @@ def test_an_idless_object_is_not_handed_an_id_keyed_call(sdk):
         "a name was embedded where the door expects an id: " + fix)
 
 
+def test_a_neutral_operator_does_not_claim_lost_belief(sdk):
+    """``direction='-'`` transfers NO confidence BY DESIGN — so nothing is lost.
+
+    ``create_operator(..., semantics='related')`` is a documented path into the
+    NEUTRAL direction (``pack_registry.SEMANTICS_DIRECTIONS``), and
+    ``_update_nary_factor`` returns at ``if not (fwd or bwd)`` before any pair
+    math. The belief-loss arms therefore stated a consequence the engine never
+    produces: the detail claimed the successor could inherit the belief if
+    "separately rewired" (it cannot — measured, posteriors identical), and the
+    idx-0 arm told the reader that deleting the edge renumbers a surviving input
+    and inverts the direction (nothing is renumbered).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
+    assert _q(sdk, "MATCH (o {id:$i}) RETURN o.direction", {"i": op["id"]}) == \
+        [["-"]], "fixture drifted: the operator is not neutral"
+    before = sdk.compute_confidence(factors=[op["id"]],
+                                    require_calibration=False)["confidences"]
+
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    assert "transfers NO confidence by design" in issues[0].detail, issues[0].detail
+    assert "The successor inherits no belief" not in issues[0].detail, (
+        "a neutral operator transfers nothing, so the successor cannot inherit "
+        "it however it is wired: " + issues[0].detail)
+    assert "Nothing was LOST by leaving it" in issues[0].fix, issues[0].fix
+    assert "direction inverts" not in issues[0].fix, (
+        "nothing is renumbered when neither leg flows: " + issues[0].fix)
+
+    # ...and the engine agrees: the superseded input is STRIPPED (its row leaves
+    # the result) and every SURVIVING posterior is unchanged — no belief moved.
+    after = sdk.compute_confidence(factors=[op["id"]],
+                                   require_calibration=False)["confidences"]
+    assert v1["id"] not in after, (
+        f"the terminal input was not stripped at all: {after}")
+    for node_id, value in after.items():
+        assert value == before[node_id], (
+            f"a neutral operator moved the posterior of {node_id}: "
+            f"{before[node_id]} -> {value}")
+
+
+def test_an_idless_subject_still_resolves_its_successor(sdk):
+    """The self-exclusion must be null-safe, or a resolvable pointer reads dead.
+
+    ``carrier.id <> sup.id`` is NULL-swallowing: an id-less Object on either side
+    makes the comparison NULL and the OPTIONAL MATCH binds NOTHING, so both checks
+    stated the OPPOSITE of the graph — 4c "NO Object carries that name" and 4b
+    "there is nothing to re-point this input onto" — over a successor that is
+    sitting right there. ``id(...)`` is internal identity and always present.
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status = 'superseded', "
+            "o.supersededBy = 'PolicyV2' REMOVE o.id", {"i": v1["id"]})
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV1'}) RETURN o.id", {}) == [[None]]
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) RETURN count(o)", {}) == [[1]]
+
+    assert [i for i in _issues(sdk, "superseded_by_unresolvable")] == [], (
+        "the pointer RESOLVES — reporting it as dead states the opposite of the "
+        "graph and prescribes a repair for a defect that is not there")
+    edges = _issues(sdk, "superseded_object_active_edges")
+    assert edges
+    assert "no OTHER Object answers its supersededBy" not in edges[0].detail, \
+        edges[0].detail
+    assert "there is nothing to re-point this input onto" not in edges[0].fix, \
+        edges[0].fix
+    # The successor resolves; the item's own missing identity is the real limit.
+    assert "No id-keyed repair is possible" in edges[0].fix, edges[0].fix
+
+
+def test_an_operators_arity_is_not_asserted(sdk):
+    """A one-input operator has NO factor at all — the ladder must say so.
+
+    ``create_operator("IMPL", <obj>, [])`` is accepted, so an operator can hold a
+    single input (measured: ``compute_confidence`` returns no factor and no
+    ``skipped_factors`` record, before the supersession as well). The strings
+    asserted "a two-input factor" and "the surviving input is renumbered",
+    describing an object that does not exist.
+    """
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", v1["id"], [], direction="->")
+    assert _q(sdk, "MATCH ()-[r:IMPL]->() RETURN count(r)", {}) == [[1]], \
+        "fixture drifted: the operator has more than one input"
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    assert "has no factor to begin with" in issues[0].detail, issues[0].detail
+    assert "a two-input factor is then skipped" not in issues[0].detail, (
+        "the row cannot prove two inputs exist: " + issues[0].detail)
+    assert "any SURVIVING input is renumbered" in issues[0].fix, issues[0].fix
+
+
 # ── 3. the history surface stops hiding a terminal chain head ──────
 
 
