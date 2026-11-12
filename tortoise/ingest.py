@@ -1063,7 +1063,9 @@ def _s7_document_entities(text, source_id, api, args, extractor=None):
         by_rule = ent_stats.get("subjects_held_by_rule") or {}
         print(f"warning: S7 held {held} subject surface(s) as non-referents "
               f"({', '.join(f'{rule} ×{n}' for rule, n in by_rule.items())}) "
-              f"— not minted, and not wired to this document; their rule, "
+              f"— not minted by S7, and not wired to this document "
+              f"(⛔ S7-SCOPED: a Point's `aboutEntities` reaches a DIFFERENT "
+              f"Subject mint, #12247); their rule, "
               f"section and span are on `held_subjects` in this stage's "
               f"return value (NOT persisted by this CLI — read the census "
               f"directly if you need the per-surface records)")
