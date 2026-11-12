@@ -92,6 +92,18 @@ Adding either is a surface change that needs owner approval (AGENTS.md hard rule
 an ``sdk`` — following ``tortoise/decide_wiring.py``'s precedent: the mechanism
 gets one home, and the surface it is eventually exposed through is a separate,
 approved decision.
+
+THE OTHER HALF IS ``tortoise/derived_invalidation.py`` (#11926).
+A judgement is a claim, and a claim whose justification is gone must stop
+counting: that module retires it when the target's bar is revised, when the
+definition changes, or when the goal is retired — one closed reason set, one
+retire door, and no trigger of its own either (same D13 gate). Two things here
+are read by it and are the reason they live HERE rather than there: the bar the
+judgement was derived under (``comparator``/``threshold``/``dwell`` and, since
+#11926, ``readingAsOf`` — all copied onto the claim by :func:`record_judgement`,
+which is what makes a revision detectable on claims written before that module
+existed), and the definition boundary (:data:`DEFINITION_BOUNDARY_PROP`, read by
+:func:`judge` so a trend is never drawn across it).
 """
 from __future__ import annotations
 
@@ -107,6 +119,7 @@ __all__ = [
     "COMPARATORS",
     "DECISION_TABLE",
     "DEFAULT_STRENGTH",
+    "DEFINITION_BOUNDARY_PROP",
     "GOAL_STATE_CACHE",
     "JUDGEMENT_STATES",
     "Judgement",
@@ -114,10 +127,13 @@ __all__ = [
     "Target",
     "compare",
     "compare_values",
+    "definition_boundary",
+    "instant_at_or_after",
     "judge",
     "judge_and_record",
     "latest_judgement",
     "latest_readings",
+    "live_judgements",
     "prior_for",
     "record_judgement",
 ]
@@ -175,6 +191,26 @@ JUDGEMENT_BASELINE_SOURCE = "system-default"
 #: the two directions can never drift apart — see :func:`prior_for` and the
 #: second trap in this module's docstring (#11822 measured both).
 DEFAULT_STRENGTH = 0.9
+
+#: The indicator property that MARKS the instant the definition changed (#11926,
+#: capability 9 of the design of record).
+#:
+#: ⛔ The definition has no comparable VALUE on the node, so it cannot be diffed
+#: the way a target's bar can (`comparator`/`threshold`/`dwell` are copied onto
+#: every judgement — see ``record_judgement``). What CAN be compared is an
+#: INSTANT: "readings before this moment were taken under an older definition of
+#: what is being measured, so they are not comparable with readings after it".
+#: That is why the boundary is a declared stamp rather than a digest of the
+#: indicator's properties: a digest cannot say WHEN the meaning moved, so it
+#: cannot bound the readings a trend may be drawn across, which is the half of
+#: capability 9 that produces the wrong number rather than a stale one.
+#:
+#: It is written by ``derived_invalidation.mark_definition_change`` (one door,
+#: explicit — nothing fires on its own; #7860's D13 "what triggers the loop?" is
+#: still unruled) and read HERE, because the derivation is the consumer that must
+#: not trend across it (:func:`judge`). ``derived_invalidation`` owns the
+#: retirement of the states derived under the old definition.
+DEFINITION_BOUNDARY_PROP = "definitionChangedAt"
 
 
 def prior_for(state: str, strength: float = DEFAULT_STRENGTH) -> tuple[float, float]:
@@ -392,6 +428,31 @@ def _num(value: Any) -> float | None:
     if not math.isfinite(out):
         return None
     return out
+
+
+def instant_at_or_after(instant: Any, boundary: Any) -> bool:
+    """``instant`` names a moment at or after ``boundary`` — and both name one.
+
+    ⛔ THE ANSWER IS ``False`` WHEN EITHER VALUE NAMES NO INSTANT, and that is
+    the fail-closed direction rather than a detail: the two questions a caller
+    asks of this predicate are "is this reading comparable with the current
+    definition?" and "was this judgement derived before the definition moved?".
+    An undated value cannot PROVE comparability, so it must not be treated as
+    if it had — and 'unparseable' is a real stored state, not a theoretical one
+    (``validity.end_state`` reports it as ``END_UNKNOWN`` for the same reason).
+
+    The measure is ``search_engine._created_sort_key``, imported lazily (the
+    same route ``validity._names_an_instant`` takes): it is the repo's ONE
+    notion of "parseable instant", and comparing the raw strings instead would
+    order ``...+00:00`` against ``...Z`` lexically — a bug that reads as correct
+    whenever both sides happen to share a spelling.
+    """
+    from .search_engine import _created_sort_key
+    a = _created_sort_key(instant)
+    b = _created_sort_key(boundary)
+    if a[0] != 0 or b[0] != 0:
+        return False
+    return a >= b
 
 
 def canonical_comparator(comparator: str) -> str:
@@ -690,12 +751,45 @@ def compare(
 # ── graph reads ──────────────────────────────────────────────────────────────
 
 
+def definition_boundary(sdk: Any, indicator_id: str) -> Any:
+    """The indicator's declared definition boundary (:data:`DEFINITION_BOUNDARY_PROP`).
+
+    ``None`` when the indicator declares none — which is the state of EVERY
+    indicator today and is not the same fact as "the definition never changed":
+    it is "no boundary was ever declared", so no reading is excluded on this
+    ground and no judgement is retired for it. An ABSENT stamp is not evidence
+    of a change, and inventing one would retire claims nobody changed.
+
+    The value is handed back as stored (never coerced to a datetime here): the
+    ordering decision belongs to :func:`instant_at_or_after`, which is the one
+    place that knows what an incomparable value means.
+
+    ⚠️ A FAILED READ ALSO RETURNS ``None``, and that is deliberate for the CALLER
+    this exists for (:func:`judge`): an indicator read that fails means no reading
+    can be shown to predate anything, so serving the readings keeps the derivation
+    working until the next pass re-reads. An INVALIDATION must not inherit that
+    fold — "the boundary could not be read" and "no boundary was declared" are
+    opposite facts there, and treating the first as the second makes a stale claim
+    look healthy — which is why ``derived_invalidation.invalidation_for`` reads the
+    property from the indicator node it has ALREADY fetched instead of calling
+    this.
+    """
+    if not indicator_id:
+        return None
+    try:
+        node = sdk.get_entity(indicator_id) or {}
+    except Exception:
+        return None
+    return node.get(DEFINITION_BOUNDARY_PROP)
+
+
 def latest_readings(
     sdk: Any,
     indicator_id: str,
     *,
     event_kind: str | None = "measurement",
     limit: int = 100,
+    since: Any = None,
 ) -> list[Reading]:
     """The readings recorded about ``indicator_id``, newest first.
 
@@ -705,6 +799,25 @@ def latest_readings(
     event kind defaults to ``measurement`` but is a parameter because the
     vocabulary for a machine reading is a downstream wave (#11081), and this
     module must not become the thing that decides it.
+
+    ``since`` EXCLUDES the readings taken before an instant — the definition
+    boundary (#11926 capability 9). It is applied HERE rather than as a Cypher
+    predicate on purpose: the stored ``startedAt`` spellings are not one format
+    (``Z``, ``+00:00``, date-only, the producer's own), so a string comparison
+    in the query would order them lexically and keep the wrong readings;
+    :func:`instant_at_or_after` compares real instants. A reading that names no
+    instant cannot PROVE it was taken after the boundary, so it is dropped — the
+    fail-closed reading, because the alternative is to draw a trend across the
+    boundary with a value nobody can date.
+
+    ⚠️ AND A BOUNDARY THAT NAMES NO INSTANT EXCLUDES EVERY READING (the same
+    predicate, applied to the same question: nothing can be shown to be after a
+    moment nobody can place). That is the loud direction on purpose — the
+    derivation answers ``unknown`` and the caller sees an indicator that stopped
+    producing states, which is fixable; silently treating the stamp as absent
+    would restart the trend across a definition change nobody can date.
+    ``mark_definition_change`` refuses to WRITE such a stamp and repairs one it
+    finds, so this state is reachable only through an outside write.
     """
     order = "coalesce(e.startedAt, e.createdAt, '')"
     where = "MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator"
@@ -730,7 +843,51 @@ def latest_readings(
                 or (row[4] if len(row) > 4 else None),
             )
         )
+    if since is not None:
+        out = [r for r in out if instant_at_or_after(r.started_at, since)]
     return out
+
+
+def live_judgements(
+    sdk: Any,
+    *,
+    goal_id: str | None = None,
+    indicator_id: str | None = None,
+    target_id: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    """EVERY live judgement Point matching the given scope, newest first.
+
+    :func:`latest_judgement` is this read with ``limit=1`` — one predicate, two
+    windows — because the invalidation sweep (#11926) has to answer "which
+    claims does this graph still hold?" rather than "which one is current?":
+    a second hand-written liveness clause is how a retracted claim gets served
+    as the current state on one surface and excluded on another, which is the
+    #2901 defect class this module imports ``TERMINAL_EXCLUDED_STATUSES`` to
+    avoid.
+
+    Scoping behaviour is identical to :func:`latest_judgement`: an omitted
+    dimension is DROPPED from the WHERE clause (so `None` means "any", not
+    "the null one") — which is why a caller that needs one chain must name all
+    three.
+    """
+    clauses = ["p.judgementState IS NOT NULL",
+               "(p.status IS NULL OR NOT (p.status IN $terminal))",
+               "coalesce(p.outdated, false) = false"]
+    params: dict[str, Any] = {"lim": limit if limit is not None else 10000,
+                              "terminal": sorted(_TERMINAL_EXCLUDED_STATUSES)}
+    for key, val in (("goalId", goal_id), ("indicatorId", indicator_id),
+                     ("targetId", target_id)):
+        if val is not None:
+            clauses.append(f"p.{key} = ${key}")
+            params[key] = val
+    cypher = (
+        "MATCH (p:Point) WHERE " + " AND ".join(clauses) +
+        " RETURN properties(p) ORDER BY coalesce(p.evaluatedAt, p.createdAt, '') DESC,"
+        " p.id DESC LIMIT $lim"
+    )
+    rows = sdk._get_proj().g.query(cypher, params=params).result_set
+    return [row[0] for row in rows]
 
 
 def latest_judgement(
@@ -749,23 +906,9 @@ def latest_judgement(
     of this, and asking it what the state is would be the inversion this module
     exists to prevent.
     """
-    clauses = ["p.judgementState IS NOT NULL",
-               "(p.status IS NULL OR NOT (p.status IN $terminal))",
-               "coalesce(p.outdated, false) = false"]
-    params: dict[str, Any] = {"lim": 1,
-                              "terminal": sorted(_TERMINAL_EXCLUDED_STATUSES)}
-    for key, val in (("goalId", goal_id), ("indicatorId", indicator_id),
-                     ("targetId", target_id)):
-        if val is not None:
-            clauses.append(f"p.{key} = ${key}")
-            params[key] = val
-    cypher = (
-        "MATCH (p:Point) WHERE " + " AND ".join(clauses) +
-        " RETURN properties(p) ORDER BY coalesce(p.evaluatedAt, p.createdAt, '') DESC,"
-        " p.id DESC LIMIT $lim"
-    )
-    rows = sdk._get_proj().g.query(cypher, params=params).result_set
-    return rows[0][0] if rows else None
+    found = live_judgements(sdk, goal_id=goal_id, indicator_id=indicator_id,
+                            target_id=target_id, limit=1)
+    return found[0] if found else None
 
 
 def judge(
@@ -791,9 +934,25 @@ def judge(
     The read window scales with the target: ``dwell`` is a count of consecutive
     READINGS, so a dwell above the default page would never be satisfiable (every
     pass would report ``dwell-holding`` and the goal would never flip).
+
+    ⛔ READINGS FROM BEFORE THE INDICATOR'S DEFINITION BOUNDARY ARE NOT SERVED
+    (#11926 capability 9). Once the definition moves, an older reading measured
+    a different quantity, so a trend drawn across the boundary is a number
+    nobody took: the newest reading is the one that must win anyway, and a
+    ``dwell`` window reaching back past the boundary would count agreement
+    between two definitions. Excluding them here (rather than at each caller)
+    means the retraction half — ``derived_invalidation.invalidate_stale`` — and
+    the derivation half agree about what a reading is worth. If every reading
+    predates the boundary, the result is EMPTY and the judgement is
+    ``unknown``: #11822's rule that a missing reading is not a state change then
+    retires nothing and mints nothing, which is the honest answer to "the
+    definition changed and nothing has been measured under the new one yet".
     """
-    readings = latest_readings(sdk, indicator_id, event_kind=event_kind,
-                              limit=max(100, target.dwell))
+    readings = latest_readings(
+        sdk, indicator_id, event_kind=event_kind,
+        limit=max(100, target.dwell),
+        since=definition_boundary(sdk, indicator_id),
+    )
     previous = latest_judgement(sdk, goal_id=goal_id, indicator_id=indicator_id,
                                target_id=target.target_id)
     previous_state = (previous or {}).get("judgementState") or "unknown"
@@ -1310,6 +1469,16 @@ def record_judgement(
         props["readingId"] = judgement.reading.reading_id
         if judgement.reading.value is not None:
             props["readingValue"] = judgement.reading.value
+        # ⛔ THE READING'S OWN AS-OF, carried on the claim so the claim is
+        # self-describing about WHEN the number it judged was taken. #11926's
+        # definition-boundary check compares that instant with the boundary: a
+        # judgement minted after a BACK-DATED definition change would otherwise
+        # read as "derived under the new definition" while its reading was taken
+        # under the old one, and the stale state would survive. Absent when the
+        # reading carries no instant — never fabricated from the clock, because a
+        # fabricated instant is then what the derivation gets judged against.
+        if judgement.reading.started_at:
+            props["readingAsOf"] = judgement.reading.started_at
 
     point = sdk.create_point(
         "statement", text, claim_class="derived", status="live", **props
