@@ -1018,7 +1018,7 @@ def _site_fact_text(rel: str, line: int) -> str:
 
     The statement span, plus — ONE level, no recursion — the body of every
     module-level constant that span NAMES. The second half is load-bearing and
-    was measured, not assumed: three of the nine entries keep their Cypher in a
+    was measured, not assumed: three of the ten entries keep their Cypher in a
     query CONSTANT their statement executes (`session_source_migration._DEGREE`
     behind `_degree`, `_OUT_TYPES`/`_IN_TYPES` behind `_rel_types`), and the
     derived SITE for those is the constant's own line. Without it the arm would
@@ -5507,8 +5507,8 @@ def test_the_module_filter_admits_a_split_traversal():
     # what proves none of them contributed a site — a module admitted and then
     # deriving nothing costs a parse, not a false claim.
     sites = census._empty_pattern_sites()
-    assert (len(sites), sum(len(lines) for lines in sites.values())) == (26, 39), (
-        "the empty-pattern derivation moved off 26 symbol keys / 39 site rows "
+    assert (len(sites), sum(len(lines) for lines in sites.values())) == (27, 40), (
+        "the empty-pattern derivation moved off 27 symbol keys / 40 site rows "
         f"({len(sites)} keys, "
         f"{sum(len(lines) for lines in sites.values())} rows). The register's "
         "`sites` counts and BOTH completeness directions are stated against "

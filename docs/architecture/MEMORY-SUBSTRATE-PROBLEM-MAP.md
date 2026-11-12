@@ -341,7 +341,7 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_problem_map_2820.py -q  # the
 The `TORTOISE_TEST_CARVE_OUT=1` is not decoration: this suite is DB-free, and on
 a box with no database the default conftest refuses the run outright
 (`default pytest requires TORTOISE_DB_URI (epic #1647 P4)` — one refusal per
-collected test, 58 at this head), which reads as the guard being broken rather
+collected test, 59 at this head), which reads as the guard being broken rather
 than the target being absent. That number is a property of the RUN, and nothing
 reads it (see the residuals below): it is re-derived with `--collect-only`
 rather than read off the page's `measured_at_commit`.
@@ -402,18 +402,37 @@ rounding:**
   and §8 carries neither date nor commit — the commit for the whole page is the
   frontmatter's `measured_at_commit`, restated in §10. Do not read §2 or §8 as
   self-dating.
-- **A status token SWAPPED between two rows this revision does not name.** Every
-  comparison in the pin file is a COUNT, so one row demoted to `OPEN` while
-  another is promoted holds §2's tally, the abstract, the index headline and the
-  WS-C cell — measured: reverting `#2782` to `OPEN` **with** `#2684` promoted to
-  `VERIFIED-FIXED` read CLEAN under `tools/problem_map_check.py --check` and
-  passed the whole suite before review caught it. The re-cut row and §8's four
-  survivors are therefore pinned **by issue**
+- **A status token SWAPPED between two rows — CLOSED by the by-issue pin; what
+  survives is the pin's own provenance.** Before the head that added the pin arm,
+  one row demoted to `OPEN` while another was promoted held §2's tally, the
+  abstract, the index row's headline and the WS-C cell — measured: reverting
+  `#2782` to `OPEN` **with** `#2684` promoted to `VERIFIED-FIXED` read CLEAN
+  under `tools/problem_map_check.py --check` and passed the whole suite before
+  review caught it. The re-cut row and §8's four survivors are therefore pinned
+  **by issue**
   (`tests/test_problem_map_2820.py::test_the_recut_row_and_survivors_hold_their_status_by_ISSUE`),
-  which reds that swap; the same swap between two of the other rows is still
-  invisible. Pinning all 26 is the only complete form and it is not taken on
-  here: it would make every future re-cut edit the pin file as well, and this
-  page's re-cuts are hand measurements. Named sets, not a claim of coverage.
+  which closes that class: §2's `OPEN` count is `4` and the pin names those four,
+  so any swap that holds the tally has to promote one of them and reds the pin.
+  (The §8 prose that also names them is NOT compared — see the prose-counts
+  residual below — so the guarantee rests on the `OPEN` count plus the pin, not
+  on §8's sentence.)
+  Those expected values — the five status literals in that arm and the `22`/`4`
+  literals the count arm asserts — are a second copy of the same hand measurement,
+  not an independent source, so a re-cut that moves the page and the pin together
+  is not caught by anything here. The tracker records whether the *ticket* was
+  closed,
+  and three of §1's four rows show that says nothing about the row in either
+  direction — two are CLOSED in the tracker over a defect this page calls `OPEN`,
+  one is `OPEN` over a fixed defect. `tools/problem_map_check.py` deliberately
+  refuses to read GitHub and re-derives none of this from the tree, so re-derive
+  those literals from the tree on every re-cut; a re-cut that only makes the
+  suite green has proven nothing about the statuses. The pin asserts statuses by
+  issue for five rows — the re-cut row and §8's four survivors — so ANY status
+  move touching one of them reds it as a status finding, swap or unilateral,
+  whatever the counts say. Outside those five, a unilateral move with every count
+  corrected reads CLEAN under `--check`; it reds only where a fixture premise
+  happens to name that row's cells, or through arms whose fixtures encode the
+  shipped counts — breakage, never confirmation.
 - **Anchor RELEVANCE.** The guard proves an anchor exists and is merged. It cannot
   prove the commit is *the fix* — a lane once cited a merge that mentioned nothing
   of the issue (this page carried exactly that defect until review caught it on
@@ -447,9 +466,12 @@ rounding:**
   sentence call open" means reading prose — and §8's second clause additionally
   needs to know which row is an epic, the tracker half this guard refuses to
   read — so a guard that parsed those sentences would be a spelling trap rather
-  than a check. Measured at this head: flip `#2684` to VERIFIED-FIXED and correct
-  the counts the guard DOES read, and §2's narrated sentence goes stale with every
-  check green. That is the residual, named rather than dressed up. §9's own
+  than a check. Measured at this head: drop `#2684` from §2's narrated
+  `**#2730 and #2684 remain open**` without moving a row, and `--check` reports
+  **no drift** while the page calls an OPEN row fixed in prose and the suite
+  reports **59 passed**. Move the ROW instead and it reds, because `#2684` is one
+  of the four survivors the pin reads by issue — the pin reads statuses, not the
+  prose around them. That is the residual, named rather than dressed up. §9's own
   refusal count is the same class: a property of the RUN rather than of the
   document — it is the suite's collected count, so it moves with every control
   added, and nothing in the checker reads it.

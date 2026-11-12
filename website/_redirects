@@ -87,3 +87,10 @@
 /self-hosted.html  /self-hosted  301
 /design-partners-intro.html  /design-partners-intro  301
 /investors.html  /investors  301
+# The legal pages moved to the company ROOT in #11762, so their `.html` twins are
+# duplicates ON the canonical host for the first time. Before that they were 301'd
+# off-host by the middleware's TORTOISE_ONLY set, which is why they were never listed
+# here; the middleware now passes them through, so this rule is what consolidates them.
+/privacy.html  /privacy  301
+/tos.html      /tos      301
+/dpa.html      /dpa      301

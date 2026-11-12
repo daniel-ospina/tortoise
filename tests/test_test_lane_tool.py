@@ -34,6 +34,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from tests import _live_utils  # noqa: E402
 from tools import test_lane as tl  # noqa: E402
 
 #: The REAL lease writer, captured before the autouse fixture stubs it. Tests that
@@ -2583,10 +2584,13 @@ def test_remove_and_describe_refuses_a_peer_lane_container(monkeypatch):
 # ── the eval contract ──────────────────────────────────────────────────────
 
 def test_uri_command_prints_only_the_export_line_on_stdout(monkeypatch, capsys):
-    """The stdout of `uri` is exactly the eval-able export block — all three
+    """The stdout of `uri` is exactly the eval-able export block — all four
     seam variables and nothing else (#5084 remainder: the port and password
     seams are what let a probe aimed at THIS container authenticate and
-    address it, instead of falling back to the shared 6379)."""
+    address it, instead of falling back to the shared 6379; the legacy port is
+    the same gap on the passwordless axis, and without it a `legacy_uri()`
+    site dials the literal 16379 — measured `5 failed` in
+    tests/test_directional_impl.py on main at e4703a286a)."""
     monkeypatch.setattr(tl, "start", lambda port=None, **k: ("fdb-lane-x", 16399))
     monkeypatch.setattr(tl, "_graph_count", lambda _n: 0)
     rc = tl.main(["uri"])
@@ -2596,6 +2600,7 @@ def test_uri_command_prints_only_the_export_line_on_stdout(monkeypatch, capsys):
         "export TORTOISE_DB_URI='docker://:@127.0.0.1:16399/tortoise_test_matrix'\n"
         "export TORTOISE_TEST_DOCKER_PORT='16399'\n"
         "export TORTOISE_TEST_DOCKER_PASSWORD=''\n"
+        "export TORTOISE_TEST_LEGACY_PORT='16399'\n"
     )
     assert "fdb-lane-x" in err, "the human-readable diagnostic belongs on stderr"
 
@@ -4500,7 +4505,7 @@ def _capture_run(monkeypatch, *, returncode: int = 0) -> dict:
     return seen
 
 
-def test_run_exports_ALL_THREE_seam_vars_to_the_child(lane, monkeypatch):
+def test_run_exports_ALL_FOUR_seam_vars_to_the_child(lane, monkeypatch):
     """The whole point of the subcommand: the private lane must be the SESSION's
     target for BOTH resolution paths.
 
@@ -4510,6 +4515,18 @@ def test_run_exports_ALL_THREE_seam_vars_to_the_child(lane, monkeypatch):
     export leaves them on the SHARED instance — and against a passwordless
     private container the probe raises AuthenticationError, which an
     `except Exception` turns into "not available" → skips, rc=0.
+
+    The LEGACY port is the fourth row of the same table, and it was the one
+    still missing: `_live_utils.legacy_port()` falls back to `FALKORDB_PORT`
+    and then to the legacy family's historical literal 16379 — NOT where CI's
+    passwordless service listens (the provision action assigns it an ephemeral
+    port and exports this very variable). So a site that resolves the legacy port
+    WITHOUT first consulting `TORTOISE_DB_URI` hit that literal on a lane whose
+    container is ephemeral: the 5 direct dials in `tests/test_directional_impl.py`
+    failed `Error 111 connecting to localhost:16379` (measured `5 failed` on main
+    at e4703a286a, `5 passed` with this export), and
+    probe-gated sites skipped the class instead. Asserting it here is what stops
+    the omission returning.
     """
     _stub_start(monkeypatch, port=16406)
     seen = _capture_run(monkeypatch)
@@ -4521,6 +4538,51 @@ def test_run_exports_ALL_THREE_seam_vars_to_the_child(lane, monkeypatch):
     # `''` is a REAL value ("no requirepass"), not a missing one — `None` is the
     # different spelling (no userinfo at all) the seam also has to distinguish.
     assert seen["env"]["TORTOISE_TEST_DOCKER_PASSWORD"] == ""
+    # The passwordless axis, pointed at the SAME container: this one has no
+    # `requirepass`, so it IS the legacy service — the export names the target,
+    # it does not widen what the tool isolates.
+    assert seen["env"]["TORTOISE_TEST_LEGACY_PORT"] == "16406"
+
+
+def test_run_names_EVERY_seam_variable_on_the_stderr_target_line(
+        lane, monkeypatch, capsys):
+    """The stderr target line is the ONLY record a killed run leaves behind.
+
+    It is also the line that stayed at three variables after the legacy axis was
+    added (review P2): a hand-written key list cannot notice a new key, so the
+    fixed tool renders it from `lane_seam_env(...)`. This pins the EFFECT: every
+    key the child receives appears on the line, exactly once — it fails for a
+    re-typed list, and it does not care about
+    separator/formatting choices. Seam GROWTH is caught by the sibling
+    `test_run_and_up_emit_the_SAME_four_seam_vars` (`len(exports) == 4`), because
+    this test re-reads the same dict at assertion time and therefore cannot see a
+    key the line renders correctly.
+
+    `DOCKER_HOST` is set so `uri_for`'s warning fires: `cmd_run` must call
+    `lane_seam_env` exactly ONCE (a second call printed that warning twice —
+    round-2 review), and every other test stays green when it is duplicated
+    because the existing `uri_for` pin only asserts presence and this one filters
+    on `invoking:`. Asserting `== 1` here is what makes the single-call fix
+    non-vacuous.
+    """
+    monkeypatch.setenv("DOCKER_HOST", "ssh://build-host")
+    _stub_start(monkeypatch, port=16406)
+    _capture_run(monkeypatch)
+    assert tl.main(["run", "--", "-q", "tests/test_guard.py"]) == 0
+    err = capsys.readouterr().err
+    assert err.count("DOCKER_HOST is set") == 1, err
+    lines = [ln for ln in err.splitlines() if "invoking:" in ln]
+    assert len(lines) == 1, err
+    for key, value in tl.lane_seam_env(16406, "tortoise_test_matrix").items():
+        assert f"{key}=" in lines[0], lines[0]
+        assert lines[0].count(f"{key}=") == 1, lines[0]
+        # The VALUE is asserted for EVERY key, the empty one included: `''` is
+        # the password's real value, so a `repr` regression that rendered a
+        # bare `TORTOISE_TEST_DOCKER_PASSWORD=` would be indistinguishable from
+        # an ABSENT variable — the exact distinction `_live_utils.legacy_port`
+        # must never collapse — and `f"{key}="` alone cannot see it (review P2).
+        rendered = value if value else repr(value)
+        assert f"{key}={rendered}" in lines[0], lines[0]
 
 
 def test_run_invokes_the_RUNNING_venv_and_passes_pytest_argv_verbatim(
@@ -4547,11 +4609,11 @@ def test_run_does_not_leak_the_lane_target_into_the_PARENT_environment(
     (a `down`, a second subset). Mutating `os.environ` would silently aim those
     at a container that may already be gone — the same class the tool refuses
     everywhere else by deriving its target from the worktree instead of the env.
-    The assertion is on the three SEAM keys specifically (not on a whole-environ
+    The assertion is on the four SEAM keys specifically (not on a whole-environ
     identity), so an unrelated env write by a future callee cannot red it.
     """
     seam = ("TORTOISE_DB_URI", "TORTOISE_TEST_DOCKER_PORT",
-            "TORTOISE_TEST_DOCKER_PASSWORD")
+            "TORTOISE_TEST_DOCKER_PASSWORD", "TORTOISE_TEST_LEGACY_PORT")
     before = {key: os.environ.get(key) for key in seam}
     _stub_start(monkeypatch, port=16411)
     _capture_run(monkeypatch)
@@ -5062,7 +5124,46 @@ def test_bare_run_targets_the_SUITE_not_the_rootdir(lane, monkeypatch):
         assert seen["argv"] == [sys.executable, "-m", "pytest", "tests/"], argv
 
 
-def test_run_and_up_emit_the_SAME_three_seam_vars(lane, monkeypatch, capsys):
+def test_the_export_REDIRECTS_every_env_name_live_utils_resolves(monkeypatch):
+    """The CONTRACT, not the dict: the names `tools/test_lane.py` exports must be
+    the names `tests/_live_utils.py` actually resolves.
+
+    This is the regression that produced the phantom red. `_live_utils` gained a
+    passwordless-port axis in #6673 (`_LEGACY_PORT_ENV`), `lane_seam_env` was
+    never revisited, and no test could see the drift — so the export dict stayed
+    green while the legacy sites dialled 16379.
+
+    The enumeration is DERIVED from `_live_utils`, and the EXPECTATION is written
+    out beside it, so a FIFTH axis reds here first with a message that forces the
+    question "does the private lane have to export it?". Writing the expectation
+    out is the mechanism, not a contradiction: the point is that it is an
+    expectation a new axis BREAKS, instead of three names asserted against a
+    three-name export (which is what stayed green through #6673).
+
+    `_HOST_ENV` is deliberately NOT exported (`_live_utils.service_host()` must
+    keep following its own seam), so it is the one named exclusion rather than
+    an absent assertion.
+    """
+    env = tl.lane_seam_env(16406, "tortoise_test_matrix")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert _live_utils.docker_port() == 16406
+    assert _live_utils.legacy_port() == 16406, (
+        "without the legacy export this resolves 16379 and a lane's "
+        "`legacy_uri()` site dials a port nothing serves")
+    assert _live_utils.docker_password() == ""
+    assert ":16406/" in _live_utils.legacy_uri("g")
+    resolved = {name for name in vars(_live_utils) if name.endswith("_ENV")}
+    assert resolved == {"_PORT_ENV", "_LEGACY_PORT_ENV", "_PASSWORD_ENV",
+                        "_HOST_ENV"}, (
+        "`_live_utils` gained an env axis — decide whether the private lane must "
+        f"export it, then update this pin: {sorted(resolved)}")
+    assert {getattr(_live_utils, name) for name in resolved} - {
+        _live_utils._HOST_ENV} <= set(env)
+    assert _live_utils._HOST_ENV not in env
+
+
+def test_run_and_up_emit_the_SAME_four_seam_vars(lane, monkeypatch, capsys):
     """`up` (printed for `eval`) and `run` (exported to the child) come from ONE
     definition. If they could drift, a lane that eval-ed `uri` and a lane that
     ran `run` would be testing against different variables — the split this
@@ -5085,7 +5186,7 @@ def test_run_and_up_emit_the_SAME_three_seam_vars(lane, monkeypatch, capsys):
     assert {k: v.strip("'") for k, v in exports.items()} == {
         k: child_env[k] for k in exports
     }
-    assert len(exports) == 3
+    assert len(exports) == 4
 
 
 def test_the_default_target_cannot_itself_be_eaten_by_an_option(

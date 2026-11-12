@@ -5717,6 +5717,156 @@ _NEGATED = re.compile(r"\b(?:not|never)\b|\bisn't\b", re.IGNORECASE)
 _CLAUSE_BREAK = re.compile(
     r"—|–|:|;|(?<=[.!?])\s|\bbut\b|\brather\b", re.IGNORECASE)
 
+#: The class-4 claim: a sentence that makes the `credibility` WORD yield
+#: `0.75`. Measured on `create_point` (see
+#: `test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair`):
+#: `0.75` is the #2199 system default with NO word (Beta(3,1)) and an EXPLICIT
+#: `set_point_baseline(3, 1)` pair, which the word never overwrites. The word
+#: itself ADDS one weak body on top of the #2199 provision (Beta(3.1,1) =
+#: 0.7561) or, with no provision at all, IS the whole baseline (Beta(1.1,1) =
+#: 0.5238). A note that hands `0.75` to the word therefore names a number
+#: nothing produces.
+#:
+#: Scope is a TRIPWIRE over the ATTRIBUTION WORDINGS this class has actually
+#: used (`is` / `reads` / `lands at` / `equals`, with the word as the subject)
+#: — never a parser — and it has NAMED RESIDUALS IN BOTH DIRECTIONS, the same
+#: discipline the mirror guards above carry. The second direction is the
+#: expensive one:
+#:
+#:   • FALSE PASS — a false attribution phrased with another verb (`yields`,
+#:     `produces`, `gives`, `returns`, `means`, `sits at`, `has a mean of`), or
+#:     with the number as the subject (`0.75 is what the credibility word
+#:     reads`), is not reported. Declared, not hidden: that is the grammar this
+#:     guard covers and no more.
+#:   • FALSE BLOCK — a TRUE sentence is reported whenever the word and the
+#:     number share the WINDOW, and the window is NOT a clause: it stops at
+#:     `.` `;` `,` `—` `–`, at a relative pronoun (`which`/`that`/`whose`/
+#:     `where`/`who`) in EITHER segment, and at `but`/`rather` in either. It
+#:     CROSSES
+#:       - a COLON,
+#:       - a parenthetical `( … )`,
+#:       - a coordinating `and`,
+#:     and the exemption span ENDS at the number, so a negator placed AFTER the
+#:     number is not read. Measured, every one of these TRUE sentences is
+#:     reported: "the credibility word adds one weak body: the #2199 default
+#:     alone reads 0.75"; the same with ( … ), with "and", and "the credibility
+#:     word reads 0.75, which is not true". All four are pinned in the control
+#:     test as KNOWN FALSE BLOCKS so a later tightening is measured, not
+#:     guessed. (The `—`/`–`/`but` forms WERE false blocks and are closed, and
+#:     so are the post-verb relative pronouns — `which`/`that` stop the window
+#:     after the verb too, which they did NOT until review cycle 5 measured
+#:     "the credibility word reads a default which is 0.75" firing. The colon
+#:     cannot be closed, because the pinned must-fire
+#:     "the credibility word is not just an added body: it reads 0.75" is a
+#:     false claim that depends on the window crossing a colon.)
+#:
+#: ⛔ THE TOKEN IS ANCHORED — `(?<![A-Za-z_])credibility(?!\w)` — and that is
+#: load-bearing, not tidiness. Unanchored, it matched every COMPOUND IDENTIFIER
+#: containing the word, and `tortoise/source_credibility.py` defines
+#: `"T2": (3.0, 1.0)` — mean 0.7500 — so the TRUE sentence "a T2
+#: ``credibilityTier`` prior reads 0.75" was reported, with a failure message
+#: quoting numbers (0.7561 / 0.5238) that do not apply to the tier ladder at all.
+#: A fixer following it would have "corrected" a correct sentence about a
+#: DIFFERENT object (review cycle 7, P1). The pins are "a T2
+#: ``credibilityTier`` prior reads 0.75" and "``credibility_prior`` for T2 is
+#: 0.75" — the class this guard is about is the `credibility=` WORD, never the
+#: tier identifier.
+#:     This is the direction that costs — the failure text hands the next fixer
+#:     a number and that fixer then "corrects" a correct sentence, the
+#:     false-correction failure this file documents for the mirror guards.
+#:     ⚠️ Say "window", never "clause": the file's own `_CLAUSE_BREAK` ends a
+#:     clause at `:` `—` `–` `but` `rather`, so a comment calling this trigger
+#:     "same clause" understates it and a verifier auditing that sentence reads
+#:     colon- and dash-joined prose as safe when dash-joined only became safe in
+#:     the same commit (review cycle 4).
+#:
+#: `0?\.750*` and NOT plain `0\.75` — measured: the lookahead alone let the same
+#: false claim written at 3 or 4 dp (`reads 0.750`, `reads 0.7500`) pass
+#: silently. `75\s*%` because `75%` is the same claim a step over (measured
+#: missed). WHAT COVERS `.75` IS `\.750*` ALONE: the pattern is unanchored, so
+#: `\.75` matches the tail of `0.75` — the `0?` is inert. A previous revision
+#: credited the `0?` with `.75` coverage; the coverage is real, the attribution
+#: was not (review cycle 7, P2). The trailing `(?!\d)` is what keeps `0.7561` —
+#: the TRUE figure — from matching as `0.75`, and the control test pins that in
+#: both directions.
+_CRED_WORD_YIELDS_075 = re.compile(
+    r"(?<![A-Za-z_])credibility(?!\w)"
+    r"(?:(?!\b(?:which|that|whose|where|who|but|rather)\b)"
+    r"[^.;,–—]){0,60}?"
+    r"\b(?:is|reads|lands\s+at|equals)\b"
+    r"(?:(?!\b(?:which|that|whose|where|who|but|rather)\b)"
+    r"[^.;,–—]){0,25}?"
+    r"(?:0?\.750*|75\s*%)(?!\d)",
+    re.IGNORECASE)
+
+#: A NEGATED or DEMOTED attribution is the correct wording, not a finding.
+#: Measured before this exemption existed, TWO true sentences fired —
+#: "the ``credibility=`` word is NOT 0.75 — it is 0.7561" and
+#: "``credibility=`` never reads 0.75: the default plus the word is Beta(3.1,1)".
+#: ⚠️ An earlier revision of this note cited FOUR and included "it is NOT the
+#: credibility word that reads 0.75" and "the credibility word is DROPPED
+#: against an explicit pair, which reads 0.75" — neither EVER matched the regex
+#: (`that` stops the pre-verb window; `, which` stops the post-verb one), so
+#: neither could have fired and neither was evidence for this exemption. Only
+#: cite what the regex reaches. A false BLOCK is this guard's expensive error,
+#: not a false pass: the failure text hands the next fixer a number, and that
+#: fixer will "correct" a sentence that is already right — the
+#: false-correction failure this file documents for the mirror guards.
+#:
+#: `is no <NUMBER>` is admitted but a bare `no` is NOT, for the reason
+#: `_NEGATED` gives: bare `no` is a determiner, and "no mere flag" is not a
+#: negation. The copula form is: measured, "``credibility=`` is no 0.75 — it is
+#: 0.5238 alone" fired before this alternative existed, which is a false block on
+#: correct prose. ⚠️ The alternative is NUMBER-BOUND for a measured reason: a
+#: bare `is\s+no` reproduced exactly the false pass the determiner rule exists to
+#: avoid — "the credibility word is no mere flag and reads 0.75" was exempted
+#: (measured, review cycle 9, P2). `is no 0.75` / `is no 75%` stay exempt.
+#:
+#: The demoters are a WORD LIST and therefore incomplete by construction:
+#: `ignored` / `discarded` / `overwritten` / `superseded` were added after they
+#: were MEASURED as false blocks; a synonym nobody has written yet is a
+#: false-block residual, not a claim of coverage. ⚠️ Their pins must use a
+#: spelling the WINDOW actually reaches. Twice this went wrong: the first pair
+#: of citations was quiet for WINDOW reasons (a comma, and a pre-verb `that`),
+#: and the second batch named `ignored`/`discarded`/`overwritten` on strings that
+#: were quiet because a POST-VERB `that` stopped the window — so deleting either
+#: batch of alternatives left the suite green (review cycles 5 and 6). All four
+#: alternatives now have a pin in the `… is <demoter> when a pair reads 0.75`
+#: form: each MATCHES the regex, is quiet ONLY because its own demoter is
+#: exempted, and fires the moment that alternative is removed.
+#:
+#: ⚠️ NAMED RESIDUALS, both directions, stated rather than hidden. It does NOT
+#: catch: (i) a false claim whose OWN final clause carries a negator that
+#: negates something else — "the credibility word is not weak and is 0.75"
+#: reads as exempt; (ii) a demoting verb outside the list above; (iii) a BOUND
+#: form — "the credibility word is no more than 0.75" / "… is no higher than
+#: 0.75" — REPORTS. The copula alternative is NUMBER-bound, so `is no <bound>`
+#: reads as an attribution and is reported; a bare `is\s+no` exempted it, and
+#: that is why the residual exists rather than being closed by the alternative.
+#: ⚠️ It is NOT left open because a bounded alternative would reopen the
+#: determiner hole — measured, `is\s+no\s+(?:0?\.|75\s*%|more\b|higher\b)`
+#: still FIRES on "the credibility word is no mere flag and reads 0.75"
+#: ("mere" is not "more"), so the hole stays shut either way (review cycle 11,
+#: P2 — an earlier revision asserted both that this reports and that exempting
+#: it would admit a FALSE claim, which cannot both hold of the same two
+#: strings). The real reason is AMBIGUITY: the wording is TRUE of the word
+#: alone (0.5238 <= 0.75) and FALSE of the word on top of the #2199 default
+#: (0.7561 > 0.75), so a guard cannot decide it from the sentence — reporting
+#: is the safe direction, and it is pinned as a boundary in the control test
+#: rather than left as prose. It also still
+#: reports an attribution negated in an EARLIER clause and restated without
+#: one, which is outside the read window — a false block, the expensive
+#: direction. It is a tripwire on a class, never a parser, and strings for both
+#: directions are pinned in the control test so a later tightening is MEASURED
+#: rather than guessed.
+_CRED_WORD_EXEMPT = re.compile(
+    r"\b(?:not|never|isn'?t|no\s+longer)\b"
+    r"|\bis\s+no\s+(?:0?\.|75\s*%)"
+    r"|\bdropped\b|\bdrops\b"
+    r"|\bloses\b|\blost\b|\bignored\b|\bdiscarded\b|\boverwritten\b"
+    r"|\bsuperseded\b",
+    re.IGNORECASE)
+
 
 def _belief_prose(rel: str) -> str:
     """One normalised string for a module: comment markers gone, whitespace
@@ -5733,11 +5883,94 @@ def _sentences(rel: str) -> list[str]:
     return [s for s in _SENTENCE_END.split(_belief_prose(rel)) if s.strip()]
 
 
+def _mirror_is_named_affirmatively(sentence: str) -> bool:
+    """True when the sentence names the mirror in a clause that does not DENY
+    it (#11993).
+
+    The original predicate cleared the claim on the bare substring ``mirror``,
+    so a sentence that INVERTED the relation it must state certified itself:
+
+        "a prior-only claim's confidence_mean IS the declared PRIOR mean;
+         the readable ``n.confidence`` mirror never leads it."
+
+    `_PRIOR_MEAN_CLAIM_PATTERNS` matched it and the mirror substring suppressed
+    the problem, so the guard reported "pinned" while certifying exactly the
+    defect it exists to catch — a false PASS. A claim is therefore qualified
+    only by an AFFIRMATIVE mention.
+
+    The scoping is the file's OWN, not a new one: the same `_NEGATED` +
+    `_CLAUSE_BREAK` machinery `_negates_its_verb` uses for the `has_ep` gloss,
+    for the same measured reason — a negator in a DIFFERENT clause belongs to a
+    different predicate and must not deny the mention:
+
+        "confidence_mean IS the declared PRIOR mean — or the readable mirror's
+         value, which LEADS it — never a measured one."
+
+    is AFFIRMATIVE: the mirror's clause carries no negator, and the `never`
+    attaches to "a measured one" in its own clause. A sentence whose own
+    mirror-carrying clause IS denied is not qualified ("…; the mirror never
+    leads it"). A comma does NOT break a clause, so "the mirror leads it, never
+    the pair" is treated as DENIED (fail-closed: the safer direction for a prose
+    guard, and the shape never occurs in the corpus). A mirror mention is
+    affirmative when ANY clause carrying it has no negator, so a mixed sentence
+    that states the relation correctly in one clause and denies it in another is
+    not reported: the guard's unit is the CLAIM, and the claim is qualified in
+    the clause that states it.
+
+    Deliberately NOT a verb-keyed negation (the shape the closed #11922 branch
+    carried as `_MIRROR_LEAD_NEGATED`, which locates a negator BEFORE the verb
+    `lead`). Measured against that branch's own regex, the verb-keyed arm DOES
+    catch `not` / `never` / `isn't` / `doesn't` in front of `lead` — it is
+    better than this predicate on `doesn't`, and #11999 carries that residual
+    because this one leaves it open. Its verbs are WIDER than the bare word:
+    the pattern ends `\blead` with NO trailing `\b`, so `leads` / `leader` /
+    `leading` are caught as well (measured: "the mirror isn't the leader" and
+    "the mirror is not leading the pair" both match). What it MISSES is every
+    inversion whose verb does not BEGIN with `lead` — `led` is missed, because
+    the pattern matches the letters `lead` ("the mirror loses to the pair", "the
+    pair outranks the mirror") — and every denial with no `lead` in reach ("the
+    mirror never is the value") — so it is the same class with a narrower KEY,
+    not a superset. Neither arm is a superset of the other.
+
+    RESIDUALS, disclosed and not closed here — tracked as #11999, measured
+    before it was filed, so none is a silent gap:
+      * a NEGATOR-FREE inversion ("the mirror loses to the pair", "the pair
+        outranks the mirror") carries no denial word and is still certified.
+        Closing it needs a positive-verb allow-list (#11993's options b/c),
+        which fail-closes on ordinary rewording and is the shape-list this
+        repo's R1/R2/R3 rule has seen falsified by "a shape beside the one it
+        named";
+      * `_NEGATED` lists `not` / `never` / `isn't` only, so CONTRACTION
+        negators ("doesn't", "cannot", "won't") and `no`-negation ("no
+        readable mirror is consulted here") still certify — `no` is excluded
+        from `_NEGATED` on purpose, for the `has_ep` guard's reason ("no mere
+        flag" is a determiner). That regex is shared with `_ep_pass_claims` and
+        is deliberately NOT widened here — widening it changes a second
+        guard's verdicts and belongs in its own reviewed change, not in the
+        tail of this one.
+      * a MIXED sentence — one affirmative mirror clause and one negated one —
+        is CLEARED, because the rule is "ANY mirror-carrying clause without a
+        negator". That is the deliberate fail-open edge of this predicate: the
+        clause that STATES the claim qualifies it, and the guard's unit is the
+        claim. Pinned by a control row, so the `all`-clause variant cannot be
+        substituted without a red.
+    A future lane should take either residual to #11999 rather than quietly
+    widening this predicate.
+    """
+    clauses = [c for c in _CLAUSE_BREAK.split(sentence)
+               if "mirror" in c.lower()]
+    return any(not _NEGATED.search(c) for c in clauses)
+
+
 def _unqualified_claims_on(sentence: str, patterns) -> list[str]:
     """The mirror-guard's predicate on ONE sentence (the reusable core of
     `_unqualified_claims`, so the control test exercises the real logic rather
-    than a regex object in isolation)."""
-    if "mirror" in sentence.lower():
+    than a regex object in isolation.
+
+    BOTH callers share this core — `_PRIOR_MEAN_CLAIM_PATTERNS` and
+    `_ABSENT_CLAIM` — so the affirmative-mention rule (#11993) is a property of
+    the predicate, not of one guard."""
+    if _mirror_is_named_affirmatively(sentence):
         return []
     return [sentence] if any(p.search(sentence) for p in patterns) else []
 
@@ -5789,6 +6022,189 @@ def _ep_pass_claims(text: str) -> list[str]:
     return suspects
 
 
+def _cred_word_yields_075(
+        text: str,
+        *,
+        window: re.Pattern[str] = _CRED_WORD_YIELDS_075,
+        exempt: re.Pattern[str] = _CRED_WORD_EXEMPT) -> list[str]:
+    """Matches that ATTRIBUTE `0.75` to the `credibility` word.
+
+    `window`/`exempt` are a MUTATION SEAM, not a configuration: they default to
+    the shipped patterns so every caller reads the shipped guard, and they exist
+    only so `_cred_word_pins_a_boundary` can drive THIS function — not a copy of
+    it — with one token removed. A pin proved against a re-implementation proves
+    nothing about the guard (review cycle 15, P2).
+
+    The exemption is read in the FINAL clause of the match's span — the clause
+    that carries the NUMBER — not across the whole span. Two measurements set
+    that boundary, and they pull in opposite directions, which is why it is
+    spelled out:
+
+    • The span must START BEFORE the token, and that is pinned on a sentence
+      the regex ACTUALLY matches: "it is not the case that the credibility word
+      reads 0.75" is quiet with a reach-back and fires the instant it is
+      removed (measured). ⚠️ HOW FAR BACK it starts is INERT: `final_clause`
+      re-derives the boundary from the last `_CLAUSE_BREAK` before the number,
+      so `cut = 0` and `cut = <clause start>` yield an identical FINAL CLAUSE
+      for every input (the `span` slice itself can differ — only the derived
+      clause is invariant; measured: `span = text[:match.end()]` keeps every
+      pin green, and the two slices differ on "the pair wins: the credibility
+      word is not 0.75 — measured").
+      Do NOT restate this as "clause-start matters" — the position is not what
+      is pinned, and an earlier revision claimed it was (review cycle 9, P2).
+      ⚠️ The sentence a previous revision cited here — "it is NOT the
+      credibility word that reads 0.75" — never matched the regex at all (`that`
+      stops the pre-verb window), so it pinned nothing (review cycle 5, P1).
+      A pin must be re-measured whenever the window changes.
+    • Reading the WHOLE SPAN is not enough either: a negator of a DIFFERENT
+      predicate then exempts a real false claim — "the credibility word is not
+      just an added body: it reads 0.75" passed silently — which is why the
+      exemption is scoped to the FINAL clause.
+    • A WHOLE-SENTENCE exemption is WRONG, and measurably so: `volunteer.py`'s
+      sentence holds "NO LONGER true of every unmeasured point" in an earlier
+      clause, so a sentence-scoped exemption would exempt the very mutation the
+      control test exists to catch. That is a different mechanism from the
+      reach-back above (the reach-back only extends the span; the final clause
+      still decides), and conflating the two is what the cycle-9 finding was.
+    """
+    hits = []
+    for match in window.finditer(text):
+        cut = max((break_.end()
+                   for break_ in _CLAUSE_BREAK.finditer(text[:match.start()])),
+                  default=0)
+        span = text[cut:match.end()]
+        inner = [break_.end() for break_ in _CLAUSE_BREAK.finditer(span)]
+        final_clause = span[inner[-1]:] if inner else span
+        if exempt.search(final_clause):
+            continue
+        hits.append(match.group(0))
+    return hits
+
+
+#: ⛔ ATTRIBUTION — the shapes `_cred_word_pins_a_boundary` splices out, one at a
+#: time. A must-not-fire row is a PIN only if SOME single removal here makes the
+#: guard report it; a row that survives every one of them is quiet for two
+#: reasons at once, asserts a tautology, and implies boundary coverage it does
+#: not have. Three review cycles in a row found rows of exactly that shape in
+#: the must-not-fire loop (`for true_sentence in …`, below) by hand, so the
+#: property is mechanical now. ⚠️ Name that loop, do NOT cite its line numbers:
+#: this pointer said `~6211-6218`, which is the MUST-FIRE loop (the false-prose
+#: spellings asserted to FIRE), so it sent a reader to rows with the opposite
+#: expectation — and it was already wrong when written, not shifted by a later
+#: edit (review cycle 19, P3).
+#: Each splice ASSERTS the text it edits rather than substituting blindly: a
+#: pattern reworded away from these spellings would otherwise yield an
+#: unchanged mutant — an inert mutant quietly certifying every row.
+_CRED_WORD_STOP_CLASS = "[^.;,–—]"
+_CRED_WORD_RELATIVIZER_GROUP = "(?:which|that|whose|where|who|but|rather)"
+_CRED_WORD_RELATIVIZERS = ("which", "that", "whose", "where", "who", "but",
+                           "rather")
+_CRED_WORD_EXEMPT_ALTERNATIVES = (
+    "not", "never", "isn'?t", "no\\s+longer", "\\bis\\s+no\\s+(?:0?\\.|75\\s*%)",
+    "dropped", "drops", "loses", "lost", "ignored", "discarded",
+    "overwritten", "superseded")
+_CRED_WORD_ANCHOR_HALVES = (("leading anchor", "(?<![A-Za-z_])"),
+                            ("trailing anchor", "(?!\\w)"))
+_CRED_WORD_LOOKAHEAD = ("digit lookahead", "(?!\\d)")
+#: The two window MAXIMA — a boundary like any other, and the one direction the
+#: rest of this table did not cover: every mutation above WIDENS what the window
+#: may cross (a stop char, a relativizer, an exempting alternative), while these
+#: two are what BOUND it. Lifting one turns TRUE prose into a report, which is
+#: this guard's expensive direction — and before these mutants existed, lifting
+#: either (or both) left the whole file GREEN (measured, review cycle 16).
+_CRED_WORD_WINDOW_MAXIMA = (("pre", "{0,60}"), ("post", "{0,25}"))
+
+
+def _cred_word_mutants() -> list[tuple[str, re.Pattern[str], re.Pattern[str]]]:
+    """(name, window, exempt) for every single-token removal of the guard.
+
+    Per SEGMENT, not per token: the stop class and the relativizer group each
+    appear twice (pre- and post-verb), so removing a token from one segment is a
+    different mutation from removing it from the other, and a row quiet in both
+    segments must be rung by at least one of them.
+    """
+    window = _CRED_WORD_YIELDS_075.pattern
+    exempt = _CRED_WORD_EXEMPT.pattern
+    assert window.count(_CRED_WORD_STOP_CLASS) == 2, (
+        "the stop class is not spelled twice in _CRED_WORD_YIELDS_075 any more — "
+        "fix _CRED_WORD_STOP_CLASS before trusting any attribution: "
+        + repr(window))
+    assert window.count(_CRED_WORD_RELATIVIZER_GROUP) == 2, (
+        "the relativizer group is not spelled twice in _CRED_WORD_YIELDS_075 "
+        "any more: " + repr(window))
+    head, middle, tail = window.split(_CRED_WORD_STOP_CLASS)
+    rel_head, rel_middle, rel_tail = window.split(_CRED_WORD_RELATIVIZER_GROUP)
+    mutants: list[tuple[str, re.Pattern[str], re.Pattern[str]]] = []
+    for char in ".;,–—":
+        trimmed = _CRED_WORD_STOP_CLASS.replace(char, "")
+        assert trimmed != _CRED_WORD_STOP_CLASS, (
+            f"{char!r} is not in the stop class any more")
+        for segment in ("pre", "post"):
+            pre = trimmed if segment == "pre" else _CRED_WORD_STOP_CLASS
+            post = trimmed if segment == "post" else _CRED_WORD_STOP_CLASS
+            mutants.append((f"{segment}-verb window without {char!r}",
+                            re.compile(head + pre + middle + post + tail,
+                                       re.IGNORECASE), _CRED_WORD_EXEMPT))
+    for token in _CRED_WORD_RELATIVIZERS:
+        narrowed = "(?:" + "|".join(
+            t for t in _CRED_WORD_RELATIVIZERS if t != token) + ")"
+        assert narrowed != _CRED_WORD_RELATIVIZER_GROUP
+        for segment in ("pre", "post"):
+            pre = narrowed if segment == "pre" else _CRED_WORD_RELATIVIZER_GROUP
+            post = narrowed if segment == "post" else _CRED_WORD_RELATIVIZER_GROUP
+            mutants.append((f"{segment}-verb relativizer {token!r} removed",
+                            re.compile(rel_head + pre + rel_middle + post
+                                       + rel_tail, re.IGNORECASE),
+                            _CRED_WORD_EXEMPT))
+    for alternative in _CRED_WORD_EXEMPT_ALTERNATIVES:
+        assert alternative in exempt, (
+            f"the exemption no longer spells {alternative!r} — a blind "
+            "substitution would be a no-op mutant: " + repr(exempt))
+        mutants.append((f"exemption alternative {alternative!r} removed",
+                        _CRED_WORD_YIELDS_075,
+                        re.compile(exempt.replace(alternative, "ZZZZ"),
+                                   re.IGNORECASE)))
+    for label, piece in (*_CRED_WORD_ANCHOR_HALVES, _CRED_WORD_LOOKAHEAD):
+        assert window.count(piece) == 1, (
+            f"{label} is not spelled once in _CRED_WORD_YIELDS_075 any more: "
+            + repr(window))
+        mutants.append((f"{label} removed",
+                        re.compile(window.replace(piece, ""), re.IGNORECASE),
+                        _CRED_WORD_EXEMPT))
+    for segment, maximum in _CRED_WORD_WINDOW_MAXIMA:
+        assert window.count(maximum) == 1, (
+            f"the {segment}-verb window maximum {maximum!r} is not spelled "
+            "once in _CRED_WORD_YIELDS_075 any more — a blind substitution "
+            "here would be a no-op mutant: " + repr(window))
+        mutants.append((f"{segment}-verb window maximum {maximum} lifted",
+                        re.compile(window.replace(maximum, "*"),
+                                   re.IGNORECASE),
+                        _CRED_WORD_EXEMPT))
+    return mutants
+
+
+_CRED_WORD_MUTANTS = _cred_word_mutants()
+
+
+def _cred_word_pins_a_boundary(text: str) -> list[str]:
+    """The single-token removals that make the guard REPORT `text`.
+
+    Empty means the row pins nothing: it is quiet under every one of the guard's
+    declared boundaries, so no edit to a boundary could ever ring it.
+    """
+    return [name for name, window, exempt in _CRED_WORD_MUTANTS
+            if _cred_word_yields_075(text, window=window, exempt=exempt)]
+
+
+def _cred_word_claims(rel: str) -> list[str]:
+    """Sentences that hand `0.75` to the `credibility` word.
+
+    Sentence-scoped on purpose: the number and the word have to be read as one
+    assertion, and a sentence is the unit the corpus writes an assertion in.
+    """
+    return [s for s in _sentences(rel) if _cred_word_yields_075(s)]
+
+
 def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
     """A guard that matches nothing pins nothing (reviewer B, cycle 1).
 
@@ -5820,6 +6236,59 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
         "Its confidence_mean is the PRIOR mean, and it clears the floor.",
         _PRIOR_MEAN_CLAIM_PATTERNS), \
         "the mirror-guard never reports an unqualified sentence"
+    # #11993: a bare `mirror` SUBSTRING must not clear a claim. A sentence that
+    # INVERTS the relation the guard exists to pin used to certify itself — the
+    # guard reported "pinned" while certifying the defect. Each `_NEGATED`
+    # spelling gets its own row, so a later edit to that regex (or a re-widening
+    # of the predicate back to a substring test) reds HERE rather than passing
+    # green over an inverted sentence.
+    _INVERTED = ("A prior-only claim's confidence_mean IS the declared PRIOR "
+                 "mean; the readable ``n.confidence`` mirror {}.")
+    for _neg in ("does not lead it", "never leads it", "isn't the leader"):
+        assert _unqualified_claims_on(_INVERTED.format(_neg),
+                                      _PRIOR_MEAN_CLAIM_PATTERNS), (
+            "the mirror-guard certifies a NEGATED mirror mention "
+            f"(`mirror {_neg}`) — a false PASS (#11993)")
+    # …and the fix must not turn the guard into a blanket rejector: the two
+    # AFFIRMATIVE shapes the shipped prose uses (a relation after an em dash, a
+    # relation in the clause that follows the mention) stay cleared.
+    for _affirming in (
+            "A prior-only claim's confidence_mean IS the declared PRIOR mean — "
+            "or the readable ``n.confidence`` mirror's value, which LEADS it.",
+            "its confidence_mean IS the declared PRIOR mean — or the mirror's "
+            "value when one is readable, because R1 leads."):
+        assert not _unqualified_claims_on(_affirming,
+                                          _PRIOR_MEAN_CLAIM_PATTERNS), \
+            "the mirror-guard now rejects an AFFIRMATIVE mirror mention: " \
+            + _affirming
+    # The DENIAL is scoped to the CLAUSE that carries the mirror, not to the
+    # sentence: a `never` in a later clause belongs to a different predicate.
+    # The real corpus writes exactly this shape (why.py), and a SENTENCE-scoped
+    # negation mutant — `"mirror" in s and not _NEGATED.search(s)` — reds here.
+    # (It also reds the corpus assertion on the shipped why.py sentence; this row
+    # is the ATTRIBUTABLE killer, which is what the mutation must be judged by.)
+    assert not _unqualified_claims_on(
+        "confidence_mean IS the declared PRIOR mean — or the readable mirror's "
+        "value, which LEADS it — never a measured one.",
+        _PRIOR_MEAN_CLAIM_PATTERNS), \
+        "the denial is SENTENCE-scoped: a `never` in a clause that does not " \
+        "carry the mirror denied an affirmative mention"
+    # …and the rule is ANY mirror-carrying clause, not EVERY one: a MIXED
+    # sentence is cleared, because the clause that STATES the claim qualifies
+    # it. Pinned so the `all`-clause variant — which passes every row above —
+    # cannot be substituted for the documented rule without a red.
+    assert not _unqualified_claims_on(
+        "confidence_mean IS the declared PRIOR mean — or the mirror's value, "
+        "which LEADS it — but the mirror never leads R1 in practice.",
+        _PRIOR_MEAN_CLAIM_PATTERNS), \
+        "the rule is now ALL-clauses: a mixed sentence whose affirmative " \
+        "mirror clause states the relation was reported"
+    # The absent-claim guard shares the predicate, so it shares the fix; assert
+    # it separately so a future divergence between the two guards is visible.
+    assert _unqualified_claims_on(
+        "prior mean (ep_alpha/beta), else ``None``; the readable mirror never "
+        "leads.", (_ABSENT_CLAIM,)), \
+        "the absent-claim guard certifies a NEGATED mirror mention (#11993)"
     # The absent-claim guard must survive the REWORDINGS of the same false
     # prediction, not just the one that shipped it.
     for spelling in (
@@ -5878,6 +6347,322 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
         assert _ep_pass_claims(mutant), (
             f"the EP-pass guard stays GREEN on the reverted denial ({what}) — "
             "it cannot fail on the tree it ships on")
+    # The credibility guard's discriminating power, measured in BOTH directions
+    # on the wordings this class actually produced. Each spelling below was an
+    # assertion somebody wrote (the second is the "correction" that replaced
+    # the first — and was itself false, since `0.7561` is what the word plus
+    # the default yields).
+    for spelling in (
+            "an author ``credibility='low'`` still reads 0.75 here",
+            "the same Beta(3,1) plus ``credibility='low'`` still reads 0.75",
+            "``credibility='low'`` lands at 0.75 on its own",
+            "Beta(3,1) with a ``credibility=`` word IS 0.75",
+            # …the same false claim at 3 and 4 dp, which the lookahead alone
+            # let through until it was measured.
+            "``credibility=`` reads 0.750",
+            "``credibility=`` reads 0.7500",
+            # …`equals`, one of the four wordings the comment claims to cover;
+            # it had no pin, so deleting it from the alternation left the suite
+            # green (review cycle 7, P2).
+            "the credibility word equals 0.75",
+            # …a copula `no` in front of a NON-number must not exempt: it is the
+            # determiner the bare-`no` rule excludes, one word over
+            # (review cycle 9, P2 — measured quiet before the alternative was
+            # number-bound).
+            "the credibility word is no mere flag and reads 0.75",
+            # …and the POST-VERB window's LENGTH is load-bearing: this gap is
+            # 21 characters, so narrowing `{0,25}` to `{0,20}` or below reds
+            # here (review cycle 9, P2 — the boundary was unpinned; cycle 10
+            # corrected the count, which an earlier revision stated as 20 and
+            # a threshold of "10 or less").
+            "the credibility word reads exactly the default 0.75",
+            # …and residual (iii) PINNED as a boundary: a BOUND form reports today
+            # because the copula alternative is number-bound. The wording is
+            # ambiguous (true of the word alone at 0.5238, false of word+default
+            # at 0.7561), so reporting is the safe direction — but the DISCLOSURE
+            # must be falsifiable: exempting these makes them a silent FALSE PASS
+            # surface, so that change has to move these rows (review cycle 11, P2).
+            "the credibility word is no more than 0.75",
+            "the credibility word is no higher than 0.75",
+            # …the other spellings of the SAME claim (review cycle 3, P2).
+            "the credibility word reads .75",
+            "the credibility word is 75%",
+            # …a negator belonging to a DIFFERENT predicate must not exempt a
+            # real false claim: with the whole span read, these passed silently
+            # (review cycle 2, P2). A colon stays inside the window, so these
+            # still match and the final-clause rule is what rejects/serves them.
+            "the credibility word is not just an added body: it reads 0.75",
+            "``credibility=`` is not dropped for an option: it reads 0.75"):
+        assert _cred_word_yields_075(spelling), (
+            f"the credibility guard misses a rewording: {spelling!r}")
+    # …and it must NOT fire on TRUE prose — the failure text hands the next
+    # fixer a number, and a fixer that "corrects" a correct sentence is the
+    # false-correction failure this file exists to prevent. Every string here
+    # CARRIES the `credibility` token: an earlier revision of this block
+    # asserted a sentence with no token, so the assert passed for a reason
+    # unrelated to the property it claimed to pin (review, P1).
+    for true_sentence in (
+            "the ``credibility=`` word is NOT 0.75 — it is 0.7561 on top of "
+            "the default",
+            "``credibility=`` never reads 0.75: the default plus the word is "
+            "Beta(3.1,1)",
+            # …and this is what pins the `(?!\d)` / `0\.750*` tail: drop the
+            # lookahead and `0.7561` matches as `0.75`, so this reds.
+            "``credibility=`` reads 0.7561 on top of the default",
+            # …the copula-negating `no`, which bare `no` must not be confused
+            # with (`_NEGATED`'s determiner rule): before this alternative
+            # existed, this correct sentence was a false block (cycle 2, P2).
+            "``credibility=`` is no 0.75 — it is 0.5238 alone",
+            # …and the PERCENT half of the same number-bound alternative: the
+            # `75\s*%` sub-branch had no row, so it was deletable with a green
+            # suite — half a disclosed false-block exemption, unsupported
+            # (review cycle 12, P2). Measured: quiet today, REDS when the
+            # sub-branch is dropped.
+            "the credibility word is no 75% — it is 0.5238 alone",
+            # …the reach-back: the negator precedes the `credibility` token, so
+            # this is quiet ONLY because the span starts at the clause
+            # beginning. It is the pin for that boundary — the sentence a
+            # previous revision cited here never matched the regex at all
+            # (cycle 5, P1), so it pinned nothing.
+            "it is not the case that the credibility word reads 0.75",
+            # …a DEMOTER whose window really is reached, so deleting the demoter
+            # list reds here (cycles 5 and 6): earlier citations for this list
+            # were quiet for WINDOW reasons, which left every alternative
+            # deletable with a green suite. Each of the five below MATCHES the
+            # regex and is quiet ONLY via its own demoter.
+            "the credibility word is dropped when a pair reads 0.75",
+            "the credibility word is ignored when a pair reads 0.75",
+            "the credibility word is discarded when a pair reads 0.75",
+            "the credibility word is overwritten when a pair reads 0.75",
+            "the credibility word is superseded when a pair reads 0.75",
+            # …the remaining LIVE alternatives in `_CRED_WORD_EXEMPT`, which had
+            # no pin at all, so each was deletable with a green suite (cycle 7,
+            # P2). Same discipline: each MATCHES the regex and is quiet ONLY via
+            # its own alternative.
+            "the credibility word isn't the default and reads 0.75",
+            "the credibility word no longer reads 0.75",
+            "the credibility word drops to nothing when a pair reads 0.75",
+            "the credibility word loses to a pair and reads 0.75",
+            "the credibility word lost to a pair and reads 0.75",
+            # …the COMMA stop: quiet only because the window cannot cross the
+            # comma to reach the bare `0.75` that follows `so` (cycle 7, P2;
+            # the quoted fragment was corrected in cycle 14 — this row carries
+            # no `reads` at all, so citing "reads 0.75" described a sentence
+            # that is not here).
+            "the credibility word is one body, so 0.75 stays the default's "
+            "mean",
+            # …and the ANCHOR: compound identifiers are a DIFFERENT object. T2 is
+            # `(3.0, 1.0)` in `source_credibility.py`, mean 0.7500, so these are
+            # TRUE and must never be reported (cycle 7, P1).
+            "a T2 ``credibilityTier`` prior reads 0.75",
+            "``credibility_prior`` for T2 is 0.75",
+            # …and this one is the ONLY pin that exercises the LEADING half of
+            # the anchor: the two above are held by `(?!\w)` alone, so without
+            # this string the `(?<![A-Za-z_])` could be deleted with a green
+            # suite. `source_credibility` has `_` before the token, so it needs
+            # the lookbehind (review cycle 8).
+            "the ``source_credibility`` T2 prior reads 0.75",
+            # …a POST-VERB relative pronoun, which crossed the window until
+            # cycle 5 measured it (true prose, reported).
+            "the credibility word reads a default which is 0.75",
+            # …the RELATIVE-CLAUSE family, where the verb the number attaches to
+            # belongs to the default or the pair, not to the word. All six
+            # fired before the window stopped at a comma and at a relative
+            # pronoun (review cycle 3, P2). Only `whose` is a single-stop pin
+            # here; the other five are MASKED TWICE and live in the MULTI-MASKED
+            # WORDING RECORD below, because inside this loop they asserted a
+            # tautology (review cycle 15, P2).
+            "the credibility word raises a default whose mean is 0.75",
+            # …the DASH and `but` forms, which the window now stops at (cycle 4).
+            "the credibility word adds one weak body — the #2199 default "
+            "alone reads 0.75",
+            "the credibility word adds one weak body – the #2199 default "
+            "alone reads 0.75",
+            "the credibility word is not used here but the #2199 default "
+            "alone reads 0.75",
+            # ⛔ ONE ROW PER WINDOW TOKEN AND PER WINDOW, cycle 13. The comment
+            # above states the window stops at the relativizers `which`/`that`/
+            # `whose`/`where`/`who` in EITHER segment and at `but`/`rather` in
+            # either — but only `which`/`whose`/`but` (pre) and `which` (post)
+            # had a row, so the rest were deletable with a GREEN suite and the
+            # stated boundary was unsupported. Each row below is quiet ONLY
+            # because of its own token: it does NOT match today, it MATCHES once
+            # that token is removed from the class, and it reds the moment it is
+            # deleted (measured, each one individually). The stop chars are
+            # pinned per WINDOW, not per char — `.`/`;`/`–`/`—` each stop BOTH
+            # windows, so each needs a row on each side (cycle 13 read the
+            # comment as implying otherwise; cycle 14 found the four
+            # occurrences still unpinned).
+            "the credibility word is a label that a pair reads 0.75 against",
+            "the credibility word is a body where the default alone reads "
+            "0.75",
+            "the credibility word is a body who the default alone reads 0.75 "
+            "with",
+            "the credibility word adds a body rather the default alone reads "
+            "0.75",
+            "the credibility word reads a body that 0.75 is the default's",
+            "the credibility word reads a body whose pair 0.75 is the "
+            "default's",
+            "the credibility word reads a body where 0.75 is the default's",
+            "the credibility word reads a body who 0.75 is the default's",
+            "the credibility word reads nothing but 0.75 is the default's",
+            "the credibility word reads rather the default 0.75",
+            # …and the STOP CHARS, one row per (char, window) pair. `;` before
+            # the verb here, `.` after it, then the four the one-sided rows
+            # missed: pre `.`, post `;`, post `–`, post `—`. Each is quiet only
+            # under its own char in its own segment, and was measured RED by
+            # deleting exactly that.
+            "the credibility word is one body; the default alone reads 0.75",
+            "the credibility word reads a body e.g. 0.75 is the default's",
+            "the credibility word is one body. The default alone reads 0.75",
+            "the credibility word reads a body; 0.75 is the default's",
+            "the credibility word reads a body – 0.75 is the default's",
+            "the credibility word reads a body — 0.75 is the default's",
+            # ⛔ THE WINDOW MAXIMA (review cycle 16, P3). `_cred_word_mutants`
+            # lifts `{0,60}`/`{0,25}` to `*` and these two rows are what rings:
+            # each is TRUE prose that the guard reports ONLY once its own
+            # maximum no longer bounds the window, so neither a deletion nor a
+            # widening of either maximum is silent. Measured gaps, not guessed,
+            # and each row is isolated from the OTHER maximum (that is what
+            # makes it a pin for its own bound):
+            #   • the first row's `credibility`→`reads` gap is 76 chars — quiet at
+            #     `{0,60}`, fires at `{0,76}`, and still quiet when only the POST
+            #     maximum is lifted;
+            #   • the second row's post-verb gap is 29 — quiet at `{0,25}`, fires
+            #     at `{0,29}`, and still quiet when only the PRE maximum is
+            #     lifted.
+            # `_cred_word_pins_a_boundary` enforces that attribution for both.
+            "the credibility word carries a label on the author's assertion "
+            "and the #2199 default alone reads 0.75",
+            "the credibility word reads one weak body on top of the 0.75 "
+            "default"):
+        assert not _cred_word_yields_075(true_sentence), (
+            f"the credibility guard fires on TRUE prose: {true_sentence!r}")
+        assert _cred_word_pins_a_boundary(true_sentence), (
+            "this must-not-fire row pins NO boundary: no single removal — a "
+            "stop char from one window segment, a relativizer from one "
+            "segment, an exemption alternative, an anchor half, a window "
+            "maximum, or the "
+            "`(?!\\d)` lookahead — makes the guard report it, so the row is "
+            "quiet twice over and asserts a tautology. Move it to the "
+            "MULTI-MASKED WORDING RECORD below with the boundaries that mask "
+            "it, or reword it so its own boundary is the only stop: "
+            + repr(true_sentence))
+    # ⛔ INERT WORDING RECORD — these two are NOT pins, and they were removed
+    # from the loop above because they cannot exercise the guard at all:
+    # `_CRED_WORD_YIELDS_075.findall(...)` returns [] for both, so inside that
+    # loop they asserted a tautology and implied coverage they never had
+    # (review cycle 14, P1). The exemption's own docstring (~5809) already
+    # recorded that neither ever matched; they are kept here, OUT of the loop,
+    # as the wording record so the next lane does not re-add them as pins.
+    #   • "it is NOT the credibility word that reads 0.75 — the explicit pair
+    #     is" — quiet because `that` stops the PRE-VERB window, not because of
+    #     `not`; the `that` stop has its own row above (cycle 13).
+    #   • "the credibility word is dropped against an explicit pair, which reads
+    #     0.75" — quiet three times over (pre-verb comma, post-verb `which`, and
+    #     the `dropped` demoter); the demoter has its own rows above.
+    # ⛔ MULTI-MASKED WORDING RECORD — five TRUE sentences that sat in the loop
+    # above AS IF they pinned the relative-clause boundary, and pin NOTHING: each
+    # is masked TWICE, so NO single-token removal rings it — the helper
+    # `_cred_word_pins_a_boundary` returns `[]` for all five (measured; review
+    # cycle 15, P2) — and deleting any one of them, or all five, left the suite
+    # GREEN. They are kept here, asserted quiet — a false block on true prose is
+    # this guard's expensive direction — but their boundaries are pinned by the
+    # rows named, never by them, and the loop's attribution assert above now
+    # refuses to let one back in.
+    #   • "the ``credibility=`` word raises the Beta(3,1) default, which reads
+    #     0.75" and "``credibility=`` is added on top of the Beta(3,1) default,
+    #     which reads 0.75" — the `,` stops the POST-verb window before `which`
+    #     can; the post-verb comma is pinned by "the credibility word is one
+    #     body, so 0.75 stays…" and `which`-stops by "the credibility word reads
+    #     a default which is 0.75" (which rings BOTH segments), both in the loop
+    #     above.
+    #   • "the credibility word is ignored / discarded / overwritten against a
+    #     pair that reads 0.75" — the pre-verb `that` stops the window, and the
+    #     demoter would exempt the claim anyway; pre-verb `that` alone is pinned
+    #     by "the credibility word is a label that a pair reads 0.75 against" and
+    #     each demoter by "the credibility word is <demoter> when a pair reads
+    #     0.75", both in the loop above.
+    for multi_masked in (
+            "the ``credibility=`` word raises the Beta(3,1) default, which "
+            "reads 0.75",
+            "``credibility=`` is added on top of the Beta(3,1) default, which "
+            "reads 0.75",
+            "the credibility word is ignored against a pair that reads 0.75",
+            "the credibility word is discarded against a pair that reads 0.75",
+            "the credibility word is overwritten by a pair that reads 0.75"):
+        assert not _cred_word_yields_075(multi_masked), (
+            "a MULTI-MASKED true sentence started firing — the window was "
+            "widened past one of the boundaries that used to mask it; if that "
+            "was deliberate its own boundary may now be the only stop, so move "
+            "it into the must-not-fire loop above instead of leaving it here: "
+            + repr(multi_masked))
+    # ⛔ KNOWN FALSE PASS, pinned as a BOUNDARY, not as correctness: a pre-verb
+    # COMMA stops the window, so this false attribution is NOT reported today.
+    # It gets its OWN row, outside the TRUE-prose loop above, because the only
+    # failure it can produce must not say "fires on TRUE prose" — that message
+    # would steer a fixer to revert a deliberate improvement (review cycle 10,
+    # P2). Widening the pre-verb class across a comma adds false-block surface
+    # (this guard's expensive direction), so it has to move this row.
+    assert not _cred_word_yields_075(
+        "the credibility word, as noted, is 0.75"), (
+        "a KNOWN FALSE PASS started firing — if the window was widened "
+        "deliberately, move this row to the must-fire loop above instead of "
+        "deleting it")
+    assert _cred_word_claims("tortoise/volunteer.py") == [], (
+        "the credibility guard reports the shipped `volunteer.py` note: "
+        + repr(_cred_word_claims("tortoise/volunteer.py")[:1]))
+    # ⛔ KNOWN FALSE BLOCKS — asserted to FIRE today, not to be right. They are
+    # TRUE sentences the guard reports, kept here so the next tightening is
+    # MEASURED instead of guessed: flip each to `assert not` as the exemption
+    # learns to read past the number / across a colon. The colon one cannot be
+    # closed while the must-fire "… not just an added body: it reads 0.75" is a
+    # false claim that depends on crossing it, which is why these are pinned
+    # rather than fixed (review cycle 4).
+    for known_false_block in (
+            "the credibility word adds one weak body: the #2199 default "
+            "alone reads 0.75",
+            "the credibility word adds one weak body (the #2199 default "
+            "alone reads 0.75)",
+            "the credibility word adds one weak body and the #2199 default "
+            "alone reads 0.75",
+            "the credibility word reads 0.75, which is not true"):
+        assert _cred_word_yields_075(known_false_block), (
+            "a KNOWN FALSE BLOCK stopped firing — the guard was tightened; if "
+            "that was deliberate, move this string to the `must not fire` loop "
+            "above instead of deleting it: " + repr(known_false_block))
+    # …and, the check that stops this guard from being INERT: the corpus it
+    # ships on must carry a sentence holding BOTH facts (the word and 0.75),
+    # and MUTATING that shipped sentence into the false attribution must RED.
+    # A guard that matches nothing anywhere cannot fail — the defect PR #11933
+    # review round 4 found in the EP-pass guard, which passed on every tree it
+    # was ever run against.
+    shipped = next(
+        (s for s in _sentences("tortoise/volunteer.py")
+         if "credibility" in s and "0.75" in s), None)
+    assert shipped is not None, (
+        "the corpus no longer holds a sentence naming both the `credibility` "
+        "word and 0.75, so the class-4 guard has nothing to be checked "
+        "against — re-anchor this control before trusting the guard")
+    # The PREDICATE, not the raw pattern: this line's message claims the GUARD
+    # does not report the shipped sentence, so it must read the same function
+    # every other row reads. It measured `_CRED_WORD_YIELDS_075.search` before
+    # cycle 14 — a different question ("does the regex reach this sentence"),
+    # which for this sentence is a tautology: the number precedes the token, so
+    # the raw search can never match, while a rewrite to exemption-covered TRUE
+    # prose would make it match and blame the guard for a report it never makes.
+    assert _cred_word_yields_075(shipped) == [], (
+        "the class-4 guard reports the SHIPPED sentence, which is true")
+    mutated = shipped.replace(
+        "the decide-part system default Beta(3,1) mean 0.75, or an author "
+        "``credibility=`` prior",
+        "an author ``credibility=`` prior IS 0.75")
+    assert mutated != shipped, (
+        "the shipped sentence was reworded, so this mutation no longer "
+        "applies — re-anchor it on the new wording rather than deleting it")
+    assert _cred_word_yields_075(mutated), (
+        "the class-4 guard stays GREEN when the shipped sentence is mutated "
+        "into the false attribution: " + repr(mutated[:200]))
 
 
 def test_a_prior_mean_claim_in_the_belief_prose_names_the_mirror():
@@ -5938,3 +6723,79 @@ def test_no_gloss_reads_has_ep_as_proof_of_an_ep_pass():
         "pass; it is a stored-column predicate (a direct `update_point` sets "
         "it, and a prior stamp sets the legacy arm):\n  "
         + "\n  ".join(problems))
+
+
+def test_the_credibility_note_never_hands_the_word_the_defaults_075():
+    """`0.75` belongs to the DEFAULT and to an EXPLICIT pair, never the word.
+
+    The belief prose explains why a prior-only claim clears a mean floor, and
+    one round of that explanation attributed the floor-clearing number to the
+    `credibility` word. It is the wrong number in both directions: the word
+    ADDS a weak body to the #2199 default (Beta(3.1,1) = 0.7561) and, alone,
+    is Beta(1.1,1) = 0.5238. Only the #2199 default itself and an explicit
+    `set_point_baseline(3, 1)` are 0.75, so a note that hands the word that
+    number misstates the value. The arithmetic is pinned behaviourally in
+    `test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair`.
+    """
+    problems = [f"{rel}: …{suspect[:180]}…"
+                for rel in _BELIEF_PROSE
+                for suspect in _cred_word_claims(rel)]
+    assert not problems, (
+        "a belief-prose sentence makes the `credibility` word yield 0.75. "
+        "Measured: the word ADDS to the #2199 default (Beta(3.1,1) = 0.7561), "
+        "is Beta(1.1,1) = 0.5238 alone, and loses only to an EXPLICIT pair:\n  "
+        + "\n  ".join(problems))
+
+
+def test_the_credibility_word_adds_to_the_default_but_loses_to_a_pair(sdk):
+    """The four means a `credibility=` word can be part of, MEASURED.
+
+    These numbers are what the class-4 prose guard is ABOUT, and each one is a
+    shape the prose has at some point described wrongly, so they are asserted
+    through the real serving path (`annotate_ep_batch`) rather than a helper:
+
+    | shape | mean | why |
+    |---|---|---|
+    | #2199 default, no word | 0.7500 | Beta(3, 1) |
+    | #2199 default + word | 0.7561 | Beta(3.1, 1) — the word ADDS one body |
+    | word alone, no default | 0.5238 | Beta(1.1, 1) — the word IS the baseline |
+    | explicit pair + word | 0.7500 | the pair wins and the word is DROPPED |
+
+    The last row is what gives "loses to a pair" its name: the word is not
+    averaged and not weighed, it is discarded, so no label is stamped.
+    """
+    default = sdk.create_point("option", "cred word: default alone")["id"]
+    plus_word = sdk.create_point(
+        "option", "cred word: default plus word", credibility="low")["id"]
+    word_alone = sdk.create_point(
+        "option", "cred word: word alone", status="draft",
+        credibility="low")["id"]
+    content = "cred word: explicit pair"
+    pair = sdk.create_point("statement", content, dedup=True)["id"]
+    sdk.set_point_baseline(pair, 3, 1)
+    # ⛔ ASSERT THE FOLD, do not assume it. The row's claim is that the word is
+    # DROPPED against the explicit pair; if the dedup identity ever stopped
+    # matching, this call would mint a SECOND point at Beta(1.1,1) and `pair`
+    # would be untouched — so both assertions below would pass while the row
+    # covered nothing (review cycle 9, P2).
+    again = sdk.create_point("statement", content, dedup=True,
+                             credibility="low")
+    assert again["id"] == pair, (
+        "the credentialed call did not fold onto the explicit-pair point, so "
+        "the 'word is dropped' row is asserting about a point the word was "
+        "never offered to")
+
+    def served(pid: str):
+        return annotate_ep_batch(sdk._get_proj().g, [pid])[pid].confidence_mean
+
+    assert served(default) == pytest.approx(0.75, abs=1e-4), (
+        "the #2199 system default alone is Beta(3,1) -> 0.75")
+    assert served(plus_word) == pytest.approx(0.7561, abs=1e-4), (
+        "the word ADDS one weak body ON TOP of the #2199 default: 3.0 -> 3.1")
+    assert served(word_alone) == pytest.approx(0.5238, abs=1e-4), (
+        "with no #2199 default the word is the whole baseline: Beta(1.1,1)")
+    assert served(pair) == pytest.approx(0.75, abs=1e-4), (
+        "an EXPLICIT set_point_baseline pair is the one shape the word never "
+        "moves — dropping the word is why the note says it 'loses' here")
+    assert sdk.get_point(pair).get("credibility") is None, (
+        "the word is DROPPED against an explicit pair, so no label is stamped")
