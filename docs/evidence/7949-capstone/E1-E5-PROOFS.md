@@ -153,7 +153,7 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
   the README does not name this file — so "reachable through the bundle's rows" was
   false and a reader routing by the documented entry point could not reach it. (An
   earlier draft justified adding nothing by `_index_row`'s "exactly one" rule; that was
-  wrong — `_index_row` (`tests/test_e1_e2_measurement.py:1848`) selects rows
+  wrong — `_index_row` (`tests/test_e1_e2_measurement.py:3218`) selects rows
   containing the literal cell `docs/evidence/7949-capstone/E1-E2.md`, so a second row
   cannot collide. Both the premise and the conclusion were wrong, caught by the
   `#10108` review.)
@@ -164,7 +164,7 @@ a *pin that stops one step short*, which is exactly what this file exists to nam
 ## Why no row can be GREEN — the structural cap, re-verified here
 
 `tools/capstone_verdict_check.py:192` declares `STEPS = ("S0", "S1", "S2.1", "S2.2",
-"S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:745`) refuses a GREEN row whose
+"S2.3", "S3", "S5", "S6")`, and `_step_accounting` (`:751`) refuses a GREEN row whose
 run left a REQUIRED step out: the rule is `missing = [s for s in required if s not in
 observed]`, reported as `GREEN with steps not observed in the run: …`. (Those two inner
 cites are deliberately NOT line numbers — #10215's own review rounds moved them twice

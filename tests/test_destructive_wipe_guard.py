@@ -1327,9 +1327,10 @@ def test_wipe_refusal_names_the_real_snapshot_residual(tmp_path):
     for the guard — so a residual clause that understates the snapshot's
     coverage mis-scopes what the refusal protects. The pre-#548-era wording
     ("covers only :Point/:Batch") is contradicted by the tuple: it also
-    carries `:Session`, the onboarding pair, the config registry,
-    `:GraphEventMeta` (restored by `reestablish_watermark` inside
-    `rebuild_all`) and `:TeamMeta`. The genuinely unrestorable residual is
+    carries `:Session`, the onboarding pair, the `:PackSelection` pack-set
+    marker, the config registry, `:GraphEventMeta` (restored by
+    `reestablish_watermark` inside `rebuild_all`) and `:TeamMeta`. The
+    genuinely unrestorable residual is
     `:GraphEvent` rows (#4664: no replay pass recreates them) plus any label
     outside the tuple. The claim and the tuple it cites are asserted TOGETHER,
     so an enrolment that changes the coverage reddens this test rather than
