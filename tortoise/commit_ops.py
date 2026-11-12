@@ -848,7 +848,7 @@ def _one_successor_spelling(names, default: str) -> str:
 
 
 def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
-                 projection: str | None = None):
+                 projection: str | None = None, with_groups: bool = False):
     """One representative row per ENTITY — a merged-away carrier is not a second one.
 
     #12120 supersession-probe site (review round): ``apply_entity_merge`` is NON-destructive, so
@@ -966,8 +966,20 @@ def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
             # that IS a live Object, so `apply_supersessions` names the true reason
             # before that fallback (`"ref carrier's survivor is gone"`).
             continue
-        out.append(rep)
+        out.append((rep, key, group) if with_groups else rep)
     return out
+
+
+def _entity_key_of(g, label: str, node_id) -> str | None:
+    """The ENTITY a node belongs to: its survivor's id, or its own.
+
+    The same rule ``_entity_rows`` groups by, for the one node it does not hand
+    back a group for — the supersession TARGET, which is resolved by its own
+    probe and compared against successor candidates at entity level.
+    """
+    if not node_id:
+        return None
+    return str(follow_resolved_from(g, label, str(node_id)) or node_id)
 
 
 _SUCCESSOR_PROJECTION = "n.id, n.name, n.status"
@@ -987,7 +999,8 @@ def _successor_candidates(g, label: str, space: str, params: dict) -> list:
         params=params).result_set
 
 
-def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
+def _apply_subject_supersession(proj, sdk, ref, supersedes_by,
+                                sb_entities, *,
                                 session_id, evidence, warn, _skip) -> bool:
     """#1423: apply ONE entity supersession whose endpoints are `:Subject`.
 
@@ -1138,10 +1151,18 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
         _skip(ref, supersedes_by, "id-less subject target")
         return False
     # ── successor must be a VISIBLE, DISTINCT Subject ────────────────────
+    # #12120 review round 8: entity-level identity, node-level visibility — the
+    # Object twin's split, and for the same reason (a retired survivor beside a
+    # live carrier authorizes the fold, because that carrier is what
+    # recall_state shows). The (id, name) pairs are the CARRIERS' spellings.
+    _target_key = _entity_key_of(proj.g, "Subject", target_id)
     _visible_successors = [
-        (sid, sname) for sid, sname, sst in sb_rows
-        if sid is not None and sid != target_id
-        and (sst or "") not in SUBJECT_TERMINAL_STATUSES]
+        (mid, mname)
+        for _rep, key, members in sb_entities
+        if key != _target_key
+        for mid, mname, mst in members
+        if mid is not None and str(mid) != str(target_id)
+        and (mst or "") not in SUBJECT_TERMINAL_STATUSES]
     has_visible_distinct = bool(_visible_successors)
     if not has_visible_distinct:
         warn(f"subject supersession {ref!r} skipped — successor "
@@ -1444,10 +1465,11 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # a second candidate): the self-alias guard below asks "is every candidate
         # the target", and that question is about entities, not nodes (#12120
         # finding 2 review).
-        sb_rows = _entity_rows(
+        sb_entities = _entity_rows(
             proj.g, "Object",
             _successor_candidates(proj.g, "Object", _sb_space, _sb_params),
-            id_idx=0, projection=_SUCCESSOR_PROJECTION)
+            id_idx=0, projection=_SUCCESSOR_PROJECTION, with_groups=True)
+        sb_rows = [_rep for _rep, _key, _members in sb_entities]
         if not sb_rows:
             # #1423: the successor may be a :Subject. #1370 routes the
             # extractor's declared §5 Subject kinds (team / role /
@@ -1463,7 +1485,8 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                 proj.g, "Subject",
                 _successor_candidates(proj.g, "Subject",
                                       _sb_space, _sb_params),
-                                      id_idx=0, projection=_SUCCESSOR_PROJECTION)
+                id_idx=0, projection=_SUCCESSOR_PROJECTION,
+                with_groups=True)
             if subj_rows:
                 if _apply_subject_supersession(
                         proj, sdk, ref, supersedes_by, subj_rows,
@@ -1567,7 +1590,8 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                 proj.g, "Subject",
                 _successor_candidates(proj.g, "Subject",
                                       _sb_space, _sb_params),
-                                      id_idx=0, projection=_SUCCESSOR_PROJECTION)
+                id_idx=0, projection=_SUCCESSOR_PROJECTION,
+                with_groups=True)
             if _apply_subject_supersession(
                     proj, sdk, ref, supersedes_by, subj_rows,
                     session_id=session_id, evidence=evidence,
@@ -1603,7 +1627,8 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                     proj.g, "Subject",
                     _successor_candidates(proj.g, "Subject",
                                           _sb_space, _sb_params),
-                                          id_idx=0, projection=_SUCCESSOR_PROJECTION)
+                    id_idx=0, projection=_SUCCESSOR_PROJECTION,
+                    with_groups=True)
                 if _apply_subject_supersession(
                         proj, sdk, ref, supersedes_by, subj_rows,
                         session_id=session_id, evidence=evidence,
@@ -1754,10 +1779,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # absorbed by the string-equality guard above; any id-less row
         # reaching this scan is a DISTINCT successor (different name) and
         # correctly forces all() to False.
-        all_candidates_are_target = bool(sb_rows) and all(
-            sid is not None and real_obj_id is not None
-            and sid == real_obj_id
-            for sid, _sname, _sst in sb_rows)
+        # The target's ENTITY, for the two entity-level questions below and the
+        # node-level one in the visible-successor gate (#12120 review round 8).
+        _target_key = _entity_key_of(proj.g, "Object", real_obj_id)
+        all_candidates_are_target = bool(sb_entities) and all(
+            real_obj_id is not None and key == _target_key
+            for _rep, key, _members in sb_entities)
         if all_candidates_are_target:
             warn(f"supersession record skipped (self-supersession via "
                  f"id/name aliasing): {record!r} resolves both sides to "
@@ -1854,10 +1881,26 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
         # being made. Also: id-less legacy targets fold by name via the
         # journaled synthesized id + name fallback — their SUCCESSORS
         # carrying canonical ids are unaffected by the id-present rule.)
+        # #12120 review round 8: the two halves of this question live at
+        # different levels, and asking both of the SURVIVOR row refused a fold
+        # that used to apply. "Is the candidate a DIFFERENT entity than the
+        # target" is entity-level (a merged carrier is not a second candidate);
+        # "is anything under that name VISIBLE" is node-level — recall_state and
+        # the render probe show a LIVE carrier even after its entity's survivor
+        # has been retired. Pre-widening the raw arm matched that live carrier
+        # directly, so a retired survivor beside a live carrier applied; the
+        # collapse to one representative per entity handed this gate the retired
+        # survivor's own status and refused ("no visible successor").
+        # The collected (id, name) pairs stay the CARRIERS' own spellings — the
+        # fold records one of them (`_one_successor_spelling`), and the survivor's
+        # row is the MERGE's spelling, not necessarily a live successor's.
         _visible_successors = [
-            (sid, sname) for sid, sname, sst in sb_rows
-            if sid is not None and sid != real_obj_id
-            and (sst or "") not in _RECALL_OBJECT_EXCLUDED_STATUS]
+            (mid, mname)
+            for _rep, key, members in sb_entities
+            if key != _target_key
+            for mid, mname, mst in members
+            if mid is not None and str(mid) != str(real_obj_id)
+            and (mst or "") not in _RECALL_OBJECT_EXCLUDED_STATUS]
         has_visible_distinct = bool(_visible_successors)
         if not has_visible_distinct:
             warn(f"entity supersession {ref!r} skipped — successor "

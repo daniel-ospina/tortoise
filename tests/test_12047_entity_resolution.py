@@ -2902,6 +2902,83 @@ class TestThe12120ReviewRound6:
             sdk.close()
 
 
+class TestThe12120ReviewRound8:
+    """Round 8: the visible-successor gate needed TWO levels, not one.
+
+    `_entity_rows` deliberately collapses to the SURVIVOR's row, because folding
+    onto a retired incarnation is the defect. But `has_visible_distinct` is a
+    NODE-level question — `recall_state` and the render probe show a live carrier
+    even when its entity's survivor has been retired. Asking it of the survivor
+    alone refused a fold that the pre-widening raw arm applied, because that arm
+    matched the live carrier directly.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r8",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_a_live_carrier_authorizes_a_fold_its_retired_survivor_cannot(
+            self, sdk_factory):
+        """Survivor retired, carrier live: the carrier is what recall_state shows."""
+        from tortoise.entity_resolver import apply_entity_merge
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            survivor = sdk.create_object("Widget", "document")["id"]
+            # The create door folds "The Widget" onto the live survivor, so the
+            # second live node is minted directly (the door's own dedupe is what
+            # makes a second live carrier legitimate at all — see round 6).
+            carrier = "r8-carrier"
+            g.query(
+                "CREATE (o:Object {id:'r8-carrier', name:'The Widget', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'widget'})")
+            apply_entity_merge(sdk, candidate_id=carrier, survivor_id=survivor,
+                               method="fuzzy", similarity=0.9)
+            # Retire the SURVIVOR only — the carrier stays live, so
+            # `recall_state` still shows "The Widget".
+            sdk.update_entity(survivor, status="superseded")
+            target = sdk.create_object("Old Co", "document")["id"]
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Co", "supersedes_by": "The Widget",
+                 "evidence": "test"}])
+            assert applied == 1, (
+                "a LIVE carrier was discarded in favour of its retired "
+                f"survivor: {(applied, skips, msgs)!r}")
+            row = g.query("MATCH (o:Object {id:$id}) RETURN o.status",
+                          params={"id": target}).result_set
+            assert row and row[0][0] == "superseded", row
+        finally:
+            sdk.close()
+
+    def test_a_retired_carrier_alone_still_refuses(self, sdk_factory):
+        """The other side of the same rule: nothing visible under the name."""
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (o:Object {id:'r8-dead-carrier', name:'Ghost Widget', "
+                "objectKind:'document', status:'superseded', "
+                "canonical_name:'ghost widget'})")
+            sdk.create_object("Old Co", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Co", "supersedes_by": "Ghost Widget",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert [s["reason"] for s in skips] == ["no visible successor"], skips
+        finally:
+            sdk.close()
+
+
 class TestThe12120ReviewRound3:
     """The three defects review round 3 found in the round-2 fix itself.
 
