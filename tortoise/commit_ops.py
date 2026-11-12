@@ -866,8 +866,11 @@ def _one_successor_spelling(names, default: str) -> str:
 
     ⛔ STATED RESIDUAL — the one path back to the record's spelling, and why it is
     kept. ``spellings`` is empty when EVERY visible candidate carries the folded
-    key through ``canonical_name``/``aliases`` with no ``name`` of its own (an
-    id-less legacy row). The value stored is then the record's spelling, which
+    key through ``canonical_name``/``aliases`` with no ``name`` of its own — and
+    "visible" means id-bearing (`mid is not None`), so the shape is an
+    id-PRESENT legacy row with a NULL ``name``, NOT an id-less one: an id-less
+    candidate never reaches this arm (it is refused `no visible successor`
+    earlier, measured). The value stored is then the record's spelling, which
     those RAW readers resolve against NO node even though the fold is CORRECT —
     the exact case ``#5370``'s prefix tolerance and ``audit``'s
     ``superseded_by_unresolvable`` exist for. Refusing the fold instead was
