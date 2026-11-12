@@ -10974,6 +10974,12 @@ durations:
   # red on `main` at 43db5c0f — fixed here because a stale citation in the map
   # this PR edits blocks every landing, not only this one — and #11904 landed it
   # without re-deriving this row, which is the staleness `#11959` records.
+  # -> 57 once `#11904`'s recut control landed
+  # (`test_the_recut_row_and_survivors_hold_their_status_by_ISSUE`: the row it
+  # re-cut to VERIFIED-FIXED and the survivors' status-by-ISSUE rule get their own
+  # pin, so that recut cannot rot back unseen — one function, no new parametrised
+  # arm, which is why the collected count moves 58 -> 59 with it; #11904 landed it
+  # without re-deriving this row, which is the staleness `#11959` records).
   # Round 14's own guard exists because `Path.exists()` re-raises
   # `PermissionError` (only the ENOENT family is swallowed) — each of these
   # controls is mutation-verified: it FAILS with its guard reverted.

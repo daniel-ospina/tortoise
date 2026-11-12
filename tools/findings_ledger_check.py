@@ -733,8 +733,7 @@ def check_verdict_tally(text: str) -> list[str]:
     letter_sentence = re.compile(
         r"\*\*\([a-z]{1,2}\)\*\*"  # a bolded letter: **(a)**
         r"|\([a-z]{1,2}\)(?:\s*,\s*\([a-z]{1,2}\))+"  # a parenthesised run: (b), (c)
-        r"|\b[a-z]{1,2}\b(?:\s*,\s*\b[a-z]{1,2}\b)+"  # a plain run: b, c, d
-        r"|\b[a-z]{1,2}\b\s+and\s+\b[a-z]{1,2}\b"  # a plain pair: b and c
+        r"|\b[a-z]\b(?:\s*,\s*\b[a-z]\b)+"  # a plain run of SINGLE letters: b, c, d
     )
     # ⛔ A SENTENCE THAT ONLY **QUOTES** THE PHRASE IS NOT ASSERTING IT. The page
     # discusses the phrase in §8 and in this very comment, so a sentence can contain it
@@ -756,9 +755,15 @@ def check_verdict_tally(text: str) -> list[str]:
     # apostrophe. Pinned by
     # `test_a_possessive_apostrophe_cannot_hide_a_second_tally`.
     quoted = re.compile(r'"[^"]*"|(?<![A-Za-z])\x27[^\x27]*\x27(?![A-Za-z])')
+    # ⛔ THE STRIP APPLIES TO THE PHRASE, NOT TO THE LETTERS. Removing quoted spans from
+    # the LETTER test as well let a quoted letter list ride out of the count — measured:
+    # `Six of the twelve rows no longer read as written: "**(b)**, **(k)** and **(l)**".`
+    # read CLEAN while the parent refused it, i.e. the same fail-open this widening
+    # exists to close, one quoting step to the left. A quote around the PHRASE names the
+    # words; a quote around a LETTER still names that letter.
     tally_sentences = [
         s for s in sentences
-        if "no longer read as written" in quoted.sub(" ", s) and letter_sentence.search(quoted.sub(" ", s))
+        if "no longer read as written" in quoted.sub(" ", s) and letter_sentence.search(s)
     ]
     if len(tally_sentences) > 1:
         return [
@@ -779,7 +784,7 @@ def check_verdict_tally(text: str) -> list[str]:
         s for s in sentences
         if "still read as written" in quoted.sub(" ", s)
         and "no longer" not in quoted.sub(" ", s)
-        and letter_sentence.search(quoted.sub(" ", s))
+        and letter_sentence.search(s)
     ]
     if len(still_sentences) > 1:
         problems.append(
