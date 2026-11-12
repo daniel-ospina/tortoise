@@ -154,6 +154,63 @@ ontology:
   #       enforcement: warn        # warn|retry|block
   chains: []
 
+  # ── Per-kind write guards (#12060) — OPTIONAL ──────────────────────────
+  # A deterministic, token-free redirect for a write that is filed on the WRONG
+  # kind. Resolution is a dict lookup plus a name predicate: no classifier, no
+  # model, no embedding, ever.
+  #
+  # A guard NEVER refuses a write. It has three possible effects, and one of
+  # them is "do nothing":
+  #   * REDIRECT — the node is written to the right kind/layer and the reply
+  #     carries `kind_redirect` {from, to, rule, override, undo} so a client can
+  #     branch on data, never on prose;
+  #   * ABSTAIN — if the redirect's target is not installed in this graph, the
+  #     write proceeds UNCHANGED and the reply carries `kind_redirect_skipped`
+  #     {rule, target, reason}. A write must never fail because of which packs
+  #     happen to be installed, so a guard whose target is missing degrades to
+  #     its `fallback` and, failing that, stays silent.
+  #   * nothing — no predicate matched.
+  #
+  # Fields, per confusion:
+  #   kind:        the kind this guard is about (bare = this pack's kind).
+  #   layer:       the layer that kind is declared on (subject|object|event|point).
+  #   onConfusion: the declared common confusions. Each entry:
+  #     when:        nameMatches (regex, full-name) | nameStartsWith (literal)
+  #     pattern:     the regex / literal prefix
+  #     redirect:    the kind a matching name belongs at. R1/INSTALL GATE: it
+  #                  must be a CORE kind, a kind in THIS pack's namespace, or a
+  #                  kind in a pack named in `depends_on`. Never a kind you only
+  #                  happen to know exists — the catalog is a superset of what a
+  #                  graph can legally write.
+  #     fallback:    REQUIRED, and it must be a CORE kind. This is what the
+  #                  guard degrades to when `redirect`'s pack is not installed.
+  #                  `tortoise pack validate` refuses a guard without one.
+  #     reason:      required — one line the caller will read. A redirect the
+  #                  caller cannot explain is a redirect it cannot judge.
+  #     fromKinds:   optional. Empty (the default) = fire only when the write
+  #                  named NO kind, so an explicit declaration is never
+  #                  overruled by a name guess. Non-empty = fire only when the
+  #                  write DECLARED one of these kinds.
+  #     fromLayers:  optional, default [subject, object].
+  #     linkPredicate: optional. A redirect TO a kind whose linking predicate is
+  #                  not implemented ABSTAINS rather than filing an orphan — see
+  #                  `tortoise.kind_guards.LINK_PREDICATES`.
+  #
+  # ⛔ Optional for third-party packs: a manifest with no `guards:` behaves
+  # EXACTLY as before. It is present here so every new pack starts with the
+  # shape rather than rediscovering it.
+  # Example — the worked example this template ships with:
+  #   guards:
+  #     - kind: concept
+  #       layer: object
+  #       onConfusion:
+  #         - when: nameMatches
+  #           pattern: '^issue:[^#\s]+#[0-9]+$'
+  #           redirect: concept
+  #           fallback: core:WorkItem
+  #           reason: 'issue:<repo>#<n> names a tracked work item, not this pack kind'
+  guards: []
+
   # Equivalence declarations: {kind: [other_ns:kind, ...]}
   # Declares this pack's kind is semantically equivalent to another pack's kind.
   # Bidirectional — the registry makes it symmetric at query time.

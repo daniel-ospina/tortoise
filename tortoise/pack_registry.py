@@ -15,6 +15,7 @@ import dataclasses
 import difflib
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, TypeGuard
 
@@ -1469,6 +1470,19 @@ class PackManifest:
     # [{id, name?, description?, steps[], enforcement?, edges?}]
     chains: list[dict] = dataclasses.field(default_factory=list)
 
+    # Per-kind write guards (#12060) — OPTIONAL, sibling to kindDefs / relations /
+    # chains. `[{kind, layer, onConfusion: [{when, pattern, redirect, fallback,
+    # reason, fromKinds?, fromLayers?, linkPredicate?}]}]`.
+    #
+    # Carried here (not merely validated) because the WRITE path reads it:
+    # `tortoise.kind_guards` compiles this block into redirections for a write
+    # whose name matches a declared confusion. Absent means "no redirects" —
+    # exactly today's behaviour, which is why third-party packs may omit it.
+    # `packs/_template/` ships a worked example so a new pack starts with the
+    # shape. The rules (target closure / required core fallback) are enforced in
+    # `_validate` — at INSTALL, never at write (R3).
+    guards: list[dict] = dataclasses.field(default_factory=list)
+
     # The pack's DECLARED business hierarchy: [{path: 'Theme → Epic', type: hasPart}].
     #
     # ⛔ Carried, not just validated (#11001). `_validate` has shape-checked this
@@ -1934,6 +1948,7 @@ class PackRegistry:
             relations=ont.get("relations", []),
             kind_defs=ont.get("kindDefs", {}),
             chains=ont.get("chains", []),
+            guards=ont.get("guards", []) or [],
             hierarchies=ont.get("hierarchies", []),
             extraction=self._normalize_extraction(raw.get("extraction")),
             kind_subclasses=ont.get("subclassOf", {}),
@@ -2854,6 +2869,191 @@ class PackRegistry:
                 "depends_on must be a list of non-empty pack namespaces"
             )
 
+        errors.extend(self._validate_guards(ont, ns, depends_on, all_pack_kinds))
+
+        return errors
+
+    # ── manifest guards (#12060) ───────────────────────────────────────
+
+    def _validate_guards(self, ont: dict, ns: str, depends_on: object,
+                         all_pack_kinds: set[str]) -> list[str]:
+        """``ontology.guards`` — R1/R3 enforcement, at INSTALL and not at write.
+
+        Two refusals, and they are exactly the two failure modes that would
+        otherwise surface as a broken write months later (#12060 R3):
+
+        * **R3a target closure** — every ``redirect`` target must be a CORE kind,
+          a kind in THIS pack's namespace, or a kind in a pack named in
+          ``depends_on``. A target resolved from the catalog instead would name
+          a kind the graph cannot legally write, because the catalog is a
+          SUPERSET of any one graph's partition (#5163).
+        * **R3b a core fallback** — every ``onConfusion`` entry must declare a
+          ``fallback`` that is a CORE kind. The fallback is what the write-time
+          ladder degrades to when the target's pack is not installed (R4), so a
+          guard without one can only abstain — and an installable guard that can
+          never act is a declaration that lies.
+
+        Everything else here is SHAPE (so a malformed entry is a schema error
+        instead of a silently dead guard). ⛔ A guard is never a reason to refuse
+        a WRITE (#1934) — this runs once, in front of the person who chose the
+        dependency, which is the only place a cross-pack error belongs.
+
+        Both spellings of a kind are accepted in ``redirect``/``fallback``: bare
+        means this pack's kind (the convention every other manifest reference
+        follows), EXCEPT for a core kind, which manifests spell bare
+        (``core:WorkItem`` and ``WorkItem`` both resolve to core).
+        """
+        from tortoise.kind_guards import (
+            WHEN_PREDICATES,
+            core_kind_names,
+            kind_forms,
+            kind_namespace,
+        )
+        from tortoise.kind_layers import LAYERS, SECTION_LAYERS, core_sections
+
+        errors: list[str] = []
+        guards = ont.get("guards")
+        if guards is None:
+            return errors
+        if not isinstance(guards, list):
+            return ["ontology.guards must be a list"]
+
+        core_names = core_kind_names()
+        core_layer = {k: SECTION_LAYERS[sec]
+                      for k, sec in core_sections().items()}
+        # The pack's OWN declared kinds, by the axis that declares them. An axis
+        # IS a layer for the two entity/event axes; `documentKinds` is a SOURCE
+        # genre (D10), not a layer, so a guard may not claim it.
+        own_layer: dict[str, str] = {}
+        for kind_field, layer in (("objectKinds", "object"),
+                                  ("pointKinds", "point"),
+                                  ("eventKinds", "event")):
+            for k in ont.get(kind_field, []) or []:
+                if isinstance(k, str) and k:
+                    own_layer[k] = layer
+        allowed_ns = {"core"} | {str(d).strip() for d in (depends_on or [])
+                                 if isinstance(d, str) and d.strip()}
+        if ns:
+            allowed_ns.add(str(ns))
+
+        def _resolve_ref(ref: str) -> tuple[str, str | None]:
+            """``(qualified kind, namespace-or-None)`` for a manifest reference."""
+            if ":" in ref:
+                _ns = ref.split(":", 1)[0]
+                return ref, (None if _ns == "core" else _ns)
+            if ref in core_names:
+                return f"core:{ref}", None
+            return f"{ns}:{ref}", (ns or None)
+
+        def _layer_of(ref: str) -> str | None:
+            """The layer the declaration under validation says ``ref`` has."""
+            bare = ref.split(":", 1)[-1]
+            if ref in core_names or f"core:{ref}" in core_layer or ref in core_layer:
+                return core_layer.get(ref) or core_layer.get(f"core:{ref}")
+            return own_layer.get(bare)
+
+        seen_rules: set[str] = set()
+        for i, entry in enumerate(guards):
+            where = f"ontology.guards[{i}]"
+            if not isinstance(entry, dict):
+                errors.append(f"{where}: expected a map, got "
+                              f"{type(entry).__name__}")
+                continue
+            kind_ref = entry.get("kind")
+            if not isinstance(kind_ref, str) or not kind_ref.strip():
+                errors.append(f"{where}: missing required 'kind'")
+                kind_ref = None
+            else:
+                qualified, _kns = _resolve_ref(kind_ref.strip())
+                bare = qualified.split(":", 1)[-1]
+                if not (qualified in core_names
+                        or f"core:{qualified}" in core_names
+                        or bare in all_pack_kinds):
+                    errors.append(
+                        f"{where}: kind '{kind_ref}' is neither a core kind nor "
+                        f"a kind this pack declares — a guard must be about a "
+                        f"kind the pack owns")
+            layer = entry.get("layer")
+            if layer not in LAYERS:
+                errors.append(
+                    f"{where}.layer: must be one of "
+                    f"{', '.join(LAYERS)} (got {layer!r})")
+            elif isinstance(kind_ref, str) and kind_ref.strip():
+                declared_layer = _layer_of(kind_ref.strip())
+                if declared_layer is not None and declared_layer != layer:
+                    errors.append(
+                        f"{where}.layer: '{kind_ref}' is declared on the "
+                        f"{declared_layer} layer, not '{layer}'")
+            elif isinstance(kind_ref, str) and ":" not in kind_ref:
+                # A documentKinds entry lands here: a document is a `:Source`
+                # (D10), not an entity layer, so there is nothing to redirect.
+                if kind_ref.strip() in (ont.get("documentKinds") or []):
+                    errors.append(
+                        f"{where}.layer: '{kind_ref}' is a documentKind (a "
+                        f":Source genre, D10) — not a guardable entity layer")
+
+            confusions = entry.get("onConfusion")
+            if not isinstance(confusions, list) or not confusions:
+                errors.append(f"{where}.onConfusion: must be a non-empty list")
+                continue
+            for j, c in enumerate(confusions):
+                cw = f"{where}.onConfusion[{j}]"
+                if not isinstance(c, dict):
+                    errors.append(f"{cw}: expected a map")
+                    continue
+                rule = c.get("rule") or f"{ns}:{kind_ref}:{j}"
+                if rule in seen_rules:
+                    errors.append(f"{cw}: duplicate rule id '{rule}'")
+                seen_rules.add(str(rule))
+                when = c.get("when", "nameMatches")
+                if when not in WHEN_PREDICATES:
+                    errors.append(
+                        f"{cw}.when: must be one of "
+                        f"{', '.join(WHEN_PREDICATES)} (got {when!r})")
+                pattern = c.get("pattern")
+                if not isinstance(pattern, str) or not pattern:
+                    errors.append(f"{cw}.pattern: required non-empty string")
+                else:
+                    try:
+                        re.compile(pattern, re.IGNORECASE)
+                    except re.error as exc:
+                        errors.append(f"{cw}.pattern: does not compile ({exc})")
+                if not isinstance(c.get("reason"), str) or not c["reason"].strip():
+                    errors.append(
+                        f"{cw}.reason: required — a redirect the caller cannot "
+                        f"explain is a redirect it cannot judge")
+
+                target = c.get("redirect")
+                if not isinstance(target, str) or not target.strip():
+                    errors.append(f"{cw}.redirect: required")
+                else:
+                    _qualified, tns = _resolve_ref(target.strip())
+                    if tns is not None and tns not in allowed_ns:
+                        errors.append(
+                            f"{cw}.redirect: '{target}' targets namespace "
+                            f"'{tns}', which this pack neither owns nor declares "
+                            f"in depends_on — either add the dependency or "
+                            f"redirect to a core kind (R1/R3)")
+                fb = c.get("fallback")
+                if not isinstance(fb, str) or not fb.strip():
+                    errors.append(
+                        f"{cw}.fallback: required — a guard whose target is "
+                        f"unavailable must degrade to a CORE kind (R3)")
+                else:
+                    _fq, fns = _resolve_ref(fb.strip())
+                    if fns is not None or not (
+                            kind_forms(_fq) & core_names):
+                        errors.append(
+                            f"{cw}.fallback: '{fb}' is not a core kind — the "
+                            f"fallback is the one home that always exists, so it "
+                            f"cannot itself depend on a pack (R3)")
+                for fk in c.get("fromKinds", []) or []:
+                    if not isinstance(fk, str) or not fk.strip():
+                        errors.append(f"{cw}.fromKinds: entries must be kinds")
+                for fl in c.get("fromLayers", []) or []:
+                    if fl not in ("subject", "object"):
+                        errors.append(
+                            f"{cw}.fromLayers: '{fl}' is not an entity layer")
         return errors
 
     # ── Cross-pack validation ──────────────────────────────────────────

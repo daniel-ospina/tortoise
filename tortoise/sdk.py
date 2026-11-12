@@ -5595,6 +5595,92 @@ def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
     return all_name_holder_ids(g, label, name) if label else []
 
 
+def _graph_installed_namespaces(sdk) -> frozenset[str] | None:
+    """This graph's INSTALLED pack namespaces, for the kind-guard path (#12060 R2).
+
+    A thin pass-through to ``pack_state.graph_installed_namespaces`` — the ONE
+    reader of "which packs does this graph have" — so the guard path cannot
+    mint a second answer to it, and ``kind_guards`` needs no ``pack_state``
+    import at module scope (it is stdlib-only on purpose).
+
+    ``None`` keeps its documented meaning: the graph has no ``:PackInstall``
+    records, so the catalog union applies and every namespace counts as
+    available (#2714 indicator 3). A read that RAISES is handled by the caller
+    (``kind_guards.resolve`` abstains and the write proceeds unchanged) —
+    an outage must never look like "no packs installed" *and* must never
+    refuse a write.
+    """
+    from tortoise.pack_state import graph_installed_namespaces
+
+    return graph_installed_namespaces(sdk)
+
+
+def _apply_kind_guard(t: str, name: str, props: dict, intent: str | None, *,
+                      installed_provider=None) -> tuple[str, object | None]:
+    """Resolve and APPLY the per-kind guard to an entity write (#12060).
+
+    Returns ``(layer, decision)`` — the layer the write should now use, and the
+    ``kind_guards.GuardDecision`` (``None`` when nothing could be computed).
+    On a redirect this MUTATES ``props``: every entity-layer kind spelling the
+    write carried is removed and the target kind is declared under the target
+    layer's canonical prop, so the fold writes the routed property and no stale
+    ``subject_kind``/``objectKind`` rides along (the same discipline
+    ``_kind_layer_note`` applies on its own routing path — extended here to a
+    NIL/blank spelling, because a ``subjectKind='other'`` must not ride along
+    onto a ``:WorkItem``).
+
+    ``declaredKind``/``declaredLayer`` are recorded on the node (R5) so an
+    override, a replay or a later audit can restore what the caller asked for —
+    a payload that only lives in one response is not durable.
+
+    Returns the decision unchanged when the guard only ABSTAINED or the caller
+    OVERRODE it: in both cases the write must land exactly as declared.
+    """
+    from tortoise.kind_guards import resolve
+    from tortoise.kind_layers import KIND_PROP
+    from tortoise.pack_state import _KIND_PROP_SPELLINGS
+
+    named = _named_layer_kinds(props)
+    declared = next((kind for _layer, _spelling, kind in named), None)
+    decision = resolve(name, t, declared, intent=intent,
+                       installed_provider=installed_provider)
+    if decision.kind is None:
+        return t, decision
+
+    _entity_props = {KIND_PROP["subject"], KIND_PROP["object"]}
+    for spelling, canonical in _KIND_PROP_SPELLINGS.items():
+        if canonical in _entity_props:
+            props.pop(spelling, None)
+    props[decision.prop] = decision.kind
+    if decision.declared_kind is not None:
+        props.setdefault("declaredKind", decision.declared_kind)
+    props.setdefault("declaredLayer", decision.declared_layer)
+    return decision.layer, decision
+
+
+def _kind_guard_payloads(decision) -> dict:
+    """The #12060 AX fields for a write reply — one shape, one field per outcome.
+
+    ⛔ ADDITIVE ONLY. A caller that ignores these loses nothing but the notice;
+    nothing here blocks, and nothing here changes what was stored (#1934). The
+    fields are top-level so a client branches on DATA, never on prose:
+    ``kind_redirect`` / ``kind_redirect_skipped`` / ``kind_guard_overridden``.
+    A degraded redirect carries BOTH ``kind_redirect`` (to the fallback) and
+    ``kind_redirect_skipped`` (the target it could not use), so the two facts
+    are never conflated.
+    """
+    if decision is None:
+        return {}
+    out: dict = {}
+    if getattr(decision, "redirect", None):
+        out["kind_redirect"] = decision.redirect
+    if getattr(decision, "skipped", None):
+        out["kind_redirect_skipped"] = decision.skipped
+    if getattr(decision, "overridden", None):
+        out["kind_guard_overridden"] = decision.overridden
+    return out
+
+
 def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
     """Route/annotate an ENTITY write by the kind it names (#9964).
 
@@ -45237,7 +45323,8 @@ class TortoiseSDK:
         return bool(total)
 
     def create_entity(self, type: str, name: str, *, is_episodic: bool | None = None,
-                       _server_id: str | None = None, **props) -> dict:
+                       _server_id: str | None = None, intent: str | None = None,
+                       **props) -> dict:
         """Create an entity — consolidated surface (epic #888 W2, PR #912).
 
         ``type`` routes to the right entity kind:
@@ -45274,6 +45361,15 @@ class TortoiseSDK:
         only on another AXIS (an Event kind at an entity door) is reported as
         ``kind_other_layer`` and the write lands as asked (warn-not-block,
         #1934). ``kind_layers`` is the one authority for both answers.
+
+        #12060 — THE KIND GUARD runs first: a name that matches a declared
+        common confusion is filed at its right kind/layer and the reply carries
+        ``kind_redirect`` (what changed, the rule id, the exact override, how to
+        undo). ``intent="as_declared"`` settles the name instead: the write
+        lands exactly as asked and the reply carries ``kind_guard_overridden``,
+        so a guard that is WRONG becomes countable. A guard whose target is not
+        resolvable here ABSTAINS — the write is unchanged and
+        ``kind_redirect_skipped`` says why; nothing is ever refused (#1934).
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         # #8171 (review P1/P2): the ref must be shape-checked BEFORE any write
@@ -45291,6 +45387,37 @@ class TortoiseSDK:
                 "'_server_id' is a server-managed field and cannot be set "
                 "via props.")
         t = (type or "").strip().lower()
+        # ── #12060: the KIND GUARD — redirect a mis-filed write, never refuse ──
+        # Runs BEFORE the kind<->layer routing below, because a guard decides
+        # WHICH KIND (and therefore which layer) the write belongs at, while
+        # `_kind_layer_note` only checks that the kind and the door agree. After
+        # the guard has rewritten the kind, the router sees a consistent write
+        # and stays silent — one decision, taken once.
+        #
+        # ⛔ PRECEDENCE (owner, #12060): the guard runs on rows that are ALREADY
+        # decided to be entities. This is the entity WRITE door, so it is only
+        # reached by a caller that made that decision; the extractor's capture
+        # spine reaches it after its own is-this-an-entity judgement, and the
+        # claim path (where a mention is recorded without minting) never reaches
+        # it at all. A guard here can therefore never redirect something that
+        # should never have existed — see `kind_guards`' module docstring.
+        #
+        # Fail-open (#1934): a guard that raised would refuse a write that
+        # landed before it existed, so every failure degrades to "no guard".
+        _guard = None
+        if intent is not None and not isinstance(intent, str):
+            raise ValueError(
+                "'intent' must be a string ('as_declared') or absent")
+        try:
+            t, _guard = _apply_kind_guard(t, name, props, intent,
+                                          installed_provider=lambda: (
+                                              _graph_installed_namespaces(self)))
+        except Exception as _guard_exc:  # noqa: BLE001, RUF100 — never refuses a write
+            _logger.warning(
+                "create_entity: the kind guard could not be resolved (%s: %s) — "
+                "the write proceeds UNGUARDED and nothing is refused (#1934).",
+                type(_guard_exc).__name__, _guard_exc)
+            _guard = None
         # ── #9964: the KIND decides the layer, then REPORT the disagreement ───
         # One authority answers which layer a kind is declared on; a kind that
         # belongs exclusively to the other entity layer ROUTES this write there
@@ -45651,6 +45778,7 @@ class TortoiseSDK:
                 _layer_note = {**_layer_note, "split_peer_id": _split_peer}
         return {
             "node": node,
+            **_kind_guard_payloads(_guard),
             "nudges": self._nudge_candidates(
                 name, exclude_ids=[node.get("id") or node.get("eventId")]),
             **_merge_advisories(
@@ -45956,10 +46084,18 @@ class TortoiseSDK:
         _adv = result.get("advisories")
         if _adv:
             node["advisories"] = _adv
+        # #12060: the alias doors must surface the kind-guard AX fields too —
+        # the same P2 the advisories above exist for (the alias unwrapped
+        # ``result["node"]`` and DROPPED every top-level key). Additive: with no
+        # guard outcome the flat node is byte-identical to before.
+        for _key in ("kind_redirect", "kind_redirect_skipped",
+                     "kind_guard_overridden"):
+            if result.get(_key):
+                node[_key] = result[_key]
         return node
 
     def create_subject(self, name: str, subjectKind: str | None = None,
-                       **props) -> dict:
+                       *, intent: str | None = None, **props) -> dict:
         """Thin alias for create_entity(type='subject') — epic #888 W2.
 
         #9964: the KIND decides the layer. An ``objectKind``-declared kind
@@ -45987,10 +46123,10 @@ class TortoiseSDK:
         if subjectKind is not None:
             props["subjectKind"] = subjectKind
         return self._flat_entity_result(
-            self.create_entity("subject", name, **props))
+            self.create_entity("subject", name, intent=intent, **props))
 
     def create_object(self, name: str, objectKind: str | None = None,
-                      **props) -> dict:
+                      *, intent: str | None = None, **props) -> dict:
         """Thin alias for create_entity(type='object') — epic #888 W2.
 
         #9964: the KIND decides the layer. ``create_object(name,
@@ -46003,6 +46139,11 @@ class TortoiseSDK:
         ``objectKind`` defaults to ``None`` (**absent**, not ``"other"**) since
         #9572 — the Object twin of ``create_subject``'s fabricated default.
         Blank is absent here too (#9572 review P2) — ``named_kind``.
+
+        #12060: the same kind guard as ``create_subject`` — an undeclared-kind
+        write whose name matches a declared common confusion is filed at its
+        right kind/layer with ``kind_redirect`` on the node; ``intent=
+        "as_declared"`` keeps it as asked and records the override.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
@@ -46013,7 +46154,7 @@ class TortoiseSDK:
         if objectKind is not None:
             props["objectKind"] = objectKind
         return self._flat_entity_result(
-            self.create_entity("object", name, **props))
+            self.create_entity("object", name, intent=intent, **props))
 
     def create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
                       _server_id: str | None = None, **props) -> dict:
