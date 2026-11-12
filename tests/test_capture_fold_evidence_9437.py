@@ -160,6 +160,12 @@ def test_a_fold_carries_the_duplicates_attachments_span_and_provenance(
     # (d) a fold is a destructive outcome and must be REPORTED as one.
     assert any("folded into canonical" in w for w in meta["warnings"]), meta["warnings"]
     assert any("attachment link(s) present" in w for w in meta["warnings"]), meta["warnings"]
+    # …including WHICH slots it filled: "no evidence" and "copied quote" are
+    # different receipts, and without this assertion the `copied` clause could
+    # be deleted from `sdk.py` with the suite still green (measured: the round-5
+    # review found this clause unpinned).
+    assert any("copied quote, span_end, span_start" in w
+               for w in meta["warnings"]), meta["warnings"]
 
 
 def test_a_plain_duplicate_with_no_evidence_still_folds(sdk, monkeypatch):
@@ -173,8 +179,33 @@ def test_a_plain_duplicate_with_no_evidence_still_folds(sdk, monkeypatch):
     assert [e["dedup"] for e in extracted] == ["new", "rephrase_linked"], extracted
     assert len(_claim_rows(sdk._get_proj())) == 1, _claim_rows(sdk._get_proj())
     assert any("folded into canonical" in w for w in meta["warnings"]), meta["warnings"]
+    assert any("no attachments" in w for w in meta["warnings"]), meta["warnings"]
     assert any("no per-occurrence evidence of its own" in w
                for w in meta["warnings"]), meta["warnings"]
+
+
+def test_a_pre_existing_link_is_reported_present_but_not_written(sdk, monkeypatch):
+    """`carried` counts links PRESENT; the receipt must also say how many THIS
+    fold wrote — the clause a reader needs to tell "the carry added support"
+    from "the support was already there".
+
+    RED if the `({created} written by this fold)` clause is deleted from
+    `sdk.py`: the link pre-exists on the canonical, so `link_entity`
+    short-circuits it and `created` is 0 while `carried` is 1 — the only shape
+    that prints the clause.
+    """
+    sdk.create_object("Acme")
+    extracted, meta = _extract(
+        sdk, monkeypatch,
+        canon_evidence={"aboutEntities": ["Acme"]},
+        evidence={"aboutEntities": ["Acme"]})
+    assert meta["errors"] == [], meta["errors"]
+    assert [e["dedup"] for e in extracted] == ["new", "rephrase_linked"], extracted
+    assert _about_targets(sdk._get_proj(), extracted[0]["id"]) == \
+        {"aboutObject:Acme"}, _about_targets(sdk._get_proj(), extracted[0]["id"])
+    assert any(
+        "1 attachment link(s) present (0 written by this fold)" in w
+        for w in meta["warnings"]), meta["warnings"]
 
 
 # ── 2) a slot the canonical owns is reported, never silently overwritten ──
@@ -534,6 +565,18 @@ def test_every_attachment_predicate_the_capture_cascade_mints_is_READ():
         "the cascade can mint a predicate the fold does not read, so a fold "
         f"destroys it: {sorted(cascade - set(capture_fold._FOLD_ATTACHMENT_RELS))}"
     )
+    # …and the SHARED WRITER's vocabulary is the other half of the population:
+    # `link_entity` is the one `about*` writer that is not the cascade, and a
+    # predicate added there (or an eighth `about*` rel) would be destroyed by
+    # the delete exactly as silently. Guarding only the cascade leaves the
+    # hand-copy free to drift against the writer that mints the rest.
+    from tortoise.session_link import ENTITY_LINKED_RELS
+
+    assert set(ENTITY_LINKED_RELS) <= set(capture_fold._FOLD_ATTACHMENT_RELS), (
+        "`link_entity` can write an about* predicate the fold does not read, "
+        "so a fold destroys it: "
+        f"{sorted(set(ENTITY_LINKED_RELS) - set(capture_fold._FOLD_ATTACHMENT_RELS))}"
+    )
     # …and the ones it CAN carry are the permitted Point-source triples.
     from tortoise.session_link import ENTITY_LINKED_TRIPLES
 
@@ -549,6 +592,23 @@ def test_an_aboutEvent_link_is_carried():
     triples)."""
     proj = _FakeProj(_FakeGraph(
         edges=[("aboutEvent", "Event", "ev_1", None)], carried=(1, None)))
+    out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
+    assert out["ok"] is True and out["carried"] == 1, out
+
+
+def test_a_carriable_link_takes_its_target_label_from_the_predicate():
+    """A carriable link's target label is a function of the PREDICATE (§3.2's
+    triple), not of whatever `head(labels(t))` answered — label order is the
+    engine's business, and the writer addresses the target by the §3.2 label.
+
+    The fake reports the edge with a label no §3.2 triple names (`Thing`, the
+    shape a multi-labelled target produces when the unexpected label comes
+    first). RED before the fix: that label was handed to `link_entity`, which
+    refuses an unknown label, and the fold came back `link_not_carried` — a
+    refusal over a link a Point DOES have a writer for, with the duplicate kept.
+    """
+    proj = _FakeProj(_FakeGraph(
+        edges=[("aboutObject", "Thing", "obj_1", None)], carried=(1, None)))
     out = capture_fold.carry_fold_evidence(proj, "pt_dup", "pt_canon")
     assert out["ok"] is True and out["carried"] == 1, out
 
@@ -658,9 +718,15 @@ def test_a_late_refusal_discloses_the_slots_it_already_copied():
 
     RED on the previous head: the raise from the post-write read escaped to the
     never-raise wrapper, whose fresh dict discarded `copied` entirely.
+
+    Also pins the RESIDUAL half of the same disclosure: `pointKind` differs and
+    is computed before the write, so a refusal that dropped it would cross a
+    difference in silence — the one thing this module never does.
     """
+    dup_row = list(_DUP_ROW_QUOTED)
+    dup_row[_FakeGraph._COLUMNS.index("pointKind")] = "observation"
     graph = _FakeGraph(
-        dup_row=_DUP_ROW_QUOTED,
+        dup_row=tuple(dup_row),
         edges=[("aboutObject", "Object", "obj_missing", None)],
         carried={"obj_missing": (0, None)})
     sdk = _FakeSDK(on_update=graph.apply_slot)
@@ -669,6 +735,7 @@ def test_a_late_refusal_discloses_the_slots_it_already_copied():
     assert out["ok"] is False and out["reason"] == "link_not_carried", out
     assert out["copied"] == ["quote"], out
     assert "ALREADY added copied quote" in out["blocked"], out["blocked"]
+    assert "kept the canonical's own pointKind" in out["blocked"], out["blocked"]
 
 
 def test_a_raise_from_the_post_write_read_is_a_disclosed_refusal():

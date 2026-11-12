@@ -364,6 +364,13 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
     for rel, label, target_id, confidence in edges:
         if not isinstance(rel, str) or not isinstance(label, str):
             return None
+        # ⚠️ For a CARRIABLE predicate the label is a pure function of the PREDICATE
+        # (§3.2's triple), not of `head(labels(t))` — which is order-dependent and
+        # would hand the writer the wrong target label (or trip the writer-less
+        # check) on a target that carries more than one label. The graph's own head
+        # is kept only for the predicates that have no permitted writer, whose
+        # message names what it found.
+        label = _CARRIABLE_ATTACHMENT_LABELS.get(rel) or label
         if isinstance(target_id, str) and target_id.strip():
             conf = confidence if isinstance(confidence, (int, float)) else None
             attachments.append((rel, label, target_id.strip(), conf))
@@ -424,13 +431,18 @@ def _canonical_view(proj: Any, canonical_id: str) -> dict | None:
 
 
 def _already_written(out: dict) -> str:
-    """Name what a REFUSED-AT-THE-END carry has already added to the canonical.
+    """Name what a REFUSED-AT-THE-END carry has already ESTABLISHED.
 
     A refusal is not always a no-op: the free-slot write is atomic and happens
     first, so a failure in the link loop refuses with those slots (and any
     earlier link) already on the canonical. Reporting that is the difference
     between "kept distinct" and "kept distinct — and the canonical gained one
     link" (measured: a reader treats the first as "nothing changed").
+
+    The RESIDUALS are reported here too, for the same reason: they are computed
+    before the write, so a late refusal would otherwise drop the differences the
+    carry had already found — the one class of fact this module never crosses in
+    silence.
     """
     added = []
     if out.get("copied"):
@@ -440,10 +452,14 @@ def _already_written(out: dict) -> str:
     # reporting them as "added" would assert a change this fold did not make.
     if out.get("created"):
         added.append(f"{out['created']} attachment link(s)")
-    if not added:
-        return ""
-    return ("; it had ALREADY added " + " and ".join(added)
-            + " to the canonical — additive, nothing removed from either node")
+    said = ""
+    if added:
+        said = ("; it had ALREADY added " + " and ".join(added)
+                + " to the canonical — additive, nothing removed from either node")
+    if out.get("residual"):
+        said += ("; kept the canonical's own " + ", ".join(out["residual"])
+                 + " (one value per field — the duplicate's differ)")
+    return said
 
 
 def _carried(proj: Any, canonical_id: str, rel: str, label: str,
@@ -463,10 +479,16 @@ def _carried(proj: Any, canonical_id: str, rel: str, label: str,
         # fail-closed backstop against interpolating an unvetted label into a
         # pattern (the same posture `session_link.link_entity` takes).
         return 0, None
+    # ⚠️ Membership, not `head(labels(t))`: a target carrying more than one
+    # label would not have the expected label FIRST, and the caller reads a 0 as
+    # "the link did not land" — a refusal whose stated reason is false, over a
+    # link that `link_entity` did create.
     rows = proj.g.query(
-        f"MATCH (:Point {{id:$canon}})-[r:{rel}]->(t:{label} {{id:$target}}) "
+        f"MATCH (:Point {{id:$canon}})-[r:{rel}]->(t {{id:$target}}) "
+        "WHERE $label IN labels(t) "
         "RETURN count(*), head(collect(r.confidence))",
-        params={"canon": canonical_id, "target": target_id}).result_set
+        params={"canon": canonical_id, "target": target_id,
+                "label": label}).result_set
     if not rows or not rows[0] or not rows[0][0]:
         return 0, None
     grading = rows[0][1]
