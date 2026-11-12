@@ -2370,7 +2370,7 @@ def test_a_sentence_quoting_the_tally_phrases_is_not_counted(tmp_path, monkeypat
     that contains one red an edit that only talked ABOUT the phrase: measured,
     appending `(The phrase "still read as written" names the complement.)` produced
     `§3 carries 2 sentences saying 'still read as written'` while a single sentence
-    asserted anything. A candidate must also carry a `**(x)**` token — a sentence with
+    asserted anything. A candidate must also carry a LETTER LIST, in any spelling (`**(x)**`, `(b), (c)`, `b, c, d` or `b and c`, every one of them bounded to the page's single-letter alphabet `a`–`l`) — requiring MARKUP rather than a list was itself fail-open, measured — and a sentence with
     no letter list in it cannot disagree with the table.
     """
     for quote in (
