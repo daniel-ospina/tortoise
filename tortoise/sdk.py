@@ -16958,10 +16958,50 @@ class TortoiseSDK:
                             f"repeated claim '{content[:60]}' kept distinct — "
                             "operator-wired duplicate not deduped")
                     else:
-                        proj.g.query(
-                            "MATCH (n:Point {id:$id}) DETACH DELETE n",
-                            params={"id": pid})
-                        pid = resolved
+                        # #9437: the fold may not destroy the duplicate's OWN
+                        # evidence. `DETACH DELETE` takes the node's
+                        # `aboutObject`/`aboutSubject` edges with it, so the
+                        # SURVIVING claim would carry less support than the
+                        # two together held — the loss the sibling guard
+                        # (PR #9424) refuses at the against-store classifier.
+                        # The evidence is moved onto the canonical FIRST; where
+                        # it cannot be moved, the copy is not redundant and the
+                        # fold is refused (the `engaged` branch's shape,
+                        # extended from "operator-wired" to "carries evidence").
+                        from tortoise.capture_fold import carry_fold_evidence
+                        fold_report = carry_fold_evidence(
+                            proj, pid, resolved, sdk=self)
+                        if not fold_report["ok"]:
+                            dedup = DEDUP_NEW
+                            warnings.append(
+                                f"repeated claim '{content[:60]}' kept "
+                                f"distinct — {fold_report['blocked']}")
+                        else:
+                            proj.g.query(
+                                "MATCH (n:Point {id:$id}) DETACH DELETE n",
+                                params={"id": pid})
+                            pid = resolved
+                            # A fold is a non-accept outcome and a destructive
+                            # one: the receipt says what happened and what was
+                            # carried, never a silent delete.
+                            carried = fold_report["carried"]
+                            copied = fold_report["copied"]
+                            residual = fold_report["residual"]
+                            said = (
+                                f"repeated claim '{content[:60]}' folded "
+                                f"into canonical {pid} — carried "
+                                f"{carried} attachment link(s)"
+                                + (f", copied {', '.join(copied)}"
+                                   if copied else "")
+                                + (", no evidence of its own to carry"
+                                   if not carried and not copied else ""))
+                            if residual:
+                                said += (
+                                    "; kept the canonical's own "
+                                    f"{', '.join(residual)} "
+                                    "(one value per field — the duplicate's "
+                                    "differ)")
+                            warnings.append(said)
                 if dedup == DEDUP_NEW:
                     canonical_by_hash[_content_hash(content)] = pid
                     canonical_contents.append((pid, content))
