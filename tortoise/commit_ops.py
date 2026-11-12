@@ -1125,8 +1125,15 @@ def _ref_candidates(entities, label: str, *, id_idx: int = 1,
     terminal = (SUBJECT_TERMINAL_STATUSES if label == "Subject"
                 else _RECALL_OBJECT_EXCLUDED_STATUS)
     rows = []
-    widened: set = set()
-    for rep, _key, members in entities:
+    # ⛔ Carrier id → the GONE-SURVIVOR GROUP it came from (review round 17, second
+    # finding). A set of ids alone can only answer "every refused candidate came
+    # from SOME gone-survivor group"; two distinct entities with two dangling
+    # `resolved_from` pointers then report as "ONE entity whose survivor is gone"
+    # and downgrade `main`'s `ambiguous-name` record to `unaddressable-name`, losing
+    # the fact that there are two separate repairs to make. Keeping the group key
+    # lets `_ref_is_one_gone_entity` ask the question its name states.
+    widened: dict = {}
+    for rep, key, members in entities:
         if rep is not None:
             rows.append(rep)
             continue
@@ -1135,22 +1142,28 @@ def _ref_candidates(entities, label: str, *, id_idx: int = 1,
                 continue
             rows.append(m)
             if m[id_idx]:
-                widened.add(str(m[id_idx]))
+                widened[str(m[id_idx])] = key
     return rows, widened
 
 
 def _ref_is_one_gone_entity(widened, rows, id_idx: int = 1) -> bool:
-    """Every refused REF candidate came from a GONE-survivor group's expansion.
+    """Every refused REF candidate came from the SAME gone-survivor group.
 
     The never-guess refusal then means "one merged ENTITY whose survivor is gone",
-    not "two entities claim this name" (review round 17). False otherwise — a
-    genuine duplicate-name/duplicate-id refusal keeps its own arm and its own
-    ``record_non_folded`` shape.
+    not "two entities claim this name" (review round 17). ⛔ "SAME group" is the
+    load-bearing word (review round 17, second finding): `widened` maps each carrier
+    to the group key it came from, because a set of ids cannot tell one entity from
+    several — and two distinct entities with dangling pointers must keep `main`'s
+    `ambiguous-name` record rather than be reported as one repairable entity. False
+    otherwise, so a genuine duplicate-name/duplicate-id refusal keeps its own arm
+    and its own ``record_non_folded`` shape.
     """
     if not widened:
         return False
     ids = [str(r[id_idx]) for r in rows if r[id_idx]]
-    return bool(ids) and set(ids) <= widened
+    if not ids or not set(ids) <= set(widened):
+        return False
+    return len({widened[i] for i in ids}) == 1
 
 
 def _id_claimant_count(g, label: str, node_id: str) -> int:

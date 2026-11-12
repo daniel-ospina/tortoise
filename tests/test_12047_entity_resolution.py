@@ -4450,9 +4450,9 @@ class TestThe12120ReviewRound16:
             non_folded_entries,
         )
 
-        for label, kind, terminal_ok in (("Object", "document", True),
-                                         ("Subject", "organization", True)):
-            assert terminal_ok  # both families carry the same contract
+        # Both families carry the SAME contract: each is exercised below on the
+        # same shape, and both must report `ref carrier's survivor is gone`.
+        for label, kind in (("Object", "document"), ("Subject", "organization")):
             sdk = sdk_factory()
             try:
                 g = sdk._get_proj().g
@@ -4627,5 +4627,63 @@ class TestThe12120ReviewRound16FamilyGuard:
                 "MATCH (s:Subject {id:'ent-r16g-sub'}) "
                 "RETURN s.status, s.supersededBy").result_set
             assert row and tuple(row[0]) == ("superseded", "New Widget"), row
+        finally:
+            sdk.close()
+
+
+class TestThe12120ReviewRound17:
+    """Two GONE-survivor entities are not one repairable entity.
+
+    `_ref_candidates` contributed the carriers of every group whose survivor is
+    gone, and the refusal's "ONE entity" test could only ask whether each candidate
+    came from SOME such group — so two distinct entities with two dangling
+    `resolved_from` pointers were reported as one, and `main`'s `ambiguous-name`
+    durable record was downgraded to `unaddressable-name`, hiding that there are two
+    repairs. The group key is now carried per carrier.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r17",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_two_gone_survivors_keep_the_ambiguous_name_record(
+            self, sdk_factory):
+        from tortoise.entity_identity import (
+            clear_non_folded_entries,
+            non_folded_entries,
+        )
+
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("New Co", "document")
+            g.query(
+                "CREATE (a1:Object {id:'p-a1', name:'Old Co', "
+                "objectKind:'document', status:'live', "
+                "resolved_from:'gone-1'}) "
+                "CREATE (a2:Object {id:'p-a2', name:'Old Co', "
+                "objectKind:'document', status:'live', "
+                "resolved_from:'gone-1'}) "
+                "CREATE (b1:Object {id:'p-b1', name:'Old Co', "
+                "objectKind:'document', status:'live', "
+                "resolved_from:'gone-2'})")
+            clear_non_folded_entries()
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Co", "supersedes_by": "New Co",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            shapes = [e.shape for e in non_folded_entries()
+                      if e.name == "Old Co"]
+            assert shapes == ["ambiguous-name"], (
+                "two distinct entities with dangling survivors were reported as "
+                f"one repairable entity: {shapes} (skips: {skips!r})")
         finally:
             sdk.close()

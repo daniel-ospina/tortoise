@@ -21844,11 +21844,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # Without the flag this site records `unregistered-reference` /
     # `ambiguous-entity-name` — NON-exempt — for a write where nothing was
     # folded, while the replay pass resolves the SAME reference exemptly
-    # (`projection/entities.py:5783` `_fold_object_status`, `:6295`
-    # `context="EventRecorded.object"` — line numbers re-derived at #12120
-    # review round 10; the two this comment used to name had drifted into
-    # `_upsert_subject` / `_upsert_document`), i.e. one reference with two
-    # dispositions, the live/replay parity break R8 forbids.
+    # (`projection/entities.py:5783` `_fold_object_status`, and its about-name
+    # resolution at `:5892` `context="status fold about"` — cited at the symbol, not
+    # only the line, because `:6295` is `context="EventRecorded.object"`, the
+    # event's EXPLICIT object, NOT this about-edge name: review round 17), i.e. one
+    # reference with two dispositions, the live/replay parity break R8 forbids.
     for _eid, _name, _exact_only in _deferred_about_objects:
         # #12120 review: strip ONCE, here. Both sibling sites strip before they
         # compare (`sdk.py` `_n = name.strip()`, `near_dup_merge.py` the same),
