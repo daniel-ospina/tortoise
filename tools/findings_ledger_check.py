@@ -673,37 +673,31 @@ def _verdicts_by_label(text: str) -> dict[str, str]:
 #: italic or bare", so the doc promised a comparison the code did not make.
 #:
 #: Letters are restricted to `[a-l]` — the page's own twelve rows.
-_NAMED_LETTER_RE = re.compile(
+#: ⛔ THE ONE SPELLING LIST. Every reader of a row letter — the extractor
+#: (`_NAMED_LETTER_RE`, built from THIS string), verdict ATTRIBUTION
+#: (`_letters_in_span`), the MENTION scan and the negated-COMPLEMENT strip — reads the
+#: spellings from here, so a spelling added in one place cannot be missing from another.
+#: The four ARM readers used to carry their own `\*\*\(([a-z])\)\*\*` — `**(x)**`
+#: ONLY — while the extractor and §8 accept four spellings, so `**` was the difference
+#: between a red and a green in the very arm whose job is to refuse a contradiction.
+#: Measured: `Note (d) is **ADOPTED**.` beside a `(d)` row read CLEAN (the fail-open);
+#: the class-first spelling the checker's own comment blesses was REFUSED as a swap of
+#: all seven rows; the documented negated complement was COUNTED into the STILL-TRUE
+#: list. ⚠️ Deriving the extractor from this string (rather than keeping two literals in
+#: step by hand) is what makes that permanent — a first attempt at this fix left a
+#: SECOND literal beside it, and a review measured the drift it permitted: a spelling
+#: added to one side alone silently re-opened the fail-open with a green suite.
+#: `test_the_span_readers_and_the_extractor_share_one_spelling_list` pins the single
+#: source, so that class of drift now reds instead of shipping.
+_LETTER_ALT_MARKED = (
     r"\*\*\(([a-l]{1,2})\)\*\*"  # **(a)**
     r"|\*\*([a-l]{1,2})\*\*"  # **a**
     r"|`\(?([a-l]{1,2})\)?`"  # `a` / `(a)`
     r"|\*\(([a-l]{1,2})\)\*"  # *(a)*
     r"|\*([a-l]{1,2})\*"  # *a*
-    r"|\(([a-l]{1,2})\)",  # (a) / (a), (b)
-    re.IGNORECASE,
+    r"|\(([a-l]{1,2})\)"  # (a)
 )
-
-#: The SAME letter spellings as ONE non-capturing alternative, for the two places that
-#: read letters out of a SPAN rather than out of the whole sentence: verdict ATTRIBUTION
-#: (which verdict class a letter sits beside) and the NEGATED COMPLEMENT clause
-#: (`— **(c)**, **(d)** do not`).
-#: ⛔ Both carried their own `\*\*\(([a-z])\)\*\*` — `**(x)**` ONLY — while
-#: `_NAMED_LETTER_RE` and §8 accept four spellings, so `**` was the difference between a
-#: red and a green in the very arm whose job is to refuse a contradiction. Measured at
-#: this head: `Note (d) is **ADOPTED**.` beside a `(d)` row read CLEAN (the fail-open),
-#: the class-first spelling §8 blesses (`**SUPERSEDED-BY-FIX**: (c), (d) and (g)`) was
-#: REFUSED as a swap the page had not made, and the documented `— `c`, `d` do not.`
-#: complement was REFUSED as a wrong STILL-TRUE list. One constant now feeds all three
-#: arms, so the spellings cannot drift apart again.
-_LETTER_ALT_MARKED = (
-    r"\*\*\([a-l]{1,2}\)\*\*"  # **(a)**
-    r"|\*\*[a-l]{1,2}\*\*"  # **a**
-    r"|`\(?[a-l]{1,2}\)?`"  # `a` / `(a)`
-    r"|\*\([a-l]{1,2}\)\*"  # *(a)*
-    r"|\*[a-l]{1,2}\*"  # *a*
-    r"|\([a-l]{1,2}\)"  # (a)
-)
-_LETTER_ITEM_MARKED = "(?:" + _LETTER_ALT_MARKED + ")"
+_NAMED_LETTER_RE = re.compile(_LETTER_ALT_MARKED, re.IGNORECASE)
 #: The marked spellings PLUS the bare one. Bare is safe ONLY where a group is ANCHORED to
 #: the clause end (the negated complement), which is why attribution does not use this:
 #: there, a bare letter is prose, and `a`/`i` are English words (#12028's own finding).

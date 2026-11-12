@@ -1192,6 +1192,38 @@ def test_a_dated_reading_is_not_the_rows_current_verdict(tmp_path, monkeypatch):
     )
 
 
+def test_the_span_readers_and_the_extractor_share_one_spelling_list():
+    """FAILS if the letter spellings become TWO literals that must be kept in step.
+
+    The round-4 fix widened three arms from `\\**(x)**`-only to the extractor's four
+    spellings, and claimed `_LETTER_ALT_MARKED` was the single source. It was not: the
+    extractor still carried its own copy of the same six alternatives, so the two could
+    drift — and a review measured both directions of the drift:
+
+        add a spelling to `_NAMED_LETTER_RE` only
+            -> `— _c_, _d_ do not.` REDS as a false accusation
+        add a spelling to `_LETTER_ALT_MARKED` only
+            -> `Note _d_ is **ADOPTED**.` reads CLEAN (the fail-open returns)
+
+    Both with the whole suite green. A hand-kept pair of literals is exactly the
+    "docstring that says VERIFIED" class the repo's `MEMORY.md` forbids, so the
+    extractor is now BUILT from the constant and this test pins the identity.
+    """
+    assert flc._NAMED_LETTER_RE.pattern == flc._LETTER_ALT_MARKED, (
+        "the extractor must be compiled FROM `_LETTER_ALT_MARKED`, not from a second "
+        "literal that has to be kept in step by hand"
+    )
+    assert flc._LETTER_ALT_MARKED in flc._LETTER_ITEM_ANY, (
+        "the governed-complement pattern must embed the same spelling list"
+    )
+    #: And the list really is the four documented spellings — assert the SPELLINGS,
+    #: not a description of them, so one dropped from the shared constant is caught too.
+    for spelling in ("**(c)**", "**c**", "`c`", "`(c)`", "*(c)*", "*c*", "(c)"):
+        assert flc._NAMED_LETTER_RE.findall(spelling), (
+            f"{spelling!r} is a documented letter spelling and must be accepted"
+        )
+
+
 def test_a_contradicting_mention_is_read_in_every_spelling(tmp_path, monkeypatch):
     """FAILS if a contradicting verdict repeat is only seen when written `**(x)**`.
 
