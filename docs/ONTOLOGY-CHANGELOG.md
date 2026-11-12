@@ -71,7 +71,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > `archived` is a legal successorless route for a **retirement**. ⚠️ **That does NOT retire `sdk.py`'s
 > over-block objection**, and an earlier draft of this entry wrongly said it did. The shape `sdk.py` protects
 > is not a retirement: it is *no longer current, replacement not yet known* — the state the extractor's
-> owner-ruled policy needs, and one `archived` cannot express (see OWED below). So that objection **still
+> owner-ruled policy needs, and one `archived` cannot express (see THE GAP IS REAL, BELOW). So that objection **still
 > stands for that shape**, and the guard must not refuse it on the strength of this clause alone. The **journal rebuild**
 > carve-out is kept and must be: `_fold_object_superseded` folds `supersededBy` from
 > `ev.get("supersedes_by") or ""`, and `sdk.py` records the id-only legacy `ObjectSuperseded` as a
@@ -112,12 +112,22 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > ⚠️ **THE GAP IS REAL AND NO WORD IS WARRANTED YET — `stale` was considered and WITHDRAWN.** The vocabulary has no word for
 > *no longer current, replacement not yet known*, the state the extractor's owner-ruled policy needs (*"mark stale now, supersede on
 > re-inference"*, `stale ≠ wrong`). That gap is why the `status='superseded'`-without-carrier shape came into use, and why refusing
-> it read as an over-block. But **nothing in the shipped system can produce that state**: `invalidate_point(id, corrected_by_id)`
-> requires the corrector, and §4.1 records that the `outdated` flag and the `CORRECTS` edge *"do not distinguish the two"* — so a
-> `stale` word would have no writer, no reader and no behaviour `archived` lacks. Nor would anything consume the difference: both
-> are terminal, so both leave retrieval and belief, and **nothing revives a terminal entity**. Policy B therefore stays
-> **unimplemented**, and when it is built it needs a word *then*, with a producer and a revival path — its own change, not this one.
-> The successorless route today is **`archived`**, which is why the clause above is buildable without an expansion.
+> it read as an over-block. What was measured about the writer is narrower than "nothing can produce it": `invalidate_point(id,
+> corrected_by_id)` requires the corrector, so **the invalidation path** cannot mark something no-longer-current without naming a
+> successor — but the shape IS reachable and already in use through `update_entity(<Subject>, status='superseded')` and
+> `create_object(name, status='superseded')`, which store it with `supersededBy` absent (`sdk.py:5267-5273` says of the mirror
+> shape "*it is a shape in use*"; `:63-67` above records the measurement). What withdraws `stale` is not that the state is
+> unreachable: it is that `archived` does not cover it either (`:71-75`), the vocabulary's own `outdated` flag does not carry the
+> distinction (§4.1: the flag and the `CORRECTS` edge *"do not distinguish the two"*), so a word would also need a consumer, and
+> there is none —
+> `archived` **and** `superseded` both leave retrieval and belief (`TERMINAL_STATUS_VALUES` → `TERMINAL_EXCLUDED_STATUSES`), so a
+> third terminal word changes nothing a reader or a retriever would act on. ⚠️ That argument does not rest on terminal being
+> frozen: it is not — `update_entity`'s Point arms carry no lifecycle guard, so a `retracted` Point can be flipped to `live` and an
+> `archived` Object given `status='live'` (recorded at `docs/ONTOLOGY.md:1177`, tracked as #9649). Policy B therefore stays
+> **unimplemented**, and when it is built it needs a word *then*, with a producer and a revival path that respects #9649 — its own
+> change, not this one. **`archived` does not close policy B**: it is the retirement route, not the replacement-not-yet-known one,
+> which is why the clause above is buildable without an expansion **and** why `sdk.py`'s over-block note still stands for that
+> shape (`:71-75`, and the owner's relay, `#11824` comment `6815950417`: *"`archived` does not close policy B"*).
 >
 > **Still unbuilt, deliberately:** the guard that enforces this vocabulary, including the AX three-part
 > refusals (`status='outdated'` naming both `archived` and `superseded`; one refusal shape across
