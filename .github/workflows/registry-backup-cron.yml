@@ -82,7 +82,9 @@ jobs:
       SWEEP_TIMEOUT_S: ${{ vars.SWEEP_TIMEOUT_S }}
     steps:
       - uses: actions/checkout@v4
-      # #12135: the driver's ONLY external dependency, declared instead of inherited.
+      # #12135: the driver's R2 dependency, declared instead of inherited. (It is not
+      # the driver's ONLY external dependency — it also shells out to `jq` and `curl`,
+      # which this change does NOT verify; see #12208.)
       # Every R2 operation in `.github/scripts/registry-cron.sh` shells out to `aws`
       # (`s3api head-bucket / list-objects-v2 / head-object / get-object /
       # put-object --if-none-match / delete-object`). Nothing installed it: the
