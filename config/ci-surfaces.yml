@@ -5868,6 +5868,26 @@ surfaces:
   # entry 'test_percent_value_11915.py' at .surfaces.core[] (lines 2201, 5872)" —
   # the #11210/#11211/#11222 recurrence this file already records). Only the
   # WEIGHT row below is still this PR's to add: `main` carries none for the file.
+  # #11915/#11955: the `percent` value SHAPE — `tortoise/percent.py`
+  # (`percent_props` / `read_percent_value`, the SDK props-intake gate, the
+  # refusal wording) plus the declared-field half, which reads
+  # `packs/investment-portfolio-manager/manifest.yaml`'s `targetPct` and proves
+  # the shape it names is now STORABLE. Like its `money.py` (#2782) and
+  # `value_normalizer.py` (#2817) siblings, `percent.py` matches no
+  # SOURCE_PATTERNS entry and is not a SHARED_MODULE, so a `percent.py`-only
+  # change falls through to `core` — this entry is what makes the shape, the
+  # bound and the gate run on the change that can break them. URI-less (pure
+  # unit + one shipped-manifest read), so it runs on the docker leg exactly as
+  # its siblings do.
+  #
+  # ⛔ THIS ROW REPAIRS `main`, NOT THIS PR. #11955 squash-merged at `927c24e`
+  # WITHOUT registering the file it added, so the REQUIRED `manifest-integrity`
+  # leg went red on `main` itself — and, because that job runs on the PR MERGE
+  # ref, red on every PR's merge ref too (measured on this PR: `ci_selection.py
+  # --integrity` -> `manifest drift: ['test_percent_value_11915.py']` after a
+  # clean merge of `origin/main`). An unlisted file is the #1262 drift class:
+  # the suite runs in NO leg and the required leg is red.
+  - test_percent_value_11915.py
   # #2814: authoritative-config durability across rebuild_all — the config
   # registry + sidecar section live in tortoise/projection/ (core fallback),
   # and pack_state/pack_manifest_store are the writer modules whose labels
@@ -11228,6 +11248,7 @@ durations:
   test_event_log.py: 0.1
   test_event_state_carrier_2788.py: 2.0  # carried forward (not a full-file CI measurement) — new in #2788; no sweep has collected it, so it carries the flat default exactly as an absent key would (the `#3419`/`test_venture_pack.py` rule). Do NOT substitute a local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit value models the leg that carries the file. — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.1s) is a LOWER bound; kept 2.0
   test_money_value_2782.py: 2.0  # carried forward (not a full-file CI measurement) — new in #2782; no sweep has collected it, so it carries the flat default exactly as an absent key would (the `#3419`/`#2788` rule). Do NOT substitute a local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit value models the leg that carries the file. (A local run's first SDK-constructing test carries a one-time embedder init; it is process-global and amortises across every SDK test in the shard, so it is not this file's weight.) — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (1.3s) is a LOWER bound; kept 2.0
+  test_percent_value_11915.py: 2.0  # new in #11915/#11955 — carried forward as the flat `DEFAULT_FAST_WEIGHT`, exactly like its `test_money_value_2782.py` sibling and for the same #3419/#2788 reason: the weight is a SHARD-LAYOUT input and only a measured CI junit reading models the leg that carries the file, so no local timing is substituted here. ⚠️ MEASURED LOCALLY as CONTEXT for a human, never as the weight: **49 passed, 159.2 s whole-file** through THIS worktree's interpreter with `TORTOISE_TEST_CARVE_OUT=1` (`real 2m49`). It is URI-less and hermetic in content (one shipped-manifest read + pure unit arms), so most of that 159 s is a one-time SDK/embedder init rather than per-case work — which is exactly why a local number cannot stand in for the shard weight. ⛔ The declaration is NOT lowered to fit: the flat 2.0 stays until `tools/ci_timing.py --refresh-durations` replaces this row from junit once a push-to-main sweep includes it, and `tools/ci_selection.py --integrity` is the authority on the denominator either way.
   test_value_normalizer_2817.py: 3.3  # new in #2817; Do NOT substitute a local timing: the weight is a SHARD-LAYOUT input and only a measured CI junit value models the leg that carries the file — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.0 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (1.2s) is a LOWER bound; kept 3.3
   test_evidence_assembly.py: 0.1  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.2
   test_fake_control_plane.py: 0.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.1
