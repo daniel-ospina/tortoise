@@ -2292,7 +2292,8 @@ def test_a_s1_row_starting_with_the_word_verdict_is_still_refused(tmp_path, monk
     was defeated by a plural: measured, `| Verdicts | a | b |`,
     `| Verdict-ish | a | b |` and `| Verdict-and-more | … |` each left
     `check_document()` at `[]` while the plain non-verdict row reded. The header is now
-    the FIRST `|` row and nothing else, so a decoy cannot sit above it either.
+    the FIRST `|` row whose first cell reads `Verdict` — position AND shape, because
+    position alone was itself a fail-open (a substituted first row went CLEAN).
     """
     for row in ("| Verdicts | a | b |", "| Verdict-ish | a | b |"):
         with monkeypatch.context() as patch:
@@ -2386,6 +2387,38 @@ def test_a_sentence_quoting_the_tally_phrases_is_not_counted(tmp_path, monkeypat
                 or "sentences saying 'no longer read as written'" in p
                 for p in problems
             ), f"a sentence quoting the phrase must not be counted: {problems}"
+
+
+def test_a_de_bolded_second_tally_sentence_is_still_refused(tmp_path, monkeypatch):
+    """FAILS if a tally candidate must be written with markdown emphasis.
+
+    The candidate filter required a BOLDED `**(x)**` token, so a second genuine tally
+    written in plain text was no candidate at all and the "keep exactly one" invariant
+    could be beaten by removing emphasis: measured, appending
+    `Six of the twelve rows no longer read as written: b, c, d, e, g and k.` left
+    `--check` at rc 0, and a de-bolded stale real list beside a compliant bolded decoy
+    — the historical exploit, re-shaped — also read CLEAN, while the parent refused
+    both. The page's own §3 spells its overtaken group in plain text, so all spellings
+    of a letter list have to count.
+    """
+    decoys = (
+        "Six of the twelve rows no longer read as written: b, c, d, e, g and k.",
+        "Six of the twelve rows no longer read as written (b), (c), (d), (e), (g) and (k).",
+        "Six of the twelve rows no longer read as written: b and c.",
+    )
+    for decoy in decoys:
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _d=decoy: t.replace(
+                    "stated both ways.)", f"stated both ways.) {_d}", 1
+                ),
+            )
+            problems = _doc_problems()
+            assert any(
+                "sentences saying 'no longer read as written'" in p for p in problems
+            ), f"a second genuine tally in plain text must red: {decoy!r} -> {problems}"
 
 
 def test_a_second_still_read_as_written_sentence_is_refused(tmp_path, monkeypatch):
