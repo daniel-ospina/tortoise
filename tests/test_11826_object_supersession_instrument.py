@@ -23,8 +23,12 @@ issue's "also measured" list), never the transfer:
     DIRECTIONAL operator whose idx-0 source is the stripped input (rewiring does
     not restore it, and a delete alone renumbers and inverts the factor), a
     DIRECT operator-less edge (no factor is built, so no skipped-factor record
-    exists), and a supersession CHAIN (the pointer's target is itself superseded,
-    so the repair targets the live head);
+    exists), an ``op_type``-only operator (EP's predicate is the flag OR
+    ``op_type``, so it takes the operator arms, not the direct-edge one), an
+    AMBIGUOUS successor name (N≥2 carriers — #3573 — where the check must not
+    describe "the successor" by picking one carrier's status), and a supersession
+    CHAIN with one hop of lookahead (the repair targets the next link, or says the
+    chain has no resolvable head — including a terminal successor that names none);
   * ``superseded_by_unresolvable`` (medium) — ``supersededBy`` is a NAME, so
     renaming the successor dangles the only link the predecessor has to it
     (#3590 made the name mutable and the id the identity);
@@ -385,8 +389,55 @@ def test_a_supersession_chain_points_the_repair_at_the_live_head(sdk):
     assert issues
     assert "the successor it names is ITSELF 'superseded'" in issues[0].detail, \
         issues[0].detail
-    assert "target the LIVE head of that chain" in issues[0].fix, issues[0].fix
-    assert "its own supersededBy is 'PolicyV3'" in issues[0].fix, issues[0].fix
+    # The fix must name the reachable live link, not just say "the head" — V3 is the
+    # hop the row proves is live, so V2 is NOT the write target.
+    assert "is ITSELF 'superseded'" in issues[0].fix, issues[0].fix
+    assert "the next link ('PolicyV3') is LIVE, so target THAT" in issues[0].fix, \
+        issues[0].fix
+
+
+def test_a_terminal_successor_with_no_chain_is_not_told_to_follow_one(sdk):
+    """A successor can be terminal WITHOUT a supersession — then there is no chain.
+
+    `update_entity(object, status='archived')` is a legal Object write and leaves
+    `supersededBy` absent, so "target the LIVE head of that chain" would name a node
+    that does not exist (the #7819 rule this module refuses to emit).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    arc = _obj(sdk, "ArcA2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    sdk.update_entity(v1["id"], status="superseded", **{"supersededBy": "ArcA2"})
+    sdk.update_entity(arc["id"], status="archived")
+    assert _q(sdk, "MATCH (o:Object {id:$i}) RETURN o.status, o.supersededBy",
+              {"i": arc["id"]}) == [["archived", None]]
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    fix = issues[0].fix
+    assert "names NO successor, so there is no chain to follow" in fix, fix
+    assert "target the LIVE head of that chain" not in fix, fix
+
+
+def test_a_chains_dangling_next_hop_is_not_named_as_the_target(sdk):
+    """The hop after the successor can dangle — then there is no resolvable head."""
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) SET o.status = 'superseded', "
+            "o.supersededBy = 'Ghost'", {})
+    assert _q(sdk, "MATCH (o:Object {name:'Ghost'}) RETURN o.id", {}) == []
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == v1["id"]]
+    assert issues
+    fix = issues[0].fix
+    assert "answers no OTHER " in fix, fix
+    assert "no resolvable head" in fix, fix
+    assert "target THAT" not in fix, fix
 
 
 def test_a_rewired_successor_leaves_the_stale_edge_reported_honestly(sdk):
@@ -466,18 +517,76 @@ def test_an_ambiguous_name_is_not_reported_as_a_dead_one(sdk):
     """N>=2 carriers is a DIFFERENT fact (#3573), not an unresolvable one.
 
     The two need different repairs (disambiguation vs. re-pointing), so folding
-    them would misdirect the fix — the check stays silent whenever the name
-    still addresses something.
+    them would misdirect the fix — the check stays silent whenever the name still
+    addresses something.  ⛔ ``create_entity`` UPSERTS on the name, so calling it
+    twice returns ONE node: the second carrier has to be minted raw, and the count
+    is asserted first, or this test passes on a one-carrier graph and a rewrite to
+    ``count(carrier) < 2`` would keep it green (#12111 review).
     """
-    _obj(sdk, "PolicyV1")
-    _obj(sdk, "PolicyV2")
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]])
     _supersede_object(sdk, "PolicyV1", "PolicyV2")
-    # A second, unrelated Object carrying the successor's name.
-    _obj(sdk, "PolicyV2")
+    # A genuine SECOND node carrying the successor's name (name-upsert bypassed).
+    _q(sdk, "CREATE (:Object {id:'twin-PolicyV2', name:'PolicyV2', "
+            "objectKind:'other', status:'live'})", {})
+    assert _q(sdk, "MATCH (o:Object {name:'PolicyV2'}) RETURN count(o)", {}) == [[2]], \
+        "fixture drifted: the twin was upserted into one node, so there is no ambiguity"
+    assert v2["id"] != "twin-PolicyV2"
 
     assert _issues(sdk, "superseded_by_unresolvable") == [], (
         "an ambiguous pointer was reported as a dead one — same-name "
         "coexistence is #3573's fact, not #11826's")
+    # And 4b must not describe "the successor" by picking one carrier's status.
+    edge_issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+                   if i.node_id == v1["id"]]
+    assert edge_issues
+    assert "is AMBIGUOUS (2 Objects carry it, #3573)" in edge_issues[0].detail, \
+        edge_issues[0].detail
+    assert "FIRST name the successor meant" in edge_issues[0].fix, edge_issues[0].fix
+
+
+def test_an_op_type_only_operator_is_not_mistaken_for_a_direct_edge(sdk):
+    """EP's operator predicate is the flag OR ``op_type`` — not the flag alone.
+
+    ``create_point(..., op_type='IMPL')`` stores ``is_operator=False,
+    op_type='IMPL'`` (the hybrid/legacy shape both ``graph-scripts/
+    backfill_is_operator.py`` and ``sdk.py`` name), and EP builds the factor from it
+    all the same. Reading the bare flag sent that row down the DIRECT-edge arm —
+    "EP builds NO factor … no skipped-factor record" (false: the record exists) and
+    a repair with no ``idx`` for an edge that is an operator input.
+    """
+    op = sdk.create_point("statement", "the hybrid operator", op_type="IMPL")
+    o1 = _obj(sdk, "PolicyV1")
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    _obj(sdk, "PolicyV2")
+    # idx 0 = the source slot, which the stale edge occupies; idx 1 = a live input.
+    assert sdk.create_direct_edge("IMPL", op["id"], o1["id"])
+    assert sdk.create_direct_edge("IMPL", op["id"], p["id"])
+    for eid, i in ((o1["id"], 0), (p["id"], 1)):
+        _q(sdk, "MATCH (a {id:$a})-[r:IMPL]->(b {id:$b}) SET r.idx = $i",
+           {"a": op["id"], "b": eid, "i": i})
+    _q(sdk, "MATCH (x:Point {id:$i}) SET x.status = 'live', x.direction = '->'",
+       {"i": op["id"]})
+    sdk.update_entity(o1["id"], status="superseded", **{"supersededBy": "PolicyV2"})
+    assert _q(sdk, "MATCH (p:Point {id:$i}) RETURN p.is_operator, p.op_type",
+              {"i": op["id"]}) == [[False, "IMPL"]], \
+        "fixture drifted: this is no longer the op_type-only shape"
+
+    # The engine fact: EP treats it as an operator and records the strip.
+    run = sdk.compute_confidence(factors=[op["id"]], require_calibration=False)
+    assert [s["reason"] for s in run.get("skipped_factors") or []] == ["source_stripped"], \
+        f"EP did not build a factor for the hybrid operator: {run.get('skipped_factors')}"
+
+    issues = [i for i in _issues(sdk, "superseded_object_active_edges")
+              if i.node_id == o1["id"]]
+    assert issues
+    issue = issues[0]
+    assert "EP builds NO factor for a direct edge" not in issue.detail, issue.detail
+    assert "source_stripped" in issue.detail, issue.detail
+    assert "it is a DIRECT edge" not in issue.fix, issue.fix
+    assert "into the SOURCE slot" in issue.fix, issue.fix
 
 
 def test_an_object_with_no_successor_name_is_not_reported(sdk):

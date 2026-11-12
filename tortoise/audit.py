@@ -711,52 +711,92 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         "WITH sup, r, active, count(carrier) AS carrier_count, "
         "     head(collect(carrier.status)) AS carrier_status, "
         "     head(collect(carrier.supersededBy)) AS carrier_sb\n"
+        # ⛔ ONE HOP OF LOOKAHEAD, because "the successor is itself terminal" is NOT
+        # the same fact as "there is a live head to re-point onto": the Object lane can
+        # terminalize without a supersession (so the successor names no successor at
+        # all — no chain exists), and a chain's next name can dangle. Both states
+        # would otherwise be told to "target the LIVE head of that chain" — a node
+        # that does not exist, the #7819 rule this module refuses to emit.
+        "OPTIONAL MATCH (nxt:Object) WHERE nxt.name = carrier_sb "
+        "AND nxt.id <> sup.id\n"
+        "WITH sup, r, active, carrier_count, carrier_status, carrier_sb, "
+        "     count(nxt) AS next_count, head(collect(nxt.status)) AS next_status\n"
         # ``r.idx`` and the OPERATOR's ``direction`` are projected because the repair
-        # differs in the idx-0 source slot (ep.py's ``source_stripped`` hazard), and
-        # ``active.is_operator`` because a DIRECT edge is a different mechanism again
-        # (no factor is built, so no skipped-factor record exists and there is no
-        # ``idx`` — measured: ``keys(r) == ['direction']``).
+        # differs in the idx-0 source slot (ep.py's ``source_stripped`` hazard),
+        # ``op_type`` because EP's operator predicate is the flag OR ``op_type``
+        # (see ``_4b_state``), and the two lookahead columns because a terminal
+        # successor is not necessarily a chain.
         "RETURN DISTINCT sup.id, sup.name, sup.supersededBy, type(r), r.idx, "
-        "coalesce(active.is_operator, false), active.direction, "
+        "coalesce(active.is_operator, false), active.op_type, active.direction, "
         f"{epistemic_identity('active')}, active.id, carrier_count, "
-        "carrier_status, carrier_sb "
+        "carrier_status, carrier_sb, next_count, next_status "
         f"LIMIT {SAMPLE_LIMIT}",
     )
 
-    def _successor_note(sup_sb, carrier_count, carrier_status, carrier_sb) -> str:
+    def _4b_state(row) -> dict:
+        """One ``rows4b`` row, as the facts the two emitted strings are built from.
+
+        ⛔ ``is_operator`` is EP's OWN operator predicate, not the bare flag: EP
+        treats a Point as an operator when ``is_operator = true`` **or** ``op_type
+        IS NOT NULL`` (the complement of its non-operator clause, ``ep.py``), and
+        the hybrid ``create_point(op_type=...)`` shape is exactly the second half
+        (measured: ``is_operator=False, op_type='IMPL'``). Reading the flag alone
+        sent that row down the DIRECT-edge arm — "EP builds NO factor … there is no
+        skipped-factor record" (false: EP builds the factor and records the strip)
+        and a repair with no ``idx`` for an edge that is an operator input.
+        """
+        (sup_id, sup_name, sup_sb, edge_type, idx, is_op_flag, op_type,
+         direction, active_id, _active_nid, carrier_count, carrier_status,
+         carrier_sb, next_count, next_status) = row
+        return {
+            "sup_id": sup_id, "sup_name": sup_name, "sup_sb": sup_sb,
+            "edge_type": edge_type, "idx": idx,
+            "is_operator": bool(is_op_flag) or op_type is not None,
+            "direction": direction, "active_id": active_id,
+            "carrier_count": carrier_count, "carrier_status": carrier_status,
+            "carrier_sb": carrier_sb, "next_count": next_count,
+            "next_status": next_status,
+        }
+
+    def _successor_note(s: dict) -> str:
         """The pointer's state, as the trailing clause of a ``detail``.
 
-        Three facts, not one: nothing resolvable, a resolvable successor, or a
+        Four facts, not one: nothing resolvable; a resolvable successor; a
         resolvable successor that is ITSELF terminal (a supersession CHAIN —
         re-pointing onto it clears this finding and leaves the input anchored to
-        another EP-dead node, so the repair must target the live head).
+        another EP-dead node); or an AMBIGUOUS name (N≥2 carriers, #3573), which
+        this check declines to resolve and therefore must not describe by picking
+        one carrier's status.
         """
-        if not carrier_count:
-            named = f"{_quoted(sup_sb)}" if bool(sup_sb) else "none"
+        if not s["carrier_count"]:
+            named = f"{_quoted(s['sup_sb'])}" if bool(s["sup_sb"]) else "none"
             return ("; and no OTHER Object answers its supersededBy "
                     f"({named}), so there is nothing to re-point this input onto")
-        if is_terminal_status(carrier_status):
+        if s["carrier_count"] > 1:
+            return (f"; and its supersededBy ({_quoted(s['sup_sb'])}) is AMBIGUOUS "
+                    f"({s['carrier_count']} Objects carry it, #3573), so the repair "
+                    "must name the Object meant as the successor")
+        if is_terminal_status(s["carrier_status"]):
             return ("; the successor it names is ITSELF "
-                    f"{_quoted(carrier_status)}, so the re-point must target the "
-                    "LIVE head of that chain")
+                    f"{_quoted(s['carrier_status'])}, so the re-point must target "
+                    "the LIVE head of that chain")
         return ""
 
-    def _active_edge_detail(sup_id, sup_name, sup_sb, edge_type, idx, is_operator,
-                            active_id, carrier_count, carrier_status,
-                            carrier_sb) -> str:
+    def _active_edge_detail(s: dict) -> str:
         """The consequence, at its measured scope, for THIS row's mechanism.
 
         Two mechanisms live behind one pattern: an operator INPUT (EP builds the
         factor and then strips it) and a DIRECT edge (EP builds no factor at all,
         so the claim loses the support silently and there is no skipped-factor
         record to find). Stating the first for the second would send a reader to a
-        diagnostic that never exists.
+        diagnostic that never exists — which is why ``is_operator`` is EP's
+        predicate and not the raw flag.
         """
-        source = (active_id if active_id is not None
+        source = (s["active_id"] if s["active_id"] is not None
                   else "<no id or eventId>")
-        detail = (f"Superseded Object '{sup_name}' still carries an active "
-                  f"{edge_type} edge from {source}")
-        if is_operator:
+        detail = (f"Superseded Object '{s['sup_name']}' still carries an active "
+                  f"{s['edge_type']} edge from {source}")
+        if s["is_operator"]:
             detail += (
                 " — the Object lane moved no edges on supersession, so EP strips "
                 "that terminal input: a two-input factor is then skipped as "
@@ -771,82 +811,123 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "NO factor for a direct edge: with a terminal endpoint the row is "
                 "excluded before evaluation, so there is no skipped-factor record "
                 "for it and the claim silently loses that support (#11826)")
-        if not carrier_count and sup_id is not None and sup_sb and sup_name == sup_sb:
+        if (not s["carrier_count"] and s["sup_id"] is not None
+                and s["sup_sb"] and s["sup_name"] == s["sup_sb"]):
             detail += ("; and its supersededBy names the Object ITSELF, so no OTHER "
                        "Object answers it — name the real successor")
         else:
-            detail += _successor_note(sup_sb, carrier_count, carrier_status,
-                                      carrier_sb)
-        if active_id is None:
+            detail += _successor_note(s)
+        if s["active_id"] is None:
             detail += ("; that endpoint carries no identity, so it cannot be named "
                        "by the repair")
         return detail
 
-    def _active_edge_fix(sup_id, sup_name, sup_sb, edge_type, idx, is_operator,
-                         direction, carrier_count, carrier_status,
-                         carrier_sb) -> str:
+    def _chain_tail(s: dict) -> str:
+        """What to do when the named successor is not a live target.
+
+        Emitted only for facts the row carries. A terminal successor with no name
+        to follow has NO chain (the Object lane can terminalize without a
+        supersession), and one whose next name answers no OTHER Object has no
+        resolvable head — telling the reader to "target the LIVE head" in either
+        state would name a node that does not exist.
+        """
+        if not s["carrier_count"] or s["carrier_count"] > 1:
+            return ""
+        status = s["carrier_status"]
+        if not is_terminal_status(status):
+            return ""
+        succ = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "the successor"
+        if not s["carrier_sb"]:
+            return (f" ⛔ {succ} is ITSELF {_quoted(status)} and names NO successor, "
+                    "so there is no chain to follow: re-point onto whatever now "
+                    "carries the claim, or delete the edge")
+        if not s["next_count"]:
+            return (f" ⛔ {succ} is ITSELF {_quoted(status)} and its own "
+                    f"supersededBy ({_quoted(s['carrier_sb'])}) answers no OTHER "
+                    "Object either, so the chain has no resolvable head: re-point "
+                    "onto whatever now carries the claim, or delete the edge")
+        if is_terminal_status(s["next_status"]):
+            return (f" ⛔ {succ} is ITSELF {_quoted(status)}, and the next link "
+                    f"({_quoted(s['carrier_sb'])}) is {_quoted(s['next_status'])} "
+                    "too — walk that chain to its LIVE head, not the immediate "
+                    "successor")
+        return (f" ⛔ {succ} is ITSELF {_quoted(status)}; the next link "
+                f"({_quoted(s['carrier_sb'])}) is LIVE, so target THAT, not the "
+                "immediate successor")
+
+    def _active_edge_fix(s: dict) -> str:
         """The repair for this row, chosen by the state the row carries.
 
-        Four arms, each a state the anchor does not rule out:
+        Five states the anchor does not rule out, each with its own repair:
 
-          * NO RESOLVABLE SUCCESSOR — the transfer has no destination, so naming
-            one is step one. ``archived`` is offered only to say what it does NOT
-            clear (#11824's two-arm rule is a write-door rule; archiving here
-            keeps the input stripped AND drops the node out of this check's
-            anchor, so a re-audit would read clean over a dead factor).
-          * A DIRECT edge — no ``idx`` exists and no factor is built, so the repair
+          * NO RESOLVABLE SUCCESSOR — the transfer has no destination, so naming one
+            is step one. ``archived`` is offered only to say what it does NOT clear
+            (#11824's two-arm rule is a write-door rule; archiving here keeps the
+            input stripped AND drops the node out of this check's anchor, so a
+            re-audit would read clean over a dead factor).
+          * AN AMBIGUOUS NAME (N≥2 carriers, #3573) — the check cannot pick one, so
+            the first step is naming the Object meant.
+          * A DIRECT edge — no factor is built and no ``idx`` exists, so the repair
             writes the equivalent edge onto the successor.
           * The operator's idx-0 SOURCE of a non-bidirectional operator — EP drops
             the whole factor while that slot is terminal, and DELETING the edge
             alone renumbers a live target into idx 0 and inverts the factor's
             direction (``ep.py``'s ``source_stripped`` note).
-          * Any other operator input — re-point, preserving ``idx``; a successor
-            that already carries an equivalent input needs only the delete.
+          * Any other operator input — re-point, preserving ``idx`` where the edge
+            carries one; a successor that already carries an equivalent input needs
+            only the delete.
         """
-        q = _quoted(sup_id) if sup_id is not None else _quoted(sup_name)
-        if not carrier_count:
+        q = _quoted(s["sup_id"]) if s["sup_id"] is not None else _quoted(s["sup_name"])
+        if not s["carrier_count"]:
             fix = (
                 f"No resolvable successor is named for {q}, so there is nothing to "
-                f"re-point this {edge_type} input onto: name the successor — "
+                f"re-point this {s['edge_type']} input onto: name the successor — "
                 f"tortoise_update_entity({q}, {{'supersededBy': '<the successor "
                 f"name>'}}) — then re-point the input onto it and delete the edge "
                 f"into {q}. Archiving it instead — tortoise_update_entity({q}, "
                 f"{{'status': 'archived'}}) — does NOT clear this: EP strips a "
                 f"terminal input either way, so the edge must still be deleted or "
                 f"re-pointed onto whatever now carries the claim")
-            if not is_operator:
+            if not s["is_operator"]:
                 fix += ("; and this is a DIRECT edge, so there is no factor to "
                         "re-point — write the equivalent edge onto that successor "
                         "and delete this one")
             return fix
-        successor = f"'{sup_sb}'" if bool(sup_sb) else "its successor"
-        tail = ""
-        if is_terminal_status(carrier_status):
-            tail = (
-                f" That successor ({successor}) is ITSELF "
-                f"{_quoted(carrier_status)}, so target the LIVE head of that chain"
-                + (f" — its own supersededBy is {_quoted(carrier_sb)}"
-                   if carrier_sb else "")
-                + ", not the immediate successor")
-        if not is_operator:
-            return (
-                f"Re-point this {edge_type} edge off {q} onto the successor "
+        prefix = ""
+        if s["carrier_count"] > 1:
+            prefix = (f"FIRST name the successor meant: {_quoted(s['sup_sb'])} is "
+                      f"carried by {s['carrier_count']} Objects (#3573) and this "
+                      "check cannot pick one, so re-point onto the intended one "
+                      "by ID. ")
+        successor = f"'{s['sup_sb']}'" if bool(s["sup_sb"]) else "its successor"
+        tail = _chain_tail(s)
+        if not s["is_operator"]:
+            return prefix + (
+                f"Re-point this {s['edge_type']} edge off {q} onto the successor "
                 f"({successor}): it is a DIRECT edge, so there is no factor to "
                 f"re-point and no edge idx to preserve — write the equivalent "
                 f"edge from the same source onto the successor and delete this "
                 f"one." + tail)
-        if idx == 0 and not all(direction_flows(direction)):
-            return (
+        if s["idx"] == 0 and not all(direction_flows(s["direction"])):
+            return prefix + (
                 f"Write the successor ({successor}) into the SOURCE slot: this "
-                f"{edge_type} edge is the operator's idx-0 source and the operator "
-                f"is {_quoted(direction)}-directional, so EP drops the whole factor "
-                f"while that slot is terminal — and DELETING the edge alone is not "
-                f"the repair: the surviving input is renumbered into idx 0 and the "
-                f"factor's direction inverts (ep.py's source_stripped note). "
-                f"Re-point idx 0 onto the successor, then delete the edge into "
-                f"{q}." + tail)
-        return (
-            f"Re-point this {edge_type} input from {q} to the successor "
+                f"{s['edge_type']} edge is the operator's idx-0 source and the "
+                f"operator is {_quoted(s['direction'])}-directional, so EP drops "
+                f"the whole factor while that slot is terminal — and DELETING the "
+                f"edge alone is not the repair: the surviving input is renumbered "
+                f"into idx 0 and the factor's direction inverts (ep.py's "
+                f"source_stripped note). Re-point idx 0 onto the successor, then "
+                f"delete the edge into {q}." + tail)
+        if s["idx"] is None:
+            return prefix + (
+                f"Re-point this {s['edge_type']} input from {q} onto the successor "
+                f"({successor}): an explicit edge write against the successor's "
+                f"ID, then delete the edge into {q}. ⛔ This input edge carries NO "
+                f"idx (a legacy or operator-less write), so stamp one — idx 0 is "
+                f"the source slot EP reads — or the source cannot be told from the "
+                f"targets. No SDK door rewires an operator's inputs" + tail)
+        return prefix + (
+            f"Re-point this {s['edge_type']} input from {q} to the successor "
             f"({successor}): an explicit edge write against the successor's ID "
             f"that PRESERVES the edge idx (the slot EP reads), then delete the "
             f"edge into {q}. A successor that ALREADY carries an equivalent input "
@@ -856,64 +937,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         AuditIssue(
             issue_type="superseded_object_active_edges",
             severity="high",
-            node_id=str(sup_id) if sup_id is not None else str(sup_name),
-            # ⛔ The consequence is STATED AT ITS MEASURED SCOPE. EP strips the
-            # terminal input (`ep.py`'s participation predicate), and only a
-            # TWO-input operator is then skipped as degenerate
-            # (`len(input_ids) < 2 <= len(full_inputs)`, #780/#2422) — a factor
-            # with three or more inputs still runs on the survivors, so its belief
-            # is diluted rather than zeroed. Claiming "the factor is skipped"
-            # unconditionally would misreport every wider operator as a
-            # higher-severity consequence than it has. The per-state wording lives
-            # in `_active_edge_detail` / `_active_edge_fix` (see their docstrings).
-            # The repair is a TRANSFER, not a deletion: the successor is the node
-            # the belief belongs to.
-            #
-            # ⛔ It is NOT a `tortoise_create_operator` call, and that is not a
-            # style choice. `create_operator(op_type, source_id, target_ids)`
-            # MINTS an operator whose `source_id` is the idx-0 input, so handing
-            # it this row's `active.id` builds a meta-operator OVER the existing
-            # one and moves no belief to the successor — guidance that executes
-            # and builds the wrong graph (the #7819 rule: a remedy that is wrong
-            # or always raises is worse than no remedy). There is no SDK door
-            # that REWIRES an operator's input list, so the repair is stated as
-            # the explicit edge write it is, and it names what must be preserved
-            # (`idx` is the slot EP reads, `ep.py`).
-            #
-            # `edge_type` is safe to interpolate: it is `type(r)` from a pattern
-            # restricted to `:IMPL|NAND`, so it is one of two server-supplied
-            # literals and never caller text. The ids go through `_quoted`.
-            #
-            # ⛔ PROSE, deliberately, and not an executable sketch. Every sketch
-            # tried here was misleading in a way only the engine disproves: an
-            # unbound destination (`(operator)-[:IMPL]->(successor)`) makes MERGE
-            # match the WHOLE pattern, so in exactly the state this check reports
-            # it re-matches the existing edge into the superseded node, creates
-            # nothing, and the following delete removes the operator's only input
-            # — the repair would destroy the belief it is meant to move (#11826
-            # round-6 measurement). A remedy that reads as runnable but builds the
-            # wrong graph is the #7819 failure this module refuses to emit, so the
-            # fix states the PROPERTIES the write must have (target the
-            # successor's ID; preserve `idx`) and leaves the statement to whoever
-            # has the successor in hand.
-            # ⛔ FOUR arms, not one: the anchor rules out no state of these facts,
-            # and the row query now carries all of them (see the 4b note).
-            # `_active_edge_fix` is the arm table; `_active_edge_detail` is the
-            # matching consequence. The "already rewired" half is handled in the
-            # wording ("needs only that delete") rather than by a second query,
-            # because the diagnostic that decides it at run time is EP's own
-            # skipped-factor record, not a graph read this check could trust without
-            # re-deriving the participation predicate.
-            detail=_active_edge_detail(sup_id, sup_name, sup_sb, edge_type, idx,
-                                       is_operator, active_id, carrier_count,
-                                       carrier_status, carrier_sb),
-            fix=_active_edge_fix(sup_id, sup_name, sup_sb, edge_type, idx,
-                                 is_operator, direction, carrier_count,
-                                 carrier_status, carrier_sb),
+            node_id=str(s["sup_id"]) if s["sup_id"] is not None else str(s["sup_name"]),
+            detail=_active_edge_detail(s),
+            fix=_active_edge_fix(s),
         )
-        for (sup_id, sup_name, sup_sb, edge_type, idx, is_operator, direction,
-             active_id, active_nid, carrier_count, carrier_status,
-             carrier_sb) in rows4b
+        for s in map(_4b_state, rows4b)
     ], count4b)
 
     # ── 4c. superseded_by_unresolvable (medium) ─────────────────
