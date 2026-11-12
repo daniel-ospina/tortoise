@@ -422,6 +422,25 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "`clean.setdefault(\"embedding\", None)`, and `update_point`'s `emit_props` on the "
         "`PointRevised` record). Their gate-side half is `gated` and lies outside this "
         "census's population"),
+    "tortoise.api::_emit": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::_emit` — a CARRIER: the vector its record carries is stamped by the "
+        "seam (`stamp_journal_embedding`) and stored by the FOLD, so there is no store clause in "
+        "its own body (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`). The instrument's "
+        "match is COMMENT PROSE — `#12000`'s F1b note quotes the shape its guard REJECTS "
+        "(a non-numeric `embedding` on the keyword payload), and `_EMBED_WRITE` reads raw "
+        "source, so a comment naming the rejected shape enrols the function. The same "
+        "prose-match class as `tortoise.sdk::_update_entity` and "
+        "`tortoise.projection::_prewipe_synthetic_write_scope`"),
+    "tortoise.api::_verify_record_vector_width": (
+        CENSUS_EXEMPT,
+        "`tortoise/api.py::_verify_record_vector_width` — a VERIFIER, not a producer: it reads "
+        "the record's declared `embedding_width` and the width's own vector and asks the seam "
+        "whether the declaration is truthful (`#11835` review round 9, P1). The instrument's "
+        "match is inside its DOCSTRING, which reproduces the measured `_emit(...)` calls — "
+        "`_EMBED_WRITE` reads raw source, so a docstring QUOTING the shape matches, exactly as "
+        "`tortoise.projection::_prewipe_synthetic_write_scope`'s does. It issues no write at "
+        "all (`NO_LIVE_VECTOR` in `tortoise/embed_writer_register`)"),
     "tortoise.consistency::_compare_views": (
         CENSUS_EXEMPT,
         "issues no write; the only WRITE-SHAPED text is a COMMENT in "
@@ -571,6 +590,14 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.api::add_point": (
         ("tortoise/api.py", "add_point",
          'p["embedding"] = fields["embedding"]'),),
+    "tortoise.api::_emit": (
+        ("tortoise/api.py", "_emit", 'embedding="abc"'),
+        ("tortoise/api.py", "_emit", "stamp_journal_embedding ="),),
+    "tortoise.api::_verify_record_vector_width": (
+        ("tortoise/api.py", "_verify_record_vector_width",
+         "embedding=[0.1234567890123, 1/3]"),
+        ("tortoise/api.py", "_verify_record_vector_width",
+         "JOURNAL_VECTOR_WIDTH_F32 as _F32"),),
     "tortoise.consistency::_compare_views": (
         ("tortoise/consistency.py", "_compare_views",
          "n.embedding=vecf32($embedding)"),),

@@ -848,6 +848,36 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
     ),
     # ── Writers that store NO vector: the instrument's false positives and its passthroughs ──
     (
+        "tortoise.api::_emit",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/api.py::_emit` — a CARRIER (its record's vector is stamped by the seam and "
+            "stored by the FOLD), so :data:`NO_LIVE_VECTOR` is the shape the two other carriers "
+            "(`tortoise.api::add_point`, `tortoise.sdk::_journal_event_raw_write`) already take. "
+            "The instrument's own match is COMMENT PROSE: `#12000`'s F1b note quotes the shape it "
+            "rejects (`embedding=\"abc\"` on the payload), and `_EMBED_WRITE` reads a function's "
+            "RAW SOURCE, so the quote enrols this function. The function itself writes no Cypher "
+            "and names no label — the fold's label is not this writer's to declare",
+            "#11835",
+            stores=NO_LIVE_VECTOR,  # the match is a COMMENT quoting a REJECTED shape
+        ),
+    ),
+    (
+        "tortoise.api::_verify_record_vector_width",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/api.py::_verify_record_vector_width` — a VERIFIER: it reads a record's "
+            "declared `embedding_width` and the width's own vector, asks the seam whether the "
+            "declaration is truthful, and stores nothing. The instrument's match is its "
+            "DOCSTRING, which reproduces the measured `_emit(...)` calls (a literal keyword "
+            "payload is what was measured, `#11835` review round 9 P1) — `_EMBED_WRITE` reads raw "
+            "SOURCE, so a docstring QUOTING a shape matches, exactly as it does for "
+            "`tortoise.projection::_prewipe_synthetic_write_scope`",
+            "#11835",
+            stores=NO_LIVE_VECTOR,  # the match is its DOCSTRING quoting a measured call
+        ),
+    ),
+    (
         "tortoise.consistency::_compare_views",
         WriterClass(
             EXEMPT,

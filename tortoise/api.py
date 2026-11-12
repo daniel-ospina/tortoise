@@ -238,23 +238,9 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
 
         _emit("PointAdded", {"id": "p", "content": "c",
                              "embedding_width": "f32"},
-              **{"embedding": [0.1234567890123, 1/3]})
+              embedding=[0.1234567890123, 1/3])
           -> journalled; envelope width `f64`, record width `f32`,
              fold reads `f32` over [0.1234567890123, 0.3333333333333333]
-
-    ⛔ Every measured example here shows the keyword payload as a `**{…}` map
-    rather than as a literal `embedding` KEYWORD ARGUMENT, and that is not
-    cosmetic:
-    `tools/dod_5090_probe.py`'s `_EMBED_WRITE` reads a function's raw SOURCE, so
-    a docstring QUOTING that shape enrols the function in the embedding-writer
-    population — and this function stores nothing. Measured: the literal form
-    here put `tortoise.api::_verify_record_vector_width` in that population as
-    `unresolved_write`, which HOLDS DoD row 2
-    (`tests/test_11641_runtime_vector_label.py::test_row_2_reads_met_with_no_runtime_label_left`,
-    seen in CI). The register's `NO_LIVE_VECTOR` disposition is the designed home
-    for a prose match, but declaring a VERIFIER as a writer class would be a
-    false statement about the product, so the example is spelled so it cannot
-    match: the shape stays demonstrated, the population stays honest.
 
     So the merged view is what gets verified, and a declared ``f32`` with NO
     decidable vector anywhere is a REFUSAL rather than the undecidable case:
@@ -341,7 +327,7 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         #
         #     _emit("PointAdded", {"id": "p", "content": "c",
         #                          "embedding_width": "f32"},
-        #           **{"embedding": "abc"})  -> journalled, fold reads f32 over 'abc'
+        #           embedding="abc")   -> journalled, fold reads f32 over 'abc'
         #
         # So: a vector the seam can only DROP is a vector no width describes,
         # and a declared `f32` over it is refused.
@@ -363,7 +349,7 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         #     _emit("PointAdded", {"id": "p", "content": "c",
         #                          "embedding": "123",
         #                          "embedding_width": "f32"})
-        #       -> journalled, and the FOLD stored '123' in the point's embedding
+        #       -> journalled, and the FOLD stored point.embedding = '123'
         #
         # ⛔ The belt is NOT a duplicate of this arm and must not be read as one
         # (#12000 cycle-3 review, P3): an empty vector passes HERE (it is
@@ -772,10 +758,9 @@ class EventAPI:
         # and POPS the width from the dict it was given, so a record declaring
         # `f32` beside a vector the seam drops would leave `f32` over `None` —
         # the exact state the no-vector refusal forbids, reached one call later
-        # (#12000 round-10 review, F1b — measured with the string "abc" as the
-        # payload's embedding: journalled with the envelope's embedding and
-        # width both `None` and the record's width still `f32`). The pre-stamp
-        # check now refuses the non-numeric
+        # (#12000 round-10 review, F1b — measured with `embedding="abc"` on the
+        # payload: journalled `env.embedding=None env.width=None
+        # record.width='f32'`). The pre-stamp check now refuses the non-numeric
         # vector that produced that instance, so this is the belt to that brace:
         # any FUTURE drop path lands here too, before the commit point.
         if isinstance(event.get("point"), dict):
