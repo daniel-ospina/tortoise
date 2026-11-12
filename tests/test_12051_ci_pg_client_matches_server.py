@@ -210,16 +210,26 @@ FAIL_CLOSED_BRANCH_RE = re.compile(
 FAIL_CLOSED_ANNOUNCE_RE = re.compile(r'^[ \t]*echo[ \t]+["\']::error::', re.MULTILINE)
 FAIL_CLOSED_STOP_RE = re.compile(r"^[ \t]*exit 1[ \t]*$", re.MULTILINE)
 
-#: A guard whose CONDITION IS A LITERAL CONSTANT, so the block it controls can
-#: never run — or, for `until true`/`while true`, never stop (#12051 review
-#: round 8). `FAIL_CLOSED_BRANCH_RE` refuses nested structure INSIDE the branch,
-#: but nothing refused an ENCLOSING `if false; then … fi` around the prepend,
-#: around the install, or around the whole fail-closed `for` loop: measured, all
-#: five rows GREEN with the block body unchanged, step exit 0, leg on the
-#: inherited client — the #12051 defect carried back in one line, and a FALSE
-#: PASS of exactly the class this guard exists to prevent.
-#: The condition is read as a WHOLE LINE and only when it is a BARE constant
-#: (optionally negated). `if [ "$major" != "16" ]; then` is untouched, because
+#: A guard whose CONDITION IS A LITERAL CONSTANT that makes the body NEVER RUN.
+#: `FAIL_CLOSED_BRANCH_RE` refuses nested structure INSIDE the branch, but nothing
+#: refused an ENCLOSING `if false; then … fi` around the prepend, around the
+#: install, or around the whole fail-closed `for` loop: measured, all five rows
+#: GREEN with the block body unchanged, step exit 0, leg on the inherited client —
+#: the #12051 defect carried back in one line, and a FALSE PASS of exactly the
+#: class this guard exists to prevent.
+#:
+#: ⛔ THE POLARITY IS "NEVER RUNS", NOT "NAMES A CONSTANT" (#12069 review). The
+#: first cut refused `false|true` on every one of `if|elif|while|until`, which is
+#: FIVE false REDs on correct shell — `if true; then` runs its body, `while true;
+#: do … break; done` runs it and stops, `until false; do` runs it, and the negated
+#: constants invert all of it. A guard that reds a correct tree is the same defect
+#: class as one that passes a broken one, so the set below is exactly the
+#: never-runs forms and nothing else:
+#:   * `if` / `elif` / `while` with `false` or `! true`  -> body never entered
+#:   * `until` with `true` or `! false`                  -> body never entered
+#: `while true … break` is deliberately NOT refused: it is the ordinary
+#: retry-loop spelling and it RUNS. Only when the condition is a BARE constant
+#: (optionally negated); `if [ "$major" != "16" ]; then` is untouched, because
 #: its condition is a `[` test whose truth nobody can read off the text.
 #:
 #: STATED LIMIT: this refuses the literal spellings that were MEASURED, not
@@ -230,17 +240,26 @@ FAIL_CLOSED_STOP_RE = re.compile(r"^[ \t]*exit 1[ \t]*$", re.MULTILINE)
 #: named residual, not a proof; the in-job `pg_dump --version` assertion is what
 #: makes a surviving blind spot visible in the log.
 CONSTANT_GUARD_RE = re.compile(
-    r"^[ \t]*(?:if|elif|while|until)[ \t]+(?:![ \t]*)?(?:false|true)[ \t]*(?:;|$)",
+    r"^[ \t]*(?:"
+    r"(?:if|elif|while)[ \t]+(?:false|![ \t]*true)"
+    r"|until[ \t]+(?:true|![ \t]*false)"
+    r")[ \t]*(?:;|$)",
     re.MULTILINE,
 )
 
-#: A command chain that is dead BY CONSTRUCTION: `false && <cmd>` never runs
-#: `<cmd>`, and `true || <cmd>` never runs it either — both measured GREEN while
-#: the prepend they prefix never executed. The HARMLESS spellings are
-#: deliberately NOT matched: `<cmd> || true` and `<cmd> && true` still RUN
-#: `<cmd>` (they only choose the exit status), so refusing them would be a false
-#: RED on a correct tree.
-DEAD_CHAIN_RE = re.compile(r"(?:^|;|&&|\|\|)[ \t]*(?:false[ \t]*&&|true[ \t]*\|\|)")
+#: A command chain that is dead BY CONSTRUCTION, at the position where the dead
+#: command sits (#12069 review corrected the first cut, which red a correct line):
+#:   * `false && <cmd>` — `<cmd>` never runs. Refused in ANY command position,
+#:     because `&&` short-circuits on a false left operand wherever it appears.
+#:   * `true || <cmd>` — `<cmd>` never runs. Refused ONLY at a STATEMENT position
+#:     (`^` or after `;`). `cmd && true || <fallback>` is NOT a dead chain: the
+#:     fallback DOES run when `cmd` fails, and it was measured as a false RED.
+#: The HARMLESS spellings stay unmatched: `<cmd> || true` and `<cmd> && true`
+#: still RUN `<cmd>` (they only choose the exit status).
+DEAD_CHAIN_RE = re.compile(
+    r"(?:^|;|&&|\|\|)[ \t]*false[ \t]*&&"
+    r"|(?:^|;)[ \t]*true[ \t]*\|\|"
+)
 
 
 @pytest.fixture(scope="module")
@@ -393,6 +412,14 @@ def _unreachable_guards(steps: list[dict], start: int, end: int) -> list[str]:
 
     Read through `_run_commands()` like every other line-unit search here, so a
     tombstone comment naming a constant guard is inert text, not an offender.
+
+    ⛔ THE CONTRACT IS "THE BODY NEVER RUNS", NOT "THE LINE NAMES A CONSTANT"
+    (#12069 review): a `while true; do … break; done` retry loop RUNS, and so does
+    `if true; then` — refusing those reds a correct tree, which is the same
+    defect class as passing a broken one. `CONSTANT_GUARD_RE` and
+    `DEAD_CHAIN_RE` are therefore both scoped to the never-runs forms, and
+    `tests/test_12051_ci_pg_client_matches_server.py`'s own mutate.py carries the
+    polarity table that pins it.
     """
 
     found: list[str] = []
@@ -727,6 +754,12 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     around the prepend or around the whole fail-closed `for` loop: measured,
     all five rows GREEN with the branch itself untouched. `_unreachable_guards()`
     is asserted here for that reason.
+
+    ⛔ AND THE REFUSAL IS SCOPED TO "NEVER RUNS" (#12069 review). The first cut of
+    that scan refused any bare constant, so `while true; do … break; done` — the
+    ordinary retry spelling, which RUNS — red this row on a correct tree. The
+    accepted set is now exactly the forms whose body is never entered, and the
+    polarity table in the mutation harness pins both directions.
 
     STATED LIMIT: the branch must be FLAT (`FAIL_CLOSED_BRANCH_RE`) — a nested
     conditional inside it is refused rather than reasoned about, because a
