@@ -504,10 +504,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   stored* defect, inside the correction that exists to stop it — and the reason two reviewers could
   each "prove" the other side was the stale one.
 
-The self-test that proves the arms its 41 mutations exercise still fire has its own **population
+The self-test that proves the arms its 50 mutations exercise still fire has its own **population
 floor** (`MIN_SELF_TEST_MUTATIONS`). An emptied arm set used to print `PASS (0 failing arm(s))` and
 exit 0 — a gate reporting OK when it cannot run — so a shrunk population now reds instead. ⛔ **The
-population is 41 mutations of the PAGE, not a proof of the guard**, and every one of them edits the
+population is 50 mutations of the PAGE, not a proof of the guard**, and every one of them edits the
 page's text (a falsified tally, a deleted correction row, a second survivor sentence), so anything an
 arm reads that is not the page's CONTENT is outside it. Of the arms `check_document()` calls, exactly
 two are blind this way — `check_section_presence`, the FIRST one called, and `check_registration`,
@@ -528,9 +528,9 @@ edit, `tier1` for a `docs/` one).
 Two mechanisms, stated separately, for the same reason the ancestry arm below states its own.
 
 Exactly one arm needs `git` **history**: the frontmatter's `measured_at_commit` must be an ancestor of
-`HEAD`. The other twelve read this checkout's tree and nothing else, and the tool keeps that split
+`HEAD`. The other thirteen read this checkout's tree and nothing else, and the tool keeps that split
 (`check_document()` / `check_all()`) because the two jobs that run it differ: the REQUIRED `docs` job
-checks out at `fetch-depth: 0` and runs `--check` (all thirteen arms), while the `test` jobs check out at
+checks out at `fetch-depth: 0` and runs `--check` (all fourteen arms), while the `test` jobs check out at
 the default depth 1, cannot resolve `f70d884b7` at all, and are where this page's own test module runs.
 In a depth-1 clone `--check` therefore reports **exit 2 UNVERIFIED** — never `0`, and never a verdict
 against the document it could not read — and `--self-test`, which drives only the tree-only arms,
@@ -582,6 +582,47 @@ section's own §6 re-read workflow (OPEN 4→3, one row to CLOSED COMPLETED 32�
 green — the last one while §7 still reads `36 of 40`, i.e. it goes stale silently on the update
 this section prescribes. Re-derive all eight from their own tables before quoting them; `#2852` §3 is
 the population source, not the derivation.
+
+The §3 **content columns** are guarded for EMPTINESS, not for length and not for truth:
+`check_correction_cells()` refuses a row whose retracted claim or correction carries no word at all
+(an emptied cell, a dash, or a vocabulary that RENDERS blank — an HTML entity such as `&nbsp;`, a
+tag/comment such as `<br>` / `<!-- removed -->`, or a markdown link whose LABEL is empty such as
+`[](https://x)`; tags and comments are stripped, a link reduced to its label, and entities decoded
+before the words are counted, which is the difference between a cell that reads empty and one that
+tests empty), refuses one whose every word — **or whose words JOINED into one token** — is a member
+of a **declared placeholder denylist** (`na`, `n`, `tbd`, `tba`, `tbc`, `todo`, `none`, `nil`, `null`,
+`xx`, `x`): the joined rule is why `n/a`, `to do` and `n o n e` are refused, since they join to `na`,
+`todo` and `none`, and it is part of the rule rather than a second class. That list is DECLARED, not
+closed, so a placeholder that joins to nothing in it (`pending`, `see above`) is NOT refused; the limit
+is stated here because a lane reading "placeholder" as "any placeholder" would otherwise be reading a
+promise the arm does not make — and
+refuses a
+correction that is a copy of its claim (markup stripped, both sides case-folded — `EXISTS` beside
+`exists` is the same words). ⛔ **The render-blank list is also a DECLARED list**: HTML tags and
+comments stripped, links reduced to their labels, entities decoded — a render-blank spelling outside
+those three families is not refused. This is a floor on EMPTINESS read from the text, not a
+renderer, and saying so is what keeps the promise equal to the code: each family here was added
+because a review measured it (`&nbsp;` then `<br>` then `[](…)`), not because the arm can see every
+way markup can hide. Measured before the arm existed (`1db5dbd2c0`): **no arm required these two
+cells to carry anything** — `check_citations` does read a citation PLACED in them, so a broken
+`path:line` there reds — blanking the claim column
+in all twelve rows,
+blanking the correction column in all twelve, and replacing one row's correction with a verbatim copy
+of its claim each left `--check` at exit 0 with every other arm green — the verdict arm reads the
+verdict cell, the evidence floor reads the evidence cell, and no arm required the two cells that carry
+what the row actually records to carry anything.
+
+⛔ **It is deliberately NOT a word-count floor, and that is a measured decision.** A three-word floor
+was written first and refuted in review of that same change: this page's shortest claim and its
+shortest correction are BOTH three words, so the floor sat at the minimum rather than below it, and a
+legitimate compression — `#2748, #1695, #1418 **closed**`, one content word that names exactly what
+closed — was refused as *records nothing*; a non-Latin correction counted zero words against an
+ASCII-only word class. Over-refusal is the false-accusation class the citation arms must not create
+either, so brief content passes **as long as it carries a word a reader can read** — the boundary is
+exactly that: a cell of nothing but `#2748`, a bare `&amp;` or a dash carries no word and is refused
+as emptiness, which is why the floor counts WORDS and not characters. **It does not
+check that the claim was ever made, or that the correction is right** — that is a re-measurement, and
+each row's own verdict says whether one is due.
 
 ---
 

@@ -242,7 +242,7 @@ def test_mutation_population_is_pinned():
     invented claim class left `check_document()` at `[]` where the parent returned a
     problem — so the exemption is the shape `| Verdict | … |`, and a reworded header is a
     deliberate two-place edit rather than a silent one.
-    39 is the population at this head.
+    50 is the population at this head.
     """
     # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
     # at this head two merges of two 25-arm populations produced 26 arms while the
@@ -253,8 +253,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 41, (
-        "this line RECORDS the population (41 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 50, (
+        "this line RECORDS the population (50 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -463,6 +463,197 @@ def test_emptying_the_whole_evidence_column_is_rejected(tmp_path, monkeypatch):
     problems = _doc_problems()
     offenders = [p for p in problems if "names no `path:line`, issue, command or §N" in p]
     assert len(offenders) == 12, problems
+
+
+# ── a §3 row must record a claim, and a correction that is not a copy of it ──
+
+
+def test_emptying_the_whole_claim_column_is_rejected(tmp_path, monkeypatch):
+    """FAILS if §3's retracted-claim column can be deleted into greenness.
+
+    Measured pre-fix at `1db5dbd2c0`: every claim cell blanked, `--check` rc 0. The
+    verdict and evidence arms read other cells, so a corrections log could lose every
+    claim it corrects and still be certified.
+    """
+    _mutated(tmp_path, monkeypatch, flc._blank_cell(2))
+    problems = _doc_problems()
+    offenders = [p for p in problems if "its claim cell carries no word at all" in p]
+    assert len(offenders) == 12, problems
+
+
+def test_emptying_the_whole_correction_column_is_rejected(tmp_path, monkeypatch):
+    """FAILS if the correction column can be deleted into greenness.
+
+    This is the one the page exists to prevent: the correction IS the record that a
+    claim was falsified. Measured pre-fix at `1db5dbd2c0`: every correction cell
+    blanked, `--check` rc 0.
+    """
+    _mutated(tmp_path, monkeypatch, flc._blank_cell(3))
+    problems = _doc_problems()
+    offenders = [p for p in problems if "its correction cell carries no word at all" in p]
+    assert len(offenders) == 12, problems
+
+
+def test_a_correction_that_copies_its_claim_is_rejected(tmp_path, monkeypatch):
+    """FAILS if a row can restate its claim in the correction column.
+
+    A copy carries words, so an emptiness rule alone would not close the hole: the row
+    would read as corrected while recording no correction at all. Measured pre-fix: one
+    row's correction replaced by its claim, `--check` rc 0.
+    """
+    _mutated(tmp_path, monkeypatch, flc._correction_copies_claim)
+    problems = _doc_problems()
+    assert any("its correction is a COPY of its claim" in p for p in problems), problems
+
+
+def test_a_copy_in_another_case_is_still_a_copy(tmp_path, monkeypatch):
+    """FAILS if `EXISTS` beside `exists` counts as a distinct correction.
+
+    The comparison must case-fold both sides: without it a one-character edit (SHOUT the
+    copy) passes, which is a silent bypass of the one clause the arm exists for — the
+    case-sensitive first version of this arm allowed exactly that (measured by the
+    review of it: `check_document()` returned `[]`).
+    """
+    _mutated(tmp_path, monkeypatch, flc._correction_copies_claim_shouted)
+    problems = _doc_problems()
+    assert any("its correction is a COPY of its claim" in p for p in problems), problems
+
+
+def test_a_placeholder_correction_is_rejected(tmp_path, monkeypatch):
+    """FAILS if `—` / `n/a` is accepted as a correction.
+
+    A lane that reds on a blank cell reaches for a placeholder next. `n/a` tokenises to
+    two words because `/` separates, so the rule reads the JOINED form as well — the
+    self-test arm for this went uncaught until it did.
+    """
+    _mutated(tmp_path, monkeypatch, flc._correction_is_a_placeholder)
+    problems = _doc_problems()
+    assert any("its correction cell is a placeholder" in p for p in problems), problems
+
+
+def test_a_blank_rendering_html_entity_is_rejected(tmp_path, monkeypatch):
+    """FAILS if `&nbsp;` / `&mdash;` is accepted as a correction.
+
+    An entity RENDERS as the blank cell the emptiness clause exists to refuse, but it
+    tokenises to a word (`nbsp`, `mdash`, `emsp`) — so before the word reader decoded
+    entities, `&nbsp;` cleared both the emptiness branch and the placeholder set and
+    `check_document()` returned `[]` (measured by the review of this change).
+    """
+    _mutated(tmp_path, monkeypatch, flc._correction_is_an_html_entity)
+    problems = _doc_problems()
+    assert any("its correction cell carries no word at all" in p for p in problems), problems
+
+
+def test_a_blank_rendering_markup_cell_is_rejected(tmp_path, monkeypatch):
+    """FAILS if `<br>` / `<span>&nbsp;</span>` / `<!-- … -->` is accepted as a correction.
+
+    The same render-blank class as the entity test, one spelling further out: a TAG
+    tokenises to letters (`br`, `span`) and renders as an empty cell, so `html.unescape`
+    alone did not reach it — `<br>` in all twelve correction cells left `check_all()` at
+    rc 0 (measured by the third review of this change).
+    """
+    for content in (" <br> ", " <span>&nbsp;</span> ", " <!-- removed --> "):
+        _mutated(tmp_path, monkeypatch, flc._s3_cell_mutation(lambda claim, c=content: c))
+        problems = _doc_problems()
+        assert any("its correction cell carries no word at all" in p for p in problems), (
+            content,
+            problems,
+        )
+
+
+def test_a_blank_rendering_markdown_link_is_rejected(tmp_path, monkeypatch):
+    """FAILS if `[](https://x)` is accepted as a correction.
+
+    A link with an empty LABEL renders as nothing while its URL still tokenises, so the
+    word reader reduces a link to its label: `[](https://x)` and `![](https://x)` carry no
+    word, `[the props doc](…)` keeps its three. Before that, all twelve correction cells
+    holding `[](https://x)` left `check_document()` at `[]` (measured by the fifth review
+    of this change).
+    """
+    for content in (" [](https://x) ", " ![](https://x) "):
+        _mutated(tmp_path, monkeypatch, flc._s3_cell_mutation(lambda claim, c=content: c))
+        problems = _doc_problems()
+        assert any("its correction cell carries no word at all" in p for p in problems), (
+            content,
+            problems,
+        )
+
+
+def test_a_link_with_a_real_label_is_not_refused(tmp_path, monkeypatch):
+    """FAILS if reducing a link to its label swallows the label — over-refusal direction.
+
+    A linked citation is ordinary prose here (`[the props doc](…)`), and the label IS the
+    content a reader sees, so it must count as words.
+    """
+    for content in (
+        " [the props doc](https://x) ",
+        " see [link](https://u) for detail ",
+    ):
+        _mutated(tmp_path, monkeypatch, flc._s3_cell_mutation(lambda claim, c=content: c))
+        problems = _doc_problems()
+        assert not [p for p in problems if "its correction cell carries no word" in p], (
+            content,
+            problems,
+        )
+
+
+def test_a_placeholder_the_denylist_lacked_is_rejected(tmp_path, monkeypatch):
+    """FAILS if `TBC` — `tba`'s twin — is accepted as a correction.
+
+    The set carried `tba` and not `tbc`, so `TBC` in all twelve correction cells left
+    `--check` at rc 0 (measured by the fourth review of this change). The set is a
+    DECLARED denylist, and §8 says so: a spelling outside it is not refused.
+    """
+    _mutated(tmp_path, monkeypatch, flc._correction_is_an_unlisted_placeholder)
+    problems = _doc_problems()
+    assert any("its correction cell is a placeholder" in p for p in problems), problems
+
+
+def test_a_cell_quoting_an_escaped_tag_or_a_bracketed_path_is_not_refused(tmp_path, monkeypatch):
+    """FAILS if stripping tags swallows content a reader SEES — the over-refusal direction.
+
+    `&lt;br&gt;` renders as the literal text `<br>`, which a reader sees, and this repo's
+    prose cites `<corpus>/…` paths. Both survive: an ESCAPED tag is not a tag in the
+    source (entities are decoded after tags are stripped), and `<corpus>/…` keeps the
+    path words because only the bracketed token is removed.
+
+    ⛔ The reversed case is REFUSED on purpose, and it is ASSERTED below rather than
+    described away: a cell that is nothing but `<corpus>` carries no word once the tag is
+    stripped — and a bare angle-bracket token is hidden by the renderer anyway, so
+    refusing it is the emptiness rule working, not over-refusal. The first version of this
+    docstring claimed the surviving words came from "words around" the token, which is
+    false for its own fixture (they come from the path suffix) and denied a refusal the
+    code makes (measured by the sixth review of this change).
+    """
+    for content in (" &lt;br&gt; escaped tag ", " <corpus>/2026-09-09-ontology-evidence.md "):
+        _mutated(tmp_path, monkeypatch, flc._s3_cell_mutation(lambda claim, c=content: c))
+        problems = _doc_problems()
+        assert not [p for p in problems if "its correction cell carries no word" in p], (
+            content,
+            problems,
+        )
+
+    # The same fixture with the bracketed token ALONE: no word survives the tag strip.
+    _mutated(tmp_path, monkeypatch, flc._s3_cell_mutation(lambda claim: " <corpus> "))
+    problems = _doc_problems()
+    assert any("its correction cell carries no word at all" in p for p in problems), problems
+
+
+def test_a_short_but_real_cell_is_not_refused(tmp_path, monkeypatch):
+    """FAILS if a BRIEF correction is reded as "records nothing".
+
+    ⛔ THE OVER-REFUSAL DIRECTION, pinned because the first version of this arm got it
+    wrong: a three-word floor sat at the page's own minimum (the shortest claim and the
+    shortest correction are both three words), so a legitimate compression was refused —
+    measured on `#2748, #1695, #1418 **closed**`, which names exactly what closed and is
+    one content word. The rule is EMPTINESS, so brief content passes and only a cell with
+    no word (or a placeholder) fails. A guard that reds correct prose is a guard a lane
+    learns to route around, which is how a real drift later merges green.
+    """
+    brief = flc._s3_cell_mutation(lambda claim: " #2748, #1695, #1418 **closed** ")
+    _mutated(tmp_path, monkeypatch, brief)
+    problems = _doc_problems()
+    assert not [p for p in problems if "cell" in p and "records nothing" in p], problems
 
 
 # ── no citation shape is exempt ────────────────────────────────────────────

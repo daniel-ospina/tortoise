@@ -44,7 +44,21 @@ That makes four things load-bearing in a way that is invisible to a reader:
    there rather than left to be discovered. The
    evidence column is held to §1's own rule for the same reason: with no floor on
    it, blanking every §3 evidence cell left the page green while each row went on
-   asserting a verdict with nothing behind it.
+   asserting a verdict with nothing behind it. The same hole sat in §3's two
+   CONTENT columns — the retracted claim and its correction — until they were
+   floored: measured at `1db5dbd2c0`, blanking the claim cell in all twelve rows,
+   blanking the correction cell in all twelve, and making one row's correction a
+   verbatim copy of its claim each left `--check` at rc 0, because the verdict arm
+   reads `cells[4]`, the evidence floor reads `cells[5]`, and **no arm required the two
+   CONTENT cells to carry anything** — `cells[2]` (the retracted claim) and `cells[3]`
+   (the correction). ⛔ Say "required", not "read": `check_citations` DOES read a citation
+   placed in either cell (a broken `path:line` there reds), so "nothing read them" is
+   false — what was missing is a floor on their content, which is why they could be
+   emptied wholesale. ⛔ And name the cells rather than ordinal words: the split array's
+   element 0 is the empty string before the leading pipe, so "cell 5" is `cells[4]` here
+   and a reader counting markdown columns lands one off.
+   A corrections log could therefore have lost every correction it recorded and still been
+   certified, which is the one thing this page exists to prevent.
 
 What this does NOT check, deliberately
 --------------------------------------
@@ -99,6 +113,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import html
 import re
 import subprocess
 import sys
@@ -351,17 +366,68 @@ VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 #: class this arm exists for, at the one position no other arm can see.
 VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
 
+#: Placeholder cells: a §3 content cell whose every word is one of these records nothing.
+#: ⛔ This is deliberately NOT a word-count floor. A length floor on these two columns sits
+#: AT the page's own minimum, not far below it — measured across the twelve rows: the
+#: shortest retracted claim is three words (`#2820 estimated ~40 decisions` -> `estimated`
+#: `decisions` and one more) and so is the shortest correction (`**False** — verified
+#: absent`, row f). A three-word floor therefore reds a correct page the moment a lane
+#: compresses a legitimate cell — measured by the review of this very change: row l's
+#: correction cut to `#2748, #1695, #1418 **closed**`, which names exactly what closed, is
+#: ONE content word and was refused as "records nothing", and a non-Latin cell
+#: (`**Ложно** — проверено отсутствует`) counts ZERO unless the word class is Unicode-aware.
+#: So the rule refuses emptiness and placeholders instead of shortness: it closes the
+#: measured bypass (a blanked column) without ever accusing content of being too brief.
+#:
+#: ⛔ IT IS A DECLARED DENYLIST, NOT A CLOSED CLASS, and §8 says so in those words. A
+#: placeholder outside this set is NOT refused — that is the arm's honest limit, and
+#: stating it is what stops a lane reading "placeholder" as "any placeholder". The set
+#: has grown by measurement, not by invention: `tbc` was missing while its twin `tba` was
+#: present, so `TBC` in a correction cell left `--check` at rc 0 (measured by the fourth
+#: review of this change) — the same one-spelling-out shape as `&nbsp;` -> `<br>`.
+PLACEHOLDER_WORDS = frozenset(
+    {"na", "n", "tbd", "tba", "tbc", "todo", "none", "nil", "null", "xx", "x"}
+)
+
+#: A content word: a run of LETTERS, Unicode-aware (`**Ложно**` counts, `**False**` counts),
+#: so a dash, a bare number or an issue ref is not a word while `_upsert_point_props` is
+#: THREE (`upsert`, `point`, `props` — `_` separates, it is not part of a word).
+CONTENT_WORD_RE = re.compile(r"[^\W\d_]+(?:[-'\u2019][^\W\d_]+)*", re.UNICODE)
+
+#: An HTML tag or comment. Stripped BEFORE the words are counted, because a cell can render
+#: empty while testing non-empty: `<br>`, `<span>&nbsp;</span>` and `<!-- removed -->` all
+#: tokenise to letters and all read as a blank table cell. Measured by the third review of
+#: this change: `<br>` in all twelve correction cells left `check_all()` at rc 0 — the same
+#: fail-open as `&nbsp;`, one spelling further out. `html.unescape` alone cannot reach it,
+#: because the problem is the TAG, not the entity.
+TAG_RE = re.compile(r"<!--.*?-->|<[^<>]*>", re.DOTALL)
+
+#: A markdown link or image, reduced to its LABEL. The label is what renders, so a cell whose
+#: label is empty renders blank while its URL still tokenises (`[](https://x)` -> `https`,
+#: `x`): measured by the fifth review of this change, `[](https://x)` in all twelve correction
+#: cells left `check_document()` at `[]`. Tags were stripped by then and links were not — the
+#: page's own markup dialect, so this is the same class one dialect out. `[the props doc](…)`
+#: keeps `the props doc`, which is why the label is KEPT rather than the whole link dropped.
+LINK_RE = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+
 #: Floor on the mutation population. `--self-test` is the arm the page's own
 #: justification rests on (*"`--self-test` is what proves the rules still fire"*),
 #: and `MUTATIONS = ()` is a ONE-place edit: without a floor it printed
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-#: ⛔ IT IS AN EQUALITY, NOT A FLOOR THAT CAN SLIDE DOWN: 41 as of the figure arms
-#: (`a falsified §3 count beside a list-free decoy`, `a falsified overtaken figure
-#: beside a compliant decoy`), which closed the paragraph-scoped presence test. Bump
-#: it with any arm added or removed — the population is what the pin compares.
-MIN_SELF_TEST_MUTATIONS = 41
+#: ⛔ IT IS AN EQUALITY, NOT A FLOOR THAT CAN SLIDE DOWN: 50 as of the §3
+#: content-column arms (`every §3 retracted-claim cell emptied`, `every §3 correction
+#: cell emptied`, `a §3 correction that is a copy of its claim`, `… in another case`,
+#: `a §3 correction replaced by a placeholder`, `… by a placeholder the denylist lacked`,
+#: `… by an HTML entity that renders blank`, `… by MARKUP that renders blank`, `… by an
+#: EMPTY-LABEL markdown link`), which closed the two
+#: cells no arm required anything OF (`check_citations` did read a citation placed in
+#: them); 41 before those were the figure arms (`a falsified §3 count
+#: beside a list-free decoy`, `a falsified overtaken figure beside a compliant
+#: decoy`), which closed the paragraph-scoped presence test. Bump it with any arm
+#: added or removed — the population is what the pin compares.
+MIN_SELF_TEST_MUTATIONS = 50
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -583,6 +649,112 @@ def _has_evidence(cell: str, sections: set[int]) -> bool:
         if CITATION_SHAPE_RE.match(body[1:-1]) and _has_path_marker(body[1:-1]):
             return True
     return False
+
+
+def _content_cell_words(cell: str) -> list[str]:
+    """The content words in a §3 cell, casefolded, for the emptiness and copy tests.
+
+    ⛔ HTML ENTITIES ARE DECODED BEFORE TOKENISING, and that is a measured fix rather than
+    tidiness: `&nbsp;` tokenises to `['nbsp']`, `&mdash;` to `['mdash']` and `&emsp;` to
+    `['emsp']`, so every one of them cleared both the emptiness branch (one "word") and
+    the placeholder set — measured by the review of this change: a correction cell of
+    `&nbsp;` left `check_document()` at `[]` while it RENDERS as a blank table cell to
+    every reader. `html.unescape` maps them to U+00A0 / U+2014 / U+2003, which carry no
+    letter, so the emptiness clause refuses them. A legitimate `R&amp;D` still works: the
+    entity decodes to `&` and the words beside it are untouched — a cell that is ONLY
+    `&amp;` decodes to a bare `&` and carries no word, so it is refused like any other
+    empty cell (the boundary is one word a reader can read, not "looks non-blank").
+
+    ⛔ TAGS AND COMMENTS ARE STRIPPED TOO, and that is the same measured lesson one
+    spelling out: `html.unescape` fixed the ENTITY and left the CLASS, so `<br>`,
+    `<span>&nbsp;</span>` and `<!-- removed -->` still tokenised to letters while
+    rendering as an empty cell — `<br>` in all twelve correction cells left `check_all()`
+    at rc 0 (measured by the third review of this change). Tags go first, then entities,
+    so `<span>&nbsp;</span>` collapses to a non-breaking space and carries no word, while
+    an ESCAPED tag (`&lt;br&gt;`) decodes to the literal text a reader sees and still
+    counts — the direction that must not over-refuse a cell quoting markup.
+    """
+    without_tags = TAG_RE.sub(" ", cell)
+    without_links = LINK_RE.sub(r"\1", without_tags)
+    return [
+        w.casefold()
+        for w in CONTENT_WORD_RE.findall(html.unescape(without_links).replace("`", " "))
+    ]
+
+
+def check_correction_cells(text: str) -> list[str]:
+    """§3: a row records a claim AND a correction, and the correction is not a copy.
+
+    Without this arm no arm REQUIRED the two CONTENT columns to carry anything:
+    `check_verdicts` reads
+    the verdict cell and `check_evidence_cells` reads the evidence cell, so the two
+    cells that carry the row's actual content could be emptied — or made to say the same
+    thing twice — while every other arm stayed green. ("Read by nothing" would be false:
+    `check_citations` DOES resolve a citation placed in either cell, so a broken
+    `path:line` there reds. What was absent is a floor on their content.) Measured at
+    `1db5dbd2c0`: blanking
+    the claim cell in all twelve rows, blanking the correction cell in all twelve, and
+    replacing one row's correction with a verbatim copy of its claim each left
+    `--check` at rc 0. That is the fail-open this page exists to prevent one level up:
+    a corrections log that can lose the corrections it records is not a record.
+
+    ⛔ THE RULE IS EMPTINESS, NOT LENGTH, and that is a measured decision rather than a
+    preference. A three-word floor was written first and the review of this change
+    refuted it: the page's own shortest cells ARE three words, so the floor sat at the
+    minimum instead of below it, and a legitimate compression — `#2748, #1695, #1418
+    **closed**`, which names exactly what closed — was refused as "records nothing".
+    Over-refusal is the false-accusation class the citation arms must not create either,
+    so the arm refuses a cell carrying NO word, and a cell whose every word is a
+    placeholder (`—`, `n/a`, `TBD`): both record nothing while reading as content.
+    `CONTENT_WORD_RE` is Unicode-aware for the same reason — a non-Latin correction is
+    content, and an ASCII-only class counted it as zero.
+
+    A copy test that compared the RAW cells would miss the shapes that actually occur: a
+    correction that repeats its claim with different MARKUP (`**Props are not durable by
+    construction**`) or different CASE (`PROPS ARE NOT DURABLE BY CONSTRUCTION`) is a copy
+    in every reading that matters, and raw equality passes both. So the comparison is on
+    the words alone, with markup stripped and both sides CASE-FOLDED: `EXISTS` beside
+    `exists` is the same words, and leaving the case in made a one-character edit a silent
+    bypass of the one clause this arm exists for (measured by the review of this change).
+    The direction this must NOT take is the other one: a correction that quotes the claim
+    and ADDS to it (`**False.** Props are not durable by construction`) is not equal to its
+    claim, so it passes — equality, never containment.
+    """
+    problems: list[str] = []
+    section = _region(text, "## 3. The corrections log", "## 4. The artefact index")
+    for offset, line in _table_rows(section):
+        match = CORRECTION_ROW_RE.match(line)
+        if match is None:
+            continue  # check_verdicts owns the shape refusal
+        cells = _split_row_cells(line)
+        claim = cells[2] if len(cells) > 2 else ""
+        correction = cells[3] if len(cells) > 3 else ""
+        for name, cell in (("claim", claim), ("correction", correction)):
+            words = _content_cell_words(cell)
+            if not words:
+                problems.append(
+                    f"row ({match.group(1)}) at §3 line {offset}: its {name} cell carries "
+                    "no word at all — a corrections row whose "
+                    f"{name} is empty records nothing, and every referential check still passes"
+                )
+            elif all(w in PLACEHOLDER_WORDS for w in words) or "".join(words) in PLACEHOLDER_WORDS:
+                # `n/a` tokenises to ['n', 'a'] because `/` separates, so the JOINED form is
+                # tested too — otherwise the most likely placeholder spelling of all is the
+                # one the set does not see (measured: the self-test arm for it went uncaught
+                # until this line read the joined form).
+                problems.append(
+                    f"row ({match.group(1)}) at §3 line {offset}: its {name} cell is a "
+                    f"placeholder ({' '.join(words)!r}) — a placeholder records nothing, "
+                    "and every referential check still passes"
+                )
+        claim_words = _content_cell_words(claim)
+        if claim_words and claim_words == _content_cell_words(correction):
+            problems.append(
+                f"row ({match.group(1)}) at §3 line {offset}: its correction is a COPY "
+                "of its claim — a row that restates the claim it exists to correct "
+                "records no correction at all"
+            )
+    return problems
 
 
 def check_evidence_cells(text: str) -> list[str]:
@@ -2087,6 +2259,7 @@ def check_document(text: str, root: Path = REPO) -> list[str]:
     problems.extend(check_vocabulary(text))
     problems.extend(check_verdicts(text))
     problems.extend(check_verdict_tally(text))
+    problems.extend(check_correction_cells(text))
     problems.extend(check_evidence_cells(text))
     problems.extend(check_citations(text, root))
     problems.extend(check_citation_shapes(text))
@@ -2145,6 +2318,107 @@ def _empty_evidence_cells(text: str) -> str:
             cells[5] = " "
             lines[i] = "|".join(cells) + "\n"
     return "".join(lines)
+
+
+def _rewrite_s3_rows(text: str, apply, *, first_only: bool = True) -> str:
+    """Rewrite §3 data rows through ONE traversal and ONE skip rule.
+
+    `apply(cells)` returns True when it edited `cells`. EVERY content-cell arm in the
+    self-test — the two that blank a whole column and the ones that replace a single
+    correction — comes through here, so the region lookup and the escaped-pipe skip rule
+    cannot disagree between them. That divergence is not hypothetical: it is the class
+    `_LETTER_ALT_MARKED` was made the single spelling list for, after four arm readers
+    carrying their own patterns disagreed about what a row letter was.
+    """
+    lines = text.splitlines(keepends=True)
+    try:
+        start = next(
+            i for i, ln in enumerate(lines) if ln.startswith("## 3. The corrections log")
+        )
+        end = next(
+            i for i, ln in enumerate(lines) if ln.startswith("## 4. The artefact index")
+        )
+    except StopIteration:  # pragma: no cover - the region arms cover this
+        return text
+    changed = False
+    for i in range(start, end):
+        row = lines[i].rstrip("\n")
+        if not CORRECTION_ROW_RE.match(row) or "\\|" in row:
+            continue
+        cells = _split_row_cells(row)
+        if not apply(cells):
+            continue
+        lines[i] = "|".join(cells) + "\n"
+        changed = True
+        if first_only:
+            break
+    return "".join(lines) if changed else text
+
+
+def _blank_cell(column: int):
+    """Blank ONE §3 cell column in EVERY row, keeping the row shape."""
+    def apply(cells: list[str]) -> bool:
+        if len(cells) <= column:
+            return False
+        cells[column] = " "
+        return True
+
+    def mutate(text: str) -> str:
+        return _rewrite_s3_rows(text, apply, first_only=False)
+
+    return mutate
+
+
+def _s3_cell_mutation(apply_correction):
+    """Replace the correction cell of the FIRST §3 row with `apply_correction(claim_cell)`.
+
+    The callback takes the row's CLAIM CELL (a string) and returns the correction cell,
+    so `lambda claim: claim` is the copy mutation.
+    """
+    def apply(cells: list[str]) -> bool:
+        if len(cells) <= 3:
+            return False
+        cells[3] = apply_correction(cells[2])
+        return True
+
+    def mutate(text: str) -> str:
+        return _rewrite_s3_rows(text, apply)
+
+    return mutate
+
+
+#: `**False.** The props are durable` -- the correction is the claim, restated.
+_correction_copies_claim = _s3_cell_mutation(lambda claim: f" {claim.strip()} ")
+
+#: The same copy with the CASE changed: the words are identical, so an arm that does not
+#: case-fold both sides lets a one-character edit through (measured by the review of
+#: this change: `exists` vs `EXISTS` left `check_document()` at `[]`).
+_correction_copies_claim_shouted = _s3_cell_mutation(
+    lambda claim: f" {claim.strip().upper()} "
+)
+
+#: `— n/a` -- an emptied cell backfilled with a placeholder, which is what a lane reaches
+#: for when the guard reds a blank one.
+_correction_is_a_placeholder = _s3_cell_mutation(lambda claim: " — n/a ")
+
+#: `&nbsp;` -- a placeholder that RENDERS blank. Defeated the placeholder set until the
+#: word reader learned to decode entities (measured by the review of this change).
+_correction_is_an_html_entity = _s3_cell_mutation(lambda claim: " &nbsp; ")
+
+#: `<br>` -- a TAG that renders blank while tokenising to letters. Defeated the entity fix
+#: until the word reader learned to strip tags and comments (measured by review cycle 3).
+#: The `<span>&nbsp;</span>` and `<!-- removed -->` spellings of the same class are covered
+#: by `test_a_blank_rendering_markup_cell_is_rejected` in the test module.
+_correction_is_markup_only = _s3_cell_mutation(lambda claim: " <br> ")
+
+#: `TBC` -- a placeholder the denylist did not carry while its twin `tba` was present.
+#: Measured by review cycle 4: `TBC` in all twelve correction cells left `--check` at rc 0.
+_correction_is_an_unlisted_placeholder = _s3_cell_mutation(lambda claim: " TBC ")
+
+#: `[](https://x)` -- a markdown link with an EMPTY LABEL: it renders as nothing and its URL
+#: still tokenises. Measured by review cycle 5, at column scale (`check_document()` = `[]`
+#: with all twelve correction cells holding it) before `LINK_RE` reduced a link to its label.
+_correction_is_an_empty_label_link = _s3_cell_mutation(lambda claim: " [](https://x) ")
 
 
 MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
@@ -2274,6 +2548,51 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         "every §3 evidence cell emptied",
         _empty_evidence_cells,
         "names no `path:line`, issue, command or §N",
+    ),
+    (
+        "every §3 retracted-claim cell emptied",
+        _blank_cell(2),
+        "its claim cell carries no word at all",
+    ),
+    (
+        "every §3 correction cell emptied",
+        _blank_cell(3),
+        "its correction cell carries no word at all",
+    ),
+    (
+        "a §3 correction that is a copy of its claim",
+        _correction_copies_claim,
+        "its correction is a COPY of its claim",
+    ),
+    (
+        "a §3 correction that is a copy of its claim in another case",
+        _correction_copies_claim_shouted,
+        "its correction is a COPY of its claim",
+    ),
+    (
+        "a §3 correction replaced by a placeholder",
+        _correction_is_a_placeholder,
+        "its correction cell is a placeholder",
+    ),
+    (
+        "a §3 correction replaced by an HTML entity that renders blank",
+        _correction_is_an_html_entity,
+        "its correction cell carries no word at all",
+    ),
+    (
+        "a §3 correction replaced by MARKUP that renders blank",
+        _correction_is_markup_only,
+        "its correction cell carries no word at all",
+    ),
+    (
+        "a §3 correction replaced by a placeholder the denylist lacked",
+        _correction_is_an_unlisted_placeholder,
+        "its correction cell is a placeholder",
+    ),
+    (
+        "a §3 correction replaced by an EMPTY-LABEL markdown link",
+        _correction_is_an_empty_label_link,
+        "its correction cell carries no word at all",
     ),
     (
         "a §6 row the arithmetic cannot name",
