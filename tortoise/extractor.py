@@ -1548,8 +1548,9 @@ class LLMExtractor:
                     # index is wrong for exactly the class this gate holds: the
                     # pronoun `it` is found INSIDE "with"/"within"/"itself", so the
                     # recorded offset pointed at a different word than the surface
-                    # — measured at the #12102 review (`body[34:36] == 'it'` inside
-                    # "with"). `None` when the phrase is genuinely absent is the
+                    # — measured at the #12102 review (`body[14:16] == 'it'` inside
+                    # "with" on the fixture body: a SUBSTRING match, which is exactly
+                    # what the word-boundary rule exists to refuse). `None` when the phrase is genuinely absent is the
                     # honest answer, never a nearby match.
                     # ⛔ AND IT MATCHES THE PHRASE THE CUE JUDGED, not the raw model
                     # string (#12102 round-3 review P2): `referentiality.judge`
@@ -1575,11 +1576,11 @@ class LLMExtractor:
                     # NOT the original document. So it is not "document
                     # coordinates" either: measured, a document carrying a 4-line
                     # frontmatter puts its body at index 8 there and 35 in the
-                    # original, and a fenced block redistributes its own text —
-                    # the OPENING fence is rewritten 3 chars → 6
-                    # (`\n\n` + fence + `\n`) and the CLOSING 3 → 5
-                    # (fence + `\n\n`), so later text shifts by +5 per complete
-                    # block (+3 on an unterminated one).
+                    # original, and a fence line is rewritten: an OPENING one goes
+                    # 3 chars -> 6 (`f"\n\n{text[i:i+3]}\n"`), a CLOSING one 3 -> 5
+                    # (`f"{fence_char}\n\n"`) — so later text shifts by +5 per
+                    # complete block (+3 on an unterminated one), measured on a
+                    # two-fence body.
                     # The two fields of this one record therefore cannot be
                     # combined: do NOT compute
                     # the document index as `span[0] + phrase_offset`. The gap is
