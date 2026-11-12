@@ -1227,9 +1227,22 @@ SELF_TEST_INDENT = 2
 
 
 def _indented_tables(text: str, spaces: int = SELF_TEST_INDENT) -> str:
-    """The same map with every table row indented by ``spaces``."""
+    """The same map with every table row at EXACTLY ``spaces`` leading spaces.
+
+    ⛔ NORMALISE, then indent — do not simply prepend. Prepending to a document that
+    already has rows at 1-3 spaces (the population `#11415` extends grading to) put
+    those rows at 4-5, where `_is_table_line` is false: the copy lost its surface
+    table, every mutator targeting those rows raised AssertionError, and
+    `--self-test` exited 1 as a wall of UNTESTABLE on a document `check()` grades
+    CLEAN — a false RED on the required `docs` job, for exactly the shape the fix
+    exists for (fresh review of PR #12016, P2; measured: one row at 2 spaces gave
+    `7/44 case(s) UNTESTABLE`, every row at 2 spaces gave `19/44` plus a
+    `1/44 NOT caught`). The copy is therefore the same map a reader sees, whatever
+    the source indentation, and it stays inside `MAX_TABLE_INDENT`.
+    """
+    indent = " " * spaces
     return "".join(
-        (" " * spaces + line) if _is_table_line(line) else line
+        (indent + line.lstrip(" ")) if _is_table_line(line) else line
         for line in text.splitlines(keepends=True)
     )
 
@@ -1309,6 +1322,22 @@ def self_test(text: str) -> int:
         print(
             f"self-test: {len(SELF_TEST_MUTATIONS)} mutation(s) registered, at least "
             f"{MIN_SELF_TEST_MUTATIONS} required — a shrunk mutation population proves nothing",
+            file=sys.stderr,
+        )
+        return 1
+    # ⛔ The indented shape must be a FIXED POINT, and that is checked rather than
+    # assumed (fresh review of PR #12016, P2): a version that PREPENDED spaces moved
+    # rows that already sat at 1-3 spaces out to 4-5, where they are no longer rows,
+    # so the second shape silently lost its surface table and reported a wall of
+    # UNTESTABLE against a document `check()` grades CLEAN. Idempotence is exactly
+    # the property that failure breaks, and it costs one comparison.
+    once = _indented_tables(text)
+    if _indented_tables(once) != once:
+        print(
+            "self-test: the indented shape is NOT idempotent — applying it twice "
+            "changes the document, so a map that is already indented would lose "
+            "rows from the second pass and red the required `docs` job on a "
+            "correct map",
             file=sys.stderr,
         )
         return 1

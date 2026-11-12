@@ -2187,6 +2187,12 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
     """
     deployment = shipped["deployment"]
     on_by_default = deployment["on"]
+    # ⛔ Lead with UNMEASURED when the deployment population could not be read (no
+    # deployment file at all, or an unreadable one). Leading with `False` there is
+    # the old bool's defect in a new place: `False` is an answer, and this tree
+    # cannot give one — a reader lifting the leading value would quote a measurement
+    # the run never made (fresh review of PR #12016, P3).
+    reported = on_by_default if deployment["measured"] else "UNMEASURED"
     per_surface_note = ", ".join(
         f"{rel}={shipped['per_surface'][rel]['state']}" for rel in shipped["surfaces"]
     )
@@ -2220,7 +2226,7 @@ def shipped_default_note(shipped: dict, flag: str, ambient: bool) -> str:
             "deployment built from the silent path(s)"
         )
     return (
-        f"gate enabled by default: {on_by_default} (ambient "
+        f"gate enabled by default: {reported} (ambient "
         f"{flag}={ambient!r}; "
         f"shipped config surface walked: {len(shipped['surfaces'])} "
         f"({', '.join(shipped['surfaces'])}); per surface: {per_surface_note}; "
