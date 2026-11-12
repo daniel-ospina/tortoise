@@ -19341,6 +19341,33 @@ class FalkorProjection(
         try:
             self._ensure_indexes()
             statements = project_records(self.g, plan)
+            # ⛔ `#11747` review, finding 1 — the DROP is REPORTED, never silent,
+            # and the report comes from a run that RAN. `node_statement` refuses
+            # a vector on a label no query leg serves (it could never be read), so
+            # a rebuild over a record whose rows carry one DELETES a vector a
+            # previous cache held. Read off the PLAN's statements (`record_plan`
+            # is pure, so the count costs no read), carried in the returned report
+            # beside the write counts — the same shape
+            # `tortoise.hosted_backup.restore_graph` uses for the identical drop —
+            # and logged, exactly as `hosted_backup` does.
+            #
+            # ⛔ MEASURED AFTER THE WRITE (`#11747` review, finding 2). It used to
+            # sit ABOVE `_assert_destructive_confirmed` / `_assert_test_graph`, so
+            # a REFUSED rebuild — every production `org_<org>` name is refused by
+            # the L2 guard — left a past-tense log line claiming vectors were
+            # dropped over a cache that was never touched: a rebuild that lost
+            # nothing reading as one that deleted, the exact false-signal class
+            # the report exists to remove. The plan is still built pre-wipe (it
+            # must not RAISE after the wipe), but only a completed write may claim
+            # a drop.
+            dropped_vectors = plan.dropped_vectors()
+            dropped_vector_total = sum(dropped_vectors.values())
+            if dropped_vector_total:
+                logger.warning(
+                    "rebuild_from_record: dropped %d vector(s) on unserved "
+                    "label(s) %s — a vector there has no query path, so the "
+                    "cache must not hold one (#11747)",
+                    dropped_vector_total, sorted(dropped_vectors))
 
             # ⛔ MEASURED AFTER THE WRITE, never the plan's length (#9556 review).
             # ``len(nodes)`` is the size of the INPUT, computed above — before the
@@ -19415,6 +19442,13 @@ class FalkorProjection(
             # restore shortfall" decision — without it an operator comparing
             # `nodes_written` with `nodes_selected` cannot see WHY they differ.
             "refused_keys": sorted(refused),
+            # `#11747`: the vectors this run REFUSED to store, by label. A
+            # rebuilt cache is otherwise indistinguishable from one that lost
+            # nothing — and these vectors have no query path, so a re-run cannot
+            # bring them back either: the record row is the only carrier, and it
+            # is what the drop was applied to.
+            "dropped_vectors": dropped_vector_total,
+            "dropped_vector_labels": sorted(dropped_vectors),
             "statements": statements,
             "record_nodes": len(view.nodes),
             "record_relations": len(view.relations),

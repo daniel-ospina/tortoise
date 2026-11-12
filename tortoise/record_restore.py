@@ -220,6 +220,15 @@ class RestoreOutcome:
     #: :attr:`nodes_selected` can be below ``record_nodes`` without anything
     #: being lost, and they are reported so the difference is auditable.
     refused_keys: tuple[tuple[str, str], ...] = ()
+    #: `#11747` — vectors the projection REFUSED to store, and the labels they
+    #: were on. The projection drops a vector on a label no query leg serves
+    #: (``cache_projection.UNSERVED_VECTOR_LABELS``), so a restore over a record
+    #: whose rows carry one DELETES it from the cache. ⛔ Reported, never silent:
+    #: without this the run prints the same clean line as a restore that lost
+    #: nothing, and no re-run can bring the vector back — the record row is the
+    #: only carrier and it is what the drop was applied to.
+    dropped_vectors: int = 0
+    dropped_vector_labels: tuple[str, ...] = ()
     #: ``complete`` / ``partial`` from the projection's own declaration.
     coverage: str | None = None
     #: Keys the declaration enumerated as known-hot. ⚠️ A ``complete``
@@ -307,6 +316,8 @@ class RestoreOutcome:
             "nodes_selected": self.nodes_selected,
             "relations_selected": self.relations_selected,
             "refused_keys": [list(key) for key in self.refused_keys],
+            "dropped_vectors": self.dropped_vectors,
+            "dropped_vector_labels": list(self.dropped_vector_labels),
             "target_nodes_before": self.target_nodes_before,
             "coverage": self.coverage,
             "declared_keys": self.declared_keys,
@@ -351,6 +362,18 @@ class RestoreOutcome:
                 f"projection as unaddressable in this cache ({shown}{more}); "
                 f"that is a record/cache addressability gap, NOT a shortfall, "
                 f"and no re-run can write them")
+        if self.dropped_vectors:
+            # ⛔ `#11747` — the DROP, on the operator's own line. A vector on a
+            # label `run_vector_query` does not serve has been refused by the
+            # projection, so this restore DELETED it from the cache; the node is
+            # kept. Stated because the alternative is a clean-looking restore
+            # that quietly lost data, and because no re-run can repair it.
+            labels = ", ".join(self.dropped_vector_labels) or "unrecorded"
+            line += (
+                f" — {self.dropped_vectors} vector(s) were DROPPED by the "
+                f"projection on unserved label(s) ({labels}): a vector there has "
+                f"no query path, so the cache must not hold one (#11747). The "
+                f"nodes are restored; re-running cannot bring the vectors back")
         if self.unwritten_keys:
             line += (
                 f" — {self.unwritten_keys} record key(s) were NOT written, so a "
@@ -594,6 +617,13 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
     # the record); only the datum that explains it is no longer discarded.
     nodes_selected = _as_optional_int(result.get("nodes_selected"))
     relations_selected = _as_optional_int(result.get("relations_selected"))
+    # `#11747`: the vectors the projection refused to store, carried from the
+    # rebuild's report to the operator's line. Absent on a seam that does not
+    # report them (the pre-#11747 shape), which reads as 0 — the state that seam
+    # could measure.
+    dropped_vectors = _as_int(result.get("dropped_vectors") or 0, "dropped_vectors")
+    dropped_vector_labels = tuple(
+        str(label) for label in (result.get("dropped_vector_labels") or ()))
     refused_keys = tuple(
         (str(key[0]), str(key[1]))
         for key in (result.get("refused_keys") or ())
@@ -679,4 +709,6 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
         nodes_selected=nodes_selected,
         relations_selected=relations_selected,
         refused_keys=refused_keys,
+        dropped_vectors=dropped_vectors,
+        dropped_vector_labels=dropped_vector_labels,
     )

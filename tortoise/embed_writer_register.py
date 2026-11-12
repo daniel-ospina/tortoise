@@ -278,7 +278,15 @@ call) — and those forms are not hypothetical. ⚠️ The SHAPE is what is blin
 WRITER carrying it: the interpolation is live in `tortoise.cache_projection::node_statement` and the
 helper in `tortoise.sdk::_emit_event`, and BOTH of those writers are genuinely ABSENT from the
 census (neither holds a decidable statement, so neither is in `WRITER_CENSUS` or this register at
-all); by contrast the computed key in `tortoise.sdk::update_point` is in the instrument's
+all); ⛔ `#11747` narrowed ONE HALF of that consequence for the projection, and only row 2: absence
+from the census is **not** absence from row 2's served-set comparison, because
+`tools/dod_5090_probe.py::cache_projection_store_labels` derives this writer's labels by RUNNING it
+(`node_from_row` → `node_statement`, through both the `embedding` column and the `props` tail, so the
+spelling of the clause never enters the derivation) and compares them to `served_labels()`. That is
+how a `:Session` vector — invisible to discovery, unserved by every query leg — was found, and the
+writer now REFUSES it (`cache_projection.UNSERVED_VECTOR_LABELS`). `sdk::_emit_event` is untouched:
+it has no such measurement, so it remains absent in every sense; by contrast the computed key in
+`tortoise.sdk::update_point` is in the instrument's
 **discovered map** (`embedding_writers()`) as `gated` — it carries no `WRITER_CENSUS` row at all,
 and that table's class vocabulary (`recognised_producer`/`exempt`/`bypass`) cannot spell `gated` —
 while `tortoise.hosted_backup::restore_graph` is IN `WRITER_CENSUS` and is declared here off its
