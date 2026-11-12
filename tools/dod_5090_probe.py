@@ -689,7 +689,19 @@ def _import_aliases(*roots: ast.AST, own_scope_only: bool) -> dict[str, str]:
             for alias in sub.names:
                 if alias.name not in _ALIASABLE_CALL_NAMES:
                     continue
-                if module not in _ALIAS_HOMES.get(alias.name, frozenset()):
+                homes = _ALIAS_HOMES.get(alias.name, frozenset())
+                # ⛔ `level` decides WHICH spelling of the home can match (`#12020`). The BARE
+                # spelling exists so a RELATIVE import (`from .embeddings import … as _enc`,
+                # `level > 0`) still resolves, and only then is it this seam's home. An ABSOLUTE
+                # import (`level == 0`) must spell the package: read level-blind, a foreign
+                # top-level module merely named `embeddings` resolved to the seam and the writer
+                # measured `gated` — owing nothing while reaching a different function (measured;
+                # `unresolved_write` on `main`), the exact false PASS `_ALIAS_HOMES` exists to
+                # prevent. Dropping a relative import is the safe direction; crediting a foreign
+                # absolute one is the dangerous one.
+                accepted = frozenset(
+                    home for home in homes if ("." not in home) == bool(sub.level))
+                if module not in accepted:
                     continue  # a same-named function from somewhere else is not this seam
                 found[alias.asname or alias.name] = alias.name
     return found

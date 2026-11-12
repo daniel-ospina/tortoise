@@ -253,15 +253,19 @@ claim and a slogan:
   `probe._import_aliases` resolves the alias back to the primitive it names, so the writer lands in
   `unresolved_write` and owes a declaration here; an aliased `encode_for_row` classes `gated`
   instead, because it really does reach the gate and therefore owes nobody a declaration — ⛔ and
-  `gated` means exactly that: CREDITED as a reach, never VERIFIED as one. Two named residuals below
-  are `gated` on a reach that need not be the one the reader assumes (the `global` rebinding, and
-  the never-run call — whose `gated` can also MASK a live ungated reach, see its entry), so `gated`
-  is not a synonym for "this writer passes the gate". ⛔ The
+  `gated` means exactly that: CREDITED as a reach, never VERIFIED as one. SEVERAL named residuals
+  are `gated` on a reach that need not be the one the reader assumes — the `global`-family module
+  rebinding, the never-run call (whose `gated` can also MASK a live ungated reach, see its entry),
+  the closure-scoped alias and the literal seam spelling among them — so `gated` is not a synonym
+  for "this writer passes the gate". ⛔ The count is deliberately not stated here: the residual list
+  is the count, and `#11398`'s lesson is that a number in prose re-stales the moment one more shape
+  is named. ⛔ The
   SCOPE of that sentence is the MODULE and the WRITER'S OWN scope: an alias imported in an
   ENCLOSING function and called in a nested one is neither resolved nor named as a writer, while the
   enclosing function is credited `gated` in its place — a named residual, not a resolved case
-  (`UNDECIDABLE_WRITE_SHAPES`, "closure-scoped alias"). ⛔ And a `global` rebinding of the alias
-  inside a NESTED scope is NOT captured: the shadow is threaded per scope, so it applies only
+  (`UNDECIDABLE_WRITE_SHAPES`, "closure-scoped alias"). ⛔ And a `global` rebinding of the alias —
+  or any other route to the same MODULE binding from a nested scope, `globals()[…] = …` included —
+  is NOT captured: the shadow is threaded per scope, so it applies only
   INSIDE the subtree that rebinds, while the `global` statement's effect is on the MODULE binding
   the writer calls — measured `gated` (the writer owes nothing while never reaching the gate). That
   residual is named in `UNDECIDABLE_WRITE_SHAPES` ("`global` rebinding …") and pinned in the suite;

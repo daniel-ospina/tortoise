@@ -614,6 +614,25 @@ ALIAS_FORMS_STILL_BLIND: dict[str, tuple[str, dict[str, str], str, str]] = {
         "it: the DANGEROUS direction — `gated` owes no declaration while never reaching the gate",
         "`global` rebinding",
     ),
+    # ⛔ The entry names the MECHANISM ("writing the module binding from a nested scope by ANY
+    # route"), so a pin driving only the `global` keyword would leave `globals()[…] = …` — the other
+    # route, measured `gated` — unprotected: a resolver that handled `ast.Global` alone would keep
+    # the suite green while the entry's claim went false. Pinned in its own row for that reason.
+    "global_rebinding_via_the_globals_DICT": (
+        "from tortoise.embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        "    def inner():\n"
+        '        globals()["_enc"] = lambda *a: a\n'
+        "    inner()\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n'
+        "    return _enc(text, 384)\n",
+        {"tortoise.m::w": "gated"},
+        "the SAME module-binding rebinding reached through `globals()` instead of the `global` "
+        "keyword: measured the same `gated`, so the residual is the mechanism, not the statement",
+        "`global` rebinding",
+    ),
     # ⛔ `#12020` round 6 review (P3): the ENCLOSING-scope axis. Both halves are pinned — the nested
     # writer is ABSENT and the enclosing function is credited `gated` in its place — because the
     # second half is the one that makes the silence look like coverage.
@@ -3641,6 +3660,34 @@ ALIASED_IMPORT_SHAPES: dict[str, tuple[str, dict[str, str], str]] = {
         '    return proj.g.query("MATCH (n:Point) " + _clear("n"))\n',
         {"tortoise.m::w": "unresolved_write"},
         "a FUNCTION-level alias: the same reach, bound in the writer's own scope",
+    ),
+    # ⛔ `#12020` — `ImportFrom.level` decides WHICH spelling of the home can match. The bare
+    # spelling exists for RELATIVE imports; read level-blind it also accepted an ABSOLUTE import of
+    # a foreign top-level module merely named `embeddings`, crediting it as the seam (`gated`, owed
+    # nothing) where `main` had `unresolved_write`. Both directions pinned: the foreign absolute
+    # import must NOT be the seam, and the honest relative import must STAY the seam.
+    "foreign_ABSOLUTE_module_with_the_bare_home_spelling": (
+        "from embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n'
+        "    return _enc(text)\n",
+        {"tortoise.m::w": "unresolved_write"},
+        "an ABSOLUTE import of a top-level module that merely shares the seam's bare spelling: "
+        "`level == 0` means the package must be spelled out, so this is a different function and "
+        "the writer owes a declaration",
+    ),
+    "honest_RELATIVE_import_with_the_bare_home_spelling": (
+        "from .embeddings import encode_for_row as _enc\n"
+        "from tortoise.vector_write import set_embedding_clause\n"
+        "\n"
+        "def w(proj, text):\n"
+        '    proj.g.query("MATCH (n:Point) SET n += $p", {"p": set_embedding_clause("n")})\n'
+        "    return _enc(text)\n",
+        {"tortoise.m::w": "gated"},
+        "the control for the row above: `level > 0` is exactly the spelling the bare home is for, "
+        "so this DOES reach the gate — dropping it would be the over-correction direction",
     ),
     "aliased_gate_call": (
         "from tortoise.embeddings import encode_for_row as _enc\n"
