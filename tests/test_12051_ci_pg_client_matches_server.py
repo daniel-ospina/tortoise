@@ -1152,8 +1152,8 @@ COMPARISON_RE = re.compile(r"==|!=|=~|(?<![-\w])=|-eq|-ne|-gt|-lt")
 #: The constructs that COMPARE or FILTER an operand. Two groups, because they need
 #: different partners to be a SELECTION on the loop variable:
 #:   * a CONDITION (`[`, `[[`, `test`) only selects when the loop variable is an
-#:     OPERAND of it AND a comparison operator is inside the same span — see
-#:     `_condition_text`; `[ -n "$version" ]` beside an `echo "$tool"` merely
+#:     OPERAND of it AND a comparison operator is inside the same CLAUSE — see
+#:     `_comparison_clauses`; `[ -n "$version" ]` beside an `echo "$tool"` merely
 #:     mentions the variable twice;
 #:   * a PATTERN MATCHER (`case`, `grep` and its `egrep`/`fgrep` spellings, `awk`,
 #:     `expr`) selects on its own argument, no operator needed.
@@ -1172,19 +1172,34 @@ PATTERN_MATCHER_RE = re.compile(r"\bcase\b|\b(?:(?:e|f)?grep|awk|expr)\b")
 #: resolved by substitution, one level (`_selects_on_var`), not refused.
 #: Only an assignment whose WHOLE VALUE is the variable records a copy — the pin's
 #: own `version="$("$tool" --version)"` assigns a command's OUTPUT, not the name.
-def _copied_to(line: str, sources: list[str]) -> str | None:
-    """The alias this line copies one of `sources` into, or None."""
+#: The trailing separator is a LOOKAHEAD so the separator is not consumed: it is the
+#: LEADING separator of the next copy on the same line, and eating it made
+#: `t=$tool; u=$t` yield only `t` (#12069 review 5).
+def _copied_to(line: str, sources: list[str]) -> list[str]:
+    """Every alias THIS LINE copies one of `sources` into, in order.
+
+    ⛔ EVERY COPY ON THE LINE, NOT THE FIRST (#12069 review 5). `search()`
+    returned one alias per line, so a CHAIN written on a single line —
+    `t=$tool; u=$t` — only ever yielded `t`, and every later pass yielded `t`
+    again: already known, so the fixed point converged with `u` unresolved, `$u`
+    never became `$tool`, the selection was invisible and BOTH tools were
+    credited while `pg_restore --version` was never reached (measured fail-open,
+    the #12051 class this row exists to refuse). The same chain split across two
+    lines resolved correctly, which is why only this form was open.
+    """
 
     alternative = "|".join(re.escape(source) for source in sources)
     ref = (
         r"(?:\$\{(?:" + alternative + r")\}|\$(?:" + alternative + r")(?!\w))"
     )
-    match = re.search(
-        r"(?:^|[;&|]|\b(?:local|export|declare|readonly|typeset)\b)\s*"
-        r"(?P<alias>[A-Za-z_]\w*)=\s*[\"']?" + ref + r"[\"']?\s*(?:$|[;&|])",
-        line,
-    )
-    return match.group("alias") if match else None
+    return [
+        match.group("alias")
+        for match in re.finditer(
+            r"(?:^|[;&|]|\b(?:local|export|declare|readonly|typeset)\b)\s*"
+            r"(?P<alias>[A-Za-z_]\w*)=\s*[\"']?" + ref + r"[\"']?\s*(?=$|[;&|])",
+            line,
+        )
+    ]
 
 
 def _with_aliases(line: str, aliases: list[str], var: str) -> str:
@@ -1217,70 +1232,44 @@ def _with_aliases_each(body: list[str], var: str) -> list[str]:
     while changed:
         changed = False
         for line in body:
-            alias = _copied_to(line, known)
-            if alias and alias not in seen:
-                seen.add(alias)
-                known.append(alias)
-                changed = True
+            for alias in _copied_to(line, known):
+                if alias not in seen:
+                    seen.add(alias)
+                    known.append(alias)
+                    changed = True
     extra = [alias for alias in known if alias != var]
     return [_with_aliases(line, extra, var) for line in body]
 
 
-#: The CONDITION itself: the `[ … ]` / `[[ … ]]` groups on a line. A line that
-#: COMPARES one variable may well MENTION the loop variable in its message branch —
-#: `if [ "$major" != "16" ]; then echo "::error::$tool"; exit 1; fi` — and a
-#: line-level test read that as a selection on `$tool` and refused a body that
-#: checks both tools unconditionally (measured false RED, round-15 review 2).
-#: Only the SPANS of the conditions are searched for the loop variable.
-#: ⛔ EVERY SPAN, NOT THE FIRST (#12069 review 3). `search()` graded only the
-#: leading group, so a selection in a SECOND one was invisible and both tools were
-#: credited with `pg_restore` never checked:
-#:     if [ -n "$PG" ] && [ "$tool" = pg_dump ]; then … fi
-#: — the #12051 fail-open, and a REGRESSION from the line-level test it replaced
-#: (that one refused it). `finditer` grades each group on its own.
-BRACKET_SPAN_RE = re.compile(r"\[\[?[^\]]*\]\]?")
+#: How a CONDITION is delimited for grading: the shell's own list separators, plus
+#: the keywords that end the test and begin a branch.
+#: ⛔ A CONDITION IS GRADED CLAUSE BY CLAUSE, NEVER LINE BY LINE (#12069 review 5).
+#: Two rounds of span heuristics traded one defect for the other, because a span is
+#: a BRACKET-MATCHING question and a selection is an OPERAND question:
+#:   * grading only `[ … ]` groups lost a selection in a second group (fail-open);
+#:   * falling back to the WHOLE LINE when the brackets mis-split re-created the
+#:     line-level test round 15 removed — a line that merely COMPARES something else
+#:     and PRINTS the loop variable in its message branch reads as a selection:
+#:         if [ "$major" != "16" ]; then echo "::error::$tool …"; fi
+#:         [ "${#TARGETS[@]}" -gt 0 ] || { echo "::error::$tool …"; exit 1; }
+#:     — both refused a body that checks every tool unconditionally (measured).
+#: A CLAUSE is the separator-delimited run around each comparison, so the message
+#: branch is its own clause, carries no comparison operator, and is DROPPED; a
+#: selection in any clause of a `&&`/`||` chain is still found. That is one rule
+#: for both directions instead of a bracket-matching special case for each.
+CLAUSE_SPLIT_RE = re.compile(
+    r"&&|\|\||;|\b(?:then|else|elif|do|done|fi)\b|\{|\("
+)
 
 
-def _splits_cleanly(line: str, spans: list[str]) -> bool:
-    """Did removing these spans leave a line with no stray bracket behind?"""
+def _comparison_clauses(line: str) -> list[str]:
+    """The separator-delimited clauses of `line` that contain a comparison."""
 
-    remainder = line
-    for span in spans:
-        remainder = remainder.replace(span, "", 1)
-    return "]" not in remainder and line.count("[") == line.count("]")
-
-
-def _condition_spans(line: str) -> list[str]:
-    """Every `[ … ]` / `[[ … ]]` group on this line, or the whole line otherwise.
-
-    ⛔ A MIS-SPLIT FAILS **OPEN**, SO THE FALLBACK IS THE WHOLE LINE (#12069
-    review 4). The previous cut claimed that not crediting a mis-split span was
-    "the safe direction" — it is the OPPOSITE: the span is where the selection is
-    DETECTED, so dropping it credits BOTH tools while one is never checked. A `]`
-    inside a quoted word split one line into two halves that each held half of the
-    test:
-
-        if [ "${TARGETS[0]}" = "$tool" ]; then … fi
-
-    so neither half carried both the operator and the variable, the body read as
-    unconditional, and the row PASSED a pin body that only checks `pg_dump`
-    (measured, via the real row). Whenever the brackets do not pair cleanly the
-    WHOLE LINE is the span: it contains the operator and the variable by
-    construction, so the selection is FOUND rather than lost.
-
-    ⛔ AND `test` IS NOT SUPPRESSED BY A BRACKET (#12069 review 4).
-    `[ -n "$CI" ] && test "$tool" = pg_dump` has an unrelated group on the line;
-    the early `if spans: return spans` dropped the `test` fallback entirely and the
-    selection was invisible (measured). `test` is added to the span list, not used
-    only when no group is present.
-    """
-
-    spans = [match.group(0) for match in BRACKET_SPAN_RE.finditer(line)]
-    if re.search(r"\btest\b", line):
-        spans.append(line)
-    if spans and _splits_cleanly(line, spans):
-        return spans
-    return [line] if re.search(r"\[|\btest\b", line) else []
+    return [
+        clause
+        for clause in CLAUSE_SPLIT_RE.split(line)
+        if COMPARISON_RE.search(clause)
+    ]
 
 
 def _matches_on(text: str, matcher: re.Match[str], ref: re.Pattern[str]) -> bool:
@@ -1344,9 +1333,10 @@ def _selects_on_var(body: list[str], var: str) -> bool:
       * a PATTERN MATCHER (`case`, `grep`/`egrep`/`fgrep`, `awk`, `expr`) selects
         when ITS OWN operand names the loop variable or a client (`grep -qx
         pg_dump`), NOT merely because the word appears somewhere on the line;
-      * a CONDITION (`[`, `[[`, `test`) selects when ANY of its groups contains
-        both a comparison OPERATOR and the loop variable, so a selection in a
-        second `&&`-joined group is not invisible.
+      * a CONDITION (`[`, `[[`, `test`) selects when the loop variable is an
+        OPERAND of a comparison in the same CLAUSE, so a selection in a second
+        `&&`-joined group is not invisible — and a variable merely PRINTED in a
+        branch's message is not read as one.
 
     Only a SELECTION on the LOOP VARIABLE counts: a condition on anything else
     (`if [ "$major" != "16" ]`, which is what this job actually writes) does not
@@ -1369,8 +1359,8 @@ def _selects_on_var(body: list[str], var: str) -> bool:
         matcher = PATTERN_MATCHER_RE.search(line)
         if matcher and _matches_on(line, matcher, ref):
             return True
-        for span in _condition_spans(line):
-            if COMPARISON_RE.search(span) and ref.search(span):
+        for clause in _comparison_clauses(line):
+            if ref.search(clause):
                 return True
     return False
 
@@ -2543,6 +2533,44 @@ VERSION_CHECK_POLARITY = [
         'done',
         {"pg_dump", "pg_restore"},
         "#12069 round-15(3): a copy used as a FILE NAME selects nothing",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  if [ "$major" != "16" ]; then echo "::error::$tool failed the test"; exit 1; fi\n'
+        'done',
+        {"pg_dump", "pg_restore"},
+        "#12069 round-5: the WORD `test` in a message is not the `test` command",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  [ "${#TARGETS[@]}" -gt 0 ] || { echo "::error::$tool has no targets"; exit 1; }\n'
+        '  version="$("$tool" --version)"\n'
+        'done',
+        {"pg_dump", "pg_restore"},
+        "#12069 round-5: an ARRAY-COUNT guard mentions `$tool` only in its message",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  if [ "${TARGETS[0]}" = "$tool" ]; then version="$("$tool" --version)"; fi\n'
+        'done',
+        set(),
+        "#12069 round-5: a `]` inside a SUBSCRIPT must not hide the condition",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  if [ -n "$CI" ] && test "$tool" = pg_dump; then\n'
+        '    version="$("$tool" --version)"\n  fi\ndone',
+        set(),
+        "#12069 round-5: a `test` COMMAND beside an unrelated group still selects",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  t=$tool; u=$t\n'
+        '  if [ "$u" = pg_dump ]; then version="$("$tool" --version)"; fi\n'
+        'done',
+        set(),
+        "#12069 round-5: an alias CHAIN on ONE line must resolve, not fail open",
     ),
 ]
 
