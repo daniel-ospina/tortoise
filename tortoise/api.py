@@ -751,13 +751,23 @@ class EventAPI:
         # The label is read through the same tolerances the writers use —
         # `Event`, `:Event`, any case — so a caller cannot slip past it by
         # spelling the label differently from the fold's.
-        _op = payload.get("op")
-        if str(payload.get("label") or "").strip().lstrip(":").lower() \
-                == "event" and _op in _ENTITY_MUTATION_STATE_OPS:
-            _state = payload.get("state")
-            refuse_terminal_event_state(
-                _state if isinstance(_state, dict) else {},
-                door=f"the `{type_}` envelope")
+        # ⛔ BOTH CHANNELS. `_emit` accepts a keyword payload OR one positional
+        # record, and the positional one is spliced into `payload["point"]`
+        # further down — reading only the keyword payload left the record channel
+        # open, exactly as it did for the `EventRecorded` arm above. Measured,
+        # review cycle 5 P1: `_emit("EntityMutated", {…op: restatus, state:
+        # {status: superseded}})` was ACCEPTED, stored the terminal status on the
+        # node AND journalled a record that reproduces it on replay.
+        for _map in (payload, *record):
+            if not isinstance(_map, dict):
+                continue
+            _op = _map.get("op")
+            if (str(_map.get("label") or "").strip().lstrip(":").lower()
+                    == "event" and _op in _ENTITY_MUTATION_STATE_OPS):
+                _state = _map.get("state")
+                refuse_terminal_event_state(
+                    _state if isinstance(_state, dict) else {},
+                    door=f"the `{type_}` envelope")
         if record:
             if len(record) > 1:
                 raise TypeError(

@@ -27426,9 +27426,36 @@ class TortoiseSDK:
             if _ENTITY_ITEM_LABELS.get(
                     str(item.get("type") or "").strip().lower()) != "Event":
                 continue
-            _declares_status, own_status = _item_declared_status(
-                item, _item_flatten_depth(item, "entities"))
+            # ⛔ THE KEY AXIS, and the `None` value, are part of this arm too
+            # (review cycle 5: one P1, one P2, both measured). `_item_declared_status`
+            # reads the LITERAL name, so a `str`-subclass or `bytes` key naming
+            # `status` was invisible here while the door refused it — Phase 1 said
+            # clean, `ingest` committed the point, and step 3 then raised (the
+            # half-commit this arm exists to prevent). And `status: None` is the
+            # DOCUMENTED clear route the door accepts, so treating it as a
+            # violation was this file's own over-rejection class (#7925).
+            # `_event_state_declarations` is the same renderer-side reader the
+            # door uses, over the item and its nested `props` with the door's
+            # presence precedence.
+            from .live import _event_state_declarations
+            _declares_status = False
+            own_status = None
+            for _scope in (item, item.get("props")):
+                if not isinstance(_scope, dict):
+                    continue
+                _sd, _sv, _od, _ov = _event_state_declarations(_scope)
+                if _sd:
+                    _declares_status, own_status = True, _sv
+                    break
             if not _declares_status:
+                _declares_status, own_status = _item_declared_status(
+                    item, _item_flatten_depth(item, "entities"))
+            if not _declares_status:
+                continue
+            if own_status is None:
+                # The documented clear route: a string is drawn from the
+                # vocabulary, `None` CLEARS it — the door accepts this, so it is
+                # not a violation.
                 continue
             # ⛔ The TYPE dimension is part of this arm (review cycle 6, P1).
             # `refuse_terminal_event_state` refuses a PERSISTABLE non-string
@@ -27456,7 +27483,10 @@ class TortoiseSDK:
                                f"`live`), or drop `status`.",
                 })
                 continue
-            if not is_terminal_status(own_status):
+            # The VALUE is normalised the way the door normalises it: a `str`
+            # SUBCLASS can lie about `__hash__`/`__eq__` (and its content is what
+            # the store keeps), so the terminal test runs on the base value.
+            if not is_terminal_status(str.__str__(own_status)):
                 continue
             violations.append({
                 "section": "entities", "index": i,

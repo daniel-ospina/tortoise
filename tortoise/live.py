@@ -609,17 +609,32 @@ def _status_is_discarded_by_every_writer(value: object) -> bool:
 
 
 def _event_state_key(key):
-    """The caller's key as a plain ``str``, insensitive to an overriding subclass.
+    """The caller's key rendered the way the WRITER renders it.
 
-    ``str.__str__`` returns a plain ``str`` and does not consult ``__str__``,
-    ``__hash__`` or ``__eq__`` on a subclass, which is the whole point: both the
-    KEY and the VALUE of an ``:Event``'s state may be a ``str`` subclass.
+    ⛔ This must mirror `_map_key_ok` exactly — ``key.decode()`` for ``bytes``,
+    else ``str(key)`` — because the guard's question is *what name will the node
+    carry*. It is deliberately NOT ``str.__str__`` (which the VALUE side uses):
+    a ``str`` SUBCLASS whose CONTENT is ``"x"`` but whose ``__str__`` returns
+    ``"status"`` is stored under ``status``, so normalising by content let it
+    through and the guard saw a different key from the writer (measured, review
+    cycle 5, P0). ``bytes`` is the second half of the same rule: the driver
+    DECODES a bytes key, so ``b"status"`` writes ``status`` and a guard that
+    skipped non-``str`` keys missed it entirely (cycle 5, P1).
+
+    So: one rule per side of the pair — the KEY is rendered (``str(key)`` /
+    ``.decode()``), the VALUE keeps its base content (``str.__str__``), because
+    that is what the writer does with each.
     """
-    return str.__str__(key) if isinstance(key, str) else key
+    if isinstance(key, bytes):
+        try:
+            return key.decode()
+        except UnicodeDecodeError:  # not a renderable name; the driver aborts
+            return key
+    return str(key)
 
 
 def declares_status_key(props) -> bool:
-    """True when ``props`` declares ``status`` under ANY ``str`` key naming it.
+    """True when ``props`` declares ``status`` under ANY key that renders to it.
 
     The presence TEST must be as shape-independent as the refusal it guards:
     ``"status" in props`` hashes the literal name, so a ``str`` SUBCLASS key that
@@ -628,6 +643,24 @@ def declares_status_key(props) -> bool:
     the KEY axis was not).
     """
     return any(_event_state_key(key) == "status" for key in props)
+
+
+def _event_state_declarations(props) -> tuple[bool, object, bool, object]:
+    """``(status_declared, status, outdated_declared, outdated)`` for a prop map.
+
+    DECLARATION is separate from the VALUE because ``status: None`` is a
+    meaningful clear (``live.py``'s refusal text documents it), so a caller
+    cannot use ``None`` as "absent".
+    """
+    status_declared = outdated_declared = False
+    status = outdated = None
+    for key, value in props.items():
+        key = _event_state_key(key)
+        if key == "status":
+            status_declared, status = True, value
+        elif key == "outdated":
+            outdated_declared, outdated = True, value
+    return status_declared, status, outdated_declared, outdated
 
 
 def _event_state_keys(props) -> tuple[object, object]:
@@ -644,19 +677,12 @@ def _event_state_keys(props) -> tuple[object, object]:
     kwargs SHAPE (``api._emit`` says the same) — failed on the KEY axis while the
     value axis was already closed.
 
-    So the key is normalised the same way the value is (``str.__str__`` returns a
-    plain ``str`` without consulting the subclass) and compared by EQUALITY,
-    never by hashing the caller's object. A non-``str`` key cannot name these
-    properties and is skipped. Cost on the normal path is a shallow scan of the
+    So the key is RENDERED as the writer renders it (``_event_state_key``) and
+    compared by EQUALITY, never by hashing the caller's object. Cost on the
+    normal path is a shallow scan of the
     caller's map — the same order as the loop the writer runs anyway.
     """
-    status = outdated = None
-    for key, value in props.items():
-        key = _event_state_key(key)
-        if key == "status":
-            status = value
-        elif key == "outdated":
-            outdated = value
+    _sd, status, _od, outdated = _event_state_declarations(props)
     return status, outdated
 
 

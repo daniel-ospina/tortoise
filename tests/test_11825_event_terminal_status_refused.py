@@ -398,6 +398,73 @@ class TestTheEventApiDoor:
             sdk.update_entity(eid, status=value)
         assert _props(sdk, eid)["status"] == "draft"
 
+    def test_a_key_that_RENDERS_as_status_cannot_smuggle_a_terminal_status(self, sdk):
+        """Review cycle 5, P0 — the key is rendered, not normalised by content.
+
+        The writer inlines a key as a backticked string with ``str(key)`` (bytes:
+        ``key.decode()``) — `projection._map_key_ok` says so verbatim — so a
+        ``str`` SUBCLASS whose CONTENT is ``"x"`` but whose ``__str__`` returns
+        ``"status"`` is STORED under ``status``. Normalising the key with
+        ``str.__str__`` (by content) therefore let it through while the writer
+        filed it under the guarded name: MEASURED at review cycle 5, the terminal
+        value was stored at ``update_entity``, ``add_event`` and
+        ``create_entity('event')``, and the flag variant hid the same way. The
+        KEY is now rendered exactly as the writer renders it; the VALUE keeps its
+        base content (``str.__str__``), because that is what the writer keeps.
+        """
+
+        class _KeyLiar(str):
+            def __str__(self):
+                return "status"
+
+        eid = _event(sdk, name="KeyRenders")
+        sdk.update_entity(eid, status="draft")
+        with pytest.raises(ValueError, match="not writable on an :Event"):
+            sdk.update_entity(eid, **{_KeyLiar("x"): "superseded"})
+        assert _props(sdk, eid)["status"] == "draft"
+
+        api = self._api(sdk)
+        _before = len(_journal_lines(sdk._test_log))
+        with pytest.raises(ValueError, match="not writable on an :Event"):
+            api.add_event("ev-kliar", "deployment", **{_KeyLiar("x"): "superseded"})
+        assert len(_journal_lines(sdk._test_log)) == _before, (
+            "a refused call must append nothing to the journal")
+
+    def test_a_BYTES_key_naming_status_is_refused_before_the_write(self, sdk):
+        """Review cycle 5, P1 — the driver DECODES a bytes key.
+
+        ``_map_key_ok`` renders ``bytes`` keys with ``key.decode()``, so
+        ``b"status"`` really does name the property; a guard that skipped non-
+        ``str`` keys missed it. Measured: ``create_entity('event', props={b'status':
+        …})`` stored the terminal status and left NO journal record (the live
+        write committed before the ``**`` splat raised), i.e. a replay-invisible
+        terminal Event. Refused now, before any write, and nothing is stored.
+        """
+        with pytest.raises(ValueError, match="not writable on an :Event"):
+            sdk.create_entity("event", "BytesKey", eventKind="deployment",
+                              props={b"status": "superseded"})
+        assert sdk._get_proj().g.query(
+            "MATCH (e:Event {name:'BytesKey'}) RETURN count(e)").result_set[0][0] == 0
+
+    def test_the_positional_record_channel_is_swept_for_state_ops(self, sdk):
+        """Review cycle 5, P1 — `_emit` takes a keyword payload OR a record.
+
+        The state-op arm read only the keyword payload, while the positional
+        record is spliced into ``payload["point"]`` and the fold applies it — so
+        ``_emit("EntityMutated", {… op: restatus, state: {status: superseded}})``
+        was ACCEPTED, stored the terminal status and journalled a record that
+        reproduces it on replay. Both channels are swept now, exactly as the
+        `EventRecorded` arm above already does.
+        """
+        eid = _event(sdk, name="PosRecord")
+        sdk.update_entity(eid, status="draft")
+        api = self._api(sdk)
+        with pytest.raises(ValueError, match="not writable on an :Event"):
+            api._emit("EntityMutated", {"id": eid, "label": "Event",
+                                        "op": "restatus",
+                                        "state": {"status": "superseded"}})
+        assert _props(sdk, eid)["status"] == "draft"
+
     def test_the_two_doors_handle_a_dropped_status_differently_and_both_are_legal(self, sdk):
         """Review cycle 3, P2 — "dropped" is FOLD behaviour, not a universal rule.
 
@@ -761,6 +828,35 @@ class TestTheBundleValidationDoor:
         })
         assert violations, f"status={status!r} passed Phase 1"
         assert any("STRING" in v["message"] for v in violations)
+
+    def test_phase_1_reads_the_value_and_the_key_the_way_the_door_does(self, sdk):
+        """Review cycle 5, P1/P2 — the arm must give the DOOR's answer.
+
+        It read the literal key and tested the raw value, so a ``str`` SUBCLASS
+        value (or a subclass/bytes key naming ``status``) produced ZERO
+        violations while the door refused it: Phase 1 said clean, ``ingest``
+        committed the point, and step 3 raised — the half-commit this arm exists
+        to prevent (measured: `phase1: []` then ``ValueError``, points 0 -> 1).
+        And ``status: None`` is the DOCUMENTED clear route the door ACCEPTS, so
+        flagging it was this file's own over-rejection class (#7925).
+        """
+
+        class _HashLiar(str):
+            def __hash__(self):
+                return 0
+
+        base = {"ref": "e1", "type": "event", "name": "A",
+                "eventKind": "deployment"}
+        for label, item in (
+                ("subclass value", {**base, "status": _HashLiar("superseded")}),
+                ("subclass key", {**base, _HashLiar("status"): "superseded"}),
+                ("bytes key", {**base, b"status": "superseded"}),
+        ):
+            violations = sdk._validate_bundle({"entities": [item]})
+            assert violations, f"{label} passed Phase 1 but the door refuses it"
+        assert sdk._validate_bundle({
+            "entities": [{**base, "status": None}],
+        }) == [], "`status: None` is the documented clear route; the door accepts it"
 
     def test_every_connection_shape_still_gets_a_diagnosis(self, sdk):
         """COVERAGE is pinned, not the message count (review cycle 5 P1).
