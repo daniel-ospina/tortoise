@@ -42,9 +42,11 @@ spell the host with no row at all — the `blog/api/notify-publish` POST in
 sweep must re-aim too (`tests/test_website_docs_consistency.py`'s `SITE_HOSTS` lists the
 retired host as LEGITIMATE, so a retired-host `<loc>` passes there) — because this guard
 counts what the RUNTIME emits in its own surface, not every occurrence in the tree. Every file that reads 0 has
-NO row and stays in `RUNTIME_FILES` — the three that lost a row (all to main's
-#12058, which landed before this branch's base) and the six that never carried one, `website/functions/blog/_lib.ts` among
-them: #11977 repointed its three `navHtml` hrefs in the same commit that introduced this list, so the count
+NO row and stays in `RUNTIME_FILES` — the landed allowlist has never carried a row for ANY of
+them: three were re-aimed to 0 by main's #12058 (which landed before this branch's base and
+never touched this file), and six never carried one,
+`website/functions/blog/_lib.ts` among them: #11977 repointed its three `navHtml` hrefs in the
+same commit that introduced this list, so the count
 reached 0 before a row could describe it — so a literal coming back REDS the guard instead
 of leaving the surface, and neither group is a leftover — which is why this guard
 cannot report GREEN over a file it never opened, and why a sweep that removes one of
@@ -52,11 +54,12 @@ those literals must remove its recorded reason too.
 
 ⛔ THE COUNTS MOVED BEFORE THIS BRANCH'S BASE, AND THAT IS THE POINT OF AN EXACT
 COUNT. main's #12058 ("serve the product at premiselabs.co/tortoise", which is what
-CLOSED #11764) re-aimed most of the dashboard set before this branch was cut, so
-THREE rows
-went to ZERO and were removed (`invite-accept.html` 3 -> 0, `welcome.html` 1 -> 0,
-`wizardPrompts.js` 3 -> 0) and two SHRANK (`signup.html` 2 -> 1,
-`overviewEmptyAction.js` 2 -> 1). Their files STAY in `RUNTIME_FILES`, so a literal
+CLOSED #11764) re-aimed most of the dashboard set before this branch was cut, so the
+counts an EARLIER DRAFT of this table carried no longer hold: `invite-accept.html`
+went 3 -> 0, `welcome.html` 1 -> 0, `wizardPrompts.js` 3 -> 0, and two SHRANK
+(`signup.html` 2 -> 1, `overviewEmptyAction.js` 2 -> 1). ⛔ The drafts' rows for the
+first three are gone with the drafts — the landed allowlist has never carried them —
+so read the table below, which is what this head measures, not this sentence. Their files STAY in `RUNTIME_FILES`, so a literal
 coming back REDS the guard rather than leaving the surface. The two survivors are
 app-ORIGIN hrefs (`/auth`, `/welcome`) on the retired host, which #12058's scope
 (the marketing and product pages) did not cover; they defer to **#12057**, which
@@ -387,10 +390,10 @@ RETIRED_HOST_ALLOWLIST = {
 #:   website/apps/blog-admin/src/App.tsx                     1  header link to the PUBLIC BLOG
 #:   website/apps/blog-admin/src/pages/PostEditor.tsx        3  public-post permalinks (View / copy-link)
 #:   website/apps/blog-admin/src/pages/PostsList.tsx          1  "View public post" permalink
-#:   website/apps/dashboard/public/invite-accept.html        0  re-aimed by #12058 (row removed)
-#:   website/apps/dashboard/public/welcome.html              0  re-aimed by #12058 (row removed)
+#:   website/apps/dashboard/public/invite-accept.html        0  re-aimed by #12058 (no row)
+#:   website/apps/dashboard/public/welcome.html              0  re-aimed by #12058 (no row)
 #:   website/apps/dashboard/public/signup.html               1  canonical /auth (app origin)
-#:   website/apps/dashboard/src/wizardPrompts.js             0  re-aimed by #12058 (row removed)
+#:   website/apps/dashboard/src/wizardPrompts.js             0  re-aimed by #12058 (no row)
 #:   website/apps/dashboard/src/harnesses.js                 1  DOCS_ORIGIN
 #:   website/apps/dashboard/src/overviewEmptyAction.js       1  ONBOARDING_FUNNEL_HREF (app origin)
 #:   website/apps/dashboard/src/billingCta.js                1  COMPARE_PLANS_URL
@@ -428,7 +431,10 @@ RETIRED_HOST_ALLOWLIST = {
 #: never carried a row at all — #11977 repointed its three `navHtml` hrefs to the
 #: terminal forms in the same commit that introduced the map (#11764 closed without
 #: doing it) — while `invite-accept.html`, `welcome.html` and `wizardPrompts.js` were
-#: re-aimed to 0 by main's #12058 and their rows deleted. All four stay in `RUNTIME_FILES` on purpose:
+#: re-aimed to 0 by main's #12058 (which touched all three files and never touched this
+#: one). ⛔ The landed allowlist has never carried a row for ANY of the four — those
+#: three rows, like `_lib.ts`'s, lived only in the pre-rebase drafts, so the table below
+#: is not a record of deletions; it is what this head measures. All four stay in `RUNTIME_FILES` on purpose:
 #: with no row the expected count is 0, so a literal coming back REDS this guard
 #: instead of leaving the surface.
 #: ⛔ COUNT THE TABLE, DO NOT TRUST A NUMBER HERE. An earlier revision of this
