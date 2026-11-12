@@ -424,7 +424,7 @@ from `sdk.py`'s point-creation path at `:16892` — keyed by symbol: `bind_point
 the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
 `subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:6588` and
-consumed at `sdk.py:9534`/`:9587` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
+consumed at `sdk.py:9540`/`:9593` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
 this pair is keyed by **symbol**), the slots are absent in the
 corpus, or the graph served is not the graph measured — are decided by evidence.
 **Proof:** Subjects `26 → N` on a real corpus, four families non-zero, both customer readers non-empty —
