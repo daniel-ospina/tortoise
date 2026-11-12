@@ -1343,24 +1343,59 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
         api.emit_belief("ConfidenceChanged", id="node-1", basisPoints=20000)
     with pytest.raises(PercentValueError, match="percent value refused"):
         api.add_object("an object", "skill", id="obj-pct", basisPoints=20000)
-    # …and the two STORAGE-FORM markers a caller can put on the positional
-    # record, which the seam never MINTS. Their harms differ and are stated per
-    # key (the `#11948` round-2 review measured both of the first draft's
-    # sentences as overclaims): `embedding_verbatim` is read by the fold — it
-    # flips the stored form — and is a declared node property, so it persists to
-    # the NODE; `embedding_preserved` is unread on THIS channel today and is
-    # refused as server-owned. Measured before the guard, with only this refusal
-    # neutralised: `_emit("PointAdded", {"id", "content", "embedding", marker:
-    # True})` journalled those keys VERBATIM — no `embedding_model` is added,
-    # because `_emit` stamps only a TOP-LEVEL `embedding` and never a nested
-    # record. The identity forgery is real only when the caller supplies the key
-    # itself (the module header's `"not-a-real-model"` measurement); it rides by
-    # CARRIAGE, not by suppression. The pin below is what refuses either shape.
-    for marker in ("embedding_preserved", "embedding_verbatim"):
-        with pytest.raises(ValueError, match="server-minted storage-form marker"):
+    # …and the record facts a caller must not set on EITHER channel of the
+    # funnel: no seam call here mints them, and each corrupts something
+    # different — `embedding_preserved` suppresses the model/text-hash
+    # attestation, `embedding_verbatim` ALSO writes the node's declared property
+    # (so the lie survives on both sides), `evidence_fold` makes a flat record
+    # read as a fold (`projection.record_is_evidence_fold`), `embeddingText`
+    # forges the text↔vector identity, and the three source-ref keys put the
+    # payload's edges AHEAD of the `:Source` resolution the seam performs.
+    # Measured before the guard: `_emit("PointAdded", {"...": "..",
+    # "embedding_preserved": True, "embedding_model": "not-a-real-model"})`
+    # journalled the lie, and `_emit("PointAdded", evidence_fold=True)` — the
+    # KEYWORD channel — journalled a record `record_is_evidence_fold` reads as
+    # a fold.
+    for marker in ("embedding_preserved", "embedding_verbatim",
+                   "evidence_fold", "embeddingText",
+                   "extractedFromAll", "sourceVersion", "sourceVersions"):
+        with pytest.raises(ValueError, match="server-minted record facts"):
             api._emit("PointAdded", {
                 "id": f"forged-{marker}", "content": "c",
                 "embedding": [0.1], marker: True})
+        if marker in ("embedding_preserved", "embedding_verbatim"):
+            # …already refused on this channel by the vector family's own guard,
+            # with its own message — the two must not be merged into one claim.
+            with pytest.raises(ValueError, match="server-managed"):
+                api._emit("PointAdded", **{marker: True})
+        else:
+            # …and the same key on the keyword payload, which is the more
+            # dangerous channel on a flat record (`evidence_fold` there IS a fold:
+            # `projection.record_is_evidence_fold` reads it and the replay's
+            # recreate anchor is skipped).
+            with pytest.raises(ValueError, match="server-minted record facts"):
+                api._emit("PointAdded", **{marker: True})
+    # The sibling that looks identical but is NOT refused: `add_point` mints it,
+    # so it is a seam fact rather than a caller's claim. Asserted as set
+    # membership rather than by journalling a record — this test's last
+    # assertion is that the refusals above left the journal EMPTY.
+    from tortoise.api import _UNCALLERABLE_RECORD_KEYS
+    from tortoise.projection import EVIDENCE_FOLD_KEY
+
+    assert "sourceVersionTransit" not in _UNCALLERABLE_RECORD_KEYS
+    assert {"extractedFromAll", "sourceVersion", "sourceVersions"} <= (
+        _UNCALLERABLE_RECORD_KEYS)
+    # The fold key is the READER's constant, not a second spelling of it: pin the
+    # identity, so a rename at the consumer cannot leave this guard refusing a
+    # name nobody reads (fail-open drift).
+    assert EVIDENCE_FOLD_KEY in _UNCALLERABLE_RECORD_KEYS
+    # …and `emit_belief` must RAISE these rather than drop them: its refusal is
+    # armed before the best-effort arm, which is the whole point of #11948 F2.
+    for marker in ("evidence_fold", "embeddingText", "extractedFromAll",
+                   "sourceVersion", "sourceVersions"):
+        with pytest.raises(ValueError, match="server-minted record facts"):
+            api.emit_belief("ConfidenceChanged", id="n-belief-forged",
+                            **{marker: True})
     assert not journal.exists() or not journal.read_text().strip(), (
         "the refusal must not leave a half-record behind")
 
@@ -1371,74 +1406,6 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
                journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert [r["type"] for r in records] == ["ConfidenceChanged"]
     assert records[0]["confidence"] == 0.5
-
-
-#: The positional channel's answer for every member of the master set, as a
-#: PARTITION rather than a second spelling of it. Keyed by the key's name, so a
-#: seventh master key cannot arrive unclassified: it reds the difference-set
-#: assertion below with its own name in the mismatch.
-_POSITIONAL_ANSWERS = {
-    "embedding_width": "VERIFIED",            # the seam MINTS it (`_point` stamp)
-    "embedding_verbatim": "REFUSED",          # storage form — no seam call mints it
-    "embedding_preserved": "REFUSED",         # storage form — no seam call mints it
-    "embedding_model": "NEITHER",             # a creating `_point` stamps it
-    "embedding_revision": "NEITHER",          # …so the channel cannot tell whose it is
-    "embedding_text_hash": "NEITHER",         # …ditto
-}
-
-
-def test_the_positional_marker_partition_is_pinned():
-    """One family, two sets — pinned in BOTH directions so neither can drift.
-
-    `#11948` review round 2 (architectural-soundness): `_emit`'s positional
-    channel answers the marker family in three ways — the width is VERIFIED, the
-    storage form is REFUSED, the identity triple is neither — and the refusal
-    set is therefore a SUBSET of the master set. Nothing asserted the relation,
-    which left two opposite drifts invisible:
-
-    * a seventh master key added tomorrow is refused on the keyword channel, by
-      `add_point`, by the SDK and by the MCP boundary, and SILENTLY ACCEPTED on
-      this channel — the "one channel is never enough" class `api.py` documents;
-    * the width (or the identity triple) added to the refusal set here would red
-      EVERY vector-bearing `PointAdded`/`OperatorAdded`, the over-block
-      `_verify_record_vector_width` measures at length.
-
-    Neither direction reds anything else, which is why the pin states the whole
-    partition rather than just the subset relation.
-    """
-    from tortoise.api import (
-        _POSITIONAL_UNMINTED_MARKERS,
-        _SERVER_MANAGED_EMBEDDING_KEYS,
-    )
-
-    assert set(_POSITIONAL_ANSWERS) == set(_SERVER_MANAGED_EMBEDDING_KEYS), (
-        "the master marker set gained/lost a key without classifying it on the "
-        "positional channel — decide REFUSED / VERIFIED / NEITHER and add it to "
-        "_POSITIONAL_ANSWERS; an unclassified key is accepted on `_emit`'s "
-        f"positional record. master={sorted(_SERVER_MANAGED_EMBEDDING_KEYS)}, "
-        f"classified={sorted(_POSITIONAL_ANSWERS)}")
-    refused = {k for k, answer in _POSITIONAL_ANSWERS.items() if answer == "REFUSED"}
-    assert refused == set(_POSITIONAL_UNMINTED_MARKERS), (
-        "the positional refusal set and the partition disagree: refused-by-"
-        f"classification={sorted(refused)}, "
-        f"refused-by-set={sorted(_POSITIONAL_UNMINTED_MARKERS)}")
-    assert set(_POSITIONAL_UNMINTED_MARKERS) < set(_SERVER_MANAGED_EMBEDDING_KEYS), (
-        "the positional refusal set must stay a PROPER subset of the master set "
-        "— it classifies the family, it never re-spells it")
-    # The two answers that must NOT move, stated so this pin does not merely
-    # agree with whatever the partition was edited to say: the width is the one
-    # member the seam MINTS on this channel (refusing it reds every vector-bearing
-    # `PointAdded`), and the identity triple is the one the channel cannot judge.
-    assert _POSITIONAL_ANSWERS["embedding_width"] == "VERIFIED", (
-        "the width is the seam's OWN marker on this channel (`_point` stamps it) "
-        "— refusing it is the measured over-block `_verify_record_vector_width` "
-        "documents, and it reds every vector-bearing PointAdded/OperatorAdded")
-    assert {k for k, answer in _POSITIONAL_ANSWERS.items() if answer == "NEITHER"} == {
-        "embedding_model", "embedding_revision", "embedding_text_hash"}, (
-        "the identity triple is the residual this channel cannot decide (a "
-        "creating `_point` stamps it), so it must stay NEITHER — refusing it "
-        "here is the same over-block, and refusing it without stamping would "
-        "strip R1's attestation off every creating record")
 
 
 def test_the_envelope_collision_guard_keeps_add_documents_event_id_pin(tmp_path):
