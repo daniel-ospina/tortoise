@@ -88,11 +88,20 @@ not a tenth spelling — it is the one a text guard cannot reach:
   the step that tried.
 - **A path built at runtime is invisible.** `b=/usr/lib/postgresql; ln -sf
   "$b/17/bin/pg_dump" …/16/bin/pg_dump` names no major this guard can read. What
-  IS refused is the mutating VERB carrying a client binary name, at or after the
-  pin, however the source is spelled — so the plausible form is loud even when
-  the arithmetic is not. The same applies to the runner's own command-file
-  directory (`_runner_file_commands`): naming it is refused outright, but a
-  directory reached through yet another variable is not.
+  IS refused is a REPLACING VERB from `BINARY_MUTATION_RE` carrying a client
+  binary name, at or after the pin, however the source path is spelled.
+  ⛔ THAT LIST IS A WHITELIST, NOT A PROOF (#12069 review, P1). This docstring
+  used to claim the refusal held "however the source is spelled"; MEASURED GREEN
+  by two ordinary copy verbs the list did not carry —
+  `sudo rsync -a "$b/17/bin/pg_dump" "$b/16/bin/pg_dump"` and
+  `sudo sh -c "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"` — so the claim was
+  false for any verb nobody listed. The list is widened (copy/archive verbs, a
+  `sh -c` redirect, and a bare `> …/pg_dump`), `BINARY_MUTATION_POLARITY` pins
+  both directions, and the RESIDUAL is stated: a verb this list omits is not
+  caught, and no line-regex list can be proved complete.
+  The same applies to the runner's own command-file directory
+  (`_runner_file_commands`): naming it is refused outright, but a directory
+  reached through yet another variable is not.
 - **A directory derived rather than spelled** (`ls -d /usr/lib/postgresql/*/bin
   | sort -V | tail -1`) is caught only because the rule treats a client dir it
   cannot read as an offender; the same derivation hidden inside an invoked
@@ -242,11 +251,28 @@ PATH_ASSIGN_RE = re.compile(r"\bPATH\s*=\s*(?P<quote>[\"']?)(?P<value>[^\s;\"']*
 #: and a `find`-derived `cp "$src" …/16/bin/pg_dump`. Keying on the BINARY NAME
 #: plus a mutating verb is independent of HOW the source path is spelled, which
 #: is the axis that was open.
+#: ⛔ A VERB WHITELIST LEAKS, SO THE MISSES ARE NAMED (#12069 review, P1).
+#: MEASURED GREEN with every row satisfied — i.e. #12051 restored — by two
+#: ordinary copy verbs the first list did not carry:
+#:
+#:     sudo rsync -a "$b/17/bin/pg_dump" "$b/16/bin/pg_dump"
+#:     sudo sh -c "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"
+#:
+#: `rsync` is the ordinary tree-copy verb and `cat >` is the same act as the
+#: `tee` the list already carries. The list is widened by the copy/replace verbs
+#: (the archive extractors included, because they write files out of an archive),
+#: and the STATED LIMIT now says plainly that this is a whitelist — the residual
+#: is a verb nobody listed, not a proof that no verb exists.
 BINARY_MUTATION_RE = re.compile(
     r"\b(?:"
-    r"ln|cp|mv|rm|unlink|chmod|chown|patch|tee|dd|"
+    r"ln|cp|mv|rm|unlink|chmod|chown|patch|tee|dd|rsync|tar|unzip|cpio|"
     r"update-alternatives|install|sed[ \t]+-i|dpkg[ \t]+-i|perl[ \t]+-i"
     r")\b"
+    # `sh -c "cat … > <client binary>"` / `bash -c '… > …'`: an in-place write
+    # through a redirect, whose VERB is a reader (`cat`, `echo`, `printf`).
+    r"|\b(?:ba|z|da)?sh[ \t]+-c\b[^\n]*>"
+    # a bare redirect that TARGETS a client binary: `… > …/16/bin/pg_dump`
+    r"|>[ \t]*[^\n]*\b(?:pg_dump|pg_restore|pg_ctl|pg_wrapper)(?![\w.])"
 )
 #: Only a binary NAME, never a filename that contains one: the `(?![\w.])` is
 #: what keeps `rm -f "$RUNNER_TEMP/pg_dump.log"` (a tidy step) and
@@ -1625,6 +1651,49 @@ def _selects_on_var(body: list[str], var: str) -> bool:
     return False
 
 
+#: The variable an armed comparison tests: `"$major" != "16"`,
+#: `test "$major" != 16`. Used to tie a loop's credit to the value the branch
+#: actually decides on (#12069 review, P2).
+COMPARED_VARIABLE_RE = re.compile(
+    r"\$\{?(?P<var>[A-Za-z_]\w*)\}?[^=\n]{0,3}![ \t]*="
+)
+
+#: `NAME=value` (with an optional `export`). The derivation graph's edges.
+ASSIGNMENT_RE = re.compile(
+    r"^[ \t]*(?:export[ \t]+)?(?P<lhs>[A-Za-z_]\w*)=(?P<rhs>.*)$"
+)
+
+
+def _compared_variable(code: str) -> str | None:
+    """The variable the armed `!= <literal>` comparison decides on, if any."""
+
+    match = COMPARED_VARIABLE_RE.search(code)
+    return match.group("var") if match else None
+
+
+def _derived_variables(body: list[str], sources: set[str]) -> set[str]:
+    """`sources` plus every variable whose value is BUILT from them, transitively."""
+
+    derived = set(sources)
+    changed = True
+    while changed:
+        changed = False
+        for line in body:
+            match = ASSIGNMENT_RE.match(line)
+            if not match or match.group("lhs") in derived:
+                continue
+            if any(
+                re.search(
+                    r"\$\{" + re.escape(name) + r"\}|\$" + re.escape(name) + r"(?!\w)",
+                    match.group("rhs"),
+                )
+                for name in derived
+            ):
+                derived.add(match.group("lhs"))
+                changed = True
+    return derived
+
+
 def _version_checked_tools(code: str) -> set[str]:
     """Which client tools this code actually VERSION-CHECKS (#12051 rounds 11-12).
 
@@ -1738,6 +1807,42 @@ def _version_checked_tools(code: str) -> set[str]:
         # where this row would otherwise only report the tool as unchecked.
         truncated = inline_truncated or _truncated_at_top_level(body)
         credited = set() if truncated or _selects_on_var(graded, var) else names
+        # ⛔ THE VALUE THE BRANCH DECIDES ON MUST COME FROM THE LOOP VARIABLE
+        # (#12069 review, P2). Crediting `$tool --version` asserted only that the
+        # body INVOKES the tool — not that the number the armed `!= <major>`
+        # comparison tests was derived from it. Measured GREEN with every row
+        # satisfied:
+        #
+        #     for tool in pg_dump pg_restore; do
+        #       version="$("$tool" --version)"
+        #       printf '%s\n' "$version"
+        #       major="$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\..*/\1/')"
+        #       if [ "$major" != "16" ]; then … fi
+        #     done
+        #
+        # — `pg_restore` at another major then exits 0, which is exactly what the
+        # pin exists to stop. The derivation is transparent: the closure starts at
+        # the loop variable, follows `NAME=…$…` edges, and must reach the compared
+        # variable. Applied only when the code HAS such a comparison, so a layout
+        # that asserts per tool without one is unaffected.
+        compared = _compared_variable(code)
+        # ⛔ ONLY A COMPARISON THIS BODY DECIDES ON. The gate applies when the
+        # compared variable is ASSIGNED in this body — i.e. the body derives the
+        # number it then tests. An unrelated `!= <digit>` elsewhere (`[ "$rc" !=
+        # 0 ]`) narrows nothing, and reading it as a narrowing is the false-RED
+        # direction this file has already paid for five times.
+        assigned_here = {
+            match.group("lhs")
+            for line in graded
+            if (match := ASSIGNMENT_RE.match(line))
+        }
+        if (
+            credited
+            and compared is not None
+            and compared in assigned_here
+            and compared not in _derived_variables(graded, {var})
+        ):
+            credited = set()
         if rest.strip():
             scan(rest, var, credited)
         for body_line in body:
@@ -2895,6 +3000,30 @@ VERSION_CHECK_POLARITY = [
         {"pg_dump", "pg_restore"},
         "#12069 round-9: an ESCAPED quote ends nothing — a `[[` inside it opens no test",
     ),
+    # ⛔ THE COMPARED VALUE MUST DERIVE FROM THE LOOP VARIABLE (#12069 review, P2).
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        "  major=\"$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump"},
+        "the branch decides on a value derived from pg_dump, so pg_restore is never compared",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        "  major=\"$(printf '%s\\n' \"$version\" | sed -E 's/[^0-9]*([0-9]+)\\..*/\\1/')\"\n"
+        '  if [ "$major" != "16" ]; then exit 1; fi\ndone',
+        {"pg_dump", "pg_restore"},
+        "CONTROL: the value the branch tests IS derived from the loop variable",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  version="$("$tool" --version)"\n'
+        '  if [ "$rc" != 0 ]; then exit 1; fi\ndone',
+        {"pg_dump", "pg_restore"},
+        "CONTROL: a comparison on an unrelated variable narrows nothing",
+    ),
 ]
 
 
@@ -3204,6 +3333,109 @@ def test_an_env_path_is_wired_into_the_row(job: dict) -> None:
     )
     with pytest.raises(AssertionError, match="GITHUB_ENV"):
         test_no_step_rewrites_the_client_path_to_another_major(github_env)
+
+
+#: (line, is it a binary REPLACEMENT, why) — the pin for `_replaces_a_client_binary`.
+#: The rule is a VERB whitelist, so its misses must be visible: `rsync` and a
+#: `cat >` redirect both copied a pg17 binary over the pinned pg16 one with every
+#: row GREEN (#12069 review, P1). Both directions are pinned, because the
+#: read-only controls are what keep the whitelist from widening into a false RED.
+BINARY_MUTATION_POLARITY = [
+    (
+        'b=/usr/lib/postgresql; sudo ln -sf "$b/17/bin/pg_dump" "$b/16/bin/pg_dump"',
+        True,
+        "the original measured form: a symlink over the pinned binary",
+    ),
+    (
+        'b=/usr/lib/postgresql\nsudo rsync -a "$b/17/bin/pg_dump" "$b/16/bin/pg_dump"',
+        True,
+        "`rsync` is the ordinary tree-copy verb (#12069 review, P1)",
+    ),
+    (
+        'sudo sh -c "cat $b/17/bin/pg_dump > $b/16/bin/pg_dump"',
+        True,
+        "`cat >` is the same act as the `tee` the list already carried",
+    ),
+    (
+        'sudo mv /usr/lib/postgresql/17/bin/pg_restore /usr/lib/postgresql/16/bin/pg_restore',
+        True,
+        "a move, the form the first list already covered",
+    ),
+    (
+        'rm -f "$RUNNER_TEMP/pg_dump.log"',
+        False,
+        "CONTROL: a tidy step names a log, not the binary",
+    ),
+    (
+        'pg_dump --version | tee -a "$RUNNER_TEMP/v.txt"',
+        False,
+        "CONTROL: the guard's own recommended control reads the binary",
+    ),
+    (
+        "dpkg -l postgresql-client-16 | tail -2",
+        False,
+        "CONTROL: a read-only diagnostic",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("line", "refused", "why"),
+    BINARY_MUTATION_POLARITY,
+    ids=[f"mut-{i}" for i in range(len(BINARY_MUTATION_POLARITY))],
+)
+def test_a_binary_replacement_reads_through_any_copy_verb(
+    line: str, refused: bool, why: str
+) -> None:
+    """A verb this list omits is a fail-open; a read-only line it catches is a false RED."""
+
+    verdict = any(_replaces_a_client_binary(part) for part in line.splitlines())
+    assert verdict is refused, f"{why} (measured, #12069 review P1): {line!r}"
+
+
+def test_every_rewrite_rule_is_wired_into_the_row(job: dict) -> None:
+    """Three arms were defined but NOT wired: deleting each left 158/158 green.
+
+    `test_an_env_path_is_wired_into_the_row` exists because the same was true of
+    the `env:` arm. Nothing in this file called `_replaces_a_client_binary`,
+    `_client_dir_mentions` or `RUNNER_FILE_COMMAND_RE` directly, and against the
+    REAL job they never have anything to report — so a deletion, or a tightening
+    that turned into a false RED, was invisible (#12069 review, P2/R5). This
+    drives the real row over mutated copies of the real job, so a missing arm
+    fails HERE.
+    """
+
+    replaced = copy.deepcopy(job)
+    leg = next(
+        s for s in _steps(replaced) if "Postgres legs" in str(s.get("name") or "")
+    )
+    leg["run"] = (
+        'b=/usr/lib/postgresql\nsudo rsync -a "$b/17/bin/pg_dump" "$b/16/bin/pg_dump"\n'
+        + leg["run"]
+    )
+    with pytest.raises(AssertionError, match="REPLACES a client binary"):
+        test_no_step_rewrites_the_client_path_to_another_major(replaced)
+
+    named = copy.deepcopy(job)
+    leg = next(
+        s for s in _steps(named) if "Postgres legs" in str(s.get("name") or "")
+    )
+    leg["run"] = (
+        'export PATH="/usr/lib/postgresql/17/bin:$PATH"\n' + leg["run"]
+    )
+    with pytest.raises(AssertionError, match="names pg17"):
+        test_no_step_rewrites_the_client_path_to_another_major(named)
+
+    command_file = copy.deepcopy(job)
+    leg = next(
+        s for s in _steps(command_file) if "Postgres legs" in str(s.get("name") or "")
+    )
+    leg["run"] = (
+        'for f in "$RUNNER_TEMP"/_runner_file_commands/add_path_*; do '
+        'echo /usr/bin >> "$f"; done\n' + leg["run"]
+    )
+    with pytest.raises(AssertionError, match="runner's own command file"):
+        test_no_step_rewrites_the_client_path_to_another_major(command_file)
 
 
 def test_a_step_env_outside_the_pin_leg_window_is_not_an_offender() -> None:
@@ -3888,7 +4120,8 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
     # ⛔ ORDER IS PART OF THE FIX. A precondition placed AFTER the install is
     # inert: the install has already died with the opaque `exit 100` this block
     # exists to replace.
-    assert code.index("apt-cache") < code.index("apt-get install"), (
+    joined = _run_commands(pin)
+    assert joined.index("apt-cache") < joined.index("apt-get install"), (
         "the package precondition runs AFTER `apt-get install`, so on an image "
         "whose archive lacks the major the job dies with the archive's opaque "
         "`E: Unable to locate package` and never reaches the named error"
@@ -3899,8 +4132,21 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
     # package too and sits earlier, so a first-match read would satisfy an
     # install-major claim by reading the PROBE (measured: switching the install
     # to -18 stayed green under the old read).
+    # ⛔ READ THE INSTALL FROM THE JOINED TEXT (`_run_commands`), NOT `code`
+    # (#12069 review, P1). `_normalised_code()` erases `${…}` so the
+    # `_precondition()` block can be matched, but it does NOT join a backslash
+    # continuation — so a correct, style-consistent
+    #
+    #     sudo apt-get install -y --no-install-recommends \
+    #       postgresql-client-16
+    #
+    # red here with "the pin never runs `apt-get install …`", telling the
+    # maintainer to add the line that is already there. `_pin_step()` reads the
+    # JOINED text, which is why every other row (and the precondition test) was
+    # happy with the same edit: the two reads must be the same read.
     install = re.search(
-        r"apt-get\s+install[^\n]*postgresql-client-(?P<major>\d+)", code
+        r"apt-get\s+install[^\n]*postgresql-client-(?P<major>\d+)",
+        _run_commands(pin),
     )
     assert install, "the pin never runs `apt-get install postgresql-client-<major>`"
     assert int(install.group("major")) == server_major, (
@@ -3908,6 +4154,34 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
         f"servers are pg{server_major}: the versioned PATH prepend would then "
         "point at a directory the install never created"
     )
+
+
+def test_a_continued_install_line_still_reads_as_the_install(job: dict) -> None:
+    """A backslash-continued install is the SAME command, and must not red (#12069 P1).
+
+    MEASURED false RED: wrapping the one-line install as this very workflow
+    already wraps 72 other long commands --
+
+        sudo apt-get install -y --no-install-recommends \
+          postgresql-client-16
+
+    red with "the pin never runs `apt-get install postgresql-client-<major>`",
+    i.e. telling the maintainer to add the line that is already there. The row
+    re-read the step through `_normalised_code()` (which erases `${...}` for the
+    precondition block but does NOT join a continuation) while `_pin_step()` read
+    the JOINED text, so the two reads disagreed. They are one read now.
+    """
+
+    continued = copy.deepcopy(job)
+    pin_index, _ = _pin_step(_steps(continued))
+    step = continued["steps"][pin_index]
+    step["run"] = step["run"].replace(
+        "sudo apt-get install -y --no-install-recommends postgresql-client-16",
+        "sudo apt-get install -y --no-install-recommends "
+        + chr(92) + chr(10) + "    postgresql-client-16",
+    )
+    assert chr(92) + chr(10) in step["run"], "the fixture did not wrap the install line"
+    test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(continued)
 
 
 def test_the_precondition_actually_fires_when_the_package_is_absent(
