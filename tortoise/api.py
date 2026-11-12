@@ -89,10 +89,18 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #:
 #:   • `embedding_preserved` — payload-only metadata; the entry at
 #:     ``projection/entities.py:2392`` says "Never a node property" in as many
-#:     words. It makes ``stamp_journal_embedding`` SKIP the
-#:     model/revision/text-hash attestation that R1 exists to keep, so the
-#:     record claims a vector of unattested origin. The harm lives in the
-#:     JOURNAL the replay reads.
+#:     words. ⛔ What it does NOT do on this door is suppress an attestation, and
+#:     an earlier draft of this comment claimed exactly that (found independently
+#:     by two reviewers, `#11948` round 2): NEITHER channel of ``_emit`` attests
+#:     a record — the positional one stamps only a TOP-LEVEL ``embedding`` (so
+#:     ``payload["point"]`` never reaches ``stamp_journal_embedding``), and the
+#:     keyword one stamps with ``creating=False``, whose else-arm POPS the
+#:     triple whatever this key says. The suppression it names is real, but it
+#:     lives at ``sdk._write_capture_turns`` (``creating=True``), a different
+#:     door. Here the key is refused because it is a SERVER-OWNED fact no seam
+#:     call in this module mints: a caller's value asserts a precedent capture
+#:     that never existed, nothing on this door can contradict it, and it becomes
+#:     load-bearing the moment anything re-stamps the record.
 #:   • `embedding_verbatim` — ⛔ NOT payload-only, and saying it was is the
 #:     same over-claim this guard was added to fix. Its entry is
 #:     ``projection/entities.py:2386``, under the comment at ``:2378``: a
@@ -651,12 +659,15 @@ class EventAPI:
         #   • the UNCALLERABLE facts are REFUSED on BOTH channels —
         #     `_UNCALLERABLE_RECORD_KEYS`: no seam call here mints them, so a
         #     value can only be a caller's. They are not one family and each
-        #     corrupts something different: `embedding_preserved` suppresses the
-        #     R1 attestation, `embedding_verbatim` ALSO writes the node's
-        #     declared property, `evidence_fold` forges the replay's recreate
-        #     anchor, `embeddingText` forges the text↔vector identity, and the
-        #     three source-ref keys assert provenance ahead of the `:Source`
-        #     resolution. See that set's comment for each harm and citation;
+        #     corrupts something different: `embedding_preserved` claims a
+        #     precedent capture nothing here can contradict (⛔ NOT an
+        #     attestation suppressor on this door — no channel of `_emit` attests
+        #     a record; see that set's comment), `embedding_verbatim` ALSO writes
+        #     the node's declared property, `evidence_fold` forges the replay's
+        #     recreate anchor, `embeddingText` forges the text↔vector identity,
+        #     and the three source-ref keys assert provenance ahead of the
+        #     `:Source` resolution. See that set's comment for each harm and
+        #     citation;
         #   • the IDENTITY triple is NEITHER — a creating `_point` legitimately
         #     stamps it, so this channel cannot tell the seam's value from a
         #     caller's. Stated as the residual it is rather than folded into a

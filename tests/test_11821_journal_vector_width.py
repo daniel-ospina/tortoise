@@ -1345,17 +1345,21 @@ def test_emit_belief_refuses_the_marker_before_its_best_effort_arm(tmp_path):
         api.add_object("an object", "skill", id="obj-pct", basisPoints=20000)
     # …and the record facts a caller must not set on EITHER channel of the
     # funnel: no seam call here mints them, and each corrupts something
-    # different — `embedding_preserved` suppresses the model/text-hash
-    # attestation, `embedding_verbatim` ALSO writes the node's declared property
-    # (so the lie survives on both sides), `evidence_fold` makes a flat record
-    # read as a fold (`projection.record_is_evidence_fold`), `embeddingText`
-    # forges the text↔vector identity, and the three source-ref keys put the
-    # payload's edges AHEAD of the `:Source` resolution the seam performs.
+    # different — `embedding_preserved` asserts a precedent capture nothing on
+    # this door can contradict (⛔ NOT an attestation suppressor here: no channel
+    # of `_emit` attests a record — `_point` and `sdk._write_capture_turns` do,
+    # and that is where the suppression it is known for actually happens),
+    # `embedding_verbatim` ALSO writes the node's declared property (so the lie
+    # survives on both sides), `evidence_fold` makes a flat record read as a fold
+    # (`projection.record_is_evidence_fold`), `embeddingText` forges the
+    # text↔vector identity, and the three source-ref keys put the payload's
+    # edges AHEAD of the `:Source` resolution the seam performs.
     # Measured before the guard: `_emit("PointAdded", {"...": "..",
     # "embedding_preserved": True, "embedding_model": "not-a-real-model"})`
-    # journalled the lie, and `_emit("PointAdded", evidence_fold=True)` — the
-    # KEYWORD channel — journalled a record `record_is_evidence_fold` reads as
-    # a fold.
+    # journalled the identity key VERBATIM — by CARRIAGE (this channel carries
+    # whatever it is handed and stamps nothing), not by suppression — and
+    # `_emit("PointAdded", evidence_fold=True)` — the KEYWORD channel —
+    # journalled a record `record_is_evidence_fold` reads as a fold.
     for marker in ("embedding_preserved", "embedding_verbatim",
                    "evidence_fold", "embeddingText",
                    "extractedFromAll", "sourceVersion", "sourceVersions"):
