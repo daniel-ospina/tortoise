@@ -165,7 +165,7 @@ this job. The first response was to raise the cap to 50 over a SUM that included
 that arm is now VOID, because #11063 removed the save from this job.** It runs
 `actions/cache/restore@v4` with no post step, so nothing is charged against its cap but its own
 steps: **12 m in-step watchdog + ~1 m setup/provision ≈ 13 m; × 1.5 = 19.5 → 20**. Its own
-`.[test,postgres]` downloads (`python-ci.yml:4704` — the `Install package + the postgres extra` step
+`.[test,postgres]` downloads (`python-ci.yml:4726` — the `Install package + the postgres extra` step
 in `test-record-postgres`; `[embeddings]`/torch deliberately absent) are a rounding error beside the
 shared archive it now only restores. The cap is
 **20** — what `main` carried before #10962 raised it, re-derived here rather than inherited — keeping the raised
@@ -325,7 +325,7 @@ produces no runs — and because a warn-only step added to that workflow never e
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": a job that mounts `~/.cache/pip` on a WRITABLE
   shared key is not an arm-1 row, because on a key change its save IS the archive.
-  `test-record-postgres` mounts that path (`python-ci.yml:4696-4698` — its `Restore pip dependency
+  `test-record-postgres` mounts that path (`python-ci.yml:4718-4720` — its `Restore pip dependency
   caches (#7612, RESTORE-ONLY — #11063)` step's `with:` block) but is **restore-only since #11063**,
   so it pays no save: 20 is the ARM-2 SUM minus that term (13 m × 1.5 → 20), not an arm-1 reading,
   and its retained `max` 15.43 m is save-era (§1 predates #11063), so arm 1 would say 30 — re-measure.
@@ -435,12 +435,63 @@ same step with the same tail is the investigation.
 - **It does not bound queue wait.** §1. No `timeout-minutes` can. The lever there is capacity and
   queue governance (`tools/ci_queue_health.py`, #9115). That tool's `PR-BACKLOGGED` state is what
   reports the wait itself: a queued PR run older than its wait budget while PR CI is *still*
-  executing is no longer `OK` (#10237 — it printed `CI: OK(queued=54, pr_running=2, pr_queued=32)`
+  counted as executing is no longer `OK` (#10237 — it printed `CI: OK(queued=54, pr_running=2, pr_queued=32)`
   with the oldest queued PR run at 527 minutes). The budget's default is derived from this
   document's own §1 measurement (max first-job wait 81.9 min → 90 min), so it fires past the
-  measured-normal population rather than on it. Where that wait cannot be MEASURED at all — the
-  queued PR runs carry no readable `created_at` — the tool reports `PR-UNWITNESSED` rather than
-  `OK`: an unmeasured wait is not a measured-healthy one.
+  measured-normal population rather than on it. `PR-UNWITNESSED` is reported rather than `OK`
+  whenever the PR work is neither witnessed nor disproved, and it has THREE causes on different
+  dimensions — and FIVE triggers, because a cut `pending`/`requested` leg is unwitnessed by the
+  same argument as a cut queued feed and takes the same lever (it just is not a *fourth* cause),
+  and because the unreadable-stamp cause applies to the WHOLE waiting population
+  (`queued + pending + requested`), not to the queued leg alone:
+  - the queued feed was cut at its page cap **and no PR-event run is executing** — raise
+    `--max-pages` to read further back;
+  - a WAITING PR-event run (`queued`/`pending`/`requested`) has no measurable age for its
+    CURRENT ATTEMPT, so the wait cannot be measured at all. ⛔ ONE OWNER for that rule:
+    `QueuedRun.wait_age_seconds`, which abstains on THREE routes — an unreadable `created_at`
+    (attempt 1), an unreadable `run_started_at`, or an `attempt >= 2` run with NO start stamp
+    (where falling back to `created_at` would report a fresh attempt as an old wait). So a
+    perfectly READABLE `created_at` does NOT rule this cause out. There is no lever here; a
+    stamp GitHub never wrote cannot be recovered, so retry the reading;
+  - the RUNNING CENSUS is unwitnessed — every run counted in `pr_running` was unmeasured. This
+    shows on the state line as `census=unmeasured` **whenever the counted census is entirely
+    unmeasured, on ANY verdict that can carry that shape** (`PR-BACKLOGGED`, `PR-UNWITNESSED`
+    via an unreadable stamp or a cut `pending`/`requested` leg, and an `OK` from a non-probing
+    caller — `PR-STARVED`/`FLOOD` cannot: they require `pr_running == 0`, and an unmeasured run
+    is always counted). ⛔ Only its DIAGNOSIS is scoped: the two-sub-cause remedy sentence and
+    its annotation arm run only on the `PR-UNWITNESSED` degradation. The two counts themselves
+    are in `--json` on EVERY verdict (`pr_running_unmeasured_unprobed` / `..._unread`), so open
+    the payload on any verdict — the annotation names the one that applies only where it runs:
+    - **the probe budget never REACHED the run** — raise `--max-job-probes`. The budget is spent
+      oldest-first, so the surplus is the *newest* runs;
+    - **the jobs read did not PROVE them idle** — RETRY the reading. This bucket now has
+      several causes and they share the one lever: the read ITSELF FAILED; the read returned
+      nothing USABLE (an empty, partial, malformed, or other-attempt job list — none of which is
+      a failed read, so the old "read FAILED" wording sent operators hunting a transport fault
+      on a surface that answered correctly); the read SUCCEEDED and returned `False` on a run
+      that had not been STILL for `JOB_SETTLE_SECONDS` (300 s), so an all-`completed` job list
+      was not yet a proof (a DYNAMIC matrix creates its shards only after its parent job
+      finishes, so retrying immediately reproduces the same downgrade — retry once the runs
+      have settled); or a proof whose completeness could not be established. A larger budget
+      does not help: it only probes more runs the same way (the failure is not sticky — every
+      reading re-probes from scratch — it is just invisible, since an unproven read abstains
+      into `has_live_job = None` by design).
+
+    There is deliberately **no** "repair the frozen run" remedy here, and that is not an
+    omission: a frozen run — `in_progress` with every job `completed` **and its own
+    `updated_at` motionless for `JOB_SETTLE_SECONDS` (300 s)** — is the *proof* that EXCLUDES
+    it from `pr_running` (see the `excluded` sentence), so it can never make the census
+    unmeasured. ⛔ The stillness half is load-bearing: this repo's test matrix is DYNAMIC
+    (`python-ci.yml` instantiates `test`/`test-slow`/`test-carve-out` from
+    `fromJSON(needs.changes.outputs.*_matrix)`), so between the parent job finishing and the
+    shards being created the jobs endpoint answers with ONE `completed` row while the run is
+    about to execute — an all-`completed` list alone would subtract a run that is working.
+    A run whose stillness cannot be proven abstains instead (counted, and reported in
+    `pr_running_unmeasured`). Such a run is identified *by being probed*, i.e. by the budget
+    lever above, and neither `/cancel` nor `/force-cancel` accepts a repair. It is **NOT
+    `--max-pages`**.
+
+  In every case an unmeasured dimension is not a measured-healthy one.
 - **It does not reduce jobs per run.** A `python-ci` run is 22 jobs (max 30) by construction; with
   ~17 concurrent PR heads that is the arithmetic behind the p95 77-minute first-job wait, and it
   is a sharding/capacity question (#5215, #9539), not a timeout question. It does now bound how

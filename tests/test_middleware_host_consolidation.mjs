@@ -34,7 +34,7 @@
 import { onRequest } from "../website/functions/_middleware.ts";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WEBSITE = join(HERE, "..", "website");
@@ -76,6 +76,74 @@ const ROOT_HTML = new Set(
     .map((f) => `/${f}`),
 );
 
+// …and the CRAWLER surface is served from root FILES too: `robots.txt` and the sitemaps
+// are static assets, not pages, so no page branch in the middleware matches them. Derived
+// from disk like `ROOT_HTML`, which means this suite reds on a row that is SERVED BUT NOT
+// 301'd, or that 301s in a CHAIN — and NOT on a file that is DELETED: measured 2026-11-12,
+// deleting `website/sitemap-product.xml` leaves this suite green (`pass 1, fail 0`) because
+// the row disappears together with the file (#12097 review P3). The pin for the DELETION is
+// `test_the_retired_hosts_crawler_surface_covers_every_sitemap_in_the_tree` in
+// `tests/test_website_docs_consistency.py`, which names `CRAWLER_SURFACE` members explicitly
+// and reds `served but not 301'd off the retired host` — not this file.
+// ⛔ `*.xml` IS NOT "A SITEMAP" — the predicate is the ROOT ELEMENT, mirroring
+// `_is_sitemap_document` in `tests/test_website_docs_consistency.py`. A plain root
+// `feed.xml` is served, but it is not a crawler surface: keying the rows on the extension
+// made the harness DEMAND a `CRAWLER_SURFACE` row for it, and adding that row then red the
+// python pin with "301'd but not served (a 301 onto a 404)" — two guards disagreeing about
+// a file that is genuinely there, so an RSS feed at the site root was unshippable
+// (#11766 round 4). A file whose NAME claims to be a sitemap must still parse as one:
+// `_is_sitemap_document` re-raises rather than skipping, because a truncated sitemap that
+// crawlers are sent is exactly the "a sitemap that does not work" class #11615 closes.
+const SITEMAP_ROOTS = new Set(["urlset", "sitemapindex"]);
+
+// The ROOT element, and nothing else: the XML declaration and COMMENTS are stripped first,
+// then the first element tag is read. ⛔ A SUBSTRING TEST IS NOT THIS PREDICATE —
+// `/<(urlset|sitemapindex)/.test(source)` classified a root RSS feed as a sitemap whenever
+// its text merely NAMED the element (a comment documenting the sitemap shape is enough), so
+// the harness demanded a `CRAWLER_SURFACE` row for a feed and the python pin then called
+// that row "a 301 onto a 404". Measured (#11766 round 4): a `feed-probe.xml` whose comment
+// contained `<urlset>` reded this suite with 3 failures while the python suite stayed green
+// — the same two-guards-disagreeing defect, one level down.
+function sitemapRoot(name) {
+  const source = readFileSync(join(WEBSITE, name), "utf8")
+    .replace(/<\?[\s\S]*?\?>/g, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .trim();
+  const tag = /^<([A-Za-z_][\w:.-]*)/.exec(source);
+  return tag ? tag[1].toLowerCase().replace(/^.*:/, "") : "";
+}
+
+function isSitemapDocument(name) {
+  const isSitemap = SITEMAP_ROOTS.has(sitemapRoot(name));
+  if (!isSitemap && name.includes("sitemap")) {
+    throw new Error(
+      `website/${name} claims to be a sitemap but its root element is ` +
+        `<${sitemapRoot(name) || "none"}>, not <urlset>/<sitemapindex>`,
+    );
+  }
+  return isSitemap;
+}
+
+const ROOT_ASSETS = new Set([
+  ...readdirSync(WEBSITE)
+    .filter((f) => f.endsWith(".xml") && isSitemapDocument(f))
+    .map((f) => `/${f}`),
+  "/robots.txt",
+]);
+
+// …and a sitemap can be a PAGES FUNCTION rather than a file (`/blog/sitemap.xml` is
+// `functions/blog/sitemap.xml.ts`). Derived from the tree so a NEW one is held to the
+// crawler-surface rule the moment it lands: a Function sitemap has no root file, so a
+// hand-kept row would miss it and the retired host would answer it with a 200 whose
+// `<loc>`s are on the marketing host (#11766 round 3 — measured: adding
+// `functions/events/sitemap.xml.ts` left every suite green).
+const FUNCTION_SITEMAPS = new Set(
+  readdirSync(join(WEBSITE, "functions"), { recursive: true })
+    .map((p) => String(p).split(sep).join("/"))
+    .filter((p) => p.endsWith("sitemap.xml.ts"))
+    .map((p) => `/${p.slice(0, -".ts".length)}`),
+);
+
 // The two layers BELOW the middleware that a bare asset mock would get wrong,
 // modelled explicitly so the pass-through assertions are about reality:
 //   • Pages Functions — `/blog` and `/blog/*` are served by
@@ -112,6 +180,9 @@ async function assetsFetch(assetUrl) {
     // `website/apps/dashboard/functions/admin/[[path]].ts` does.
     return new Response(null, { status: 301, headers: { Location: COMMITTED_REDIRECTS.get(pathname) } });
   }
+  if (ROOT_ASSETS.has(pathname)) {
+    return new Response(`asset:${pathname}`, { status: 200 });
+  }
   if (ROOT_HTML.has(pathname)) {
     return new Response(`<html data-asset="${pathname}"></html>`, { status: 200 });
   }
@@ -140,11 +211,22 @@ function ctx(urlStr) {
           headers: { Location: `${u.origin}${COMMITTED_REDIRECTS.get(u.pathname)}` },
         });
       }
+      // ⛔ ORDER: a SITEMAP Function is checked BEFORE the blog Function, because
+      // `/blog/sitemap.xml` matches BOTH (`isBlogFunction` is `startsWith("/blog/")`).
+      // Blog-first answers today's only Function sitemap with an HTML body, so the sitemap
+      // branch below never models it and the comment claiming this half is covered
+      // behaviourally would be overstating it for the one case it exists for (#11766 review).
+      if (FUNCTION_SITEMAPS.has(u.pathname)) {
+        return new Response(`<urlset data-function="sitemap"></urlset>`, { status: 200 });
+      }
       if (isBlogFunction(u.pathname)) {
         return new Response(`<html data-function="blog"></html>`, { status: 200 });
       }
       if (u.pathname === "/") {
         return new Response(`<html data-asset="/index.html"></html>`, { status: 200 });
+      }
+      if (ROOT_ASSETS.has(u.pathname)) {
+        return new Response(`asset:${u.pathname}`, { status: 200 });
       }
       if (ROOT_HTML.has(u.pathname) || ROOT_HTML.has(`${u.pathname}.html`)) {
         return new Response(`<html data-asset="${u.pathname}"></html>`, { status: 200 });
@@ -230,6 +312,49 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
       expectLocation: `https://${COMPANY}${to}`,
     });
   }
+
+  // ⛔ THE CRAWLER SURFACE IS NOT A PAGE (#11766). `robots.txt` and the sitemaps are root
+  // ASSETS, so without an explicit branch the retired host falls through to the asset
+  // router and answers 200 with a sitemap index whose <loc>s are all on the marketing
+  // host — an index naming sitemaps off its own site, which the Sitemaps protocol forbids
+  // (a subdomain is the spec's own counterexample). Measured on the live site before this
+  // branch existed: `tortoise.premiselabs.co/sitemap.xml` → 200. The alias maps straight
+  // to the index in ONE hop rather than chaining through the company host's `_redirects`.
+  //
+  // ⛔ DERIVED FROM THE TREE, not a hand-kept list (round 3). Every root sitemap DOCUMENT
+  // (root element, not extension — see `isSitemapDocument`), `robots.txt`, and every
+  // Function-served sitemap must leave the retired host in ONE hop; a page branch does not
+  // catch them, because they are not pages. The static half is the SAME population
+  // `tests/test_website_docs_consistency.py` compares `CRAWLER_SURFACE` against (both use
+  // `_is_sitemap_document`'s predicate); the Function half is the one that list cannot
+  // express.
+  for (const from of [...ROOT_ASSETS, ...FUNCTION_SITEMAPS].sort()) {
+    await assertOneHop(`https://${PRODUCT}${from}`, {
+      expectLocation: `https://${COMPANY}${from}`,
+    });
+  }
+  // `/sitemap_index.xml` is a CONVENTION, not a file: it maps straight onto the index in
+  // one hop rather than chaining through the company host's own `_redirects` row.
+  await assertOneHop(`https://${PRODUCT}/sitemap_index.xml`, {
+    expectLocation: `https://${COMPANY}/sitemap.xml`,
+  });
+
+  // ⛔ `/index` IS THE SAME ASSET AS `/index.html` ON THE RETIRED HOST, and is 301'd there.
+  // Pages' pretty-URL resolution serves `website/index.html` for `/index`, so leaving it out
+  // answered a 200 copy of the COMPANY homepage on the retired host while `/index.html` 301'd
+  // — measured (#11766 round 4). One-hop row rather than a member of the canonical loop below,
+  // because the target is the product root, not a `/tortoise/<page>`.
+  //
+  // ⛔ The COMPANY host's `/index` is the surviving twin and is a RECORDED RESIDUAL, not a fix
+  // here: redirecting it makes `_in_scope_pages()` drop `website/index.html` from the blog
+  // guard's pinned page set (measured — `test_blog_guard_covers_every_served_indexable_page`
+  // reds `missing=['index.html']`), because that derivation reads served-ness off the `/index`
+  // route while `index.html` is really served at `/`. Fixing it means teaching that derivation
+  // first; see `website/website_architecture.md` §6.5. Asserting it here without the rule would
+  // be a red no author could clear.
+  await assertOneHop(`https://${PRODUCT}/index`, {
+    expectLocation: `https://${COMPANY}/tortoise`,
+  });
 
   // ⛔ The product host must hand off the CANONICAL form in ONE hop. Forwarding
   // the raw path chains (`/tortoise/docs.html` -> `.../tortoise/docs.html` ->

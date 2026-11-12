@@ -312,6 +312,36 @@ class HybridReadUnavailableError(RuntimeError):
         )
 
 
+class PropagationCensusRefused(RuntimeError):
+    """#11823 — the propagation census refused to run over this graph.
+
+    ``dream_health_check()``'s ``propagation`` block is a graph-scoped census
+    (it traverses every live ``:Point`` and its ``IMPL|NAND`` edges), and it
+    rides a POLLED endpoint (``GET /v1/dream/health``). Measured cost is
+    ~65 ms per 1,000 live claims, i.e. linear in graph size: a 40k-claim graph
+    would hold the dream executor for ~2.6 s per poll.
+
+    So the read is bounded (``TORTOISE_PROPAGATION_CENSUS_MAX_POINTS``, default
+    25_000) and REFUSES with this exception above the bound. The caller reports
+    it as ``propagation.unavailable`` — a named reason, never a reassuring
+    zero, and never a silent stall
+    (`docs/architecture/BOUNDED-OPERATION-CONTRACT.md` §1a). Raise the bound if
+    you accept the cost.
+    """
+
+    def __init__(self, live_points: int, cap: int, env_var: str):
+        self.live_points = live_points
+        self.cap = cap
+        self.env_var = env_var
+        super().__init__(
+            f"propagation census refused: this graph has {live_points} live "
+            f"non-operator :Point(s), above the polled-endpoint bound of {cap} "
+            f"(the census is O(points + edges); measured ~65 ms per 1,000 "
+            f"claims). Raise {env_var} if you accept that cost on every "
+            f"GET /v1/dream/health poll (#11823)."
+        )
+
+
 class EmbedderUnavailableError(RuntimeError):
     """(C) #4861 — a process that REQUIRED the embedder must not be handed
     ``None``.

@@ -263,6 +263,19 @@ export const onRequest: PagesFunction = async (context) => {
     rest === "" ? PRODUCT_PREFIX : `${PRODUCT_PREFIX}/${rest}`;
 
   const COMPANY_HOSTS = new Set(["premiselabs.co"]);
+  // THE CRAWLER SURFACE (#11766): root FILES of this Pages project, so no page branch
+  // below matches them — without an explicit branch the retired host falls through to
+  // the asset router and serves its own 200 copy of the sitemap index, whose <loc>s are
+  // all on `premiselabs.co`. That is an index specifying sitemaps off its own site, which
+  // the Sitemaps protocol forbids (a subdomain is the spec's own counterexample, #11623),
+  // and it is the same defect this set exists to retire. `/blog/sitemap.xml` is not here:
+  // the blog branch above already hands it off in one hop.
+  const CRAWLER_SURFACE = new Set([
+    "/robots.txt",
+    "/sitemap.xml",
+    "/sitemap-company.xml",
+    "/sitemap-product.xml",
+  ]);
   // Trailing-slash-stripped pathname, the form every path set below is keyed on.
   const path = url.pathname.replace(/\/+$/, "") || "/";
 
@@ -518,11 +531,22 @@ export const onRequest: PagesFunction = async (context) => {
       });
 
     if (isBlogPath) return toCompany(path);
+    // The crawler surface is a root ASSET, not a page: 301 it in ONE hop, exactly like
+    // every page above. `/sitemap_index.xml` maps straight to the index rather than
+    // chaining through the company host's own `_redirects` row (two hops).
+    if (path === "/sitemap_index.xml") return toCompany("/sitemap.xml");
+    if (CRAWLER_SURFACE.has(path)) return toCompany(path);
     // The root IS the product page on this host today, so it maps to the one
     // canonical product URL; the raw duplicates map there too (`/index.html` is
     // a duplicate of the PRODUCT root on THIS host — it is the company page's
     // duplicate on the company host, which `_redirects` owns).
-    if (path === "/" || path === "/index.html" || PRODUCT_ROOT.has(path)) {
+    // ⛔ `/index` IS `/index.html` HERE. Pages' pretty-URL resolution serves
+    // `website/index.html` for `/index` as well, so leaving it out answered a 200 copy of the
+    // COMPANY homepage on the retired host while its own comment promised the raw duplicates
+    // all map to the one canonical URL — measured (#11766 round 4): `/index` → 200,
+    // `/index.html` → 301. Listed as a separate member rather than derived, because
+    // `productRest`/`PRODUCT_ROOT` are about the product pages, not this host's root.
+    if (path === "/" || path === "/index" || path === "/index.html" || PRODUCT_ROOT.has(path)) {
       return toCompany(PRODUCT_PREFIX);
     }
     if (path === PRODUCT_PREFIX || path.startsWith(PRODUCT_PREFIX + "/")) {

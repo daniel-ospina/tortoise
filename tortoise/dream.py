@@ -130,6 +130,27 @@ WINDOW_CLAIM_BATCH = 2000
 # caller falls back to lazy-read + the scheduled dream_all (#85).
 EMBEDDED_LATENCY_BUDGET_S = 0.5
 
+# The operator-less, live, non-operator `:Point` predicate — the population EP
+# can never compute, which `_trivial_stamp` therefore stamps directly.
+#
+# #11823 (#12116 review A-P3): ONE spelling INSIDE this module. It was inline
+# in `_trivial_stamp` twice already, and any future reader of that population
+# must not hand-copy the literal a third time (the #7505 neutral-link class, or
+# a status-vocabulary widening, would silently desynchronise them).
+#
+# ⚠️ The HEALTH BLOCK does not import this constant: its `operator_less_claims`
+# is derived as `graph_live - points_edged` (a positive traversal) because the
+# negated pattern below measured 76.6 ms per 1 000 claims — 57% of that census
+# — on a POLLED endpoint (#12116 review P2). The two therefore agree by VALUE,
+# not by text, and `tests/test_11823_propagation_cap_signal.py`
+# (`test_untested_operator_less_population_matches_trivial_stamp`) is what keeps
+# them equal.
+TRIVIAL_STAMP_PREDICATE = (
+    "(n.is_operator IS NULL OR n.is_operator = false) "
+    "AND (n.status IS NULL OR n.status <> 'draft') "
+    "AND NOT (n)-[:IMPL|NAND]-()"
+)
+
 
 class Dreamer:
     """Incremental + whole-graph EP stabilization.
@@ -670,9 +691,7 @@ class Dreamer:
         if claim_ids is None:
             rows = proj.g.query(
                 "MATCH (n:Point) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-                "AND (n.status IS NULL OR n.status <> 'draft') "
-                "AND NOT (n)-[:IMPL|NAND]-() "
+                f"WHERE {TRIVIAL_STAMP_PREDICATE} "
                 "SET n.lastDreamedAt = $now, n.updatedAt = $now "
                 "RETURN n.id",
                 params={"now": now},
@@ -680,9 +699,7 @@ class Dreamer:
         else:
             rows = proj.g.query(
                 "MATCH (n:Point) WHERE n.id IN $ids "
-                "AND (n.is_operator IS NULL OR n.is_operator = false) "
-                "AND (n.status IS NULL OR n.status <> 'draft') "
-                "AND NOT (n)-[:IMPL|NAND]-() "
+                f"AND {TRIVIAL_STAMP_PREDICATE} "
                 "SET n.lastDreamedAt = $now, n.updatedAt = $now "
                 "RETURN n.id",
                 params={"ids": list(claim_ids), "now": now},
