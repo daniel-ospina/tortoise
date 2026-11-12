@@ -1668,9 +1668,13 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
         "paragraph cites as its evidence")
     # ⛔ AND THE PROSE CLAIMS ABOUT THAT BLOCK, not only the block's own facts: a
     # sentence that names the WRONG one of two same-version blocks, or cites an id
-    # the block does not carry, is exactly what C5 found. Each is parsed out of the
-    # docstring, so re-wording is free but re-CLAIMING is checked.
-    ordinal = re.search(r"the (first|second) of the two v3\.33 entries", flat_doc)
+    # the block does not carry, is exactly what C5 found. Each claim is PARSED, so
+    # its claim must be recognisable, not free-form: the shapes below are the ones
+    # accepted, they mirror the module-wide sweep's own tolerance (a `file's` is
+    # accepted by both), and a truthful sentence phrased outside them is a
+    # recogniser gap to widen here — not evidence that the sentence is wrong.
+    ordinal = re.search(
+        r"the (?:file's )?(first|second) of the two v3\.33 entries", flat_doc)
     assert ordinal, (
         "the SCOPE paragraph must say WHICH of the two v3.33 entries it means — "
         "\"the first/second of the two v3.33 entries\" — so this pin can check it")
@@ -1684,10 +1688,10 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
             f"this module calls the `D2 — A` block the {word.lower()} of the two "
             f"v3.33 entries somewhere; measured, it is the "
             f"{'first' if lands_first else 'second'}")
-    named_issue = re.search(r"\(issue\s+#(\d+)\)", doc)
+    named_issue = re.search(r"issue\s+#(\d+)", flat_doc)
     assert named_issue, (
         "the SCOPE paragraph must name the ISSUE the landing block records — "
-        "\"(issue #<n>)\" — so this pin can check it")
+        "\"issue #<n>\" in any wording — so this pin can check it")
     assert f"issue #{named_issue.group(1)}" in lands_d2[0].split("\n", 1)[0], (
         f"the SCOPE paragraph names issue #{named_issue.group(1)}, but the block it "
         "points at records " + repr(lands_d2[0].split("\n", 1)[0][:100]))
