@@ -602,8 +602,11 @@ CENSUS_EVIDENCE: dict[str, tuple[tuple[str, str, str], ...]] = {
     "tortoise.api::_verify_record_vector_width": (
         ("tortoise/api.py", "_verify_record_vector_width",
          "embedding=[0.1234567890123, 1/3]"),
+        # ⛔ The DECISION, not the import that feeds it: `JOURNAL_VECTOR_WIDTH_F32 as _F32`
+        # survives turning the refusal into an abstention, so it proved less than the
+        # row's reason claims (cycle-4 review, measured).
         ("tortoise/api.py", "_verify_record_vector_width",
-         "JOURNAL_VECTOR_WIDTH_F32 as _F32"),),
+         "declared != _F32"),),
     "tortoise.consistency::_compare_views": (
         ("tortoise/consistency.py", "_compare_views",
          "n.embedding=vecf32($embedding)"),),
