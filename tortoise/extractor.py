@@ -1050,8 +1050,13 @@ def _referentiality_hold(surface: str) -> tuple[str, str] | None:
     (``_mint_subject_stub``) for a name that resolves to nothing. So this cue
     does not make the *document* free of a minted non-referent, and an armed run
     can leave that surface's Subject population unchanged — measured at the
-    #12102 review (``api.add_point(aboutEntities=["it", "the former"])`` →
-    ``[['it', 'it'], ['the former', 'the former']]``).
+    #12102 review (``api.add_point(aboutEntities=["it", "the former"])`` then
+    ``MATCH (s:Subject) RETURN s.name, s.id`` →
+    ``[['it', 'it'], ['the former', 'the former']]``: each non-referent is a stub
+    whose id IS its name, and ``RETURN s.name`` alone → ``[['it'], ['the former']]``).
+    ⛔ Name the QUERY, not just the rows: two result columns sharing one name are
+    refused by the engine, so a copied row shape without the projection is not a
+    reproduction recipe.
 
     ⛔ **It is DECLINED here, not fixed, and that is a decision with a reason.**
     The construction the door lands in is a recorded design, not an oversight:
