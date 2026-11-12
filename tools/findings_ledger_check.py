@@ -220,7 +220,7 @@ def _is_host_port(token: str) -> bool:
 #:   * `_` parsed the identifier `tests/test_findings_ledger_2852.py` as `path _ 2852`;
 #:   * `-` collided with a dated slug (`2026-10-15-7879-postgres-…`) and a commit ref;
 #:   * `/` parsed plain paths as citations — `docs/evidence/11083/README.md`,
-#:     `2024/03/01` — 600+ spans across 799 files;
+#:     `2024/03/01` — 600+ spans across 801 files (re-derived, not carried);
 #:   * `#` parsed issue refs (`daniel-ospina/tortoise#9363`, the form used everywhere
 #:     in this repo) as `path # LINE`;
 #:   * `@` parsed commit refs (`origin/main@3ac6b1636`), and `,` parsed SQL and
@@ -246,7 +246,7 @@ CITATION_UNCOLONED_SHAPE_RE = re.compile(
     # and was the one delimiter the narrowing neither kept nor named in §8 — so
     # `path|999999` went from refused to CLEAN while §8's list presented itself as
     # complete (found by review, measured). It is safe to refuse on the same terms and
-    # was measured for it: every code span in the 1144 tracked files under `docs/` plus
+    # was measured for it: every code span in the 1146 tracked files under `docs/` plus
     # the 144 other tracked `*.md` carries ZERO `path|LINE` spans, so no prose here can
     # red on it (the single apparent match was a PNG read as text).
     r"(?:\s+|\s*\|\s*)(?P<num>\d{1,7})(?:\s*[-–]\s*\d{1,7})?(?![\w.>&|/]|-\w)"
@@ -288,7 +288,7 @@ def _uncoloned_is_exempt(body: str, u: re.Match) -> bool:
 #: above need a `:`, so an out-of-range `path#L999999` and an unverifiable
 #: `path#L16` both left the page CLEAN (measured — #11952), i.e. the likeliest
 #: real-world spelling was also the one shape that looked verified and was not.
-#: MEASURED, as every delimiter in this file must be: every code span in all 1144
+#: MEASURED, as every delimiter in this file must be: every code span in all 1146
 #: tracked files under `docs/` was scanned with this exact pattern — ZERO matches, so
 #: refusing it cannot red this repository's own prose. The bare-number form
 #: (`path#16`) stays a declared carve-out: it is the one that collides with issue refs.
