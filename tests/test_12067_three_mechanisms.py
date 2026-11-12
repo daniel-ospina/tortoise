@@ -565,9 +565,18 @@ def test_the_direct_edge_door_refuses_TOO(sdk):
     P1): `create_operator` refused the second mechanism, but `create_direct_edge`
     wrote a bare edge beside an existing operator without a check — so
     `create_operator(IMPL)` then `create_direct_edge("NAND")` produced exactly
-    the two-mechanism pair the refusal exists to make unwritable. Both directions
-    are asserted: the door must not care which mechanism came first, and it must
-    not care that one is stored as an edge and the other as a node.
+    the two-mechanism pair the refusal exists to make unwritable. Both DOORS are
+    asserted, and what this test varies is the FORM the incumbent is stored in — a
+    node operator first (then a bare edge is asked for), then a bare `:IMPL` edge
+    first (then an operator is asked for) — plus which mechanism is asked for
+    SECOND (`NAND`, then `coherence`).
+    ⛔ It does NOT vary mechanism ORDER: `IMPL` is written first in both refusal
+    cases (review round 12, P2 — an earlier revision of this docstring said "the
+    door must not care which mechanism came first", and a citing comment copied
+    that over-claim verbatim). Order lives in
+    `test_refuses_a_second_mechanism_on_one_pair`, which is parametrized over all
+    six ordered pairs, and holds through a non-Point endpoint too
+    (`test_a_non_point_endpoint_is_still_checked`).
     """
     a, b = _points(sdk)
     sdk.create_operator("IMPL", a, [b])
@@ -1384,12 +1393,13 @@ def test_only_PRICED_pairs_count_measured_six_ways(sdk):
         sdk.create_operator("IMPL", cond, [dep])
     assert "coherence" in str(exc2.value), str(exc2.value)
 
-    # REFUSE: the plain two-input mirror, ONE order here. The reverse — `NAND`
-    # first, then `IMPL` over the same pair — is pinned by
-    # `test_a_non_point_endpoint_is_still_checked` (it reaches the pair through a
-    # `:Subject` endpoint, which is incidental to the order it writes). This file
-    # must not claim to cover both orders in one case: that is how a count came
-    # to be wrong here before.
+    # REFUSE: the plain two-input mirror, ONE order here. The reverse of THIS
+    # shape — `NAND` first, then `IMPL` over the same two plain points — is
+    # `test_refuses_a_second_mechanism_on_one_pair[NAND-IMPL]`, whose parametrize
+    # covers all six ordered pairs; the same order also holds through a
+    # `:Subject` endpoint (`test_a_non_point_endpoint_is_still_checked`). This
+    # file must not claim to cover both orders in one case: that is how a count
+    # came to be wrong here before.
     x, y = _points(sdk)
     sdk.create_operator("IMPL", x, [y])
     with pytest.raises(ValueError) as exc3:
