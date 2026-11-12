@@ -2337,7 +2337,18 @@ def test_the_gate_is_not_read_True_off_ONE_armed_surface(tmp_path, monkeypatch):
     # opposite of what the walk measured. Pin the qualification, not just the claim.
     assert "read from that file ALONE the gate is off" in note, note
     assert "INHERITS that image's `ENV`" in note, note
-    assert "SCOPED to the surface(s) that arm it (.env.example)" in note, note
+    # ⛔ The OFF branch closes on PER-FILE semantics, never on a negation of the
+    # sentence above it (fresh review of PR #12016, P2): the clause used to read
+    # "This condition is SCOPED to the surface(s) that arm it (.env.example) and is
+    # NOT a claim about a deployment built from the silent path(s)" — naming the
+    # ANY-SURFACE template as the population of a DEPLOYMENT reading, and telling the
+    # reader the row says nothing about `docker compose up` (the `#11455` reading).
+    assert "this reading is PER FILE" in note, note
+    assert "is NOT a claim about a deployment built from the silent path" not in note, note
+    # ⛔ …and neither spelling of the wrong-population scope may come back: the clause
+    # named `shipped["armed"]` (the ANY-SURFACE template list) as the population of a
+    # DEPLOYMENT reading. `.env.example` cannot arm a deployment on its own.
+    assert "SCOPED to the surface(s) that arm it" not in note, note
 
 
 def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
@@ -2601,6 +2612,16 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     # the flag. The clause is scoped to templates; here it states the opposite fact.
     assert "do not deploy the container's environment on their own" not in hold, hold
     assert "themselves deployment files" in hold, hold
+
+    # ⛔ And no clause on THIS shape may scope the reading to `shipped["armed"]` — the
+    # ANY-SURFACE armed list is the TEMPLATE here, while this note's subject is the
+    # DEPLOYMENT population (`silent` = ['docker-compose.yml'], `armed` =
+    # ['Dockerfile.selfhost']), which the note names correctly four words away. That
+    # mix is the P2 this round removes, so pin it OUT on the shape that prints both.
+    shipped_default = _gate_note(shipped)
+    assert "UNARMED deployment file(s) ['docker-compose.yml']" in shipped_default, shipped_default
+    assert "Dockerfile.selfhost=ON" in shipped_default, shipped_default
+    assert "SCOPED to the surface(s) that arm it" not in shipped_default, shipped_default
 
 
 @pytest.mark.parametrize("text", [
@@ -7664,7 +7685,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # existed, but the note that enrols it did not until `#12000`'s F1b note),
     # and a provenance asserted here would be the false record this note exists
     # to prevent. ⛔ The count is SCOPED
-    # to that head rather than re-cut, because this file collects 171 now and no
+    # to that head rather than re-cut, because this file collects 179 now and no
     # run of it can report
     # 152; an unscoped figure here would be the stale-measurement defect §6 of the
     # census doc exists to forbid. What closed the gap is the AST guard below —
