@@ -21044,9 +21044,9 @@ class TortoiseSDK:
         # `:Event` (`#3311`'s `retype`, migrated graphs) was terminalized here
         # while the `update_entity` door refused the same value (measured, review
         # cycle 11: `retract_point(<:Point:Event>)` -> `['retracted',
-        # ['Point','Event']]`). The probe is the update door's own text for the
-        # same question — Events resolve on `eventId` OR `id` — so the doors
-        # cannot disagree about which nodes are Events.
+        # ['Point','Event']]`). The probe below then answers "does the node THIS
+        # door writes carry `:Event` too", which is a NARROWER question than the
+        # update door's — see the block below for why the two differ on purpose.
         #
         # Scoped by `refuse_terminal`: that is exactly the "this door
         # terminalizes" predicate (the docstring above defines it that way), and

@@ -1176,6 +1176,30 @@ class TestTheBundleValidationDoor:
                 assert violations == [], (
                     f"{why}: Phase 1 refused an :Object the writer files by content")
 
+    def test_create_entity_resolves_the_type_by_content_too(self, sdk):
+        """The DOOR argument, not just the bundle item (`create_entity(type=…)`).
+
+        Review cycle 13 measured this read unpinned: reverting `t =
+        _type_text(type)` to the bound `(type or "").strip().lower()` left 290
+        tests green while `create_entity(LieStrip("object"), …, status=
+        "superseded")` flipped from an accepted `:Object` (T5: it HAS a
+        lifecycle) to a refusal, because the subclass's `strip()` said `event`.
+        Both directions are asserted, and the node's label is, so a pass cannot
+        come from the write merely being refused.
+        """
+        class LieStrip(str):
+            def strip(self, *a, **k):
+                return "event"
+
+        node = sdk.create_entity(LieStrip("object"), "StripCreated",
+                                 objectKind="policy",
+                                 status="superseded")["node"]
+        labels = sdk._get_proj().g.query(
+            "MATCH (n {id:$id}) RETURN labels(n)",
+            params={"id": node["id"]}).result_set[0][0]
+        assert "Object" in labels and "Event" not in labels, (
+            f"the door argument was routed by a `strip()` override: {labels}")
+
     def test_the_endpoint_arms_resolve_the_type_by_content(self, sdk):
         """Review cycle 12, P2 — the arm with NO pin was the endpoint arm.
 
@@ -1206,17 +1230,11 @@ class TestTheBundleValidationDoor:
             "the endpoint arm refused a Subject endpoint over a __str__ the "
             "writer never calls")
 
-        strip_bundle = {
-            "points": [{"ref": "p1", "content": "endpoint claim"}],
-            "entities": [{"ref": "s1", "type": LieStrip("subject"),
-                          "name": "StripSubject",
-                          "subjectKind": "organization",
-                          "status": "dead"}],
-            "connections": [{"from": "s1", "to": "p1",
-                             "operator": "IMPL"}],
-        }
-        assert sdk._validate_bundle(strip_bundle), (
-            "a `strip()` override routed the item past Phase 1")
+        # ⛔ No second half here on purpose: a `strip()`-override endpoint case was
+        # tried and MEASURED inert — the violation it produced is the `:Subject`
+        # vocabulary arm's and a plain-`str` control produced the identical one, so
+        # it pinned a different arm (review cycle 13). The writer-side `strip()` is
+        # pinned by `test_the_writer_resolves_the_type_by_content_too`.
 
     def test_a_non_terminal_event_item_is_not_a_violation(self, sdk):
         """No over-block: the door accepts `scheduled`, so Phase 1 must too."""
