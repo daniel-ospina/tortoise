@@ -2152,7 +2152,14 @@ fi
 # ── 5. driver heartbeat (carries r2_ok so the R2_DOWN signal is auditable) ──
 # jq-built body (security review): a `status` string from an arbitrary API
 # response must not be interpolated into raw JSON.
-r2_ok=$([ "$R2_OK" = "1" ] && echo true || echo false)
+# #12135 (review P2): with the aws CLI missing, R2 was NEVER PROBED, so `false`
+# here would publish a reachability measurement this run explicitly refused to
+# make — its own preflight says the state is UNKNOWN and its R2_DOWN filing is
+# refused for exactly that reason. `null` is the honest value for "not measured";
+# nothing keys off the boolean (the `r2_ok` on `/status` is the WATCHER's own
+# probe, and this one is carried for audit: `tortoise/hosted_api.py` stores the
+# body verbatim and surfaces only the driver's `ran_at`).
+if [ "$AWS_CLI_MISSING" = "1" ]; then r2_ok=null; else r2_ok=$([ "$R2_OK" = "1" ] && echo true || echo false); fi
 curl -sS -m 20 -X POST -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   -d "$(jq -nc --arg rid "$(date +%s)" --arg s "$RUN_STATUS_SAFE" --argjson ok "$r2_ok" '{run_id:$rid,status:$s,r2_ok:$ok}')" \
   "${API}/v1/internal/driver/heartbeat" >/dev/null 2>&1 || true

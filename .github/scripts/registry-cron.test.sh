@@ -560,7 +560,7 @@ case "$url" in
   *"/v1/internal/reconcile"*)
     if [ -n "${STUB_RECONCILE_RC:-}" ]; then printf '%s' "${STUB_RECONCILE_CODE:-000}"; exit "$STUB_RECONCILE_RC"; fi
     emit '{}' "${STUB_RECONCILE_CODE:-200}" ;;
-  *"/v1/internal/driver/heartbeat"*) printf '{}' ;;
+  *"/v1/internal/driver/heartbeat"*) printf '%s\n' "$data" >> "${STUB_LOG}.heartbeat"; printf '{}' ;;
   *) printf '{}' ;;
 esac
 exit 0
@@ -3445,6 +3445,12 @@ assert_contains "$FOUT" "SECOND fault" \
   "118. … it names the coverage fault the missing CLI left unfiled"
 assert_contains "$OUT" "RED: the aws CLI is missing" \
   "118. the terminal line names the cause, not just 'a broken pipeline'"
+# The heartbeat is the driver's audit record of its own r2_ok, and this run never
+# probed R2 (review P2): `false` would publish a reachability verdict the runner
+# could not take. Only a missing-CLI run produces null, so no other case can
+# satisfy this.
+assert_contains "$(cat "$LOG.heartbeat" 2>/dev/null)" '"r2_ok":null' \
+  "118. the driver heartbeat records r2_ok as UNMEASURED (null), not a measurement it never took"
 
 # ── 119. #12135: the declaration side is honest about both runner families ─
 # ensure-aws-cli.sh is the half that PREVENTS case 118 in production, so its
@@ -3478,14 +3484,20 @@ for v in PIN_SHA256_X86_64 PIN_SHA256_AARCH64; do
 done
 assert_file_match "$ENSURE" 'sha256sum --check --status' \
   "119. the installer source carries a digest check"
+# The download is bounded per attempt (review P2): `--retry 3 --max-time 300`
+# allowed ~20 min against ≈12 min of job headroom, so a HANGING mirror could get
+# the driver killed mid-sweep by the job ceiling. Both halves are pinned — this
+# per-attempt bound and the workflow's whole-leg `timeout` below.
+assert_file_match "$ENSURE" '--max-time 120' \
+  "119. each download attempt is time-bounded well inside the job's headroom"
 # The workflow half needs its own pin (review P2): `continue-on-error` is what
 # keeps a failed install from skipping the hour's sweep, and nothing else in the
 # suite reads it — deleting the flag, or the step, used to leave the suite green.
 WF="$SCRIPT_DIR/../workflows/registry-backup-cron.yml"
 assert_file_match "$WF" '^        continue-on-error: true$' \
   "119. the install step cannot fail the job and skip the hour's sweep"
-assert_file_match "$WF" 'run: bash \.github/scripts/ensure-aws-cli\.sh' \
-  "119. the workflow actually runs the installer"
+assert_file_match "$WF" 'run: timeout [0-9]+ bash \.github/scripts/ensure-aws-cli\.sh' \
+  "119. the workflow runs the installer UNDER A TIME BOUND (a hanging download must not eat the job ceiling — review P2)"
 # The digest check must FAIL CLOSED on a tampered/incomplete archive, and it must
 # fail BEFORE anything lands on PATH (review P2: a source grep cannot tell that
 # ordering, and one stray commented line satisfies it). Drive the real code path

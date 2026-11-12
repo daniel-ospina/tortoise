@@ -32,8 +32,9 @@ jobs:
   drive:
     runs-on: ubuntu-latest
     # #10234: 45, not 30. The timing arithmetic that actually holds, worst case:
-    # sweep 1500s (SWEEP_TIMEOUT_S) + purge 300s + reconcile 120s + status 20s
-    # + listing 20s ≈ 1960s ≈ 33 min, plus checkout and runner overhead. The job
+    # the AWS CLI step (bounded at 300s by the `timeout` below) + sweep 1500s
+    # (SWEEP_TIMEOUT_S) + purge 300s + reconcile 120s + status 20s
+    # + listing 20s ≈ 2260s ≈ 38 min, plus checkout and runner overhead. The job
     # ceiling has to be ABOVE that or the runner kills the driver mid-leg and
     # the run reports a timeout for work the runner never let finish. NOTE the
     # ceiling does NOT remove `driver_timeout`: the server-side sweep takes
@@ -101,7 +102,12 @@ jobs:
       # still runs, reds, and names the missing CLI (its own dependency preflight).
       - name: Ensure the AWS CLI (the backup driver's only R2 dependency)
         continue-on-error: true
-        run: bash .github/scripts/ensure-aws-cli.sh
+        # `timeout 300` bounds the LEG as a whole (review P2), on top of the
+        # script's own per-attempt curl bounds. The ceiling is 45 min against
+        # ≈38 min of legs, so an install that HANGS on a blackholed mirror must
+        # not eat the headroom and get the driver killed mid-sweep. A fast failure
+        # is what `continue-on-error` is for; a slow one is what this bound is for.
+        run: timeout 300 bash .github/scripts/ensure-aws-cli.sh
       - name: Run backup driver
         run: bash .github/scripts/registry-cron.sh
         env:

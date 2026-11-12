@@ -89,7 +89,16 @@ zip="awscli-exe-linux-${arch}-${PIN_VERSION}.zip"
 url="https://awscli.amazonaws.com/${zip}"
 
 log "downloading ${url}"
-curl --fail --silent --show-error --location --retry 3 --retry-delay 2 --max-time 300 \
+# The download is bounded as a WHOLE LEG, not per attempt (review P2): the job's
+# 45-min ceiling has only ≈12 min of headroom above the driver's own legs
+# (1500+300+120+20+20 ≈ 1960s), and `--retry 3 --max-time 300` allowed ~20 min of
+# retries — a HANGING mirror (blackholed egress, which is exactly the "no egress"
+# condition this step exists to survive) would burn the ceiling and the runner
+# would kill the driver mid-sweep: no heartbeat, no filing, no self-heal. 120s per
+# attempt with 2 retries is ≈6 min worst case, and the step is additionally bounded
+# by `timeout 300` in the workflow.
+curl --fail --silent --show-error --location --connect-timeout 10 \
+  --retry 2 --retry-delay 2 --max-time 120 \
   "$url" --output "${work}/${zip}"
 
 if ! echo "${pin_sha}  ${work}/${zip}" | sha256sum --check --status -; then
