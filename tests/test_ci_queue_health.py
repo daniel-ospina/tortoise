@@ -2299,7 +2299,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     same inference in this very file.
 
     SO THE MATCH IS CLAIM-LEVEL AND FORMATTING-INSENSITIVE. Line-literal matching let a
-    re-wrap at a comment boundary through (routine at ~72 columns here), so leading
+    re-wrap at a comment boundary through (routine at ~80–85 columns here), so leading
     comment markers are stripped and all whitespace flattened on both sides — and CASE
     and BACKTICKS are normalised away too (review P2-2), because a revert is re-TYPED,
     not pasted: "the PROOF that EXCLUDES" returns as "the proof that excludes" the moment
@@ -2421,10 +2421,14 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         def _terminator(after: int) -> int:
             """Index of the next sentence terminator at/after ``after``, or -1.
 
-            ⛔ A BARE ``.`` COUNTS (review P2). Requiring ". " missed a sentence that ends in
-            "`…)`" or at end-of-string — measured: the exact parenthetical in the `correct`
-            list below went unseen, so the lookahead stopped short and the needle red it.
-            Over-segmenting only SHRINKS the passage (stricter detection), never loosens it.
+            ⛔ A BARE ``.`` COUNTS, and the reason is the measured one (review P2): after
+            ``flat()`` collapses every whitespace run, ``". "`` and ``"."`` select the SAME
+            index except at end-of-string, where this returns -1 and the caller's fallback
+            already runs the passage to the end — so the two rules are equivalent, and the
+            bare form is simpler to read. (An earlier revision of this docstring claimed the
+            ". "-only rule "stopped the lookahead short and red the needle"; that is NOT
+            reproducible at this head or at the commit that wrote it — measured, both GREEN —
+            and the mechanism was inverted: over-segmenting SHRINKS the passage.)
             """
             for j in range(after, len(hay)):
                 if hay[j] in ".!?":
@@ -2468,6 +2472,9 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # the OMISSION ("now READ:" — without SETTLED), because the inference itself becomes
         # TRUE once the run is settled and a correct header may then state it.
         "`False` is a PROOF (every job of the run is `completed`, so it is executing nothing)",
+        # the SHORT form of the same claim, which survived in this very file until a review
+        # found it (review P2): `False` alone is a CANDIDATE proof, not a final one.
+        "`False` is a PROOF of non-execution",
         "now READ: every job is `completed`, so none of them is executing anything",
         # the sufficiency CLAIM, carried through its own terminal clause: the short form alone
         # ("… is the PROOF that excludes it from `pr_running`") is a prefix of a CORRECT
@@ -2568,8 +2575,8 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # not disarm — so `pre_fix` covers detection, never disarming. The disarm path is
     # exercised ONLY by the `correct` entries that embed a span. That was ONE when this was
     # written and is FIVE now (the four vocabulary pins below joined it), which is why the
-    # assertion states a measured invariant instead of a count: `assert disarming` proves the
-    # path is exercised, and it is the entries themselves that keep the path alive.
+    # assertion pins a measured FLOOR instead of an exact count — `len({entry for entry, _ in
+    # disarming}) >= 5` — so it catches a deletion without going stale when one is added.
     correct = [
         "PR-event runs whose EVERY job had completed, and which are therefore NOT counted "
         "in `pr_running` (#12037) only once its `updated_at` has been still for "
@@ -2630,7 +2637,8 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # future edit could delete the ONE entry that makes `hits()`'s context check
     # load-bearing and the whole suite would stay green (measured).
     assert len({entry for entry, _ in disarming}) >= 5, (
-        f"hits()'s disarm path is exercised by only {len(disarming)} `correct` entries — it "
+        f"hits()'s disarm path is exercised by only "
+        f"{len({entry for entry, _ in disarming})} distinct `correct` entries — it "
         f"was five when this was pinned, and a deletion that takes it lower means the path is "
         f"silently less tested: {disarming!r}"
     )
@@ -2640,10 +2648,10 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     # vacuously (every correct sentence carries the stillness half, so any hit on one is
     # disarmed). This is the leg with teeth: it catches the real risk of narrowing — a needle
     # taken so far down that the sentence it exists to catch walks past it. These are the
-    # phrasings that actually SHIPPED — pre-fix on `origin/main` for 13 of them, plus TWO
-    # sentences that shipped only mid-branch at `6c05aeb903` (the merged closed-avenue claim,
-    # later retracted), ONE truncation of a shipped sentence to its shortest true instance,
-    # ONE declared RE-TYPED variant — SIXTEEN entries. ⛔ THE COUNT CLAIMS ARE NOT HERE: they
+    # phrasings that actually SHIPPED — pre-fix on `origin/main` for 13 of them (ONE of those a
+    # truncation of a shipped sentence to its shortest true instance), plus TWO sentences that
+    # shipped only mid-branch at `6c05aeb903` (the merged closed-avenue claim, later
+    # retracted), and ONE declared RE-TYPED variant — SEVENTEEN entries. ⛔ THE COUNT CLAIMS ARE NOT HERE: they
     # live in `unconditional` below, checked WITHOUT the discriminator, because a count sentence
     # is wrong whatever stillness it also names (every shipped form names `JOB_SETTLE_SECONDS`,
     # which would otherwise read as a correction). Several guarded sites carry more than one
@@ -2680,6 +2688,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # the two test headers
         "`False` is a PROOF (every job of the run is `completed`, so it is executing nothing)",
         "now READ: every job is `completed`, so none of them is executing anything",
+        "`False` is a PROOF of non-execution — the frozen-run shape, measured.",
         # ⛔ THE MERGED-CLOSED-AVENUE CLAIM, as it SHIPPED in BOTH workflow blocks at
         # `6c05aeb903` (review NIT: without these two entries the "either state" needles
         # were relied on by nothing, so deleting them was silent).
@@ -2687,13 +2696,6 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         "a run in either state (409), so naming it would send an operator to a closed avenue.",
         "neither /cancel nor /force-cancel accepts a repair in either state, so naming one "
         "would point an operator at a closed avenue.",
-        # ... and the cause COUNT at `6c05aeb903` (the module field doc). ⛔ THE SHIPPED
-        # SENTENCE ITSELF IS DISARMED BY DESIGN: it goes on to name `JOB_SETTLE_SECONDS`, so
-        # the second-half discriminator treats it as a corrected two-half sentence. This entry
-        # is the shortest TRUE instance of the claim, which is what pins that the needle can
-        # still fire — a count re-added without a stillness clause is exactly the revert the
-        # needle exists for.
-
         # ⛔ A RE-TYPED REVERT, not a shipped quote: `flat()` turns the shipped
         # "all-jobs" / newline / "-completed" into "all-jobs -completed", so a revert that
         # re-types it without the break would otherwise be caught by no needle at all
@@ -2713,9 +2715,10 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     )
     # ⛔ THE COUNT CLAIMS ARE CHECKED WITHOUT THE DISCRIMINATOR (review P2). The retraction
     # here is that NO count is given at all, so unlike the one-half claims a count sentence is
-    # wrong whatever stillness it also names — and EVERY shipped form goes on to name
-    # `JOB_SETTLE_SECONDS`, which `hits()` would read as a correction. Measured: with only the
-    # discriminator, a revert to c0c53f8c's sentence (and to 6c05aeb9's) was GREEN.
+    # wrong whatever stillness it also names: the FIRST TWO shipped forms go on to name
+    # `JOB_SETTLE_SECONDS`, so `hits()` reads them as a correction (measured — with only the
+    # discriminator, reverts to c0c53f8c's and 6c05aeb9's sentences were GREEN), and the third
+    # shipped form is listed because it shipped, not because it is disarmed.
     unconditional = [
         "disproved — three causes, one bucket",
         "disproved — FOUR causes, one bucket",
@@ -2812,7 +2815,10 @@ def _jobs(*statuses, total_count=None):
 
 
 def test_live_job_false_only_when_every_job_is_completed(monkeypatch):
-    """`False` is a PROOF of non-execution — the frozen-run shape, measured."""
+    """`False` is a CANDIDATE proof of non-execution — every VISIBLE job `completed` AND the
+    list provably complete; the CALLER's settle gate (`_settled_still`) is what makes it
+    final. ⛔ NOT "a PROOF of non-execution" on its own: that short form is the inference
+    this PR removes from every other site, and it survived here (review P2)."""
     monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None: _jobs("completed", "completed"))
     assert Q.read_run_live_job("o/r", 42066648922) is False
 
@@ -3101,7 +3107,9 @@ def test_live_job_false_when_an_int_total_count_equals_a_full_page(monkeypatch):
     """Completeness accepted from `total_count` EQUAL to the page, not only below it.
 
     The counter-arm to the abstentions: a full page whose `total_count` says exactly that
-    many jobs exist IS a complete read, so it may still prove non-execution. Without this
+    many jobs exist IS a complete read, so it can still be PROVED non-executing — once the
+    CALLER's settle gate corroborates it, which is the other half and not this function's.
+    Without this
     the guard could be "fixed" by abstaining on every full page and the frozen-run
     exclusion would silently stop working on any run with >= 100 jobs.
     """
