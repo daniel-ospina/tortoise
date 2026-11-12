@@ -392,15 +392,47 @@ def test_the_code_detector_is_fail_closed(tmp_path):
 
 # ── 1. propagate_shock callers ────────────────────────────────────
 
-def test_no_propagate_shock_callers():
-    """Assert: propagate_shock.calls only in deprecated definition + tests + scripts."""
-    # All references to propagate_shock (the word)
-    all_refs = _grep("propagate_shock", "tortoise/", "graph-scripts/", "validation/", "tests/")
-    filtered = [
-        l for l in all_refs  # noqa: E741
-        if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l
-    ]
+def _classify_propagate_shock_refs(lines: list[str]) -> dict[str, list[str]]:
+    """Bucket `grep` hits for `propagate_shock` by what each hit actually is.
 
+    Extracted from :func:`test_no_propagate_shock_callers` (this PR) so the
+    bucketing can be pinned by a non-vacuity test without invoking the audit's
+    own `grep` and repository walk. The extraction is a pure refactor: every
+    branch below is the branch that test carried inline.
+
+    ⛔ THE ONE RULE, and it belongs to :func:`_classify_tortoise_hit` (#11903):
+    a `tortoise/` hit is CODE unless the name on that line sits inside a comment
+    or inside prose. This function routes; it does not decide.
+
+    Why that rule and not a call-shape regex — this is the seam where two rival
+    implementations of the same fix met, and the record is kept here so the
+    next reader does not "restore" the arm that lost. The audit's question is
+    whether PRODUCTION code **calls** the deprecated path, and the pre-#11903
+    matcher answered it with a heuristic keyed to one historical comment's
+    wording (`#` AND `replaces`), so a docstring line that merely NAMED the
+    symbol counted as a caller — #11803's #11702 note in
+    `projection/propagation.py` reddened the audit that way. This PR first
+    answered it with a regex call shape (`propagate_shock(`, `propagate_shock (`,
+    a backslash-continued call, any `.propagate_shock` attribute). #11903 landed
+    the stronger version of the same idea on `main` first: every `NAME` token
+    whatever its syntactic position, plus every non-prose string literal, which
+    covers a call, a dotted attribute, a `partial(...)`, a bare
+    `key=propagate_shock`, a decorator, an aliased import, and a
+    `getattr(m, "propagate_shock")` resolved from a string — and identifies
+    prose by SHAPE (a bare string statement, a comment), never by wording.
+
+    ⛔ The regex arm is NOT kept beside it, and that is the resolution of this
+    merge, not an omission. The two rules disagree on a line that carries the
+    symbol with neither `(` nor a dot — `key=propagate_shock`, `@propagate_shock`,
+    `from x import propagate_shock as ps` — which the regex bucketed as a
+    reference and this rule calls code. Keeping the regex in front would hand
+    back exactly the quieter guard #11903 removed (a fail-OPEN the audit could
+    not see), so the later, stricter rule governs and the PR's own intent — "a
+    call site must never be bucketed as prose" — is satisfied more strongly than
+    its mechanism satisfied it. The shapes that motivated the regex are still
+    pinned, through this classifier, by
+    :func:`test_the_audit_discriminates_a_call_from_a_mention`.
+    """
     callers: dict[str, list[str]] = {
         "definition (deprecated)": [],
         "prose only": [],
@@ -409,9 +441,8 @@ def test_no_propagate_shock_callers():
         "production_code": [],
     }
 
-    for line in filtered:
+    for line in lines:
         path_part = line.split(":")[0]
-        full_path = ROOT / path_part  # noqa: F841
 
         # #378: projection.py was split into the projection/ package — the
         # deprecated definition now lives in projection/propagation.py.
@@ -429,7 +460,80 @@ def test_no_propagate_shock_callers():
             bucket = _classify_tortoise_hit(ROOT / path_part, int(line.split(":", 2)[1]))
             callers[bucket].append(line)
 
-    # The only "production" reference is a comment: no actual call
+    return callers
+
+
+def test_the_audit_discriminates_a_call_from_a_mention(tmp_path):
+    """Non-vacuity, BOTH directions, for `_classify_propagate_shock_refs`.
+
+    The audit's two failure modes pull in opposite directions, so both are
+    pinned at the end of the chain the audit really uses (`grep` line ->
+    `/tortoise/` routing -> :func:`_classify_tortoise_hit`):
+
+    * a PROSE mention must not red the audit — #11803's false positive (a
+      docstring stating the path is UNREACHABLE was reported as a caller);
+    * a CALL, or a reference that can be invoked later, must not be re-bucketed
+      as prose — the false PASS this audit exists to catch. The shapes below are
+      the ones a literal `"propagate_shock("` substring test misses: a space
+      before the `(` and a backslash-continued call whose `(` is on the next
+      physical line (both E211, which is preview-only, so `ruff` does not flag
+      either at this repo's selection), plus a dotted attribute alias and a
+      `partial(...)` that carry no `(` after the symbol at all.
+
+    ⛔ A REAL temp file, never a fabricated `path:line:` string: this classifier
+    reads and parses the file named on the line, so a fabricated path would make
+    the rows assert something about whichever line of that real file happens to
+    be numbered 999 — green or red for a reason unrelated to the shape under
+    test. (The rows this test was first written with did exactly that; they are
+    the reason the payload lives in `tmp_path` now.)
+    """
+    probe = tmp_path / "tortoise" / "probe.py"
+    probe.parent.mkdir()
+    probe.write_text(
+        'def f(m):\n'
+        '    """prose: propagate_shock persists the blend; it is never invoked."""\n'
+        '    self.propagate_shock(eid)\n'
+        '    self._shock = proj.propagate_shock\n'
+        '    p = functools.partial(proj.propagate_shock, eid)\n'
+        '    proj.propagate_shock \\\n'
+        '        (eid)\n'
+        '    propagate_shock (eid)\n'
+        '    propagate_shock \\\n'
+        '        (eid)\n',
+        encoding="utf-8",
+    )
+    # `grep`-shaped rows: the real text of every line that carries the symbol, in
+    # the `path:lineno:text` form the audit receives. Lines 1, 7 and 10 do not
+    # carry it (the `def` and the continuation lines), so they are not rows.
+    source = probe.read_text(encoding="utf-8").splitlines()
+    rows = {
+        n: f"{probe}:{n}:{source[n - 1]}"
+        for n in (2, 3, 4, 5, 6, 9)
+    }
+    callers = _classify_propagate_shock_refs(list(rows.values()))
+
+    assert callers["prose only"] == [rows[2]], (
+        "a docstring line that only NAMES propagate_shock is prose, not a "
+        f"caller; bucketed as: {callers['prose only']}")
+    assert callers["production_code"] == [
+        rows[3], rows[4], rows[5], rows[6], rows[9]], (
+        "a real CALL site, and every reference that can be invoked later, must "
+        f"be reported as production code; bucketed as: {callers['production_code']}")
+
+
+def test_no_propagate_shock_callers():
+    """Assert: propagate_shock.calls only in deprecated definition + tests + scripts."""
+    # All references to propagate_shock (the word)
+    all_refs = _grep("propagate_shock", "tortoise/", "graph-scripts/", "validation/", "tests/")
+    filtered = [
+        l for l in all_refs  # noqa: E741
+        if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l
+    ]
+
+    callers = _classify_propagate_shock_refs(filtered)
+
+    # No production mention is a call: the deprecated definition, docstring prose
+    # that names the symbol, and one historical comment.
     assert len(callers["production_code"]) == 0, (
         f"PRODUCTION CODE REFERENCES propagate_shock:\n" + "\n".join(callers["production_code"])  # noqa: F541
     )
