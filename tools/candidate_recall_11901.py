@@ -1,6 +1,18 @@
 #!/usr/bin/env python
 """Candidate recall@k for the capture-time link-before-create prior (#11901).
 
+HOW TO RUN THE TESTS THAT GUARD THIS DOCUMENT
+---------------------------------------------
+``tests/test_candidate_recall_11901.py`` needs no graph, but every ``pytest`` run
+in this repo needs the lane's DB seam (epic #1647 P4), so a bare
+``uv run pytest`` reports one ERROR per collected test from
+``tests/_embedded.py`` (22 at this head) — that is the
+repo's gate, not these tests. Use either form:
+::
+
+    uv run python tools/test_lane.py run -- tests/test_candidate_recall_11901.py -q
+    TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_candidate_recall_11901.py -q
+
 WHAT THIS MEASURES, AND WHY THE THREE ARMS ARE MEASURED SEPARATELY
 ---------------------------------------------------
 Every capture derives one ``object`` query per extracted entity name and feeds
@@ -101,6 +113,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import json
 import os
 import re
@@ -176,7 +189,15 @@ def harvest(sessions_dir: Path) -> dict[str, collections.Counter]:
                 out[cls][name] += 1
 
             for m in _DD.finditer(blob):
-                phrase = m.group(0)
+                # ⛔ Collapse whitespace BEFORE the filters: `_DD`'s ``\s`` matches
+                # a newline, so a line-wrapped phrase was harvested verbatim and
+                # became a node whose NAME carries ``\n`` (`the\nverdict`,
+                # `the\n   check-runs are stale`) — 4 of 1000 population names,
+                # one of them colliding under a fold with a real name, and three
+                # of them clause fragments rather than names. A name is a single
+                # line; `_norm` would fold the whitespace for a COMPARISON but
+                # the stored name keeps it.
+                phrase = " ".join(m.group(0).split())
                 toks = re.split(r"[\s_-]+", phrase)
                 if toks[1] in _STOP_FIRST or toks[-1] in _STOP_LAST:
                     continue
@@ -247,7 +268,16 @@ def _has_embedder() -> bool:
 
 
 def _mode_note(has_embedder: bool, legs_seen: dict[str, bool]) -> str:
-    """What the fused read ACTUALLY submitted — from the traces, not a guess."""
+    """The ARTIFACT-level mode note, from ``legs_seen`` (the legacy rule).
+
+    ⛔ This is the #3005 *submitted* predicate (``ran``, regardless of
+    ``degraded``), OR-ed over every window — which is why :func:`run` now also
+    classifies each window with ``search_engine.require_hybrid_read`` (the
+    strict #2952 predicate, whose docstring says a lane that RECORDS A SCORE
+    must delegate to it) and REFUSES to write an artifact whose windows are not
+    uniformly one mode. The committed artifacts predate that guard; their note
+    is this function's answer, and the brief declares the residual.
+    """
     vector = bool(legs_seen.get("vector"))
     if vector:
         return "hybrid"
@@ -273,6 +303,44 @@ def _fold_punct(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def _allocate_shares(sample: int, pop: list[dict]) -> dict[str, int]:
+    """Largest-remainder allocation of ``sample`` across the harvested classes.
+
+    Rounding each class's share independently (``round(sample*n_c/N)``) does not
+    guarantee the shares SUM to ``sample``, and the previous code then truncated
+    with ``sample[:sample]`` — which drops from the END of a class-blocked list,
+    i.e. always ``path``. Measured over sample sizes 1..600 on the committed
+    600/300/100 mix, 124 of them produced a short sum or a ZERO share for a
+    class (``--sample 6`` → [4, 2, 1] = 7 → the path class disappears).
+    """
+    total = len(pop) or 1
+    counts = collections.Counter(r["cls"] for r in pop)
+    base = {c: sample * counts[c] // total for c in counts}
+    rem = sample - sum(base.values())
+    order = sorted(counts, key=lambda c: (-(sample * counts[c] % total), c))
+    for c in order[:max(0, rem)]:
+        base[c] += 1
+    return base
+
+
+def _interleave(by_cls: dict[str, list[dict]], shares: dict[str, int]) -> list[dict]:
+    """Round-robin the class lists so a slice of the sample is not one class.
+
+    ``build_population`` emits class by class, so the pooled arm's groups
+    (``sample[start:start+budget]``) were class-HOMOGENEOUS — 12 all-definite, 6
+    all-ident, 2 all-path of 20 — while a real capture mixes classes. A
+    same-class group shares tokens far more, so the union deduplicates harder and
+    the mean is biased LOW (conservative for "~40 vs 15", but not "a capture").
+    """
+    queues = {c: list(by_cls[c][:shares[c]]) for c in sorted(by_cls)}
+    out: list[dict] = []
+    while any(queues.values()):
+        for c in sorted(queues):
+            if queues[c]:
+                out.append(queues[c].pop(0))
+    return out
+
+
 def run(args: argparse.Namespace) -> int:
     uri = os.environ.get("TORTOISE_DB_URI") or ""
     if not uri.startswith(("docker://", "redis://")):
@@ -296,14 +364,46 @@ def run(args: argparse.Namespace) -> int:
         return 3
     counts = {c: len(v) for c, v in harvested.items()}
 
-    sdk = TortoiseSDK(namespace=args.namespace, graph_name=args.graph)
+    # ⛔ RUN-SCOPED GRAPH. `_upsert_object` MERGEs on the id and writes `o.name`
+    # ON CREATE only (projection/entities.py:5031-5050, the recorded #8919 gap),
+    # so a second run on the SAME graph whose harvest shifted a name into a
+    # different population position leaves the node at that id carrying the
+    # FIRST run's name — the query then matches nothing and books as
+    # `miss_absent_at_max_k`. Measured on a lane container: upsert id X as
+    # "alpha original", upsert X as "beta shifted", and "beta shifted" returns
+    # ZERO rows while "alpha original" still returns X. Nothing below is allowed
+    # to assume the names landed; it is CHECKED after the write (see the refusal)
+    # and the graph name is recorded so a reader can tell two runs apart.
+    graph_name = args.graph or f"recall11901_{int(time.time())}_{os.getpid()}"
+    pop_digest = hashlib.sha256(
+        "\n".join(r["name"] for r in pop).encode()).hexdigest()[:16]
+
+    sdk = TortoiseSDK(namespace=args.namespace, graph_name=graph_name)
     try:
         proj = sdk._get_proj()
         # The population is written through the REAL projection: one Object per
-        # name, ids minted here (the projection MERGEs on the id per #3590).
+        # name, ids minted here (the projection MERGEs on the id per #3590), and
+        # the id is CARRIED on the population row so every comparison below is
+        # by identity — a fold-equality on NAME can credit the wrong node (the
+        # corpus yields fold-equal groups such as 'the verdict' / 'the merge
+        # base' + 'the merge-base').
         for i, row in enumerate(pop):
-            proj._upsert_object({"id": f"obj-11901{i:06d}", "name": row["name"],
+            row["id"] = f"obj-11901{i:06d}"
+            proj._upsert_object({"id": row["id"], "name": row["name"],
                                  "object_kind": "core:other"})
+        # ⛔ REFUSE a run whose names did not land: with `o.name` unwritten on
+        # ON MATCH, a reused graph silently measures the PREVIOUS population.
+        stored = {r[0]: r[1] for r in proj.g.query(
+            "MATCH (o:Object) WHERE o.id STARTS WITH 'obj-11901' "
+            "RETURN o.id, o.name", params={}).result_set}
+        stale = [row["name"] for row in pop
+                 if stored.get(row["id"]) != row["name"]]
+        if stale:
+            print(f"REFUSED: {len(stale)} of {len(pop)} population names did not "
+                  f"land (first: {stale[:3]!r}) — `o.name` is an ON CREATE write "
+                  f"(#8919), so this graph already held a different population. "
+                  f"Pass a fresh --graph.", file=sys.stderr)
+            return 3
         # One cache-warming query so the first measured query is not paying the
         # full-scan cold cost — the residual is the #4997 unindexed-label scan
         # (§14.3 V3), constant across every arm, so it cannot bias a comparison.
@@ -318,6 +418,17 @@ def run(args: argparse.Namespace) -> int:
         #: FTS-only run published as a product measurement as the class this
         #: field exists to prevent). Recorded, never assumed.
         legs_seen: dict[str, bool] = {}
+        #: Per-window verdict from `search_engine.require_hybrid_read` — the
+        #: STRICT #2952 predicate (an IN-SCOPE vector entry RAN **and was not
+        #: degraded**), whose docstring says a lane that records a score must
+        #: delegate to it. `legs_seen` above is the looser #3005 "was submitted"
+        #: predicate and is OR-ed over thousands of windows, so on its own it
+        #: cannot distinguish a hybrid run from a MIXED one (`ran=True,
+        #: degraded=True` on `no_embeddings`/below-floor, or `ran=False` on
+        #: `breaker_open`). The pair is recorded and a mixed run is REFUSED.
+        window_modes: dict[str, int] = {"hybrid": 0, "keyword_only": 0}
+        from tortoise.exceptions import HybridReadUnavailableError
+        from tortoise.search_engine import require_hybrid_read
 
         def window(query: str, k: int) -> list[dict]:
             """EXACTLY the leg ``_fts_rows`` runs, at width ``k``.
@@ -342,20 +453,41 @@ def run(args: argparse.Namespace) -> int:
                 name = entry.get("leg") or entry.get("strategy") or "?"
                 legs_seen[str(name)] = legs_seen.get(str(name), False) or bool(
                     entry.get("ran"))
+            try:
+                require_hybrid_read(trace)
+            except HybridReadUnavailableError:
+                window_modes["keyword_only"] += 1
+            else:
+                window_modes["hybrid"] += 1
             return [{"id": r.get("id", ""), "name": r.get("content", ""),
                      "kind": r.get("point_kind", "")} for r in (rows or [])]
 
         # STRATIFIED, not head-sliced: ``build_population`` emits class by class,
         # so ``pop[:n]`` would sample one class only and report its recall as the
-        # population's. Each class contributes its own proportional share.
+        # population's. Each class contributes its own proportional share — via
+        # LARGEST REMAINDER, so the shares sum to ``args.sample`` (independent
+        # rounding plus a `[:sample]` truncation silently dropped the LAST class,
+        # which is `path`, at 124 of the 600 sample sizes measured), and a sample
+        # too small to give every class a member is refused rather than silently
+        # dropping one.
         _by_cls: dict[str, list[dict]] = collections.defaultdict(list)
         for row in pop:
             _by_cls[row["cls"]].append(row)
-        sample: list[dict] = []
-        for cls in sorted(_by_cls):
-            share = round(args.sample * len(_by_cls[cls]) / len(pop))
-            sample.extend(_by_cls[cls][:share])
-        sample = sample[: args.sample] or pop[: args.sample]
+        if args.sample > len(pop):
+            print(f"REFUSED: --sample {args.sample} exceeds the population "
+                  f"({len(pop)}) — `sample_by_class` would sum to "
+                  f"{args.sample} while the sample held {len(pop)}", file=sys.stderr)
+            return 2
+        shares = _allocate_shares(args.sample, pop)
+        if any(shares.get(c, 0) == 0 for c in _by_cls):
+            print(f"REFUSED: --sample {args.sample} starves a class ({shares}) — "
+                  f"a per-class rate needs at least one name per class",
+                  file=sys.stderr)
+            return 2
+        # INTERLEAVED, so the pooled arm's groups are not single-class slices
+        # (a real capture mixes classes; a same-class group deduplicates harder
+        # and biases the union LOW).
+        sample: list[dict] = _interleave(_by_cls, shares)
         arms: dict[str, dict] = {}
 
         # ── ARM 1: the mention IS the stored name (the exact rung of the ladder)
@@ -384,25 +516,35 @@ def run(args: argparse.Namespace) -> int:
                             if m != n and len(t & _tok[n]) >= 2) for n in _tok}
         for row in sample:
             name = row["name"]
+            # ── identity is the MINTED ID, never the name: `_norm` folds
+            # whitespace and case, so a name comparison credits a different node
+            # whose normalised name happens to match (the corpus yields
+            # fold-equal groups), and 'was the canonical returned' is a question
+            # about a node, not a string.
             wide = window(name, max(KS))
             for k in KS:
                 rows = window(name, k)
                 exact_by_class[row["cls"]][str(k)]["n"] += 1
-                hit = next((i for i, r in enumerate(rows) if r["name"] == name), None)
+                hit = next((i for i, r in enumerate(rows) if r["id"] == row["id"]), None)
                 if hit is not None:
                     exact[k]["in_window"] += 1
                     exact_by_class[row["cls"]][str(k)]["in_window"] += 1
                     exact[k]["rank_sum"] += hit + 1
                 else:
                     # one over-fetch tells "never returned" from "cut at k"
-                    if any(r["name"] == name for r in wide):
+                    if any(r["id"] == row["id"] for r in wide):
                         exact[k]["miss_past_k"] += 1
                     else:
                         exact[k]["miss_absent_at_max_k"] += 1
                         if not rows:
                             exact[k]["rows_zero"] += 1
                             exact_by_class[row["cls"]][str(k)]["rows_zero"] += 1
-                    if k == KS[0] and len(exact_misses) < 200:
+                    # NO CAP: a `len(exact_misses) < 200` guard took the HEAD of
+                    # a class-blocked list, so once it bound, the crowding
+                    # statistic and §3's "N of the misses" became
+                    # definite-only while the denominator still said "all".
+                    # 300 entries is nothing.
+                    if k == KS[0]:
                         toks = _sanitise_query_text(name).split()
                         exact_misses.append({
                             "name": name, "cls": row["cls"],
@@ -414,7 +556,14 @@ def run(args: argparse.Namespace) -> int:
                                 [t for t in toks if not t.isdigit()]) != len(toks),
                             "wide_top": [r["name"] for r in wide[:5]],
                         })
-                # phase 1 over the SAME window — the shipped matcher, real code
+                # phase 1 over the SAME window — the shipped matcher, real code.
+                # ⛔ The denominator is THIS ONE query's k-window, not the union
+                # production hands `resolve_entities` (`search_graph`'s id-keyed
+                # union, ~40 at limit=3), so this field is recall@k under another
+                # name — `attached == in_window` at every k is the tell. It is
+                # recorded for the arm-1 cross-check only; arm `variant` is where
+                # the union does not matter (a variant is `_norm`-different from
+                # every candidate).
                 cand, _mode = _find_existing_entity(rows, name, "core:other")
                 if cand is not None:
                     exact[k]["attached"] += 1
@@ -440,14 +589,14 @@ def run(args: argparse.Namespace) -> int:
                     var[k]["pairs"] += 1
                     by_class[vclass][str(k)]["pairs"] += 1
                     rows = window(surface, k)
-                    in_win = any(r["name"] == name for r in rows)
+                    in_win = any(r["id"] == row["id"] for r in rows)
                     if in_win:
                         var[k]["in_window"] += 1
                         by_class[vclass][str(k)]["in_window"] += 1
                     # the MENTION is the surface form, exactly as a capture's
                     # derived query would carry it — never the stored name
                     cand, _m = _find_existing_entity(rows, surface, "core:other")
-                    hit_ok = cand is not None and cand.get("name") == name
+                    hit_ok = cand is not None and cand.get("id") == row["id"]
                     if hit_ok:
                         var[k]["attached"] += 1
                         by_class[vclass][str(k)]["attached"] += 1
@@ -456,7 +605,7 @@ def run(args: argparse.Namespace) -> int:
                     folded = [dict(r, name=_fold_punct(r["name"])) for r in rows]
                     cand2, _m2 = _find_existing_entity(folded, folded_surface,
                                                        "core:other")
-                    if cand2 is not None and cand2.get("name") == _fold_punct(name):
+                    if cand2 is not None and cand2.get("id") == row["id"]:
                         var[k]["attached_folded"] += 1
                         by_class[vclass][str(k)]["attached_folded"] += 1
         arms["variant"] = var
@@ -487,23 +636,52 @@ def run(args: argparse.Namespace) -> int:
                 pooled[k]["set_max"] = max(pooled[k]["set_max"], size)
         arms["pooled"] = pooled
 
+        # ⛔ A MIXED run is refused: `legs_seen` OR-s the looser #3005 predicate
+        # over thousands of windows, so a run where the dense leg held for some
+        # windows and degraded for others would carry the label "hybrid" for a
+        # measurement that is part keyword-only. Every committed artifact must
+        # come from ONE mode (the strict per-window verdict).
+        uniform = (window_modes["keyword_only"] == 0
+                   or window_modes["hybrid"] == 0)
+        if not uniform and not args.allow_mixed_modes:
+            print(f"REFUSED: MIXED retrieval modes across windows "
+                  f"({window_modes}) — an artifact labelled from this run would "
+                  f"report a mixture as one mode. Re-run on a box whose dense leg "
+                  f"is stable, or pass --allow-mixed-modes to record it AS a "
+                  f"mixture (the note then says so).", file=sys.stderr)
+            return 3
+
         report = {
             "issue": 11901,
             "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "corpus": {"dir": str(sessions), "files": len(list(sessions.glob("*.jsonl"))),
                        "harvested_distinct": counts, "population": len(pop),
-                       "sample": len(sample), "elapsed_s": round(time.time() - t0, 1)},
+                       "sample": len(sample),
+                       # The graph the population was written to, and a digest of
+                       # the names — both absent from the first-generation
+                       # artifacts, which is why those cannot be re-proved
+                       # (a reused graph keeps the OLD name at a shifted id,
+                       # #8919).
+                       "graph": graph_name, "population_digest": pop_digest,
+                       "sample_by_class": dict(sorted(shares.items())),
+                       "elapsed_s": round(time.time() - t0, 1)},
             "ks": list(KS),
             "retrieval": {
                 "has_embedder": _has_embedder(),
                 "legs_seen": dict(sorted(legs_seen.items())),
+                # The STRICT per-window verdict (`require_hybrid_read`); a mixed
+                # run is refused above unless explicitly allowed, in which case
+                # `uniform_windows` says so in the artifact itself.
+                "window_modes": dict(sorted(window_modes.items())),
+                "uniform_windows": uniform,
                 # ⛔ The note is derived from the LEGS, never from embedder
                 # availability: a model that loads but whose leg never answers
                 # (`ran=False, reason="encode_failed"`, or a breaker-open empty
                 # trace) would otherwise be labelled "hybrid" — the exact false
                 # label `retrieval_preflight` exists to prevent, in the first
                 # field a reader checks.
-                "note": _mode_note(_has_embedder(), legs_seen),
+                "note": ("MIXED: see window_modes" if not uniform
+                         else _mode_note(_has_embedder(), legs_seen)),
             },
             "pooled_budget_note": ("a pooled group is `max_queries` (15) names, "
                                    "which is the production BUDGET CAP, not the "
@@ -531,7 +709,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--captures", type=int, default=20,
                    help="pooled-set groups to emulate (a capture = max_queries=15 names)")
     p.add_argument("--namespace", default="recall11901")
-    p.add_argument("--graph", default=None)
+    p.add_argument("--graph", default=None,
+                   help="graph to write the population to; default is RUN-SCOPED "
+                        "(a reused graph keeps the previous run's names at any "
+                        "shifted id — `o.name` is an ON CREATE write, #8919)")
+    p.add_argument("--allow-mixed-modes", action="store_true",
+                   help="record a run whose windows did not all share one "
+                        "retrieval mode (the artifact then says MIXED); refused "
+                        "by default, because a mixture published as one mode is "
+                        "the false-label class #2952/#3005 exist to prevent")
     p.add_argument("--out", default=None)
     return run(p.parse_args(argv))
 

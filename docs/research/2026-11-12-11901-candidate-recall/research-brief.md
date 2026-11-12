@@ -24,9 +24,14 @@ names / stratified sample 300, both modes on one box.
 
 ## 0. Preflight
 
-**Search tool:** rung 1 (`mcp__seo-intelligence__perplexity_search`) is **unavailable on this box** —
-`mcp_load seo-intelligence` → `Unknown MCP server 'seo-intelligence'`. Rung 2 (`web_search`) also refused with
-`PERPLEXITY_API_KEY not set`, so the calls were made against the Perplexity API directly with the model named
+**Search tool:** rung 1 (`mcp__seo-intelligence__perplexity_search`) **could not be loaded on this box** —
+`mcp_load seo-intelligence` → `spawn /mcp-servers/seo-intelligence/node_modules/.bin/tsx ENOENT`. The server IS
+declared (`mcp_catalog` lists it as `lazy`), and the catalog's own note names the cause: it needs a one-time
+`npm install` in `mcp-servers/seo-intelligence` per checkout, or the entry fails to spawn. (An earlier draft
+recorded this as `Unknown MCP server 'seo-intelligence'`, which points a fixer at the wrong layer — the config.)
+Rung 2 (`web_search`) also refused with `PERPLEXITY_API_KEY not set`: the key exists in `~/keys.env` (mode 0600),
+which the research skill names as its home, but it was not in this shell's environment — so the calls were made
+against the Perplexity API directly with the model named
 explicitly on every request (`"model": "sonar"`; no `sonar-deep-research`, no `sonar-reasoning-pro`). **Queries:
 5 attempted / 5 returned.** No 429.
 
@@ -64,7 +69,14 @@ Three consequences decide the shape of the measurement, and none of them was on 
    | 15 | 170.8 | 100 | 198 |
 
    The issue's comparison — *"our window is 3, Zep's is 15"* — compares a per-query width against a candidate-list
-   length. The right comparison is **~40 vs 15**.
+   length. At production's budget cap the right comparison is **~40 vs 15** — and ⚠️ **the cap is the WIDEST case,
+   not the typical one.** The artifact records the caveat in `pooled_budget_note` (*"a capture with 5 entities
+   issues 5 object queries"*). At `limit=3` that is 807 rows over 20 groups of 15 names ≈ **2.7 candidates per
+   derived query**, so a 5-entity capture's union is ≈ **13 < 15**: Zep's 15 **narrows** us at or near the cap and
+   **widens** us below ~6 entities. What holds at every capture size is the mechanism, not the arithmetic — the
+   candidate set is the union over the derived **object** queries (`_derive_queries` emits no `subject` query, and
+   `search_graph` buckets `object` rows into `entities` at `:3074`; the `point`/`event` rows land in other
+   buckets and are not handed to `resolve_entities`), never `limit`.
 2. **The phase-1 matcher is exact**, so a candidate can be *inside* the window and still unusable. Retrieval and
    phase-1 matching fail differently and are measured separately (§3, §4).
 3. **Phase 2 exists, is instructed to do exactly this job** (*"Resolve ONLY confident aliases: same referent,
@@ -77,12 +89,33 @@ Three consequences decide the shape of the measurement, and none of them was on 
 ## 2. Method, and what is real
 
 The harness runs the real code path: names harvested from this box's **real capture corpus**
-(`~/.tortoise/session-events`, 9 daily files, 8,218 real session records, 45.3 M characters — **as of the
-measurement run**; the corpus is live, so re-measure rather than trusting the record count and the character
-total, which the artifact does not carry — the file count it does carry, as `corpus.files`) into a **real FalkorDB**
-through the real projection (`_upsert_object`, id-keyed per `#3590`), queried by `sdk.tortoise_fts_query` with the
-exact flags `_fts_rows` passes (`include_terminal=True`, `_record_reads=False`, `_valid_time_rerank=False`) and
-production's own query sanitisation.
+(`~/.tortoise/session-events`, 9 daily files — the count the artifact carries, as `corpus.files`) into a **real
+FalkorDB** through the real projection (`_upsert_object`, id-keyed per `#3590`), queried by `sdk.tortoise_fts_query`
+with the exact flags `_fts_rows` passes (`include_terminal=True`, `_record_reads=False`,
+`_valid_time_rerank=False`) and production's own query sanitisation.
+
+⚠️ **The record and character totals are NOT in the artifact and do not reproduce from it:** read on that same
+directory at 2026-11-12T15:48Z it held **7,859 records / 53,089 turns / 42.4 M conversation characters**, so "the
+corpus census" depends on the box *and* on which of those quantities is meant. Re-derive it rather than quoting
+it; no figure below depends on it. See also §2.2 — the population itself is re-provable only going forward.
+
+### 2.2 The graph the population was written to (and why a re-run now refuses to guess)
+
+⚠️ **A re-run must NOT reuse the graph.** `_upsert_object` MERGEs on the **id** and writes `o.name` **ON CREATE
+only** (`tortoise/projection/entities.py:5031-5050`, the recorded `#8919` gap), so a second run whose harvest
+shifted a name into a different population position leaves the node at that id carrying the FIRST run's name —
+the query then matches nothing and books as `miss_absent_at_max_k`. Measured on a lane container: upsert id `X`
+as `alpha original`, upsert the same id as `beta shifted`, and `beta shifted` returns **zero rows** while `alpha
+original` still returns `X`.
+
+⛔ **The two committed artifacts predate both guards**, so their population is not re-provable from the artifact:
+neither records the graph it wrote to nor a population digest, and both default to the same
+`org_recall11901`-derived graph. A positional shift (a drifted corpus, a different `--population`) would leave a
+stale name at that id and **understate** recall — in the absence direction, which is the headline. The harness
+now (a) targets a **run-scoped graph** by default, (b) records `corpus.graph` and a population digest, and (c)
+**refuses** the run when a stored name does not match the population it just built. Treat the committed figures as
+the measurement they are — with this residual declared, in this direction, rather than as a property a reader can
+re-derive from the JSON alone.
 
 **Harvest rules** (declared, deterministic, in the tool): `the <1-4 tokens>` — the class **62.3 %** of `:Object`
 names belong to (research-brief §3.2) — plus an **identifier** class (`#<n>` references, which the audit splits into
@@ -124,6 +157,18 @@ modes were measured and both artifacts are committed; each records which mode ra
 embedder being available — a model that loads and whose leg then fails to answer is labelled
 `KEYWORD-ONLY DESPITE AN EMBEDDER`, because that is a different measurement again. The two runs sampled the same
 live corpus but not the identical population (§2).
+
+⚠️ **What the committed `retrieval.note` can and cannot prove.** The artifacts' label is derived from
+`legs_seen`, which is the **OR** over every window of a predicate that asks whether the vector leg was
+*submitted* (`ran`). That is the **#3005 battery capability predicate**, and `search_engine.require_hybrid_read`
+says explicitly that *"a battery lane that records a score should delegate to this predicate so the capability
+it reports cannot be looser than this one"* — it asks for an IN-SCOPE vector entry that RAN and was **NOT
+degraded**, because `ran=True, degraded=True` (`no_embeddings`, below the relevance floor) and `ran=False,
+reason="breaker_open"` both contribute no semantic results. ⛔ **The committed artifacts predate the strict
+test**, so a run in which some windows degraded to keyword-only would still have carried the label `hybrid` — and
+the artifacts cannot answer the strict question after the fact. A re-run now classifies **per window** with
+`require_hybrid_read`, records `retrieval.window_modes`, and **refuses to write an artifact** whose windows are
+not uniformly one mode; treat the committed label as `legs_seen`-derived, with this residual declared.
 
 ---
 
@@ -182,6 +227,14 @@ identifier class, where the loss is not near-synonym competition.
 The node exists; a later capture says it a different, real way. ⛔ **This arm measures `_find_existing_entity`,
 phase 1 only.** Production also runs the phase-2 LLM over these same candidates (§1 consequence 3); that arm is
 **not measured here** and §7 names it as the next work.
+
+**Variant rules (declared, in `variants()`):** one pair per name per applicable rule — article-drop for every
+`the …` name, **both** separator directions for every name carrying a separator, basename-only for every path,
+`#`-drop for every `#n`. ⛔ **The class mix is the harness's, not an observed incidence.** The transformations are
+ones `_norm` provably does not fold, but nothing here measures how often a capture actually emits each shape — so a
+share of the 419 pairs (e.g. *"27.2 % of all variants"*) is a share of **these rules' output**, never of duplicate
+captures in production traffic. The 193 separator pairs illustrate it exactly: they are the rule firing on every
+name that contains a separator, not 193 observed re-spellings.
 
 | k | pairs | canonical **in** window | **phase-1 attached** | attached under a candidate punctuation fold |
 |---|---|---|---|---|
@@ -250,7 +303,7 @@ live question, which is why they were measured rather than researched into exist
 | **Mem0** is ADD-only: no similarity cutoff merges memories; an extracted entity links to an existing one by **exact name or cosine ≥ 0.95**, and that is a *link*, not a merge | `docs.mem0.ai/core-concepts/how-it-works.md`, `/memory-operations/add` | No | **NOT ADOPTED as a threshold.** 0.95 would be a **second constant** beside `tortoise.embeddings.DEFAULT_THRESHOLD = 0.72` (`tortoise/embeddings.py:763`), and *"a second constant for a similarity threshold"* is a **REFUSED** row in research-brief §5. The *shape* (link, never merge) is ours already. |
 | **pgvector filtered ANN**: a `WHERE` predicate is applied **after** the ANN scan; a selective predicate over-filters and returns fewer than `LIMIT` or misses true neighbours; `hnsw.iterative_scan` (≥ 0.8) keeps scanning and **does not** turn it into exact filtered NN | `docs.pgedge.com/pgvector/v0-8-7/{filtering,iterative-index-scans}`, supabase HNSW guide | No | **NOT THIS STEP, and it binds step 2.** Irrelevant at the measured population: a scan is exact and an approximate index is parameters + rebuild + lost exactness for nothing (§12.1a). It stays the named risk **when** the index is built. |
 | **LongMemEval** publishes no isolated per-component ablation for entity resolution or write-time dedup; its reported gains are in **indexing and query formulation** | arXiv 2410.10813 (`arxiv.org/html/2410.10813`) | No | **CONFIRMS the gap this issue exists to close**: there is no external number to borrow. `docs/benchmarks/longmemeval-500q/run-report.md` stays `PENDING` — **no LongMemEval figure of our own is claimed here.** |
-| **Blocking recall degrades with scale and surface variation**: token/lexical blocking falls ~0.91 → ~0.55 as records go 10 K → 2 M (block-size caps); embedding blocking reaches ~89.9 % pair completeness; a single HNSW index measured 97.7 % | arXiv 2202.12521; arXiv 2607.26298; Mannheim SC-Block (ESWC 2024) | No | **ADOPT as the frame, not as a number.** Our 61.3 % hybrid recall@3 is in the same range and the recorded diagnosis (block-size caps / crowding) matches ours qualitatively; it is *why* "widen `k`" reads as the obvious fix and why the measurement was needed to show it is not. |
+| **Blocking recall degrades with scale and surface variation**: token/lexical blocking falls ~0.91 → ~0.55 as records go 10 K → 2 M (block-size caps); embedding blocking reaches ~89.9 % pair completeness; a single HNSW index measured 97.7 % | arXiv 2202.12521; arXiv 2607.26298; Mannheim SC-Block (ESWC 2024) | No | **ADOPT as the frame, not as a number.** Our 61.3 % hybrid recall@3 is a *different quantity* (the share of queries whose exact node is inside a 3-wide window, not pair completeness), so it is not compared to these as a number; what carries over is the recorded diagnosis (block-size caps / crowding), which matches ours qualitatively; it is *why* "widen `k`" reads as the obvious fix and why the measurement was needed to show it is not. |
 
 **Adoption gate:** `adopt` (the generate-then-decide shape; the blocking-recall frame) · `no recorded decision
 reached` for the window size and the verdict step — that is #11901's live question and it is now measured ·
@@ -262,25 +315,31 @@ reached` for the window size and the verdict step — that is #11901's live ques
 ## 7. The decision the evidence supports
 
 **1. Do not widen `limit` on its own. The prior should not change yet on a window argument.**
-It recovers 30.2 % of the hybrid misses (61.3 % → 73.0 %), moves phase 1's attach rate by **0.0 %**, and takes the
-already-~40-candidate list to a **measured 170.8** at `limit=15` — which is research-brief **X7**'s regime, where
+It recovers 30.2 % of the hybrid misses (61.3 % → 73.0 %), moves the **419-pair variant arm's** phase-1 attach
+rate by **0.0 %** (in the *exact* arm `attached` rises 184 → 219 only because a mention that *is* the name
+attaches once it is in the window — that is recall@k, not matching), and takes the already-~40-candidate list to a
+**measured 170.8** at `limit=15` — which is research-brief **X7**'s regime, where
 selection accuracy falls as the candidate list grows. A wider window **without** a verdict step is the recorded
 regression; the measurement says the window is not even the right first lever.
 
 **2. The measured next changes, in this order, and none is shipped here:**
-  - **(2a) Measure phase 2 before changing anything else.** It is live in production, it is instructed to resolve
-    exactly the variant class, and it is handed 62.1 % of those variants at `limit=3`. **This is the biggest
-    unknown and it gates (2b) and (2c)**: if phase 2 binds them, the fold buys little; if it does not, that is the
-    measured loss.
-  - **(2b) The phase-1 matcher's normalisation** — a separator fold **in the identity comparison, never in
-    `_norm`** (whose other consumers assume its narrow contract): **0 % → 100 %** of in-window separator variants,
-    **0 % → 27.2 %** of all variants, and **+0.7 pts** available from widening `k`. Mode-independent (§4).
-  - **(2c) The class split in §3.1** — the dense leg *worsens* the definite-description class by 13.3 points while
-    improving identifiers by 25.6 and paths by 63.3. That is a fusion/weighting question (RRF competing
-    near-synonyms), not a width question, and it is where §12.2c's *resolution key* claim needs its own
-    measurement.
-  - **(2d) The article class** (179/419) — reached by neither the window nor a punctuation fold. Phase 2 or the
-    embedding rung, on the existing `DEFAULT_THRESHOLD = 0.72`, never a new constant.
+
+- **(2a) Measure phase 2 before changing anything else.** It is live in production, it is instructed to resolve
+  exactly the variant class, and it is handed 62.1 % of those variants at `limit=3`. **This is the biggest
+  unknown and it gates (2b) and (2c)**: if phase 2 binds them, the fold buys little; if it does not, that is the
+  measured loss.
+- **(2b) The phase-1 matcher's normalisation** — a separator fold **in the identity comparison, never in
+  `_norm`** (whose other consumers assume its narrow contract): **0 % → 100 %** of in-window separator variants,
+  **0 % → 27.2 %** of all variants, and **+0.7 pts** available from widening `k`. ✓ **Mode-independent in the two
+  claims that carry the conclusion** — the **0.0 %** attach and the **114/114 · 117/117** recovery hold in BOTH
+  modes (§4). The **27.2 %** and **+0.7 pts** are the HYBRID arm: the keyword-only control folds **12.6 % →
+  14.8 %** (53/419 → 62/419).
+- **(2c) The class split in §3.1** — the dense leg *worsens* the definite-description class by 13.3 points while
+  improving identifiers by 25.6 and paths by 63.3. That is a fusion/weighting question (RRF competing
+  near-synonyms), not a width question, and it is where §12.2c's *resolution key* claim needs its own
+  measurement.
+- **(2d) The article class** (179/419) — reached by neither the window nor a punctuation fold. Phase 2 or the
+  embedding rung, on the existing `DEFAULT_THRESHOLD = 0.72`, never a new constant.
 
 **3. The index question, answered on the evidence rather than before it: NOT YET.** At the measured population a
 scan is exact. The hybrid sweep (300 names × 4 widths × 3 arms plus the harvest) completed in **390 s** against an
@@ -294,6 +353,8 @@ pgvector's post-filter trap all point the same way: resolution step first, index
 - **Not a production census.** The population is a declared sample of real capture strings (§2).
 - **Not a class-share estimate.** The quotas oversample identifiers and paths on purpose (§2).
 - **Not a production duplicate rate.** §5 is phase-1 only; §4's "0.0 %" is not "this capture mints a duplicate".
+- **Not an observed variant mix.** The 419 pairs are generated by the declared rules in `variants()` (§4); only the
+  *names* they are derived from are real, so a share of them is a property of the rules.
 - **Not a measurement of phase 2.** It is live in production and unmeasured here (§1, §7-2a).
 - **No mechanism for the identifier class's keyword-only failure.** The keyword-only control returns **zero rows
   for 11/300 names**, 8 of them identifiers; the dense leg removes that entirely (`rows_zero` 0 in hybrid). That
@@ -323,19 +384,34 @@ the variant classes, that both committed artifacts are internally consistent
 and declare their retrieval mode, and that the tables above match the artifact — so the numbers cannot rot away
 from the evidence.
 
+⚠️ **Run them the way the repo requires** — the module needs no *graph*, but every `pytest` run in this repo
+needs the lane's DB seam (epic #1647 P4), so a bare `uv run pytest tests/test_candidate_recall_11901.py` reports
+**errors** from `tests/_embedded.py` (one per collected test — 22 of them at this head), not a failure of these
+tests:
+
+```bash
+uv run python tools/test_lane.py run -- tests/test_candidate_recall_11901.py -q   # every test passed
+# …or, for the URI-less embedded carve-out:
+TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_candidate_recall_11901.py -q
+```
+
 **What is pinned, precisely** (because "the tables match" was untrue of §5 until round 5): every measured row of §1,
 §3, §3.1, §4 (both the arm table and the decomposition) and §5 (§5's first row is the DEFINITIONAL baseline — no
 harness has a prior-off arm — and is pinned as text); §3's prose derivatives (past-this-k, absent-at-15, the
 identifier share, the crowding mean and median); §6's and §7's restatements (the recall pair, the pooled mean, the
-fold's two denominators, the width residual, the class deltas, the wall clock); and §8's `rows_zero` claim. **Not
+fold's two denominators, the width residual, the class deltas, the wall clock); and §8's `rows_zero` claim. Each
+§3 row is anchored to **its own** section — a swap of the two tables' bodies reds, which it did not before review
+round 8. **Not
 pinned:** §2's corpus census (file count, record count, characters — the artifact carries only the first, and the
-corpus is live). One unpinned sentence is the honest state; an unpinned TABLE is not.
+corpus is live), and §2.2's graph/digest, which the committed artifacts predate. Two unpinned sentences are the
+honest state; an unpinned TABLE is not.
 
 ## 10. Write-back
 
-`wrote: not written — the local graph this issue names is absent on this box (nothing listens on 16379; all six
-cited ids answer GRAPH-EMPTY-RESULT), and the hosted graph REFUSED the write: `tortoise-graph.sh evidence …` →
-`{"error":"Team points limit reached (25000). Upgrade your plan to increase it.","code":-32006}`.`
-`edges: none — no hosted point on this topic exists to attach to (the topic lives on the absent local graph), so an
-edge would have been fabricated.` The finding lives in this document, in the two artifacts, and on #11901; the
+**`wrote:`** not written — the local graph this issue names is absent on this box (nothing listens on 16379; all
+six cited ids answer GRAPH-EMPTY-RESULT), and the hosted graph REFUSED the write: `tortoise-graph.sh evidence …`
+→ `{"error":"Team points limit reached (25000). Upgrade your plan to increase it.","code":-32006}`.
+
+**`edges:`** none — no hosted point on this topic exists to attach to (the topic lives on the absent local graph),
+so an edge would have been fabricated. The finding lives in this document, in the two artifacts, and on #11901; the
 point that would have carried it is blocked on a quota, not on a decision.

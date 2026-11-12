@@ -204,6 +204,44 @@ def test_the_shipped_matcher_attaches_no_variant_at_any_width(request, artifact)
         assert row["in_window_not_attached"] == row["in_window"]
 
 
+def test_the_sample_allocation_sums_to_the_requested_size_and_starves_no_class():
+    """The stratified shares must SUM to `--sample`, and no class may get zero.
+
+    Independent rounding (`round(sample*n_c/N)`) plus a `[:sample]` truncation
+    silently dropped the LAST class — measured: 124 of the sample sizes 1..600
+    on the committed 600/300/100 mix, e.g. `--sample 6` → [4, 2, 1] = 7 → the
+    path class disappeared while the artifact still said "sample: 6".
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "candidate_recall_11901", TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    pop = ([{"cls": "definite"}] * 600 + [{"cls": "ident"}] * 300
+           + [{"cls": "path"}] * 100)
+    for sample in (270, 300, 450):
+        shares = mod._allocate_shares(sample, pop)
+        assert sum(shares.values()) == sample, (sample, shares)
+        assert all(v > 0 for v in shares.values()), (sample, shares)
+    # …and the interleave keeps every class in every full group of 15, which is
+    # what makes the pooled arm a capture-shaped set rather than a class slice.
+    shares = mod._allocate_shares(300, pop)
+    by_cls = {"definite": [{"cls": "definite", "i": i} for i in range(180)],
+              "ident": [{"cls": "ident", "i": i} for i in range(90)],
+              "path": [{"cls": "path", "i": i} for i in range(30)]}
+    ordered = mod._interleave(by_cls, shares)
+    assert len(ordered) == 300
+    # Measured shape: 14 of the 20 groups are class-mixed and 6 (the tail, once
+    # the 120 minority names are exhausted) are definite-only — the honest shape
+    # of a 60/30/10 population. What the interleave removes is the ALL-DEFINITE
+    # head (12 of 20 groups were single-class before), not the arithmetic of the
+    # mix. Pinned as an equality so a regression to class-blocking reds.
+    mixed = sum(1 for start in range(0, 300, 15)
+                if len({r["cls"] for r in ordered[start:start + 15]}) > 1)
+    assert mixed == 14, f"{mixed} of 20 pooled groups are class-mixed, expected 14"
+
+
 def test_search_graph_unions_the_derived_queries_into_one_id_keyed_dict(monkeypatch):
     """The mechanism behind "`limit=3` is not 3 candidates", pinned in the CODE.
 
@@ -373,7 +411,18 @@ def test_the_brief_quotes_the_recall_the_artifact_holds(report, control):
     control's table is checked too (round 2, F4; round 3, F4).
     """
     text = _squash(BRIEF.read_text())
-    for art, label in ((report, "hybrid"), (control, "keyword-only")):
+    # ⛔ ANCHOR each artifact's rows to ITS OWN section. Asserting both whole
+    # rows somewhere in the brief is position-blind: with the two §3 table BODIES
+    # swapped (so the headline "HYBRID — the product's read" table published the
+    # keyword-only numbers, the exact false-product-measurement class
+    # `retrieval_preflight` exists to prevent) both `want` strings are still
+    # present and this test passed — measured, review round 8. §3.1's row is
+    # position-anchored because both columns live in one row; §3's was not.
+    head, sep, rest = text.partition("KEYWORD-ONLY — the lexical control")
+    assert sep, "§3's control table heading is gone — cannot anchor its rows"
+    assert "HYBRID — the product's read" in head, "§3's hybrid table heading is gone"
+    for art, label, body in ((report, "hybrid", head),
+                             (control, "keyword-only", rest)):
         n = art["corpus"]["sample"]
         for k in ("3", "5", "10", "15"):
             row = art["arms"]["exact"][k]
@@ -381,8 +430,11 @@ def test_the_brief_quotes_the_recall_the_artifact_holds(report, control):
             want = (f"| {k} | {row['in_window']}/{n} = {pct:.1f} % | "
                     f"{row['miss_past_k']} | {row['miss_absent_at_max_k']} | "
                     f"{row['rows_zero']} |")
-            assert want in text, f"{label} k={k}: the brief does not carry `{want}`"
-    # §3's prose figures on the same misses, recomputed from the k=3 row.
+            assert want in body, (
+                f"§3 {label} k={k}: the brief does not carry `{want}` in that "
+                f"artifact's OWN section")
+    # §3's prose figures follow BOTH tables, so they are checked against the whole
+    # document; they are recomputed from the HYBRID k=3 row and are unique.
     h3 = report["arms"]["exact"]["3"]
     absent = h3["miss_absent_at_max_k"]
     past = h3["miss_past_k"]
