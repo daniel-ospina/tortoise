@@ -1845,24 +1845,73 @@ def test_SVBP_declines_a_mechanism_it_cannot_price():
     # reaching the public `run()` with a coherence factor would still be priced
     # with the IMPL potential). `_tilt` maps every non-NAND op_type onto the IMPL
     # term, so the refusal has to be at `run()`.
-    import contextlib
-    import io
+    import logging
 
     import pytest
 
     svbp = pytest.importorskip("tortoise.svbp")
     engine = svbp.TortoiseSVBP(n_particles=4, n_svgd_steps=1, max_iter=1)
-    buf = io.StringIO()
-    # one factor this engine CAN price, one it cannot; only the first is priced
-    with contextlib.redirect_stdout(buf):
+    # one factor this engine CAN price, one it cannot; only the first is priced.
+    # The refusal is a LOGGER warning (#12067 review round 16) — a host captures
+    # logs, not stdout — so the pin captures the record, not a print.
+    records: list[str] = []
+
+    class _Cap(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Cap()
+    logging.getLogger("tortoise.svbp").addHandler(handler)
+    logging.getLogger("tortoise.svbp").setLevel(logging.WARNING)
+    try:
         engine.run([("op-impl", "IMPL", ["c1", "c2"], 1.0),
                     ("op-coh", "coherence", ["c3", "c4"], 1.0)],
                    evidence={"c1": (2.0, 2.0), "c2": (2.0, 2.0),
                              "c3": (2.0, 2.0), "c4": (2.0, 2.0)})
-    out = buf.getvalue()
+    finally:
+        logging.getLogger("tortoise.svbp").removeHandler(handler)
+    out = " ".join(records)
     assert "REFUSED" in out, out
     assert "coherence" in out, (
         f"the refusal must NAME the mechanism it declined: {out!r}")
     # the refused factor's claims are never touched by the tilt
     assert "c3" not in engine.posteriors or engine.posteriors["c3"] == (
         2.0, 2.0), engine.posteriors.get("c3")
+
+
+def test_the_SVBP_decline_warning_survives_a_NULL_op_type(monkeypatch):
+    """⛔ A WARNING MUST NOT BECOME A CRASH (#12067 review round 16, P2).
+
+    `extract_svbp_factors` reads `o.op_type` straight off the graph with no
+    `op_type IS NOT NULL` conjunct, and `op_type IS NULL` on an `is_operator`
+    node is an admitted shape (`ep.py`'s `_non_operator` doctrine). The round-15
+    warning then sorted those keys, so a NULL beside a `str` raised
+    `TypeError: '<' not supported between instances of 'str' and 'NoneType'` —
+    out of `get_svbp` into `get_confidence`, turning a warning into a failed
+    belief read. The pin is the call: it must return factors, not raise.
+    """
+    from tortoise.projection import FalkorProjection
+
+    rows = [("op-null", None), ("op-coh", "coherence")]
+
+    class _Res:
+        result_set = rows
+
+    class _G:
+        def query(self, *_a, **_k):
+            return _Res()
+
+    proj = FalkorProjection.__new__(FalkorProjection)
+    proj.__dict__["g"] = _G()
+    # the live method reads more than op_types; stub the two queries it needs
+    calls = {"n": 0}
+
+    def _query(*_a, **_k):
+        calls["n"] += 1
+        class _R:
+            result_set = rows if calls["n"] == 1 else []
+        return _R()
+
+    proj.__dict__["g"] = type("G", (), {"query": staticmethod(_query)})()
+    factors, _meta = FalkorProjection.extract_svbp_factors(proj)
+    assert factors == [], factors
