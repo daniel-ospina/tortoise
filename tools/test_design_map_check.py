@@ -1310,13 +1310,15 @@ def _run_mutation_pass(text: str, label: str, *, verbose: bool) -> tuple[int, in
 
 
 def self_test(text: str) -> int:
-    """Prove the checker is not a rubber stamp. Prints one line per mutation.
+    """Prove the checker is not a rubber stamp.
 
-    TWO passes (#11415): the shipped map, and the same map with every table row
-    indented `SELF_TEST_INDENT` spaces. The second pass is what catches a harness
-    that can only express column-0 rows — the reason all 21 pre-fix mutations
-    missed an indentation-blind parser — and a checker that regrades an indented
-    row differently from a flush one.
+    Output shape: the SHIPPED-MAP shape prints one line per mutation; the second
+    shape runs quietly and prints only its summary line (failures go to stderr in
+    both). TWO shapes (#11415): the shipped map, and the same map with every table
+    row at `SELF_TEST_INDENT` spaces (`_indented_tables`). The second is what
+    catches a harness that can only express column-0 rows — the reason all 21
+    pre-fix mutations missed an indentation-blind parser — and a checker that
+    grades an indented row differently from a flush one.
     """
     if len(SELF_TEST_MUTATIONS) < MIN_SELF_TEST_MUTATIONS:
         print(
