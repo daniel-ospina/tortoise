@@ -551,13 +551,8 @@ def _code_quoted(line: str, position: int) -> bool:
     )
 
 
-def _redirects_into_a_client_binary(line: str, spared=None) -> bool:
+def _redirects_into_a_client_binary(line: str) -> bool:
     """Does this line WRITE OVER a client binary by REDIRECTION? (#12069 P1)
-
-    `spared`, when given, is a predicate on a position: a redirect whose operator
-    sits in the pin's own INSTALL SEGMENT is not graded (#12069 review round 25 —
-    the exemption used to be the whole LINE, so a replacement chained onto the
-    install command with `&&` was GREEN).
 
     A redirection needs no verb, so the rule above cannot see it. A target is an
     offence when it is a client BINARY NAME, a path under a versioned client
@@ -589,8 +584,6 @@ def _redirects_into_a_client_binary(line: str, spared=None) -> bool:
     # file's own (`BINARY_MUTATION_POLARITY`): `sudo sh -c "cat $b/17/bin/pg_dump >
     # $b/16/bin/pg_dump"`, verbatim the shape the guard exists for.
     for match in REDIRECT_TARGET_RE.finditer(line):
-        if spared is not None and spared(match.start()):
-            continue
         # ⛔ IS THE `>` ITSELF INSIDE A QUOTED MESSAGE? (#12069 review 12, measured
         # FAIL-OPEN). The previous cut inferred that from the SHAPE of what followed
         # the captured word, so appending two characters defeated the whole rule:
