@@ -535,10 +535,16 @@ def test_add_operator_rejects_non_string_op_type():
             api.add_operator(bad, ["a"], prov)
             assert False, f"should have raised ValueError for {bad!r}"  # noqa: B011
         except ValueError as e:
-            assert "must be 'NAND' or 'IMPL'" in str(e), (
+            msg = str(e)
+            # Pinning the whole sentence would be the same trap one level down:
+            # a good-faith rewording that keeps the claim ("must be one of
+            # 'NAND', 'IMPL'") would red this for nothing. Assert the CLAIM the
+            # message exists to carry — a refusal that is this door's limit,
+            # naming the mechanisms it does accept — and nothing about wording.
+            assert "NAND" in msg and "IMPL" in msg, (
                 "the refusal must name the mechanisms this door DOES accept — "
-                f"a bare 'unknown gate' text reads as a typo rather than as "
-                f"this door's limit (#12067): {str(e)!r}")
+                "a bare 'unknown gate' text reads as a typo rather than as "
+                f"this door's limit (#12067): {msg!r}")
     print("PASS test_add_operator_rejects_non_string_op_type")
 
 def test_add_operator_single_string_input_not_char_split():
