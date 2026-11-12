@@ -19363,10 +19363,15 @@ class FalkorProjection(
             dropped_vectors = plan.dropped_vectors()
             dropped_vector_total = sum(dropped_vectors.values())
             if dropped_vector_total:
+                # ⛔ The keys are RECORD LABELS and, since `#12015`, edge
+                # `<relationship:TYPE>` entries — one vocabulary, matching the
+                # spelling `hosted_backup` already reports an edge vector under. So
+                # the line says "target(s) with no query path" rather than calling an
+                # edge type a label.
                 logger.warning(
-                    "rebuild_from_record: dropped %d vector(s) on unserved "
-                    "label(s) %s — a vector there has no query path, so the "
-                    "cache must not hold one (#11747)",
+                    "rebuild_from_record: dropped %d vector(s) on target(s) with "
+                    "no query path %s — a vector there has no query path, so the "
+                    "cache must not hold one (#11747, #12015)",
                     dropped_vector_total, sorted(dropped_vectors))
 
             # ⛔ MEASURED AFTER THE WRITE, never the plan's length (#9556 review).
@@ -19442,11 +19447,12 @@ class FalkorProjection(
             # restore shortfall" decision — without it an operator comparing
             # `nodes_written` with `nodes_selected` cannot see WHY they differ.
             "refused_keys": sorted(refused),
-            # `#11747`: the vectors this run REFUSED to store, by label. A
-            # rebuilt cache is otherwise indistinguishable from one that lost
-            # nothing — and these vectors have no query path, so a re-run cannot
-            # bring them back either: the record row is the only carrier, and it
-            # is what the drop was applied to.
+            # `#11747`: the vectors this run REFUSED to store, by label — and, since
+            # `#12015`, by `<relationship:TYPE>` for an edge (a relationship has no
+            # label at all). A rebuilt cache is otherwise indistinguishable from one
+            # that lost nothing — and these vectors have no query path, so a re-run
+            # cannot bring them back either: the record row is the only carrier, and
+            # it is what the drop was applied to.
             "dropped_vectors": dropped_vector_total,
             "dropped_vector_labels": sorted(dropped_vectors),
             "statements": statements,

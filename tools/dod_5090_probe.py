@@ -2107,6 +2107,32 @@ def unparsed_modules(writers: dict[str, dict] | None = None) -> list[str]:
 _CACHE_PROJECTION_PROBE_VECTOR: tuple[float, ...] = (0.5, 0.25)
 
 
+def _statement_stores_vector(stmt, vector_props) -> bool:
+    """Would this statement STORE one of ``vector_props``? — the one predicate.
+
+    ⛔ The two doors put the vector in DIFFERENT places, and a probe that read only
+    one would be blind to the other (`#12015` review, finding 1):
+
+    * a NODE statement LIFTS each vector into its own top-level param, because it
+      needs a per-property store clause (`n.embedding = vecf32($embedding)`) for
+      the width narrowing — so the name appears in ``stmt.params``;
+    * a RELATION statement passes the whole bag as ONE param (``SET r += $props``),
+      so the name appears in ``stmt.params["props"]`` and NOWHERE else.
+
+    Reading only ``stmt.params`` against a relation statement answers "no vector"
+    on a tree where the vector IS stored — a FALSE PASS in the instrument, the
+    same class of blindness this derivation exists to remove. So both shapes are
+    read, and neither is assumed: the predicate asks the statement what it would
+    write, wherever that statement puts it.
+    """
+    params = getattr(stmt, "params", None) or {}
+    bags = [params]
+    inner = params.get("props")
+    if isinstance(inner, dict):
+        bags.append(inner)
+    return any(prop in bag for bag in bags for prop in vector_props)
+
+
 def cache_projection_store_labels() -> dict:
     """The labels `cache_projection` can still put a vector on — MEASURED, not read.
 
@@ -2162,17 +2188,37 @@ def cache_projection_store_labels() -> dict:
     path embeds is one the query path serves"*) would be measurably narrower than
     stated, and deleting that one check would leave the row `MET`.
 
-    Returns ``{"labels": frozenset[str], "unmeasured": {label: why}, "error": str|None}``
-    — ``error`` means the projection could not be imported at all, so nothing
-    was measured and the row must not read as if something had been.
+    ⛔ A RELATIONSHIP IS THE SAME QUESTION WITH NO LABEL AT ALL (`#12015`). The
+    record's `public.relation` rows carry a property bag too, and the writer emits
+    `SET r += $props` — so an `embedding` key lands a vector on an EDGE, where
+    `run_vector_query` (node-only) can never reach it. Node labels alone therefore
+    left this half of row 2 unmeasured: the row kept printing
+    `stored-without-a-query-path: none` over an edge vector, exactly the blindness
+    `#11747` closed for `:Session`. So every RELATIONSHIP TYPE the writer can be
+    handed (`tortoise.security.KNOWN_REL_TYPES`) is probed through the two doors
+    that exist for edges — the record row (`relation_from_row`) and a
+    directly-built `RecordRelation`, since `record_plan` is public — and the types
+    that would store one are returned as ``relationships``.
+
+    ⚠️ A relationship type is NOT a label and has no place in the served-label
+    comparison: it is reported in its OWN key, and row 2 unions
+    ``<relationship:TYPE>`` into the orphan set, where nothing in the served
+    vocabulary can ever match it — which is the correct answer (there is no edge
+    query path) rather than a comparison that is true by construction.
+
+    Returns ``{"labels": frozenset[str], "relationships": frozenset[str],
+    "unmeasured": {target: why}, "error": str|None}`` — ``error`` means the
+    projection could not be imported at all, so nothing was measured and the row
+    must not read as if something had been.
     """
     try:
         from tortoise import cache_projection as cp
         from tortoise import record_projection as rp
     except Exception as e:  # an unimportable projection is UNMEASURED
-        return {"labels": frozenset(), "unmeasured": {},
-                "error": f"{type(e).__name__}: {e}"}
+        return {"labels": frozenset(), "relationships": frozenset(),
+                "unmeasured": {}, "error": f"{type(e).__name__}: {e}"}
     stored: set[str] = set()
+    edge_stored: set[str] = set()
     unmeasured: dict[str, str] = {}
     for label in sorted(cp.NODE_TABLES):
         try:
@@ -2213,10 +2259,54 @@ def cache_projection_store_labels() -> dict:
             unmeasured[label] = "; ".join(errors)
             continue
         for _door, stmt in statements:
-            if any(prop in stmt.params for prop in vector_props):
+            if _statement_stores_vector(stmt, vector_props):
                 stored.add(label)
                 break
-    return {"labels": frozenset(stored), "unmeasured": unmeasured, "error": None}
+    # ── the EDGE doors (`#12015`) ─────────────────────────────────────────────
+    # Every allowlisted predicate: the answer is per-TYPE, so a rule that exempted
+    # one type would be invisible to a probe that planted on a single favourite.
+    # Both edge doors are built, and a type whose doors could not be built at all is
+    # UNMEASURED rather than assumed clean.
+    try:
+        from tortoise.security import KNOWN_REL_TYPES
+        edge_types = sorted(KNOWN_REL_TYPES)
+        vector_props = sorted(cp.stored_vector_props())
+    except Exception as e:
+        unmeasured["<relationship>"] = f"{type(e).__name__}: {e}"
+        edge_types = []
+    for rel_type in edge_types:
+        vector = list(_CACHE_PROJECTION_PROBE_VECTOR)
+        planted = {prop: vector for prop in vector_props}
+        key = f"dod-5090-probe-{rel_type}"
+        row = {"rel_type": rel_type, "src_label": "Point", "src_key": key,
+               "tgt_label": "Point", "tgt_key": key, "idx": 0,
+               "props": dict(planted)}
+        edge_statements: list[tuple[str, object]] = []
+        edge_errors: list[str] = []
+        try:
+            edge_statements.append(
+                ("record row", cp.relation_statement(cp.relation_from_row(row))))
+        except Exception as e:  # a refusal is one door's answer
+            edge_errors.append(f"record row: {type(e).__name__}: {e}")
+        try:
+            edge_statements.append((
+                "direct edge",
+                cp.relation_statement(cp.RecordRelation(
+                    rel_type=rel_type, src_label="Point", src_key=key,
+                    tgt_label="Point", tgt_key=key, idx=0,
+                    props=dict(planted)))))
+        except Exception as e:
+            edge_errors.append(f"direct edge: {type(e).__name__}: {e}")
+        if not edge_statements:
+            unmeasured[f"<relationship:{rel_type}>"] = "; ".join(edge_errors)
+            continue
+        for _door, stmt in edge_statements:
+            if _statement_stores_vector(stmt, vector_props):
+                edge_stored.add(rel_type)
+                break
+    return {"labels": frozenset(stored),
+            "relationships": frozenset(edge_stored),
+            "unmeasured": unmeasured, "error": None}
 
 
 def served_labels() -> set[str]:
@@ -2367,7 +2457,15 @@ def score_path_bullet() -> Row:
     # own exact content). Keeping the two populations separate in the notes and united only in
     # the comparison is what lets the row catch an unserved projection label WITHOUT the
     # instrument's writer tree appearing to gain a writer it does not have.
-    orphans = (labels | set(projection["labels"])) - served
+    # ⛔ `#12015`: a RELATIONSHIP type that would store a vector is an orphan BY
+    # CONSTRUCTION — no edge query path exists for it to be served by — so it joins
+    # the ONE orphan set as `<relationship:TYPE>` and can never match `served`. It is
+    # unioned here rather than compared on its own so the row keeps a single answer:
+    # a second comparison would be a second place for the verdict to disagree with
+    # the line that prints it.
+    edge_orphans = {f"<relationship:{rel_type}>"
+                    for rel_type in (projection.get("relationships") or ())}
+    orphans = (labels | set(projection["labels"]) | edge_orphans) - served
     notes = [
         f"written labels: {sorted(labels)}",
         # The evidence for the comparison below: HOW the cache projection's labels were obtained.
@@ -2378,6 +2476,13 @@ def score_path_bullet() -> Row:
         "cache_projection.node_from_row → node_statement over every record label — the "
         "`embedding` column, the `props` tail, and a directly-built `RecordNode` — "
         f"#11747): {sorted(projection['labels'])}",
+        # `#12015`: the same measurement over EDGES, under its OWN key — a relationship
+        # type is not a label and must not be read as one. Named on every run for the
+        # same reason the line above is: a `MET` must not rest on an unprinted set.
+        "cache projection RELATIONSHIP vector targets (MEASURED by running "
+        "cache_projection.relation_from_row → relation_statement over every allowlisted "
+        "predicate — the `props` bag and a directly-built `RecordRelation` — "
+        f"#12015): {sorted(projection['relationships'])}",
         f"served labels (run_vector_query vocabulary): {sorted(served)}",
         f"stored-without-a-query-path: {sorted(orphans) or 'none'}",
     ]

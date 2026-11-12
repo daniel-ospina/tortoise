@@ -368,12 +368,25 @@ class RestoreOutcome:
             # projection, so this restore DELETED it from the cache; the node is
             # kept. Stated because the alternative is a clean-looking restore
             # that quietly lost data, and because no re-run can repair it.
-            labels = ", ".join(self.dropped_vector_labels) or "unrecorded"
+            #
+            # ⛔ `#12015` — and the same line now carries EDGES. A
+            # `<relationship:TYPE>` entry is not a label (a relationship has none),
+            # and the KEPT half is different from a node's: the EDGE is restored,
+            # its vector dropped. Calling it a "node" would tell an operator the
+            # wrong object survived.
+            targets = ", ".join(self.dropped_vector_labels) or "unrecorded"
+            has_node = any(not t.startswith("<relationship:")
+                           for t in self.dropped_vector_labels)
+            has_edge = any(t.startswith("<relationship:")
+                           for t in self.dropped_vector_labels)
+            kept = ("The nodes and edges are restored" if has_node and has_edge
+                    else "The edges are restored" if has_edge
+                    else "The nodes are restored")
             line += (
                 f" — {self.dropped_vectors} vector(s) were DROPPED by the "
-                f"projection on unserved label(s) ({labels}): a vector there has "
-                f"no query path, so the cache must not hold one (#11747). The "
-                f"nodes are restored; re-running cannot bring the vectors back")
+                f"projection on target(s) with no query path ({targets}): a vector "
+                f"there has no query path, so the cache must not hold one "
+                f"(#11747, #12015). {kept}; re-running cannot bring the vectors back")
         if self.unwritten_keys:
             line += (
                 f" — {self.unwritten_keys} record key(s) were NOT written, so a "

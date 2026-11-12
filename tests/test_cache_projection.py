@@ -1151,6 +1151,110 @@ def test_the_PLAN_reports_the_vectors_it_refuses():
         "a projection that withheld nothing must not print a drop clause")
 
 
+# ── 3d. #12015 — a vector may not land on a RELATIONSHIP (no label at all) ───
+
+
+def _relation_row(**over):
+    row = {"rel_type": "IMPL", "src_label": "Point", "src_key": "op-1",
+           "tgt_label": "Point", "tgt_key": "in-1", "idx": 0, "props": {}}
+    row.update(over)
+    return row
+
+
+def test_a_relation_row_may_not_store_a_vector():
+    """`#12015` — the edge's `props` bag is an OPEN set and `embedding` is legal in it.
+
+    `public.relation`'s own CHECK (`chk_relation_props_no_derived`) refuses only the
+    four EP names, so a relation row carrying a vector reached `SET r += $props` and
+    stored it on the EDGE: **no label, nothing `run_vector_query` can reach** (`#5090`
+    DoD row 2, and `#11641`'s words for the same defect at the DR door).
+
+    The drop happens in the row→view map the RECORD READ answers from, so a view
+    cannot advertise bytes the writer refuses — the placement `#11747` chose for the
+    node rule, for the same reason.
+    """
+    rel = cp.relation_from_row(_relation_row(
+        props={"label": "addresses", "embedding": [0.5, 0.25]}))
+    assert "embedding" not in rel.props, rel.props
+    assert rel.props["label"] == "addresses", (
+        "only the vector is withheld — the edge's other open-set props ride it")
+    assert "embedding" in rel.dropped_vectors, rel.dropped_vectors
+    assert "<relationship:IMPL>" in rel.dropped_vectors["embedding"]
+    stmt = cp.relation_statement(rel)
+    assert "embedding" not in stmt.params["props"], (
+        "the vector rides the `props` BAG on an edge (one param), not a top-level "
+        f"param — so the bag is what must be checked: {stmt.params}")
+    assert dict(stmt.dropped_vectors) == dict(rel.dropped_vectors), (
+        "the writer must not report a different drop from the view it was built from")
+
+    # The control: an edge with ordinary props is untouched, and reports nothing.
+    clean = cp.relation_from_row(_relation_row(props={"anchor": "extractedFrom"}))
+    assert clean.dropped_vectors == {}, clean.dropped_vectors
+    assert cp.relation_statement(clean).params["props"] == {
+        "anchor": "extractedFrom"}
+
+
+def test_the_EDGE_writer_refuses_a_directly_built_relation():
+    """The edge writer's OWN check — `record_plan` is public, so a caller may hand it one.
+
+    ⛔ WHAT THIS PINS, stated plainly (`#11747` round-3 review, finding 4b's lesson):
+    `relation_statement`'s check and nothing else. The `RecordRelation` is built HERE,
+    so `relation_from_row`'s drop never runs — deleting the writer's loop reds this
+    test, while the row-door drop is pinned by the test above (which asserts on the
+    VIEW's props/dropped_vectors). Two doors, two attributable pins.
+    """
+    stmt = cp.relation_statement(cp.RecordRelation(
+        rel_type="IMPL", src_label="Point", src_key="a", tgt_label="Point",
+        tgt_key="b", idx=0, props={"embedding": [0.5, 0.25]}))
+    assert "embedding" not in stmt.params["props"], stmt.params
+    assert "embedding" in stmt.dropped_vectors, stmt.dropped_vectors
+    assert "<relationship:IMPL>" in stmt.dropped_vectors["embedding"]
+
+
+def test_the_PLAN_reports_an_edge_drop_as_a_relationship_type():
+    """`#12015` — the plan's drop report carries edges under `#11641`'s spelling.
+
+    A rebuild is what DELETES the vector (the record row is its only carrier), so the
+    count has to reach the operator. `hosted_backup` already reports an edge vector as
+    `<relationship:TYPE>`; the projection uses the SAME spelling so one defect has one
+    vocabulary — and the plan's node loop is bounded by `len(self.nodes)`, so a relation
+    statement can never be read as a node's.
+    """
+    edge = cp.relation_from_row(_relation_row(
+        props={"embedding": [0.5, 0.25]}))
+    assert cp.record_plan([], [edge]).dropped_vectors() == {
+        "<relationship:IMPL>": 1}, cp.record_plan([], [edge]).dropped_vectors()
+    # Nodes and edges in ONE plan, each under its own key — the mixed case a bare
+    # `zip(self.nodes, self.statements)` would get wrong once relation statements exist.
+    node = _node("Session", {"props": {"embedding": [0.5, 0.25]}})
+    mixed = cp.record_plan([node], [edge]).dropped_vectors()
+    assert mixed == {"Session": 1, "<relationship:IMPL>": 1}, mixed
+    # Two edges of the SAME type aggregate under one key.
+    same = cp.record_plan([], [edge, cp.relation_from_row(_relation_row(
+        src_key="op-2", props={"embedding": [0.5, 0.25]}))]).dropped_vectors()
+    assert same == {"<relationship:IMPL>": 2}, same
+    # A plan that withholds nothing says so.
+    assert cp.record_plan(
+        [], [cp.relation_from_row(_relation_row())]).dropped_vectors() == {}
+    # The report's drop clause must not call an edge type a "label".
+    report = cp.ProjectionReport(nodes_written=1, relations_written=1,
+                                 dropped_vectors=1,
+                                 dropped_vector_labels=("<relationship:IMPL>",))
+    assert "relationship type(s)" in report.render(), report.render()
+    assert "<relationship:IMPL>" in report.render(), report.render()
+
+
+def test_the_declined_edge_property_set_is_DERIVED_not_a_second_list():
+    """`#12015` — one owner for WHICH properties are vectors, on the edge door too.
+
+    A literal `{"embedding"}` here would be the second declaration `#11747` spent a
+    review round removing on the served-label side: widen the store seam and the edge
+    writer would keep storing the new property with nothing going red.
+    """
+    assert cp.relation_vector_declined_properties() == cp.stored_vector_props()
+    assert "embedding" in cp.relation_vector_declined_properties()
+
+
 def test_is_verbatim_is_an_or_across_the_sides_it_is_given():
     """One side's flag is enough — a dropped flag must not hide a narrowing."""
     from tortoise.stored_form import is_verbatim
