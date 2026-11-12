@@ -381,6 +381,13 @@ Rules:
   the retired host — they are root ASSETS, so no page branch matched them and the retired host served
   its own 200 copy of the index until #11766; pinned by
   `tests/test_middleware_host_consolidation.mjs`, which drives the real `onRequest`.
+  **Residual (measured 2026-11-12):** the retired host still answers **200** for `/contact` —
+  a company page no branch here owns. `/index` and `/index.html` are 301'd (they are the
+  company homepage's raw duplicates); `/contact` is not, deliberately: adding company pages
+  to this map one at a time is the hand-kept-list decay #11766 exists to undo, and the page
+  carries `<link rel="canonical" href="https://premiselabs.co/contact">`, so the duplicate is
+  consolidated rather than competing. If a second company page starts answering there, the
+  fix is a PRINCIPLE (every non-product root asset hands off), not another member.
 - **Search Console submission:** submit `https://premiselabs.co/sitemap.xml` — the index names the
   three same-host children, so they are submitted with it. The app origin's sitemap stays submitted
   from its own property, as it always was — the marketing index no longer names it (#11766).

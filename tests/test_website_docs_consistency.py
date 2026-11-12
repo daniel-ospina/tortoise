@@ -1119,8 +1119,10 @@ def test_faq_avoids_root_relative_fragment_links() -> None:
 
 # ── #3950: the blog is live but unreachable — pin every public page's way in ──
 #
-# The blog at /blog is live and crawler-discoverable (`robots.txt` cross-submits
-# `/blog/sitemap.xml`), but 0 of the site's public pages linked to it, so a
+# The blog at /blog is live and crawler-discoverable (`/blog/sitemap.xml` is one of the
+# three children of the index `robots.txt` advertises — since #11766 it is discovered
+# THROUGH the index, not by a cross-submission), but 0 of the site's public pages linked
+# to it, so a
 # visitor could only reach it by typing the URL. The root cause was an OWNERSHIP
 # omission — the blog epic scoped discovery to crawlers and its human journey
 # *started at* /blog, so nothing ever owned arrival-from-the-site. A one-off
@@ -2840,9 +2842,16 @@ def test_the_product_prefix_resolves_to_the_served_document() -> None:
     assert declared, (
         "_middleware.ts no longer declares `const PRODUCT_PAGES = new Set([...])` — "
         "re-derive PRODUCT_PAGE_NAMES in this module by hand and re-point this guard")
+    # ⛔ `"[^"]+"`, NOT a `[a-z0-9.-]` CHARACTER CLASS. A class silently DROPS any member it
+    # does not match (`/pricing_v2`, `/Pricing`), and both sides of this assertion are then
+    # missing the name — so the pin stays green while the OTHER walks red a correct `<loc>`
+    # with "no document in the served tree", the opposite of the truth. Measured: adding
+    # `/pricing_v2` here, `website/pricing_v2.html` and its loc left this test green and
+    # `test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex` red with "no document
+    # in the served tree".
     served_names = {
-        name[: -len(".html")] if name.endswith(".html") else name
-        for name in re.findall(r'"/([a-z0-9.\-]+)"', declared.group(1))
+        name.lstrip("/").removesuffix(".html")
+        for name in re.findall(r'"([^"]+)"', declared.group(1))
     }
     assert served_names == set(PRODUCT_PAGE_NAMES), (
         "the middleware serves "
@@ -2975,9 +2984,15 @@ def test_the_site_root_is_a_different_page_per_host() -> None:
         "the product host's 301 helper is no longer the shape this guard reads — "
         "either it was restructured (re-derive HOST_ROOT_PAGE by hand and re-point this "
         "guard) or it is gone")
+    # ⛔ THE SET IS THE SUBJECT, NOT THE MEMBER LIST. This pinned the literal
+    # `"/" || "/index.html" || PRODUCT_ROOT.has(path)` and red on the harmless addition of
+    # `"/index"` (the same asset after Pages' pretty-URL resolution, #11766 round 4) — a pin
+    # that fails when the branch gets MORE correct teaches the next lane to edit the pin
+    # rather than read it. The property is: the branch is keyed on the ROOT and returns
+    # `toCompany(PRODUCT_PREFIX)`; which raw spellings also qualify is the middleware's
+    # business, and `tests/test_middleware_host_consolidation.mjs` asserts their behaviour.
     assert re.search(
-        r'if \(path === "/" \|\| path === "/index\.html" \|\| PRODUCT_ROOT\.has\(path\)\) \{\s*'
-        r"return toCompany\(PRODUCT_PREFIX\);",
+        r'if \([^\n]*path === "/"[^\n]*\) \{\s*return toCompany\(PRODUCT_PREFIX\);',
         code,
     ), (
         "the product host's ROOT is no longer redirected onto PRODUCT_PREFIX — the "
@@ -3028,7 +3043,9 @@ def test_the_conventional_sitemap_url_serves_a_sitemap_index() -> None:
         "(#11615)")
     assert _sitemap_root_tag(SITEMAP_INDEX) == f"{SITEMAP_NS}sitemapindex", (
         f"website/sitemap.xml is a {_sitemap_root_tag(SITEMAP_INDEX)} — the conventional "
-        "entry point must be a <sitemapindex>, so it can advertise every host's sitemap")
+        "entry point must be a <sitemapindex>, so it can advertise every child sitemap ON "
+        "ITS OWN HOST (since #11766 the children are all on this host; a cross-host index "
+        "is what #11623 removed, not the fix)")
     locs = _xml_locs(SITEMAP_INDEX)
     assert locs, "the sitemap index advertises nothing"
     for loc in locs:

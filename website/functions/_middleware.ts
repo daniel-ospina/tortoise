@@ -540,7 +540,13 @@ export const onRequest: PagesFunction = async (context) => {
     // canonical product URL; the raw duplicates map there too (`/index.html` is
     // a duplicate of the PRODUCT root on THIS host — it is the company page's
     // duplicate on the company host, which `_redirects` owns).
-    if (path === "/" || path === "/index.html" || PRODUCT_ROOT.has(path)) {
+    // ⛔ `/index` IS `/index.html` HERE. Pages' pretty-URL resolution serves
+    // `website/index.html` for `/index` as well, so leaving it out answered a 200 copy of the
+    // COMPANY homepage on the retired host while its own comment promised the raw duplicates
+    // all map to the one canonical URL — measured (#11766 round 4): `/index` → 200,
+    // `/index.html` → 301. Listed as a separate member rather than derived, because
+    // `productRest`/`PRODUCT_ROOT` are about the product pages, not this host's root.
+    if (path === "/" || path === "/index" || path === "/index.html" || PRODUCT_ROOT.has(path)) {
       return toCompany(PRODUCT_PREFIX);
     }
     if (path === PRODUCT_PREFIX || path.startsWith(PRODUCT_PREFIX + "/")) {

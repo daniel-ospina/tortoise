@@ -80,11 +80,51 @@ const ROOT_HTML = new Set(
 // are static assets, not pages, so no page branch in the middleware matches them. Derived
 // from disk like `ROOT_HTML`, so a row that lands on one of them is falsifiable: delete
 // `sitemap-product.xml` and the row that must land on a 200 reds (#11766).
-const ROOT_ASSETS = new Set(
-  readdirSync(WEBSITE)
-    .filter((f) => f === "robots.txt" || f.endsWith(".xml"))
+// ⛔ `*.xml` IS NOT "A SITEMAP" — the predicate is the ROOT ELEMENT, mirroring
+// `_is_sitemap_document` in `tests/test_website_docs_consistency.py`. A plain root
+// `feed.xml` is served, but it is not a crawler surface: keying the rows on the extension
+// made the harness DEMAND a `CRAWLER_SURFACE` row for it, and adding that row then red the
+// python pin with "301'd but not served (a 301 onto a 404)" — two guards disagreeing about
+// a file that is genuinely there, so an RSS feed at the site root was unshippable
+// (#11766 round 4). A file whose NAME claims to be a sitemap must still parse as one:
+// `_is_sitemap_document` re-raises rather than skipping, because a truncated sitemap that
+// crawlers are sent is exactly the "a sitemap that does not work" class #11615 closes.
+const SITEMAP_ROOTS = new Set(["urlset", "sitemapindex"]);
+
+// The ROOT element, and nothing else: the XML declaration and COMMENTS are stripped first,
+// then the first element tag is read. ⛔ A SUBSTRING TEST IS NOT THIS PREDICATE —
+// `/<(urlset|sitemapindex)/.test(source)` classified a root RSS feed as a sitemap whenever
+// its text merely NAMED the element (a comment documenting the sitemap shape is enough), so
+// the harness demanded a `CRAWLER_SURFACE` row for a feed and the python pin then called
+// that row "a 301 onto a 404". Measured (#11766 round 4): a `feed-probe.xml` whose comment
+// contained `<urlset>` reded this suite with 3 failures while the python suite stayed green
+// — the same two-guards-disagreeing defect, one level down.
+function sitemapRoot(name) {
+  const source = readFileSync(join(WEBSITE, name), "utf8")
+    .replace(/<\?[\s\S]*?\?>/g, "")
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .trim();
+  const tag = /^<([A-Za-z_][\w:.-]*)/.exec(source);
+  return tag ? tag[1].toLowerCase().replace(/^.*:/, "") : "";
+}
+
+function isSitemapDocument(name) {
+  const isSitemap = SITEMAP_ROOTS.has(sitemapRoot(name));
+  if (!isSitemap && name.includes("sitemap")) {
+    throw new Error(
+      `website/${name} claims to be a sitemap but its root element is ` +
+        `<${sitemapRoot(name) || "none"}>, not <urlset>/<sitemapindex>`,
+    );
+  }
+  return isSitemap;
+}
+
+const ROOT_ASSETS = new Set([
+  ...readdirSync(WEBSITE)
+    .filter((f) => f.endsWith(".xml") && isSitemapDocument(f))
     .map((f) => `/${f}`),
-);
+  "/robots.txt",
+]);
 
 // …and a sitemap can be a PAGES FUNCTION rather than a file (`/blog/sitemap.xml` is
 // `functions/blog/sitemap.xml.ts`). Derived from the tree so a NEW one is held to the
@@ -271,11 +311,13 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
   // branch existed: `tortoise.premiselabs.co/sitemap.xml` → 200. The alias maps straight
   // to the index in ONE hop rather than chaining through the company host's `_redirects`.
   //
-  // ⛔ DERIVED FROM THE TREE, not a hand-kept list (round 3). Every root crawler asset and
-  // every Function-served sitemap must leave the retired host in ONE hop; a page branch
-  // does not catch them, because they are not pages. The population is the same one
-  // `tests/test_website_docs_consistency.py` compares `CRAWLER_SURFACE` against for the
-  // static half, and it is the half that list CANNOT express.
+  // ⛔ DERIVED FROM THE TREE, not a hand-kept list (round 3). Every root sitemap DOCUMENT
+  // (root element, not extension — see `isSitemapDocument`), `robots.txt`, and every
+  // Function-served sitemap must leave the retired host in ONE hop; a page branch does not
+  // catch them, because they are not pages. The static half is the SAME population
+  // `tests/test_website_docs_consistency.py` compares `CRAWLER_SURFACE` against (both use
+  // `_is_sitemap_document`'s predicate); the Function half is the one that list cannot
+  // express.
   for (const from of [...ROOT_ASSETS, ...FUNCTION_SITEMAPS].sort()) {
     await assertOneHop(`https://${PRODUCT}${from}`, {
       expectLocation: `https://${COMPANY}${from}`,
@@ -285,6 +327,15 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
   // one hop rather than chaining through the company host's own `_redirects` row.
   await assertOneHop(`https://${PRODUCT}/sitemap_index.xml`, {
     expectLocation: `https://${COMPANY}/sitemap.xml`,
+  });
+
+  // ⛔ `/index` IS THE SAME ASSET AS `/index.html`. Pages' pretty-URL resolution serves
+  // `website/index.html` for it, so leaving it out answered a 200 copy of the COMPANY
+  // homepage on the retired host while `/index.html` 301'd — measured (#11766 round 4).
+  // One-hop row rather than a member of the canonical loop below, because the target is
+  // the product root, not a `/tortoise/<page>`.
+  await assertOneHop(`https://${PRODUCT}/index`, {
+    expectLocation: `https://${COMPANY}/tortoise`,
   });
 
   // ⛔ The product host must hand off the CANONICAL form in ONE hop. Forwarding
