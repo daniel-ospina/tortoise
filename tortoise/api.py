@@ -1776,8 +1776,10 @@ class EventAPI:
                 f"set via {type_}'s payload: the envelope is built here, so a "
                 f"colliding caller key re-types or re-attributes the record "
                 f"instead of adding a field")
-        # ⛔ `event_id` IS THE ONE ENVELOPE NAME `_ENVELOPE_KEYS` LEAVES OUT, and
-        # leaving it out here was a hole big enough to re-identify any record
+        # ⛔ `event_id` IS ONE OF TWO ENVELOPE NAMES `_ENVELOPE_KEYS` LEAVES OUT
+        # (the other is `projection_version`, kept out so the RECORD doors can pass
+        # the producers' own keyword — see `_RECORD_ENVELOPE_EXTRA`), and leaving it
+        # out here was a hole big enough to re-identify any record
         # (#11996 review round 21, measured). The exclusion is justified by
         # `add_document`'s recorded `#125` pin, which passes `event_id=` as ITS OWN
         # named parameter — but this channel serves EVERY type, so the exclusion
@@ -1805,8 +1807,9 @@ class EventAPI:
         # id and can DUPLICATE one. Closing that needs `add_document`'s pin to stop
         # travelling through a caller-reachable payload channel — a record-contract
         # decision, not this lane's — so it is named here rather than papered over
-        # with a claim of producer scoping. What the arm BUYS is every other type,
-        # which is the whole `PointAdded`/document/object surface a caller reaches.
+        # with a claim of producer scoping. What the arm BUYS is every OTHER type —
+        # the `PointAdded`/object surface a caller reaches — so `DocumentCreated`
+        # is the WHOLE of what it does not buy, not part of what it does.
         # Reversing `#125`/`#167` to close it would be a reopen, not a fix, and
         # `tests/test_11821_journal_vector_width.py::test_the_envelope_collision_
         # guard_keeps_add_documents_event_id_pin` pins that half.
