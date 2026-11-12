@@ -790,6 +790,28 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             stores=("Event",),  # `set_embedding_clause("e")` in both of its write arms
         ),
     ),
+    # ── A prose-matched CARRIER (the match is a message; the vector is the caller's) ──────────
+    (
+        "tortoise.sdk::create_source",
+        WriterClass(
+            EXEMPT,
+            "`tortoise/sdk.py::create_source` — the instrument's match is an operator-facing "
+            "REFUSAL message, not a write clause: the only `embedding=` in the body is the "
+            "`#11858` guard's own sentence (\"pass `embedding=` and it declares the truth\"), "
+            "which names the keyword to say the `_SERVER_MANAGED_EMBEDDING_MARKERS` family may "
+            "NOT be set by hand. The door computes NO vector: a caller-supplied `embedding` is "
+            "CARRIED into `_create_entity`'s `:Source` write, which is the `#5004` "
+            "caller-vector contract — `tortoise/projection/entities.py::_upsert_source`'s "
+            "passthrough legitimately stores `s.embedding` for the vector retrieval leg to "
+            "read, so the store is DELEGATED and the vector is the caller's, never one this "
+            "door produces. Exempt as a CARRIER on `#5004`, the same disposition "
+            "`tortoise.api::add_point` carries — NOT because no store is reachable through it",
+            "#5004",
+            # The store is DELEGATED to `_create_entity`/`_upsert_source` and the vector is the
+            # caller's: the body issues no clause of its own and produces nothing.
+            stores=NO_LIVE_VECTOR,
+        ),
+    ),
     (
         "tortoise.sdk::_embedding_repair_attempt",
         WriterClass(

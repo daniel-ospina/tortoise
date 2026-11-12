@@ -667,8 +667,16 @@ class TestBlastRadius:
         sdk.create_direct_edge("NAND", y, old)
         # a structural edge
         sdk.create_edge("aboutSubject", old, subj)
-        # an alreadyDecided operator — must stay attached to the dead prior
-        sdk.create_operator("IMPL", old, [y], label="alreadyDecided")
+        # an alreadyDecided operator — must stay attached to the dead prior.
+        # ⛔ Its input is `z`, NOT `y`: `y` already carries a direct `NAND` into
+        # `old`, and since #12067/#12112 the mechanism set is CLOSED — a pair
+        # carries at most one mechanism, so an `IMPL` operator on `(z→old)` beside
+        # a `NAND` direct edge on `(y→old)` is the valid shape, while an operator
+        # over `y` is refused outright (`create_operator: the pair … already
+        # carries the 'NAND' mechanism as a direct edge`). The double-claim was
+        # the fixture's, not the writer's.
+        z = _seed_point(sdk, "z")
+        sdk.create_operator("IMPL", old, [z], label="alreadyDecided")
         # a self edge to the successor — delete-only, never repointed
         sdk.create_edge("aboutObject", old, new)
 

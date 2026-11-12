@@ -408,10 +408,19 @@ def test_fuzz_critical_classes_always_survive(sdk, seed=42):
         for m in op_members[op["id"]]:
             ops_of[m].add(op["id"])
 
-    # 3 NAND ops
+    # 3 NAND ops — on pairs no IMPL op covers. #12067 closes the mechanism set
+    # (a pair carries at most one), and with this seed the 10-target IMPL ops
+    # happened to cover the NAND pair the old sampling picked, so the closure
+    # refused a fixture that asserts nothing about the closure.
+    impl_pairs = {frozenset((src, t))
+                  for oid, members in op_members.items() if op_mech[oid] == "IMPL"
+                  for src in members for t in members if t != src}
     for _ in range(3):
         src = ids[rng.randrange(len(ids))]
-        tgt = rng.choice([i for i in ids if i != src])
+        free = [i for i in ids if i != src
+                and frozenset((src, i)) not in impl_pairs]
+        assert free, "every pair is IMPL-covered — the fixture needs a free pair"
+        tgt = rng.choice(free)
         op = sdk.create_operator("NAND", src, [tgt])
         op_members[op["id"]] = {src, tgt}
         op_mech[op["id"]] = "NAND"

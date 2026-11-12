@@ -177,17 +177,16 @@ not a fix (D2-5).
      the claims that satisfy neither are `unclassified_claims`.
    - Invariants (asserted, not merely documented): `0 ≤ no_belief ≤ ep_reachable_claims` and
      `0 ≤ belief_coverage_pct ≤ 1`.
-   - ⚠️ `ep_reachable_claims` INCLUDES live claims whose only `IMPL|NAND` edge reaches an
-     operator with no usable factor — the operator's far endpoint is DRAFT, so EP excludes the
-     factor and no pass can recompute the claim, yet the claim IS in the `:Point`-anchored
-     denominator (measured) — so `no_belief` may be non-zero on a converged graph. **A true
-     statement** (no belief is stored), and the instrument may over-report, never under-report.
-     ⛔ #12138 §3: this bullet used to name an ANCHOR-LESS `:Subject-[:IMPL]->:Object`
-     component as that benign non-zero — it cannot be: the denominator query anchors `n:Point`,
-     so such a component never matches it (measured: adding one leaves `ep_reachable_claims` at
-     3 while `_edged_claim_ids()` goes 3→5). The R6 bullet below carries the same correction;
-     the two used to contradict each other inside one section. Tests:
-     `test_operator_less_claims_are_not_in_the_denominator` +
+   - ⚠️ `no_belief` may be non-zero on a converged graph, and the cause is a live `:Point` whose
+     `IMPL|NAND` edge reaches an operator whose far endpoint is DRAFT: EP excludes the factor, so no
+     pass recomputes the claim, yet the claim IS in the denominator (`ep_reachable_claims`) — **a
+     true statement** (no belief is stored), and the instrument may over-report, never under-report.
+     ⛔ **Corrected (#12138 §3):** an earlier version of this bullet named an anchor-less
+     `:Subject-[:IMPL]->:Object` component (`#7902`) as the cause — it CANNOT be: the denominator
+     query anchors `n:Point`, so such a component never matches it (measured: adding one leaves
+     `ep_reachable_claims` unchanged at 3 while `_edged_claim_ids()` goes 3→5). This is the same
+     correction R6 already carries; the two now agree with the code docstring
+     (`sdk.py::_propagation_counts`). Tests: `test_operator_less_claims_are_not_in_the_denominator` +
      `test_no_belief_stays_inside_its_invariants` (range, not identity) +
      `test_counts_match_an_independent_query` (the denominator counted separately, #12138 §2).
 3. **`_propagation_counts()`** — live non-operator `:Point`s, their `lastDreamedAt` stamps, and their
@@ -300,17 +299,17 @@ unreadable test goes red; drop the closure term from `_reachable_claim_count` wh
   `test_an_edged_but_unreachable_claim_is_not_invisible` +
   `test_the_three_counts_partition_the_live_points` (the remainder is `unclassified_claims`, and the
   partition is exact).
-- R10 (added after review, #12116 C-P3) a mixed population is silently corrected by a clamp instead
-  of being visible → the clamp is gone, and the ranges are asserted in
-  `test_no_belief_stays_inside_its_invariants`. ⛔ #12138 §2: *which* defect those ranges see is
-  direction-specific, and this bullet named only ONE of the two directions while reading as a general
-  control. A NARROWER denominator (or a label-blind numerator, measured -8.0) pushes `no_belief`
-  negative or the ratio above 1.0 → the ranges catch it. A WIDER denominator with `belief_present`
-  fixed LOWERS the ratio and RAISES `no_belief` — both in range, invisible to the ranges (measured on
-  the §2 fixture: `belief_present=1`, denominator 4→5 gives `pct` 0.25→0.2 and `no_belief` 3→4;
-  #12138 round-4 note — the earlier `0.2 / +4` shorthand read as a delta and is not one). That
-  direction is pinned by `test_counts_match_an_independent_query`, which counts the denominator
-  itself; the ranges are the clamp's replacement, not a general mixed-population control.
+- R10 (added after review, #12116 C-P3; **corrected #12138 §2**) a mixed population is silently
+  corrected by a clamp instead of being visible → the clamp is gone (and the counts are reported as
+  measured). ⚠️ The RANGES (`test_no_belief_stays_inside_its_invariants`) catch only the NARROWER /
+  label-blind direction — numerator > denominator ⇒ `no_belief < 0`, ratio > 1. The direction that
+  matters here is the WIDER one, and it is INVISIBLE to them: with `belief_present` fixed, a larger
+  denominator makes the ratio FALL and `no_belief` RISE, both in range (measured on the §2 fixture,
+  `belief_present=1`: denominator 4→5 gives `pct` 0.25→0.2 and `no_belief` 3→4 — absolute values, not
+  a delta; the earlier `/ +4` shorthand read as one and is not). So the ranges are a lower bound, not
+  the control: `test_counts_match_an_independent_query` pins `ep_reachable_claims`, `belief_present`
+  and `points_edged` against independently written queries, which is what reddens on an inflated
+  denominator.
 - R7 the new reads make a polled endpoint expensive (`GET /v1/dream/health` is per-request; the
   census traverses every live `:Point` and its `IMPL|NAND` edges) → **two** controls, because the
   first one alone was inadequate:
