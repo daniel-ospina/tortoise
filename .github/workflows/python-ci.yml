@@ -4775,26 +4775,36 @@ jobs:
           # every class that would otherwise surface as apt's or curl's OWN text, since those
           # are the ones that read as a typo in this step:
           #   1. the signing key cannot be FETCHED (egress/DNS/503, or `curl` absent) — guarded at the fetch;
-          #   2. the box carries no VERSION_CODENAME, so there is no suite to name — guarded below;
-          #   3. `apt-get update` fails HARD (a suite/key/archive fault apt reports as an error) — guarded below;
-          #   4. the index does not SUPPLY `postgresql-client-<major>` — either because its fetch
+          #   2. /etc/os-release cannot be READ, so there is no codename to derive — guarded at the source;
+          #   3. the box carries no VERSION_CODENAME, so there is no suite to name — guarded below;
+          #   4. `apt-get update` fails HARD (a suite/key/archive fault apt reports as an error) — guarded below;
+          #   5. the index does not SUPPLY `postgresql-client-<major>` — either because its fetch
           #      failed SOFTLY (apt only WARNS and exits 0: DNS/egress/5xx) or because the suite
           #      carries no such package — guarded by the ORIGIN check below, the only guard that
           #      can see a soft failure. MEASURED, review cycle 7 of `fc9d4204aa`: with the PGDG
           #      host unresolvable, `apt-get update -qq` exits 0 (`W: Some index files failed to
           #      download`), the distro archive still satisfies a bare `apt-cache show` on noble,
           #      and the step would have gone GREEN with the mechanism this PR installs never applied;
-          #   5. the package RESOLVES but cannot be INSTALLED — the install itself, named below.
-          # ⛔ (5) IS NOT PEDANTRY on a POOL box: this job is pool-eligible, and a shared box
+          #   6. the package RESOLVES but cannot be INSTALLED — the install itself, named below.
+          # ⛔ (6) IS NOT PEDANTRY on a POOL box: this job is pool-eligible, and a shared box
           # can hold the dpkg frontend lock (the image's own unattended-upgrades) or run out of
           # disk, both of which fail the INSTALL after a clean probe — and would otherwise
           # surface as apt's text, i.e. as the un-named class these guards exist to replace.
           # ⚠️ The key fetch, the `apt-get update` and the install are ALL fatal on purpose:
           # swallowing any of them would let the step fall back to the DISTRO archive, which
           # carries whatever major the release ships and is the mechanism #12051 round 1 died on.
-          # ⚠️ A SIXTH named failure sits AFTER all of these — the client-major assertion on
+          # ⚠️ A SEVENTH named failure sits AFTER all of these — the client-major assertion on
           # `pg_dump`/`pg_restore`. It is deliberately outside this list: this list is about
           # GETTING a client onto the leg, that one is about the client it GOT.
+          #
+          # ⛔ THE BOX IS POOL-ELIGIBLE, SO WHAT THIS STEP ADDS TO APT IS REMOVED AGAIN.
+          # /etc/apt/sources.list.d/pgdg.list changes apt resolution for EVERY later job on the
+          # same box, and a leftover sources file is worse than none once this step's keyring is
+          # gone: an unverifiable key turns the next job's `apt-get update` into exactly the SOFT
+          # failure the ORIGIN check below exists to catch. Registered BEFORE the first write so a
+          # failure anywhere later still cleans up, and the SOURCE is removed FIRST so there is no
+          # window in which it outlives the key that signs it.
+          trap 'sudo rm -f /etc/apt/sources.list.d/pgdg.list /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc /tmp/pgdg.asc || true' EXIT
           if ! curl -fsSL -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc; then
             echo "::error::could not FETCH the PGDG signing key (ACCC4CF8.asc) [$identity] — the client this drill needs comes from apt.postgresql.org, so without the key nothing can be installed and BOTH provisioned servers are pg16 (#12051). Either this runner cannot reach www.postgresql.org (egress/DNS/503), or curl/ca-certificates are not installed on it — test with 'command -v curl' before chasing the firewall."
             exit 1
@@ -4804,7 +4814,15 @@ jobs:
           # below would fail `No such file or directory` — unnamed, one line before the guard.
           sudo install -d /usr/share/postgresql-common/pgdg
           sudo install -m 0644 /tmp/pgdg.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
-          . /etc/os-release
+          # ⛔ THE SOURCE IS GUARDED, not just the variable it sets. `.` on a box with no
+          # readable /etc/os-release aborts under `set -e` with bash's own text (`No such file
+          # or directory`) and NO `::error::` — the unnamed-abort class every other line here
+          # replaces. Guarding the source also makes the codename guard below reachable on such
+          # a box, so the two states keep two distinct messages.
+          if ! . /etc/os-release; then
+            echo "::error::/etc/os-release on this runner cannot be READ [$identity] — the PGDG suite name is derived from its VERSION_CODENAME, so the pg16 client this drill needs cannot be installed (#12051). A Debian/Ubuntu box always carries it; a non-apt-derived image does not."
+            exit 1
+          fi
           # ⛔ `${VERSION_CODENAME}` IS CHECKED, not left to `set -u`: an unbound-variable abort
           # at the sources line is exactly the unnamed failure the repo-setup guards (the key
           # fetch above and the `apt-get update` below) exist to replace,

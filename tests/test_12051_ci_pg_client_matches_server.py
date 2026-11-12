@@ -299,6 +299,43 @@ def _code_only(text: str) -> str:
     )
 
 
+def _strip_trailing_comment(line: str) -> str:
+    """`line` up to its first UNQUOTED `#` that opens a trailing comment.
+
+    A `#` starts a comment only at column 0 or after whitespace, and only OUTSIDE
+    a single- or double-quoted span — so `echo "::error::…#12051 …"` is ONE
+    string, not a message followed by a comment (the issue number itself lives
+    behind a `#`, and truncating there would hide the text under test).
+
+    WHY THIS EXISTS: the message scan below reads a step that is mostly `echo`
+    lines, and MEASURED (review cycle 8 of `5ed3b1950b`) a trailing `# …` comment
+    on a PRINTING line red the step as "a message this step PRINTS asks the shell
+    to substitute something". A comment is not printed, so that was a FALSE BLOCK
+    — the direction that teaches the next lane to widen a guard instead of
+    trusting it.
+    """
+    quote = ""
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        # `\\` is literal inside single quotes and an escape everywhere else.
+        if char == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            quote = char
+            continue
+        if char == "#" and (index == 0 or line[index - 1].isspace()):
+            return line[:index]
+    return line
+
+
 #: The precondition, in either shell shape that actually fails closed: an `if !`
 #: guard around the probe, or the probe short-circuiting into a `{ … }` / `( … )`
 #: group. FACTS are extracted (probe verb either way, quoted or not, any redirect
@@ -362,9 +399,9 @@ def _precondition(code: str) -> re.Match[str]:
 
 #: The version branch as a BLOCK, for the same reason `_precondition` is a block:
 #: a substring pin cannot tell an ARMED branch from a gutted one. The step now
-#: contains SIX `::error::`/`exit 1` pairs — the five install-path guards and this
+#: contains SEVEN `::error::`/`exit 1` pairs — the SIX install-path guards and this
 #: branch — where `origin/main` carried TWO (the package precondition and this
-#: branch). So a whole-step search is satisfied by ANY of the five, which is why
+#: branch). So a whole-step search is satisfied by ANY of the six, which is why
 #: the fail action is read from this branch's own body.
 #: MEASURED 2026-11-12 (fresh review of `eb8e4d7268`): the assertion this replaces
 #: stayed green with `if [ "$major" != "16" ]; then :; fi`.
@@ -497,10 +534,16 @@ def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> 
       · DELIBERATELY CONSERVATIVE, and said so here so it reads as a choice rather than a
         bug: an ESCAPED `\\$(…)` (an ODD run of backslashes) prints literally and is
         exempted — `\\$(…)` is NOT, because bash consumes one backslash and then runs it
-        (MEASURED, review cycle 8) — but text after a trailing `#` on a printing line is
-        still refused (the scan cannot tell a comment from a `#` inside quotes without a
-        parser, and this step has no legitimate `$(` in any printed message). A future
-        lane that needs one should move the message to a single-quoted string instead of
+        (MEASURED, review cycle 8) — and a TRAILING COMMENT is not scanned at all
+        (`_strip_trailing_comment`), because a comment is never printed. Two limits are
+        stated rather than implied: the comment splitter is quote-aware, not a parser (a
+        `#` inside an undetectable quoting form would be read as a comment), and a
+        substitution LAUNDERED THROUGH A VARIABLE — `who="$(hostname)"; echo "… $who"` —
+        is invisible to ANY text scan (MEASURED, review cycle 8: that shape passed 8
+        passed). The variable half is unreachable without executing the step, so it is
+        recorded here rather than half-guarded; the concrete half (a literal `$(` or a
+        backtick in a printed message) is what this test refuses. A future lane that
+        needs a literal one should move the message to a single-quoted string instead of
         widening this guard.
 
     ⛔ A LINE-INITIAL `echo` SCAN IS NOT ENOUGH, and that is a correction this test needed: an
@@ -512,7 +555,12 @@ def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> 
     code = _code_only(_run_text(pin))
     offenders: list[str] = []
     for line in code.splitlines():
-        stripped = line.strip()
+        # A COMMENT IS NOT PRINTED, so it is stripped before the scan — otherwise a
+        # trailing `# …` note on an install line reds as a printed message that asks the
+        # shell to substitute something (MEASURED false block, review cycle 8).
+        stripped = _strip_trailing_comment(line).strip()
+        if not stripped:
+            continue
         if "`" in stripped:
             offenders.append(stripped[:140])
             continue
@@ -621,6 +669,31 @@ def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict)
     )
 
 
+#: The os-release SOURCE as a guarded BLOCK — two idioms, one fact (the idiom
+#: `_precondition` already uses). A bare `. /etc/os-release` aborts under `set -e`
+#: with bash's own text and no `::error::`, which is the unnamed-abort class the
+#: install-path guards exist to replace.
+_IF_SOURCE_RE = re.compile(
+    r"^(\s*)if\s+!\s*\.\s+/etc/os-release[^\n]*;\s*then(?P<body>.*?)^\1fi\s*$",
+    re.DOTALL | re.MULTILINE,
+)
+_OR_SOURCE_RE = re.compile(
+    r"^(\s*)\.\s+/etc/os-release[^\n]*\|\|\s*[({]?(?P<body>(?:[^\n]*\n){0,4}[^\n]*)",
+    re.MULTILINE,
+)
+
+
+def _guarded_source(code: str) -> re.Match[str]:
+    match = _IF_SOURCE_RE.search(code) or _OR_SOURCE_RE.search(code)
+    assert match, (
+        "the step sources `/etc/os-release` UNGUARDED: `.` fails under `set -e` "
+        "with bash's own `No such file or directory` and no `::error::`, so a box "
+        "without it aborts unnamed — the exact class the other guards replace. "
+        "Wrap the source itself (not only the variable it sets)."
+    )
+    return match
+
+
 def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     """⛔ DELETING THE PGDG BLOCK USED TO LEAVE THIS ENTIRE FILE GREEN.
 
@@ -681,6 +754,61 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
         "the codename is used unguarded, so a box whose os-release carries none "
         "aborts `set -u` at the sources line with no `::error::` — the exact "
         "unnamed failure the guards exist to replace. Guard it explicitly."
+    )
+    # ⛔ THE SOURCE ITSELF, not only the variable it sets. Two states, two messages: a
+    # box with NO readable os-release and a box whose os-release carries no codename
+    # are different defects, and only the second was named. MEASURED, review cycle 8 of
+    # `5ed3b1950b`: with the file absent, `. /etc/os-release` aborted the step with bash's
+    # own text, so the codename guard below was never reached.
+    source_body = _guarded_source(code).group("body")
+    assert "::error::" in source_body, (
+        "the guarded source stops the step but names nothing, so a missing "
+        f"/etc/os-release still reads as bash's own abort: {source_body!r}"
+    )
+    assert re.search(r"\bexit\s+1\s*(?:;|\}|\)|$)", source_body), (
+        "the guarded source does not `exit 1`, so the step would carry on into the "
+        f"codename guard with nothing sourced: {source_body!r}"
+    )
+
+    # ⛔ AND THE BOX IS LEFT AS IT WAS FOUND. This job is POOL-ELIGIBLE: the sources
+    # file it writes changes apt resolution for EVERY later job on the same box, and a
+    # sources file outliving its keyring turns the next job's `apt-get update` into the
+    # very SOFT failure the origin check exists to catch. The trap is the cleanup, and it
+    # is pinned because deleting it leaves every other test in this file green.
+    traps = [
+        line for line in code.splitlines()
+        if re.search(r"\btrap\b", line) and re.search(r"\b(?:EXIT|0)\b", line)
+    ]
+    assert traps, (
+        "the step never registers an EXIT trap, so it leaves "
+        "`/etc/apt/sources.list.d/pgdg.list` and its keyring on a POOL box — changing "
+        "apt resolution for every later job there, and leaving a source whose key is "
+        "gone if the keyring is cleaned up separately"
+    )
+    cleanup = traps[0]
+    for artifact, why in (
+        ("/etc/apt/sources.list.d/pgdg.list", "the PGDG source it added"),
+        ("apt.postgresql.org.asc", "the keyring it installed"),
+        ("/tmp/pgdg.asc", "the downloaded key"),
+    ):
+        assert artifact in cleanup, (
+            f"the EXIT trap does not remove {artifact} ({why}), so a pool box keeps "
+            f"state this step added: {cleanup!r}"
+        )
+    assert cleanup.index("/etc/apt/sources.list.d/pgdg.list") < cleanup.index(
+        "apt.postgresql.org.asc"
+    ), (
+        "the trap removes the keyring BEFORE the sources file that is signed by it, so "
+        "there is a window in which the box advertises a source it cannot verify — a "
+        f"soft `apt-get update` failure for the next job on the box: {cleanup!r}"
+    )
+    assert code.index("trap ") < code.index("curl -fsSL"), (
+        "the EXIT trap is registered AFTER the first write, so a failure between that "
+        "write and the trap leaves the box dirty — the state the trap exists to prevent"
+    )
+    assert code.index("trap ") < code.index("apt.postgresql.org/pub/repos/apt"), (
+        "the EXIT trap is registered AFTER the sources line, so any failure from there "
+        "on leaves the PGDG source on the box"
     )
     # ⛔ THE KEYRING'S DIRECTORY: the FACT is that it exists before the key is written
     # into it, so this asserts the ORDER and accepts every equivalent spelling.
@@ -842,6 +970,8 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     when it was armed. On a box running the suite as root it would instead have
     written the HOST's apt sources and fetched from the network — which is why
     the stubs below are part of the contract this test claims, not decoration.
+    `rm` joined that set for the same reason once the step grew its EXIT trap: an
+    unstubbed trap deletes the HOST's `/tmp/pgdg.asc` as this arm exits.
 
     ⛔ AND THE HOST's `/etc/os-release` IS THE SAME CLASS ONE STEP FURTHER. The
     prefix contains `. /etc/os-release` (the PGDG suite is derived from the box's
@@ -864,10 +994,11 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     argument), so a future rewrite reds here instead of silently restoring the
     host dependency.
 
-    Six arms over the step's FOUR named pre-install branches — the key fetch, the
-    codename, `apt-get update`, and the ORIGIN check (THREE arms: an `apt-cache`
-    that fails, an index that loaded but does not name apt.postgresql.org, and
-    the control that reaches past) — plus TWO branches no arm executes: the
+    Seven arms over the step's FIVE named pre-install branches — the os-release
+    SOURCE, the key fetch, the codename, `apt-get update`, and the ORIGIN check
+    (THREE arms: an `apt-cache` that fails, an index that loaded but does not name
+    apt.postgresql.org, and the control that reaches past) — plus TWO branches no
+    arm executes: the
     install guard (unreachable by construction, since this arm stops AT the install line;
     it is pinned in text by `test_the_client_comes_from_pgdg_not_the_distro_archive`) and
     the version branch (its reachability is a stated limit, see `_version_branch`).
@@ -928,13 +1059,18 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         apt_get: str = "apt-get() { return 0; }",
         curl_stub: str = "curl() { return 0; }",
         codename: str = "noble",
+        os_release_present: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         # The fixture is rewritten per arm, so the codename guard can be exercised
-        # without ever reading the host's file.
-        os_release.write_text(
-            "ID=ubuntu\n" + (f"VERSION_CODENAME={codename}\n" if codename else ""),
-            encoding="utf-8",
-        )
+        # without ever reading the host's file. `os_release_present=False` removes it
+        # so the SOURCE guard can be exercised the same way.
+        if os_release_present:
+            os_release.write_text(
+                "ID=ubuntu\n" + (f"VERSION_CODENAME={codename}\n" if codename else ""),
+                encoding="utf-8",
+            )
+        else:
+            os_release.unlink(missing_ok=True)
         script = tmp_path / "precondition.sh"
         # ⛔ `sudo`, `apt-*`, `curl` AND THE REPO-SETUP COMMANDS are stubbed. Without
         # the first two the prefix runs the HOST's real `sudo apt-cache` / `sudo apt-get
@@ -949,6 +1085,10 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
             f"{apt_get}\n{curl_stub}\n"
             "install() { return 0; }\n"
             "mkdir() { return 0; }\n"
+            # The EXIT trap removes the source, the keyring and the downloaded key. `sudo`
+            # forwards to the real command, so `rm` is the last stub this prefix needs —
+            # without it the arm deletes HOST paths as its own cleanup runs.
+            "rm() { return 0; }\n"
             "tee() { cat >/dev/null; }\n"
             f"{stub}\n{prefix}\n"
             "echo REACHED_PAST_PRECONDITION\n",
@@ -1062,6 +1202,31 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     assert "::error::" in curl_combined, (
         "the key fetch stopped the step but named nothing — `set -e` would surface "
         f"curl's exit 22 as an opaque failure: {curl_combined!r}"
+    )
+
+    # ⛔ AND AN os-release THAT CANNOT BE READ — the SOURCE, not its content. Without
+    # this arm the source guard is an UNGUARDED CLAIM: it could be deleted and every
+    # test here would stay green (the fixture always exists for the other arms).
+    # MEASURED, review cycle 8 of `5ed3b1950b`: with the file absent, `.` aborted under
+    # `set -e` with bash's own `No such file or directory` and NO `::error::`.
+    no_os_release = run_with("apt-cache() { return 0; }", os_release_present=False)
+    os_release_combined = no_os_release.stdout + no_os_release.stderr
+    assert no_os_release.returncode != 0, (
+        "with NO readable /etc/os-release the step carried on, so the sources line "
+        f"would be built from an empty suite name: {os_release_combined!r}"
+    )
+    assert "REACHED_PAST_PRECONDITION" not in no_os_release.stdout, (
+        "the source guard let the script continue with nothing sourced: "
+        f"{os_release_combined!r}"
+    )
+    assert "::error::" in os_release_combined, (
+        "an unreadable /etc/os-release stopped the step but named nothing — the whole "
+        "point of guarding the SOURCE is that it reads as THIS defect rather than as "
+        f"bash's own `No such file or directory`: {os_release_combined!r}"
+    )
+    assert "os-release" in os_release_combined, (
+        "the failure was named, but not as the missing FILE — a reader is sent after "
+        f"the codename when the box has no os-release at all: {os_release_combined!r}"
     )
 
     # ⛔ AND AN os-release WITHOUT A CODENAME — the `set -u` abort the explicit
