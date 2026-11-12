@@ -4591,11 +4591,20 @@ jobs:
     #
     # 24.04 is noble, whose archive carries the major: measured on the image
     # itself, `postgresql-client-16` candidate `16.15-0ubuntu0.24.04.1`. It is an
-    # accepted hosted label (`tools/ci_runner_labels.py` HOSTED_IMAGES and
-    # `_ACTIONLINT_KNOWN_LABELS`), and two other jobs in this workflow already
-    # pin it. `tests/test_12051_ci_pg_client_matches_server.py` pins THIS choice,
-    # so a revert to a floating label reds at test time instead of silently
-    # swapping the client under the artifact.
+    # accepted hosted label (`tools/ci_runner_labels.py` HOSTED_IMAGES), accepted
+    # by actionlint (`tests/test_ci_selection.py`'s `_ACTIONLINT_KNOWN_LABELS`),
+    # and two other jobs in this workflow already pin it
+    # (`tests/test_12051_ci_pg_client_matches_server.py` pins THIS choice, so a
+    # revert to a floating label reds at test time instead of silently swapping
+    # the client under the artifact).
+    #
+    # ⚠️ HOSTED-ONLY BY LABEL, NOT BY CONSTRUCTION: `scripts/ci_runner_gate.sh`
+    # attaches only `ubuntu-latest` to the pool, so this pin resolves to a hosted
+    # image today (live runner list: no carrier). That is the trade for a
+    # deterministic client — on a hosted outage this REQUIRED leg waits instead of
+    # being served by the pool (the same trade `test-slow` records above), and if
+    # the pool ever claims the label (`CI_RUNNER_OS_LABEL=on|auto`), the in-step
+    # `apt-cache show` precondition below is what catches a non-noble box.
     runs-on: ubuntu-24.04
     # Measured on the lane where this was built: 63 passed / 0 skipped in 70–73s
     # against a warm database, and ~100s when the container first applies the

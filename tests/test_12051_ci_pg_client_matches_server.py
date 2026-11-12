@@ -242,49 +242,109 @@ def test_the_pin_runs_before_the_record_leg(job: dict) -> None:
         "so the leg would run on the runner image's own client"
     )
 
+#: A (release -> PostgreSQL client major) fact table, PROVEN and not assumed.
+#: Which client a release's archive carries IS #12051 round 2: `ubuntu-latest`
+#: moved to `ubuntu-26.04`, whose archive ships `postgresql-client-18` and NO 16,
+#: so the pin died `E: Unable to locate package` before a single test ran. A new
+#: release must be MEASURED and added here before it is adopted — this map is the
+#: record of a measurement, not a shape check.
+KNOWN_GOOD_IMAGE_MAJOR = {
+    # `docker run --rm ubuntu:24.04 apt-cache policy postgresql-client-16`
+    #   -> Candidate: 16.15-0ubuntu0.24.04.1
+    "ubuntu-24.04": 16,
+}
 
-#: A version-pinned Ubuntu image label — `ubuntu-24.04`, `ubuntu-26.04`, …
-#: Deliberately NOT `ubuntu-latest`: a floating label is what moved the client.
-VERSION_PINNED_IMAGE_RE = re.compile(r"^ubuntu-\d{2}\.\d{2}$")
+#: A commented-out line is inert shell that reads EXACTLY like live code, so the
+#: content assertions below read the step's code. `tests/test_ci_selection.py`
+#: refuses a substring pin for the same reason: a substring pin is satisfied by
+#: commenting the body out.
+_COMMENT_ONLY_RE = re.compile(r"^\s*#")
 
 
-def test_the_pin_runs_on_a_named_image_not_a_floating_label(job: dict) -> None:
+def _code_only(text: str) -> str:
+    """The step's shell with comment-only lines dropped."""
+    return "\n".join(
+        line for line in text.splitlines() if not _COMMENT_ONLY_RE.match(line)
+    )
+
+
+def _runs_on_labels(job: dict) -> list[str]:
+    """`runs-on` as a label list — a one-element list is the same request."""
+    runs_on = job.get("runs-on")
+    if isinstance(runs_on, str):
+        return [runs_on]
+    assert isinstance(runs_on, list), (
+        f"`{JOB}` must name its image(s) literally; found runs-on={runs_on!r}. An "
+        "expression makes the client major depend on what the expression "
+        "resolved to, which no assertion in this file can see."
+    )
+    return [str(label) for label in runs_on]
+
+
+def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict) -> None:
     """The image is part of the artifact: it decides which client the archive has.
 
-    Round 2 of #12051. The pin above assumes the image's archive CARRIES
+    Round 2 of #12051. The pin assumes the image's archive CARRIES
     `postgresql-client-<major>`, and that assumption is not free: MEASURED
     2026-11-12 (job `131022562781`, head `58b5a417ba`), `ubuntu-latest` had
-    migrated to `Image: ubuntu-26.04`, whose archive ships
-    `postgresql-client-18` and NO 16 — so the install died
-    `E: Unable to locate package postgresql-client-16` (exit 100) BEFORE the
-    version assertion, and every leg below skipped.
+    migrated to `Image: ubuntu-26.04`, whose archive ships `postgresql-client-18`
+    and no 16 — so the install died `E: Unable to locate package` (exit 100)
+    BEFORE the version assertion, and every leg below skipped.
 
-    A floating label means the runner image can change the drill's client major
-    without a diff, which is the exact class this PR closes. Naming the release
-    makes that a deliberate, reviewable choice; the in-job `apt-cache show`
-    precondition turns the next move into a NAMED `::error::` instead of an
-    opaque apt failure.
+    A floating label lets the runner image change the drill's client major with
+    no diff, which is the class this PR closes. The (release -> major) pair is
+    asserted rather than the label's SHAPE, because `ubuntu-26.04` is just as
+    version-pinned as `ubuntu-24.04` and is the release that broke.
     """
-    runs_on = job.get("runs-on")
-    assert isinstance(runs_on, str), (
-        f"`{JOB}` must name ONE literal image; found runs-on={runs_on!r}. An "
-        "expression makes the client major depend on what the expression "
-        "happened to resolve to, which no assertion in this file can see."
-    )
-    assert runs_on != "ubuntu-latest", (
+    server_major = _postgres_image_majors(job)[0]
+    labels = _runs_on_labels(job)
+
+    assert "ubuntu-latest" not in labels, (
         "`ubuntu-latest` is a MOVING label and it moved: on 2026-11-12 it became "
         "ubuntu-26.04, whose archive has no `postgresql-client-16`, so this job "
         "reds before a single test runs (#12051). Name the release."
     )
-    assert VERSION_PINNED_IMAGE_RE.match(runs_on), (
-        f"`{JOB}` runs on {runs_on!r}, which is not a version-pinned Ubuntu "
-        "image. The record drill's client major comes from the image's archive, "
-        "so the image IS part of the artifact's contract."
-    )
+    for label in labels:
+        assert label in KNOWN_GOOD_IMAGE_MAJOR, (
+            f"`{JOB}` runs on {label!r}, whose PostgreSQL client major has not "
+            "been measured. PROVE it — `apt-cache policy "
+            f"postgresql-client-{server_major}` on that image — and add the "
+            "pair to KNOWN_GOOD_IMAGE_MAJOR. The image supplies the drill's "
+            "client, so adopting one unmeasured is how #12051 round 2 shipped."
+        )
+        assert KNOWN_GOOD_IMAGE_MAJOR[label] == server_major, (
+            f"`{JOB}`'s two servers are pg{server_major}, but {label} carries a "
+            f"pg{KNOWN_GOOD_IMAGE_MAJOR[label]} client: the archive would be "
+            "dumped by a client whose major differs from the restore target "
+            "(#12051)."
+        )
+
     _, pin = _pin_step(_steps(job))
-    assert "apt-cache show postgresql-client-16" in _run_text(pin), (
-        "the pin does not precondition on the package being resolvable, so an "
+    code = _code_only(_run_text(pin))
+    precondition = re.search(
+        r"if\s+!\s*apt-cache\s+show\s+postgresql-client-(?P<major>\d+)"
+        r"\s*>\s*/dev/null\s*2>&1\s*;\s*then(?P<body>.*?)^\s*fi\s*$",
+        code,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert precondition, (
+        "the pin does not precondition on the package being RESOLVABLE, so an "
         "image whose archive lacks the major reds as `E: Unable to locate "
         "package` (exit 100) — an opaque failure that reads as a typo in this "
-        "step, which is how the image move hid behind a #12051-shaped red"
+        "step, which is how the 2026-11-12 image move hid behind a "
+        "#12051-shaped red. Asserted structurally (comment lines stripped), "
+        "because a substring pin is satisfied by commenting the body out."
+    )
+    assert int(precondition.group("major")) == server_major, (
+        f"the precondition probes postgresql-client-"
+        f"{precondition.group('major')} but the servers are pg{server_major}"
+    )
+    body = precondition.group("body")
+    assert "::error::" in body, (
+        "the precondition fails silently: an absent package must be reported as "
+        "its OWN named failure, not as the archive's opaque apt error"
+    )
+    assert re.search(r"^\s*exit\s+1\s*$", body, re.MULTILINE), (
+        "the precondition does not `exit 1`, so a missing client would fall "
+        "through to the install and surface as exit 100 again"
     )
