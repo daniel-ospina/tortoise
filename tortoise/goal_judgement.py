@@ -299,12 +299,38 @@ def _assert_supersession_scope(
         )
     for key, want in (("goalId", goal_id), ("indicatorId", indicator_id),
                       ("targetId", target_id)):
-        # ⛔ Presence AND equality, in BOTH directions: a predecessor that carries
-        # a dimension the caller did not declare (or declares one the predecessor
-        # lacks) is a different chain, and `want is not None` was an escape that
-        # let `indicator_id=None` skip the check entirely — measured to mint a
-        # SECOND live claim and double the goal's operators.
+        # ⛔ Presence AND equality, in BOTH directions, with ONE named exception
+        # — an ABSENT `indicatorId`. `want is not None and have is not None and
+        # have != want` was an escape that let `indicator_id=None` skip the check
+        # entirely (measured: a SECOND live claim and a doubled operator count),
+        # so `have != want` is the rule.
+        #
+        # ⛔ BUT `have is None` on `indicatorId` is NOT "another chain": it is a
+        # claim written by the module that shipped in #11942, where
+        # `indicator_id` defaulted to `None` and the writer stored the prop only
+        # for a truthy id. Such a claim carries `judgementState`/`goalId`/
+        # `targetId` and no `indicatorId`, and the DERIVED lookup can never see
+        # it — `latest_judgement` adds `p.indicatorId = $indicatorId` to its WHERE
+        # clause only when the argument is not `None`, and `indicator_id` is now
+        # REQUIRED, so the clause is always present and a Point carrying no
+        # `indicatorId` property fails it (Cypher: a null property never equals a
+        # value). That leaves THIS seam as the only path
+        # that can retire it, and refusing it made a goal that ever received a
+        # pre-#11965 judgement PERMANENTLY un-writable through `record_judgement`
+        # while the double-count behind it could not be repaired either.
+        # MEASURED at the pre-fix head: two live `met` claims and two IMPL
+        # arrows into one goal, and every repair call raised. Retiring ONE claim
+        # of the same goal+target — the supersession transfers its arrow, #6180 —
+        # is exactly the collapse this module exists to produce.
+        #
+        # `goalId` and `targetId` stay STRICT: this module has ALWAYS written
+        # them, so their absence means the Point is not a judgement of this chain
+        # at all. The tolerance is one named dimension, never a blanket rule —
+        # tolerating `goalId` would re-open the cross-goal transfer (#6180) this
+        # guard exists to stop.
         have = node.get(key)
+        if have is None and key == "indicatorId":
+            continue
         if have != want:
             raise ValueError(
                 f"refusing to supersede {previous_point_id!r}: its {key} is "
@@ -840,7 +866,9 @@ def _ensure_judgement_edge(sdk: Any, point_id: str, goal_id: str) -> str | None:
         sequence POST-FIX reads ``0.6502 -> 0.3498 -> 0.6502 -> 0.3498 ->
         0.6502``.
       * a write that failed after its Point landed leaves a live judgement with
-        no arrow at all, which the unchanged arm would then never repair.
+        no arrow at all — nothing else re-creates it, which is why this function
+        checks for the missing edge on every pass (the unchanged arm calls it
+        unconditionally).
 
     So the edge is (re)created only when the point has none INTO THIS GOAL — the
     check is goal-scoped, because "has an operator" is not the question: a point
@@ -866,22 +894,27 @@ def _cache_then_arrow(
 ) -> tuple[str | None, str | None]:
     """Write the ``goalState`` cache and the IMPL arrow — NEITHER suppressing the other.
 
-    ORDER: the cache goes FIRST. A cache word left contradicting a live claim is
-    what a reader sees, and measured, an ``update_entity`` refusal on a flip left
-    the claim ``unmet`` while ``goalState`` still said ``met``.
+    ORDER: the cache goes FIRST, and what that buys is bounded and exact — a
+    failed ARROW leaves the cache already agreeing with the live claim (pinned by
+    ``test_a_failed_arrow_leaves_the_cache_agreeing_with_the_claim``). It does NOT
+    make a refused ``update_entity`` harmless: on a flip the supersession has
+    already happened, so a refused cache write leaves ``goalState`` on the PREVIOUS
+    word under a live claim whichever of the two writes goes first. That
+    staleness is repaired on the next pass — the unchanged arm re-writes the cache
+    unconditionally (``_write_goal_state_cache`` does not read-then-compare), so a
+    failed CACHE and a failed ARROW both have a self-healing arm.
 
     ⛔ BUT THE ARROW IS WRITTEN EITHER WAY, and that is the half a plain reorder
     gets wrong: with the two writes merely SEQUENCED, a refused cache write skips
     ``_ensure_judgement_edge`` entirely, so the judgement is live with NO belief
-    arrow — and the self-healing path cannot repair it, because the unchanged arm
-    writes the cache first too (measured: with ``update_entity`` raising, the goal
-    ended with ZERO IMPL arrows while a live ``met`` judgement existed). Ordering
-    two writes must therefore not make one a precondition of the other: the cache
-    refusal is captured, the arrow is written regardless, and only then is the
-    original exception re-raised so the caller still sees it. A failed ARROW is
-    the branch the unchanged arm repairs on the next pass (it re-asserts the
-    edge); a failed CACHE has no such arm, which is why it may never cost the
-    arrow.
+    arrow (measured: with ``update_entity`` raising, the goal ended with ZERO IMPL
+    arrows while a live ``met`` judgement existed). Ordering two writes must
+    therefore not make one a precondition of the other: the cache refusal is
+    captured, the arrow is written regardless, and only then is the original
+    exception re-raised so the caller still sees it. The asymmetry that IS real is
+    about what each write is FOR, not about which one self-heals: the cache is a
+    word a reader sees, while an arrow is the belief path itself, and the two
+    comments above say which failure each repair arm covers.
 
     Neither step has a compensating delete: the claim and its prior are correct,
     and removing them would destroy the judgement.

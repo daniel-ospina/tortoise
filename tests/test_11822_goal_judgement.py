@@ -1447,11 +1447,16 @@ def test_the_scope_guard_refuses_a_dimension_the_caller_did_not_declare(sdk):
 def test_a_failed_arrow_leaves_the_cache_agreeing_with_the_claim(sdk, monkeypatch):
     """The cache is written BEFORE the arrow, on purpose.
 
-    A failed arrow is the one failure the unchanged arm repairs on the next pass
-    (it re-asserts the edge); a cache word left contradicting a live claim is what
-    a reader sees. MEASURED on a flip whose `update_entity` was refused, with the
-    reverse order: claim `unmet`, `goalState` still `met`, belief already moved —
-    and the caller only saw an exception. This pins the order.
+    What the order buys is bounded, and stated here exactly as the helper states
+    it: a failed arrow leaves the cache ALREADY AGREEING with the live claim,
+    and a cache word contradicting a claim is what a reader sees. It does not
+    make a refused `update_entity` harmless — on a flip the supersession has
+    already happened, so the cache can be left on the PREVIOUS word whichever
+    write goes first (MEASURED on a flip whose `update_entity` was refused: claim
+    `unmet`, `goalState` still `met`, belief already moved, and the caller only
+    saw an exception) and that staleness is what the unchanged arm's
+    unconditional cache write repairs on the next pass. This pins the ORDER; the
+    cache's own repair arm is pinned by `test_the_unchanged_arm_still_reowns_the_cache`.
     """
     import tortoise.goal_judgement as gj
 
@@ -1505,8 +1510,8 @@ def test_a_refused_cache_write_does_not_cost_the_arrow(sdk, monkeypatch):
     assert live is not None, "the judgement itself landed; only the cache refused"
     assert _impl_into(sdk, live["id"], goal["id"]) == 1, (
         "a refused cache write cost the IMPL arrow: the judgement is live with no "
-        "belief path, and the unchanged arm cannot repair it — it writes the "
-        "cache first as well"
+        "belief path, and the next pass cannot recover from that cheaply — the "
+        "cache refusal must never be a precondition of the arrow"
     )
 
 
@@ -1620,6 +1625,67 @@ def test_a_missing_predecessor_is_refused_as_missing(sdk):
     )
 
 
+
+
+def test_a_LEGACY_claim_without_an_indicator_is_REPAIRED_not_refused(sdk):
+    """A predecessor the pre-#11965 module wrote must stay RETIRABLE.
+
+    `record_judgement` defaulted `indicator_id` to `None` before this PR and the
+    writer stored the prop only for a truthy id, so a claim it minted carries
+    `judgementState`/`goalId`/`targetId` and NO `indicatorId`. MEASURED at this
+    head, with such a claim live and arrowed into the goal: the DERIVED lookup
+    could not see it — `latest_judgement` adds `p.indicatorId = $indicatorId` to
+    its WHERE clause whenever the argument is not `None`, and `indicator_id` is
+    now REQUIRED, so the clause is always present and a Point carrying no
+    `indicatorId` property fails it (a null property never equals a value);
+    and the explicit seam REFUSED it — leaving 2 live `met` claims and 2 IMPL
+    arrows into one goal, every repair call raising, so the double-count was
+    unrepairable and the goal was unwritable.
+
+    The tolerance is ONE dimension, not a blanket "absent is fine": the second
+    half of this test pins that an absent `goalId`/`targetId` is STILL refused —
+    tolerating `goalId` is the cross-goal edge transfer of #6180.
+    """
+    indicator, target_node, goal = _world(sdk)
+    target = Target.from_node(target_node)
+    _reading(sdk, indicator, 9.0, at="2026-11-11T10:00:00Z")
+    legacy = sdk.create_point("statement",
+                              "judgement: met (pre-#11965, unscoped)",
+                              claim_class="derived", judgementState="met",
+                              goalId=goal["id"], targetId=target.target_id)
+    assert sdk.get_entity(legacy["id"]).get("indicatorId") is None
+    sdk.set_point_baseline(legacy["id"], 9.0, 1.0)
+    sdk.create_operator("IMPL", legacy["id"], [goal["id"]], direction="->")
+    assert _impl_into(sdk, legacy["id"], goal["id"]) == 1
+
+    repaired = record_judgement(
+        sdk, goal_id=goal["id"],
+        judgement=judge(sdk, goal_id=goal["id"],
+                        indicator_id=indicator["id"], target=target),
+        target=target, indicator_id=indicator["id"],
+        previous_point_id=legacy["id"],
+    )
+    assert repaired["superseded_id"] == legacy["id"]
+    assert sdk.get_entity(legacy["id"])["status"] == "superseded"
+    live = [r for r in _judgement_points(sdk, goal["id"])
+            if r[1] not in {"superseded", "retracted"}]
+    assert len(live) == 1, f"the legacy claim was not collapsed: {live}"
+    assert live[0][0] == repaired["point_id"]
+    assert sdk.get_entity(repaired["point_id"])["indicatorId"] == indicator["id"]
+
+    for missing in ("goalId", "targetId"):
+        props = {"judgementState": "met", "goalId": goal["id"],
+                 "targetId": target.target_id}
+        props.pop(missing)
+        foreign = sdk.create_point("statement", f"a claim with no {missing}",
+                                   claim_class="derived", **props)
+        with pytest.raises(ValueError) as exc:
+            _assert_supersession_scope(sdk, foreign["id"], goal["id"],
+                                       indicator["id"], target.target_id)
+        assert missing in str(exc.value), (
+            f"an absent {missing} was tolerated — the tolerance must be ONE "
+            "named dimension, never a blanket rule"
+        )
 
 
 def test_an_unscoped_write_is_refused_on_both_shapes(sdk):
