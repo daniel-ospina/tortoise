@@ -73,10 +73,10 @@ there, so naming one would invent work that does not exist.)
 
 ⛔ `_lib.ts` HAS NO ROW, AND THE LANDED HISTORY IS WHY. #11764's deferral was the
 three `navHtml` product hrefs, and it closed WITHOUT repointing them (2026-11-12,
-by PR #12058 — which did not touch this file). The repoint is #11977's: its commit
+by PR #12058 — which touched neither `_lib.ts` nor this test file). The repoint is #11977's: its commit
 `7e6baffc5d` moved those three hrefs to the terminal forms AND introduced this
-allowlist, so the count was ALREADY 0 when the list first existed and no revision
-of it ever carried a `_lib.ts` row. ⛔ Measured, not inferred: 14 keys at
+allowlist, so the count was ALREADY 0 when the list first existed and no landed
+revision of it ever carried a `_lib.ts` row. ⛔ Measured, not inferred: 14 keys at
 `7e6baffc5d`, 14 at this head, the same set, and `_lib.ts` is a key in neither.
 This branch changes no line of `_lib.ts` and no line of the blog guard —
 `git log 81269704..HEAD` over both files is empty. #11976's own guard follows: on
@@ -427,15 +427,15 @@ RETIRED_HOST_ALLOWLIST = {
 #: in `RETIRED_HOST_ALLOWLIST` with the same kind of reason — recording a count is
 #: not blessing the literal, it is what makes the deferral visible and what forces
 #: a sweep to update the record in the same commit.
-#: ⛔ The other FOUR files in the list above sit at 0 and are NOT in the map, for two
-#: different reasons, and the difference matters: `website/functions/blog/_lib.ts`
-#: never carried a row at all — #11977 repointed its three `navHtml` hrefs to the
+#: ⛔ The other FOUR files in the list above sit at 0 and are NOT in the map, and the
+#: reason is ONE, not two: each carried a row only in the DRAFTS of this file, never in
+#: a landed revision. #11977 repointed `_lib.ts`'s three `navHtml` hrefs to the
 #: terminal forms in the same commit that introduced the map (#11764 closed without
-#: doing it) — while `invite-accept.html`, `welcome.html` and `wizardPrompts.js` were
-#: re-aimed to 0 by main's #12058 (which touched all three files and never touched this
-#: one). ⛔ The landed allowlist has never carried a row for ANY of the four — those
-#: three rows, like `_lib.ts`'s, lived only in the pre-rebase drafts, so the table below
-#: is not a record of deletions; it is what this head measures. All four stay in `RUNTIME_FILES` on purpose:
+#: doing it); main's #12058 re-aimed `invite-accept.html`, `welcome.html` and
+#: `wizardPrompts.js` to 0 before this branch's base (it touched all three files and
+#: never touched this one). ⛔ So the table below is not a record of deletions — it is
+#: what this head measures, and no landed revision of the map has ever carried a row
+#: for any of these four. All four stay in `RUNTIME_FILES` on purpose:
 #: with no row the expected count is 0, so a literal coming back REDS this guard
 #: instead of leaving the surface.
 #: ⛔ COUNT THE TABLE, DO NOT TRUST A NUMBER HERE. An earlier revision of this
@@ -447,7 +447,7 @@ RETIRED_HOST_ALLOWLIST = {
 #:
 #: ⛔ An earlier revision of this paragraph said the OPPOSITE — that they were
 #: "deliberately NOT added", because blessing them "would turn a deferral into a
-#: decision" — while the map above already carried them. Left standing,
+#: decision" — while that draft's map already carried them. Left standing,
 #: that is an instruction to delete the very entries that make this guard able to
 #: fail, leaving a red count check nobody can explain.
 #:
