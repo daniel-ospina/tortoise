@@ -1395,6 +1395,49 @@ _DESTINATION_VERBS = frozenset({"cp", "rsync", "mv", "ln", "install"})
 #: bare flag, which is what a person writes.
 _TARGET_OPTION_VERBS = frozenset({"cp", "mv", "ln", "install"})
 
+#: The options that take their value as a SEPARATE token, so the word after them is
+#: NOT an operand. ⛔ AN OPTION NOT LISTED HERE TAKES NO VALUE (#12173 review round
+#: 31, measured FAIL-OPEN): "any option without `=` consumes the next word" made a
+#: VALUE-LESS flag eat the destination —
+#:
+#:     sudo rsync -a "$b/17/bin/" -v "$b/16/bin/"      -- GREEN (bypass)
+#:     sudo cp -a "$b/17/bin/" -v "$b/16/bin/"         -- GREEN (bypass)
+#:     sudo rsync -a "$b/17/bin/" --verbose "$b/16/bin/" -- GREEN (bypass)
+#:
+#: — because `last` fell back to the SOURCE, so the real destination read as a
+#: source. Listing the value-takers is the fail-CLOSED direction: an option this
+#: set omits costs at most a false RED, never a spared write. The residual is the
+#: mirror: a value-taking option OMITTED from this list lets its value be read as
+#: an operand, which can spare a write whose target precedes it — so a new rsync/
+#: cp option that takes a value must be added here, and `--opt=value` never does.
+_VALUE_TAKING_OPTIONS = frozenset(
+    {
+        "-e",
+        "--rsh",
+        "--exclude",
+        "--include",
+        "-f",
+        "--filter",
+        "--exclude-from",
+        "--include-from",
+        "-T",
+        "--files-from",
+        "--rsync-path",
+        "--log-file",
+        "--password-file",
+        "--suffix",
+        "--chmod",
+        "--chown",
+        "--block-size",
+        "-B",
+        "--bwlimit",
+        "--timeout",
+        "--remote-option",
+        "-M",
+        "--temp-dir",
+    }
+)
+
 
 #: A whitespace-delimited token that names a path (contains a `/`).
 _PATH_TOKEN_RE = re.compile(r"[^\s]+")
@@ -1573,8 +1616,10 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
         # `--exclude-from=/etc/rsync-exclude` and `--log-file="$SCRATCH/x.log"`
         # carry a path in an option VALUE and were taken as the destination.
         if text.startswith("-"):
-            # `--opt=value` carries its own value; `-e`/`--exclude` take the next word.
-            expect_value = "=" not in text
+            # `--opt=value` carries its own value; a listed `-e`/`--exclude` takes the
+            # next word; every OTHER option takes none, so the word after it is an
+            # operand — which is what keeps `rsync -a SRC -v DST` refusing.
+            expect_value = "=" not in text and text.split("=", 1)[0] in _VALUE_TAKING_OPTIONS
             continue
         if expect_value:
             expect_value = False
@@ -5485,6 +5530,20 @@ BINARY_MUTATION_POLARITY = [
         'find "$b/17/bin" -type f -exec cp {} "$b/16/bin/" \\;',
         True,
         "#12173 round-30: `\\;` is one escaped token, not a segment boundary",
+    ),
+    # ⛔ AND A VALUE-LESS FLAG IS STILL NOT A VALUE (#12173 review round 31). "Any
+    # option without `=` consumes the next word" ate the destination, so `last` fell
+    # back to the SOURCE and the complete replacement went GREEN. Only the listed
+    # `_VALUE_TAKING_OPTIONS` consume a word; `-v`/`-h`/`-a` do not.
+    (
+        'sudo rsync -a "$b/17/bin/" -v "$b/16/bin/"',
+        True,
+        "#12173 round-31: a VALUE-LESS flag between source and destination",
+    ),
+    (
+        'sudo rsync -a "$b/16/bin/" -v "$RUNNER_TEMP/"',
+        False,
+        "#12173 round-31 CONTROL: the same flag on a read stays GREEN",
     ),
 ]
 
