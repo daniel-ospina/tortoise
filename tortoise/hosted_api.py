@@ -21854,13 +21854,23 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             #     unfiltered probe would write a NEW `aboutObject` edge onto a
             #     superseded/archived/retracted Object that every recall surface
             #     excludes (and for `retracted`, the #689 direction).
-            #   • ATTACH TO EVERY carrier, like the Point anchor below (which
-            #     narrows with `AND o.name = $exact` and MERGEs per matching row) —
-            #     otherwise one payload with two exact carriers yields N Point
-            #     edges and ZERO Event edges, a family split no rule asks for.
+            #   • ATTACH TO EVERY carrier, the shape the Point anchor below uses
+            #     (it narrows with `AND o.name = $exact` and MERGEs per matching
+            #     row) — otherwise one payload with two exact carriers yields N
+            #     Point edges and ZERO Event edges, a family split no rule asks
+            #     for.
+            #     ⚠️ DECLARED DIVERGENCE, not parity: that Point anchor is
+            #     STATUS-BLIND (main's behaviour — it carries no liveness
+            #     predicate), while this arm is live-only because the resolver it
+            #     narrows is. So for one reference whose only exact carrier is
+            #     already terminal, the Point channel attaches and this one does
+            #     not. Left as stated rather than silently aligned: making the
+            #     Point arm live-only would change main's behaviour for every
+            #     about-edge payload, which is not this fix's surface.
             # No ambiguity record is owed here: nothing is chosen between
-            # carriers (the pre-fix `_refuse` fired because a FOLD-WIDE resolver
-            # would have had to pick one, which is exactly what this arm avoids).
+            # carriers (the pre-#12120-round-6 arm called `resolve_fold_name`,
+            # which on two carriers recorded an EXEMPT `unfolded-mention` and
+            # dropped the link — precisely the link this arm now writes, to both).
             _exact_rows = proj.g.query(
                 "MATCH (o:Object) WHERE o.name = $n AND "
                 f"{_terminal_excluded('o.status')} RETURN o.id",

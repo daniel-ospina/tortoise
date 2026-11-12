@@ -5768,6 +5768,78 @@ class TestThe12120HostedAboutObjectAnchor:
         assert rows and rows[0][0] >= 1, (
             "F6's exact-name carrier lost its Event edge to the fold arm")
 
+    def test_two_exact_name_carriers_are_refused_before_the_arm_sees_them(
+            self, client):
+        """Round 7 — the N≥2 case is UNREACHABLE through this door, and that is pinned.
+
+        The exact-only arm is only reached for a reference that FOLD-equals a
+        declared subject-kind name, so the payload must declare that very spelling
+        (validation) with a NON-subject kind — which means capture REGISTERS it,
+        and two live same-name carriers are refused there first
+        (`AMBIGUOUS_ENTITY_NAME` / route-then-refuse, #3633). Measured on this
+        fixture: 422 with both candidate ids named.
+
+        So the arm can never see two exact carriers today, and its
+        attach-to-every shape (`_targets`, replacing
+        `_exact_rows[0][0] if len(_exact_rows) == 1 else None`) is DEFENSIVE
+        parity with the Point anchor, not a reachable code path. This test pins
+        the boundary: if registration ever stops refusing, the arm's N≥2 case goes
+        live and this test reds, which is the moment to give it a behavioural pin.
+        """
+        _seed_objects(client, "s12120-ev-two-1", ["the team"])
+        _team_sdk()._get_proj().g.query(
+            "CREATE (b:Object {id:'obj-12120-ev-two-b', name:'the team', "
+            "objectKind:'document', status:'live'})")
+        raw = _raw_payload(
+            1, session_id="s12120-ev-two-2",
+            entities=[{"name": "The Team", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the team", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[])],
+            events=[{"id": "ev_" + "2" * 62, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": ["the team"]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 422, resp.text[:800]
+        assert "AMBIGUOUS_ENTITY_NAME" in resp.text, resp.text[:800]
+
+    def test_an_event_skips_a_terminal_exact_name_carrier(self, client):
+        """Round 7: the exact-only arm is LIVE-ONLY, like the resolver it narrows.
+
+        `resolve_fold_name(mention=True)` reads live holders. The narrowed arm
+        replaced it with a raw probe, and an unfiltered probe writes a NEW
+        `aboutObject` edge onto an Object every recall surface excludes — a link
+        the pre-fix code could not create. Reverting the liveness conjunct reds
+        this test with one edge.
+        """
+        _team_sdk()._get_proj().g.query(
+            "CREATE (b:Object {id:'obj-12120-ev-term-b', name:'the team', "
+            "objectKind:'document', status:'superseded', "
+            "supersededBy:'The Team'})")
+        raw = _raw_payload(
+            1, session_id="s12120-ev-term-2",
+            entities=[{"name": "The Team", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the team", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[])],
+            events=[{"id": "ev_" + "3" * 62, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": ["the team"]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (:Event)-[:aboutObject]->(o:Object {id:'obj-12120-ev-term-b'}) "
+            "RETURN count(*)").result_set
+        assert not rows or rows[0][0] == 0, (
+            "the exact-only Event arm wired a terminal carrier: an `aboutObject` "
+            "edge onto a superseded Object no recall surface shows")
+
     def test_an_event_fold_variant_of_a_subject_kind_name_is_skipped(
             self, client):
         """#12120 review round 4: the EVENT channel needs the FOLD arm.
