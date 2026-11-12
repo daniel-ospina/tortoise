@@ -139,7 +139,7 @@ the owner already ruled on (#10194).
 
 | flag | where | required verification |
 |---|---|---|
-| **Silent function skips** | `subject_binding_available` is a **fail-OPEN** probe (`search_engine.py:6607`, consumed `sdk.py:9540`/`:9593` — a symbol-keyed pair, so a later insertion above either one moves the helper, not the claim); a fail-open probe makes "no subjects" indistinguishable from "never ran" | A5's case must report *which* state occurred — **Tier E**, asserted on the run record, not on a mock |
+| **Silent function skips** | `subject_binding_available` is a **fail-OPEN** probe (`search_engine.py:6607`, consumed `sdk.py:9612`/`:9665` — a symbol-keyed pair, so a later insertion above either one moves the helper, not the claim); a fail-open probe makes "no subjects" indistinguishable from "never ran" | A5's case must report *which* state occurred — **Tier E**, asserted on the run record, not on a mock |
 | **Conditional guards** | `_capture_lane()` returns `"v2"` unless `TORTOISE_SESSION_EXTRACTOR=m2`; the whole door claim hangs on a conditional | a CI-level pin on the selector itself (cheap, file-level) + Tier E evidence that the named lane ran |
 | **Stale measurement artifact** | the shipped verdict table carries `E4 2/15` while `E1-E5-PROOFS.md` corrects to `5/15` | CI pin that **both** figures are named and the stale one is not used as a bar |
 | **N+1 / cost blowup** | `capstone_measure.py` re-derives over 397 nodes; the E4 leg pays 7-session LLM cost | Tier E only; a CI pin on the *declared* point budget would be theatre |
