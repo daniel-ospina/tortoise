@@ -192,6 +192,12 @@ _EXCLUSION_REASONS: dict[str, str] = {
     "embedding_revision": "#5004 — payload-only embedding identity, never a node prop",
     "embedding_text_hash": "#5004 — payload-only embedding identity, never a node prop",
     "embedding_preserved": "#5004 — payload-only capture marker, never a node prop",
+    # #11821 P0: the width the payload's vector TEXT was written at. A property
+    # of the journal's encoding (`embeddings.JOURNAL_VECTOR_WIDTH_KEY`), so the
+    # graph has no counterpart to compare it against — a payload carrying it and
+    # a node lacking it is a FAITHFUL projection, not a missing property.
+    "embedding_width": (
+        "#11821 — payload-only vector-width marker, never a node prop"),
     "evidence_fold": (
         "#10010 — payload-only record flag (`_fold_source_evidence`): this "
         "PointAdded folded evidence into an EXISTING Point, it created nothing"),
@@ -700,9 +706,19 @@ def _canonical_point_fields(props: dict, skip: frozenset = frozenset(),
 def _as_f32(vec: list) -> list | None:
     """Round a vector to the store's `vecf32` width, or None if not numeric.
 
-    The journal carries the ingest encoder's float64 (`encode_for_store`), while
-    the node stores `vecf32($embedding)` — so an exact comparison of a faithful
-    replay fails on the last mantissa bits. Compare at the stored width.
+    ⛔ **The premise was RE-STATED for #11821 P0; the conclusion and the
+    narrowing are unchanged, and the narrowing must be KEPT.** The journal no
+    longer carries the ingest encoder's float64 for a vector the writer
+    produced: it carries the **shortest float32 round-trip decimal** (`0.1`,
+    which is OFF the float32 grid as a float64), while the node stores
+    `vecf32($embedding)` (`0.10000000149011612`). So the two still differ on the
+    last mantissa bits — for a different reason than before — and an exact
+    comparison of a faithful replay still fails. Compare at the stored width:
+    `narrow_to_stored_width(journal 0.1)` → `0.10000000149011612` == the node.
+
+    A caller-owned (`embedding_verbatim`) vector never reaches this function:
+    `_compare_views` reads the marker on either side (`consistency.py:945`) and
+    normalises such a pair WITHOUT narrowing, so it compares exactly.
 
     #8615: the rounding itself lives in `tortoise/stored_form.py` — ONE spelling
     shared with the writer (`cache_projection.node_statement`) and with the

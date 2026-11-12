@@ -3460,6 +3460,11 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # stored verbatim; the writer marks it `embedding_verbatim` instead.
     "embedding_model", "embedding_revision", "embedding_text_hash",
     "embedding_verbatim", "embedding_preserved",
+    # #11821 P0: the journal payload's vector-WIDTH marker is writer-minted for
+    # the same reason as the identity stamps — a caller-set `f32`/`f64` would
+    # declare a width the text does not have, which is exactly the claim a later
+    # width/base64 migration would act on.
+    "embedding_width",
     # #8488 scope 1: the enriched text a turn's vector describes (schema A′ on
     # #8932) is writer-minted by the capture path and replayed from the
     # journaled snapshot; no `PointRevised` arm carries a caller-set value, so

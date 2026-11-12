@@ -5,6 +5,7 @@ Runnable without pytest:  .venv/bin/python tests/test_ingest.py
 """
 from __future__ import annotations  # noqa: I001
 
+import json
 import os
 import sys
 import tempfile
@@ -53,6 +54,21 @@ _live_db = pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="Live FalkorDB (Doc
 
 def _tmp(name):
     return os.path.join(tempfile.mkdtemp(prefix="tortoise_"), name)
+
+
+def _records_of_type(log_path, type_name):
+    """The journal's records whose envelope ``type`` is ``type_name``, PARSED.
+
+    #11821 P0 made the writer COMPACT (``separators=(",", ":")`` — one fewer
+    byte per separator on every line), so a substring match on the PRETTY form
+    ``'"type": "DocumentCreated"'`` stops finding anything. Two of these call
+    sites redded on it in CI; the third asserts ABSENCE and so went silently
+    vacuous, which is the worse half. JSON whitespace is insignificant, so the
+    type is read off the DECODED object where no writer's spacing can mask it.
+    """
+    lines = Path(log_path).read_text(encoding="utf-8").splitlines()
+    return [rec for rec in (json.loads(ln) for ln in lines if ln.strip())
+            if rec.get("type") == type_name]
 
 
 # #3717: the ingest CLI defaults BOTH output paths relative to the process CWD
@@ -470,11 +486,9 @@ Content here.
             dl_mod.load_manifest = orig_load
             dl_mod.resolve_domain_from_path = orig_resolve
 
-        events = [ln for ln in Path(log_path).read_text(encoding="utf-8").splitlines() if ln.strip()]
-        doc_created = [e for e in events if '"type": "DocumentCreated"' in e]
+        doc_created = _records_of_type(log_path, "DocumentCreated")
         assert doc_created, "expected DocumentCreated event"
-        import json
-        ev = json.loads(doc_created[0])
+        ev = doc_created[0]
         assert ev["document_knowledge_domain"] == "capability", \
             f"expected capability, got {ev.get('document_knowledge_domain')!r}"
     finally:
@@ -512,12 +526,10 @@ def test_main_document_metadata_emitted():
                             "--db", db, "--log", log_path, "--out", out]):
         _run_main(None)
 
-    events = [ln for ln in Path(log_path).read_text(encoding="utf-8").splitlines() if ln.strip()]
-    doc_created = [e for e in events if '"type": "DocumentCreated"' in e]
+    doc_created = _records_of_type(log_path, "DocumentCreated")
     assert doc_created, "expected DocumentCreated event"
 
-    import json
-    ev = json.loads(doc_created[0])
+    ev = doc_created[0]
     assert ev["type"] == "DocumentCreated"
     assert ev["title"] == "Research Brief"
     assert ev["document_kind"] == "research"
@@ -538,8 +550,7 @@ def test_main_transcript_no_document():
                             "--db", db, "--log", log_path, "--out", out]):
         _run_main(None)
 
-    events = [ln for ln in Path(log_path).read_text(encoding="utf-8").splitlines() if ln.strip()]
-    doc_created = [e for e in events if '"type": "DocumentCreated"' in e]
+    doc_created = _records_of_type(log_path, "DocumentCreated")
     assert not doc_created, "DocumentCreated should NOT be emitted for transcript"
     print("PASS test_main_transcript_no_document")
 
