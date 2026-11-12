@@ -972,6 +972,39 @@ def test_the_never_run_call_entry_NAMES_every_spelling_it_was_measured_on():
             f"ungated reach was MASKED; state that instead: {summary_clause[:240]!r}…")
 
 
+def test_the_register_scopes_its_SHADOW_claim_to_the_SEAM_and_names_the_builder_residual():
+    """⛔ `#12020` round 11 review (P3): the delta corrected the register's claim that the shadow is
+    threaded per scope — it is, for the SEAM spelling only — and round 11 measured that reverting
+    BOTH hunks left this whole file GREEN (47 passed). The sibling clauses of the same bullet are
+    pinned (the never-run clause and the `gated` summary above); this one was not, so a later
+    cleanup could restore the false universality silently. Pinned by SLICE + PRESENCE, the idiom
+    those pins use, rather than by asserting a phrase is ABSENT across the whole docstring — an
+    absence check reds correct negations and is satisfied by a paraphrase.
+    """
+    doc = re.sub(r"\s+", " ", (register.__doc__ or "").lower())
+    start = doc.find("for the seam spelling the shadow is threaded")
+    stop = doc.find("this bullet is the seam's")
+    assert start != -1 and stop > start, (
+        "the register's SEAM-shadow sentence moved — this pin reads the clause between \"for the "
+        "SEAM spelling the shadow is threaded\" and \"this bullet is the SEAM's\", so re-anchor "
+        "it deliberately rather than letting the pin cover nothing")
+    clause = doc[start:stop]
+    assert "clause builder" in clause, (
+        "the seam-shadow clause no longer says the shadow is scoped to the SEAM by naming the "
+        "clause BUILDER as the exception — without it the sentence reads as universal again: "
+        f"{clause[:240]!r}…")
+    assert "delete" in clause, (
+        "the seam-shadow clause no longer states the DIRECTION of the builder exception — "
+        "suppressing a shadowed builder call DELETES a real writer instead of demoting it, which "
+        "is the measurement the shadow-aware arm was reverted on (`74d7b854cb`): "
+        f"{clause[:240]!r}…")
+    assert "escapes as an argument" in clause, (
+        "the seam-shadow clause no longer points at the builder residual's OWN naming entry — "
+        "`UNDECIDABLE_WRITE_SHAPES` \"… ESCAPES as an argument\" — so a reader who hits the "
+        "exception has no named residual to follow: "
+        f"{clause[:240]!r}…")
+
+
 def test_the_seam_CALL_population_is_the_one_the_register_names():
     """A `gated` writer owes NO declaration — so the register's only duty to it is an accurate
     statement of WHO is in that population, and this is the one claim about it that can go stale.
