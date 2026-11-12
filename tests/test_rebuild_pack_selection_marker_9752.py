@@ -4,12 +4,16 @@
 Six operator-facing arms this change adds are LOG LINES with no count or shape
 behind them, and no test reds if they are deleted or their level degraded:
 
-  `projection/__init__.py:17525`  "restore attempt raised …"        (per-attempt)
-  `projection/__init__.py:17624`  "… treated as transient …"        (gap summary)
-  `projection/__init__.py:13737`  "%d marker(s) were captured, but …"  (rebuild())
-  `projection/__init__.py:13790`  "… but the read-back FAILED …"    (_replay_log)
-  `projection/__init__.py:14576`  "%d TeamMeta, %d PackSelection)"  (union summary)
-  `projection/__init__.py:14999`  "The wipe would also destroy …"   (pre-wipe warn)
+  `projection/__init__.py`  "rebuild: :PackSelection marker restore attempt raised …"
+  `projection/__init__.py`  "… treated as transient (an error after the write landed) …"
+  `projection/__init__.py`  "%d :PackSelection marker(s) were captured, but …"
+  `projection/__init__.py`  "… but the read-back FAILED …"
+  `projection/__init__.py`  "%d TeamMeta marker(s), %d PackSelection marker(s))"
+  `projection/__init__.py`  "The wipe would also destroy the :PackSelection pack-set marker …"
+
+⛔ Named by MESSAGE, not by line: the first version of this block carried six line
+numbers and five of them were already stale when it landed — the block's own
+doctrine, applied to itself (#9752 review r11).
 
 Measured: `elif pack_selection_restore_failures:` → `elif False:` leaves this
 file and both `_replay_log` arms GREEN. That is a REAL gap, not a design choice:
