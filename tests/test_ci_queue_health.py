@@ -2919,7 +2919,7 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # sentence, since a settle-downgraded run WAS read. No needle reached it: the suite was
         # GREEN with the two-route gloss and again with the three-route gloss plus the wrong
         # conclusion, so the presence pin is what keeps the conclusion honest.
-        ("module", "count in this state is an UPPER BOUND on executing work and cannot"),
+        ("module", "pr_running count in this state is an UPPER BOUND on executing work"),
         # ⛔ AND THE GLOSSES THAT ONLY A MAINTAINER READS — pinned because the delta's own rule
         # is that a corrected claim needs a leg, and these had none (#12166 review round 16).
         # The `--help` one is EMITTED (argparse's description), i.e. operator-visible; a revert

@@ -1738,19 +1738,22 @@ def classify_queue(
         return QueueHealth(**base)
 
     def healthy() -> QueueHealth:
-        """`OK` — but only when the PR wait was MEASURED and inside the budget.
+        """`OK` — the PR wait was MEASURED and inside the budget, OR nothing was waiting
+        in any READ leg (see the exception below, which is about `pr_wait_measured`).
 
         ⛔ AND THIS SEAM ALSO RETURNS `OK` WITH `pr_wait_measured=False` (review P2,
         round 21). The condition is NOT truncation — it is `wait_runs` being EMPTY, and
-        there are several ways in (measured): a quiet queue through `no_flood()`, a flood
-        with an executing PR run that leaves no PR wait, and the truncated variant of that
-        last one. Truncation is therefore neither necessary nor sufficient: a truncated
+        there are several ways in (measured): a quiet queue through `no_flood()`, a queue
+        whose offender clears the flood counters but has an executing PR run — leaving no
+        PR wait at all — and the truncated variant of that last one. Truncation is
+        therefore neither necessary nor sufficient: a truncated
         feed whose queued PR wait WAS read returns `pr_wait_measured=True`
-        (`test_a_CUT_pending_leg_cannot_certify_the_queue_clear`'s sibling fixture pins
-        exactly that). In every `False` case this seam's `OK` is a statement about what was
-        READ, and the destructive gate stays shut on it (`congests_pr is None`) because the
-        `wait_runs`-empty clauses emit `pr_wait_measured=False` — the field, not "the
-        sentinel".
+        (`test_congests_pr_is_three_valued_so_a_cancel_cannot_consume_silence` pins that
+        half at `tests:1174-1183`; the `pending_truncated` tests next to it pin the OPPOSITE
+        half deliberately). In every `False` case this seam's `OK` is a statement about what
+        was READ, and the destructive gate stays shut on it (`congests_pr is None`) because
+        the `not wait_runs` clause and the constructor's derivation both emit
+        `pr_wait_measured=False` — the field, not "the sentinel".
 
         Every `OK` EXCEPT the `not wait_runs` clause below returns through
         here. `OK` is a claim
