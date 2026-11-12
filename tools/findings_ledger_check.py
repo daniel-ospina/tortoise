@@ -210,7 +210,7 @@ def _is_host_port(token: str) -> bool:
 #: is indistinguishable from a command without a recognised prefix), and prose with no
 #: path marker (`localhost 6379`, `fetch-depth 0`) stays out of scope exactly as the
 #: `key: value` carve-out above does. The tree-wide sweep is what bounded this: at this
-#: head ONE span is refused across 799 `docs/` files — `collision_preflight.py 10984`,
+#: head ONE span is refused across 801 `docs/` files — `collision_preflight.py 10984`,
 #: a bare tool invocation the arm cannot tell from a path because it has no recognised
 #: program prefix (the `uv run`-prefixed form IS excluded). None is on this page, and
 #: the earlier delimiter sets refused 7, then 600+; each figure was re-measured rather
@@ -342,13 +342,22 @@ TABLE_SEPARATOR_RE = re.compile(r"^\|[\s:|-]+\|$")
 #: A row of §1's vocabulary table: `| **VERDICT** | Means | What a lane should do |`.
 VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 
+#: §1's table header — the FIRST `|` row, and the only row in that table allowed to
+#: carry no verdict. ⛔ A shape test, not a prefix test and not a position test: the
+#: arm used to skip row 1 unconditionally, which exempted whatever sat there, so
+#: `| SUPERSEDED-BY-DRIFT | Means | What a lane should do |` substituted for the
+#: header left `check_document()` at `[]` while the same row one line lower reded
+#: (measured, #11902 review P1) — a claim class with no handling rule, in the exact
+#: class this arm exists for, at the one position no other arm can see.
+VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
+
 #: Floor on the mutation population. `--self-test` is the arm the page's own
 #: justification rests on (*"`--self-test` is what proves the rules still fire"*),
 #: and `MUTATIONS = ()` is a ONE-place edit: without a floor it printed
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 38
+MIN_SELF_TEST_MUTATIONS = 39
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -1088,6 +1097,20 @@ def check_vocabulary(text: str) -> list[str]:
             "§1's table has no header row — its first `|` row is already a "
             "`**VERDICT**` row, so the table a reader sees is not the one this arm "
             "enumerates"
+        )
+    elif vocab_rows and not VOCAB_HEADER_RE.match(vocab_rows[0]):
+        # ⛔ THE FIRST ROW IS THE HEADER, SO IT HAS A SHAPE TOO (#11902 review P1).
+        # Skipping it by POSITION exempted whatever stood there: measured, substituting
+        # `| SUPERSEDED-BY-DRIFT | Means | What a lane should do |` for the shipped
+        # header left `check_document()` at `[]`, while the same row placed one line
+        # lower reded — the header slot was the one position a claim class could
+        # occupy without a handling rule, and no named test or `--self-test` arm could
+        # see it. The exemption is now the header's SHAPE (`| Verdict |`), which is
+        # what the page actually starts its table with.
+        problems.append(
+            f"§1's first `|` row is not the table header: {vocab_rows[0][:80]} — the "
+            "first row is the header (`| Verdict | … |`), so a row shaped any other way "
+            "there is a claim class with no handling rule"
         )
     for row in vocab_rows[1:]:
         if VOCAB_ROW_RE.match(row):
@@ -1990,6 +2013,19 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             1,
         ),
         "is not a `**VERDICT**` row",
+    ),
+
+    (
+        # The header SLOT. Skipping row 1 by position exempted whatever stood there, so
+        # substituting a claim class for the shipped header left `check_document()` at
+        # `[]` while the same row one line lower reded (measured, #11902 review P1).
+        "a §1 first row that is not the table header",
+        lambda t: t.replace(
+            "| Verdict | Means | What a lane should do |",
+            "| SUPERSEDED-BY-DRIFT | Means | What a lane should do |",
+            1,
+        ),
+        "is not the table header",
     ),
     (
         # The tally arm joined EVERY sentence matching its phrase, so a second one
