@@ -2149,11 +2149,14 @@ def test_the_only_ok_outside_the_seam_has_no_wait_to_measure():
 #     `max_pr_wait_seconds` (5400 s), so a queue starved for 30× longer than the floor
 #     certified itself `OK`.
 #
-# THE FIX. `pr_running` counts only runs whose jobs were READ and not all found
-# terminal. The discrimination matters as much as the exclusion: this fixture's `False`
-# MEANS settled (its `updated_at` is 7 days old, so both halves hold), while an
-# unmeasured run abstains toward EXECUTING — under-counting manufactures `PR-STARVED`,
-# a `STARVING_VERDICT` that authorises a destructive cancel-then-rerun.
+# THE FIX. `pr_running` SUBTRACTS only the runs whose jobs were READ, EVERY one of them
+# found terminal (`completed`), and whose own `updated_at` had been still for
+# `JOB_SETTLE_SECONDS` — an all-completed list alone is also what a DYNAMIC matrix's
+# pre-expansion window looks like, so stillness is the second half of the proof. Every
+# other run is still COUNTED, an unmeasured one included: this fixture's `False` MEANS
+# settled (its `updated_at` is 7 days old, so both halves hold), while an unmeasured run
+# abstains toward EXECUTING — under-counting manufactures `PR-STARVED`, a
+# `STARVING_VERDICT` that authorises a destructive cancel-then-rerun.
 
 GHOSTS = (42066648922, 42063693940, 42062549845)
 
@@ -2280,9 +2283,9 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
 
     WHY A TEXT GUARD EXISTS IN A SUITE OTHERWISE BUILT ON EXECUTED ASSERTIONS. The
     settle gate made exclusion require every job `completed` AND `updated_at` still for
-    `JOB_SETTLE_SECONDS`. That rule is stated in prose in SEVEN places — three module
-    comments, two `#:` field docs, two workflow comment blocks — plus the ops doc and two
-    test headers, and prose cannot be executed, so a revert to the one-half wording is
+    `JOB_SETTLE_SECONDS`. That rule is stated in prose in TEN places — three module
+    comments, two `#:` field docs, two workflow comment blocks, the ops doc, and two test
+    headers — and prose cannot be executed, so a revert to the one-half wording is
     invisible to every behavioural test. It has ALREADY happened four times: round 17
     corrected one twin and left the other contradicting it in the same file; the workflow
     block claiming an all-completed run "can never make the census unmeasured" is FALSE for
@@ -2346,8 +2349,10 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         "accepts a run in either state",
         "accepts a repair in either state",
         # a COUNT claim that contradicts this module's own emitted sentence: the field
-        # counts the budget-unreached runs too (the split is emitted separately)
-        "three causes, one bucket",
+        # counts the budget-unreached runs too (the split is emitted separately). Anchored
+        # to the CLAIM, not to the bare count: "three causes, one bucket" alone is a true
+        # statement about `PR-UNWITNESSED` and reds on legitimate prose.
+        "disproved — three causes, one bucket",
     ]
     flats = {name: flat(text) for name, text in scanned.items()}
     # The guard's own docstring quotes several of these to describe them, so the test file
@@ -3318,8 +3323,11 @@ def test_the_unwitnessed_annotation_selects_the_CAUSE_and_its_own_lever():
     enough either: "unmeasured" is either "the budget never reached the run" (raise
     --max-job-probes) or "the run's read did not PROVE it idle" (retry once it has settled —
     a bigger budget probes more runs the same way), and the arm must name the one that
-    applies, not both. The canonical list of what "did not prove it idle" covers lives in
-    `read_run_live_job`'s Returns block; it is NOT re-enumerated here.
+    applies, not both. ⛔ NO SINGLE LIST owns what "did not prove it idle" covers: the callee's
+    routes are in `read_run_live_job`'s Returns block, the settle gate is the caller's
+    (`read_health` downgrades an unproven `False` via `_settled_still` — the callee never sees
+    `updated_at`), and the budget cause is neither. Only the ANNOTATION's copy of the first two
+    is pinned below; the prose that owns the set is `pr_running_unmeasured_unprobed`.
     """
     arm = _pr_unwitnessed_arm_and_branches()
 

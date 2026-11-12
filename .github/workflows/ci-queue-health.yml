@@ -360,9 +360,11 @@ jobs:
               # a third cause: exclusion needs every job `completed` AND `updated_at` still
               # for JOB_SETTLE_SECONDS, so an all-completed run is unmeasured whenever its
               # stillness is unproven — and the bucket it lands in is this one, whose lever
-              # (RETRY once it settles) is exactly right. Such a run is identified BY being
-              # probed, which is the budget lever. Do NOT offer /cancel or /force-cancel as
-              # the lever: for a FROZEN run they answer 409, and for a settle-downgraded one
+              # (RETRY once it settles) is exactly right, and a bigger budget is NOT that
+              # lever — it only probes more runs the same way. A FROZEN run is reachable only
+              # BY being probed; that bounds how many are ever FOUND, it does not fix one.
+              # Do NOT offer /cancel or /force-cancel as the lever: for a FROZEN run they
+              # answer 409, and for a settle-downgraded one
               # they would be ACCEPTED and destructive — the run is about to execute its
               # matrix — so an "API-side repair" is either closed or harmful, never right.
               unprobed_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured_unprobed') or 0)" 2>/dev/null || echo 0)"

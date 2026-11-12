@@ -550,7 +550,9 @@ class QueuedRun:
     #:   * ``True`` — at least one non-terminal job. Executing.
     #:   * ``None`` — NOT MEASURED: a failed jobs read, an empty jobs list, a malformed or
     #:     status-less job row, a payload whose jobs belong to a DIFFERENT attempt, a list
-    #:     that is not provably complete, or a run the probe BUDGET
+    #:     that is not provably complete, an all-`completed` list the run's own `updated_at`
+    #:     did not corroborate (“still for `JOB_SETTLE_SECONDS`” — applied by the CALLER,
+    #:     `read_health`, since only it holds the run projection), or a run the probe BUDGET
     #:     (`DEFAULT_MAX_JOB_PROBES`) never reached. Abstains toward EXECUTING, i.e. toward
     #:     the pre-#12037 status-string reading that every caller constructing a `QueuedRun`
     #:     without this field still gets.
@@ -688,8 +690,9 @@ class QueueHealth:
     pr_running_excluded: tuple[int, ...] = ()
     #: PR-event runs that are still COUNTED as executing because their execution was not
     #: disproved. FOUR causes, ONE bucket — and the causes span three layers, so the
-    #: enumeration and its attribution live once, on `pr_running_unmeasured_unprobed` below,
-    #: and are deliberately not restated here (a second copy is what drifted before).
+    #: ATTRIBUTION is stated once, on `pr_running_unmeasured_unprobed` below, and the set is
+    #: deliberately not re-enumerated here (a second copy is what drifted before; the
+    #: `has_live_job` field doc above carries the callee's half of it).
     #: Abstaining toward executing is what keeps an unread jobs surface from manufacturing
     #: `PR-STARVED` — a `STARVING_VERDICT` that authorises a destructive cancel-then-rerun.
     #: Reported so the abstention is visible.
@@ -1588,10 +1591,11 @@ def classify_queue(
             # — a run GitHub has stopped driving — and they are subtracted from
             # `pr_running`. BOTH halves are required: an all-completed list alone is also
             # what a DYNAMIC matrix's pre-expansion window looks like.
-            # `pr_running_unmeasured` counts runs whose jobs could not be read OR whose
-            # all-completed list was not corroborated by stillness; they remain IN
-            # `pr_running` (abstaining toward executing, so an unread jobs surface can
-            # never manufacture a starvation verdict).
+            # `pr_running_unmeasured` counts the runs still counted because their execution
+            # was not disproved — whether the probe never reached them or their read proved
+            # nothing (a failed read, nothing usable, or an all-completed list stillness did
+            # not corroborate); they remain IN `pr_running` (abstaining toward executing, so
+            # an unread jobs surface can never manufacture a starvation verdict).
             "pr_running_excluded": pr_running_excluded,
             "pr_running_unmeasured": pr_running_unmeasured,
             # ⛔ THE DEGRADATION ITSELF, EMITTED AS A NAMED FACT (#12037 review round 5).
