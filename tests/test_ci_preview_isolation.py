@@ -131,19 +131,65 @@ def _child_pids(pid: int) -> list[int]:
     return kids
 
 
-def _spawn(cmd: list[str], cwd: Path) -> subprocess.Popen:
-    """A detached process, like `wrangler pages dev` under a runner step."""
+def _spawn(cmd: list[str], cwd: Path, executable: str | None = None) -> subprocess.Popen:
+    """A detached process, like `wrangler pages dev` under a runner step.
+
+    `executable=` decouples WHAT RUNS from `argv[0]`: the census/`pkill` name and the
+    program are then two different things, which is the only portable way to put an
+    arbitrary name in front of a live process (#12039).
+    """
     return subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, start_new_session=True)
+                            stderr=subprocess.DEVNULL, start_new_session=True,
+                            executable=executable)
 
 
 def _wait_alive(pid: int, timeout: float = 5.0) -> None:
+    """Wait for the pid to be RUNNING — ⚠️ in the sense `_pid_alive` means, which is NOT
+    "the decoy is up".
+
+    ⛔ `Popen` RETURNS AT FORK TIME, and a freshly forked child is a copy of THIS process:
+    `/proc/<pid>/stat` reads a live, non-zombie `R` for a few microseconds before `execve`
+    has run one instruction of what we spawned. So this returns for a child that never
+    becomes the decoy at all — measured on an idle box, 6/6, against a decoy that exits 1
+    at exec: every wait passed. Use `_await_exec` when the question is "did it RUN".
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _pid_alive(pid):
             return
         time.sleep(0.05)
     pytest.fail(f"decoy pid {pid} never came alive — the harness cannot measure")
+
+
+def _await_exec(pid: int, argv0: str, timeout: float = 5.0) -> None:
+    """Wait until the pid has actually EXEC'd the command we spawned (#12039).
+
+    ⛔ `_wait_alive` CANNOT ANSWER THIS, and its passing is not evidence the decoy ever
+    ran (see its docstring): the forked child is alive before `execve`. The observable
+    that separates the two states is the COMMAND LINE, because `execve` rewrites it —
+    before exec it still carries the pytest worker's argv, after exec it carries ours.
+    Same fork→exec window as the census probe in `tests/test_fleet_state.py`, same remedy.
+
+    A decoy that dies at exec fails HERE, saying so, instead of surfacing minutes later as
+    `record` refusing a pid the harness had "just confirmed alive".
+    """
+    deadline = time.time() + timeout
+    seen = ""
+    while time.time() < deadline:
+        seen = subprocess.run(
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        if seen.startswith(argv0):
+            return
+        if not _pid_alive(pid):
+            break
+        time.sleep(0.05)
+    pytest.fail(
+        f"decoy pid {pid} never ran {argv0!r} — the harness cannot measure "
+        f"(the table's row for it read {seen!r}, so it either exited at exec or never "
+        f"replaced its parent's command line)"
+    )
 
 
 def _kill0(pid: int) -> str:
@@ -168,17 +214,19 @@ def _record_when_running(name: str, pid: int, env: dict[str, str],
                         timeout: float = 10.0) -> subprocess.CompletedProcess:
     """`record` a just-spawned pid, asking the SUT until it answers — and naming why not.
 
-    ⛔ THE SUT GRADES LIVENESS ITSELF. `record` decides with
-    `preview-server.sh::pid_running` = `kill -0 <pid>` **and** `/proc` state != `Z`;
-    `_wait_alive` decides with the state letter alone. Read those two again: they are
-    the SAME question — exists, and is not a zombie — because `kill -0` succeeds for a
-    zombie and only the state letter rules it out. So one sample cannot disagree, and
-    the red this issue reports is a GAP IN TIME rather than a difference of predicate:
-    the decoy was alive when `_wait_alive` returned and gone by the time `record` had
-    finished spawning its shell (issue #12039; `test (a)` red on main at `4b1d6cd0d4`).
-    ⚠️ Said plainly because the issue's own first framing was "two predicates disagreed
-    about the same pid within the same millisecond" — that cannot happen; a later sample
-    can only differ if the process can come back, and this one cannot.
+    ⛔ THEY AGREE FOR ANY PID THIS USER CAN SIGNAL. `kill -0` succeeds on a zombie — it
+    is the state letter that rules one out, on either side — so both ask "exists and is
+    not a zombie". The only one-sample divergences are EPERM (exists, not signalable)
+    and an unreadable `/proc`, and neither is reachable for a child of THIS process. So a
+    single sample cannot disagree, and what the reds this issue reports actually are is
+    not a predicate mismatch:
+
+      * at the preview decoy the decoy never reached `execve` (a renamed multi-call
+        binary, #12039 measured on `ubuntu-26.04`) — the fixture's; fixed here, and now
+        probed with `_await_exec` instead of `_wait_alive`;
+      * otherwise the process was gone by the time `record` spawned its shell — a GAP IN
+        TIME, which no retry reverses (issue #12039; `test (a)` red on main at
+        `4b1d6cd0d4`).
 
     ⚠️ WHAT THE POLL CAN AND CANNOT REPAIR — stated because the honest answer
     determines whether a red here blames the code or the box. Of `record`'s two
@@ -186,10 +234,10 @@ def _record_when_running(name: str, pid: int, env: dict[str, str],
     start time"); the LIVENESS arm (`kill -0` says ESRCH/EPERM, or the state letter
     is `Z`) is a process that is gone or a zombie, and no number of retries brings it
     back. So this is not a fix for "the decoy was OOM-killed on a thrashing runner" —
-    it is a bounded second look at the ONE retryable arm, plus a refusal that says
-    WHICH leg refused so the next reader does not have to guess. The time-gap arm that
-    produced the reported red stays open, and it is a capacity/dead-decoy question, not
-    a probe question.
+    it is a refusal that says WHICH leg refused so the next reader does not have to
+    guess. ⚠️ The loop re-asks on ANY refusal, not only the retryable one (gating it on
+    the arm would make a message an assertion condition, which this file forbids), so a
+    liveness refusal costs the full deadline and still fails — correctly.
 
     A refusal that survives the deadline stays a FAILURE: this is a bounded second
     look at a transient window, not a licence for a dead pid to go green.
@@ -239,9 +287,16 @@ def _refusal_arm(env: dict[str, str], name: str, pid: int) -> str:
         )
     arm = parts[2]
     if arm == "not-running":
-        return ("the LIVENESS leg refused (`pid_running`): the spawn was already gone "
-                "or a zombie when `record` ran — that red is the fixture's, not the "
-                "SUT's (`stderr` says 'is not running')")
+        return (
+            "the LIVENESS leg refused (`pid_running`). ⚠️ THE WITNESS DOES NOT SAY WHICH "
+            "OF THAT ARM'S THREE CAUSES FIRED — `kill -0` failing gives ESRCH (gone) or "
+            "EPERM (unsignalable), and a `Z` state letter is the third — so this names "
+            "the candidates and not a culprit: the decoy exited or never exec'd (the "
+            "fixture's), a peer job's machine-global reap killed it (#10283's actual "
+            "defect, i.e. a REAL finding), or `/proc` lost it (the SUT's). Read the "
+            "decoy's own exit status and the job log before closing a red here as flake"
+            " (`stderr` says 'is not running' for all three)"
+        )
     if arm == "no-start-time":
         return ("the START-TIME leg refused (`pid_starttime`): `/proc` lost the pid "
                 "under us — the retryable arm this poll exists to absorb, so a "
@@ -543,14 +598,45 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
     assert SCRIPT.is_file(), f"missing {SCRIPT}"
 
     # Job B: a `workerd`-named decoy, registered in ITS OWN state directory.
+    #
+    # ⛔ NOT A SYMLINK TO `sleep` (#12039, measured). On the `ubuntu-26.04` hosted image
+    # `/usr/bin/sleep` is a uutils MULTI-CALL binary that dispatches on
+    # `basename(argv[0])`, so a process renamed to `workerd` refuses to run at all
+    # (`coreutils: unknown program 'workerd'`, exit 1). The decoy then never exists and
+    # this test reds as `record: pid N is not running` — #12039's exact signature — with
+    # nothing wrong in the SUT. The sibling census fixture in `tests/test_fleet_state.py`
+    # carries the same fix (`executable=`), for the same reason.
+    #
+    # argv[0] is the name the pre-fix teardown matched, and `prctl(PR_SET_NAME)` gives the
+    # process the `comm` `pkill workerd` actually reads, so the decoy stays faithful to
+    # #10283's shape while no longer depending on a copied binary accepting its new name.
     peer_bin = tmp_path / "bin"
     peer_bin.mkdir()
     peer_workerd = peer_bin / "workerd"
-    peer_workerd.symlink_to("/bin/sleep")
     peer_state = dict(state, PREVIEW_STATE=str(tmp_path / "peer-preview"), GITHUB_JOB="dashboard-e2e")
-    peer = _spawn([str(peer_workerd), "120"], tmp_path)
-    _wait_alive(peer.pid)
-    assert (peer_bin / "workerd").exists()
+    peer = _spawn(
+        [str(peer_workerd), "-c",
+         "import ctypes, time\n"
+         "try:\n"
+         "    ctypes.CDLL('libc.so.6').prctl(15, b'workerd', 0, 0, 0)\n"
+         "except OSError:\n"
+         "    pass\n"              # not Linux: argv[0] still carries the name
+         "time.sleep(120)\n"],
+        tmp_path, executable=sys.executable,
+    )
+    _await_exec(peer.pid, str(peer_workerd))
+    # The decoy must really BE a `workerd` process, or this test proves nothing about the
+    # name `pkill workerd` matched (#12039 replaced the symlinked `sleep` with an
+    # interpreter under that argv[0] + `prctl`, so the pin moves from "the symlink exists"
+    # to "the process is named workerd"). `ps -o comm=` is what `pkill` reads; guarded to
+    # Linux because `prctl` does not exist elsewhere and comm then stays the interpreter's.
+    if Path("/proc").is_dir():
+        comm = subprocess.run(["ps", "-o", "comm=", "-p", str(peer.pid)],
+                              capture_output=True, text=True).stdout.strip()
+        assert comm == "workerd", (
+            f"the peer decoy is named {comm!r}, not `workerd` — the shape #10283's "
+            "pre-fix machine-global `pkill workerd` matched is not reproduced"
+        )
     result = _record_when_running("app", peer.pid, env=peer_state)
     assert result.returncode == 0, _recorded(result, peer.pid, peer_state)
 
@@ -904,6 +990,12 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
     afterwards (a later sample, which can invert the attribution: a decoy alive at
     refusal can be a zombie by the time the message is formatted).
 
+    ⚠️ THE LIVENESS ARM IS NAMED BY CANDIDATES, NOT BY A CULPRIT — the witness records
+    the VERDICT and none of the three legs that can produce it (ESRCH, EPERM, `Z`), and
+    a dead decoy is *possibly a true positive* (#10283's machine-global reap, the defect
+    that is then named). Calling it "the fixture's" would tell the next reader to close
+    a real defect as flake.
+
     ⛔ THE LIVENESS WITNESS IS PRODUCED BY THE SUT, NOT WRITTEN BY HAND. The parser
     couples to `cmd_record`'s exact wording, and a fabricated string cannot notice the
     day that wording moves — every arm would silently degrade to "arm is unrecorded"
@@ -929,7 +1021,11 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
         "the SUT's own witness no longer parses — its wording moved and every arm is now "
         f"attributed to nothing: {liveness}"
     )
-    assert "fixture's, not the SUT's" in liveness, liveness
+    assert "the candidates and not a culprit" in liveness, liveness
+    assert "#10283" in liveness, (
+        "the liveness arm's message must name the REAL defect a dead decoy can be "
+        f"(#10283's machine-global reap), not only the fixture: {liveness}"
+    )
     assert "observed NOW" in liveness, liveness
 
     # ⛔ A witness for a DIFFERENT pid is not this refusal's arm. `cmd_record` writes
@@ -945,9 +1041,9 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
     starttime = _recorded(dead, 4242, state)
     assert "START-TIME leg refused" in starttime, starttime
     assert "retryable arm" in starttime, starttime
-    assert "fixture's, not the SUT's" not in starttime, (
-        "the start-time arm is the SUT's own failure to read /proc — calling it the "
-        f"fixture's red inverts the attribution: {starttime}"
+    assert "the candidates and not a culprit" not in starttime, (
+        "the start-time arm has ONE cause the witness names exactly — a multi-cause "
+        f"message here would send the reader hunting: {starttime}"
     )
 
     (state_dir / "app.refused").unlink()
