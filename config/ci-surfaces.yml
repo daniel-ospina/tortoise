@@ -1558,15 +1558,16 @@ surfaces:
   - test_3036_oauth_retention.py  # #3036: oauth_* retention/GC sweep (fake CP, no live DB)
   - test_3026_oauth_boundaries.py  # #3026: the five OAuth endpoints' transient-failure boundary (fake CP via #2863's harness; asserts no bare 500 detail reaches a consumer)
   - test_pricing_tiers.py
-  # #11758 (`#11981` on main): the two PURCHASABLE storage dimensions declared on the
-  # pricing record — stored data and hot capacity, per account. ⛔ `main` landed this
-  # file WITHOUT a `surfaces:` entry, so `tools/ci_selection.py --integrity` reports
-  # `manifest drift: ['test_pricing_storage_dimensions.py']` on `origin/main` itself and
-  # reds the manifest-integrity gate for every PR (measured on `e4703a286a`). `core` is
-  # the home for the same reason its `pricing_tiers` sibling above sits here: the file
-  # pins `tortoise/pricing.py` / the pack loader / the overage arithmetic, none of which
-  # matches a named SOURCE_PATTERN, so a change there falls through to `core`.
-  - test_pricing_storage_dimensions.py
+  # ⛔ `test_pricing_storage_dimensions.py` IS NOT REGISTERED HERE. A change of mine
+  # added it beside this `api` sibling on the theory that it needed classifying; it did
+  # not — `26176ca7d9`, a repair on the same branch, had already put it in `core`, where
+  # it belongs (it pins `tortoise/pricing.py`, the pack loader and the overage
+  # arithmetic, and those fall through to `core`). Keeping both rows is invisible to
+  # `--integrity`, which checks duplicates WITHIN a list, but it changes what runs:
+  # measured, `select(['tests/test_pricing_storage_dimensions.py'])` returned
+  # `['api', 'core']` with 953 test files against `['core']` with 819 — 134 extra files
+  # on the PR leg of every change to that one file. Deleted rather than corrected in
+  # place, and this note stays so the row is not "repaired" back in.
   - test_probe_reset_inflight_4608.py  # #4608: a probe reset/rebuild must not close a handle an in-flight probe still queries (hosted_api + selfhost)
   - test_provisioning_edge_function.py
   - test_quota.py
