@@ -430,6 +430,30 @@ class TestTheEventApiDoor:
         assert len(_journal_lines(sdk._test_log)) == _before, (
             "a refused call must append nothing to the journal")
 
+    def test_a_key_the_JOURNAL_would_file_as_status_is_guarded_too(self, sdk):
+        """Review cycle 7, P1 — TWO key renderers, and the journal is the second.
+
+        The live transport inlines ``str(key)``; the journal serialises the map
+        with ``json.dumps``, which writes a ``str`` SUBCLASS key by its CONTENT.
+        A key with content ``"status"`` and ``__str__`` returning ``"harmless"``
+        was therefore ACCEPTED at every door: the live node kept
+        ``harmless='superseded'``, the journalled record carried
+        ``"status": "superseded"``, and ``rebuild_all`` from that journal
+        produced a TERMINAL ``:Event`` — a bypass that exists only on the replay
+        path, which is the path this whole half-state class is about. The guard
+        now asks the UNION of both renderings.
+        """
+
+        class _ReplayKey(str):
+            def __str__(self):
+                return "harmless"
+
+        eid = _event(sdk, name="ReplaySplit")
+        with pytest.raises(ValueError, match="not writable on an :Event"):
+            sdk.update_entity(eid, **{_ReplayKey("status"): "superseded"})
+        stored = _props(sdk, eid)
+        assert "harmless" not in stored and "status" not in stored, stored
+
     def test_the_outdated_half_is_gated_by_the_same_rendered_key_rule(self, sdk):
         """Review cycle 6, P1 — the SDK door gated on `status` ALONE.
 
@@ -871,6 +895,16 @@ class TestTheBundleValidationDoor:
 
         base = {"ref": "e1", "type": "event", "name": "A",
                 "eventKind": "deployment"}
+        # (0) the SAME key at both levels: `_coerce_props` fills absent keys from
+        # the nested map, so the TOP-LEVEL value wins — a top terminal is a
+        # violation, and a top non-terminal shadows the nested terminal exactly as
+        # the writer shadows it.
+        assert sdk._validate_bundle({"entities": [
+            {**base, "status": "superseded", "props": {"status": "live"}},
+        ]}), "the door refuses the top-level terminal status; Phase 1 must too"
+        assert sdk._validate_bundle({"entities": [
+            {**base, "status": "live", "props": {"status": "superseded"}},
+        ]}) == [], "the writer keeps the top-level `live`; Phase 1 must not over-reject"
         # (a) an aliased `status: live` plus a nested terminal status: the door
         # merges both and refuses, so Phase 1 must too.
         assert sdk._validate_bundle({"entities": [

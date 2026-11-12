@@ -731,8 +731,9 @@ class EventAPI:
         # `_emit("EntityMutated", id=<event id>, label="Event", op="restatus",
         # state={"status": "superseded"})` is exactly what
         # `projection._journal_entity_mutation` emits, the fold reads it through
-        # `state["status"]` → `restatus` (`cache_projection`, `EventMutated`
-        # arm), and it stored a terminal `:Event` status with no refusal.
+        # `state["status"]` → `restatus` (`projection._fold_entity_mutation`,
+        # the `EntityMutated` state arm), and it stored a terminal `:Event` status
+        # with no refusal.
         # ⛔ HERE, not only at `emit_belief`: this is the seam the
         # `EventRecorded` refusal above already argues is "what makes the answer
         # independent of a door list", and a cycle-6 measurement showed the one
@@ -1078,7 +1079,7 @@ class EventAPI:
         # label: `emit_belief("EntityMutated", id=<event id>, label="Event",
         # op="restatus", state={"status": "superseded"})` is exactly the shape
         # `projection._journal_entity_mutation` emits, the fold reads it through
-        # `state["status"]` → `restatus` (`cache_projection`, `EventMutated` arm),
+        # `state["status"]` → `restatus` (`projection._fold_entity_mutation`, the `EntityMutated` state arm),
         # and it stored a terminal `:Event` status with no refusal at all — the
         # same half-state this change exists to make unwritable, reached through
         # the door the change declared in scope (measured: the node carried

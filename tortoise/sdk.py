@@ -27462,43 +27462,64 @@ class TortoiseSDK:
             # `_event_state_declarations` is the same renderer-side reader the
             # door uses, over the item and its nested `props` with the door's
             # presence precedence.
-            from .live import _event_state_declarations
-            _declares_status = False
+            # ⛔ The scope precedence is the WRITER's, not "last scope wins"
+            # (review cycle 7, P1/P2 — the first revision of this arm got it
+            # backwards, then the second removed the `break` and got it backwards
+            # the other way). `_coerce_props` fills ABSENT keys from the nested
+            # `props`, so the TOP-LEVEL key wins; an aliased top-level key does
+            # not shadow a literal nested one, because the fill is by EXACT key.
+            # Building the merged map is the only way to get all three measured
+            # shapes right — top terminal + nested live, top live + nested
+            # terminal, and aliased top + literal nested terminal.
+            # ⛔ The scope precedence is the WRITER's, and the same-name collision
+            # rule is the ENGINE's (review cycle 7). Three shapes had to be
+            # measured to get this right, and the two earlier revisions each got
+            # one wrong:
+            #   * `_coerce_props` fills ABSENT keys from the nested `props`, so the
+            #     TOP-LEVEL value of the SAME exact key wins;
+            #   * two DIFFERENT keys that both render to `status` are both written,
+            #     and the door refuses when EITHER is terminal (measured).
+            # So the map is built the way the writer builds it, and then EVERY
+            # declaration of the guarded name is evaluated — which cannot call a
+            # bundle clean that the door refuses, and does not over-reject the
+            # same-key shadowing the writer resolves.
+            from .live import _event_state_key_names
+            _scopes = []
+            _cur: object = item
+            for _ in range(_item_flatten_depth(item, "entities") or 1):
+                if not isinstance(_cur, dict):
+                    break
+                _scopes.append(_cur)
+                _cur = _cur.get("props")
+            _merged: dict = {}
+            for _scope in _scopes:                # shallow first: it WINS
+                _merged.update({k: v for k, v in _scope.items()
+                                if k not in _merged})
+            _status_values = [v for k, v in _merged.items()
+                              if "status" in _event_state_key_names(k)]
             own_status = None
-            for _scope in (item, item.get("props")):
-                if not isinstance(_scope, dict):
-                    continue
-                _sd, _sv, _od, _ov = _event_state_declarations(_scope)
-                if _sd:
-                    _declares_status, own_status = True, _sv
-            if not _declares_status:
+            if not _status_values:
                 _declares_status, own_status = _item_declared_status(
                     item, _item_flatten_depth(item, "entities"))
-            if not _declares_status:
+                _status_values = [own_status] if _declares_status else []
+            else:
+                own_status = _status_values[-1]
+            # `status: None` is the DOCUMENTED clear route the door ACCEPTS, so it
+            # is not a violation (review cycle 5, P2).
+            _status_values = [v for v in _status_values if v is not None]
+            if not _status_values:
                 continue
-            if own_status is None:
-                # The documented clear route: a string is drawn from the
-                # vocabulary, `None` CLEARS it — the door accepts this, so it is
-                # not a violation.
-                continue
-            # ⛔ The TYPE dimension is part of this arm (review cycle 6, P1).
-            # `refuse_terminal_event_state` refuses a PERSISTABLE non-string
-            # status (an int glided through the membership test and stored a
-            # status no vocabulary can name) while a NON-persistable one is
-            # accepted-and-dropped, because the projection's persistable-value
-            # filter drops it before the `SET` (#7925's over-rejection class).
-            # Without this mirror a bundle carrying `status: 42` passed Phase 1
-            # and raised in step 3 with the point already committed — the same
-            # partial-mutation class, in the dimension this arm had not swept
-            # (measured: `phase1: []` then `ValueError`, point count 0 → 1).
-            if not isinstance(own_status, str):
-                from .live import _status_is_discarded_by_every_writer
-                if _status_is_discarded_by_every_writer(own_status):
-                    continue
+            # The TYPE dimension (review cycle 6, P1): a PERSISTABLE non-string is
+            # refused by the door, a discarded one is accepted-and-dropped.
+            from .live import _status_is_discarded_by_every_writer as _is_discarded
+            _stored_bad = [v for v in _status_values
+                           if not isinstance(v, str)
+                           and not _is_discarded(v)]
+            if _stored_bad:
                 violations.append({
                     "section": "entities", "index": i,
                     "message": f"ingest: entities[{i}] declares status "
-                               f"{own_status!r} for an :Event — `status` on "
+                               f"{_stored_bad[0]!r} for an :Event — `status` on "
                                f"the node is a STRING drawn from the "
                                f"vocabulary, or `None` to clear it, so the "
                                f"bundle is rejected at validation rather "
@@ -27507,11 +27528,20 @@ class TortoiseSDK:
                                f"`live`), or drop `status`.",
                 })
                 continue
-            # The VALUE is normalised the way the door normalises it: a `str`
-            # SUBCLASS can lie about `__hash__`/`__eq__` (and its content is what
-            # the store keeps), so the terminal test runs on the base value.
-            if not is_terminal_status(str.__str__(own_status)):
+            if not any(isinstance(v, str)
+                       and is_terminal_status(str.__str__(v))
+                       for v in _status_values):
                 continue
+            violations.append({
+                "section": "entities", "index": i,
+                "message": f"ingest: entities[{i}] declares status "
+                           f"{_status_values[-1]!r} for an :Event — an :Event "
+                           f"carries no lifecycle, so its door refuses the "
+                           f"terminal half mid-write and the bundle is rejected "
+                           f"at validation. WHAT TO DO: drop `status` from the "
+                           f"item, or use a non-terminal value (the door "
+                           f"accepts `scheduled`/`draft`/`live`).",
+            })
             violations.append({
                 "section": "entities", "index": i,
                 "message": f"ingest: entities[{i}] declares status "

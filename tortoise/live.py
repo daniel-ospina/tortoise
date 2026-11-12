@@ -32,6 +32,7 @@ is the factor-extraction family that must agree on ``include_draft``, so
 
 from __future__ import annotations
 
+import contextlib
 import json
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -625,12 +626,39 @@ def _event_state_key(key):
     ``.decode()``), the VALUE keeps its base content (``str.__str__``), because
     that is what the writer does with each.
     """
+    return _event_state_key_names(key)[0]
+
+
+def _event_state_key_names(key) -> tuple[str, ...]:
+    """EVERY name this key can be filed under — the union of the two renderers.
+
+    ⛔ There are TWO key renderers and they disagree for a `str` SUBCLASS:
+      * the LIVE transport inlines ``str(key)`` (bytes: ``key.decode()``) —
+        ``projection._map_key_ok`` states it;
+      * the JOURNAL serialises the map with ``json.dumps``, which writes a
+        ``str`` subclass key by its CONTENT.
+    Measured (review cycle 7, P1): a key with content ``"status"`` and
+    ``__str__`` returning ``"harmless"`` was ACCEPTED at every door, the live
+    node kept ``harmless='superseded'``, the journalled record carried
+    ``"status": "superseded"``, and ``rebuild_all`` from that journal produced a
+    TERMINAL ``:Event`` — a bypass that only exists on the replay path, which is
+    the path the whole half-state class is about. So the guard asks the union:
+    if ANY renderer would file the key under a guarded name, it is guarded. The
+    reverse (content ``"x"``, ``__str__`` ``"status"``) was already refused; this
+    closes the direction that was not.
+    """
+    names: list[str] = []
     if isinstance(key, bytes):
-        try:
-            return key.decode()
-        except UnicodeDecodeError:  # not a renderable name; the driver aborts
-            return key
-    return str(key)
+        with contextlib.suppress(UnicodeDecodeError):
+            names.append(key.decode())
+    else:
+        names.append(str(key))          # the live transport's rendering
+        if isinstance(key, str):
+            names.append(str.__str__(key))   # the journal's rendering (content)
+        else:
+            names.append(repr(key))
+    # Sorted + de-duplicated only so a plain ``str`` yields exactly one name.
+    return tuple(dict.fromkeys(names))
 
 
 def declares_status_key(props) -> bool:
@@ -642,7 +670,7 @@ def declares_status_key(props) -> bool:
     guard entirely (measured at review cycle 4 — the VALUE axis was closed and
     the KEY axis was not).
     """
-    return any(_event_state_key(key) == "status" for key in props)
+    return any("status" in _event_state_key_names(key) for key in props)
 
 
 def declares_event_state_key(props) -> bool:
@@ -657,7 +685,9 @@ def declares_event_state_key(props) -> bool:
     through a declared door). `create_entity`/`add_event`/`_emit`/`emit_belief`
     refused the same key, so this was the one hole.
     """
-    return any(_event_state_key(key) in ("status", "outdated") for key in props)
+    return any(_event_state_key_names(key) and
+               {"status", "outdated"}.intersection(_event_state_key_names(key))
+               for key in props)
 
 
 def _event_state_declarations(props) -> tuple[bool, object, bool, object]:
@@ -670,10 +700,10 @@ def _event_state_declarations(props) -> tuple[bool, object, bool, object]:
     status_declared = outdated_declared = False
     status = outdated = None
     for key, value in props.items():
-        key = _event_state_key(key)
-        if key == "status":
+        names = _event_state_key_names(key)
+        if "status" in names:
             status_declared, status = True, value
-        elif key == "outdated":
+        if "outdated" in names:
             outdated_declared, outdated = True, value
     return status_declared, status, outdated_declared, outdated
 
