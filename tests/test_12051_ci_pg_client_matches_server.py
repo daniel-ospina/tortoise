@@ -59,6 +59,16 @@ JOB = "test-record-postgres"
 IMAGE_RE = re.compile(r":(?:pg)?(\d+)$")
 CLIENT_PKG_RE = re.compile(r"postgresql-client-(\d+)\b")
 
+#: The INSTALL line specifically. `CLIENT_PKG_RE` is ALSO satisfied by the
+#: precondition's probe above it (`apt-cache show postgresql-client-16`), so a
+#: first-match read reported the PROBE's major as the installed one and a
+#: comment naming the package could select the step (MEASURED, review of
+#: `17847279b1`: mutating the install to `-18` left this test green, and a
+#: comment line naming `postgresql-client-16` could satisfy the pin-step search).
+CLIENT_INSTALL_RE = re.compile(
+    r"apt(?:-get)?\s+install[^\n]*?\bpostgresql-client-(?P<major>\d+)\b"
+)
+
 #: The `$GITHUB_PATH` write as ONE unit: the versioned dir IS the value written.
 #: `echo <dir> >> "$GITHUB_PATH"` — read the major from the
 #: write line itself, never from an `export` elsewhere in the step.
@@ -84,11 +94,16 @@ def _run_text(step: dict) -> str:
 
 
 def _pin_step(steps: list[dict]) -> tuple[int, dict]:
-    """The one step that installs a PostgreSQL client package."""
+    """The one step that installs a PostgreSQL client package.
+
+    Read from the step's CODE: a comment naming the package is inert shell, and
+    letting it select the step both mis-identifies the pin and, when two steps
+    are matched, reports "a second installer" over a step that installs nothing.
+    """
     hits = [
         (index, step)
         for index, step in enumerate(steps)
-        if CLIENT_PKG_RE.search(_run_text(step))
+        if CLIENT_PKG_RE.search(_code_only(_run_text(step)))
     ]
     assert len(hits) == 1, (
         "expected exactly ONE PostgreSQL-client pin step in "
@@ -158,10 +173,10 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     _, pin = _pin_step(steps)
     text = _run_text(pin)
 
-    pkg = CLIENT_PKG_RE.search(text)
+    pkg = CLIENT_INSTALL_RE.search(_code_only(text))
     assert pkg, f"the pin step does not install `postgresql-client-<major>`: {text!r}"
-    assert int(pkg.group(1)) == server_major, (
-        f"the client pin installs major {pkg.group(1)} but the provisioned "
+    assert int(pkg.group("major")) == server_major, (
+        f"the client pin installs major {pkg.group('major')} but the provisioned "
         f"servers are pg{server_major}. A client NEWER than the target server "
         "dumps a preamble the target cannot execute — `SET transaction_timeout` "
         "from a PG17 client into a PG16 server is #12051"
@@ -170,7 +185,7 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # ONE regex over the WHOLE command: the versioned dir must be the value
     # WRITTEN TO `$GITHUB_PATH`. A bare `CLIENT_PATH_RE`/`"GITHUB_PATH" in text`
     # pair is satisfiable by two different lines and by an inert `export`.
-    prepend = GITHUB_PATH_PREPEND_RE.search(text)
+    prepend = GITHUB_PATH_PREPEND_RE.search(_code_only(text))
     assert prepend, (
         "the pin step never writes a `/usr/lib/postgresql/<major>/bin` entry to "
         "`$GITHUB_PATH`; a prepend that only exists as an `export` inside this "
@@ -376,12 +391,16 @@ _VERSION_BRANCH_RE = re.compile(
     # (no separator) is a syntax error, so it must NOT match: accepting it would
     # assert an armed branch over one the shell cannot parse.
     r"(?:\s*;\s*then|\n[ \t]*then)"
-    # The branch ENDS at the HEADER's own indent (`(?P=ind)`), so a nested `if … fi`
-    # inside it cannot end the body early. MEASURED (review of `25b89e4e94`): with a
-    # wildcard indent, the nested `if [ -n "${ImageOS:-}" ]` this pin step already
-    # uses truncated the body before its `::error::`/`exit 1`, and the guard
-    # reported a gutted fail-closed arm over one that was present and armed — the
-    # false block `origin/main`'s `_closing_fi(indent)` helper existed to prevent.
+    # The branch ENDS at the HEADER's own indent (`(?P=ind)`), which is what
+    # `origin/main`'s deleted `_closing_fi(indent)` helper did. A nested `if … fi`
+    # indented DEEPER than the header therefore cannot end the body early;
+    # MEASURED (review of `25b89e4e94`): with a wildcard indent, the nested
+    # `if [ -n "${ImageOS:-}" ]` this pin step already uses truncated the body
+    # before its `::error::`/`exit 1` and the guard reported a gutted fail-closed
+    # arm over one that was present and armed. STATED LIMIT: a nested block
+    # written FLAT, at the header's own indent, still ends the body early — bash
+    # does not require indentation, and matching braces instead would mean a
+    # shell parser (review of `17847279b1` measured that flat shape RED).
     r"(?P<body>.*?)^(?P=ind)fi[ \t]*$",
     re.DOTALL | re.MULTILINE,
 )
@@ -413,9 +432,11 @@ def _version_branch(code: str, server_major: int) -> str:
         # `7b02823f41`). The unmatched spellings are MEASURED, not guessed (review
         # of `25b89e4e94`): `[[ … ]]`, a single-quoted literal (`'16'`), reversed
         # operands (`[ "16" != "$major" ]`), a compound condition joined with
-        # `&&`, and a one-line `if … then …; fi`. NONE of them occurs in this
-        # workflow (0 occurrences), so widening is a deliberate edit with a
-        # measured matrix — not this guard's implicit promise.
+        # `&&`, and a one-line `if … then …; fi`. NONE of them occurs in THIS STEP
+        # (0 occurrences, measured) — the compound form does occur elsewhere in the
+        # workflow, in three `test` job conditions, which is why the count is scoped
+        # to the step and not to the file. Widening is therefore a deliberate edit
+        # with a measured matrix, not this guard's implicit promise.
         "the pin has no `if [ \"$major\" != \"<major>\" ]; then … fi` block "
         "(`[ … ]` or the `test …` builtin, `$major` or `${major}`, `; then` or a "
         "newline before `then`, closed at the header's own indent) — a branch "
