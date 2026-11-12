@@ -208,15 +208,19 @@ not a tenth spelling — it is the one a text guard cannot reach:
   is taken as the last POSITIONAL path token of the owning verb's command
   segment, with redirect targets and `-`-prefixed options skipped. SIX residuals
   are stated rather than claimed closed, and each spares or refuses for its OWN
-  mechanism — they are not one: an option whose VALUE carries a path
-  (`rsync … --log-file="$SCRATCH/x.log"`, `-e "ssh -o X=/a"`) moves the
-  last-path reading past the real target; a base quoted separately from its token
+  mechanism — they are not one: an option whose value is a SEPARATE token written
+  AFTER the target (`rsync … "$b/17/bin/" "$b/16/bin/" --log-file
+  "$SCRATCH/x.log"`, `-e "ssh -o X=/a"`) moves the last-path reading past the
+  real target, while the `=`-joined form (`--log-file=…`) starts with `-` and is
+  skipped, so it stays REFUSED; a base quoted separately from its token
   (`"$b"/16/bin/`, `"${b}"/17/bin/`) is never MATCHED, so the last-path
   machinery is not reached at all; a quoted command word (`sh -c 'rsync …'`) puts
   both mentions in COMMAND position, so the arm is skipped; a destination reached
-  through an EXPANSION or an assigned variable (`d="$b/16/bin"; rsync -a
-  "$b/17/bin/" "$d/"`) names no token the pattern can read, so again the arm is
-  not reached; a versioned path under a VARIABLE base is the OPPOSITE direction —
+  through an EXPANSION or an assigned variable (`rsync -a "$b/17/bin/" "$d/"`)
+  names no token the pattern can read, so again the arm is not reached (a
+  preceding `d=…` assignment on the same line is itself spared by COMMAND
+  POSITION, like the residual above); a versioned path under a VARIABLE base is
+  the OPPOSITE direction —
   it is REFUSED (`d=$RUNNER_TEMP/tools; sudo chmod -R a+rX "$d/16/bin"` red, the
   same act on a literal path with an extra component green), which is fail-closed
   and kept because a variable base cannot be resolved; and an EXTRACTOR's
@@ -230,8 +234,10 @@ not a tenth spelling — it is the one a text guard cannot reach:
   the defect the whitelist's own note names. The admitted spellings are pinned in
   `BINARY_MUTATION_POLARITY`. The task's own `pg_dump --version` assertion is the
   observation that does not depend on this text at all; this row is the static
-  half, and it fails closed on every spelling whose destination it can READ —
-  not on every spelling that exists.
+  half, and it fails closed on every spelling whose destination it can PLACE as
+  the last positional token of the owning verb's segment — residual 1 is the one
+  class where the reading lands on the wrong token, and it is fail-OPEN, not
+  fail-closed.
 
 So: a green run means "no plausible spelling of the regression is in this
 text", not "the job provably installs and uses pg16". The job's own assertion is
@@ -4813,6 +4819,25 @@ BINARY_MUTATION_POLARITY = [
         "STATED RESIDUAL, compound spelling: same act one segment on. It was RED "
         "before round 23 only as a side effect of the first-verb bug, so the "
         "verdict is admitted rather than claimed (#12069 round 24)",
+    ),
+    (
+        'sudo cpio -idmv -D "$b/16/bin"',
+        False,
+        "STATED RESIDUAL: `cpio` is not in `_OPERAND_TAKING_WORDS`, so "
+        "`_is_command_position` calls it a COMMAND and the arm is skipped; pinned "
+        "so closing it is a deliberate edit (#12069 round 24)",
+    ),
+    (
+        'sudo unzip -o pg17.zip -d "$b/16/bin"',
+        False,
+        "STATED RESIDUAL: an extractor's `-d` is not graded (see the docstring's "
+        "sixth residual); pinned so closing it is a deliberate edit (#12069 round 24)",
+    ),
+    (
+        'sudo dpkg-deb -x x.deb "$b/16/bin"',
+        False,
+        "STATED RESIDUAL: `dpkg-deb -x` takes NO flag value (the destination is "
+        "positional), so no flag grammar can read it; pinned as above (#12069 round 24)",
     ),
     (
         'tar -czf "$RUNNER_TEMP/pg_dump-output.tgz" "$b/16/bin"',
