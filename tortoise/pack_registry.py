@@ -2952,6 +2952,12 @@ class PackRegistry:
         # drift. `message` is there because `pack_guards` takes it as an alias of
         # `reason`; anything NOT here is a typo that would otherwise be read as
         # absent (see the loud refusal at both levels).
+        # Every core kind ANY axis declares (`CORE_KINDS`), in both spellings:
+        # the vocabulary a `fromKinds` scope may name. `core_kind_names()` — the
+        # entity axes + `other` — is the FALLBACK vocabulary and is deliberately
+        # narrower, so it must not be reused here (round-6 review: it refused
+        # `core:brief`, a scope that fires).
+        _CORE_ANY_FORM = {f"core:{k}" for k in CORE_KINDS} | set(CORE_KINDS)
         _GUARD_KEYS = frozenset({"kind", "layer", "onConfusion"})
         _CONFUSION_KEYS = frozenset({
             "rule", "when", "pattern", "redirect", "fallback", "reason",
@@ -3166,33 +3172,37 @@ class PackRegistry:
                             f"{cw}.fromKinds: '{fk}' names namespace "
                             f"'{_fkns}', which this pack neither owns nor "
                             f"declares in depends_on (R1)")
-                    # ⛔ ``own_layer`` — the ENTITY axes — and NOT
-                    # ``all_pack_kinds``. That set is the union of every
-                    # `KIND_FIELDS` axis, and it includes the two this same
-                    # method already refuses a guard `kind:` for
-                    # (`documentKinds`, `actionKinds`) and deliberately leaves
-                    # out of ``own_layer`` because no door writes them. A scope
-                    # on one of those therefore validated CLEAN and compiled
-                    # DEAD — `_named_layer_kinds` never yields it, so no write
-                    # can ever declare it — which is the exact false PASS this
-                    # check exists to close (round-5 review P2, measured with a
-                    # real registry: `documentKinds: [contract]` +
-                    # `fromKinds: [contract]` → `✓ Clean`).
+                    # ⛔ ``all_pack_kinds`` — every kind ANY axis of ANY pack
+                    # declares — and NOT ``own_layer``. Round-5 narrowed this to
+                    # the entity axes on the theory that ``_named_layer_kinds``
+                    # (which does exclude ``documentKinds``/``actionKinds``)
+                    # proved no write could declare one. It does not: that
+                    # function reads the layer PROP's VALUE, and the value is
+                    # caller input over a deliberately OPEN vocabulary. Measured
+                    # (round-6 review P2): with
+                    # ``documentKinds: [brief]`` + ``fromKinds: [brief]``,
+                    # ``sdk.create_object('brief-9', objectKind='acme:brief')``
+                    # REDIRECTED — the scope was live — while the narrowed gate
+                    # had refused it at install. A gate that refuses a scope the
+                    # runtime demonstrably fires is a FALSE BLOCK, the same
+                    # category of lie as the dead guard it was meant to catch.
                     elif (_fkns is not None and _fkns == (ns or None)
-                          and _fkq.split(":", 1)[-1] not in own_layer):
+                          and _fkq.split(":", 1)[-1] not in all_pack_kinds):
                         errors.append(
                             f"{cw}.fromKinds: '{fk}' is this pack's own "
-                            f"namespace but no entity kind it declares — a "
-                            f"scope no write to this pack can ever match")
-                    # ⛔ AND A CORE SCOPE THAT NAMES NO CORE KIND. The arm above
-                    # only covers this pack's OWN namespace, so `core:WrokItem`
-                    # (a typo of `core:WorkItem`) validated clean and compiled to
-                    # a scope that matches nothing — the same dead-guard class,
-                    # reached through the one namespace with no pack to check it
-                    # against (round-5 review P2, measured).
-                    elif (_fkns is None
-                          and _fkq not in core_names
-                          and _fkq.split(":", 1)[-1] not in core_names):
+                            f"namespace but no kind it declares — a scope no "
+                            f"write to this pack can ever match")
+                    # ⛔ AND A CORE SCOPE THAT NAMES NO CORE KIND — against the
+                    # FULL core vocabulary (`CORE_KINDS`, every declared axis,
+                    # the same set `core_kind_names()` narrows), not the entity
+                    # subset: `core:brief` is a declared core kind, so a scope on
+                    # it can fire, and refusing it would be the same false block
+                    # as the arm above. ``ns`` must be non-empty or `_resolve_ref`
+                    # answers `":kind"` for a bare name and this arm would report
+                    # a missing namespace as a core typo (round-6 review P3).
+                    elif (_fkns is None and ns
+                          and _fkq not in _CORE_ANY_FORM
+                          and _fkq.split(":", 1)[-1] not in _CORE_ANY_FORM):
                         errors.append(
                             f"{cw}.fromKinds: '{fk}' is a core scope but names "
                             f"no core kind — a scope no write can ever match")

@@ -1710,19 +1710,22 @@ class TestReviewRound4Closed:
     # ── the install gate: a misspelled KEY, not just a bad value ──────────
 
     @staticmethod
-    def _validate(confusion, guard_extra=None):
+    def _validate(confusion, guard_extra=None, ont_extra=None,
+                  all_pack_kinds=None):
         from tortoise.pack_registry import PackRegistry
 
         entry = {"kind": "concept", "layer": "object",
                  "onConfusion": [confusion]}
         entry.update(guard_extra or {})
         ont = {"objectKinds": ["concept"], "guards": [entry]}
+        ont.update(ont_extra or {})
         # `_validate_guards` reads no `self` state (asserted by its own shape:
         # every name it touches is a local), so the validator is callable
         # without a loaded catalog — which is the point: this is the INSTALL
         # gate, and it must answer for a manifest that is not installed.
         reg = PackRegistry.__new__(PackRegistry)
-        return reg._validate_guards(ont, "acme", [], {"concept"})
+        return reg._validate_guards(ont, "acme", [],
+                                    all_pack_kinds or {"concept"})
 
     def test_a_misspelled_linkPredicate_KEY_is_refused_at_install(self):
         """`linkpredicate:` (lowercase) is read as ABSENT — the worse outcome.
@@ -1804,22 +1807,41 @@ class TestReviewRound4Closed:
         assert [r for r in rows if r["outcome"] == "skipped"
                 and r["to"] == "core:WorkItem"], rows
 
-    def test_a_fromKinds_scope_on_a_NON_ENTITY_axis_is_refused(self):
-        """`documentKinds`/`actionKinds` declare no entity layer — a scope on one is DEAD.
+    def test_a_fromKinds_scope_on_a_DOCUMENT_kind_is_ACCEPTED(self):
+        """⛔ A gate must not refuse a scope the runtime DEMONSTRABLY fires.
 
-        Round-5 review P2: the membership test used `all_pack_kinds`, the union of
-        EVERY `KIND_FIELDS` axis — including the two this same method refuses a
-        guard `kind:` for. `_named_layer_kinds` never yields them, so no write can
-        ever declare one: the guard installed `✓ Clean` and could never fire, the
-        exact false PASS the check exists to close.
+        This test replaced the opposite assertion, which round 5 shipped on the
+        theory that `_named_layer_kinds` excluded `documentKinds` and therefore no
+        write could declare one. That function reads the layer PROP's VALUE
+        (`objectKind=…`), and the value is caller input over an open vocabulary —
+        so a document kind CAN be declared and the guard does fire. Measured
+        (round-6 review P2): with `documentKinds: [brief]` + `fromKinds: [brief]`,
+        `create_object("brief-9", objectKind="acme:brief")` REDIRECTED while the
+        narrowed gate had refused it at install. A false block is the same
+        category of lie as the dead guard it was meant to catch.
+
+        The gate's job is to refuse a scope that can NEVER fire — "no pack declares
+        this kind on ANY axis", which is `all_pack_kinds`. Keeping this test makes
+        the false block un-reintroducible.
         """
         errs = self._validate(
-            {"rule": "acme:doc", "pattern": r"^contract-[0-9]+$",
+            {"rule": "acme:brief", "pattern": r"^brief-[0-9]+$",
              "redirect": "core:WorkItem", "fallback": "core:WorkItem",
-             "reason": "x", "fromKinds": ["contract"]},
+             "reason": "x", "fromKinds": ["brief"]},
+            ont_extra={"documentKinds": ["brief"]},
+            all_pack_kinds={"concept", "brief"},
         )
-        # `_validate` declares only `concept` on the entity axes, so `contract`
-        # is a scope no entity write can match.
+        assert errs == [], (
+            "a scope on a kind this pack DECLARES (on a non-entity axis) is live "
+            f"at runtime — refusing it is a false block: {errs}")
+
+        # …and the gate still refuses one no axis declares (a typo).
+        errs = self._validate(
+            {"rule": "acme:conpekt", "pattern": r"^conpekt-[0-9]+$",
+             "redirect": "core:WorkItem", "fallback": "core:WorkItem",
+             "reason": "x", "fromKinds": ["conpekt"]},
+            all_pack_kinds={"concept", "brief"},
+        )
         assert errs and "fromKinds" in " ".join(errs), errs
 
     def test_a_fromKinds_scope_naming_no_CORE_kind_is_refused(self):
