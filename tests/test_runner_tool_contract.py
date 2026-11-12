@@ -743,7 +743,13 @@ def _poolable_label(text: str) -> bool:
 _SHELL_SEP = re.compile(r"&&|\|\||;&|;|&|\|")
 
 #: The command word a command starts with, after YAML's `- ` / `run:` decoration.
-_SEGMENT_CMD = re.compile(r"^(?:-\s+)?(?:run:\s*)?([A-Za-z_][\w.-]*)")
+#: ⛔ A leading `then`/`else` is SHELL KEYWORD, not the command word (#12088). A segment split
+#: on `;` from `if …; then echo "…"` begins with `then`, so without this the message reads as a
+#: command named `then` and the helper name inside the message becomes a HAZARD — the exact
+#: #12133 false positive this gate exists to remove, whose demanded remedy (`ensure gh`) fails
+#: closed on a no-egress pool box. Carried from the sibling lane's `_MESSAGE_CMD`; main's reader
+#: dropped it and `test_the_message_exclusion_cannot_hide_a_real_invocation` now pins both shapes.
+_SEGMENT_CMD = re.compile(r"^(?:-\s+)?(?:run:\s*)?(?:(?:then|else)\s+)?([A-Za-z_][\w.-]*)")
 
 #: Commands that EMIT a message rather than EXECUTE their arguments.
 _MESSAGE_CMDS = frozenset({"echo", "printf"})
@@ -1109,14 +1115,20 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
 
     …while the INERT shapes stay inert, so the fix cannot be satisfied by reverting it.
 
-    ⛔ CLASS 8 IS CARRIED FROM A SIBLING LANE'S REVIEW (#12153, measured 2026-11-12). Its
-    first fix reduced the exemption to "the command word is `echo`/`printf` AND the line
-    carries no shell operator", which reads the line WHOLE — so a real invocation followed
-    by a comment mentioning `echo` became a "message" and was exempt, because `_code_only`
-    keeps the comment. The widening survived all 34 of that lane's tests until the row was
-    added, so the absence of such a row here is a measured gap, not a hypothetical one. The
-    POSITIONAL rule below cannot make this mistake — the command word is `python3` — and
-    this row is what reddens if anyone ever restores a whole-line predicate.
+    ⛔ CLASS 8 IS CARRIED FROM A SIBLING LANE'S REVIEW (#12153, measured 2026-11-12), and the
+    MECHANISM it pins is narrower than "a whole-line predicate" — state it precisely or the row
+    reads as covering more than it does. The sibling's first cut tested the command word
+    (`^echo|printf`) AND the absence of a shell operator, which is CORRECTLY SCOPED and does NOT
+    exempt this row at all — the command word here is `python3`, so a line is read as one message
+    only if it really starts with one. What reddened was the **widening** of that test to
+    `^.*(?:echo|printf)\b` — "the line MENTIONS echo/printf anywhere" — under which a trailing
+    comment mentioning `echo` turned a real invocation into a "message", and which survived all
+    34 of that lane's tests until this row existed. So: this row reddens on a LINE-WIDE TEXT
+    search, verified by reinstating the widened pattern (reds exactly this row) and by
+    reinstating the correctly-scoped predicate (all green — it is not buggy, so it SHOULD stay
+    green). ⛔ Stated limitation, so the next author does not read false coverage here: a
+    correctly-scoped whole-line predicate is deliberately NOT caught by this corpus, because it
+    has nothing to be caught for.
     """
     scripts = _gh_executing_scripts()
     helper = "install-ci-runner-x64.sh"
@@ -1145,14 +1157,33 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     # 6 — the helper quoted as an argument to a NESTED substitution
     assert _gh_hazards([f'            echo "$(bash -c "bash tools/{helper}")"'], scripts)
     # 8 — a REAL invocation whose trailing COMMENT mentions the message command. A
-    #     whole-line "starts with echo / has no separator" exemption reads the comment as
-    #     part of the command and exempts the invocation (#12153, carried from PR #12088).
+    #     LINE-WIDE text search (`^.*(?:echo|printf)`) reads the comment as part of the
+    #     command and exempts the invocation (#12153, carried from PR #12088).
     assert _gh_hazards(
         [f"            python3 tools/{helper} --emit  # then echo done"], scripts
     ), "a trailing comment that mentions `echo` must not turn a real invocation into a message"
-    assert _gh_hazards(
-        [f"            tools/{helper} --emit; # then echo done"], scripts
-    ), "a comment after a separator must not exempt the command before it"
+
+    # ── `then`/`else` are SHELL KEYWORDS, not the command word (#12088) ─────────────────────
+    # A segment split on `;` from `if …; then echo "…"` starts with `then`, so a command-word
+    # reader that does not skip the keyword names the command `then`, and the helper named in
+    # the message becomes a HAZARD. That is the #12133 false positive again — measured on this
+    # implementation before `_SEGMENT_CMD` accepted the keyword: both rows below answered
+    # `hazard` while the sibling lane's `_MESSAGE_CMD` answered `[]`.
+    assert (
+        _gh_hazards([f'            then echo "run tools/{helper} by hand"'], scripts) == []
+    )
+    assert (
+        _gh_hazards(
+            [f'            else echo "please run tools/{helper} --repair-labels by hand"'],
+            scripts,
+        )
+        == []
+    )
+    # …and accepting the keyword must not open the hole it was skipped for: a real command
+    # AFTER a `then`-message is still a call site (the `;` separates them).
+    assert _gh_hazards([f"            then echo x; bash tools/{helper}"], scripts)
+    # …nor may the keyword launder a substitution inside the message.
+    assert _gh_hazards([f'            else echo "$(python3 tools/{helper})"'], scripts)
 
     # …and the inert shapes that motivated the fix stay inert — including prose that
     # CONTAINS a separator, which must not split the message into a raw segment.
