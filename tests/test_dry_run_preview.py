@@ -667,8 +667,15 @@ class TestBlastRadius:
         sdk.create_direct_edge("NAND", y, old)
         # a structural edge
         sdk.create_edge("aboutSubject", old, subj)
-        # an alreadyDecided operator — must stay attached to the dead prior
-        sdk.create_operator("IMPL", old, [y], label="alreadyDecided")
+        # an alreadyDecided operator — must stay attached to the dead prior.
+        # ⛔ Its target is a FRESH node, not `y`: since #12067 a pair carries at
+        # most one mechanism, and `y` is already the far end of the bare
+        # `NAND y->old` written above, so an IMPL operator over the same pair is
+        # (correctly) refused. A distinct node keeps the fixture's intent — one
+        # more edge at `old` that must not follow it to the successor — without
+        # asking the write door to mint a shape the closed set forbids.
+        z = _seed_point(sdk, "z")
+        sdk.create_operator("IMPL", old, [z], label="alreadyDecided")
         # a self edge to the successor — delete-only, never repointed
         sdk.create_edge("aboutObject", old, new)
 
