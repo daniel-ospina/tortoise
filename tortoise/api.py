@@ -100,11 +100,15 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #:     (``promote_point`` &c.) reads the point back and must carry the storage
 #:     form. A forged one therefore writes ``n.embedding_verbatim = true`` AND
 #:     flips the journal's storage form — the node and the record both.
-#:   • `evidence_fold` — the replay's recreate anchor. ``_emit``'s KEYWORD
-#:     channel is the dangerous one: a flat record carrying this key is read as a
-#:     fold (``projection.record_is_evidence_fold``), which makes the decay plan
-#:     and the terminalizer stamp diverge from the live tree. ``sdk.py:6837``
-#:     calls it a HARD-REJECT key for that reason.
+#:   • `evidence_fold` — the replay's recreate anchor, and it forges from BOTH
+#:     channels (so neither is the safe one to drop): a flat record carries the
+#:     key at the top level, and on the positional channel ``_norm`` splices the
+#:     ``point`` record over the envelope on replay, so the nested flag is read
+#:     identically — ``projection.record_is_evidence_fold`` returns True for
+#:     ``{"type": ..., "evidence_fold": True}`` AND for
+#:     ``{"type": ..., "point": {"evidence_fold": True}}`` (measured). Either way
+#:     the decay plan and the terminalizer stamp diverge from the live tree.
+#:     ``sdk.py:6837`` calls it a HARD-REJECT key for that reason.
 #:   • `embeddingText` — the enriched text the vector is computed from; a
 #:     caller-set one forges the text↔vector identity the ``#8488`` hash attests.
 #:   • `extractedFromAll`, `sourceVersion`, `sourceVersions` — the source-ref
@@ -266,11 +270,13 @@ def _refuse_uncallerable_record_keys(fields: dict, type_: str, channel: str) -> 
     stating them as one family is what made the previous comment false. See that
     set's comment for the harm of each, and the citation for each.
 
-    ⛔ BOTH CHANNELS, because the keyword one is not the safer one: a flat record
-    that carries ``evidence_fold`` is read as a fold by
-    ``projection.record_is_evidence_fold`` — measured, one caller-settable key
-    flipped the decay plan AND the terminalizer stamp, i.e. ``derived =
-    replay(journal)`` diverged from the live tree.
+    ⛔ BOTH CHANNELS, because neither is the safer one: a flat record carrying
+    ``evidence_fold`` at the top level is read as a fold by
+    ``projection.record_is_evidence_fold``, and a positional record carrying it
+    nested under ``point`` is read identically on replay (``_norm`` splices
+    ``point`` over the envelope) — measured, one caller-settable key flipped the
+    decay plan AND the terminalizer stamp, i.e. ``derived = replay(journal)``
+    diverged from the live tree.
 
     Deliberately silent on the identity triple (`embedding_model`,
     `embedding_revision`, `embedding_text_hash`): a creating `_point` stamps
@@ -741,8 +747,10 @@ class EventAPI:
                 f"{type_}'s payload")
         # ⛔ The same set on the OTHER channel. `_forged_markers` above covers the
         # vector family; these are the record facts no seam call here mints, and
-        # the keyword channel is the more dangerous of the two on a flat record
-        # (`evidence_fold` is read as a fold by `record_is_evidence_fold`).
+        # this channel is not the SAFER one — `record_is_evidence_fold` reads a
+        # flat record's top-level flag, and reads the positional record's nested
+        # one identically on replay (`_norm` splices `point` over the envelope).
+        # Both arms are here because dropping either leaves a forge.
         _refuse_uncallerable_record_keys(dict(payload), type_, "payload")
         # ⛔ THE STAMP covers the vector THIS door carries — top-level
         # `embedding` only. The record-shaped doors nest their payload
