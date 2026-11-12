@@ -2218,15 +2218,20 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
                   {"id": "p-staged", "content": "c",
                    "embedding": _Staged([0.5], [float("nan")], 6),
                    JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
-    with pytest.raises(ValueError, match="not an exact"):
+    with pytest.raises(ValueError, match="no float reproduces exactly"):
         api._emit("PointAdded", {"id": "p-bigint", "content": "c",
                                  "embedding": [2 ** 53 + 1],
                                  JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32})
     # …and an `int` the float conversion cannot represent AT ALL is the same
     # verdict, with the same exception TYPE — both widths, because the element
     # arm runs before the `f32` narrowing.
+    # ⛔ AND BOTH HAVE THEIR OWN MESSAGE (#11996 review round 13, measured): these
+    # are exact `int`s, so `match="not an exact"` pinned a sentence that
+    # contradicted itself ("…that is not an exact `int` / `float` (int)") and told
+    # the caller to resend the same value. The TYPE arm and the MAGNITUDE arm are
+    # separate refusals now, and these rows pin the magnitude one.
     for _width in (JOURNAL_VECTOR_WIDTH_F32, JOURNAL_VECTOR_WIDTH_F64):
-        with pytest.raises(ValueError, match="not an exact"):
+        with pytest.raises(ValueError, match="no float reproduces exactly"):
             api._emit("PointAdded",
                       {"id": f"p-hugeint-{_width}", "content": "c",
                        "embedding": [2 ** 2000],

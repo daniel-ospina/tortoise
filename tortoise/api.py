@@ -820,9 +820,7 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         # `except ValueError` around a door) reading an unhandled type as a
         # crash rather than a refusal. A value the float conversion cannot even
         # represent is not exactly representable, which is the same verdict.
-        bad = [x for x in values
-               if type(x) not in (int, float)
-               or (type(x) is int and not _int_is_float_exact(x))]
+        bad = [x for x in values if type(x) not in (int, float)]
         if bad:
             raise ValueError(
                 f"{_KEY}={declared!r} is declared over a vector carrying an "
@@ -832,6 +830,32 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
                 f"as it is, so the two readers can disagree and the declared "
                 f"width would describe a value the guard never saw (#5004 "
                 f"round-7). Pass exact `int` / `float` elements.")
+        # ⛔ THE `int`-INEXACT CASE HAS ITS OWN MESSAGE, because the element IS an
+        # `int` (#11996 review round 13, measured). Folding both reasons into one
+        # `bad` list made the refusal for `2**53 + 1` say "an element that is not
+        # an exact `int` / `float` (int)" — contradicting the clause it was
+        # appended to — and told the caller to "Pass exact `int` / `float`
+        # elements", i.e. to resend the same value and be refused identically:
+        #
+        #     _emit(… "embedding": [2**53 + 1], KEY: "f32")   -> float() ROUNDS it
+        #     _emit(… "embedding": [2**2000],   KEY: "f32")   -> no finite float
+        #
+        # Both are exact `int`s. The reason is the MAGNITUDE, not the type:
+        # `float()` rounds above 2**53 and has no value at all above ~1.8e308,
+        # while the encoder writes the integer verbatim. That is also the arm
+        # `_int_is_float_exact` makes TOTAL — a bare `float(x) != x` RAISED
+        # `OverflowError` on the second, this guard's only non-`ValueError` exit.
+        inexact = [x for x in values
+                   if type(x) is int and not _int_is_float_exact(x)]
+        if inexact:
+            raise ValueError(
+                f"{_KEY}={declared!r} is declared over a vector carrying an "
+                f"`int` that no float reproduces exactly: the seam reads the "
+                f"vector through `float(x)` — which ROUNDS an integer above "
+                f"2**53 and has no finite value at all above ~1.8e308 — while "
+                f"the journal's JSON encoder writes the integer verbatim, so "
+                f"the declared width would describe a value the guard never saw "
+                f"(#5004 round-7). Pass a value a float holds exactly.")
     if declared != _F32:
         # ``f64`` is truthful about the VALUES it can describe — it only forgoes
         # narrowing, which the raw form is entitled to — but it is NOT a licence
