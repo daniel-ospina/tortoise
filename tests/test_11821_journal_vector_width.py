@@ -1618,3 +1618,35 @@ def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
                journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert len(records) == 3 and records[-1]["point"]["embedding_width"] == "f64", (
         "a truthful declaration over the envelope's vector must still land")
+
+    # 7. ⛔ A VECTOR THE SEAM CAN ONLY DROP IS A VECTOR NO WIDTH DESCRIBES
+    #    (#12000 round-10 review, F1 — measured). `_is_shortest_f32_text` is
+    #    fail-CLOSED on non-numeric input and returns False; asking
+    #    `shortest_float32_vector` about the same input RAISES, and a shared
+    #    `except: return` read that as "the seam cannot decide" — over a value
+    #    the seam describes exactly, by dropping it. Measured at `bf1957fb9`:
+    #
+    #        _emit("PointAdded", {"id": "p", "content": "c", KEY: "f32"},
+    #              embedding="abc")  -> journalled, fold reads f32 over 'abc'
+    #
+    #    …and in the same call the seam then dropped that vector and popped its
+    #    own width, leaving the record's `f32` over `None`: the exact state
+    #    arm 5 above refuses, reached one call later. Both are refused now.
+    for _bad in ("abc", 7, {"0": 0.1}, [float("nan")]):
+        with pytest.raises(
+                ValueError,
+                match=r"is not what the values say|declared over NO vector"):
+            api._emit("PointAdded", {"id": "p-junk", "content": "c",
+                                    JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
+                      embedding=_bad)
+    # …and the post-stamp re-check: a record declaring `f32` cannot survive a
+    # payload whose vector the seam DROPS. The non-numeric shapes above are the
+    # reachable ones today, so this asserts the ordering, not a second path.
+    with pytest.raises(ValueError):
+        api._emit("PointAdded",
+                  {"id": "p-dropped", "content": "c",
+                   JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
+                  embedding="abc")
+    assert [json.loads(ln) for ln in
+            journal.read_text(encoding="utf-8").splitlines() if ln.strip()] == records, (
+        "every refusal precedes the commit point — the journal is unchanged")
