@@ -3443,6 +3443,20 @@ assert_not_contains "$FOUT" "backups are not the part that failed" \
   "118. … and the terminal line does NOT deny the sweep fault the run just measured"
 assert_contains "$FOUT" "SECOND fault" \
   "118. … it names the coverage fault the missing CLI left unfiled"
+# Review C6: `degraded` is backed_up-with-per-graph-errors — the sweep-status case
+# takes `backed_up|degraded ;;` and leaves NO_COVERAGE=0 (suite 31a/46 pin that), so
+# a coverage fault was neither detected nor attempted. The first C5 fix invented
+# one anyway; this arm must NOT claim an incident that does not exist.
+export STUB_SWEEP_BODY='{"status":"degraded","graph_totals":{"attempted":2,"backed_up":1,"error":1}}'
+set +e
+DOUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+DRC=$?
+set -e
+assert_eq "$DRC" 1 "118. a degraded sweep is still RED with the CLI missing"
+assert_not_contains "$DOUT" "SWEEP_NO_COVERAGE incident could not be filed" \
+  "118. … and no coverage incident is invented for a status that never files one"
+assert_contains "$DOUT" "coverage is not the part that failed" \
+  "118. … degraded is reported as backed-up coverage, per its own classification"
 assert_contains "$OUT" "RED: the aws CLI is missing" \
   "118. the terminal line names the cause, not just 'a broken pipeline'"
 # The heartbeat is the driver's audit record of its own r2_ok, and this run never

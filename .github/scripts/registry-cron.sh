@@ -2234,16 +2234,28 @@ if [ "$AWS_CLI_MISSING" = "1" ]; then
   # this arm is reached before the NO_COVERAGE one below — so a run whose sweep
   # really did fail ended on a line denying the fault its own output had just
   # measured (and the `sweep backed up nothing` arm never ran, because this exit
-  # came first). State what was measured; a coverage fault is then a SECOND fault
-  # whose incident could not be filed while the CLI is missing.
-  case "$RUN_STATUS" in
-    backed_up)
-      cli_scope="the sweep leg ran too, and backed up normally — backups are not the part that failed" ;;
-    degraded)
-      cli_scope="the sweep leg ran but reported status=$RUN_STATUS_SAFE (per-graph errors) — a SECOND fault, and its SWEEP_NO_COVERAGE incident could not be filed while the CLI is missing" ;;
-    *)
-      cli_scope="the sweep leg ran but reported status=$RUN_STATUS_SAFE — a SECOND fault, and its SWEEP_NO_COVERAGE incident could not be filed while the CLI is missing" ;;
-  esac
+  # came first). State what was measured.
+  #
+  # Review C6: the first fix still GUESSED from `RUN_STATUS`, and guessed wrong for
+  # every shape whose status implies no coverage fault — `degraded` is `backed_up`
+  # with per-graph errors (`:1764` takes `backed_up|degraded ;;` and leaves
+  # NO_COVERAGE=0, suite cases 31a/46 pin that), and `already_running` with a fresh
+  # stamp and `driver_timeout` with a fresh completed sweep are equally silent. So
+  # a healthy-backups run ended by inventing a coverage fault — the mirror of the
+  # defect C5 fixed. Key on the driver's OWN measured flag instead: `$NO_COVERAGE`
+  # is 1 exactly when a `file_alert SWEEP_NO_COVERAGE` was attempted this run.
+  if [ "$NO_COVERAGE" = "1" ]; then
+    cli_scope="the sweep leg ran but also reported a coverage fault (status=$RUN_STATUS_SAFE) — a SECOND fault, and its SWEEP_NO_COVERAGE incident could not be filed while the CLI is missing"
+  else
+    case "$RUN_STATUS" in
+      backed_up)
+        cli_scope="the sweep leg ran too, and backed up normally — backups are not the part that failed" ;;
+      degraded)
+        cli_scope="the sweep leg ran too: status=degraded (per-graph errors, at least one graph backed up) — coverage is not the part that failed" ;;
+      *)
+        cli_scope="the sweep leg ran too (status=$RUN_STATUS_SAFE) — no coverage fault was measured this run" ;;
+    esac
+  fi
   fail "RED: the aws CLI is missing on this runner, so this run could not measure R2, dedup, file or resolve any incident (#12135). $cli_scope. Fix: install the CLI (the workflow's 'Ensure the AWS CLI' step does it idempotently), then re-run."
   exit 1
 fi
