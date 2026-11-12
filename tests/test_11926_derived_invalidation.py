@@ -323,6 +323,37 @@ def test_a_failed_read_of_the_DEFINITION_BOUNDARY_is_undecidable_not_healthy(sdk
     assert sdk.get_entity(made["point_id"])["status"] == "live"
 
 
+def test_the_boundary_is_read_from_the_NODE_not_from_definition_boundary(sdk):
+    """⛔ REVIEW cycle 2, P2, reproduced: the failing-read test above passes for
+    the WRONG REASON — failing `get_entity` for the indicator also fails the
+    `indicator-retired` arm, which produces a `could not be read` message of its
+    own, so it never exercises the boundary comparison at all.
+
+    This is the discriminating pin: `goal_judgement.definition_boundary` is forced
+    to answer `None` (exactly the fold it performs on a failed read) while the
+    indicator node DOES carry a boundary. A refactor that "simplifies"
+    `invalidation_for` back onto that helper — the natural move, since the helper
+    exists and looks right — passes the whole suite except this test, and re-opens
+    the silent-healthy defect."""
+    from tortoise import goal_judgement as gj
+
+    i, t, g = _world(sdk, tag="boundary-source")
+    made = _judge(sdk, i, t, g, at="2026-11-11T10:00:00Z")
+    mark_definition_change(sdk, i["id"], at="2026-11-12T00:00:00+00:00")
+
+    real = gj.definition_boundary
+    gj.definition_boundary = lambda *a, **kw: None
+    try:
+        v = _only(verdicts(sdk, goal_id=g["id"]))
+    finally:
+        gj.definition_boundary = real
+    assert v.invalidation is not None, (
+        "the boundary was read through `definition_boundary` — a transient read "
+        "failure would now make a stale claim read healthy")
+    assert v.invalidation.reason == "definition-changed"
+    assert sdk.get_entity(made["point_id"])["status"] == "live"
+
+
 # ── 5. the GOAL is retired (capability 12's derived half) ─────────────────
 
 @pytest.mark.parametrize("retirement", [
@@ -434,6 +465,32 @@ def test_a_backdated_definition_change_still_retires_a_later_judgement(sdk):
     assert claimed["evaluatedAt"] > "2026-11-11T12:00:00+00:00"
     v = _only(verdicts(sdk, goal_id=g["id"]))
     assert v.invalidation.reason == "definition-changed"
+
+
+def test_a_judgement_derived_EXACTLY_AT_the_boundary_STANDS(sdk):
+    """⛔ REVIEW cycle 2, P1, reproduced. `instant_at_or_after` is `>=`, so at
+    EQUALITY both directions are true and the boundary looked "later" — retiring a
+    claim the derivation half of this same change ADMITS (the reading filter is
+    `>= boundary`), and starting a retire/re-derive loop: the documented
+    `judge_and_record` follow-up re-mints the claim and the next sweep retires it
+    again, growing a Point and an operator per cycle.
+
+    The equality cell is the one neither of the strictly-before / strictly-after
+    tests covers, and it is the cell that decides which side of the module is
+    right."""
+    i, t, g = _world(sdk, tag="definition-equal")
+    instant = "2026-11-11T10:00:00Z"
+    made = _judge(sdk, i, t, g, at=instant)
+    mark_definition_change(sdk, i["id"], at=instant)
+    assert sdk.get_entity(made["point_id"])["readingAsOf"] == instant
+    # the derivation half admits a reading taken exactly AT the boundary ...
+    assert len(latest_readings(sdk, i["id"], since=instant)) == 1
+    # ... so the retirement half must not retire the claim built from it
+    v = _only(verdicts(sdk, goal_id=g["id"]))
+    assert v.invalidation is None, v.invalidation
+    report = invalidate_stale(sdk, goal_id=g["id"])
+    assert report["counts"]["retired"] == 0
+    assert sdk.get_entity(made["point_id"])["status"] == "live"
 
 
 def test_a_judgement_derived_after_the_boundary_stands(sdk):
@@ -727,6 +784,36 @@ def test_a_failed_cache_reconcile_is_reported_and_the_retirement_still_lands(sdk
     # the repair route works, and is a no-op when there is nothing to do
     repaired = reconcile_goal_state_cache(sdk, g["id"])
     assert repaired["cleared"] is True
+    assert sdk.get_entity(g["id"]).get("goalState") is None
+
+
+def test_a_failed_cache_write_counts_as_a_FAILED_sweep(sdk):
+    """⛔ REVIEW cycle 2, P2, reproduced. A cache reconcile failure was reported
+    per finding but left OUT of `counts.failed`, so a sweep whose cache write
+    failed read clean while the goal still showed `met` — #11926's own headline
+    surviving a sweep that claimed nothing went wrong. The summary must not
+    contradict the nested key."""
+    i, t, g = _world(sdk, tag="cache-fail-count")
+    _judge(sdk, i, t, g)
+    sdk.update_entity(t["id"], threshold=8.0)
+    real_update = sdk.update_entity
+
+    def failing(node_id, **props):
+        if node_id == g["id"]:
+            raise RuntimeError("transient write failure")
+        return real_update(node_id, **props)
+
+    sdk.update_entity = failing
+    try:
+        report = invalidate_stale(sdk, goal_id=g["id"])
+    finally:
+        sdk.update_entity = real_update
+    assert report["counts"]["retired"] == 1
+    assert report["invalidated"][0]["cache"]["checked"] is False
+    assert report["counts"]["failed"] == 1, (
+        "the sweep reported no failure while the goal still shows a derived word")
+    # and the repair route clears it
+    reconcile_goal_state_cache(sdk, g["id"])
     assert sdk.get_entity(g["id"]).get("goalState") is None
 
 

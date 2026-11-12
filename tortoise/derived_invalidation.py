@@ -515,14 +515,29 @@ def invalidation_for(
         # ANY pair it cannot order — including "the boundary names no instant",
         # which is not the same fact as "the judgement predates it". Reading
         # only the first direction would retire a claim on an unreadable stamp.
-        derived_is_later = instant_at_or_after(derived_at, boundary)
-        boundary_is_later = instant_at_or_after(boundary, derived_at)
-        if not derived_is_later and not boundary_is_later:
+        #
+        # ⛔ AND THE DECISION IS **STRICT**: a claim derived EXACTLY AT the
+        # boundary STANDS. `instant_at_or_after` is `>=`, so at equality BOTH
+        # directions are true — a `if boundary_is_later:` test therefore retired a
+        # claim that the derivation half of this same change ADMITS (the reading
+        # filter is `>= boundary`, ``goal_judgement.latest_readings``), with a
+        # detail string — "before the change" — that was false. MEASURED by
+        # review: the claim was retracted, the documented follow-up
+        # `judge_and_record` re-minted it (`written: True`), and the next sweep
+        # retired that one too — a retire/re-derive loop that grows a Point and an
+        # operator per cycle, with a terminal retirement at its centre.
+        #
+        # So the question asked here is the ONE the derivation asks: is the
+        # reading PREDATES the boundary (`derived_at < boundary`). Equality means
+        # "taken under the new definition", on both sides of the module.
+        derived_is_at_or_after = instant_at_or_after(derived_at, boundary)
+        boundary_is_at_or_after = instant_at_or_after(boundary, derived_at)
+        if not derived_is_at_or_after and not boundary_is_at_or_after:
             return Verdict(judgement_id=judgement_id, undecidable=(
                 f"the definition boundary {boundary!r} and the judgement's "
                 f"derivation instant {str(derived_at)!r} cannot be ordered "
                 "(one of them names no instant)"))
-        if boundary_is_later:
+        if not derived_is_at_or_after:
             return _verdict(
                 "definition-changed",
                 f"the indicator {indicator_id!r} definition changed at {boundary!r}; "
@@ -789,7 +804,15 @@ def invalidate_stale(
             "stale": len(stale),
             "retired": sum(1 for r in invalidated if r.get("invalidated")),
             "alreadyRetired": sum(1 for r in invalidated if r.get("alreadyRetired")),
-            "failed": sum(1 for r in invalidated if r.get("error")),
+            # ⛔ A FAILED CACHE RECONCILE IS A FAILURE OF THIS SWEEP. It is
+            # reported per finding (`cache.error`) but a summary that counts only
+            # per-finding retirements reads CLEAN while the goal still shows a
+            # derived word — which is #11926's own headline, surviving a sweep that
+            # said it was fine. Counted here so the top-level numbers cannot say
+            # "nothing went wrong" while a nested key does.
+            "failed": sum(1 for r in invalidated
+                          if r.get("error")
+                          or (r.get("cache") or {}).get("error")),
             "undecidable": len(undecidable),
         },
     }
