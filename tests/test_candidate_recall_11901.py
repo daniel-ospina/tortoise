@@ -889,3 +889,33 @@ def test_a_mixed_mode_run_is_refused_and_no_artifact_is_written(tool_mod, monkey
                      trace_maker=_trace)
     assert rc == 3, f"a mixed-mode run was not refused (rc={rc})"
     assert not out.exists(), "an artifact labelled as one mode was written from a mixture"
+
+
+def test_a_sample_that_starves_a_class_is_refused(tool_mod, monkeypatch, tmp_path):
+    """Exit 2, and NO artifact: a per-class rate from ZERO names is a silent drop.
+
+    `_allocate_shares(1, 3 classes)` is `{definite: 1, ident: 0, path: 0}` — a
+    correct allocation that must not be sampled anyway. Deleting this refusal
+    would write an artifact whose `sample_by_class` reports a class rate over no
+    names, which is the class-drop the largest-remainder pass exists to prevent.
+    """
+    rc, out = _drive(tool_mod, monkeypatch, tmp_path,
+                     stored_names=["the alpha", "AB-12", "src/beta.py"],
+                     trace_maker=lambda: {"leg": "vector", "ran": True,
+                                          "degraded": False},
+                     argv=["--population", "3", "--sample", "1",
+                           "--captures", "2", "--out", str(tmp_path / "artifact.json")])
+    assert rc == 2, f"a class-starving sample was not refused (rc={rc})"
+    assert not out.exists(), "an artifact was written from a sample that starved a class"
+
+
+def test_a_sample_larger_than_the_population_is_refused(tool_mod, monkeypatch, tmp_path):
+    """Exit 2: `sample_by_class` cannot exceed the population it samples."""
+    rc, out = _drive(tool_mod, monkeypatch, tmp_path,
+                     stored_names=["the alpha", "AB-12", "src/beta.py"],
+                     trace_maker=lambda: {"leg": "vector", "ran": True,
+                                          "degraded": False},
+                     argv=["--population", "3", "--sample", "4",
+                           "--captures", "2", "--out", str(tmp_path / "artifact.json")])
+    assert rc == 2, f"a sample larger than the population was not refused (rc={rc})"
+    assert not out.exists(), "an artifact was written from a sample larger than the population"

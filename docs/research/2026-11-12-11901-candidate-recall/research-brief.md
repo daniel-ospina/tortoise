@@ -133,13 +133,22 @@ never class-share weighted** — it is not an estimate of the production mix, an
 to quote for any one class.
 
 ⚠️ **The corpus is LIVE, and the two runs therefore did NOT sample the identical population.** `~/.tortoise/session-events`
-is written by the fleet's own capture hook, so each run harvests whatever landed since: the two committed
-artifacts harvested **102,898** (hybrid) and **103,087** (control) distinct definite descriptions, a 0.18 % drift
-between two runs ~60 s apart. The artifacts carry their own `corpus.harvested_distinct`, so the drift is visible
-rather than silent — and it is why **§3.1's class deltas are BETWEEN-RUN, not paired**: they are two samples of
-the same live corpus, not one population measured twice. A paired version needs the population written out
-(`--population-file`), which this harness does not yet do; treat §3.1's deltas as directional evidence, not a
-controlled effect size.
+is written by the fleet's own capture hook: the two committed artifacts harvested **102,898** (hybrid) and
+**103,087** (control) distinct definite descriptions, a 0.18 % drift between two runs ~60 s apart.
+
+⛔ **That 0.18 % is the gap between THOSE two runs, not a bound on between-run variation, and this corpus is NOT
+append-only in effect.** Re-running the committed `harvest()` over the same nine files ~2 h later (16:37Z and
+16:41Z, twice, independently) returned **91,725 / 91,774 / 91,601** distinct definite descriptions — **−10.8 %**
+— *fewer* than the artifacts, which appends alone cannot produce (ident −6.5 %, path −7.3 % as well). The obvious
+mechanisms were then RULED OUT by measurement rather than assumed: the eight older day-files are frozen at their
+day-end mtimes, today's file is append-only (**+60 distinct definite names in 180 s**, 1,155 → 1,165 lines),
+`tortoise/session_events_drain.py` is not running, and the directory holds no sealed or rotated file. So the loss
+pre-dates that window, and **the current contents of the named directory cannot reproduce the artifacts' population
+at all** — either today's file was rewritten between 14:19Z and 16:37Z (an event no longer observable) or the
+artifacts' bytes came from a corpus other than the one they name; nothing in the artifact distinguishes the two.
+The artifacts carry their own `corpus.harvested_distinct`, so the drift is at least visible — and it is why
+**§3.1's class deltas are BETWEEN-RUN, not paired**: treat them as directional evidence, not a controlled effect
+size, and see the consequence in §3.1.
 
 ⛔ **Declared gap, stated where it cannot be skimmed away:** this is a sample of the strings real captures
 contain, **not a census of production `:Object` rows**. No lane can reach that population (no live `:Object` graph
@@ -202,8 +211,10 @@ the two states with different fixes.
 ### 3.1 The finding that matters most: the dense leg moves the classes in OPPOSITE directions
 
 ⚠️ **Between-run, not paired** (§2): the two artifacts sampled the same live corpus ~60 s apart, not the identical
-population. The direction of every delta below is large relative to that drift, but the magnitudes are not a
-controlled effect size.
+population. The direction of every delta below is large relative to the 0.18 % those two runs differ by — **but §2
+measures the population itself moving by ~10.8 % between a re-run and the artifact, which is the SAME ORDER as the
+−13.3 pt definite delta this section defends.** So that delta is directional, not a controlled effect: what makes it
+usable is its sign and its size across two independent runs, not a claim that between-run variation is small.
 
 | class | n | keyword-only @3 | **hybrid @3** | change | hybrid @15 |
 |---|---|---|---|---|---|
