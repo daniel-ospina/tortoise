@@ -699,9 +699,15 @@ def _named_callees(node) -> set[str]:
         for child in ast.iter_child_nodes(current):
             if isinstance(child, _NEW_SCOPE_NODES):
                 # This subtree's OWN bindings — its parameters, locals, captures, walrus targets
-                # and rebinding imports, plus a nested `def`/`class` NAME. A `global`/`nonlocal`
-                # rebinding inside it lands in this set too, which is the answer we want: the
-                # writer's later call to that name is then NOT the imported seam.
+                # and rebinding imports, plus a nested `def`/`class` NAME. ⛔ Threaded DOWNWARD
+                # only: the shadow applies INSIDE this subtree, so a legitimate closure that calls
+                # the module alias from a nested body keeps its `gated` (see the arm below), while
+                # the nested body's own `enc`-named parameter stops crediting the writer.
+                # ⛔ What this does NOT fix, and must not be read as fixing: a `global` rebinding
+                # inside the nested scope changes the MODULE binding, and this walk is scoped, so
+                # the writer's later call is still credited — measured `gated`, and named in
+                # `UNDECIDABLE_WRITE_SHAPES` ("`global` rebinding …"). A `nonlocal` against a
+                # module-level alias does not even compile, so it is not a shape to claim.
                 visit(child, shadowed | frozenset(_own_scope_bindings(child)))
                 continue
             if (isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
