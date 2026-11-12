@@ -348,7 +348,7 @@ VOCAB_ROW_RE = re.compile(r"^\|\s*\*\*(?P<token>[A-Z][A-Z-]*)\*\*\s*\|")
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-MIN_SELF_TEST_MUTATIONS = 36
+MIN_SELF_TEST_MUTATIONS = 38
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -713,9 +713,23 @@ def check_verdict_tally(text: str) -> list[str]:
             "exactly one"
         ]
     non_still_sentence = tally_sentences[0] if tally_sentences else ""
-    still_sentence = " ".join(
+    # ⛔ THE COMPLEMENT NEEDS THE SAME RULE, and it did not have it (#11902 review P2):
+    # the `still read as written` list was joined across every matching sentence and
+    # then compared as a SET-UNION, so appending one contradicting still-sentence left
+    # the page saying `seven of the twelve … no longer read as written` AND `Only
+    # **(a)** still read as written` (7 + 1 != 12) at `--check` rc 0 — measured.
+    # Falsifying the real still-list beside a compliant decoy did the same. One
+    # sentence, or a red.
+    still_sentences = [
         s for s in sentences if "still read as written" in s and "no longer" not in s
-    )
+    ]
+    if len(still_sentences) > 1:
+        problems.append(
+            f"§3 carries {len(still_sentences)} sentences saying 'still read as "
+            "written' — the guard cannot tell which one a lane quotes, so a second "
+            "one can assert a letter the real sentence does not; keep exactly one"
+        )
+    still_sentence = still_sentences[0] if still_sentences else ""
     named = set(re.findall(r"\*\*\(([a-z])\)\*\*", non_still_sentence))
     if named != set(non_still):
         problems.append(
@@ -1058,11 +1072,25 @@ def check_vocabulary(text: str) -> list[str]:
             f"enforces {VERDICTS} — in either direction a verdict has no handling "
             "rule, and §8 names §1 as the authority"
         )
-    for line in section.splitlines():
-        row = line.strip()
-        if not row.startswith("|") or TABLE_SEPARATOR_RE.match(row):
-            continue
-        if VOCAB_ROW_RE.match(row) or row.startswith("| Verdict"):
+    # ⛔ THE HEADER IS THE FIRST `|` ROW AND NOTHING ELSE (#11902 review P2). The skip
+    # used to be `row.startswith("| Verdict")`, which exempted EVERY row whose first
+    # cell merely begins with that word — so the arm below was defeated by a plural:
+    # measured, `| Verdicts | a | b |`, `| Verdict-ish | a | b |` and
+    # `| Verdict-and-more | … |` each left `check_document()` at `[]` while the plain
+    # non-verdict row reded. A table whose first `|` row is already a verdict row has
+    # no header at all, which is a page defect rather than an exemption.
+    vocab_rows = [
+        row for row in (ln.strip() for ln in section.splitlines())
+        if row.startswith("|") and not TABLE_SEPARATOR_RE.match(row)
+    ]
+    if vocab_rows and VOCAB_ROW_RE.match(vocab_rows[0]):
+        problems.append(
+            "§1's table has no header row — its first `|` row is already a "
+            "`**VERDICT**` row, so the table a reader sees is not the one this arm "
+            "enumerates"
+        )
+    for row in vocab_rows[1:]:
+        if VOCAB_ROW_RE.match(row):
             continue
         problems.append(
             f"§1 carries a table row that is not a `**VERDICT**` row: {row[:80]} — "
@@ -1989,6 +2017,31 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             1,
         ),
         "not a recognised citation",
+    ),
+    (
+        # #11902 review P2: the §1 header skip was a prefix test on the word
+        # `Verdict`, so EVERY row whose first cell merely began with it was exempt —
+        # defeating the arm above with a plural (measured: `| Verdicts | a | b |` left
+        # `check_document()` at `[]`). The header is the FIRST `|` row and nothing
+        # else now, and this arm fails if the skip widens back into a prefix test.
+        "a §1 row whose first cell begins with `Verdict`",
+        lambda t: t.replace(
+            "| **ADOPTED** |", "| Verdicts | a | b |\n| **ADOPTED** |", 1
+        ),
+        "is not a `**VERDICT**` row",
+    ),
+    (
+        # #11902 review P2: the COMPLEMENT list was still joined across every matching
+        # sentence and compared as a set-union, so the page could assert
+        # `seven of the twelve … no longer read as written` beside
+        # `Only **(a)** still read as written` (7 + 1 != 12) at rc 0 — measured.
+        "a second `still read as written` sentence",
+        lambda t: t.replace(
+            "stated both ways.)",
+            "stated both ways.) Only **(a)** still read as written.",
+            1,
+        ),
+        "sentences saying 'still read as written'",
     ),
 )
 

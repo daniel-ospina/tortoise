@@ -206,7 +206,16 @@ def test_mutation_population_is_pinned():
     page name hid an out-of-range line, or a citation of a file that does not exist
     (measured at `6413d5e8`). The 32nd–35th fixed the permalink arm for the same shape
     one branch above; this is the arm that was left behind.
-    36 is the population at this head.
+
+    The 37th and 38th close two holes the review of that pass found in the fixes
+    themselves: a §1 row whose first cell merely BEGINS with `Verdict` (the header skip
+    was a prefix test, so the row-shape arm beside it was defeated by a plural) and a
+    second `still read as written` sentence (the complement list was joined across
+    sentences and compared as a set-union, so the page could assert 7 + 1 letters
+    against a table of twelve). The same review also proposed a `~/.swarm/../…` escape
+    guard: it is absent here because the reconciliation commit removed the `~` carve-out
+    outright, which refuses that spelling by construction and carries its own arm.
+    38 is the population at this head.
     """
     # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
     # at this head two merges of two 25-arm populations produced 26 arms while the
@@ -217,8 +226,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 36, (
-        "this line RECORDS the population (36 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 38, (
+        "this line RECORDS the population (38 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -2253,6 +2262,69 @@ def test_a_non_verdict_row_in_s1_is_refused(tmp_path, monkeypatch):
         problems = _doc_problems()
         assert any("is not a `**VERDICT**` row" in p for p in problems), (
             f"an unhandled claim class in §1 must red: {problems}"
+        )
+
+
+def test_a_s1_row_starting_with_the_word_verdict_is_still_refused(tmp_path, monkeypatch):
+    """FAILS if §1's header skip is a prefix test on the word `Verdict`.
+
+    The skip exists for the ONE header line, but `row.startswith("| Verdict")`
+    exempted every row whose first cell began with that word — so the arm beside it
+    was defeated by a plural: measured, `| Verdicts | a | b |`,
+    `| Verdict-ish | a | b |` and `| Verdict-and-more | … |` each left
+    `check_document()` at `[]` while the plain non-verdict row reded. The header is now
+    the FIRST `|` row and nothing else, so a decoy cannot sit above it either.
+    """
+    for row in ("| Verdicts | a | b |", "| Verdict-ish | a | b |"):
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, _r=row: t.replace(
+                    "| **ADOPTED** |", f"{_r}\n| **ADOPTED** |", 1
+                ),
+            )
+            problems = _doc_problems()
+            assert any("is not a `**VERDICT**` row" in p for p in problems), (
+                f"{row!r} is not the header and must be refused: {problems}"
+            )
+    # The header itself cannot be dropped: the first `|` row is then a verdict row.
+    with monkeypatch.context() as patch:
+        _mutated(
+            tmp_path,
+            patch,
+            lambda t: t.replace(
+                "| Verdict | Means | What a lane should do |\n|---", "|---", 1
+            ),
+        )
+        problems = _doc_problems()
+        assert any("has no header row" in p for p in problems), (
+            f"a header-less §1 table must red: {problems}"
+        )
+
+
+def test_a_second_still_read_as_written_sentence_is_refused(tmp_path, monkeypatch):
+    """FAILS if the tally's COMPLEMENT list can be joined across sentences.
+
+    The `still read as written` list was joined from every matching sentence and
+    compared as a set-union, so the page could assert `seven of the twelve … no longer
+    read as written` beside `Only **(a)** still read as written` — 7 + 1 against a
+    table of twelve — at `--check` rc 0 (measured), and falsifying the real still-list
+    next to a compliant decoy did the same. One sentence, or a red.
+    """
+    with monkeypatch.context() as patch:
+        _mutated(
+            tmp_path,
+            patch,
+            lambda t: t.replace(
+                "stated both ways.)",
+                "stated both ways.) Only **(a)** still read as written.",
+                1,
+            ),
+        )
+        problems = _doc_problems()
+        assert any("sentences saying 'still read as written'" in p for p in problems), (
+            f"a second complement sentence must red: {problems}"
         )
 
 
