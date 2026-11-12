@@ -1070,14 +1070,18 @@ def test_the_lane_constants_match_the_pinned_literals():
 
     assert _PREWIPE_RESTORE_LANE == RESTORE
     assert _PREWIPE_SYNTHETIC_LANE == SYNTHETIC
-    # ⛔ THE TABLE'S COMPLETENESS, pinned here because nothing else can see it:
-    # `_leg_of` classifies BY `_LEGS`, so deleting a row removes the leg from
-    # both sides of `assert set(observed) == set(_LEGS)` in
-    # `test_every_snapshot_restore_leg_declares_itself` and that guard stays
-    # GREEN — as does the shape rule, which skips the `pre-wipe-restore:`
-    # reason prefix. Measured (#9752 review r12): deleting the
-    # `"pack-selection"` row left the file green; the seed mutation reds, so
-    # today's coverage is real, and this set makes tomorrow's deletion loud.
+    # ⛔ THE TABLE'S COMPLETENESS, pinned here because the set-equality guard cannot
+    # see a deletion on its own: `_leg_of` classifies BY `_LEGS`, so deleting a row
+    # removes the leg from BOTH sides of `assert set(observed) == set(_LEGS)` in
+    # `test_every_snapshot_restore_leg_declares_itself` and that guard stays GREEN —
+    # as does the shape rule, which skips the `pre-wipe-restore:` reason prefix.
+    # Measured at 4f7279618d (#9752 review r12): deleting the `"pack-selection"` row
+    # left `test_every_snapshot_restore_leg_declares_itself` green but reddened the
+    # FILE through `test_the_restore_lane_does_not_claim_a_record_fold`, which named
+    # the now-unclaimed `MERGE (s:PackSelection) ON CREATE SET s += $props`. So the
+    # deletion WAS already caught — via that sibling row, by misattribution rather
+    # than by the guard it was deleted from. This set makes the deletion name its
+    # own cause directly instead of through that detector.
     assert set(_LEGS) == {
         "batch-marker", "batch-link", "session", "session-link",
         "onboarding", "onboarding-onboards", "onboarding-step",
