@@ -286,7 +286,23 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # alert exists to carry; the run link above is the escape hatch for
         # anything cut (the measured 2026-09-04 report was 509 bytes, so the cap
         # is not normally reached).
-        excerpt="$(tail -c 6000 "$DRIFT_REPORT_FILE" | iconv -f UTF-8 -t UTF-8 -c)"
+        # ⛔ The conversion must NEVER abort the alert — the notifier IS the safety
+        # net, so a decoding hiccup must not be able to suppress the page.
+        # `iconv -c` guarantees valid UTF-8 OUTPUT, but its EXIT STATUS is not part
+        # of that contract: GNU libiconv, and newer glibc builds, return 1 having
+        # discarded an invalid sequence. Under `set -e` + `pipefail` that status
+        # killed the whole script before the body was built, so nothing was filed:
+        # measured on CI as "the alert succeeds on a report cut mid-character
+        # (got '1', want '0')" — a fail-CLOSED notifier, i.e. the exact silence
+        # this script exists to remove. The status is ignored; the output is not.
+        excerpt="$(tail -c 6000 "$DRIFT_REPORT_FILE" | iconv -f UTF-8 -t UTF-8 -c 2>/dev/null || true)"
+        # If the converter is absent or emitted nothing, fall back to dropping
+        # every non-ASCII byte (`tr` is coreutils, and its output is ASCII, hence
+        # valid UTF-8). The operator still gets the ASCII report rather than an
+        # empty fenced block that explains nothing.
+        if [ -z "$excerpt" ]; then
+          excerpt="$(tail -c 6000 "$DRIFT_REPORT_FILE" | LC_ALL=C tr -d '\200-\377' || true)"
+        fi
         # `tail -c` cuts at a BYTE, so it can land inside a multibyte character;
         # `iconv -c` above drops the split sequence rather than putting invalid
         # UTF-8 in the issue body. The fence is then made longer than any backtick

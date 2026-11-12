@@ -121,7 +121,8 @@ from .live import direction_spellings  # #7852 stored-token equivalence class
 from .live import is_default_direction  # #7852 "does not differentiate" default
 from .entity_identity import (  # #3633 route-then-refuse identity resolution
     ADDRESSING_SOURCE, UnaddressableEntityName, all_name_holder_ids,
-    entity_create_lock, resolve_document_target_id, resolve_entity_id)
+    entity_create_lock, resolve_document_target_id,
+    resolve_entity_id_same_entity)
 from .live import _terminal_expression  # #3142 shared Cypher terminal predicate (POSITIVE direction)
 from .live import is_terminal_status  # #2498 shared terminal predicate (Python mirror)
 from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verdict
@@ -5068,6 +5069,55 @@ _RESERVED_ENVELOPE_PROPS = (
     "initiated_by", "projection_version",
 )
 
+#: The SERVER-MANAGED embedding journal fields — the names a caller may never
+#: supply, for TWO different reasons that must not be collapsed into one (#11858
+#: review cycle 3, P3 — measured):
+#:
+#: * `embedding_width` / `embedding_model` / `embedding_revision` /
+#:   `embedding_text_hash` are DERIVED by the writer beside the vector;
+#: * `embedding_verbatim` / `embedding_preserved` / `embeddingText` are INPUTS
+#:   the writer READS (`tortoise/embeddings.py:539`, `:550`, `:692`) — a caller
+#:   value for those does not duplicate a derivation, it FORGES the reading.
+#:
+#: ONE spelling, TWO placements, and the second placement is the fix for #11858:
+#:
+#: * `_sanitize_props` refuses them at prop INTAKE, which covers every SDK door
+#:   that passes through it;
+#: * `create_source` refuses them over its ASSEMBLED `ev`, because that door
+#:   builds its payload itself and passes `_skip_sanitize=True` — the intake
+#:   strip cannot cover it, and the write happens before `_emit_event` runs.
+#:
+#: ⛔ WHAT THE WRITER ACTUALLY DOES, per key — the enumeration above is a
+#: REFUSAL set, not a claim that one function mints all seven (#11858 review
+#: cycle 2, P2 — measured). `stamp_journal_embedding` WRITES `embedding_width`
+#: for every vector it stamps, and writes `embedding_model` /
+#: `embedding_revision` / `embedding_text_hash` only on `creating=True` records
+#: (`tortoise/embeddings.py:539-562`) — which a `SourceCreated` never is. It only
+#: READS `embedding_verbatim` / `embedding_preserved` / `embeddingText`
+#: (`:539`, `:550`, `:692`): those three are INPUTS the writer consults, so a
+#: caller value does not "duplicate a derivation" — it FORGES the reading (a
+#: truthy `embedding_preserved` silences the R1 model-change attestation; a
+#: supplied `embeddingText` rewrites the text the #4194 comparison trusts).
+#:
+#: The measured route the refusal names is therefore the WIDTH one: hand over the
+#: vector with `embedding=` and the writer declares `f32`/`f64` from the values
+#: it just stored. The other six have no route on this door by design — they are
+#: not the caller's to set, and the message says so instead of promising a mint
+#: that does not happen.
+#:
+#: ⚠️ What this set is NOT: a claim about every caller-visible journal field.
+#: `update_point` legitimately rides `embedding_verbatim` INTO a `PointRevised`
+#: record (it sets it from the vector it was given, #5004 round-8) — so the set
+#: is refused at INTAKE and at the ONE door that bypasses intake, never as a
+#: blanket rule over `_emit_event`'s props, where it would false-block that
+#: sanctioned writer.
+_SERVER_MANAGED_EMBEDDING_MARKERS = frozenset({
+    "embedding_model", "embedding_revision", "embedding_text_hash",
+    "embeddingText",
+    "embedding_verbatim", "embedding_preserved",
+    "embedding_width",
+})
+
 #: `_emit_event`-owned names that are NOT journal-envelope keys, yet still
 #: collide with a caller prop AT THE CALL — the same fail-open the set above
 #: closes, but invisible to `_journal_record_payload` (neither name is in
@@ -5156,6 +5206,41 @@ def _drop_reserved_emit_props(props: dict) -> list[str]:
     for _k in _dropped:
         props.pop(_k)
     return _dropped
+
+
+def _with_folded_entity_name(name: str, props: dict) -> dict:
+    """Add the FOLDED name key (``canonical_name``) to an entity create's props.
+
+    #12047: entity resolution's deterministic rung compares folded names. The
+    folded form is written at CREATE so the lookup only has to fold the INCOMING
+    name and compare it to a STORED key — without it there is no key to compare
+    at all, and the rung could only find a near-duplicate by reading every
+    entity and folding it in Python, once per write (the 44k re-file the issue
+    exists to unblock would then be quadratic). ⚠️ It is an INDEXED equality:
+    ``canonical_name`` is in
+    ``projection._RANGE_INDEX_LABEL_PROPS`` for both ``Subject`` and ``Object``,
+    and in ``projection._REQUIRED_RANGE_INDEXES`` so a plan cannot silently drop
+    it (parity pinned by `tests/test_5407_index_label_parity.py`; #12047 N5). An
+    earlier revision of this docstring described it as a stored-key-only
+    equality and deferred the index as a follow-up; the index has since shipped
+    with the declaration, so the deferral text was stale.
+    ``canonical_name`` is the slot
+    ``entity_identity._NAME_PROPERTIES`` already treats as an addressable name
+    spelling (“the SECOND spelling an Object may be addressed by (``mining``'s
+    reification writes it)”), and the #783 plan §4.1 defines it as exactly
+    “normalized entity name … for matching; display ``title`` preserves
+    original”. A caller-supplied value wins (``setdefault``).
+
+    The fold is NEVER an identity: it is a lookup key (#3590 — identity is the
+    opaque id), so a rename changes it without changing who the entity is.
+    """
+    from .entity_resolver import normalize_entity_name
+
+    out = dict(props)
+    folded = normalize_entity_name(name)
+    if folded:
+        out.setdefault("canonical_name", folded)
+    return out
 
 
 def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
@@ -5592,7 +5677,14 @@ def _existing_entity_ids(g, etype: str, props: dict, name: Any) -> list:
     if not isinstance(name, str) or not name:
         return []
     label = _landing_entity_label(etype, props)
-    return all_name_holder_ids(g, label, name) if label else []
+    if not label:
+        return []
+    # ⛔ #12047 review round 9: ANY-status over the WRITER'S union. A raw-name
+    # probe reported "no holder" for a fold-only match, so `created.entities`
+    # counted 1 on every re-ingest forever — the exact #9964 review P2 defect
+    # this function's docstring says it fixes.
+    from tortoise.entity_identity import _live_holders_same_entity
+    return list(_live_holders_same_entity(g, label, name, any_status=True)[0])
 
 
 def _kind_layer_note(t: str, props: dict) -> tuple[str, dict | None]:
@@ -6797,31 +6889,11 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     # persist LIVE and vanish on a rebuild — a live/replay parity break. They
     # are brand-new names, so rejecting them cannot break an existing caller;
     # this closes the only route by which they could become node properties.
-    _embed_identity_keys = set(props) & {
-        "embedding_model", "embedding_revision", "embedding_text_hash",
-        # #8488 scope 1: the enriched text a turn's vector describes is
-        # WRITER-minted (only the capture path stores it, beside the vector it
-        # was encoded from). A caller-supplied value would persist live through
-        # `update_point`'s bare `SET n += $props`, and no `PointRevised` arm
-        # replays it — a live-only write a rebuild drops. It is also the input
-        # to the #4194 comparison, so a caller-set value would let a node claim
-        # a vector describes text it was never computed from.
-        "embeddingText",
-        # #5004 round-3/4: the verbatim marker is server-owned too. It is a
-        # declared node property (so a re-emit carries it), which means a
-        # tenant-supplied value WOULD persist live — and it both flips the
-        # replay's storage form and silences the R1 model-change attestation.
-        # `embedding_preserved` is the same argument: truthy makes
-        # `stamp_journal_embedding` skip the identity on a CREATING record, so
-        # a caller could silence the model-change record R1 exists to keep
-        # (and, living only on the live side, it is a parity break too).
-        "embedding_verbatim", "embedding_preserved",
-        # #11821 P0: the journal payload's vector WIDTH marker. Server-minted
-        # beside the vector (`stamp_journal_embedding`), and it must stay out of
-        # caller props for the same reason as the identity stamps: it is a
-        # recorded fact about the journal's text, and a caller could otherwise
-        # forge it.
-        "embedding_width"}
+    # The family and its reasons live in ONE constant
+    # (`_SERVER_MANAGED_EMBEDDING_MARKERS`); the notes it carries are the ones
+    # this strip was introduced with (#8488 scope 1 for `embeddingText`, #5004
+    # round-3/4 for the verbatim/preserved pair, #11821 P0 for the width).
+    _embed_identity_keys = set(props) & _SERVER_MANAGED_EMBEDDING_MARKERS
     if _embed_identity_keys:
         raise ValueError(
             f"{sorted(_embed_identity_keys)} are server-managed embedding "
@@ -10835,6 +10907,16 @@ def _property_filter_clause(key: str) -> str:
         return (f"(n.`{key}` = ${key} OR "
                 f"(n)-[:extractedFrom]->(:Source {{url: ${key}}}))")
     return f"n.`{key}` = ${key}"
+
+
+# #11823 — the propagation census rides a POLLED endpoint
+# (`GET /v1/dream/health`) and costs O(live points + IMPL|NAND edges), so it is
+# BOUNDED: above this many live non-operator `:Point`s the census refuses with
+# a named reason instead of holding the dream executor. Measured ~65 ms per
+# 1,000 live claims (embedded), so 25_000 is ~1.6 s worst case per poll.
+# Raise it if you accept that cost.
+PROPAGATION_CENSUS_MAX_POINTS_ENV = "TORTOISE_PROPAGATION_CENSUS_MAX_POINTS"
+DEFAULT_PROPAGATION_CENSUS_MAX_POINTS = 25_000
 
 
 class TortoiseSDK:
@@ -23446,8 +23528,7 @@ class TortoiseSDK:
         # coordinate to one live id and match the id: the identity decision
         # lives in the resolver, not here.
         try:
-            entity_id = resolve_entity_id(
-                proj.g, "Object", topic, name_props=("name", "canonical_name"))
+            entity_id = resolve_entity_id_same_entity(proj.g, "Object", topic)
             unaddressable = False
         except UnaddressableEntityName:
             # EXACTLY ONE live holder, and it carries no `id` property. The
@@ -23698,19 +23779,33 @@ class TortoiseSDK:
         candidate_type='content': pending (unreviewed) content candidates —
         draft decision Points flagged by the two-tier dedup, shaped as
         {id, content, pointKind, method, similarity, target_id, batch_id}.
-        candidate_type='entity': entity ambiguity pairs — the entity
-        resolver surface (#783) is not yet implemented; returns [] (the MCP
-        tool contract still holds).
+        candidate_type='entity': ambiguity pairs over live ``:Object``/``:Subject``
+        — the entity resolver chain's review band (``entity_resolver``), shaped as
+        {id, name, existing_id, existing_name, label, kind, method, similarity,
+        candidate_type, status, auto_mergeable}.
+
+        ⛔ **An empty entity queue is a MEASUREMENT, never a stub** (#12047). The
+        entity scan runs on every call; if it cannot run it RAISES
+        ``EntityScanUnavailable`` instead of returning ``[]``. The stub this
+        replaced answered ``[]`` unconditionally, so a caller had to read *"could
+        not answer"* as *"no duplicate entities"* — the fail-open shape
+        ``record-reconcile``'s exit 2 exists to prevent.
         """
         if limit < 1:
             raise ValueError(f"limit must be >= 1, got {limit}")
-        proj = self._get_proj()
-        if candidate_type == "entity":
-            return []  # #783 partial — entity queue tracked for epic completion
-        if candidate_type not in ("content", "temporal"):
+        if candidate_type not in ("content", "temporal", "entity"):
             raise ValueError(
                 f"candidate_type must be 'content', 'temporal' or 'entity', "
                 f"got {candidate_type!r}")
+        proj = self._get_proj()
+        if candidate_type == "entity":
+            # #12047: real pairs or a loud failure. Never the ``[]`` stub.
+            from .entity_resolver import entity_candidates
+            # A reviewed PAIR is already suppressed inside the scan
+            # (`entity_resolver._pair_reviewed`), so what comes back is the
+            # pending queue — the same contract as the content branch, without a
+            # second filter that would silently disagree with the first.
+            return entity_candidates(proj.g, limit=limit)
         if candidate_type == "content":
             rows = proj.g.query(
                 "MATCH (n:Point) "
@@ -23761,20 +23856,76 @@ class TortoiseSDK:
         return out
 
     def approve_merge(self, candidate_id: str, action: str = "merge") -> dict:
-        """Review a content dedup candidate (plan §6.1, DE2E-3 Variants B/C).
+        """Review a dedup candidate — a content Point OR an entity (Object/Subject).
 
-        action='reject' → the candidate stays separate (dedup_reviewed=
-        'reject', reviewed=true, DedupeRejected event) and is no longer
-        surfaced by list_dedup_candidates.
+        action='reject' → the candidate stays separate (reviewed=true, a
+        DedupeRejected event) and is no longer surfaced by list_dedup_candidates.
         action='merge' → the "already decided" IMPL is wired now when the
         prior is DRAFT; when the prior is LIVE it is DEFERRED and wired at
         the candidate's promotion time (Variant C — promote_point wires the
         live→live link). Returns {candidate_id, action, wired,
         deferred_to_promotion, target_id}.
+
+        **Entities (#12047)** take the same contract but a NON-DESTRUCTIVE merge
+        (#783 J-2 edge case — a merge is a recorded link, never a destructive
+        collapse; #2730 §6.7.3 — record the alias, do not lose the surface form):
+
+        * ``merge`` → the survivor gains the candidate's folded name in
+          ``aliases`` (so a later write of the variant resolves instead of
+          minting a twin) and the candidate is stamped
+          ``resolved_from``/``dedup_reviewed='merge'``. **No node is deleted and
+          no edge is moved.** Returns ``{candidate_id, action, candidate_type:
+          'entity', survived_id, aliases, method, similarity}``.
+        * ``reject`` → ``dedup_reviewed='reject'``, ``reviewed=true``, and the
+          rejected pair recorded in ``dedup_rejected_targets``; the verdict is
+          journaled as an ``EntityMutated`` record (the property form #783's
+          plan sanctions) — the entity branch emits NO ``DedupeRejected`` event,
+          unlike the content branch above. Nothing is written onto the survivor.
+          The verdict is SET-VALUED: every survivor this candidate was rejected
+          against is kept (the scalar ``dedup_target_id`` is the legacy
+          single-verdict fallback), so rejecting a second pair does not
+          un-suppress the first. Returns the ``target_id`` it decided against.
+
+        ⛔ The pair is RECOMPUTED (the queue is a read surface and stores no
+        pair), so a merge applies to the resolver's *current* best unambiguous
+        match. Two equally-good survivors REFUSE — a merge never picks one for
+        the reviewer (route-then-refuse, #3590 R8).
+
+        Idempotency is PER PAIR, not per candidate: a repeat returns
+        ``already_reviewed`` without a second event when the pair it would
+        decide is one already answered (or when no pair remains). ⚠️ When the
+        candidate still has ANOTHER reviewable survivor, a repeat of ``reject``
+        is a NEW decision against that next pair — by design, since ``reject``
+        means "this candidate is not a duplicate of the pair I am shown" — so a
+        caller retrying a timed-out reject can consume the next queued pair.
+        The result always names the pair that stands as this candidate's
+        rejection (``target_id``, falling back to the stored verdict) so the
+        record is never ambiguous about what was answered.
         """
         if action not in ("merge", "reject"):
             raise ValueError(f"action must be 'merge' or 'reject', got {action!r}")
         proj = self._get_proj()
+        # ── #12047: entity branch FIRST — an Object/Subject id is not a Point id.
+        # ⛔ LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id AND
+        # (n:Object OR n:Subject)` (#3590 review round 5, finding 2): FalkorDB
+        # indexes are label-scoped, so an unlabelled pattern can use no label's
+        # `id` index and degrades to a whole-node scan — and every content/temporal
+        # verdict would pay it (review F11).
+        ent_rows = []
+        for _label in ("Object", "Subject"):
+            ent_rows = proj.g.query(
+                f"MATCH (n:{_label} {{id: $id}}) RETURN labels(n), properties(n)",
+                params={"id": candidate_id},
+            ).result_set
+            if ent_rows:
+                break
+        if ent_rows:
+            _entity_verdict = self._approve_entity_merge(candidate_id, action, ent_rows[0])
+            # `None` = "this id is an entity, but there is no entity verdict and it
+            # is ALSO a Point" — fall through to the content branch below rather
+            # than making a legitimate content verdict unreachable (review).
+            if _entity_verdict is not None:
+                return _entity_verdict
         rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN properties(n)",
             params={"id": candidate_id},
@@ -23851,6 +24002,193 @@ class TortoiseSDK:
         return {"candidate_id": candidate_id, "action": action,
                 "wired": wired, "deferred_to_promotion": deferred,
                 "target_id": target_id}
+
+    def _approve_entity_merge(self, candidate_id: str, action: str,
+                              row) -> dict | None:
+        """The entity half of :meth:`approve_merge` (#12047).
+
+        Split out so the content/temporal Point branch above keeps its exact
+        shape (three pinned suites read it) and this branch owns the entity
+        semantics: recompute the pair, refuse an ambiguous one, never delete.
+
+        ``None`` is a SENTINEL, not an answer: it means "this id is an entity and
+        ALSO a Point, and there is no entity pair to merge", so the caller falls
+        through to the content branch. Returning a dict instead would make a
+        legitimate content verdict unreachable for an id that both labels carry.
+        """
+        from .entity_resolver import (
+            EntityScanUnavailable,
+            apply_entity_merge,
+            entity_pair_for,
+        )
+
+        _labels, props = row
+        reviewed = str(props.get("dedup_reviewed") or "")
+        # ⛔ #12047 review F1: a REJECT verdict is PAIR-scoped, so "the candidate
+        # is already rejected" is NOT the same question as "THIS pair is already
+        # rejected". The queue's suppression filter (`_pair_reviewed`) suppresses
+        # only the reviewed combination, so the scan legitimately re-offers the
+        # candidate against a different survivor — and a candidate-scoped early
+        # return answered that fresh row with `already_reviewed` about a pair
+        # nobody had reviewed, leaving it permanently displayed and permanently
+        # un-rejectable. The MERGE arm keeps the plain early return (a merge is
+        # final for the candidate); the reject arm decides below, once the pair
+        # is known.
+        if reviewed == action and action != "reject":
+            return {"candidate_id": candidate_id, "action": action,
+                    "candidate_type": "entity", "already_reviewed": True,
+                    "survived_id": props.get("resolved_from"),
+                    "target_id": props.get("resolved_from")}
+        if reviewed == "merge":
+            # A verdict is a decision, not a toggle: flip-flopping one candidate
+            # between merge and reject would leave the survivor's alias written
+            # by the merge and the node rejected by the second call.
+            raise ValueError(
+                f"Entity {candidate_id!r} was already reviewed as {reviewed!r} — "
+                f"refusing to overwrite that verdict with {action!r}")
+        proj = self._get_proj()
+        if action == "reject":
+            # #783 plan sanctions the PROPERTY form of the rejection record
+            # ("DedupeRejected event type OR reviewed: true property"); the
+            # journaled EntityMutated carries it, so a rebuild keeps the verdict.
+            target_id = None
+            pair_known = False
+            _pair = None
+            try:
+                _pair = entity_pair_for(proj.g, candidate_id)
+                pair_known = True
+                target_id = (_pair or {}).get("survivor_id")
+            except ValueError:
+                # An ambiguous candidate has no single survivor to record — the
+                # rejection still stands, it just names no target.
+                target_id = None
+            except EntityScanUnavailable:
+                # #12047 review F-C: the pair window is a bound on the MERGE's
+                # re-derivation. A REJECT does not need a survivor — it asserts
+                # "these are not duplicates" and names the target best-effort —
+                # so a full window must not make the review surface's reject verb
+                # unavailable exactly when the queue is largest.
+                target_id = None
+            # ⛔ `pair_known and _pair is None` — a DEFINITIVE "no pair", never
+            # "the scan could not answer" (#12120 V-GATE finding 3). The two
+            # `except` arms above deliberately still write the rejection, so
+            # folding them into the sentinel told an ambiguous/truncated scan to
+            # hand the verdict to the content branch: the entity rejection was
+            # never written, the row stayed permanently re-offered and
+            # un-rejectable (the F1 class), and a `DedupeRejected` was emitted
+            # about a Point the reviewer's row was not about.
+            if pair_known and _pair is None:
+                # ⛔ #12120 finding 4 (P3): the MERGE arm below returns this
+                # method's ``None`` SENTINEL when the id is a Point with no
+                # entity pair, so a legitimate CONTENT verdict stays reachable
+                # for an id that carries BOTH labels. The REJECT arm had no such
+                # fall-through: it wrote an entity rejection with
+                # ``target_id=None``, emitted no ``DedupeRejected``, and left the
+                # content branch unreachable. Probe ``:Point`` exactly as the
+                # merge arm does, and hand the verdict back when the Point half
+                # is a dedup/temporal candidate.
+                _point = proj.g.query(
+                    "MATCH (n:Point {id:$id}) "
+                    "RETURN n.dedup_candidate, n.temporal_candidate",
+                    params={"id": candidate_id},
+                ).result_set
+                if _point:
+                    _row = _point[0]
+                    _dedup = _row[0] if len(_row) > 0 else None
+                    _temporal = _row[1] if len(_row) > 1 else None
+                    if _dedup or _temporal:
+                        return None
+            # ⛔ SET-VALUED (#12047 review F1): one scalar`dedup_target_id` slot
+            # could not hold two rejections, and overwriting it un-suppressed the
+            # pair the reviewer had already answered. `dedup_rejected_targets` is
+            # the authoritative list; the scalar is kept for readers written
+            # before it existed.
+            prior_targets = [str(t) for t in
+                             (props.get("dedup_rejected_targets") or [])
+                             if t is not None]
+            prior_scalar = props.get("dedup_target_id")
+            if prior_scalar is not None and str(prior_scalar) not in prior_targets:
+                prior_targets.append(str(prior_scalar))
+            if reviewed == "reject" and (
+                    target_id is None or str(target_id) in prior_targets):
+                # Already answered: either there is no pair left to act on (the
+                # earlier rejection named no survivor — an ambiguous set — or the
+                # queue now suppresses every pair for this candidate), or THIS
+                # pair is the one already rejected. Both are idempotent no-ops.
+                return {"candidate_id": candidate_id, "action": "reject",
+                        "candidate_type": "entity", "already_reviewed": True,
+                        "survived_id": target_id or props.get("dedup_target_id"),
+                        "target_id": target_id or props.get("dedup_target_id")}
+            new_targets = prior_targets + ([str(target_id)]
+                                           if target_id is not None else [])
+            write: dict = {}
+            if new_targets:
+                write["dedup_rejected_targets"] = new_targets
+            if target_id is not None:
+                write["dedup_target_id"] = target_id
+            self.update_entity(candidate_id, dedup_reviewed="reject",
+                               reviewed=True,
+                               **write)
+            return {"candidate_id": candidate_id, "action": "reject",
+                    "candidate_type": "entity", "wired": False,
+                    "deferred_to_promotion": False, "target_id": target_id}
+        # ⛔ A MERGE never takes the lenient path: it needs the survivor the queue
+        # showed, so `EntityScanUnavailable` (a truncated window) propagates and
+        # the caller is told to re-list, rather than folding into a guessed node.
+        pair = entity_pair_for(proj.g, candidate_id)
+        if pair is None:
+            # An id can be carried by BOTH a Point and an Object/Subject (the
+            # explicit-id doors make that reachable). The entity probes above run
+            # first, so without this the content verdict was diverted into the
+            # entity branch and raised "no ambiguity pair" for a candidate whose
+            # Point half is a perfectly valid content duplicate — a regression
+            # introduced by this PR's routing, not a pre-existing refusal.
+            _point = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.id",
+                params={"id": candidate_id},
+            ).result_set
+            if _point:
+                return None
+            raise ValueError(
+                f"Entity {candidate_id!r} has no ambiguity pair on the current "
+                f"graph — nothing to merge (re-list the queue to see the "
+                f"candidates that exist now)")
+        if reviewed:
+            # #12047 review F1: the flip refusal is PAIR-scoped, like the filter
+            # that decides what the queue offers. A `reject` records the survivor
+            # it was decided against (`dedup_target_id` / `dedup_rejected_targets`)
+            # and suppresses ONLY that combination, so the scan re-offers the
+            # candidate against a DIFFERENT survivor — a different question, not a
+            # flip. Refuse only when this merge would overwrite the verdict on the
+            # SAME pair, or when the rejection named no survivor (it was decided
+            # against an ambiguous set, so no specific pair carries the verdict).
+            rejected = {str(t) for t in
+                        (props.get("dedup_rejected_targets") or [])
+                        if t is not None}
+            prior_target = props.get("dedup_target_id")
+            if prior_target is not None:
+                rejected.add(str(prior_target))
+            if not rejected or str(pair["survivor_id"]) in rejected:
+                raise ValueError(
+                    f"Entity {candidate_id!r} was already reviewed as {reviewed!r} "
+                    f"against {prior_target!r} — refusing to overwrite that "
+                    f"verdict with 'merge' onto the same survivor")
+        result = apply_entity_merge(
+            self, candidate_id, pair["survivor_id"],
+            method=pair["method"], similarity=pair["similarity"])
+        return {"candidate_id": candidate_id, "action": "merge",
+                "candidate_type": "entity", "wired": True,
+                "deferred_to_promotion": False,
+                "survived_id": pair["survivor_id"],
+                "target_id": pair["survivor_id"],
+                "aliases": result["aliases"],
+                "method": pair["method"],
+                "similarity": pair["similarity"],
+                # The queue refuses to call a mismatched-kind pair
+                # `auto_mergeable`; a human verdict may still merge it, but the
+                # caller is told what it decided (review F13).
+                "kind_mismatch": pair.get("kind_mismatch", False)}
+
     # ── Operators ─────────────────────────────────────────────────
 
     @_declares_apply_first_write_lane("create_operator")
@@ -26723,14 +27061,46 @@ class TortoiseSDK:
         about what "terminal" means.
         """
         proj = self._get_proj()
-        rows = proj.g.query(
-            f"MATCH (n:{label} {{name:$name}}) "
-            f"RETURN n.id, {_terminal_expression('n')} AS term, "
-            f"coalesce(n.is_operator, false) AS op, n.status AS status",
-            params={"name": name},
-        ).result_set
-        if not rows:
-            return False, None, None, None, 0, False, None
+        # ⛔ #12047 review round 9 (P1): the probe must ask the WRITER's
+        # question. `resolve_or_mint` matches the folded UNION (name ·
+        # canonical_name · aliases, raw and folded spellings) and collapses
+        # merged-away carriers; this probe matched `{name:$name}` only. A
+        # fold-only holder was therefore invisible here, the guard passed the
+        # bundle item, and the write then died in step 4 with the earlier items
+        # already committed — the partial-mutation class this guard exists to
+        # prevent. It also refused legitimate bundles after an EXACT-TWIN merge,
+        # whose two carriers both keep the raw name. `_live_holders_same_entity`
+        # IS that predicate, so the guard and the writer cannot disagree.
+        from .entity_identity import (
+            _live_holders_same_entity,
+            _name_holder_ids_same_entity,
+        )
+        holders, _ = _live_holders_same_entity(proj.g, label, name)
+        if not holders:
+            # No LIVE carrier. `exists_by_name` still gates the #7925 terminal
+            # refusal, so a TERMINAL-only reference keeps answering True — but
+            # through the SAME union, not a raw-name probe. ⛔ The ANY-STATUS
+            # question must NOT collapse (#12047 round-4 finding 3):
+            # `_collapse_resolved_holders` re-applies a LIVE filter the moment it
+            # follows a `resolved_from` hop, so a TERMINAL survivor vanished and
+            # `exists_by_name` answered False for a name held by two nodes
+            # (measured: un-collapsed ANY `[carrier, survivor]`, collapsed `[]`).
+            # The docstring above promises the opposite. The LIVE probe keeps
+            # collapsing — that one must agree with `resolve_or_mint`.
+            any_holders = _name_holder_ids_same_entity(
+                proj.g, label, name, any_status=True)
+            if not any_holders:
+                return False, None, None, None, 0, False, None
+            return True, None, None, None, 0, False, None
+        holder_ids = [str(h) for h in holders if h]
+        rows = []
+        if holder_ids:
+            rows = proj.g.query(
+                f"MATCH (n:{label}) WHERE n.id IN $ids "
+                f"RETURN n.id, {_terminal_expression('n')} AS term, "
+                f"coalesce(n.is_operator, false) AS op, n.status AS status",
+                params={"ids": holder_ids},
+            ).result_set
         # ⛔ #3590 (round-5 review F1): THE TARGET IS THE NODE THE WRITE LANDS
         # ON, and the write now resolves over **LIVE** carriers only
         # (`entity_identity.resolve_or_mint`): a TERMINAL sole carrier does not
@@ -26745,7 +27115,7 @@ class TortoiseSDK:
         # computed from the LIVE holder set, the same predicate the create uses,
         # so the guard and `resolve_or_mint` cannot disagree.
         _live = [r for r in rows if not r[1]]
-        if len(_live) != 1 or not _live[0][0]:
+        if len(holders) != 1 or not _live or not _live[0][0]:
             # 0 (terminal-only) and 2+ (same-name coexistence, which the create
             #     REFUSES rather than picking a carrier — #8864 / D2): the write
             #     lands on no single existing carrier, so it MINTS its own node
@@ -26760,7 +27130,7 @@ class TortoiseSDK:
             #     is what keeps the name create-able.
             # The cases are told apart by the live COUNT — and by the target's
             # own id, which is what separates a MINT from an ADOPT.
-            return True, None, None, None, len(_live), len(_live) == 1, None
+            return True, None, None, None, len(holders), len(holders) == 1, None
         target = _live[0]
         # All three axes in ONE pass (#7925 review round 4 — an early return per
         # axis made a holder that matched two of them report only the first, so
@@ -30592,8 +30962,8 @@ class TortoiseSDK:
         # wired the raw coordinate. Resolve id-or-name to EXACTLY ONE live id
         # (>=2 -> AmbiguousEntityName) and rebind so every downstream write uses
         # the id, never the name.
-        resolved_approver = resolve_entity_id(proj.g, "Subject", approver_id,
-                                             addressing=ADDRESSING_SOURCE)
+        resolved_approver = resolve_entity_id_same_entity(
+            proj.g, "Subject", approver_id, addressing=ADDRESSING_SOURCE)
         if resolved_approver is None:
             raise ValueError(
                 f"Cannot file human approval: Subject {approver_id!r} does not exist"
@@ -30853,8 +31223,8 @@ class TortoiseSDK:
         # returned None for an id-valued author — AND took `rows[0]` with no
         # live filter, a silent pick over same-name carriers. Resolve id-first
         # then one live case-insensitive name (>=2 -> AmbiguousEntityName).
-        resolved = resolve_entity_id(proj.g, "Subject", author,
-                                    case_insensitive_name=True)
+        resolved = resolve_entity_id_same_entity(proj.g, "Subject", author,
+                                                case_insensitive_name=True)
         if resolved is None:
             return {**chain, "subject": None}
         rows = proj.g.query(
@@ -32052,7 +32422,22 @@ class TortoiseSDK:
         # deliberately retains the dirty root. Excuse the reasons the guard
         # calls legitimate instead of false-paging on them.
         no_op_reason = self._dream_metrics.get("last_pass_no_op_reason")
-        coverage = self._metrics_coverage()
+        # #12116 review A-P2 (the WHOLE-read half): the live/stamped pair is read
+        # ONCE per health call and its ratio is computed from that one value.
+        # Before this, `coverage_pct` and the `propagation` block each called the
+        # pair read of their own (twice + once = the same aggregate computed
+        # THREE times, measured 5 graph queries per `dream_health_check`), and a
+        # helper-level pin could not see it — R7 bounded only the new helper, so
+        # the endpoint grew while the test stayed green. Both consumers below
+        # take the pair (or its failure) from THIS read.
+        # Failure posture is preserved per surface: `coverage_pct` keeps its
+        # pre-existing 0.0 (it feeds the alarm), while the `propagation` block
+        # reports `unavailable` with the reason (BOUNDED-OPERATION-CONTRACT §1a)
+        # — so a failed read is still `0` on one surface and `unavailable` on the
+        # other, never collapsed into a single meaning.
+        stamp_pair, stamp_error = self._read_stamp_pair()
+        coverage = (self._coverage_ratio(stamp_pair)
+                    if stamp_pair is not None else 0.0)
         _LEGITIMATE_NO_OP = {
             "stale_run_guard", "budget_zero", "no_dirty_roots",
             "no_ep_factors",
@@ -32094,7 +32479,9 @@ class TortoiseSDK:
             # caller must be able to see. The silent case raised
             # DreamNoOpError; this reports the proven-empty case.
             "no_op_reason": self._dream_metrics.get("last_pass_no_op_reason"),
-            "coverage_pct": self._metrics_coverage(),
+            # …the SAME number the alarm above was computed from — one read, not
+            # a second one that could disagree with the alarm's input (#12116 A-P2).
+            "coverage_pct": coverage,
             "failure_rate": (
                 self._dream_metrics["failure_count"]
                 / max(self._dream_metrics["pass_count"], 1)),
@@ -32104,30 +32491,346 @@ class TortoiseSDK:
                 self._dream_metrics.get("per_mode_counts", {})),
             "region_attempts": state["retry_attempts"],
             "warm_skipped_updates": state["warm_skipped_updates"],
+            # #11823 — the propagation cap, made visible. `coverage_pct` above
+            # is STAMP coverage over a population EP cannot reach; this block
+            # is the graph-scoped answer to "how many claims have no belief",
+            # plus the reach of the last pass THIS SDK instance served (not
+            # "in this process" — the hosted door runs the pass on another
+            # per-request SDK, see `_propagation_health`). It is an
+            # additive field on a plain dict (no key-set is pinned here), and
+            # it is on this surface for the same reason #3139 put
+            # `last_belief_write_count` here: the pass result's key-set IS
+            # pinned (I1, #6211), so belief observability lives on health.
+            # "6 of 20, 14 uncovered": the graph-scoped half gives the counts;
+            # this records the pass that ran. The pass half is per-instance, so
+            # the per-pass keys are absent when this instance served no pass —
+            # see `last_pass_reason`. The stamp pair (and its failure) is the ONE
+            # read this call already made above, so the block does not repeat it
+            # (#12116 A-P2, whole-read half).
+            "propagation": self._propagation_health(stamp_pair, stamp_error),
         }
+
+    def _propagation_health(self,
+                            stamp_pair: tuple[int, int] | None = None,
+                            stamp_error: Exception | None = None) -> dict:
+        """#11823 — the `propagation` block of `dream_health_check()`.
+
+        ``last_pass`` is `None` with a named reason when no pass reached THIS
+        SDK instance, never a reassuring zero. ⛔ The reason says "observed by
+        this sdk" and not "ran in this process" because the hosted door runs the
+        pass on a DIFFERENT per-request SDK than the one serving this read
+        (`hosted_api.py::dream_health` builds one per request, `_run_dream_on_pool`
+        closes its own), so a pass can have run in the process and still be
+        invisible here — "no pass ran in this process" would be a false
+        statement on exactly the surface that polls this record (#12116 C-P2).
+        The graph-scoped half above is the durable carrier: it is read from the
+        graph, so it survives any instance.
+        """
+        out: dict = {
+            "graph_live_claims": None,
+            "ep_reachable_claims": None,
+            "belief_present": None,
+            "no_belief": None,
+            "belief_coverage_pct": None,
+            "stamped": None,
+            "operator_less_claims": None,
+            "unclassified_claims": None,
+            "unavailable": None,
+            "last_pass": None,
+            "last_pass_reason": None,
+        }
+        try:
+            # `stamp_pair` is the one read `dream_health_check` already made; the
+            # block does not read that aggregate a second time (#12116 A-P2). A
+            # read that already failed is REPLAYED rather than retried: `unavailable`
+            # must carry why the read failed, not a second exception from a retry
+            # (and the endpoint must not pay the failing read twice per poll).
+            if stamp_pair is None and stamp_error is not None:
+                raise stamp_error
+            out.update(self._propagation_counts(stamp_pair))
+        except Exception as exc:  # noqa: BLE001, RUF100
+            # "0 claims" and "could not read it" must never collapse
+            # (`BOUNDED-OPERATION-CONTRACT.md` §1a) — a failed read reports WHY
+            # and leaves the counts NULL rather than zeroed.
+            out["unavailable"] = f"{type(exc).__name__}: {exc}"
+        reach = self._dream_metrics.get("last_pass_reach")
+        if not reach:
+            # #12116 review C-P2: this string must be literally true. It is NOT
+            # "no pass ran in this process" — the hosted door runs the pass on a
+            # DIFFERENT per-request SDK than the one serving this read, so a pass
+            # can have run in this process and still be invisible here. It names
+            # what is actually observed: no pass reached THIS instance's metrics.
+            # The graph-scoped half above is the durable carrier (`stamped` /
+            # `no_belief` survive any instance); the pass half is per-instance by
+            # construction, which is the recorded residual (#12099).
+            out["last_pass_reason"] = (
+                "no_pass_observed_by_this_sdk"
+                if not self._dream_metrics.get("last_pass_mode")
+                else "reach_not_recorded")
+            return out
+        last = dict(reach)
+        # #12116 review B-P2 — NEVER subtract the pass's `affected` from the
+        # graph population. `affected` is the window the pass CONSUMED and it
+        # includes the operator-less ids `_trivial_stamp` unions in
+        # (`dream.py::_trivial_stamp`), which are NOT in `ep_reachable_claims`,
+        # so `ep_reachable - affected` reads 0 over a graph where nothing is
+        # covered (measured: affected=20, ep_reachable=6, no_belief=6 → a
+        # subtraction published "uncovered: 0"). The deficit needs no
+        # arithmetic: the block's `no_belief` is read from the graph AFTER this
+        # pass, so it IS the uncovered count — "6 of 20" is
+        # `belief_present` of `ep_reachable_claims`, and 14 uncovered is
+        # `no_belief`. `graph_ep_reachable` is reported as the denominator this
+        # pass ran against, with no cross-population sum.
+        reachable = out.get("ep_reachable_claims")
+        if reachable is not None:
+            last["graph_ep_reachable"] = int(reachable)
+        out["last_pass"] = last
+        return out
 
     def _metrics_coverage(self) -> float:
         """Coverage % = fraction of live non-operator claims with a
-        lastDreamedAt stamp (graph-wide)."""
+        lastDreamedAt stamp (graph-wide).
+
+        #11823 (#12116 review A-P2): the population and its stamp aggregate are
+        that of :meth:`_stamp_counts`, so the stamp ratio on this surface and
+        the ``stamped`` / ``graph_live_claims`` pair in the ``propagation``
+        block cannot disagree — one spelling, one query.
+
+        ⛔ This is the STANDALONE read (one query). `dream_health_check` must not
+        call it: it reads the pair ONCE via :meth:`_read_stamp_pair` and hands
+        the value to both the alarm's ratio and :meth:`_propagation_health`, so
+        the polled endpoint computes the aggregate once per request (#12116
+        review A-P2, whole-read half — pinned by
+        ``test_the_health_read_computes_the_stamp_pair_once``).
+        """
+        stamp_pair, _err = self._read_stamp_pair()
+        return (self._coverage_ratio(stamp_pair)
+                if stamp_pair is not None else 0.0)
+
+    def _read_stamp_pair(self) -> tuple[tuple[int, int] | None, Exception | None]:
+        """The live/stamped pair, or the failure, in ONE read (#12116 A-P2).
+
+        Returns ``(pair, None)`` on success and ``(None, exc)`` on a failed read
+        instead of raising, because its two consumers have deliberately
+        DIFFERENT postures for the same failure: ``coverage_pct`` collapses it
+        to ``0.0`` (pre-existing, it feeds the alarm) while the ``propagation``
+        block reports ``unavailable`` with the reason. Capturing the error here
+        keeps one read and both postures; re-reading per consumer is what made
+        the polled endpoint compute the same aggregate three times.
+        """
         try:
-            proj = self._get_proj()
-            total = proj.g.query(
-                "MATCH (n:Point) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-                "AND (n.status IS NULL OR n.status <> 'draft') "
-                "RETURN count(n)"
-            ).result_set
-            stamped = proj.g.query(
-                "MATCH (n:Point) "
-                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
-                "AND (n.status IS NULL OR n.status <> 'draft') "
-                "AND n.lastDreamedAt IS NOT NULL RETURN count(n)"
-            ).result_set
-            n_total = int(total[0][0]) if total else 0
-            n_stamped = int(stamped[0][0]) if stamped else 0
-            return (n_stamped / n_total) if n_total else 0.0
-        except Exception:
-            return 0.0
+            return self._stamp_counts(), None
+        except Exception as exc:  # noqa: BLE001, RUF100
+            return None, exc
+
+    @staticmethod
+    def _coverage_ratio(stamp_pair: tuple[int, int]) -> float:
+        """Stamped fraction of a ``(live, stamped)`` pair; ``0.0`` when empty."""
+        n_total, n_stamped = stamp_pair
+        return (n_stamped / n_total) if n_total else 0.0
+
+    def _stamp_counts(self) -> tuple[int, int]:
+        """Live non-operator ``:Point`` population and how many carry a
+        ``lastDreamedAt`` stamp — ONE query, ONE spelling of the predicate.
+
+        Used by :meth:`_metrics_coverage` (the ``coverage_pct`` ratio) and by
+        :meth:`_propagation_counts` (which publishes the same two numbers as
+        ``graph_live_claims`` / ``stamped``), so the two cannot drift apart.
+        """
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND (n.status IS NULL OR n.status <> 'draft') "
+            "RETURN count(n), "
+            "  sum(CASE WHEN n.lastDreamedAt IS NOT NULL THEN 1 ELSE 0 END)"
+        ).result_set
+        if not rows:
+            return 0, 0
+        # `sum(...)` returns a FLOAT on this engine (measured 3.0) — cast.
+        return int(rows[0][0] or 0), int(rows[0][1] or 0)
+
+    def _propagation_census_cap(self) -> int:
+        """The live-`:Point` bound above which :meth:`_propagation_counts`
+        refuses (#12116 P2). Env-overridable; a malformed or non-positive value
+        falls back to the default rather than disabling the bound."""
+        raw = os.environ.get(PROPAGATION_CENSUS_MAX_POINTS_ENV)
+        try:
+            value = int(raw) if raw not in (None, "") else 0
+        except (TypeError, ValueError):
+            value = 0
+        return value if value > 0 else DEFAULT_PROPAGATION_CENSUS_MAX_POINTS
+
+    def _propagation_counts(
+            self, stamp_pair: tuple[int, int] | None = None) -> dict:
+        """#11823 — the graph-scoped population a propagation pass does NOT choose.
+
+        ``stamp_pair`` is the ``(live, stamped)`` value the caller already read
+        (:meth:`_read_stamp_pair`); absent, this method reads it itself so a
+        direct caller still gets a complete answer. Passing it in is what keeps
+        a polled health read to ONE read of that aggregate per request (#12116
+        review A-P2).
+
+        `dream()`'s own `coverage` divides by the pass's radius
+        (``affected / len(_window_closure(window, max_hops))``, ``_dream_local``
+        and ``_dream_stale_first``), so it reads ≈1.0 for ANY pass that
+        consumed its window — it cannot distinguish "the cascade converged"
+        from "I stopped at level 6". And `_metrics_coverage` counts
+        ``lastDreamedAt`` STAMPS, which are written for a population EP can
+        never compute (`_trivial_stamp`). Neither can answer "how many claims
+        have no belief".
+
+        This returns the two numbers that can, and they are defined on ONE
+        population each so the arithmetic cannot mix scopes (#11823 review):
+
+        - ``ep_reachable_claims`` — live non-operator ``:Point``s with >=1
+          ``IMPL|NAND`` edge to a live epistemic endpoint. Its OWN
+          ``count(DISTINCT n)``, never ``_edged_claim_ids()``: that query is
+          label-blind (``epistemic_disjunction`` admits Point|Subject|Object|
+          Event), so reusing it here would put a ``:Point`` numerator over a
+          wider denominator and yield ``belief_coverage_pct > 1`` and a
+          NEGATIVE ``no_belief`` (measured: 5.0 / -8.0).
+        - ``belief_present`` — the SAME population, counted through the shared
+          presence predicate (`ep_has_belief_cypher`, #11702) rather than a
+          private ``IS NOT NULL``: a stored (0,0) pair is not a belief and a
+          declared baseline prior is (`analyze.py`: "The presence gate is
+          `ep_has_belief_cypher`, the SHARED predicate — never a private sum").
+        - ``graph_live_claims`` / ``stamped`` — the ``:Point`` population the
+          existing stamp-coverage ratio uses.
+        - ``operator_less_claims = graph_live_claims - points_edged``, where
+          ``points_edged`` is the count of live non-operator ``:Point``s with
+          ANY ``IMPL|NAND`` edge: the `_trivial_stamp`/``scanned_count``
+          population EP can never cover. ⛔ **Derived from the POSITIVE
+          traversal, not from a negated pattern** (#12116 review P2: the
+          ``NOT (n)-[:IMPL|NAND]-()`` spelling measured 76.6 ms per 1 000
+          claims — 57% of the whole census — against 7.9 ms for the positive
+          count). It is NOT ``graph_live_claims - ep_reachable_claims``: the
+          two are defined by different rules, and a live Point whose only
+          ``IMPL|NAND`` edge reaches a DRAFT or non-epistemic endpoint has an
+          edge and is still unreachable (#12116 review C-P2, measured with
+          ``create_direct_edge``). That population is ``unclassified_claims``
+          (below).
+        - ``unclassified_claims`` — ``points_edged - ep_reachable`` (the same
+          value as ``graph_live - ep_reachable - operator_less``): live
+          non-operator ``:Point``s that DO have an
+          ``IMPL|NAND`` edge but whose far endpoint is draft or non-epistemic,
+          so EP excludes the factor and no pass can recompute them. Without
+          this field the block UNDER-reports — a graph whose only live claim
+          is draft-edged read ``no_belief: 0`` (measured, #12116 C-P2) — which
+          its own posture forbids ("may over-report, never under-report").
+          This subtraction IS sound where the ``affected`` one was not
+          (#12116 B-P2): all three terms are disjoint counts over the SAME
+          ``:Point`` population, so the partition is exact.
+
+        ⚠️ ``ep_reachable_claims`` INCLUDES live claims whose only ``IMPL|NAND``
+        edge reaches an operator with no usable factor — the operator's far
+        endpoint is DRAFT, so EP excludes the factor and no pass can
+        recompute the claim, yet the claim IS in the denominator (measured).
+        That is the benign non-zero ``no_belief`` a converged graph can carry,
+        and it is why this instrument may over-report but must never
+        under-report. ⛔ #12116 review B-P3: do NOT describe the over-report as
+        an anchor-less ``:Subject-[:IMPL]->:Object`` component — this query
+        anchors ``n:Point``, so such a component can never match it and can
+        never enter the denominator.
+
+        Raises ``PropagationCensusRefused`` when the live ``:Point`` population
+        exceeds ``TORTOISE_PROPAGATION_CENSUS_MAX_POINTS`` — checked after the
+        cheap O(points) stamp count and BEFORE the two O(points + edges)
+        traversals (#12116 review P2: this census rides a polled endpoint) —
+        and re-raises any read failure. The caller reports either as
+        ``unavailable`` rather than letting 0 mean both "no claims" and "could
+        not read" (`docs/architecture/BOUNDED-OPERATION-CONTRACT.md` §1a).
+        """
+        from .search_engine import ep_has_belief_cypher  # #11702 shared gate
+        proj = self._get_proj()
+        live = "(n.status IS NULL OR n.status <> 'draft')"
+        live_m = "(m.status IS NULL OR m.status <> 'draft')"
+        non_op = "(n.is_operator IS NULL OR n.is_operator = false)"
+        # #12116 review P2 — the census is BOUNDED before the expensive reads.
+        # The census is O(points + edges) and rides a POLLED endpoint; measured
+        # 135 ms per 1,000 live claims for the first version and ~68 ms for this
+        # one. The stamp count below is O(points) only, so it is the cheap
+        # population probe — and it is the ONE aggregate two surfaces share
+        # (#12116 A-P2): when `dream_health_check` already read it, reuse that
+        # value rather than reading the third copy in one poll.
+        if stamp_pair is not None:
+            graph_live, stamped = stamp_pair
+        else:
+            graph_live, stamped = self._stamp_counts()
+        cap = self._propagation_census_cap()
+        if graph_live > cap:
+            from .exceptions import PropagationCensusRefused
+            raise PropagationCensusRefused(
+                graph_live, cap, PROPAGATION_CENSUS_MAX_POINTS_ENV)
+        # Query 1: how many live non-operator :Points carry ANY IMPL|NAND edge.
+        # This is the CHEAP spelling of the operator-less answer (#12116 P2:
+        # a negated pattern — `NOT (n)-[:IMPL|NAND]-()` — measured 76.6 ms per
+        # 1,000 claims, 57% of the whole census; the positive traversal is
+        # 7.9 ms for the same answer, derived as `graph_live - points_edged`).
+        edged_rows = proj.g.query(
+            "MATCH (n:Point)-[:IMPL|NAND]-() "
+            f"WHERE {non_op} AND {live} "
+            "WITH DISTINCT n RETURN count(n)"
+        ).result_set
+        points_edged = int(edged_rows[0][0] or 0) if edged_rows else 0
+        # Query 2: of those, the ones EP can actually reach (a LIVE, epistemic
+        # far endpoint) and how many store a belief — one pass, both numbers,
+        # so the numerator and denominator cannot come from different sets.
+        reach_rows = proj.g.query(
+            "MATCH (n:Point)-[r:IMPL|NAND]-(m) "
+            f"WHERE {non_op} AND {live} AND {live_m} "
+            f"AND ({epistemic_disjunction('m')}) "
+            f"WITH DISTINCT n, ({ep_has_belief_cypher('n')}) AS has_belief "
+            "RETURN count(n), sum(CASE WHEN has_belief THEN 1 ELSE 0 END)"
+        ).result_set
+        reachable = int(reach_rows[0][0] or 0) if reach_rows else 0
+        belief_present = int(reach_rows[0][1] or 0) if reach_rows else 0
+        # The partition, each term the difference of two counts over the SAME
+        # `:Point` population — `operator_less` is the `_trivial_stamp`
+        # population (no IMPL|NAND edge at all) and `unclassified` is edged but
+        # unreachable (#12116 C-P2). Equalities, not clamps.
+        operator_less = graph_live - points_edged
+        # No clamp: the numbers are reported as measured. A future mixed
+        # population must show up as `no_belief < 0` / a `belief_coverage_pct`
+        # outside [0, 1] — a VISIBLE defect — rather than being silently
+        # corrected into a plausible "fully covered" (#12116 review C-P3: a
+        # clamp is the opposite of the asserted invariant the comment claimed).
+        # `tests/test_11823_*` asserts the ranges instead.
+        no_belief = reachable - belief_present
+        unclassified = points_edged - reachable
+        return {
+            "graph_live_claims": graph_live,
+            "ep_reachable_claims": reachable,
+            "belief_present": belief_present,
+            "no_belief": no_belief,
+            "belief_coverage_pct": (
+                (belief_present / reachable) if reachable else 0.0),
+            "stamped": stamped,
+            "operator_less_claims": operator_less,
+            "unclassified_claims": unclassified,
+        }
+
+    def _record_pass_reach(self, mode: str, max_hops: int | None,
+                           affected: int, window_reachable: int) -> None:
+        """#11823 — record the reach of the pass that just ran.
+
+        Called from EVERY pass arm, including the two that return before
+        `_record_dream_metrics` (``budget=0`` → `_dream_noop`, and the
+        no-dirty-roots return) and BEFORE `_guard_dream_progress` (which
+        records metrics and then RAISES on the silent no-op — the worst reach
+        there is, and the exact pass this instrument exists to expose). Keying
+        "did a pass run" on ``last_pass_mode is None`` would report
+        "no pass ran" for passes that ran and reached nothing.
+
+        No graph read: the closure/`affected` values are already computed by
+        the caller.
+        """
+        self._dream_metrics["last_pass_reach"] = {
+            "mode": mode,
+            "max_hops": max_hops,
+            "affected": int(affected),
+            "window_reachable": int(window_reachable),
+        }
 
     def _record_dream_metrics(self, result: dict, mode: str) -> None:
         """Per-pass observability record (C7) — called by the dream adapters."""
@@ -32913,7 +33616,7 @@ class TortoiseSDK:
             self._ensure_calibrated("dream")
         if budget is not None and budget <= 0:
             # I1: budget=0 → no-op result, not an error. No EP, no stamps.
-            return self._dream_noop(resolved)
+            return self._dream_noop(resolved, max_hops)
         dreamer = self._get_dreamer()
         if resolved == "local":
             return self._dream_local(dreamer, max_hops, stamp_dreamed_at,
@@ -32972,13 +33675,16 @@ class TortoiseSDK:
             return "full"
         return "local"
 
-    def _dream_noop(self, mode: str) -> dict:
+    def _dream_noop(self, mode: str, max_hops: int | None = None) -> dict:
         """budget ≤ 0 → no-op result with the mode's EXACT key-set (I1:
         "budget=0 → no-op result (not an error)"). No EP, no stamps;
         converged flags are vacuously True (matches dream_window's budget=0
         contract)."""
         # #3139: an explicit budget=0 is a legitimate no-op — report why.
         self._dream_metrics["last_pass_no_op_reason"] = "budget_zero"
+        # #11823: the pass RAN and reached nothing — record that, so the health
+        # surface does not report "no_pass_observed_by_this_sdk" for it.
+        self._record_pass_reach(mode, max_hops, 0, 0)
         # #3139 (review P2): this pass wrote no belief state, so the belief
         # count must not survive from a previous pass — a field documented as
         # "beliefs written by the LAST pass" reporting a stale non-zero value
@@ -33187,6 +33893,9 @@ class TortoiseSDK:
             # one (a stale ``truncated: True`` would tell a caller to distrust
             # a topology nothing capped).
             dreamer._last_selection_stats = {}
+            # #11823: a pass DID run (and reached nothing) — record it as such,
+            # else the health surface reports "no_pass_observed_by_this_sdk" for it.
+            self._record_pass_reach("local", max_hops, 0, 0)
             return {"mode": "local", "iterations": 0, "converged": True,
                     "affected_claims": [], "budget_used": 0, "coverage": 0.0}
 
@@ -33208,6 +33917,15 @@ class TortoiseSDK:
             before_run=_gate if require_calibration else None,
         )
         affected = set(result.get("affected_claims", []))
+        # #11823: record the pass's reach BEFORE the no-op guard — the guard
+        # itself records metrics and then RAISES on the silent no-op, and that
+        # pass's reach (nothing) is exactly what the instrument exists to
+        # expose. NO extra read: `reachable` is the SAME value `coverage` uses
+        # below (one closure BFS per pass, hoisted here — recomputing it after
+        # the guard doubled the most expensive read on the write path, which
+        # D2-5's ≤500 ms embedded budget cannot pay; #12116 review A-P1).
+        reachable = self._window_closure(anchors, max_hops)
+        self._record_pass_reach("local", max_hops, len(affected), len(reachable))
         # #3139: fail closed BEFORE any dirty-root mutation — a silent no-op
         # that swept its own backlog would leave the graph permanently stale.
         self._guard_dream_progress(dreamer, "local", result, window=anchors)
@@ -33232,7 +33950,8 @@ class TortoiseSDK:
             self._register_failed_attempt(
                 affected,
                 run_ep=getattr(dreamer, "_last_run_ep_version", None))
-        reachable = self._window_closure(anchors, max_hops)
+        # #11823: `reachable` is the hoisted closure from above (one BFS per
+        # pass — do NOT recompute it here; #12116 review A-P1).
         coverage = (len(affected) / len(reachable)) if reachable else 0.0
         result["coverage"] = coverage
         result["budget_used"] = getattr(
@@ -33273,6 +33992,10 @@ class TortoiseSDK:
                                      warm_start=warm_start)
         window = getattr(dreamer, "_last_window", []) or []
         affected = set(result.get("affected_claims", []))
+        # #11823: reach recorded before the no-op guard (see _dream_local).
+        reachable = self._window_closure(window, max_hops)
+        self._record_pass_reach("stale-first", max_hops, len(affected),
+                                len(reachable))
         # #3139: fail closed before the dirty-root sweep (see _dream_local).
         self._guard_dream_progress(dreamer, "stale-first", result,
                                    window=window)
@@ -33289,7 +34012,7 @@ class TortoiseSDK:
             self._register_failed_attempt(
                 set(self._dirty_roots) & affected,
                 run_ep=getattr(dreamer, "_last_run_ep_version", None))
-        reachable = self._window_closure(window, max_hops)
+        # #11823: `reachable` is the hoisted closure from above (one BFS per pass).
         coverage = (len(affected) / len(reachable)) if reachable else 0.0
         result["coverage"] = coverage
         # I6→I1 mapping: drop the scheduler-internal operators_deduped
@@ -33320,6 +34043,12 @@ class TortoiseSDK:
         )
         # #1338: scheduler-internal — not part of the pinned I1 full key-set.
         result.pop("truncated", None)
+        # #11823: reach recorded before the no-op guard (see _dream_local).
+        # Full's denominator is the same reachable-claim count `coverage` uses.
+        reachable = self._reachable_claim_count(max_hops)
+        self._record_pass_reach("full", max_hops,
+                                int(result.get("total_affected", 0) or 0),
+                                int(reachable))
         # #3139: fail closed before the dirty-root sweep — a full pass that
         # scanned zero anchors over a populated graph must not report success.
         self._guard_dream_progress(dreamer, "full", result, window=None)
@@ -33341,7 +34070,6 @@ class TortoiseSDK:
             self._sweep_dirty_roots(
                 affected, run_ep=getattr(dreamer, "_last_run_ep_version", None))
             self._prune_nonexistent_dirty_roots()
-        reachable = self._reachable_claim_count(max_hops)
         coverage = ((result["total_affected"] / reachable)
                     if reachable else 0.0)
         result["coverage"] = coverage
@@ -33561,8 +34289,24 @@ class TortoiseSDK:
         if not anchors:
             return 0
         closure = self._window_closure(anchors, max_hops)
-        # The EP-run universe: claims with ≥1 IMPL|NAND edge, any epistemic
-        # label on either endpoint (#7902).
+        # #11823: the edged set lives in its own helper (one spelling of the
+        # predicate); the closure intersection stays HERE, so this function's
+        # behaviour is unchanged by the extraction.
+        edged = self._edged_claim_ids()
+        return len(closure & edged)
+
+    def _edged_claim_ids(self) -> set[str]:
+        """The EP-run universe: claims with ≥1 ``IMPL|NAND`` edge, any epistemic
+        label on either endpoint (#7902).
+
+        ⚠️ #11823: this query is **label-blind** — ``epistemic_disjunction``
+        admits ``Point|Subject|Object|Event`` — so it is NOT the denominator for
+        a ``:Point``-scoped belief count. Mixing the two populations yields
+        ``belief_coverage_pct > 1`` and a negative ``no_belief``; the health
+        block's own denominator is a separate, ``:Point``-scoped
+        ``count(DISTINCT n)`` in :meth:`_propagation_counts`.
+        """
+        proj = self._get_proj()
         edged_rows = proj.g.query(
             "MATCH (n)-[r:IMPL|NAND]-(m) "
             f"WHERE {epistemic_disjunction('n')} "
@@ -33572,8 +34316,7 @@ class TortoiseSDK:
             "AND (m.status IS NULL OR m.status <> 'draft') "
             "RETURN DISTINCT n.id"
         ).result_set
-        edged = {r[0] for r in edged_rows}
-        return len(closure & edged)
+        return {r[0] for r in edged_rows}
 
     def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
                          rel_filter: str = "IMPL|NAND",
@@ -43649,6 +44392,22 @@ class TortoiseSDK:
         # a caller-forged `type` when its drop is removed (measured) — only that
         # door's drop keeps it honest. Assigned rather than reordered so the
         # dict's key order is unchanged.
+        #
+        # #12047: the FOLDED name key is filled HERE, at the funnel every entity
+        # door meets, and not only at `create_entity`'s subject/object branches
+        # (review P1). Two in-tree writers reach the node through this method
+        # WITHOUT passing the door helper — `_connect_issue_objects` (issue
+        # Objects) and any caller-relayed props — so they wrote no folded key at
+        # all, and the deterministic rung could not see their nodes: creating
+        # "the owner" beside a stub `(s:Subject {name:"The Owner"})` misses both
+        # arms (raw name differs, no `canonical_name`) and mints a second live
+        # carrier. `setdefault` because a caller-supplied fold wins, and the value
+        # is computed from the JOURNALED `name`, so live and replay agree.
+        if label in ("Object", "Subject") and "canonical_name" not in props:
+            _ent_name = props.get("name")
+            if isinstance(_ent_name, str) and _ent_name:
+                from .entity_resolver import normalize_entity_name
+                props["canonical_name"] = normalize_entity_name(_ent_name)
         event = {"type": event_type, "id": id_val, **props}
         event["type"] = event_type
         # Normalize field names for projection compatibility
@@ -44261,7 +45020,7 @@ class TortoiseSDK:
                     "Point", tid, "delete", cache_tier=RECORD_ONLY_TIER)
                 for tid in (turn_ids or ())}
 
-    def _refuse_ambiguous_rename(self, id_val: str, new_name: str) -> None:
+    def _refuse_ambiguous_rename(self, id_val: str, new_name: str) -> bool:
         """Refuse a rename onto a name a DIFFERENT live entity already holds.
 
         #3590 R2 + D3: the name is a mutable natural key, and a natural key that
@@ -44299,10 +45058,17 @@ class TortoiseSDK:
         holders of one name — the exact state this guard exists to prevent.
         ``_update_entity`` takes both identity labels' locks (fixed order) around
         both.
+
+        Returns whether the write is a REAL rename (the target's stored name
+        differs) — ``_update_entity`` stamps the folded key only then (#12047
+        review F-H: a read-modify-write re-sending the unchanged name must not
+        replace a caller-supplied ``canonical_name``, and a Point/Event rename
+        must not gain one this module never declares).
         """
-        from .entity_identity import live_name_holder_ids
+        from .entity_identity import _live_holders_same_entity
         from .exceptions import NameAlreadyHeld
         g = self._get_proj().g
+        renamed = False
         # ⛔ LABEL-SCOPED probes, never `MATCH (n) WHERE n.id = $id AND
         # (n:Object OR n:Subject)` (#3590 review round 5, finding 2). FalkorDB
         # indexes are label-scoped, so a pattern with no label in it can use no
@@ -44324,7 +45090,13 @@ class TortoiseSDK:
             stored = rows[0][0] if rows[0] else None
             if isinstance(stored, str) and stored == new_name:
                 continue
-            holders = live_name_holder_ids(g, label, new_name)
+            renamed = True
+            # #12047 review N3: count over the FOLDED key as well. Once the
+            # rename maintains `canonical_name` (below), two entities whose
+            # folded names collide are as create-poisoned as two whose raw names
+            # do — and `resolve_or_mint` will refuse every create of either
+            # spelling. Same evidence the create and the pre-flight probe use.
+            holders, _props = _live_holders_same_entity(g, label, new_name)
             # ⛔ Count HOLDERS (live rows), not truthy ids (#9876 review F1).
             # That list is deliberately row-per-holder and yields ``None`` for
             # an id-less LIVE row — the legacy / raw shape the create ADOPTS —
@@ -44340,6 +45112,7 @@ class TortoiseSDK:
                       if h is None or str(h) != str(id_val)]
             if others:
                 raise NameAlreadyHeld(label, new_name, others, id_val)
+        return renamed
 
     def _entity_identity_for(self, label: str, name: str, *,
                              explicit_id: str | None = None) -> str:
@@ -44967,12 +45740,57 @@ class TortoiseSDK:
         if isinstance(props.get("name"), str) and props["name"].strip():
             _rename_locks = (("Object", props["name"]),
                              ("Subject", props["name"]))
+            # ⛔ A RENAME MUST REFRESH THE FOLDED KEY (review N3 / P1).
+            # `_with_folded_entity_name` states the contract — "the fold is a
+            # lookup key, so a rename changes it without changing who the entity
+            # is" — but it only ran on the two CREATE doors, so a rename left the
+            # old fold behind in `canonical_name`. Two measured consequences, both
+            # silent: creating the NEW spelling missed both arms of
+            # `resolve_or_mint` (name is case-sensitive, the fold was stale) and
+            # minted a twin beside the renamed node — the exact damage this issue
+            # removes, produced by this PR's own rung; and creating the OLD
+            # spelling still matched the stale fold, so the write resolved onto
+            # the renamed entity — a wrong-entity write, with
+            # `refuse_ambiguous_create` agreeing because it reuses the same
+            # helper (`_refuse_ambiguous_rename` below therefore counts the folded
+            # key too, so a rename ONTO a fold collision refuses instead of
+            # create-poisoning two entities).
+            #
+            # It rides the ordinary `SET n += $p`, whose applied map is the
+            # journaled `EntityMutated.state`, so a rebuild restores it too (no
+            # #7951 live-only key). A caller-supplied `canonical_name` in the same
+            # call still wins (`setdefault` semantics) — this fills, never
+            # overwrites. A non-entity label renamed through here (a Point
+            # carrying `name`) just gains an inert property nothing reads.
         with contextlib.ExitStack() as _rename_lock_stack:
             for _lock_key in _rename_locks:
                 _rename_lock_stack.enter_context(
                     entity_create_lock(*_lock_key))
             if _rename_locks:
-                self._refuse_ambiguous_rename(id_val, props["name"])
+                _renamed = self._refuse_ambiguous_rename(id_val, props["name"])
+                # #12047 review N3: `canonical_name` is the FOLDED key the
+                # deterministic resolution rung queries, so a rename that does
+                # not maintain it leaves the entity invisible under its new
+                # spelling — and a later create of that spelling mints a twin,
+                # the exact damage this issue removes. It rides the SAME applied
+                # map, so `EntityMutated` replays it. A caller that supplied the
+                # key explicitly keeps their value (`setdefault`).
+                # ⛔ Only on a REAL rename (review F-H): a read-modify-write that
+                # re-sends the unchanged name must not spend the write, and must
+                # not replace a caller-supplied key.
+                # ⛔ Deferred to AFTER the guard, so the fold is spent only on a
+                # REAL rename (#12047 review F-H): a read-modify-write that
+                # re-sends the unchanged name must not replace a caller-supplied
+                # `canonical_name`, and a Point/Event renamed through here must
+                # not gain one. A caller who DOES supply the key on a real rename
+                # keeps it — and then OWNS maintaining the rung for that entity
+                # (round-4 finding 7: the stored fold stays at the caller's value,
+                # so the new spelling is not a folded-rung hit).
+                if _renamed:
+                    from .entity_resolver import normalize_entity_name
+                    _folded_new = normalize_entity_name(props["name"])
+                    if _folded_new:
+                        props.setdefault("canonical_name", _folded_new)
             for label, _prop in _CANONICAL_ENTITY_ID_PROPS:
                 # #4649: a canonical label's identity is an OR-SET, not one key.
                 # NOTE: the primary key is not read here any more — `id_keys` below
@@ -45350,6 +46168,26 @@ class TortoiseSDK:
                 type(_layer_exc).__name__, _layer_exc)
             _layer_note = None
         if t == "subject":
+            # #12047: a role Subject may DECLARE who holds it. The prop is a write
+            # SHORTHAND for the sanctioned ``holdsRole`` edge (ONTOLOGY §3.6 —
+            # deliberately distinct from ``memberOf``, ``:206``), following the
+            # ``authoredBy``/``ownedBy``/``managedBy`` prop convention. It is
+            # popped here so it never lands on the node as a bare property: the
+            # edge is the record. ``#12047`` measured ZERO ``holdsRole`` edges in
+            # both hosted graphs — the predicate was declared and read but never
+            # produced, so a role floated free of its holder.
+            _role_holder = props.pop("roleHolder", None)
+            # ⛔ BOTH pops run, unconditionally. The snake alias used to be popped
+            # only when the camel key was absent, so a caller supplying both left
+            # `role_holder` in `props` — and `_entity_door_props` copies the
+            # remainder onto the node, which is exactly what this block exists to
+            # prevent ("the edge is the record").
+            _role_holder_alias = props.pop("role_holder", None)
+            if _role_holder is None:
+                _role_holder = _role_holder_alias
+            # The PRE-FLIGHT's resolved holder id, kept (#12047 round-3 P1): the
+            # self-edge refusal needs it, and it must run before the write.
+            _holder_id = None
             # #1423 (review P1): `status` arrives through `**props` below, so this
             # surface is a SECOND door onto an undeclared Subject status.
             # Validate against ONTOLOGY §4.2's declared lifecycle and fail closed,
@@ -45366,6 +46204,24 @@ class TortoiseSDK:
                     f"Must be one of: "
                     f"{', '.join(sorted(_SUBJECT_STATUS_VALUES))}"
                 )
+            if _role_holder is not None:
+                # #12047 review F5: pre-flight, so a refusal writes nothing.
+                # ⛔ The kind is compared through `named_kind` — the SAME
+                # normaliser the door applies a few lines below. Comparing the
+                # raw prop refused `subjectKind=" role "` here while the identical
+                # call WITHOUT `roleHolder` succeeded and stored `subjectKind="role"`:
+                # two spellings of one rule, which is the divergence `named_kind`
+                # exists to prevent. Both PROPERTY spellings are read: a caller
+                # reaching `create_entity(type='subject', subject_kind='role')`
+                # was refused with "got None".
+                _kind = named_kind(props.get("subjectKind")
+                                   or props.get("subject_kind"))
+                if _kind != "role":
+                    raise ValueError(
+                        "roleHolder is only valid on a Subject of "
+                        f"subjectKind='role', got {_kind!r} for {name!r}")
+                from .entity_resolver import resolve_role_holder
+                _holder_id = resolve_role_holder(self, _role_holder, required=True)
             # ⛔ #3590 review (finding 1): resolve AND write under ONE lock.
             # `resolve_or_mint` only closes the check-then-act window if the
             # write that makes the holder visible happens before the lock is
@@ -45375,12 +46231,41 @@ class TortoiseSDK:
             # (`_source_merge_locks` + `create_source`).
             from .entity_identity import entity_create_lock
             with entity_create_lock("Subject", name):
+                _subject_id = self._entity_identity_for(
+                    "Subject", name, explicit_id=_server_id)
+                # ⛔ #12047 round-3 P1: the SELF-EDGE refusal runs HERE — after
+                # the role's id is resolved and BEFORE `_create_entity` writes
+                # anything. `wire_holds_role` refuses the same edge, but it runs
+                # after the write: `_upsert_subject`'s
+                # `ON MATCH SET s.subjectKind = coalesce($sk, s.subjectKind)`
+                # overwrote the holder's stored kind with 'role' and journaled a
+                # `SubjectAdded` line, and only then did the call raise — telling
+                # the caller the create failed while the graph recorded that the
+                # person had become a role (the F5 atomicity class, one rung out).
+                # `_entity_identity_for` mints but does not write (its docstring),
+                # so a refusal here leaves NOTHING behind.
+                if _holder_id is not None:
+                    from .entity_resolver import refuse_role_self_edge
+                    refuse_role_self_edge(_holder_id, _subject_id)
                 node = self._create_entity(
                     "Subject",
-                    self._entity_identity_for("Subject", name,
-                                              explicit_id=_server_id),
-                    _entity_door_props("subjectKind", name, props),
+                    _subject_id,
+                    _entity_door_props(
+                        "subjectKind", name, _with_folded_entity_name(name, props)),
                     "SubjectAdded", is_episodic=is_episodic)
+            if _role_holder is not None:
+                # #12047: PRODUCE the edge. Declared, never inferred: the holder
+                # is a Subject id or name, and an unresolvable/ambiguous holder
+                # RAISES rather than wiring the role to a guess (#1370).
+                # ⛔ Every refusal above was checked BEFORE the write (review F5):
+                # `resolve_role_holder` runs first and the self-edge check runs
+                # inside the create lock (§ round-3 P1), so a bad holder, a
+                # non-role kind or a self edge cannot leave a node + a
+                # `SubjectAdded` journal line behind while telling the caller the
+                # call failed — the atomicity rule `_update_entity` states for its
+                # own status change.
+                from .entity_resolver import wire_holds_role
+                wire_holds_role(self, _role_holder, _subject_id)
         elif t == "object":
             from .entity_identity import entity_create_lock
             with entity_create_lock("Object", name):
@@ -45388,7 +46273,8 @@ class TortoiseSDK:
                     "Object",
                     self._entity_identity_for("Object", name,
                                               explicit_id=_server_id),
-                    _entity_door_props("objectKind", name, props),
+                    _entity_door_props(
+                        "objectKind", name, _with_folded_entity_name(name, props)),
                     "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
             # ⛔ #8398 (5th review P2-1): a CALLER PROP named ``event`` is
@@ -48197,10 +49083,19 @@ class TortoiseSDK:
                                 proj.g, "Object", name)
                             self._create_entity(
                                 "Object", oid,
-                                {"name": name, "objectKind": okind,
-                                 "repo": repo,
-                                 "issue_number": issue_number,
-                                 "url": url},
+                                # #12047 review F-E: this connector lane is a
+                                # producer too, and it wrote no folded key — so a
+                                # later `create_object("the acme corp")` minted a
+                                # twin beside it, the gap `mining`/`EventAPI` had.
+                                # `_with_folded_entity_name` is the SDK door's own
+                                # single stamper; reuse it rather than a second
+                                # fold expression.
+                                _with_folded_entity_name(
+                                    name,
+                                    {"name": name, "objectKind": okind,
+                                     "repo": repo,
+                                     "issue_number": issue_number,
+                                     "url": url}),
                                 "ObjectRegistered")
                     except AmbiguousEntityName as exc:
                         _logger.debug(
@@ -48609,11 +49504,71 @@ class TortoiseSDK:
         # store unguarded, so `create_source(url, "web", sourceDate=2**70)` was
         # still silently clamped — the exact defect #4647 exists to fix, still
         # live on a public tenant write surface (and reachable through `ingest`,
-        # which splats `**item` into this method). Running it here, after every
-        # `ev` assignment, makes the cover structural: a field added to `ev`
-        # later cannot bypass a guard that runs after all of them.
+        # which splats `**item` into this method). Running it here, after the
+        # CALLER-facing assignments, covers every field a caller can reach: a
+        # caller field added to `ev` above this point cannot bypass the guard.
+        # (Two assignments do follow it — `updatedAt` and `validFrom`, minted
+        # from this door's one clock — so the cover is over caller ingress, not
+        # over literally every later line. Stated because the earlier wording
+        # "after every `ev` assignment … cannot bypass a guard that runs after
+        # all of them" was false as written, and #11858's guard below says why
+        # that distinction matters.)
         for _key, _value in ev.items():
             _reject_unrepresentable_number(_key, _value)
+        # #11858: the embedding MARKER family is not caller-writable on this
+        # door either — and the placement follows the two gates above for the
+        # same reason: this writer bypasses `_sanitize_props` entirely
+        # (`_skip_sanitize=True`), it is the ONE door measured to accept them,
+        # and it writes the node BEFORE it emits, so a refusal at `_emit_event`
+        # would land too late and leave a live-only `:Source` (the #2296
+        # divergence). Over the ASSEMBLED `ev`, so the guard follows every
+        # CALLER ingress of this door (the `**props` splat and the explicit
+        # keyword arguments) rather than a caller-argument list. It is NOT a
+        # claim that no `ev` assignment follows — two server-minted ones do, and
+        # the note below the guard names them.
+        #
+        # Measured at `7e6baffc5d`, one `create_source` call per key, none of
+        # them carrying any vector — i.e. every marker describing NOTHING:
+        #
+        #     create_source(url, "web", embedding_width="f16")
+        #       -> OK, journalled SourceCreated with `embedding_width: "f16"`
+        #          and no `embedding` key anywhere (#11996 measured the same
+        #          through this door); `embedding_verbatim` / `_preserved` /
+        #          `_model` / `_revision` / `_text_hash` / `embeddingText`
+        #          land identically.
+        #
+        # The other public props doors were driven the same way in the same
+        # measurement — all TEN of them (the eleven `**props` write doors minus
+        # this one), not just the four this note first listed (#11858 review
+        # cycle 3, P3): `create_point`, `create_entity`,
+        # `create_document`, `create_object`, `create_subject`, `create_event`,
+        # `update_point` and `update_entity` refuse the name at intake; `update`
+        # and `update_knowledge` refuse on an EXISTING node and silently no-op
+        # on an unknown id (so a census row for those two must create its target
+        # first — a row without one asserts nothing). This door was the only
+        # leak, which is why the guard is here and why the test drives every
+        # door rather than this row alone.
+        #
+        # ⚠️ Scope of "covered": this guard sits above every CALLER ingress
+        # (`**props` is splatted into `ev` at the top of this method), so a
+        # caller key cannot arrive below it. It is NOT a claim that no `ev`
+        # assignment follows — two server-minted ones do (`updatedAt` /
+        # `validFrom` from the one clock), and they are this door's own values,
+        # not caller input. That distinction is pinned by the control test rather
+        # than by this comment (a marker injected after the guard is caught
+        # there; the guard itself never sees it).
+        _caller_markers = sorted(set(ev) & _SERVER_MANAGED_EMBEDDING_MARKERS)
+        if _caller_markers:
+            raise ValueError(
+                f"{_caller_markers} are server-managed embedding journal "
+                "fields and cannot be set by hand. On this door the writer "
+                "declares only the WIDTH, derived from the vector it stores — "
+                "pass `embedding=` and it declares the truth; the rest are "
+                "either inputs the writer READS (a supplied value forges that "
+                "reading) or identity stamps it never mints on a `:Source`. A "
+                "marker written here describes no values at all, which is "
+                "exactly what a later width/base64 migration trusts (#11858)."
+            )
         # #2782 (review Finding 3): the same reason, one field family over — and
         # the same placement discipline, over the ASSEMBLED ``ev`` so a later
         # keyword cannot bypass it. This door is the one props write that never
@@ -49403,7 +50358,8 @@ class TortoiseSDK:
         # outcomes into one score. The resolver now returns exactly one live id
         # (id match still wins) and REFUSES on >=2 same-name carriers; a dead
         # coordinate resolves to None and yields the vacuous posterior.
-        resolved_sid = resolve_entity_id(proj.g, "Subject", subject_id)
+        resolved_sid = resolve_entity_id_same_entity(
+            proj.g, "Subject", subject_id)
         if resolved_sid is None:
             return {"mean": 0.5, "total_events": 0, "impl_count": 0,
                     "nand_count": 0, "alpha": 1.0, "beta": 1.0,
@@ -49603,7 +50559,8 @@ class TortoiseSDK:
         # #3633 route-then-refuse: the `s.id = $sid OR s.name = $sid` start
         # unioned BOTH same-name carriers' owned entities. Resolve to exactly
         # one live id (>=2 -> AmbiguousEntityName), then traverse from that id.
-        resolved_sid = resolve_entity_id(proj.g, "Subject", subject_id)
+        resolved_sid = resolve_entity_id_same_entity(
+            proj.g, "Subject", subject_id)
         r = proj.g.query(
             # #6976: load-bearing `WITH s` — without it FalkorDB 6.0.0 drops the
             # id predicate at the re-binding MATCH below (foreign rows).

@@ -47,6 +47,7 @@ the P1 regression pin (`STARTS WITH` on a non-string id).
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -666,7 +667,7 @@ def test_the_lifetime_baseline_excludes_the_sample_at_the_query(tmp_path):
 #: ``LIFETIME_MEMORY_QUERY``. Spelled here rather than imported — the NUMBER is
 #: the claim's subject, and importing the API module for it would pull the whole
 #: stack into a fast suite.
-_PIVOT = 23477
+_PIVOT = 23502
 
 #: The one pattern that defines a "cite target" lives in
 #: ``tools/hosted_api_cite_census.py`` — ONE implementation, so the note's stated
@@ -816,6 +817,120 @@ def _census_tmp_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         dest.write_text(_src(rel), encoding="utf-8")
     monkeypatch.setattr(census_mod, "REPO", tmp_path)
     return tmp_path
+
+
+def _census_fixture_repo(tmp_path: Path) -> Path:
+    """A throwaway git repo carrying the module `census()` derives the pivot from.
+
+    `census(pivot, repo=…)` also calls `lifetime_query_sites(repo)`, so the fixture
+    needs `tortoise/hosted_api.py` with exactly one
+    `query(LIFETIME_MEMORY_QUERY)` execution — on the line the arm then passes as
+    its pivot. Files are added by the caller; `_track_all` must run after the last
+    one is written (`git grep` reads the WORKING TREE of TRACKED files — `--cached`
+    is what reads the index — so a file must be `git add`ed, never committed).
+    """
+    repo = tmp_path / "census_repo"
+    (repo / "tortoise").mkdir(parents=True)
+    (repo / "tortoise" / "hosted_api.py").write_text(
+        "\n" * 9 + "    rows = graph.query(LIFETIME_MEMORY_QUERY, params)\n",
+        encoding="utf-8",
+    )
+    return repo
+
+
+def _track_all(repo: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+
+
+def test_the_census_counts_cites_of_this_file_and_not_of_its_lookalikes(tmp_path):
+    """A token that merely ENDS with the basename is a cite of a DIFFERENT file.
+
+    Why this exists (#11850): ``CITE_RE`` was ``hosted_api\\.py:[0-9]+`` with no
+    left boundary, so ``tests/test_hosted_api.py:22`` counted as a cite of
+    ``hosted_api.py`` line 22. That overstated the shipped population in BOTH
+    dimensions the two prose notes state — distinct targets and citing files — and
+    it quoted a floor (``22``) naming a line no bare cite targets, in notes whose
+    whole justification is that their figures are MEASURED.
+
+    ⛔ The sizes are NOT restated here: they move as lookalikes are written, so
+    `census()` is the only thing that answers "how big it is now".
+
+    The boundary cannot be expressed on the grep side (``git grep -E`` is POSIX
+    ERE: no lookbehind), so the tool greps PERMISSIVELY and decides with
+    ``fullmatch``. This arm pins that decision: it builds a throwaway repository
+    holding one genuine cite and one lookalike, and asserts the lookalike is
+    counted nowhere — not as a target, not as a citing file.
+
+    REDS IF: the population is matched by suffix again (targets 1 -> 2, citing
+    files 1 -> 2, ``non_cite_tokens`` 1 -> 0), which is the defect #11850 records.
+    """
+    from tools import hosted_api_cite_census as census_mod
+
+    repo = _census_fixture_repo(tmp_path)
+    (repo / "docs").mkdir(parents=True)
+    (repo / "tests").mkdir(parents=True)
+    # ⛔ IN TWO DIFFERENT FILES, so the `citing_files` assertion can discriminate.
+    # Both tokens in one file leaves `citing_files` at 1 whether the lookalike is
+    # counted or not — an assertion the mutant survives reads as coverage
+    # (measured: it survived a boundary-only mutant).
+    #
+    # ⛔ And BUILT, never written as a literal: the census greps EVERY tracked
+    # file, so a cite literal in this file would itself join the measured
+    # population and move the very figures the notes state (measured while writing
+    # this change: it took the population to 443 distinct and quoted a floor of 10).
+    (repo / "docs" / "notes.md").write_text(
+        "a real cite " + "hosted_api.py:" + "10" + "\n", encoding="utf-8")
+    (repo / "tests" / "lookalike.md").write_text(
+        "a lookalike " + "tests/test_hosted_api.py:" + "22" + "\n",
+        encoding="utf-8",
+    )
+    _track_all(repo)
+
+    data = census_mod.census(10, repo=repo)
+
+    assert data["distinct_targets"] == 1, (
+        f"the lookalike `tests/test_hosted_api.py:22` was counted as a cite of "
+        f"`hosted_api.py`: {data!r}")
+    assert data["citing_files"] == 1, (
+        f"the lookalike's file was counted as citing `hosted_api.py`: {data!r}")
+    assert data["non_cite_tokens"] == 1, (
+        "the declined token is not reported: the definition's cost would be "
+        f"invisible instead of stated — {data!r}")
+    assert data["at_pivot"] == 1 and data["below_pivot"] == 0, (
+        f"the one genuine cite must be the pivot itself: {data!r}")
+
+
+def test_the_census_counts_a_binary_carrier_without_a_line_number(tmp_path):
+    """A BINARY file that cites the module still counts as a citing file.
+
+    Why this exists (review of #12107, P3): `git grep -o` emits a COLON-LESS
+    `Binary file <path> matches` line for a binary carrier, and `census()`'s
+    `path:token` parse drops such a line before either counter — so the file would
+    vanish from `citing_files` with nothing reported, silently under-reporting a
+    figure the notes state as MEASURED. `-a` (treat binary as text) makes the line
+    `path:token` again. Removing `-a` restores the undercount, and nothing else in
+    the suite would notice: no tracked file is a binary carrier today.
+
+    REDS IF: `-a` is dropped from the census's `git grep` argv — `citing_files`
+    goes 1 -> 0 and `distinct_targets` 1 -> 0 on this fixture.
+    """
+    from tools import hosted_api_cite_census as census_mod
+
+    repo = _census_fixture_repo(tmp_path)
+    # A NUL byte is what makes git classify the file as binary; the token is real.
+    (repo / "carrier.dat").write_bytes(
+        b"\x00\x01 before " + b"hosted_api.py:" + b"10" + b" after\x00\x02\n")
+    _track_all(repo)
+
+    data = census_mod.census(10, repo=repo)
+
+    assert data["citing_files"] == 1, (
+        "a binary carrier of a real cite was dropped from `citing_files` — the "
+        f"notes' stated figure would silently under-report: {data!r}")
+    assert data["distinct_targets"] == 1, (
+        f"the binary carrier's cite target was dropped: {data!r}")
+    assert data["at_pivot"] == 1, f"the cite must be the pivot: {data!r}"
 
 
 def test_the_census_check_verb_reds_on_a_stale_figure(tmp_path, monkeypatch):

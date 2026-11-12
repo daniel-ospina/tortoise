@@ -186,7 +186,7 @@ clause text a helper builds is read as text like any other, so a construct insid
 
 **Discovery, and the edge of the guard.** The guard's population comes from
 `tools/dod_5090_probe.py::embedding_writers()`, so the guard is exactly as wide as that discovery —
-no wider. Two write shapes are worth naming, because the difference is the difference between a
+no wider. Three write shapes are worth naming, because the difference is the difference between a
 claim and a slogan:
 
 * **Container keys are SEEN — the LITERAL-ASSIGNMENT form** (`record["embedding"] = …`), for every
@@ -245,6 +245,65 @@ claim and a slogan:
   mean). ⚠️ "Known" is load-bearing: the shape is undecidable by syntax (above), so neither this
   sentence nor the instrument can say these are the ONLY two — a reader scoping the residual must
   not read two as the complete population.
+* **An import ALIAS is the reach it names** — (`from tortoise.vector_write import set_embedding_clause
+  as _set`), DECIDED since `#11274`, not blind. Discovery decides a write from the writer's own
+  source TEXT (`_EMBED_WRITE`) and its CALL NAMES (`_callees`), and an aliased import renames BOTH,
+  so such a writer used to be ABSENT from the census entirely — measured: an empty map, i.e. neither
+  unclassified nor refused, which is the fail-open direction this whole module exists to close.
+  `probe._import_aliases` resolves the alias back to the primitive it names, so the writer lands in
+  `unresolved_write` and owes a declaration here; an aliased `encode_for_row` classes `gated`
+  instead, because it really does reach the gate and therefore owes nobody a declaration — ⛔ but
+  ONLY when the import actually names the seam's module: resolution is home-checked (`_ALIAS_HOMES`)
+  AND level-checked (`_accepted_homes`), so a RELATIVE import may use the bare `from .embeddings`
+  spelling while an ABSOLUTE one must write `from tortoise.embeddings` — otherwise the same generic
+  name from a foreign module is NOT credited and the writer stays in `unresolved_write`, owing a
+  declaration. ⛔ And
+  `gated` means exactly that: CREDITED as a reach, never VERIFIED as one. SEVERAL named residuals
+  are `gated` on a reach that need not be the one the reader assumes — the `global`-family module
+  rebinding, the never-run call (whose `gated` can also MASK a live ungated reach, see its entry),
+  the closure-scoped alias and the literal seam spelling among them — so `gated` is not a synonym
+  for "this writer passes the gate". ⛔ The count is deliberately not stated here: the residual list
+  is the count, and `#11398`'s lesson is that a number in prose re-stales the moment one more shape
+  is named. ⛔ The
+  SCOPE of that sentence is the MODULE and the WRITER'S OWN scope: an alias imported in an
+  ENCLOSING function and called in a nested one is neither resolved nor named as a writer, while the
+  enclosing function is credited `gated` in its place — a named residual, not a resolved case
+  (`UNDECIDABLE_WRITE_SHAPES`, "closure-scoped alias"). ⛔ And a `global` rebinding of the alias —
+  or any other route to the same MODULE binding from a nested scope, `globals()[…] = …` included —
+  is NOT captured: for the SEAM spelling the shadow is threaded per scope, so it applies only
+  INSIDE the subtree that rebinds, while the `global` statement's effect is on the MODULE binding
+  the writer calls — measured `gated` (the writer owes nothing while never reaching the gate). That
+  residual is named in `UNDECIDABLE_WRITE_SHAPES` ("`global` rebinding …") and pinned in the suite;
+  this bullet does not cover it. ⛔ THAT SHADOW IS NOT THREADED FOR A CLAUSE BUILDER, and must not
+  be read as if it were: for a builder the alias is the only discovery signal (`_EMBED_WRITE`
+  cannot see `SET y += $p`), so suppressing a shadowed call DELETES a real writer instead of
+  demoting it — measured, and the reason the builder arm is deliberately shadow-BLIND and
+  over-credits instead. Its residual has its own naming entry in `UNDECIDABLE_WRITE_SHAPES`
+  ("a builder alias ESCAPES as an argument") and its own two pins; this bullet is the SEAM's.
+  (`nonlocal` is NOT part of that residual and must not be read as
+  one: a `nonlocal` naming a module-level alias does not compile — `SyntaxError: no binding for
+  nonlocal … found` — so no runnable writer can be in that shape.) ⛔ The
+  RESOLUTION IS OF CALLS, not of imports: an alias imported and never called is credited nothing —
+  crediting the import would fill the population with writers that store nothing, the cry-wolf
+  direction. Pinned, DRIVEN (a temp module per shape, through the real discovery filter), by
+  `tests/test_embed_writer_register.py::test_an_IMPORT_ALIAS_is_the_reach_it_names` — the same test
+  whose `ALIASED_IMPORT_SHAPES` table carries the `gated`/`{}` arms that bound this in the other
+  direction. ⛔ The MIRROR of that is NOT closed: a CALL the writer never RUNS — a never-called
+  nested `def`, a never-called `lambda` body, a method of a class the writer never instantiates,
+  or a call behind an `if False` / after `return` in the writer's own scope — IS credited, so the
+  writer classes `gated`. ⛔ AND `gated` NEED NOT MEAN IT REACHED NOTHING: because the seam branch
+  pre-empts the write predicate, a writer that ALSO reaches an ungated primitive is masked out of
+  `NEEDS_A_DECLARATION` — measured `ungated` → `gated` once a never-run seam call is added — so
+  for that composition the wanted verdict is `ungated`, NOT `unresolved_write`
+  (measured; the dangerous direction). That is a named residual in `UNDECIDABLE_WRITE_SHAPES`
+  ("never-run call"), not a resolved case, and this bullet must not be read as "every credited
+  call executes". Pinned, DRIVEN, by
+  `tests/test_embed_writer_register.py::test_the_alias_forms_discovery_still_cannot_see_are_named`
+  — that table owns the never-run rows (`never_run_nested_def`, `…_LAMBDA`,
+  `…_container_CLASS_METHOD`), and the pin reds both when a row stops being blind and when its
+  naming entry is deleted. ⛔ The citation above is NOT this one: `ALIASED_IMPORT_SHAPES` does not
+  drive the never-run shapes, so a reader holding this sentence to that test would find it
+  unfalsifiable.
 
 **Leaf, and it must stay one.** `04-plan.md` §5: a leaf must not live under `tortoise/projection/`,
 whose `__init__` is the head of the `projection → pack_state → sdk → projection` cycle where a
@@ -313,8 +372,11 @@ visible for a DIFFERENT reason — `_EMBED_WRITE` matches the `embedding=None` i
 it is not evidence that a literal subscript is what gets a carrier seen; the writers that genuinely
 owe their visibility to `#11274`'s AST pass are the ones the container-key bullet above names as
 found — not every container-key declaration in the table. A writer is also
-excluded from the declaration requirement when discovery classes it `gated` (a bare call to anything
-*named* `encode_for_row`), `producer`, `duplicate` (two same-named defs in one module that BOTH
+excluded from the declaration requirement when discovery classes it `gated` (a call to anything
+*named* `encode_for_row` — the credit is NAME-BASED on the literal path, so it covers both a bare
+`Name` and an attribute call, and it is NOT filtered by the writer's own rebinding or by which
+module the name came from: named in `UNDECIDABLE_WRITE_SHAPES`, "literal seam spelling …" — a named
+residual, not a claim that the reach is real), `producer`, `duplicate` (two same-named defs in one module that BOTH
 reach `_put` — `_put` is only reached for a def discovery CLASSIFIES, so a colliding def that is a
 pure reader never reaches it and the discovered def's own kind stays in the map, leaving an
 `unresolved_write`/`ungated` sibling CAUGHT rather than excused; the test header's collision note
@@ -1035,9 +1097,14 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: `update_point`, which skips its own derive for the same key (`"embedding" in props`) and merges
 #: it verbatim. So on the create path the gate RUNS and its verdict is OVERWRITTEN, and where the
 #: caller supplied a vector on the update path it is not called at all — including `create_point`'s
-#: own `dedup=True` delegation, which is the MCP door's default. A content-only revise DOES reach
-#: `encode_for_row` (`update_point` derives when `content` arrives without `embedding`), which is
-#: part of why `update_point` classes as `gated`; neither outcome is "the gate decides this vector".
+#: own `dedup=True` delegation, which is the MCP door's default. A content-only revise WITH
+#: NON-EMPTY `content` DOES reach `encode_for_row` (`update_point` derives when `content` arrives
+#: without `embedding`), which is part of why `update_point` classes as `gated`; ⛔ a `content=""`
+#: revise takes the SAME branch and does NOT reach the seam — the derive is guarded by
+#: `if _new_content else None`, so it sets `props["embedding"] = None` and WIPES the vector with no
+#: `encode_for_row` call (pinned by `tests/test_update_point_none_content_5240.py`). An enforcement
+#: author reading "every content revise is gated" misses exactly that path; neither outcome is "the
+#: gate decides this vector".
 #: ⛔ Symbols only, never a line number: this block is comment prose
 #: and nothing re-derives it, which is the rot `WriterClass.reason`'s rule exists to prevent.
 #: ⛔ The difference between those two sentences is load-bearing and is stated in the module
@@ -1047,8 +1114,10 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
 #: or an INTERPOLATED property name) are found BY SHAPE in no case — where one of them does reach the
 #: population it is for ANOTHER reason, and the live instances named here differ exactly so:
 #: `sdk::_update_entity` (a map-merge) arrives as an `unresolved_write` and is declared here as
-#: `exempt` under the named `#4094` exemption, `sdk::update_point`'s computed key arrives as `gated`
-#: and is therefore declared nowhere, and `cache_projection::node_statement`'s interpolated property
+#: `exempt` under the named `#4094` exemption, `sdk::update_point` — the SECOND map-merge instance,
+#: `SET n += $props` — arrives as `gated` (it also calls `encode_for_row`, which classes it before
+#: any write predicate runs) and is therefore declared nowhere, and
+#: `cache_projection::node_statement`'s interpolated property
 #: arrives not at all. `#11274` NAMES the shape discovery will not decide
 #: (`UNDECIDABLE_WRITE_SHAPES`) instead of guessing at it.
 #: Forward — every writer DISCOVERY FINDS outside the gate is declared (never "every writer", see the

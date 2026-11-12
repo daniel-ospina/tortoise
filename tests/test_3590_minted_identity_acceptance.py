@@ -1801,9 +1801,10 @@ def test_the_rename_door_locks_the_guard_and_the_write_together(sdk, monkeypatch
     owned_at: dict[str, bool] = {}
     real_holders = entity_identity.live_name_holder_ids
 
-    def probing(g, label, name):
+    def probing(g, label, name, **kw):
+        # `**kw`: the folded arm of the union passes `name_props` (#12047 N1).
         owned_at[f"probe:{label}"] = real_holder_lock(label, name)._is_owned()
-        return real_holders(g, label, name)
+        return real_holders(g, label, name, **kw)
 
     monkeypatch.setattr(entity_identity, "live_name_holder_ids", probing)
 

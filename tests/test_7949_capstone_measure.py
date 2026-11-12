@@ -5095,13 +5095,13 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # whole sentence's three numbers, so a re-derivation of one cannot leave
         # its neighbours behind the way it did at `a08f7bce3d`.
         ("RECONCILE-A1-A2-A5.md", "`TortoiseSDK._extract_session_v2` at", (
-            ("17974", "relation_write = apply_relation_edges("),
+            ("17984", "relation_write = apply_relation_edges("),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
-            ("17973", "from tortoise.relation_write import apply_relation_edges"),
+            ("17983", "from tortoise.relation_write import apply_relation_edges"),
         ), "sdk"),
         ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
-            ("17961", "# `#10999` made the channel TRANSPORT ONLY"),
+            ("17971", "# `#10999` made the channel TRANSPORT ONLY"),
         ), "sdk"),
         # `subject_binding_available`'s DEFINITION and its CONSUME pair, in both
         # documents that state them — a row per document, because a row scopes to
@@ -5127,24 +5127,43 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
         # names the call), keyed by the quoted form the sentence prints.
         ("00-plan.md", "point-creation path at", (
-            ("17621", "bind_point_subjects(proj, self, point_id=pid,"),
+            ("17631", "bind_point_subjects(proj, self, point_id=pid,"),
         ), "sdk"),
         # The manifest's own `carve_out:` entry, cited from the artifact table.
         # ⛔ The 5th element is the SECTION the cite must fall inside: this exact
         # anchor text also sits under `core:` and its mirror, so without it a
         # re-derivation onto either stays green while the document's `carve_out:`
         # claim goes false (measured: 5854 and 8173 both drove this row GREEN).
-        # Re-derived 9714 -> 9842 (review cycle 3, P3 — the first revision of this
-        # comment mis-attributed the move). MEASURED: the pin was ALREADY stale at
-        # the merge base `8126970432c9`, where the entry sat at 9810, not 9714 —
-        # that pre-existing drift is why this row was red on main. #11825 adds 32
-        # lines ABOVE it (the new surface row), moving 9810 -> 9842; the `durations`
-        # row it also adds sits at 10118, BELOW the cite, so it moves nothing. The
-        # document's cite is bumped with the pin, so the row and the doc agree on
-        # the live line and the claim the row makes (the entry is inside
-        # `carve_out:`) is true again.
+        # ⛔ THIS NUMBER IS NOT A CONSTANT OF THE EPIC — it is wherever the last
+        # merge above the entry left it, and it is re-derived at the head this PR
+        # lands on, never copied forward from a run that was green earlier.
+        #
+        # The history, because it is why this row carries this much prose:
+        # `#12035` re-derived the document here (9635 -> 9714) and its own +3 kept
+        # the entry and the document in step at 9714. Later merges then moved the
+        # entry out from under the document without touching it: `#12061` +7
+        # (9714 -> 9721), `#12056` +54 (-> 9775), `#11977` +35 (-> 9810). A parallel
+        # batch then re-derived the DOCUMENT to 9823 while the entry kept moving — so
+        # at main `edcac493a5` line 9823 reads `- test_flip_gate.py`, a different file
+        # 83 lines above the entry, and the pin was RED on main and on every diff that
+        # selects this file (a `config/*` diff takes `core`).
+        #
+        # Re-derive, never copy: read the number the DOCUMENT claims, then measure
+        #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
+        # and the section bounds
+        #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
+        # At THIS head — the merge result, i.e. #11825's own 32-line surface row
+        # applied on top of the base that re-derived 9906 — the entry is 9938,
+        # `carve_out:` opens 9812 and `uri_requiring:` 10136, so 9938 is inside the
+        # section, and the identical text also sits at 6056 and 8454, which is what
+        # the 5th element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
+        # (`core:` 2235, `sdk:` 8220) of `surfaces:`, so the resolver's
+        # nearest-column-zero-key rule reports the PARENT: a cite onto 8454 refuses
+        # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
+        # re-derivation onto it does not get told `sdk:` and conclude the guard is
+        # broken.
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            ("9842", "- test_pack_logic_writeprobe_11083.py"),
+            ("9938", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (

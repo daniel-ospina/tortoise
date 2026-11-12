@@ -10,7 +10,7 @@ census has one command:
 
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
-    uv run python tools/hosted_api_cite_census.py --pivot 23477
+    uv run python tools/hosted_api_cite_census.py --pivot 23502
     uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
     uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
 
@@ -48,6 +48,16 @@ into the NIGHTLY main-health report and not into a per-PR check —
 ⛔ The pattern requires DIGITS (`[0-9]+`, not `[0-9]*`). The `*` form also matches a
 bare `hosted_api.py:` and `sort -u` then counts that empty run as one more target —
 that is exactly how the count was briefly "re-measured" from 449 to 450.
+
+⛔ A cite target is a TOKEN that IS ``hosted_api.py:<n>``. ``tests/test_hosted_api.py:22``
+is a cite of the TEST file, not of `hosted_api.py` line 22, and counting those
+overstated the population in BOTH dimensions the two notes state — distinct
+targets AND citing files — while quoting a floor (``22``) that no bare cite
+targets (#11850). ⛔ Neither size is frozen in this paragraph: both move as
+lookalikes are written, so `census()` is the only thing that answers "how big is it
+right now". The boundary is applied with ``fullmatch`` in `census`, and the tokens
+it declines are counted into ``non_cite_tokens`` so the definition's cost is
+reported rather than silent.
 """
 from __future__ import annotations
 
@@ -68,9 +78,41 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-#: The one pattern that defines a "cite target". DIGITS REQUIRED — see the module
-#: docstring for the `*` footgun.
+#: The DEFINITION of a cite target: a token that IS ``hosted_api.py:<n>``.
+#:
+#: ⛔ A token that merely ENDS with it — ``tests/test_hosted_api.py:22`` — is a cite
+#: of a DIFFERENT file, and counting those overstated the "measured" population in
+#: BOTH dimensions the notes state: distinct targets, and citing files (a file can
+#: carry only lookalikes and no bare cite at all — this change's own two files do
+#: exactly that). It also quoted a floor naming a line no bare cite targets (#11850).
+#: The boundary is enforced by ``fullmatch`` in `census`, never by suffix-matching.
+#:
+#: ⛔ NO COUNT IS FROZEN HERE ON PURPOSE, and that is a correction, not a style
+#: choice: an earlier draft of this comment quoted the overstatement as a bracket of
+#: measured figures and asserted the delta could not drift — and both halves were
+#: falsified before the change landed, twice, at three different sites. Measured at
+#: #11850's filing head the pair was 456 → 440; re-measured at ``8300c102c8`` it was
+#: 458 → 442; and the citing-file delta grew on the very commit that introduced
+#: lookalike-bearing files. `census()` is the only thing that answers "how big is it
+#: right now" — every figure written here is a measurement of a PAST tree, which is
+#: precisely the hand-paste class this module exists to end.
+#:
+#: ⚠️ TWO patterns, and the split is FORCED: ``git grep -E`` is POSIX ERE, which
+#: has NO lookbehind, so the left boundary cannot be expressed on the grep side.
+#: ``_CITE_CANDIDATE_RE`` is therefore deliberately PERMISSIVE on the left — it
+#: captures any run of filename characters before the basename — and the Python
+#: side decides which candidates are actually cites. DIGITS REQUIRED in both (see
+#: the module docstring for the ``[0-9]*`` footgun).
+#:
+#: ⚠️ A PATH-QUALIFIED cite IS counted: the candidate class excludes ``/``, so
+#: ``git grep -o`` starts its match after the slash and ``tortoise/hosted_api.py:<n>``
+#: arrives as ``hosted_api.py:<n>`` — same file, same absolute line, so it belongs in
+#: the population. This is stated because the obvious later "tighten the boundary"
+#: edit (admitting ``/`` into the class) would silently drop those targets and force
+#: a note refresh with nothing to explain it. No count is frozen here on purpose: it
+#: moves with every new qualified cite, and `census()` is the verb that measures it.
 CITE_RE = r"hosted_api\.py:[0-9]+"
+_CITE_CANDIDATE_RE = r"[[:alnum:]_.-]*hosted_api\.py:[0-9]+"
 
 #: The line the two notes are written around: the ONE production execution site of
 #: `LIFETIME_MEMORY_QUERY`. ⚠️ A FALLBACK, not the source: every shipped path
@@ -79,18 +121,22 @@ CITE_RE = r"hosted_api\.py:[0-9]+"
 #: which is exactly why it must be re-derived whenever an edit above the site
 #: moves it (#10226 forward-merge moved it 23128 -> 23131; #11795 moved it
 #: 23131 -> 23466, where it had sat stale while the notes it is a fallback for
-#: had already been re-derived by hand; #11803 moved it 23466 -> 23477). Two
+#: had already been re-derived by hand; #11803 moved it 23466 -> 23477; #11977 moved
+#: it 23477 -> 23502 and re-derived neither this constant nor the notes, which is
+#: why the #11850 lane found the census red on main at `7e6baffc5d`). Two
 #: distinct wrongnesses, with distinct start points — do not merge them:
-#:   • `pivot_is_the_lifetime_site(23466)` is FALSE from #11803 onward, because
-#:     the CALL moved while the note still cited 23466;
-#:   • the COUNT SPLIT beside it (`above 13`, `at the pivot 0`) only goes wrong
-#:     once a re-derivation moves the notes to 23477 and leaves this constant
-#:     behind — measured at #11950's first commit `5d35cd58f6`, over a correct
-#:     tree, where the whole triple read `at the pivot 0` / `above 13` /
-#:     `site: False` and nothing reddened.
+#:   • `pivot_is_the_lifetime_site(<old pivot>)` goes FALSE the moment the CALL
+#:     moves, because the note still cites the old line (#11803, #11977);
+#:   • the COUNT SPLIT beside it (`above N`, `at the pivot 0`) only goes wrong
+#:     once a re-derivation moves the notes and leaves this constant behind —
+#:     measured at #11950's first commit `5d35cd58f6`, over a correct tree, where the
+#:     whole triple read `at the pivot 0` / `above 13` / `site: False` and nothing
+#:     reddened.
 #: Because no shipped path reads it, nothing could see that, so it is now PINNED:
-#: `tests/test_demo_session_read_exclusion_8290.py` asserts it equals the site.
-DEFAULT_PIVOT = 23477
+#: `tests/test_demo_session_read_exclusion_8290.py` asserts it equals the site —
+#: and that pin is what reds when a forward merge grows the module, which is the
+#: remedy this constant relies on rather than a hand sweep.
+DEFAULT_PIVOT = 23502
 
 _SCORECARD = "tortoise/activation_scorecard.py"
 _HOSTED = "tortoise/hosted_api.py"
@@ -142,22 +188,53 @@ def census(pivot: int = DEFAULT_PIVOT, repo: Path = REPO) -> dict:
     failure, and the fast test's collapse floor is what decides whether an empty
     one is acceptable. Only rc >= 2 is a real error.
     """
+    # ONE `git grep` answers both questions: `-o` without `-h` prints
+    # `path:matched-text`, and git puts the path first, so the FIRST colon
+    # separates it from the token (no tracked path contains a colon — measured, and
+    # a path that did would yield a token failing `fullmatch` below, i.e. an
+    # undercount this function reports as `non_cite_tokens`, never a miscount).
+    #
+    # ⛔ `-a` IS REQUIRED, not decoration: without it a BINARY carrier makes git
+    # print `Binary file <path> matches` — a colon-less line, which this parse would
+    # drop before either counter, so the file would vanish from `citing_files` with
+    # nothing reported (measured on a throwaway repo: old `-l` listed the file, the
+    # colon-less line yields no token). With `-a` the line is `path:token` and the
+    # parse stays total. Today no tracked file is a binary carrier, so the figures
+    # do not move; the flag is what keeps that from becoming a silent undercount, and
+    # `test_the_census_counts_a_binary_carrier_without_a_line_number` pins it.
+    #
+    # ⛔ `-c grep.lineNumber=false -c grep.column=false` IS REQUIRED TOO: git's own
+    # documented config can prefix the match with a line or column number, after
+    # which this parse reads that number as part of the token and every genuine cite
+    # lands in `non_cite_tokens` (a false red, never a false green — but a phantom
+    # hunt). `-c` is used rather than `--no-line-number` so an older git that lacks
+    # the flag still runs; an unknown config key is inert.
+    # ⛔ And do NOT spell a concrete cite in this comment (or in any test's prose):
+    # the census greps EVERY tracked file, so a literal cite here JOINS the
+    # population it measures and immediately reds `--check`. Write `hosted_api.py:<n>`.
     proc = subprocess.run(
-        ["git", "grep", "-o", "-h", "-E", CITE_RE],
+        ["git", "-c", "grep.lineNumber=false", "-c", "grep.column=false",
+         "grep", "-a", "-o", "-E", _CITE_CANDIDATE_RE],
         cwd=str(repo), capture_output=True, text=True, check=False,
     )
     if proc.returncode > 1:
         raise SystemExit(
             f"hosted_api_cite_census: `git grep` failed in {repo}: {proc.stderr!r}")
-    targets = sorted({int(tok.rsplit(":", 1)[1]) for tok in proc.stdout.split()})
 
-    files = subprocess.run(
-        ["git", "grep", "-l", "-E", CITE_RE],
-        cwd=str(repo), capture_output=True, text=True, check=False,
-    )
-    if files.returncode > 1:
-        raise SystemExit(
-            f"hosted_api_cite_census: `git grep -l` failed: {files.stderr!r}")
+    targets_seen: set[int] = set()
+    citing_files: set[str] = set()
+    non_cite = 0
+    for line in proc.stdout.splitlines():
+        path, _, token = line.partition(":")
+        if not token:
+            continue
+        if not re.fullmatch(CITE_RE, token):
+            # e.g. `tests/test_hosted_api.py:22` — a cite of a different file.
+            non_cite += 1
+            continue
+        citing_files.add(path)
+        targets_seen.add(int(token.rsplit(":", 1)[1]))
+    targets = sorted(targets_seen)
 
     below = [n for n in targets if n < pivot]
     above = [n for n in targets if n > pivot]
@@ -167,7 +244,10 @@ def census(pivot: int = DEFAULT_PIVOT, repo: Path = REPO) -> dict:
         "below_pivot": len(below),
         "above_pivot": len(above),
         "at_pivot": sum(1 for n in targets if n == pivot),
-        "citing_files": len([ln for ln in files.stdout.splitlines() if ln.strip()]),
+        "citing_files": len(citing_files),
+        #: tokens the permissive grep found that are NOT cites of this file. Report
+        #: them so the definition's cost is visible instead of silent (#11850).
+        "non_cite_tokens": non_cite,
         "min_target": below[0] if below else None,
         "max_below": below[-1] if below else None,
         "above_min": above[0] if above else None,
@@ -340,6 +420,8 @@ def main(argv: list[str] | None = None) -> int:
           f"({data['above_min']} … {data['max_above']})")
     print(f"  at the pivot       {data['at_pivot']}")
     print(f"  citing files       {data['citing_files']}")
+    print(f"  not a cite         {data['non_cite_tokens']} token(s) name a "
+          f"different file (e.g. `tests/test_hosted_api.py:<n>`)")
     print(f"  pivot is the LIFETIME_MEMORY_QUERY site: "
           f"{data['pivot_is_lifetime_site']}")
     return 0
