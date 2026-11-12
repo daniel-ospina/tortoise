@@ -448,8 +448,10 @@ same step with the same tail is the investigation.
   TWO: that one and `run_started_at`; the third is an `attempt >= 2` run with NO start stamp)
   — applies to the WHOLE waiting population (`queued + pending + requested`), not to the
   queued leg alone:
-  - the queued feed was cut at its page cap **and no PR-event run is executing** — raise
-    `--max-pages` to read further back;
+  - a feed was cut at its page cap — the QUEUED one (which also needs no PR-event run
+    executing, since an executing run is observed in the in-progress read regardless) or
+    the RUNNING one, whose missing tail is part of the running census — raise `--max-pages`
+    to read further back;
   - a WAITING PR-event run (`queued`/`pending`/`requested`) has no measurable age for its
     CURRENT ATTEMPT, so the wait cannot be measured at all. ⛔ ONE OWNER for that rule:
     `QueuedRun.wait_age_seconds`, which abstains on THREE routes — an unreadable `created_at`

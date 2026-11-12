@@ -1657,6 +1657,32 @@ def test_an_UNCUT_reading_is_required_before_any_witness_can_be_excluded():
         "but the exemption is unavailable: the cut may have hidden a second witness")
 
 
+def test_a_cut_PENDING_leg_refuses_OK_even_with_no_PR_run_in_ANY_leg():
+    """⬛ ROUND-16 P1: the refusal was in `healthy()`, and one path never calls it.
+
+    A capped `pending`/`requested` read drops its OLDEST runs, so the wait this reading
+    is about to call healthy — or CLEAR — may be one it never saw. It was refused
+    inside `healthy()`, which the `no PR-event run is waiting` clause does not call, so a
+    flood-shaped queue (no PR run in any leg, a cut pending page) printed
+    `OK(queued=6, pr_running=0, …)` over a leg this reading KNOWS was cut, while
+    `truncated=True` in the same shape returned `PR-UNWITNESSED`.
+
+    Discriminating: moving the check back into `healthy()` alone reds this; so does
+    dropping it from `health()`, since the queued-leg arm would still pass.
+    """
+    flood = [run(5000 + i, "Some Other Workflow", event="push", age_seconds=1800)
+             for i in range(6)]
+    cut_pending = classify(flood, in_progress=[], pending_truncated=True)
+    assert cut_pending.verdict == Q.PR_UNWITNESSED, (
+        "a leg the reading knows was cut cannot be reported as OK")
+    assert "pending`/`requested` leg was cut" in " ".join(cut_pending.reasons)
+    # …and the destructive gate stays shut, which it already did (pr_wait_measured)
+    assert cut_pending.congests_pr is None
+    # the queued-leg arm is unchanged, so the two legs are now actually symmetric
+    assert classify(flood, in_progress=[],
+                    truncated=True).verdict == Q.PR_UNWITNESSED
+
+
 def test_the_witness_ids_are_emitted_so_the_caller_does_not_re_derive_them():
     """One derivation, at the single constructor — the JSON carries it."""
     health = classify([], pending=[run(4247, "Python CI", event="pull_request",
@@ -2686,9 +2712,10 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # window` prose, said "has been still for 300 s" and so was disarmed by BOTH
         # `has been still` and `still for`, i.e. by nothing in particular). ⛔ THE RISK
         # DIRECTION IS THE OTHER WAY FROM WHAT IT LOOKS, and this comment got it wrong twice
-        # (review P2/P1, rounds 12-14; all measured). A DELETION always reds, because the
-        # exact-set pin above fires on any removal — this leg is NOT what catches one. What
-        # it would miss is a deletion of `still for`: NO REGISTERED PIN NAMES IT AT ALL, and
+        # (review P2/P1, rounds 12-16; all measured). A DELETION always reds, because the
+        # exact-set pin above fires first on any removal. This leg ALSO reds on four of the
+        # five deletions — every token a registered pin names alone. What it cannot see is a
+        # deletion of `still for`: NO REGISTERED PIN NAMES IT AT ALL, and
         # the one `correct` entry that embeds a needle and leans on it is also carried by
         # `has been still`. The other four tokens each carry a registered pin alone, so their
         # deletion reds HERE.

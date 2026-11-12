@@ -280,8 +280,9 @@ PR_STARVED = "PR-STARVED"
 #: PR_STARVED (which means nothing of the PR work is executing at all): the two are
 #: true of different queues, and neither may be inferred from the other.
 PR_BACKLOGGED = "PR-BACKLOGGED"
-#: A truncated feed — the queued one with no PR-event run executing, OR a cut
-#: ``pending``/``requested`` leg, which needs no such qualifier — a WAITING PR-event run
+#: A truncated feed — the QUEUED one (which needs `pr_running == 0` to degrade),
+#: the RUNNING one (whose missing tail is part of the census), OR a cut
+#: ``pending``/``requested`` leg (which needs no such qualifier) — a WAITING PR-event run
 #: (queued/pending/requested) whose CURRENT-ATTEMPT age cannot be measured, OR a running
 #: census made entirely of unmeasured runs: the PR work is neither witnessed nor DISPROVED,
 #: so this is not ``OK``. ⛔ The age rule has ONE owner — `QueuedRun.wait_age_seconds` — and
@@ -1547,10 +1548,30 @@ def classify_queue(
         if verdict == OK and truncated and pr_running == 0:
             verdict = PR_UNWITNESSED
             reasons.append(
-                "PR-UNWITNESSED: the queued feed was cut at the page cap, and the "
-                "feed is NEWEST-FIRST, so the oldest queued runs (the ones the age "
-                "clause needs) were never read; no PR-event run is executing, so "
-                "starvation is neither witnessed nor disproved — not reported as OK"
+                "PR-UNWITNESSED: a feed was cut at the page cap, and the feed is "
+                "NEWEST-FIRST, so its oldest runs were never read — the queued leg's "
+                "oldest run is the AGE clause's only witness, and the in-progress "
+                "leg's is part of the running census; no PR-event run is executing, "
+                "so starvation is neither witnessed nor disproved — not reported as OK"
+            )
+        # ⛔ AND THE SAME REFUSAL FOR THE `pending`/`requested` LEGS, FROM HERE RATHER
+        # THAN FROM `healthy()` (review P1, round 16). A capped `pending` read drops its
+        # OLDEST runs, so the wait this reading is about to call healthy (or clear) may be
+        # one it never saw — the same READ failure as an unparseable stamp, and the same
+        # argument the queued leg gets four lines up. It used to be refused inside
+        # `healthy()`, which the `no PR-event run is waiting` clause never calls: MEASURED,
+        # a flood-shaped queue (6 runs of one non-PR workflow) with `pending_truncated=True`
+        # and no PR run in any leg returned `OK` — a clean bill of health printed over a
+        # leg the reading knows was cut, while `truncated=True` in the same shape returned
+        # `PR-UNWITNESSED`. `pr_wait_measured` stayed False, so no destructive caller was
+        # authorised; the falsehood was the verdict itself.
+        if verdict == OK and pending_truncated:
+            verdict = PR_UNWITNESSED
+            reasons.append(
+                "PR-UNWITNESSED: a `pending`/`requested` leg was cut at the page cap "
+                "and that feed is NEWEST-FIRST, so the oldest waiting PR-event run "
+                "(the one the wait budget applies to) may never have been read — "
+                "not reported as OK"
             )
         # ⛔ A `pr_running` MADE ENTIRELY OF UNMEASURED RUNS IS NOT A MEASUREMENT, AND `OK`
         # MUST NOT REST ON IT (#12037 review round 3). The probe BUDGET
@@ -1724,19 +1745,10 @@ def classify_queue(
                        "cannot be applied — not reported as OK")
                 )
                 return health(PR_UNWITNESSED)
-            if pending_truncated:
-                # The same refusal, for the legs the queued feed cannot contain: a
-                # capped `pending`/`requested` read drops its OLDEST runs, so the wait
-                # this clause is about to call healthy may be one it never saw. This is
-                # a `READ`
-                # failure, not a healthy queue (same class as an unparseable stamp).
-                reasons.append(
-                    "PR-UNWITNESSED: a `pending`/`requested` leg was cut at the page "
-                    "cap and that feed is NEWEST-FIRST, so the oldest waiting PR-event "
-                    "run (the one the wait budget applies to) may never have been "
-                    "read — not reported as OK"
-                )
-                return health(PR_UNWITNESSED)
+            # ⛔ NO `pending_truncated` CHECK HERE ANY MORE (review P1, round 16): it
+            # lives in `health()` now, so it fires on THIS path and on the
+            # `no PR-event run is waiting` path. Leaving a copy here would be a second
+            # owner of one refusal, and the copy is what made the other path miss it.
             return health(OK)
         # WHOSE QUEUE IS IT? (#9118 P2-2, recurring INSIDE this state.) This clause
         # is reached from `pr_running != 0`, i.e. from a queue whose leader the
