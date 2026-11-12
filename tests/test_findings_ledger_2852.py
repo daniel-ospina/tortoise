@@ -326,8 +326,8 @@ def test_invented_verdict_is_rejected(tmp_path, monkeypatch):
         tmp_path,
         monkeypatch,
         lambda t: t.replace(
-            "| **STILL-TRUE** | `tortoise/sdk.py:17045`",
-            "| **PROBABLY-TRUE** | `tortoise/sdk.py:17045`",
+            "| **STILL-TRUE** | `tortoise/sdk.py:17109`",
+            "| **PROBABLY-TRUE** | `tortoise/sdk.py:17109`",
             1,
         ),
     )
@@ -345,8 +345,8 @@ def test_missing_verdict_is_rejected(tmp_path, monkeypatch):
         tmp_path,
         monkeypatch,
         lambda t: t.replace(
-            "| **STILL-TRUE** | `tortoise/sdk.py:17045`",
-            "| looks right | `tortoise/sdk.py:17045`",
+            "| **STILL-TRUE** | `tortoise/sdk.py:17109`",
+            "| looks right | `tortoise/sdk.py:17109`",
             1,
         ),
     )
@@ -430,10 +430,10 @@ def test_an_evidence_cell_naming_nothing_is_rejected(tmp_path, monkeypatch):
         tmp_path,
         monkeypatch,
         lambda t: t.replace(
-            "| **STILL-TRUE** | `tortoise/sdk.py:17045` —",
+            "| **STILL-TRUE** | `tortoise/sdk.py:17109` —",
             "| **STILL-TRUE** | checked, trust me —",
             1,
-        ).replace("`tortoise/sdk.py:17478`", "the call", 1),
+        ).replace("`tortoise/sdk.py:17530`", "the call", 1),
     )
     problems = _doc_problems()
     assert any("names no `path:line`, issue, command or §N" in p for p in problems), problems
@@ -536,7 +536,7 @@ def test_a_citation_with_a_space_after_the_colon_is_refused(tmp_path, monkeypatc
     _mutated(
         tmp_path,
         monkeypatch,
-        lambda t: t.replace("`tortoise/sdk.py:17045`", "`tortoise/sdk.py: 16962`", 1),
+        lambda t: t.replace("`tortoise/sdk.py:17109`", "`tortoise/sdk.py: 16962`", 1),
     )
     problems = _doc_problems()
     assert any("not a recognised citation" in p for p in problems), problems
@@ -582,7 +582,7 @@ def test_a_citation_with_a_trailing_character_is_refused(tmp_path, monkeypatch):
     does not even look mangled to a reader.
     """
     for old, new in (
-        ("`tortoise/sdk.py:36163-36166`", "`tortoise/sdk.py:36163-36166 `"),
+        ("`tortoise/sdk.py:36215-36218`", "`tortoise/sdk.py:36215-36218 `"),
         ("`tortoise/pipeline.py:16`", "`tortoise/pipeline.py:16 `"),
     ):
         _mutated(tmp_path, monkeypatch, lambda t, o=old, n=new: t.replace(o, n, 1))
@@ -592,7 +592,7 @@ def test_a_citation_with_a_trailing_character_is_refused(tmp_path, monkeypatch):
 
 def test_a_shorthand_with_a_trailing_character_is_refused(tmp_path, monkeypatch):
     """FAILS if a trailing space or period after a `:LINE` shorthand is skipped."""
-    for old, new in (("`:792`", "`:792 `"), ("`:3144`", "`:999999.`")):
+    for old, new in (("`:792`", "`:792 `"), ("`:3162`", "`:999999.`")):
         _mutated(tmp_path, monkeypatch, lambda t, o=old, n=new: t.replace(o, n, 1))
         problems = _doc_problems()
         assert any("not a recognised citation" in p for p in problems), (old, problems)
@@ -922,8 +922,8 @@ def test_a_stray_table_row_with_no_separator_is_rejected(tmp_path, monkeypatch):
     §1's closed vocabulary has no handling rule for.
     """
     stray = (
-        "| **Z** | a stray row | `tortoise/sdk.py:17045` | **FIXED-IT** |"
-        " `tortoise/sdk.py:17045` |\n\n"
+        "| **Z** | a stray row | `tortoise/sdk.py:17109` | **FIXED-IT** |"
+        " `tortoise/sdk.py:17109` |\n\n"
     )
     for anchor_heading in ("## 4. The artefact index", "## 7. What this changes"):
         _mutated(
@@ -1468,12 +1468,12 @@ def test_shipped_shorthand_citations_are_matched_not_skipped():
     Reachable, and it is the pre-fix shape: `CITATION_RE` required `<path>.<ext>`
     before `:LINE`, so row (b)'s `:792` / `:1002` / `:429-438` (its only
     commitments about `tortoise/commit_schema.py` beyond `:395`), row (c)'s
-    `:3144` and row (e)'s `:66` were skipped entirely while §8 told the reader
+    `:3162` and row (e)'s `:66` were skipped entirely while §8 told the reader
     every `path:line` in §3/§5 is checked. Skipped evidence presents as checked
     evidence, which is the defect this page is about.
     """
     matched = {m.group(0) for m in flc.CITATION_RE.finditer(flc.read_doc(REPO))}
-    for shorthand in ("`:792`", "`:1002`", "`:429-438`", "`:3144`", "`:66`"):
+    for shorthand in ("`:792`", "`:1002`", "`:429-438`", "`:3162`", "`:66`"):
         assert shorthand in matched, f"{shorthand} is not matched, so it is not checked"
 
 
