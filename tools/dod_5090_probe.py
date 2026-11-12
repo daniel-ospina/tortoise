@@ -2781,11 +2781,14 @@ def score_rule_bullet() -> Row:
             "UNMEASURED, never True and never 'the config sets nothing')"
         )
     elif not deployment["on"]:
-        # ⛔ The clause is about a TEMPLATE, and only a template (fresh review of PR
-        # #12016, P2): when a surface that ARMS the flag is itself a deployment file
-        # (an armed `Dockerfile*` today; any other deployment file that arms it later),
-        # "the surfaces that do arm it do not deploy the container's environment on
-        # their own" is the `#11455` false claim in its OTHER half — that build DOES
+        # ⛔ FOUR arms now, and the rule is that each one names ONLY what the walk
+        # MEASURED (fresh reviews of PR #12016, P2 then P3): an armed DEPLOYMENT file;
+        # else an armed non-deployment surface; else an armed-and-UNREADABLE surface;
+        # else nothing armed at all. The two middle arms inherit `#11455`, the two
+        # later ones are the shapes where "nothing arms it" would be a claim the walk
+        # cannot support. A surface that ARMS the flag and is itself a deployment file
+        # makes "the surfaces that do arm it do not deploy the container's environment
+        # on their own" the `#11455` false claim in its OTHER half — that build DOES
         # carry the flag, and the row is held because this walk reads each file
         # independently and does not model the merge.
         # ⛔ The population this clause interpolates must be the PER-FILE one
@@ -2818,15 +2821,33 @@ def score_rule_bullet() -> Row:
                 "merge"
             )
         elif shipped["armed"]:
+            # ⛔ NOT "a TEMPLATE": this arm is reached by ANY armed non-deployment
+            # surface, and `config/` and `.github/workflows` arm it too (both scored
+            # HITs by this walk), so a template-only noun named a population the walk
+            # did not measure. The consequence is stated for the population actually
+            # armed, and `#11455` stays named for traceability (fresh review of PR
+            # #12016, P3).
             armed_clause = (
-                f"the surfaces that do arm it ({', '.join(shipped['armed'])}) do not "
-                "deploy the container's environment on their own; this is the "
-                "`#11455` reading: one armed TEMPLATE is not a shipped default"
+                f"the surface(s) that do arm it ({', '.join(shipped['armed'])}) do "
+                "not deploy the container's environment on their own, so no armed "
+                "non-deployment surface makes this a shipped default (the `#11455` "
+                "reading)"
+            )
+        elif shipped["unmeasured"]:
+            # ⛔ "nothing arms it" over an UNREAD path is the exact doctrine
+            # `flag_in_shipped_configs` forbids: a file that could not be read is not
+            # a file that is silent. This arm exists because the absence claim below
+            # would otherwise be published over a path the walk never read (fresh
+            # review of PR #12016, P3).
+            armed_clause = (
+                "no surface the walk could READ arms it, but "
+                f"{', '.join(shipped['unmeasured'])} could not be read — so "
+                "'nothing arms it' is UNMEASURED here, not a measurement"
             )
         else:
             armed_clause = (
-                "no shipped surface arms it at all, so there is no armed template "
-                "for a deployment to fail to inherit"
+                "no shipped surface arms it at all, so there is no armed surface "
+                "for a deployment to inherit"
             )
         # ⛔ The per-FILE fact is stated FIRST and no deployment consequence is
         # asserted then retracted (fresh review of PR #12016 P3, #12070 item 4): a

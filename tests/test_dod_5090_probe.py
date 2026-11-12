@@ -2393,6 +2393,16 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
     # intersection, which the mutated condition never computes).
     assert "do not deploy the container's environment on their own" in hold, hold
     assert "themselves deployment files" not in hold, hold
+    # ⛔ The `#11455` sentence lives in THIS arm and must be PINNED here (fresh review
+    # of PR #12016, P3): it was moved out of the shared tail, and nothing asserted its
+    # presence — deleting it left the whole file green while the real tree, which takes
+    # this very arm, lost the reading from the published row.
+    assert "no armed non-deployment surface makes this a shipped default" in hold, hold
+    assert "`#11455` reading" in hold, hold
+    # ⛔ …and the noun is population-neutral ON PURPOSE: this arm is reached by ANY
+    # armed non-deployment surface, and `config/` and `.github/workflows` arm the flag
+    # too, so calling it "a TEMPLATE" named a shape the walk had not measured.
+    assert "one armed TEMPLATE" not in hold, hold
 
     # ⛔ And the THIRD shape, where NOTHING arms the flag at all (fresh review of PR
     # #12016, P3). The two-arm form published "the surfaces that do arm it (none) do
@@ -2410,7 +2420,24 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
     hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
     assert "no shipped surface arms it at all" in hold, hold
     assert "(none)" not in hold, hold
-    assert "one armed TEMPLATE" not in hold, hold
+
+    # ⛔ And the FOURTH shape, where the only candidate surface could not be READ
+    # (fresh review of PR #12016, P3). `shipped["armed"]` holds only `ON` rels, so an
+    # UNMEASURED surface is absent from it too — and the arm above would then publish
+    # "no shipped surface arms it at all" over a path the walk never read, the exact
+    # absence-over-UNREAD claim `flag_in_shipped_configs` forbids ("a file that could
+    # not be read is not a file that is silent"). The 2 MB bound is the walk's own.
+    (tmp_path / ".env.example").write_text(
+        "#" + "x" * 2_100_000, encoding="utf-8")
+    shipped = probe.flag_in_shipped_configs("TORTOISE_EMBED_GATE")
+    assert shipped["armed"] == [], shipped
+    assert shipped["unmeasured"] == [".env.example"], shipped
+    row = probe.score_rule_bullet()
+    assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
+    hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
+    assert "could not be read" in hold, hold
+    assert "UNMEASURED here, not a measurement" in hold, hold
+    assert "no shipped surface arms it at all" not in hold, hold
 
     # …and the `ambient` HALF of the same clause: a lane's exported flag is not a
     # DEFAULT. With the switch armed in the ENVIRONMENT and the deployment still
