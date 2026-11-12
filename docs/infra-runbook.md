@@ -3380,13 +3380,14 @@ a second reading of prod could name a different blocking set than the run being 
 It is **quoted, not guaranteed verbatim**: the body carries the report's **last 6000
 bytes** (a tail — the gate prints the actionable block last), and it declares beside the
 excerpt the losses it makes (the 6000-byte cut; a multibyte character split by the cut and
-dropped by the squeeze; the non-ASCII bytes dropped by the ASCII fallback when no `iconv`
-is available). When neither path produces an excerpt — the report unreadable, empty, or
-nothing left by the squeeze and its fallback — the body says exactly that and sends the
-reader to the run link. It never claims an excerpt it is not showing, never guesses the
-cause when two states are indistinguishable from there, and the section intro no longer
-promises a "verbatim" report it may not be carrying (#12200): on-call reads the body, so a
-false claim there costs the reader the trip they were trying to avoid.
+dropped by the squeeze; the non-ASCII bytes dropped by the ASCII fallback when `iconv` is
+unavailable or refuses to emit). When neither path produces an excerpt — the report unreadable,
+empty, or nothing left by the squeeze and its fallback — the body says exactly that and sends
+the reader to the run link (for a report it could not even read, to the step log inside that
+run). It never claims an excerpt it is not showing, never guesses the cause when two states are
+indistinguishable from there, and the section intro no longer promises a "verbatim" report it
+may not be carrying (#12200): on-call reads the body, so a false claim there costs the reader
+the trip they were trying to avoid.
 
 **What to do when it fires.** Read the issue, then the linked run. For a drift
 block, the remediation is the one the report prints — resolve any `OUT OF ORDER`

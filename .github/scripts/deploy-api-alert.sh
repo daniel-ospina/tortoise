@@ -281,8 +281,8 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
       # sentence authored at the BRANCH site describing an ARTIFACT decided later. Write the
       # claim about the artifact, never about the code path that produced it. Pinned by
       # case 17i, which requires this phrase to be ABSENT from an empty-state body.
-      echo "The gate's own report (\`check-migration-drift\`), which names the blocking versions"
-      echo "and the ordered remediation, is reproduced below when it can be carried — the"
+      echo "The gate's own report (\`check-migration-drift\`) — the one that names the blocking"
+      echo "versions and the ordered remediation — is reproduced below when it can be carried; the"
       echo "6000-byte cut, a character dropped by the squeeze, and the bytes dropped by the ASCII"
       echo "fallback are each declared beside it. **No production action is"
       echo "taken by this alert, and none should be taken without the owner** (#2240 ruling: a lane"

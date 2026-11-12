@@ -700,12 +700,21 @@ assert_contains "$BODY_17I" "could not be byte-squeezed" "case 17i: and the sque
 assert_contains "$BODY_17I" "produced no excerpt either" "case 17i: and it names the state it is actually in"
 assert_contains "$BODY_17I" "run link above" "case 17i: and sends the reader to where the report actually is"
 assert_not_contains "$BODY_17I" "it is pasted with its non-ASCII bytes dropped" "case 17i: and it does NOT claim a pasted excerpt it does not carry (#12200 — this row reds if the sentence's condition is removed)"
-# The claim is pinned by SHAPE, not only by one phrasing: a reworded unconditional
-# sentence ("it has been pasted with non-ASCII removed") must not walk past this case.
-# ⚠️ The subject list is why this does not false-red on the CORRECT wording: the fixed
-# empty-state sentence says "NOTHING is pasted below", whose subject is `NOTHING`, not one
-# of the claim subjects below.
-assert_no_match "$BODY_17I" '(it|they|this|the excerpt|the report) (is|are|has been|have been) pasted' "case 17i: no phrasing of a PASTE claim survives (#12200)"
+# The claim is pinned by SHAPE, not only by one phrasing, and the shape row alone is NOT the
+# net: round-1 review measured a mutant that keeps every other row green — the correct state
+# sentence SURVIVES and a second clause is added ("… yet the report **was** pasted with its
+# non-ASCII bytes dropped"). A past-tense verb walked past the original alternation, so the
+# row now spans the tenses AND the PRESENCE verbs this paragraph can carry (pasted / reproduced
+# / quoted / shown …: "the report was reproduced below" is the same false claim with a
+# different verb), and a verb-agnostic row pins the claim's distinctive clause (the loss
+# declaration), which no synonym for "is pasted" can avoid — the two nets catch different
+# regressions and BOTH are kept.
+# ⚠️ The subject list is why neither row false-reds on the CORRECT wording: the fixed
+# empty-state sentence says "NOTHING is pasted below", whose subject is `NOTHING` — never one
+# of the claim subjects here. A rewrite that makes the negation's subject a listed noun WOULD
+# false-red, and that is the correct trade: the state sentence is ours to word.
+assert_no_match "$BODY_17I" '(it|they|this|the excerpt|the report|the degraded report) (is|are|was|were|has been|have been) (pasted|reproduced|quoted|included|shown|carried|printed)' "case 17i: no phrasing of a PASTE/PRESENCE claim survives (#12200)"
+assert_not_contains "$BODY_17I" "with its non-ASCII bytes dropped" "case 17i: and no LOSS CLAUSE survives either — verb-agnostic, so a synonym for 'pasted' cannot carry it in"
 assert_no_match "$BODY_17I" 'follows verbatim' "case 17i: and the section intro claims no verbatim report either — the louder sibling of the same class"
 assert_not_contains "$BODY_17I" '```' "case 17i: and it pastes NO fenced block, in any form"
 if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then
