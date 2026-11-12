@@ -10898,10 +10898,23 @@ def _mechanism_conflicts_for_pairs(proj, pairs):
     The bare-edge arm compares against the NEW MECHANISM, never its storage type:
     a bare edge's mechanism IS its rel type, so every bare type that is not the
     new mechanism conflicts. It fires on any 2-SUBSET of the pair — the same
-    criterion the operator arm uses (`len(shared) >= 2`) — because that is the
-    door's own rule for an n-ary operator: a bare `NAND b→c` conflicts with
-    `coherence a→[b, c]`, and an equality test would let the door write it while
-    Phase 1 refused the mirror (#12067 review round 6, P2).
+    criterion the operator arm uses — because that is the door's own rule for an
+    n-ary write: a bare `NAND b→c` conflicts with `coherence a→[b, c]`, and an
+    equality test would let the door write it while Phase 1 refused the mirror
+    (#12067 review round 6, P2).
+
+    ⛔ THE OPERATOR ARM COMPARES THE PAIRS THE FACTOR *PRICES*, not the endpoint
+    SETS (#12067 review round 6, P1). The first cut decided coverage with
+    ``shared = eps & pair; if len(shared) < 2``, where ``eps`` was the existing
+    operator's whole endpoint set — so two endpoints merely being present TOGETHER
+    read as a conflict even when the factor never prices them against each other.
+    A one-way `NAND c→[a, b]` is a STAR (`TortoiseEP._factor_pairs`: `(c, a)` and
+    `(c, b)`; `(a, b)` is not priced), so a later `IMPL(a, b)` is legal — and it
+    was REFUSED, with a message asserting a shared pair that does not exist. Two
+    fully disjoint stars were refused the same way (measured). Every pair this
+    reader is asked about is now matched against `_priced_pairs`, the ONE
+    declaration of that decomposition, so the door cannot disagree with the factor
+    about what a mechanism covers.
     """
     from tortoise.pack_registry import CORE_PREDICATES
 
@@ -10912,7 +10925,7 @@ def _mechanism_conflicts_for_pairs(proj, pairs):
         return {}
     population = _live_operator_mechanism_pairs(proj, ids)
     operators = [
-        (oid, otype, eps) for oid, (otype, eps) in population.items()
+        (oid, otype, priced) for oid, (otype, priced) in population.items()
         if otype is not None and otype in CORE_PREDICATES
     ]
     bare: list[tuple[str, str, str]] = []
@@ -10929,14 +10942,13 @@ def _mechanism_conflicts_for_pairs(proj, pairs):
                 bare.append((_a, _b, _t))
     out: dict[frozenset, list[tuple[str, str, list[str], str | None]]] = {}
     for pair, mechanism in pairs.items():
-        for oid, otype, eps in operators:
+        for oid, otype, priced in operators:
             if otype == mechanism:
                 continue
-            shared = eps & pair
-            if len(shared) < 2:
+            if pair not in priced:
                 continue
             out.setdefault(pair, []).append(
-                ("operator", otype, sorted(shared), oid))
+                ("operator", otype, sorted(pair), oid))
         for _a, _b, _t in bare:
             if _t != mechanism and (_a in pair and _b in pair):
                 out.setdefault(pair, []).append(
@@ -10944,24 +10956,91 @@ def _mechanism_conflicts_for_pairs(proj, pairs):
     return out
 
 
-def _mechanism_pair_conflicts(proj, endpoints, mechanism):
-    """Every existing mechanism a NEW ``mechanism`` write on ONE pair would
+def _declares_direction(op_type: str, direction: str | None) -> bool:
+    """Did the caller STATE a direction for a write of ``op_type``?
+
+    ⛔ PER-MECHANISM, because the "not declared" spelling is (#12067 review
+    round 6, P2). `is_default_direction` answers against the GLOBAL mutual default
+    (`bidirectional` and its model spelling `<->`), which is IMPL's signature
+    default — but `coherence`'s own default is `->` (`_canonical_direction`), so
+    for a coherence write `<->` is a REAL statement: it asks for MUTUAL necessity.
+    Reading it as "not declared" silently downgraded it — a declared `semantics`
+    then replaced the caller's `<->` with `->` and the node was recorded with
+    `direction_basis: 'default'`, contradicting `create_operator`'s own contract
+    ("a NON-default explicit value outranks `semantics`").
+
+    The signature DEFAULT token (`bidirectional`) stays "not declared" for every
+    mechanism, which is what keeps the semantics step alive for an IMPL/coherence
+    write that only repeated the parameter default. IMPL and NAND are unchanged:
+    neither has a non-mutual absent default, so `is_default_direction` is already
+    the right question for them.
+    """
+    if op_type != "coherence":
+        return not is_default_direction(direction)
+    if direction is None:
+        return False
+    # `bidirectional` is the PARAMETER default (a non-declaration); `<->` is the
+    # model token for the same mutual reading, and for this mechanism it IS a
+    # statement, because the mechanism's own default is one-way.
+    return direction != "bidirectional"
+
+
+def _priced_pairs(op_type: str, inputs, direction: str | None):
+    """The ``(source, target)`` pairs a write of ``op_type`` over ``inputs``
+    PRICES — ``TortoiseEP._factor_pairs``, the one declaration of the shape.
+
+    ⛔ WHY THIS EXISTS (#12067 review round 6, P1). The closed-set doors judged
+    the write's whole ENDPOINT SET against the existing operator's whole endpoint
+    SET, so two endpoints merely present together counted as "the same pair". The
+    factor does not work that way: `IMPL` is always a STAR (`inputs[0]` → every
+    other input, so its TARGETS never price each other), a one-way `NAND` and a
+    one-way `coherence` are stars too, and only an operator whose direction flows
+    BOTH ways prices a clique. Re-deriving that decomposition here would drift
+    from the factor that computes it — which is why this reads
+    `TortoiseEP._factor_pairs`, the same function `_update_nary_factor` and
+    `_null_input_sends` read. A two-input write prices ONE pair in every shape,
+    so the bare-edge door and `ingest`'s Phase 1 (both two-endpoint) are
+    unaffected by the shape branch and only gain the precise unit.
+    """
+    ids = [str(i) for i in inputs]
+    if len(ids) < 2:
+        return []
+    from tortoise.ep import TortoiseEP
+    from tortoise.live import direction_flows
+
+    _fwd, _bwd = direction_flows(direction)
+    return TortoiseEP._factor_pairs(op_type, ids, bool(_fwd and _bwd))
+
+
+def _mechanism_pair_conflicts(proj, pairs, mechanism):
+    """Every existing mechanism a NEW ``mechanism`` write over ``pairs`` would
     DOUBLE-COUNT — ``[(kind, other, shared_ids, operator_id)]`` (#12067).
 
-    The single-pair entry point; the judgement itself lives in
+    ``pairs`` is every two-endpoint pair the write PRICES (``_priced_pairs``), not
+    its endpoint set: a write covering a star does not conflict with a mechanism
+    on a pair between two of its TARGETS, because the factor never prices them
+    against each other (#12067 review round 6, P1). The judgement itself lives in
     :func:`_mechanism_conflicts_for_pairs` so a batch and a single pair can never
     disagree about what conflicts.
     """
-    pair = frozenset(endpoints)
-    return _mechanism_conflicts_for_pairs(proj, {pair: mechanism}).get(pair, [])
+    wanted = {frozenset(p) for p in pairs}
+    if not wanted:
+        return []
+    found = _mechanism_conflicts_for_pairs(
+        proj, {pair: mechanism for pair in wanted})
+    out: list[tuple[str, str, list[str], str | None]] = []
+    for pair in wanted:
+        out.extend(found.get(pair, []))
+    return out
 
 
 def _live_operator_mechanism_pairs(proj, ids):
     """The mechanisms operators already carry over ``ids`` (#12067).
 
-    Returns ``{operator_id: (op_type, other_endpoint_ids)}`` for every NON-TERMINAL
-    operator (live OR draft — a draft is promoted, see ``_mechanism_population``)
-    that touches at least one id in ``ids``. ONE reader, because the
+    Returns ``{operator_id: (op_type, priced_pairs)}`` — each operator's NON-TERMINAL
+    (live OR draft — a draft is promoted, see ``_mechanism_population``) mechanisms
+    as the two-endpoint pairs its factor PRICES, for every operator that touches at
+    least one id in ``ids``. ONE reader, because the
     closed-set invariant has TWO doors that must judge the same population: the
     operator door (``create_operator``) and the operator-less direct-edge door
     (``create_direct_edge``). A second copy is how one door stops seeing a shape
@@ -10974,20 +11053,54 @@ def _live_operator_mechanism_pairs(proj, ids):
     ``(p:Point)`` cannot see a pair whose endpoint is a :Subject. The swept
     ``{label}`` keeps the per-(label, id) index (``epistemic_label_queries``) and
     the far side is reached BY THE EDGE, so no label is imposed on it.
+
+    ⛔ The SHAPE is read, not assumed (#12067 review round 6, P1): the factor's
+    decomposition depends on `op_type` and on whether the direction flows both
+    ways, so the query carries ``o.direction`` and each input's ``r.idx`` (the
+    slot `ep.py` itself orders by — ``idx 0`` is the source). Reading only the
+    endpoint SET is what let a star be judged as a clique. An operator whose edges
+    carry NO ``idx`` (legacy/hand-written) has no recoverable slot order, so its
+    shape is UNKNOWN and it keeps the conservative endpoint-set reading — every
+    pair among its endpoints — rather than guessing a source and letting a real
+    conflict through.
     """
-    rows_out: dict[str, tuple[str | None, set[str]]] = {}
+    rows: dict[str, tuple[str | None, str | None, dict[str, int | None]]] = {}
     for _q in epistemic_label_queries(
         "MATCH (o:Point)-[:IMPL|NAND]->(p:{label}), "
-        "(o)-[:IMPL|NAND]->(q) "
+        "(o)-[r:IMPL|NAND]->(q) "
         "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
         f"AND {_mechanism_population('o.status')} "
         "AND p.id IN $ids "
-        "RETURN DISTINCT o.id, o.op_type, q.id"
+        "RETURN DISTINCT o.id, o.op_type, o.direction, q.id, r.idx"
     ):
-        for _oid, _otype, _qid in proj.g.query(
+        for _oid, _otype, _odir, _qid, _idx in proj.g.query(
                 _q, params={"ids": sorted(ids)}).result_set:
-            rows_out.setdefault(_oid, (_otype, set()))[1].add(_qid)
-    return rows_out
+            slots = rows.setdefault(_oid, (_otype, _odir, {}))[2]
+            if _qid not in slots:
+                slots[_qid] = _idx
+            elif slots[_qid] is None:
+                continue                       # already unknown: stays unknown
+            elif _idx is None or _idx < slots[_qid]:
+                slots[_qid] = _idx
+    priced_out: dict[str, tuple[str | None, set[frozenset]]] = {}
+    for _oid, (_otype, _odir, slots) in rows.items():
+        if not slots:
+            continue
+        if any(v is None for v in slots.values()):
+            # No slot order ⇒ no recoverable shape: keep the conservative
+            # endpoint-set reading (every pair among its endpoints), which is
+            # what this reader did before the shape was read at all.
+            endpoints = sorted(slots)
+            priced = {frozenset((endpoints[a], endpoints[b]))
+                      for a in range(len(endpoints))
+                      for b in range(a + 1, len(endpoints))}
+        else:
+            ordered = [k for k, _ in sorted(slots.items(),
+                                            key=lambda kv: (kv[1], kv[0]))]
+            priced = {frozenset(p)
+                      for p in _priced_pairs(_otype or "", ordered, _odir)}
+        priced_out[_oid] = (_otype, priced)
+    return priced_out
 
 
 class TortoiseSDK:
@@ -24187,7 +24300,8 @@ class TortoiseSDK:
         # FALSE provenance and silently disable the semantics step below. A
         # declared semantics therefore outranks both, and never overrides a
         # direction the caller actually differentiated.
-        direction_basis = "explicit" if not is_default_direction(direction) else "default"
+        direction_basis = ("explicit" if _declares_direction(op_type, direction)
+                          else "default")
         if semantics is not None:
             from tortoise.enforcement import emit_violation
             from tortoise.pack_registry import (
@@ -24226,7 +24340,7 @@ class TortoiseSDK:
             else:
                 derived = self._direction_from_semantics(semantics)
                 if derived is not None and (
-                        direction is None or is_default_direction(direction)):
+                        not _declares_direction(op_type, direction)):
                     # Chain step 2 — basis `semantics`: the direction was resolved
                     # from the Layer-2 meaning the caller declared, which is the
                     # input actually read here. `is_default_direction` is what
@@ -24558,15 +24672,18 @@ class TortoiseSDK:
         from tortoise.pack_registry import CORE_PREDICATES
 
         if op_type in CORE_PREDICATES:
-            _new_endpoints = set(inputs)
+            _new_priced = _priced_pairs(op_type, inputs, direction)
             # ONE reader, shared with `create_direct_edge` and with `ingest`'s
             # Phase-1 validation (`_mechanism_pair_conflicts`): three copies of
             # this judgement is how one door stops seeing what another writes,
             # and how a conflict reached the execution door with no Phase-1
             # violation to skip (a mid-bundle abort after earlier items
             # committed, #12067 review round 3).
+            # ⛔ What is judged is the pair the FACTOR prices, not the endpoint
+            # set (#12067 review round 6, P1): `IMPL` is a star, so a mechanism
+            # on a pair between two TARGETS is not a conflict.
             for _kind, _other, _shared, _oid in _mechanism_pair_conflicts(
-                    proj, _new_endpoints, op_type):
+                    proj, _new_priced, op_type):
                 if _kind == "operator":
                     raise ValueError(
                         f"create_operator: the pair {_shared} already carries "
@@ -26176,6 +26293,32 @@ class TortoiseSDK:
         """
         from tortoise.pack_registry import SEMANTICS_DIRECTIONS
         return SEMANTICS_DIRECTIONS.get(semantics)
+
+    @staticmethod
+    def _effective_direction(op_type: str, direction: str | None,
+                             semantics: str | None) -> str:
+        """The direction the WRITE will store, resolved by the writer's own steps.
+
+        Phase 1 predicts the door's PAIR SHAPE (`_factor_pairs` is a STAR for a
+        one-way mechanism and a CLIQUE for a mutual one), so it must resolve the
+        direction the way the door does rather than reading the raw token: an
+        ABSENT direction is `->` for `coherence` (one-way necessity) and
+        `bidirectional` for `IMPL` (#12067 review round 6, P1 — reading the raw
+        token made an absent coherence connection look mutual, so Phase 1 judged a
+        clique where the door prices a star). Both steps are the writer's own:
+        `_direction_from_semantics` reads the ONE table (`SEMANTICS_DIRECTIONS`),
+        and `_canonical_direction` is the writer's chain step 4.
+
+        ⚠️ STATED RESIDUAL: a RETIRED semantics word (`SEMANTICS_TRANSITION`) is
+        not canonicalized here, so the shape may be predicted from the retired
+        spelling. Every shipped row resolves that spelling to the same meaning,
+        and the execution door remains the backstop.
+        """
+        if semantics is not None and not _declares_direction(op_type, direction):
+            derived = TortoiseSDK._direction_from_semantics(semantics)
+            if derived is not None:
+                direction = derived
+        return TortoiseSDK._canonical_direction(op_type, direction)
 
     @staticmethod
     def _canonical_direction(op_type: str, direction: str | None) -> str:
@@ -28933,12 +29076,13 @@ class TortoiseSDK:
         ⛔ WHAT A PREDICTION MUST MODEL, and each item below was MEASURED as a
         live mid-write abort at some point in this review (#12067 rounds 3-5):
 
-        1. **The pair the DOOR judges is every 2-subset of the operator's endpoint
-           set**, not `(from, target)`. `create_operator` tests an existing
-           operator's endpoints against `set(inputs)` with `len(shared) >= 2`, so
-           for `coherence a→[b, c]` the pair `(b, c)` is judged too — and a
-           conflict there is one Phase 1 must see, not the one it derives from
-           `from`/`to`.
+        1. **The pair the FACTOR prices**, not the endpoint set. `TortoiseEP._factor_pairs`
+           decomposes an n-ary write into a STAR when the direction is one-way
+           (`IMPL` always: `inputs[0]` → every other input) and a CLIQUE only when
+           it flows both ways — so `coherence a→[b, c]` prices `(a, b)` and `(a, c)`
+           and never `(b, c)`, and a conflict on `(b, c)` is not a conflict at all.
+           `_priced_pairs` is that decomposition, read from the factor's own
+           declaration (#12067 review round 6, P1).
         2. **The landing NODE, not the spelling.** The first cut passed the raw
            `from`/`to` STRINGS into the reader, which seeks `p.id IN $ids` — so for
            refs (the idiomatic spelling) the check was a silent NO-OP. Endpoints are
@@ -28981,7 +29125,7 @@ class TortoiseSDK:
 
         conns = [c for c in (bundle.get("connections") or [])
                  if isinstance(c, dict)]
-        shape: list[tuple[int, str, list[str]]] = []
+        shape: list[tuple[int, str, list[str], tuple]] = []
         endpoint_names: set[str] = set()
         for i, conn in enumerate(conns):
             mechanism = conn.get("operator")
@@ -28991,11 +29135,23 @@ class TortoiseSDK:
             dsts = conn.get("to")
             if not isinstance(src, str):
                 continue
-            targets = [dsts] if isinstance(dsts, str) else list(dsts or [])
-            targets = [t for t in targets if isinstance(t, str) and t != src]
+            # The SHAPE of `to` is the contract check's business (Phase 0).
+            # Phase 1 is documented as aggregated-never-fail-fast, so a
+            # malformed `to` becomes that check's violation, never a `TypeError`
+            # that unwinds the whole bundle (#12067 review round 6, P1 —
+            # `list(5)` raised, so `test_connection_contract_classes` aborted
+            # Phase 1 instead of reporting one class).
+            if isinstance(dsts, str):
+                candidates = [dsts]
+            elif isinstance(dsts, (list, tuple, set, frozenset)):
+                candidates = list(dsts)
+            else:
+                continue
+            targets = [t for t in candidates if isinstance(t, str) and t != src]
             if not targets:
                 continue
-            shape.append((i, mechanism, [src, *targets]))
+            shape.append((i, mechanism, [src, *targets],
+                          (conn.get("direction"), conn.get("semantics"))))
             endpoint_names.update([src, *targets])
         if not shape:
             return
@@ -29023,27 +29179,37 @@ class TortoiseSDK:
         seen: dict[frozenset, tuple[str, int]] = {}
         graph_pairs: dict[frozenset, str] = {}
         pair_index: dict[frozenset, list[tuple[int, list[str], str]]] = {}
-        for i, mechanism, names in shape:
-            tokens = [_node(n) for n in names]
-            for a in range(len(tokens)):
-                for b in range(a + 1, len(tokens)):
-                    key = frozenset((tokens[a], tokens[b]))
-                    prev = seen.get(key)
-                    if prev is not None and prev[0] != mechanism:
-                        pm, pj = prev
-                        violations.append(self._mechanism_violation(
-                            i, mechanism,
-                            f"connections[{pj}] of THIS bundle already states "
-                            f"the {pm!r} mechanism on that pair (no node exists "
-                            f"to read, so this is an intra-bundle conflict)",
-                            None))
-                        continue
-                    seen.setdefault(key, (mechanism, i))
-                    if tokens[a][0] == "id" and tokens[b][0] == "id":
-                        id_key = frozenset((tokens[a][1], tokens[b][1]))
-                        graph_pairs.setdefault(id_key, mechanism)
-                        pair_index.setdefault(id_key, []).append(
-                            (i, [names[a], names[b]], mechanism))
+        for i, mechanism, names, (raw_direction, raw_semantics) in shape:
+            # ⛔ The unit is the pair the FACTOR prices (#12067 review round 6,
+            # P1). Every 2-subset of the endpoint list was the round-5 unit, and
+            # it is one pair too many for a star: `IMPL a→[b, c]` prices `(a, b)`
+            # and `(a, c)` and NEVER `(b, c)`, so judging `(b, c)` refused bundles
+            # the execution door accepts (a false block) and reported a conflict
+            # on a pair no factor covers. `_priced_pairs` is the factor's own
+            # decomposition, so Phase 1 and `create_operator` cannot disagree.
+            named_pairs = _priced_pairs(
+                mechanism, names,
+                self._effective_direction(
+                    mechanism, raw_direction, raw_semantics))
+            for name_a, name_b in named_pairs:
+                token_a, token_b = _node(name_a), _node(name_b)
+                key = frozenset((token_a, token_b))
+                prev = seen.get(key)
+                if prev is not None and prev[0] != mechanism:
+                    pm, pj = prev
+                    violations.append(self._mechanism_violation(
+                        i, mechanism,
+                        f"connections[{pj}] of THIS bundle already states "
+                        f"the {pm!r} mechanism on that pair (no node exists "
+                        f"to read, so this is an intra-bundle conflict)",
+                        None))
+                    continue
+                seen.setdefault(key, (mechanism, i))
+                if token_a[0] == "id" and token_b[0] == "id":
+                    id_key = frozenset((token_a[1], token_b[1]))
+                    graph_pairs.setdefault(id_key, mechanism)
+                    pair_index.setdefault(id_key, []).append(
+                        (i, [name_a, name_b], mechanism))
         for key, found in _mechanism_conflicts_for_pairs(proj, graph_pairs).items():
             for i, names, mechanism in pair_index.get(key, []):
                 for _kind, other, _shared, oid in found:
@@ -30613,7 +30779,7 @@ class TortoiseSDK:
         # stored as `:IMPL` but it is a DIFFERENT mechanism, so an operator
         # declaring it conflicts with a bare IMPL edge.
         for _kind, _otype, _pair, _oid in _mechanism_pair_conflicts(
-                proj, {source_id, target_id}, op_type):
+                proj, [(source_id, target_id)], op_type):
             if _kind != "operator":
                 continue
             raise ValueError(

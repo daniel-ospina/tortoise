@@ -774,27 +774,28 @@ def test_a_REF_endpoint_resolves_to_its_LANDING_node(sdk):
                for v in violations), violations
 
 
-def test_an_NARY_sibling_pair_is_judged_at_Phase_1(sdk):
-    """⛔ The DOOR judges every 2-subset of the operator's endpoint set, so Phase 1
-    must too (#12067 review round 5, P1 — measured).
+def test_an_NARY_PRICED_pair_is_judged_at_Phase_1(sdk):
+    """The pairs an n-ary write PRICES are judged in Phase 1, before anything commits.
 
-    `create_operator` tests an existing operator's endpoints against
-    `set(inputs)` with `len(shared) >= 2`, so for `coherence a→[b, c]` the pair
-    `(b, c)` is a pair it refuses — but Phase 1 derived only `(a, b)` and `(a, c)`.
-    A conflict on the sibling pair therefore passed validation, committed the
-    operator, and then raised mid-write with no violation to skip.
+    (#12067 review round 5, P1 — the class; review round 6, P1 — the unit.) A
+    conflict the EXECUTION door would refuse must be a Phase-1 violation, or the
+    bundle aborts MID-WRITE with the earlier items already committed. Round 5 fixed
+    that for every 2-subset of the endpoint set; round 6 showed the unit itself was
+    wrong (a STAR never prices its targets against each other), so the invariant is
+    re-pinned on a pair the factor really prices: `coherence a→[b, c]` prices
+    `(a, c)`, and an existing `IMPL c→a` covers it.
     """
     from tortoise.exceptions import BundleValidationError
 
     a, b, c = _points(sdk, 3)
-    sdk.create_operator("IMPL", b, [c])
+    sdk.create_operator("IMPL", c, [a])
     with pytest.raises(BundleValidationError) as exc:
         sdk.ingest({"connections": [
             {"operator": "coherence", "from": a, "to": [b, c]}]})
     violations = getattr(exc.value, "violations", []) or []
     assert any("SECOND mechanism" in (v.get("message") or "")
                for v in violations), violations
-    # The conflict is on the SIBLING pair, so nothing new was written.
+    # The conflict was caught in Phase 1, so nothing new was written.
     ops = sdk._get_proj().g.query(
         "MATCH (o:Point) WHERE o.is_operator = true "
         "AND o.op_type = 'coherence' RETURN count(o)").result_set
@@ -833,29 +834,51 @@ def test_two_REFS_that_fold_onto_one_minted_node_are_ONE_pair(sdk):
     assert rows[0][0] == 0, rows
 
 
-def test_a_bare_edge_on_an_NARY_SUBPAIR_is_refused_by_BOTH_doors(sdk):
-    """⛔ The door's rule is "share ≥2 endpoints", and the bare-edge arm must use
-    it too (#12067 review round 6, P2 — measured).
+def test_a_bare_edge_on_a_TARGET_SUBPAIR_is_NOT_a_conflict(sdk):
+    """⛔ THE UNIT IS THE PAIR THE FACTOR PRICES (#12067 review round 6, P1).
 
-    The bare arm required the bare edge's endpoints to EQUAL the whole endpoint
-    set, so a bare `NAND b→c` sat beside `coherence a→[b, c]` — two mechanisms on
-    the pair (b, c) — while the mirrored `ingest` refused the same state. The
-    doc's claim ("one shared reader, one rule") has to be true of both arms, so
-    this pins the SAME shape through `create_operator` and through `ingest`.
+    Round 6 (P2) made the bare-edge arm fire on any 2-SUBSET of the endpoint set
+    so both arms shared one rule; the SAME round's P1 shows that rule is wrong for
+    a STAR: `coherence a→[b, c]` prices `(a, b)` and `(a, c)` and never `(b, c)`
+    (`TortoiseEP._factor_pairs`), so a bare `NAND b→c` is a mechanism on a DIFFERENT
+    pair and the write is legal. Both doors must say so — that is the invariant
+    (one reader, one rule), and the earlier pin asserted the opposite verdict
+    because the arms agreed on the wrong unit.
+
+    The PRICED sub-pair is still refused, by both doors, in the next test.
+    """
+    a, b, c = _points(sdk, 3)
+    sdk.create_direct_edge("NAND", b, c)
+    op = sdk.create_operator("coherence", a, [b, c])
+    assert op["id"], op
+    # ... and the mirror through `ingest` accepts the same state.
+    d, e, f = _points(sdk, 3)
+    sdk.create_direct_edge("NAND", e, f)
+    out = sdk.ingest({"connections": [
+        {"operator": "coherence", "from": d, "to": [e, f]}]})
+    assert not (getattr(out, "violations", None) or []), out
+
+
+def test_a_bare_edge_on_a_PRICED_SUBPAIR_is_refused_by_BOTH_doors(sdk):
+    """The star's SOURCE→target pairs ARE priced, so the closure applies there.
+
+    `coherence a→[b, c]` prices `(a, b)` and `(a, c)`: a bare `NAND a→b` is a
+    second mechanism on a pair the factor prices twice, and both doors must refuse
+    it — the execution door with a `ValueError`, `ingest` with a Phase-1 violation
+    (never a mid-bundle abort).
     """
     from tortoise.exceptions import BundleValidationError
 
     a, b, c = _points(sdk, 3)
-    sdk.create_direct_edge("NAND", b, c)
+    sdk.create_direct_edge("NAND", a, b)
     with pytest.raises(ValueError) as exc:
         sdk.create_operator("coherence", a, [b, c])
     assert "NAND" in str(exc.value), str(exc.value)
-    # ... and the ingest door reports the mirror instead of raising mid-bundle.
     with pytest.raises(BundleValidationError) as exc2:
         sdk.ingest({"connections": [
             {"operator": "coherence", "from": a, "to": [b, c]}]})
     violations = getattr(exc2.value, "violations", []) or []
-    assert any("direct edge" in (v.get("message") or "") for v in violations),         violations
+    assert any("direct edge" in (v.get("message") or "") for v in violations), violations
 
 
 def test_a_bare_edge_conflict_names_the_EDGE_not_an_operator(sdk):
@@ -1276,37 +1299,97 @@ def test_mutual_coherence_never_RAISES_the_necessary_condition():
     assert src_mutual < cond_before - 1e-4, src_mutual
 
 
-def test_a_mechanism_on_a_TARGET_SUBPAIR_is_a_Phase1_violation(sdk):
-    """THE DOOR JUDGES THE WHOLE INPUT SET; PHASE 1 JUDGED ONE TARGET AT A TIME.
+def test_a_mechanism_on_a_TARGET_SUBPAIR_is_NOT_priced(sdk):
+    """THE FACTOR PRICES A STAR'S SOURCE→TARGET PAIRS, NEVER ITS TARGETS AGAINST
+    EACH OTHER (#12067 review round 6, P1 — a FALSE BLOCK, measured).
 
-    (#12067 review round 4, P1.) `_mechanism_pair_conflicts` fires on any pair
-    sharing two or more endpoints, and `create_operator` passes its FULL input
-    set. `_check_pair_mechanisms` asked per `{src, tgt}`, so an existing
-    mechanism on a TARGET-TO-TARGET sub-pair was invisible to it and fatal at
-    the door.
+    Round 4 pinned the OPPOSITE verdict, because the reader compared endpoint SETS:
+    an existing `NAND(b, c)` plus `IMPL A→[B, C]` read as "two mechanisms on the
+    pair (b, c)" and the bundle was refused — with the point already committed on
+    the round-4 code (a mid-bundle abort with no violation to skip). The factor
+    never prices `(b, c)`: `IMPL` is a star, `NAND b→c` is a one-way star, so the
+    two writes cover DISJOINT pairs and the bundle is legal.
 
-    Measured before the fix — existing NAND on (B,C), then
-    `ingest({points:[new], connections:[{IMPL, from:A, to:[B,C]}]})`:
-    Phase 1 passed clean, the bundle's new point COMMITTED, then
-    `create_operator` raised with no violation to skip.
+    What the round-4 pin was really protecting — a bundle that the door would
+    refuse must be refused in Phase 1, BEFORE anything commits — is still pinned,
+    on a PRICED pair: an existing `NAND(a, b)` with `IMPL A→[B, C]` is a Phase-1
+    violation and the bundle's point is never written.
     """
     from tortoise.exceptions import BundleValidationError
 
     a, b, c = _points(sdk, 3)
     sdk.create_operator("NAND", b, [c])
-    payload = {
-        "points": [{"content": "queued ahead of a target sub-pair conflict"}],
+    out = sdk.ingest({
+        "points": [{"content": "queued ahead of an UNPRICED target sub-pair"}],
         "connections": [{"operator": "IMPL", "from": a, "to": [b, c]}],
-    }
+    })
+    assert not (out.get("violations") or []), out
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.content = $c RETURN n.id",
+        params={"c": "queued ahead of an UNPRICED target sub-pair"},
+    ).result_set, "the accepted bundle must have committed its point"
+
+    # The PRICED pair still blocks the bundle in Phase 1, before any write.
+    d, e, f = _points(sdk, 3)
+    sdk.create_operator("NAND", d, [e])
     with pytest.raises(BundleValidationError) as exc:
-        sdk.ingest(payload)
+        sdk.ingest({
+            "points": [{"content": "queued ahead of a PRICED sub-pair conflict"}],
+            "connections": [{"operator": "IMPL", "from": d, "to": [e, f]}],
+        })
     violations = getattr(exc.value, "violations", []) or []
     assert any("SECOND" in (v.get("message") or "") for v in violations), (
         violations)
-    rows = sdk._get_proj().g.query(
+    assert sdk._get_proj().g.query(
         "MATCH (n:Point) WHERE n.content = $c RETURN n.id",
-        params={"c": "queued ahead of a target sub-pair conflict"}).result_set
-    assert rows == [], rows
+        params={"c": "queued ahead of a PRICED sub-pair conflict"},
+    ).result_set == [], "Phase 1 must refuse BEFORE the point is committed"
+
+
+def test_only_PRICED_pairs_count_measured_eight_ways(sdk):
+    """Every shape the factor knows, judged on the pair it prices (#12067 round 6, P1).
+
+    Measured on the pre-fix code, each of the four ACCEPTs was a false refusal
+    whose message asserted a shared pair the factor never prices, and each of the
+    four REFUSEs is the closure the pair-level invariant exists to enforce.
+    """
+    # ACCEPT: a one-way NAND star `c→[a, b]` does not price `(a, b)`.
+    c, a, b = _points(sdk, 3)
+    sdk.create_operator("NAND", c, [a, b], direction="unidirectional")
+    assert sdk.create_operator("IMPL", a, [b])["id"]
+
+    # ACCEPT: two fully DISJOINT stars.
+    p, q, r, s = _points(sdk, 4)
+    sdk.create_operator("NAND", p, [q], direction="unidirectional")
+    assert sdk.create_operator("IMPL", r, [s])["id"]
+
+    # REFUSE: a MUTUAL nand prices the clique, so `(a, b)` is covered.
+    c2, a2, b2 = _points(sdk, 3)
+    sdk.create_operator("NAND", c2, [a2, b2], direction="<->")
+    with pytest.raises(ValueError) as exc:
+        sdk.create_operator("IMPL", a2, [b2])
+    assert "NAND" in str(exc.value), str(exc.value)
+
+    # REFUSE: a one-way coherence star prices `(condition, dependent)`.
+    cond, dep, other = _points(sdk, 3)
+    sdk.create_operator("coherence", cond, [dep, other])
+    with pytest.raises(ValueError) as exc2:
+        sdk.create_operator("IMPL", cond, [dep])
+    assert "coherence" in str(exc2.value), str(exc2.value)
+
+    # REFUSE: the plain two-input mirror, in both orders.
+    x, y = _points(sdk)
+    sdk.create_operator("IMPL", x, [y])
+    with pytest.raises(ValueError) as exc3:
+        sdk.create_operator("NAND", x, [y])
+    assert "IMPL" in str(exc3.value), str(exc3.value)
+
+    # REFUSE: a bare `NAND` edge over a pair a coherence operator prices.
+    cond2, dep2 = _points(sdk)
+    sdk.create_operator("coherence", cond2, [dep2])
+    with pytest.raises(ValueError) as exc4:
+        sdk.create_direct_edge("NAND", cond2, dep2)
+    assert "coherence" in str(exc4.value), str(exc4.value)
 
 
 def test_the_mechanism_set_is_one_tuple_everywhere():
