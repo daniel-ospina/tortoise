@@ -737,6 +737,24 @@ def _poolable_label(text: str) -> bool:
     return False
 
 
+#: A line that EMITS a message rather than EXECUTING anything.
+#:
+#: The NAME arm below searches the RAW line on purpose — a real invocation is usually
+#: quoted (`python3 "$GITHUB_WORKSPACE/tools/ci_timing.py"`), so `_code_only` is the
+#: wrong test there and an earlier version that used it lost the honest positive. The
+#: cost of reading raw text is that operator-facing PROSE naming a helper reads as a
+#: hazard. MEASURED 2026-11-12 on main's tip `4b1d6cd0d4` (introduced by `8126970432`):
+#: `test-record-postgres`'s client-pin step EMITS
+#: `::error::… tools/install-ci-runner-x64.sh --repair-labels …` as guidance for the
+#: operator, and this scan named `python-ci.yml::test-record-postgres` an undeclared
+#: gap — reddening `test-carve-out (c)` on main's tip, which withheld the REQUIRED
+#: `python-ci-gate` from every PR. The job executes no script in that step: it is an
+#: `echo`. The remedy the red DEMANDED (`ensure gh`) fails CLOSED, so applying it would
+#: have reddened a healthy job on a no-egress pool runner — the false positive is the
+#: defect, not the workflow's prose.
+_MESSAGE_ONLY = re.compile(r"^(?:-\s+)?(?:run:\s*)?(?:echo|printf)\b")
+
+
 def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
     hits = []
     # ⛔ BOUNDARY-MATCHED, not `name in code`. A substring test made
@@ -756,7 +774,17 @@ def _gh_hazards(body: list[str], scripts: frozenset[str]) -> list[str]:
         if stripped.startswith("#") or stripped.startswith("- name:"):
             continue
         code = _code_only(line)
-        if _GH_CMD.search(code) or (script_ref is not None and script_ref.search(line)):
+        # ⛔ TWO ARMS, TWO READINGS, deliberately: `gh` is read from the QUOTE-STRIPPED
+        # text (a `gh` in an operator message is prose), while a helper-script NAME is
+        # read from the RAW line (a real invocation is usually quoted). A message
+        # emitter executes no script, so it is excluded from the NAME arm only — the
+        # `gh` arm needs no exclusion because `_code_only` already blanks the prose.
+        name_hit = (
+            script_ref is not None
+            and not _MESSAGE_ONLY.match(stripped)
+            and script_ref.search(line)
+        )
+        if _GH_CMD.search(code) or name_hit:
             hits.append(stripped)
     return hits
 
@@ -844,6 +872,37 @@ def test_a_test_module_named_like_a_helper_is_not_a_gh_hazard():
     # …while a REAL invocation of the helper is still a hazard, in both shapes.
     assert _gh_hazards(["        run: python3 tools/ci_timing.py --refresh-durations"], scripts)
     assert _gh_hazards(['        run: python3 "$GITHUB_WORKSPACE/tools/ci_timing.py"'], scripts)
+
+
+def test_an_operator_message_naming_a_helper_is_not_a_gh_hazard():
+    """PROSE is not an INVOCATION — the false positive that reddened main's tip.
+
+    MEASURED 2026-11-12 on main `4b1d6cd0d4`: `test-record-postgres`'s client-pin step
+    emits `::error::… tools/install-ci-runner-x64.sh --repair-labels …` as operator
+    guidance, and the NAME arm — reading the raw line, which it must — took the message
+    for a hazard. `test_every_pool_eligible_gh_job_is_declared` then named
+    `python-ci.yml::test-record-postgres` an undeclared gap, `test-carve-out (c)` reddened
+    on main's tip, and `python-ci-gate` withheld a REQUIRED check from every PR.
+
+    The exclusion is scoped to the NAME arm and to message emitters, and BOTH directions
+    are pinned below: the same helper in a real invocation — bare or quoted — is still a
+    hazard, so this cannot be satisfied by never matching it.
+    """
+    scripts = _gh_executing_scripts()
+    assert "install-ci-runner-x64.sh" in scripts, (
+        "the derivation no longer sees the helper this pin is written against, so the "
+        "assertions below would pass vacuously"
+    )
+    prose = (
+        '            echo "::error::routing drift #10289 — on it run CI_RUNNER_OS_LABEL=off'
+        ' tools/install-ci-runner-x64.sh --repair-labels --count <N>"'
+    )
+    assert _gh_hazards([prose], scripts) == []
+    # …the SAME name in a real invocation is still a hazard, in both shapes.
+    assert _gh_hazards(["        run: bash tools/install-ci-runner-x64.sh --repair-labels"], scripts)
+    assert _gh_hazards(['        run: bash "tools/install-ci-runner-x64.sh" --repair-labels'], scripts)
+    # …and an `echo` that really shells out is caught by the OTHER arm, not this one.
+    assert _gh_hazards(['            echo "x"; gh api repos/o/r']  , scripts)
 
 
 def test_the_poolable_label_reader_sees_every_yaml_shape():
