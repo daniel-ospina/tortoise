@@ -9,7 +9,12 @@ token-delivery path in the product: a hop on it is a hop that can drop the token
 from `Location`. And a `grep` could not see the defect, because **four fixtures
 SET `EMAIL_LINK_BASE_URL` to the retired host, and a fifth asserted the same value
 through the recorded cassette** — so every email suite was green while asserting
-the retired value, and exactly ONE test pinned the default.
+the retired value, and **TWO** tests pinned the default
+(`test_email_integration_resend.py::test_invite_link_contract_is_hermetic` via the
+cassette, and `test_welcome_url_consolidation.py::test_welcome_redirect_default_host`).
+An earlier revision of this paragraph said "exactly ONE", which was a miscount and
+omitted the second — and that second one is one of the two this PR had to change,
+so the paragraph was understating its own surface.
 
 So the assertions here are on the ARTIFACT (the invite email's own body, the
 `302`'s `Location`), not on the constant that feeds it. A test that reads
@@ -222,8 +227,10 @@ RETIRED_HOST_ALLOWLIST = {
         "misses the exclusion turns a POST into a GET. The sweep is #12057's."),
     "website/apps/blog-admin/src/lib/blog-api.ts": (
         1,
-        "#11767 item 4 — the admin client's blog origin; same deferral as the "
-        "blog Function above (301 measured on the retired host)."),
+        "#11767 item 4 — `DEFAULT_AUTHOR_IMAGE_URL` (line 52), a default AUTHOR "
+        "AVATAR; an earlier revision of this row said \"the admin client's blog "
+        "origin\", which this file does not carry. Deferred with the blog sweep "
+        "(#12057)."),
     # ⛔ The blog origin's ACTUAL source, missed by the first pass at this map: it
     # named the admin client and the dashboard Function but not `_lib.ts`, which is
     # what the blog's canonicals, OG tags, JSON-LD, sitemap and feed are built from.
@@ -243,26 +250,38 @@ RETIRED_HOST_ALLOWLIST = {
         "— map measured 2026-11-12 under #11763's inverted consolidation. The "
         "FOURTH occurrence this row used to carry, `SITE_URL`, is GONE: #11765 "
         "(PR #11976) flipped it to premiselabs.co, which is why the count is 3."
-        " ⛔ The hrefs are a DESTINATION deferral with an owner — #11764 creates "
-        "the product paths on the company host, and `tests/test_blog_seo_meta.mjs` "
-        "(#11976) records the same assignment — so this is NOT the same class as "
-        "the #12057 sweep and must not be folded into it."),
+        " ⛔ The hrefs are a DESTINATION deferral with an owner — #11764 owns the "
+        "repoint itself (`tests/test_blog_seo_meta.mjs`, #11976, records the same "
+        "assignment) — so this is NOT the same class as the #12057 sweep and must "
+        "not be folded into it. ⛔ The product paths ALREADY EXIST on the company "
+        "host: #12031 made `/docs` a same-host 301 onto `/tortoise/docs` before "
+        "#11976 shipped, so this is a hop and not a 404 — an earlier revision of "
+        "this row said they \"did not exist ... when it shipped\", which was false "
+        "and is the reason the deferral is about the destination, not about "
+        "creating a path."),
     "website/apps/dashboard/functions/admin/[[path]].ts": (
         1,
-        "#11767 item 4 — blog-admin API origin; deferred with the blog sweep "
-        "(#11764). Measured 2026-11-12."),
+        "#11767 item 4 — the 403 page's `<a>← Back to the blog</a>` link (line "
+        "295), NOT an API origin — an earlier revision of this row said \"blog-admin "
+        "API origin\", which the file does not contain. Deferred with the blog "
+        "sweep (#12057). Measured 2026-11-12."),
     "website/apps/blog-admin/src/App.tsx": (
         1,
         "#11767 item 4 — blog-admin UI origin; deferred with the blog sweep "
-        "(#11764). Measured 2026-11-12."),
+        "(#12057). Measured 2026-11-12."),
     "website/apps/blog-admin/src/pages/PostEditor.tsx": (
         3,
-        "#11767 item 4 — blog-admin author-image preview URLs; deferred with the "
-        "blog sweep (#11764). Measured 2026-11-12."),
+        "#11767 item 4 — three PUBLIC-POST permalinks (`/blog/${slug}`, View and "
+        "copy-link, lines 484/803/808), NOT the author-image preview — an earlier "
+        "revision of this row said \"author-image preview URLs\", which this file "
+        "builds from `form.author_image_url` with no literal. Deferred with the "
+        "blog sweep (#12057). Measured 2026-11-12."),
     "website/apps/blog-admin/src/pages/PostsList.tsx": (
         1,
-        "#11767 item 4 — blog-admin author-image thumbnail; deferred with the blog "
-        "sweep (#11764). Measured 2026-11-12."),
+        "#11767 item 4 — the `title=\"View public post\"` permalink (line 186), NOT "
+        "an author-image thumbnail — an earlier revision of this row said the "
+        "thumbnail, which this file derives from the row's own URL. Deferred with "
+        "the blog sweep (#12057). Measured 2026-11-12."),
     "website/apps/dashboard/src/wizardPrompts.js": (
         3,
         "#11767 item 5-adjacent — the copy-pasteable wizard prompts still hand the "
@@ -296,11 +315,11 @@ RETIRED_HOST_ALLOWLIST = {
 #: why `[[path]].ts` is 1 and not 2 (line 12 is a comment, line 49 emits):
 #:   website/apps/dashboard/functions/blog/api/[[path]].ts   1  DEFAULT_BLOG_ORIGIN
 #:   website/functions/blog/_lib.ts                          3  navHtml product hrefs (SITE_URL re-aimed by #11976)
-#:   website/apps/blog-admin/src/lib/blog-api.ts             1  author-image URL
-#:   website/apps/dashboard/functions/admin/[[path]].ts      1  blog-admin API origin
+#:   website/apps/blog-admin/src/lib/blog-api.ts             1  DEFAULT_AUTHOR_IMAGE_URL avatar
+#:   website/apps/dashboard/functions/admin/[[path]].ts      1  the 403 page's ← Back to the blog link
 #:   website/apps/blog-admin/src/App.tsx                     1  blog-admin UI origin
-#:   website/apps/blog-admin/src/pages/PostEditor.tsx        3  author-image preview
-#:   website/apps/blog-admin/src/pages/PostsList.tsx          1  author-image thumbnail
+#:   website/apps/blog-admin/src/pages/PostEditor.tsx        3  public-post permalinks (View / copy-link)
+#:   website/apps/blog-admin/src/pages/PostsList.tsx          1  "View public post" permalink
 #:   website/apps/dashboard/public/invite-accept.html        3  nav /docs + footer /tos + /privacy
 #:   website/apps/dashboard/public/welcome.html              1  nav /
 #:   website/apps/dashboard/public/signup.html               2  canonical /auth + nav /

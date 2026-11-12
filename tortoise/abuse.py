@@ -362,9 +362,13 @@ def appeal_url() -> str:
     the pasted onboarding copies and explicitly does NOT touch this function
     (its item 4) — so do not read this comment as "someone else will";
     #11939 is the owner of where this link goes, and it is OPEN.
-    ⛔ #12049 and not #11764: #11764's scoping assigns `onboarding/SKILL.md` to
-    #11767 and lists it under "deliberately NOT do", and #11767 closes with the
-    alias still in place — without #12049 the re-point would have no owner.
+    ⛔ An earlier revision of THIS docstring left a `#12049 and not #11764`
+    paragraph here, arguing the pasted-onboarding re-point would have no owner
+    without #12049. That fact is true but it is about `onboarding/SKILL.md`, not
+    about `appeal_url()`, and sitting under the sentence above it read as a claim
+    that #12049 WOULD re-point this function — the opposite of what #12049 says.
+    The onboarding fact is recorded where it belongs (the guard's OWNERSHIP
+    paragraph, and #12049's own scope), not here.
 
     ⚠️ The fragment is DEAD and this function does not claim otherwise: the
     docs page has no ``id="appeal"`` (and no occurrence of the word), so this
