@@ -859,9 +859,11 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
     #          "declared over NO vector" from the post-stamp belt
     #
     # So the seam's own reading is materialised ONCE here and handed to every
-    # arm; when the ENVELOPE carries the vector it is written back onto it, since
-    # the stamp covers the envelope's top-level `embedding` only and would
-    # otherwise read the exhausted iterator.
+    # arm, and written back onto whichever CHANNEL carried the vector: the stamp
+    # and the post-stamp belt each read the merged view, so a channel left holding
+    # the object this arm consumed is read a SECOND time and refuses a value the
+    # arm had just ACCEPTED. (The envelope's write-back was added in round 14; the
+    # record's was missing until round 23 — see the arm below.)
     # ⛔ THE ELEMENT ARM KEEPS THE RAW OBJECT ON PURPOSE: materialising would put
     # a numpy array's `np.float64` elements in front of a check that refuses
     # everything but an exact `int`/`float`, turning the stated residual (a
@@ -873,12 +875,33 @@ def _verify_record_vector_width(record: dict, type_: str, payload: dict) -> None
         except TypeError:  # not iterable at all: the seam's DROP still decides
             seam_values = values
         else:
-            # ⛔ WRITTEN BACK ONLY WHEN THE ENVELOPE IS WHAT CARRIED IT: the
-            # merged view lets the RECORD win, so a record-carried vector must
-            # not overwrite the envelope's — the stamp covers the envelope's
-            # top-level `embedding`, and replacing it would change what lands.
+            # ⛔ EACH WRITE-BACK IS SCOPED TO THE OBJECT THAT CHANNEL ACTUALLY
+            # CARRIED: the merged view lets the RECORD win, so replacing the
+            # channel that did NOT carry the vector would change what lands.
             if payload.get("embedding") is values:
                 payload["embedding"] = seam_values
+            # ⛔ THE RECORD NEEDS IT TOO, AND ONLY FOR A ONE-SHOT ITERATOR
+            # (#11996 review round 23, measured). `iter(x) is x` is what makes a
+            # second read EMPTY rather than merely redundant, so a RE-ITERABLE
+            # container is deliberately left as it is: that is the stated
+            # residual (a numpy array still rides the seam arms and reaches the
+            # element check with its own element types), and materialising it
+            # here would turn the residual into an over-block.
+            #
+            # Measured before this arm — the round-14 write-back covered the
+            # ENVELOPE only, so the record channel kept the exhausted iterator
+            # and the post-stamp belt diagnosed a vector the seam ACCEPTS:
+            #
+            #     _emit("PointAdded", {"id": "p", "content": "c",
+            #                          KEY: "f64", "embedding": (x for x in [0.1, 0.2])})
+            #       -> ValueError "declared over a value the seam can only DROP"
+            #          (and under `f32`: "declared over an EMPTY vector")
+            # while `stamp_journal_embedding({"embedding": (x for x in [0.1, 0.2])})`
+            # returns `[0.1, 0.2]`, and the SAME generator on the ENVELOPE
+            # channel landed. Both messages named a cause that is not the cause,
+            # which is the class this guard exists to close.
+            if record.get("embedding") is values and iter(values) is values:
+                record["embedding"] = seam_values
     # ⛔ EVERY ELEMENT IS READ BY TWO DIFFERENT PATHS, so neither arm below can
     # verify an element that is not an EXACT `int` / `float` (#11996 review
     # rounds 6 and 7, each measured). This guard asks the SEAM, and the seam

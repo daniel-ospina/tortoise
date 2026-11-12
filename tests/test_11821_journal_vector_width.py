@@ -2649,15 +2649,22 @@ def test_a_declared_width_reads_a_one_shot_iterable_exactly_once(tmp_path):
     probes reading `values`) and this row reds with that belt refusal, because the
     stamp consumed the generator before the belt ran (measured).
 
-    ⛔ It is the KEYWORD channel's vector, deliberately. A RECORD-carried
-    generator is not pinned here: it cannot land on any tree (`main` raised
-    `TypeError` at the encoder; this head refuses it in the post-stamp belt —
-    "the seam can only DROP" under a declared `f64`, "an EMPTY vector" under
-    `f32`, both measured — because the pre-stamp call materialises the record's
-    iterator and does not write it back, so the belt re-reads it empty),
-    so there is no behaviour to pin. The residual — a non-`list`/`tuple` iterable
-    of a type this arm cannot enumerate still rides the seam arms — is unchanged
-    and is NOT what this row pins.
+    Both channels are pinned, because the write-back that makes this work is
+    PER-CHANNEL and one of them was missing (#11996 review round 23, measured).
+    The round-14 write-back covered the ENVELOPE only, so a RECORD-carried
+    generator kept the exhausted iterator and the post-stamp belt refused a value
+    the seam ACCEPTS — under `f64` as "declared over a value the seam can only
+    DROP", under `f32` as "declared over an EMPTY vector", while
+    `stamp_journal_embedding({"embedding": (x for x in [0.1, 0.2])})` returns
+    `[0.1, 0.2]`. Both messages named a cause that is not the cause. Falsifier for
+    the record rows: drop the `record.get("embedding") is values` write-back and
+    the two record rows red with those two belt refusals (measured).
+
+    ⛔ What is NOT pinned here is a RE-ITERABLE non-container (a numpy array):
+    the write-back is scoped to `iter(x) is x` on purpose, so that shape still
+    rides the seam arms and reaches the element check with its own element types —
+    the stated residual, unchanged. Materialising it too would turn the residual
+    into an over-block of a vector the envelope channel still accepts.
     """
     from tortoise.api import EventAPI
     from tortoise.log import EventLog
@@ -2673,15 +2680,40 @@ def test_a_declared_width_reads_a_one_shot_iterable_exactly_once(tmp_path):
     api._emit("PointAdded", {"id": "p-gen-f32", "content": "c",
                              JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32},
               embedding=(x for x in shortest_float32_vector([0.5, 0.25])))
+    # …and the same two on the RECORD channel, which had no write-back at all
+    # until round 23 — the channel the merged view lets WIN.
+    api._emit("PointAdded", {"id": "p-rec-gen-f64", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64,
+                             "embedding": (x for x in [0.1, 0.2])})
+    api._emit("PointAdded", {"id": "p-rec-gen-f32", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F32,
+                             "embedding": (x for x in
+                                           shortest_float32_vector([0.5, 0.25]))})
+    api._emit("PointAdded", {"id": "p-rec-iter", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64,
+                             "embedding": iter([0.1, 0.2])})
 
     records = [json.loads(ln) for ln in
                journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    assert [r["point"]["id"] for r in records] == ["p-gen-f64", "p-gen-f32"], (
+    assert [r["point"]["id"] for r in records] == [
+        "p-gen-f64", "p-gen-f32", "p-rec-gen-f64", "p-rec-gen-f32",
+        "p-rec-iter"], (
         "a declared width over a one-shot iterable must land exactly like the "
-        "same values spelled as a list — the guard reads it ONCE and hands the "
-        "stamp what it read")
+        "same values spelled as a list — on BOTH channels — the guard reads it "
+        "ONCE and hands the stamp what it read")
     assert records[0]["embedding"] == [0.1, 0.2], (
         "the materialised vector must be the one journalled, not an exhausted "
         f"iterator, got {records[0].get('embedding')!r}")
     assert records[0]["point"][JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
     assert records[1]["point"][JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32
+    # The record channel journals under `point` (the merged view the fold reads),
+    # so the materialised list must be THERE — an exhausted iterator left on the
+    # record is what the belt re-read as empty.
+    assert records[2]["point"]["embedding"] == [0.1, 0.2], (
+        "a RECORD-carried one-shot iterable must be written back, not left "
+        f"exhausted on the record, got {records[2]['point'].get('embedding')!r}")
+    assert records[2]["point"][JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F64
+    assert records[3]["point"][JOURNAL_VECTOR_WIDTH_KEY] == JOURNAL_VECTOR_WIDTH_F32
+    assert records[4]["point"]["embedding"] == [0.1, 0.2], (
+        "every one-shot iterator type must be written back, not only `generator` "
+        f"— got {records[4]['point'].get('embedding')!r}")
