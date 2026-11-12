@@ -5981,16 +5981,21 @@ surfaces:
   # would not run on the change that can break them. The prose→value DERIVATION
   # half is #2817 (`tortoise/value_normalizer.py`), deliberately not pinned here.
   - test_money_value_2782.py
-  # #11915: the `percent` value SHAPE — one bounded int plus a basis, on the same
-  # class of door as money above. Registered here for the reason that comment gives:
-  # a shipped pack declares `valueKind: percent` and NOTHING could store it, so the
-  # storing shape is what the declaration was lying about. `main` added this file in
-  # `927c24e233` (`#11955`) WITHOUT classifying it, so `ci_selection.py --integrity`
-  # reported `manifest drift: ['test_percent_value_11915.py']` on `main` itself
-  # (measured on `origin/main` at `927c24e233`), which reds the manifest-integrity gate
-  # in `python-ci.yml` for every PR. `core` is the right home: it is the surface a
-  # `tortoise/values`-side change falls through to.
-  - test_percent_value_11915.py
+  # #11758: the two purchasable storage dimensions per account (stored data,
+  # hot capacity) and the overage arithmetic. Registered here for the reason the
+  # money comment above gives: `tortoise/pricing.py` and
+  # `tortoise/cost_dimensions.py` match no SOURCE_PATTERNS entry and are not
+  # SHARED_MODULES, so a change to either selects `core` (measured:
+  # `select(['tortoise/pricing.py'])` -> surfaces ['core']), and without this
+  # entry the dimension-name/allowance-key invariants would not run on the
+  # change that can break them. `#11981` added the file WITHOUT classifying it,
+  # so `ci_selection.py --integrity` reported
+  # `manifest drift: ['test_pricing_storage_dimensions.py']` on `main` itself
+  # (measured on `origin/main` at `e4703a286a`), which reds
+  # `tests/test_ci_selection.py::test_integrity_covers_all_test_files` — and so the
+  # manifest-integrity gate in `python-ci.yml` — for every PR. `core` is the
+  # right home: it is the surface both subject modules fall through to.
+  - test_pricing_storage_dimensions.py
   # #2817: the DERIVE half of the money value — `tortoise/value_normalizer.py`
   # (prose -> canonical props, abstention-first). Like `money.py` it matches no
   # SOURCE_PATTERNS entry and is not a SHARED_MODULE, so a value_normalizer.py
