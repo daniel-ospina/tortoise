@@ -1213,9 +1213,9 @@ _REPO = WRITE_PATH.resolve().parents[2]
 _CROSS_FILE_CITES: dict[tuple[str, int], tuple[str, str]] = {
     ("tortoise/commit_schema.py", 445): ("def validate_span(span_start: object, span_end: object) -> None:",
          "`validate_span`'s definition"),
-    ("tortoise/commit_schema.py", 775): ("span_start: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)",
+    ("tortoise/commit_schema.py", 815): ("span_start: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)",
          "the `span_start` field"),
-    ("tortoise/commit_schema.py", 789): ("return self", "the end of `_span_is_an_address`"),
+    ("tortoise/commit_schema.py", 847): ("return self", "the end of `_span_is_an_address`"),
     ("tools/longmem_eval/retrieve.py", 1005): ('if p.get("span_start") is not None and p.get("span_end") is not None:',
          "the eval lane's offset annotation"),
     ("tools/longmem_eval/retrieve.py", 1007): ('entry["span_end"] = p["span_end"]',
