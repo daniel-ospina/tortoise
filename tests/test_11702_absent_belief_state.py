@@ -5727,19 +5727,37 @@ _CLAUSE_BREAK = re.compile(
 #: 0.5238). A note that hands `0.75` to the word therefore names a number
 #: nothing produces.
 #:
-#: Scope is one sentence and one direction: the ASSERTION forms (`is` / `reads`
-#: / `lands at` / `equals`) fire, while a sentence that merely prints both
-#: facts passes, because the true sentence ("0.7561 for that default plus an
-#: author word") must.
+#: Scope is a TRIPWIRE over the ATTRIBUTION WORDINGS this class has actually
+#: used (`is` / `reads` / `lands at` / `equals`, with the word as the subject)
+#: — never a parser — and it has NAMED RESIDUALS IN BOTH DIRECTIONS, the same
+#: discipline the mirror guards above carry. The second direction is the
+#: expensive one:
+#:
+#:   • FALSE PASS — a false attribution phrased with another verb (`yields`,
+#:     `produces`, `gives`, `returns`, `means`, `sits at`, `has a mean of`), or
+#:     with the number as the subject (`0.75 is what the credibility word
+#:     reads`), is not reported. Declared, not hidden: that is the grammar this
+#:     guard covers and no more.
+#:   • FALSE BLOCK — a TRUE sentence can be reported whenever the word and the
+#:     number share a clause with no exemptor. The window therefore stops at a
+#:     COMMA and at a RELATIVE PRONOUN (`which`/`that`/`whose`/`where`/`who`):
+#:     measured before that, "the ``credibility=`` word raises the Beta(3,1)
+#:     default, which reads 0.75" and "the credibility word raises a default
+#:     whose mean is 0.75" both fired. This is the direction that costs — the
+#:     failure text hands the next fixer a number and that fixer then
+#:     "corrects" a correct sentence, the false-correction failure this file
+#:     documents for the mirror guards.
 #:
 #: `0\.750*` and NOT plain `0\.75` — measured: the lookahead alone let the same
 #: false claim written at 3 or 4 dp (`reads 0.750`, `reads 0.7500`) pass
-#: silently, which left one spelling of the class unpoliced. The trailing
-#: `(?!\d)` is what keeps `0.7561` — the TRUE figure — from matching as `0.75`,
-#: and the control test pins that in both directions.
+#: silently. `0?\.` and `75\s*%` because `.75` and `75%` are the same claim a
+#: step over (both measured missed). The trailing `(?!\d)` is what keeps
+#: `0.7561` — the TRUE figure — from matching as `0.75`, and the control test
+#: pins that in both directions.
 _CRED_WORD_YIELDS_075 = re.compile(
-    r"credibility[^.;]{0,60}?\b(?:is|reads|lands\s+at|equals)\b"
-    r"[^.;]{0,25}?0\.750*(?!\d)",
+    r"credibility(?:(?!\b(?:which|that|whose|where|who)\b)[^.;,]){0,60}?"
+    r"\b(?:is|reads|lands\s+at|equals)\b[^.;,]{0,25}?"
+    r"(?:0?\.750*|75\s*%)(?!\d)",
     re.IGNORECASE)
 
 #: A NEGATED or DEMOTED attribution is the correct wording, not a finding.
@@ -5757,22 +5775,24 @@ _CRED_WORD_YIELDS_075 = re.compile(
 #: form is: measured, "``credibility=`` is no 0.75 — it is 0.5238 alone" fired
 #: before this alternative existed, which is a false block on correct prose.
 #:
-#: ⚠️ NAMED RESIDUAL, and this one runs in BOTH directions, so it is stated
-#: rather than hidden. The exemption is read in the FINAL clause of the span
-#: (the clause that carries the number), which is what stops a negator
-#: belonging to a DIFFERENT predicate from exempting a real false claim —
-#: measured, "the credibility word is not just an added body: it reads 0.75"
-#: and "``credibility=`` is not dropped for an option: it reads 0.75" both
-#: passed silently when the whole span was read. What remains: (i) a false
-#: claim whose OWN final clause carries a negator or demoter — "the word is not
-#: 0.75, whatever the pair does" — reads as exempt; (ii) an attribution negated
-#: in an earlier clause and restated without one. Both are reported only when
-#: the final clause is bare, which is the direction this guard can defend; it is
-#: a tripwire on a class, never a parser. The two strings are pinned in the
-#: control test so a later tightening is MEASURED rather than guessed.
+#: The demoters are a WORD LIST and therefore incomplete by construction:
+#: `ignored` / `discarded` / `overwritten` / `superseded` were added after they
+#: were MEASURED as false blocks; a synonym nobody has written yet is a
+#: false-block residual, not a claim of coverage.
+#:
+#: ⚠️ NAMED RESIDUALS, both directions, stated rather than hidden. It does NOT
+#: catch: (i) a false claim whose OWN final clause carries a negator that
+#: negates something else — "the credibility word is not weak and is 0.75"
+#: reads as exempt; (ii) a demoting verb outside the list above. It also still
+#: reports an attribution negated in an EARLIER clause and restated without
+#: one, which is outside the read window — a false block, the expensive
+#: direction. It is a tripwire on a class, never a parser, and strings for both
+#: directions are pinned in the control test so a later tightening is MEASURED
+#: rather than guessed.
 _CRED_WORD_EXEMPT = re.compile(
     r"\b(?:not|never|isn'?t|no\s+longer|is\s+no)\b|\bdropped\b|\bdrops\b"
-    r"|\bloses\b|\blost\b",
+    r"|\bloses\b|\blost\b|\bignored\b|\bdiscarded\b|\boverwritten\b"
+    r"|\bsuperseded\b",
     re.IGNORECASE)
 
 
@@ -5992,9 +6012,13 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # let through until it was measured.
             "``credibility=`` reads 0.750",
             "``credibility=`` reads 0.7500",
+            # …the other spellings of the SAME claim (review cycle 3, P2).
+            "the credibility word reads .75",
+            "the credibility word is 75%",
             # …a negator belonging to a DIFFERENT predicate must not exempt a
-            # real false claim: read across the whole span, both of these
-            # passed silently (review cycle 2, P2).
+            # real false claim: with the whole span read, these passed silently
+            # (review cycle 2, P2). A colon stays inside the window, so these
+            # still match and the final-clause rule is what rejects/serves them.
             "the credibility word is not just an added body: it reads 0.75",
             "``credibility=`` is not dropped for an option: it reads 0.75"):
         assert _cred_word_yields_075(spelling), (
@@ -6020,7 +6044,19 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # …the copula-negating `no`, which bare `no` must not be confused
             # with (`_NEGATED`'s determiner rule): before this alternative
             # existed, this correct sentence was a false block (cycle 2, P2).
-            "``credibility=`` is no 0.75 — it is 0.5238 alone"):
+            "``credibility=`` is no 0.75 — it is 0.5238 alone",
+            # …the RELATIVE-CLAUSE family, where the verb the number attaches to
+            # belongs to the default or the pair, not to the word. All six
+            # fired before the window stopped at a comma and at a relative
+            # pronoun (review cycle 3, P2).
+            "the ``credibility=`` word raises the Beta(3,1) default, which "
+            "reads 0.75",
+            "``credibility=`` is added on top of the Beta(3,1) default, which "
+            "reads 0.75",
+            "the credibility word raises a default whose mean is 0.75",
+            "the credibility word is ignored against a pair that reads 0.75",
+            "the credibility word is discarded against a pair that reads 0.75",
+            "the credibility word is overwritten by a pair that reads 0.75"):
         assert not _cred_word_yields_075(true_sentence), (
             f"the credibility guard fires on TRUE prose: {true_sentence!r}")
     assert _cred_word_claims("tortoise/volunteer.py") == [], (
