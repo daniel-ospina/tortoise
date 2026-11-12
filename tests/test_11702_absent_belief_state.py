@@ -5759,6 +5759,18 @@ _CLAUSE_BREAK = re.compile(
 #:     cannot be closed, because the pinned must-fire
 #:     "the credibility word is not just an added body: it reads 0.75" is a
 #:     false claim that depends on the window crossing a colon.)
+#:
+#: ⛔ THE TOKEN IS ANCHORED — `(?<![A-Za-z_])credibility(?!\w)` — and that is
+#: load-bearing, not tidiness. Unanchored, it matched every COMPOUND IDENTIFIER
+#: containing the word, and `tortoise/source_credibility.py` defines
+#: `"T2": (3.0, 1.0)` — mean 0.7500 — so the TRUE sentence "a T2
+#: ``credibilityTier`` prior reads 0.75" was reported, with a failure message
+#: quoting numbers (0.7561 / 0.5238) that do not apply to the tier ladder at all.
+#: A fixer following it would have "corrected" a correct sentence about a
+#: DIFFERENT object (review cycle 7, P1). The pins are "a T2
+#: ``credibilityTier`` prior reads 0.75" and "``credibility_prior`` for T2 is
+#: 0.75" — the class this guard is about is the `credibility=` WORD, never the
+#: tier identifier.
 #:     This is the direction that costs — the failure text hands the next fixer
 #:     a number and that fixer then "corrects" a correct sentence, the
 #:     false-correction failure this file documents for the mirror guards.
@@ -5768,14 +5780,18 @@ _CLAUSE_BREAK = re.compile(
 #:     colon- and dash-joined prose as safe when dash-joined only became safe in
 #:     the same commit (review cycle 4).
 #:
-#: `0\.750*` and NOT plain `0\.75` — measured: the lookahead alone let the same
+#: `0?\.750*` and NOT plain `0\.75` — measured: the lookahead alone let the same
 #: false claim written at 3 or 4 dp (`reads 0.750`, `reads 0.7500`) pass
-#: silently. `0?\.` and `75\s*%` because `.75` and `75%` are the same claim a
-#: step over (both measured missed). The trailing `(?!\d)` is what keeps
-#: `0.7561` — the TRUE figure — from matching as `0.75`, and the control test
-#: pins that in both directions.
+#: silently. `75\s*%` because `75%` is the same claim a step over (measured
+#: missed). WHAT COVERS `.75` IS `\.750*` ALONE: the pattern is unanchored, so
+#: `\.75` matches the tail of `0.75` — the `0?` is inert. A previous revision
+#: credited the `0?` with `.75` coverage; the coverage is real, the attribution
+#: was not (review cycle 7, P2). The trailing `(?!\d)` is what keeps `0.7561` —
+#: the TRUE figure — from matching as `0.75`, and the control test pins that in
+#: both directions.
 _CRED_WORD_YIELDS_075 = re.compile(
-    r"credibility(?:(?!\b(?:which|that|whose|where|who|but|rather)\b)"
+    r"(?<![A-Za-z_])credibility(?!\w)"
+    r"(?:(?!\b(?:which|that|whose|where|who|but|rather)\b)"
     r"[^.;,–—]){0,60}?"
     r"\b(?:is|reads|lands\s+at|equals)\b"
     r"(?:(?!\b(?:which|that|whose|where|who|but|rather)\b)"
@@ -6052,6 +6068,10 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # let through until it was measured.
             "``credibility=`` reads 0.750",
             "``credibility=`` reads 0.7500",
+            # …`equals`, one of the four wordings the comment claims to cover;
+            # it had no pin, so deleting it from the alternation left the suite
+            # green (review cycle 7, P2).
+            "the credibility word equals 0.75",
             # …the other spellings of the SAME claim (review cycle 3, P2).
             "the credibility word reads .75",
             "the credibility word is 75%",
@@ -6101,6 +6121,24 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             "the credibility word is discarded when a pair reads 0.75",
             "the credibility word is overwritten when a pair reads 0.75",
             "the credibility word is superseded when a pair reads 0.75",
+            # …the remaining LIVE alternatives in `_CRED_WORD_EXEMPT`, which had
+            # no pin at all, so each was deletable with a green suite (cycle 7,
+            # P2). Same discipline: each MATCHES the regex and is quiet ONLY via
+            # its own alternative.
+            "the credibility word isn't the default and reads 0.75",
+            "the credibility word no longer reads 0.75",
+            "the credibility word drops to nothing when a pair reads 0.75",
+            "the credibility word loses to a pair and reads 0.75",
+            "the credibility word lost to a pair and reads 0.75",
+            # …the COMMA stop: quiet only because the window cannot cross the
+            # comma to reach "reads 0.75" (cycle 7, P2).
+            "the credibility word is one body, so 0.75 stays the default's "
+            "mean",
+            # …and the ANCHOR: compound identifiers are a DIFFERENT object. T2 is
+            # `(3.0, 1.0)` in `source_credibility.py`, mean 0.7500, so these are
+            # TRUE and must never be reported (cycle 7, P1).
+            "a T2 ``credibilityTier`` prior reads 0.75",
+            "``credibility_prior`` for T2 is 0.75",
             # …a POST-VERB relative pronoun, which crossed the window until
             # cycle 5 measured it (true prose, reported).
             "the credibility word reads a default which is 0.75",
