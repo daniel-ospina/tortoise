@@ -300,7 +300,7 @@ def main() -> int:
     print("  * float32 shortest text   — the vector term above, and the whole")
     print("    `embedding` field, not a separator count;")
     print("  * compact separators     — ~8% on EVERY record (the `PointRevised`/")
-    print("    `EntityLinked` 1.08x rows above carry NO vector and move only by it).")
+    print("    `EntityLinked` 1.08-1.09x rows above carry NO vector and move only by it).")
     print()
     print("VERDICT: P0's measured delta. It is NOT 'half the record' — a JSON")
     print("  number encoding cannot reach 50 % of 8,414 B at float32 precision")

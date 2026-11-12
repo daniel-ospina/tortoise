@@ -175,6 +175,79 @@ _ENVELOPE_KEYS_AT_PASSTHROUGH = _ENVELOPE_KEYS | {
 }
 
 
+def _verify_record_vector_width(record: dict, type_: str) -> None:
+    """A width declared on `_emit`'s POSITIONAL record must be the SEAM's answer.
+
+    ⛔ NOT a refusal of the family, and that distinction is measured: the record
+    doors legitimately carry the markers, because each stamps its own payload
+    through `stamp_journal_embedding` (``_point`` with ``creating=True``;
+    ``add_point`` with ``creating=False`` after popping a stale width). Refusing
+    `_SERVER_MANAGED_EMBEDDING_KEYS` on this channel breaks every vector-bearing
+    ``PointAdded``/``OperatorAdded`` — the reviewer who found the gap proposed
+    exactly that, and it reds the whole width suite.
+
+    So this VERIFIES instead. The harm the marker rule exists to prevent is a
+    marker that LIES — a declared ``f32`` over values it does not describe,
+    which a later width/base64 migration trusts (#5004 round-7). The decision is
+    a pure function of the values, so re-derive it: copy the record WITHOUT its
+    declared width and ask the seam again (the same trick ``add_point`` uses to
+    defeat the seam's own ``f32`` idempotency guard). Agreement means the marker
+    is the seam's; disagreement is the lie.
+
+    Measured before this guard, through the private channel only:
+
+        _emit("PointAdded", {"id": "p1", "content": "c",
+                             "embedding": [0.1234567890123, 1/3],
+                             "embedding_width": "f32"})
+          -> journalled, values [0.1234567890123, 0.3333333333333333],
+             declared `f32`   ← the marker LIE, on the one channel built to be
+                                unreachable from any door
+
+    Undecidable input (a non-numeric ``embedding``, an unimportable seam —
+    #5148: an import must never fail a WRITE) is treated as NO MISMATCH, i.e.
+    exactly the behaviour before this guard; the guard only ever turns a lie
+    into a refusal, never a write into an I/O failure.
+
+    ⛔ THE PREDICATE IS "would the seam also have said `f32`", NOT a re-stamp.
+    An earlier draft copied the record WITHOUT the declared width and re-ran
+    `stamp_journal_embedding` — and that OVER-BLOCKS, measured: the seam's
+    ``f32`` idempotency arm reads the marker itself, so stripping it makes every
+    already-narrowed payload (whose text is off-grid as a float64 by
+    construction) re-decide ``f64``, and every real `add_point` with an embedder
+    available would raise. So ask the seam's own two questions in the one order
+    that cannot over-block: a declared ``f32`` is truthful iff the values ARE
+    its shortest-round-trip text (the idempotent case) or ARE on the float32
+    grid (the case it would narrow). A declared ``f64`` is always truthful — it
+    only forgoes narrowing, which the raw form is entitled to.
+    """
+    if not isinstance(record, dict):
+        return
+    try:
+        from .embeddings import JOURNAL_VECTOR_WIDTH_F32 as _F32
+        from .embeddings import JOURNAL_VECTOR_WIDTH_KEY as _KEY
+        from .embeddings import _is_shortest_f32_text, shortest_float32_vector
+    except Exception:  # noqa: BLE001, RUF100 — #5148
+        return
+    declared = record.get(_KEY)
+    if declared is None or declared != _F32:
+        return
+    values = record.get("embedding")
+    try:
+        truthful = (_is_shortest_f32_text(values)
+                    or shortest_float32_vector(values) is not None)
+    except Exception:  # noqa: BLE001, RUF100 — undecidable input keeps the old posture
+        return
+    if not truthful:
+        raise ValueError(
+            f"{_KEY}={declared!r} is not what the values say: this payload's "
+            f"`embedding` is neither the seam's shortest float32 text nor on "
+            f"the float32 grid, so `f32` describes a width the values do not "
+            f"have. A declared width is a server-managed journal field and "
+            f"`{type_}`'s record may only carry a truthful one — a marker that "
+            f"lies is trusted by the next width/base64 migration (#5004 "
+            f"round-7).")
+
+
 def _refuse_caller_named_record_keys(keys, door: str) -> None:
     """Refuse a caller-supplied record-shaped payload on a channel that is not
     `_emit`'s positional record argument.
@@ -456,6 +529,11 @@ class EventAPI:
             # `event_id=` here re-types or re-attributes the replayed record.
             _refuse_caller_named_envelope_keys(
                 record[0], f"the `{type_}` record door")
+            # ⛔ And the MARKER family is VERIFIED here rather than refused —
+            # see `_verify_record_vector_width` for why a refusal is the wrong
+            # shape on this channel (the record doors legitimately carry the
+            # markers; each stamps its own payload through the seam).
+            _verify_record_vector_width(record[0], type_)
             payload["point"] = record[0]
         # #7951 — THE JOURNAL ORDERING CONTRACT: **journal first, then
         # project.** The full contract (and the failure-mode argument) lives at

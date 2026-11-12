@@ -1546,14 +1546,17 @@ class EventLog:
         # #11821 P0: COMPACT separators. The journal is byte-metered and never
         # pretty-printed (nothing reads it back as text), so the default
         # ``(", ", ": ")`` spent ONE space per separator: measured on the
-        # committed corpus, 435 B of a 9,176 B creating record and 383 B of its
-        # 5,072 B vector alone. This is not a format change — JSON whitespace
-        # is insignificant, `read_all`/`json.loads`/the strict restore reader
-        # all decode the compact line to the identical object — and its delta is
-        # attributable by MEASUREMENT, not by the history: it landed in the SAME
-        # commit as the float32 narrowing above (the plan's proposed split would
-        # have left an intermediate red test), and the vector-less corpus rows
-        # pin it separately (`docs/evidence/11821-journal-encoding/`: every row
+        # committed corpus, 435 B of a 9,176 B creating record and 383 B of a
+        # vector under EITHER ruler — the 8,414 B vector of that pre-change
+        # record, and the same vector post-change at 5,072 B (the same 383 B
+        # again: 8,414 -> 8,031 and 5,072 -> 4,689). This is not a format
+        # change — JSON whitespace is insignificant, `read_all`/`json.loads`/
+        # the strict restore reader all decode the compact line to the identical
+        # object — and its delta is attributable by MEASUREMENT, not by the
+        # history: it landed in the SAME commit as the float32 narrowing above
+        # (the plan's proposed split would have left an intermediate red test),
+        # and the vector-less corpus rows pin it separately
+        # (`docs/evidence/11821-journal-encoding/`: every row
         # that carries no vector at all moves 1.07–1.10×, which whitespace alone
         # can cause). Do not "restore" a commit split that never existed.
         # (`_POSITION` already writes compact for the same reason).

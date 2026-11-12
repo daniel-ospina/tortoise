@@ -1502,3 +1502,60 @@ def test_the_belief_door_keeps_a_graph_outage_inside_its_own_arm(tmp_path):
     # 3. Nothing was journalled by the outage and nothing by the refusals.
     assert not journal.exists() or not journal.read_text().strip(), (
         "a swallowed outage and a refusal both leave NOTHING to replay")
+
+
+def test_a_forged_width_cannot_ride_the_funnels_positional_record(tmp_path):
+    """The POSITIONAL channel verifies the marker instead of refusing it — and
+    it is the verification that closes the last lie.
+
+    Round 8's review found the family covered on `_emit`'s KEYWORD payload
+    (`_refuse_caller_named_markers`) and not on its POSITIONAL record, which is
+    the one channel built to be unreachable from any door. Measured at
+    `13d6361efc`:
+
+        _emit("PointAdded", {"id": "p1", "content": "c",
+                             "embedding": [0.1234567890123, 1/3],
+                             "embedding_width": "f32"})
+          -> journalled, values [0.1234567890123, 0.3333333333333333], `f32`
+
+    ⛔ The obvious fix — refuse `_SERVER_MANAGED_EMBEDDING_KEYS` on `record[0]`
+    too — is WRONG, and this row is what says so: the record doors legitimately
+    carry the markers, because each stamps its own payload through
+    `stamp_journal_embedding` (`_point` with `creating=True`, `add_point` with
+    `creating=False` after popping a stale width). A refusal there reds every
+    vector-bearing `PointAdded`. So the funnel re-DECIDES from the values and
+    refuses only a disagreement — the marker-lie shape, and nothing else.
+    """
+    from tortoise.api import EventAPI, provenance
+    from tortoise.log import EventLog
+
+    events = tmp_path / "positional-marker"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    # 1. The lie is refused: `f32` over values the seam decides are `f64`.
+    with pytest.raises(ValueError, match="is not what the values say"):
+        api._emit("PointAdded", {"id": "p-forged", "content": "c",
+                                 "embedding": [0.1234567890123, 1 / 3],
+                                 JOURNAL_VECTOR_WIDTH_KEY:
+                                     JOURNAL_VECTOR_WIDTH_F32})
+    assert not journal.exists() or not journal.read_text().strip(), (
+        "the refusal precedes the commit point, so nothing may be journalled")
+
+    # 2. A marker that AGREES with the values is not refused — it is the seam's
+    #    own answer, which is what every `add_point` record carries.
+    api._emit("PointAdded", {"id": "p-honest", "content": "c",
+                             "embedding": [0.1, 0.2],
+                             JOURNAL_VECTOR_WIDTH_KEY: "f64"})
+    api.add_point("a real point", provenance("src:1", [0, 4], "q"),
+                  embedding=[0.1, 0.2])
+    # 3. …and the record door still declares ITS OWN answer, untouched.
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    widths = [r["point"].get(JOURNAL_VECTOR_WIDTH_KEY) for r in records]
+    assert widths == ["f64", "f64"], (
+        "the honest marker and the door's own stamp must both survive; a "
+        f"blanket refusal on the positional channel would break the door, got {widths}")
+    assert records[1]["point"]["embedding"] == [0.1, 0.2], (
+        "the door's vector must reach the journal untouched")
