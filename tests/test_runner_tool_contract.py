@@ -671,13 +671,14 @@ def _code_only(line: str) -> str:
 #: to catch.
 #:
 #: RESIDUAL, stated rather than discovered later: a message printed by another command
-#: (`cat <<'EOF'` heredocs, `python3 -c 'print(…)'`) is still read as code, and so is a
-#: printed line that carries a substitution (`echo "$(date) — run tools/x.sh"`). Both
-#: fail in the SAFE direction — they ask for a declaration the job may not need, never a
-#: silent skip.
+#: (`cat <<'EOF'` heredocs, `python3 -c 'print(…)'`) is still read as code, so is a
+#: printed line that carries a substitution (`echo "$(date) — run tools/x.sh"`), and so
+#: is a message carrying a `${{ … }}` expression (it contains `${`). All three fail in
+#: the SAFE direction — they ask for a declaration the job may not need, never a silent
+#: skip.
 _MESSAGE_CMD = re.compile(r"^(?:-(?:\s+)?)?(?:run:\s*)?(?:(?:then|else)\s+)?(?:echo|printf)\b")
 _SHELL_OPERATOR = re.compile(r"[;&|]")
-_SUBSTITUTION = re.compile(r"\$[({]|`")
+_SUBSTITUTION = re.compile(r"\$[({]|[<>]\(|`")
 
 
 def _message_only(line: str) -> bool:
@@ -939,17 +940,22 @@ def test_a_remediation_message_is_not_read_as_a_gh_call_site():
     span is how a real invocation is commonly written, and the substitution forms below
     are the ones a whitespace test lost (two are in this repo today).
 
-    ⛔ CONVERGENCE WITH #12102, which repairs the same #12133 red with the same predicate:
-    that PR carries its OWN copy of this test. **This copy is the superset** — the derived
-    `_gh_executing_scripts()` set plus the leading-space, mid-span and quoted-argv pins —
-    so the SECOND lander keeps this one and drops the other. A duplicate same-named
-    `def` is SILENT (python binds the later definition), not a merge error, so this is
-    stated rather than left to be discovered.
+    ⛔ CONVERGENCE WITH #12102, which repairs the same #12133 red: that PR carries its OWN
+    copy of this test, and ITS PREDICATE IS **NOT** THE SAME — it has three conditions,
+    this one has four (`_SUBSTITUTION`, added here because a printed substitution
+    EXECUTES; see the loop below). So keep **this** predicate and **this** test copy:
+    relative to #12102's, this one pins ten additional shapes (both in-repo substitutions,
+    leading space, mid-span, quoted argv, the three message-FIRST operator forms, the
+    backtick and `printf` forms), while #12102's additionally pins a `then`-prefixed
+    compound and the returned strings' positions. The second lander drops the other copy.
+    A duplicate same-named `def` is NOT a git conflict and pytest does not complain, but
+    `ruff check .` (a merge gate, pinned 0.16.4) reds it with F811 — never keep both.
     """
     scripts = _gh_executing_scripts()
 
-    # 1. The message itself: no hazard, in both the live shape and a substitution-
-    #    bearing one (`echo "$(date) — run tools/x.sh"` is still only printing).
+    # 1. The message itself — the LIVE shape only. A message that carries a
+    #    substitution is read as CODE (asserted in the loop below), because printing a
+    #    substitution executes it.
     assert _gh_hazards(
         [
             '            echo "::error::no client in this archive — on this box run '
@@ -973,8 +979,18 @@ def test_a_remediation_message_is_not_read_as_a_gh_call_site():
          "the backtick form runs it too"),
         ("        run: echo done && tools/install-ci-runner-x64.sh --repair-labels",
          "an invocation AFTER an operator is a call site, not a message"),
+        ("        run: echo <(tools/install-ci-runner-x64.sh --repair-labels)",
+         "PROCESS substitution also EXECUTES the script — the fourth condition catches it"),
+        ("        run: echo >(tools/install-ci-runner-x64.sh --repair-labels)",
+         "and so does the output form"),
     ]:
         assert _gh_hazards([line], scripts), why
+    # …while the `then`/`else` prefix is still a message: a `run: |` body line that only
+    # prints after a branch is prose. Deleting the prefix from `_MESSAGE_CMD` reds this.
+    assert _gh_hazards(
+        ['        then echo "::error::run tools/install-ci-runner-x64.sh --repair-labels"'],
+        scripts,
+    ) == [], "a `then`-prefixed printed message is still a message"
 
     # 2. Real invocations, including every shape a whitespace strip hid: the two in
     #    this repo, a leading space inside the quotes, and a mid-span substitution.
