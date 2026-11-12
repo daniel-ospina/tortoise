@@ -6169,6 +6169,20 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         "a comment after `$(` survived"
     )
 
+    # CONTROL: three live mechanisms that were UNGRADED (#12279 REVIEW 6, P3):
+    # deleting the `]]` closer, deleting the `))` closer, or flipping the `=(`
+    # opener's boundary each left the whole suite GREEN. They fail CLOSED (only
+    # false REDs), but nothing noticed them — pinned here.
+    for stripper, what in (("[[ -n x ]]", "a `]]` closer"), ("(( 1 ))", "a `))` closer")):
+        step = {"run": f"b=/usr/lib/postgresql; {stripper} # {replacement}"}
+        assert replacement not in _run_commands(step), (
+            f"{what} did not end the word, so a REAL comment survived: {_run_commands(step)!r}"
+        )
+    step = {"run": f'b=/usr/lib/postgresql; a=(#c); {replacement}'}
+    assert replacement not in _run_commands(step), (
+        f"a `#` right after `=(` is a comment (bash: unexpected EOF), not data: {_run_commands(step)!r}"
+    )
+
     # CONTROL: a GROUP-closing `)` IS an operator, so the rest of the line is a
     # comment and must be dropped (bash prints only `x` for the same line).
     step = {"run": f"(echo x)#note; {replacement}"}
