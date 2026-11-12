@@ -147,11 +147,17 @@ def _wait_alive(pid: int, timeout: float = 5.0) -> None:
     """Wait for the pid to be RUNNING — ⚠️ in the sense `_pid_alive` means, which is NOT
     "the decoy is up".
 
-    ⛔ `Popen` RETURNS AT FORK TIME, and a freshly forked child is a copy of THIS process:
-    `/proc/<pid>/stat` reads a live, non-zombie `R` for a few microseconds before `execve`
-    has run one instruction of what we spawned. So this returns for a child that never
-    becomes the decoy at all — measured on an idle box, 6/6, against a decoy that exits 1
-    at exec: every wait passed. Use `_await_exec` when the question is "did it RUN".
+    ⛔ `Popen` RETURNS AFTER A SUCCESSFUL `execve` on CPython/Linux (the parent blocks on
+    the CLOEXEC errpipe), so this never samples a pre-exec fork: measured the instant
+    `Popen` returned, `/proc/<pid>/cmdline` carried OUR argv[0] in 38/40 spawns and was
+    unreadable in the other 2 — never the parent's. What it does sample is the few
+    milliseconds BETWEEN exec and a decoy's own death: against `executable=/bin/false`
+    (which execs and exits at once) every wait passed, 6/6, because the process is still
+    live when the wait looks. ⚠️ `posix_spawn` paths on other platforms may return
+    earlier, so this is a statement about this box's CPython, not a guarantee everywhere.
+
+    Use `_await_exec` when the question is "does a row NAME what we spawned", which is
+    what a census matcher and a human reading a failure both need.
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -162,16 +168,14 @@ def _wait_alive(pid: int, timeout: float = 5.0) -> None:
 
 
 def _await_exec(pid: int, argv0: str, timeout: float = 5.0) -> None:
-    """Wait until the pid has actually EXEC'd the command we spawned (#12039).
+    """Wait until a process-table row NAMES the command we spawned (#12039).
 
-    ⛔ `_wait_alive` CANNOT ANSWER THIS, and its passing is not evidence the decoy ever
-    ran (see its docstring): the forked child is alive before `execve`. The observable
-    that separates the two states is the COMMAND LINE, because `execve` rewrites it —
-    before exec it still carries the pytest worker's argv, after exec it carries ours.
-    Same fork→exec window as the census probe in `tests/test_fleet_state.py`, same remedy.
-
-    A decoy that dies at exec fails HERE, saying so, instead of surfacing minutes later as
-    `record` refusing a pid the harness had "just confirmed alive".
+    `_wait_alive` cannot answer that: it reads `/proc/<pid>/stat` directly and returns in
+    the milliseconds a doomed decoy is still alive (measured 6/6 against a decoy that
+    execs and exits immediately), so it reports a decoy as up that `record` will refuse
+    moments later. A `ps` row costs ~40 ms, which is longer than that window — so this
+    fails HERE, naming the row it last saw, instead of surfacing later as `record`
+    refusing a pid the harness had "just confirmed alive".
     """
     deadline = time.time() + timeout
     seen = ""
@@ -186,9 +190,9 @@ def _await_exec(pid: int, argv0: str, timeout: float = 5.0) -> None:
             break
         time.sleep(0.05)
     pytest.fail(
-        f"decoy pid {pid} never ran {argv0!r} — the harness cannot measure "
-        f"(the table's row for it read {seen!r}, so it either exited at exec or never "
-        f"replaced its parent's command line)"
+        f"decoy pid {pid} never showed a row starting {argv0!r} — the harness cannot "
+        f"measure (the last row read for it was {seen!r}, so it either died at exec or "
+        f"was already gone when the table was read)"
     )
 
 
@@ -221,11 +225,11 @@ def _record_when_running(name: str, pid: int, env: dict[str, str],
     single sample cannot disagree, and what the reds this issue reports actually are is
     not a predicate mismatch:
 
-      * at the preview decoy the decoy REACHED `execve` and died there — a renamed
+      * at the preview decoy the decoy reached `execve` and died there — a renamed
         multi-call binary cannot run under its new name (#12039 measured on
-        `ubuntu-26.04`) — the fixture's; fixed here, and now probed with `_await_exec`
-        rather than `_wait_alive`, because a decoy that has NOT reached exec is a live
-        copy of the parent and `record` would accept it;
+        `ubuntu-26.04`) — the fixture's; fixed here, and now probed with `_await_exec`,
+        because a decoy that dies in the millisecond after exec is still "alive" to the
+        `/proc` read `_wait_alive` uses and is refused moments later;
       * otherwise the process was gone by the time `record` spawned its shell — a GAP IN
         TIME, which no retry reverses (issue #12039; `test (a)` red on main at
         `4b1d6cd0d4`).
@@ -637,7 +641,15 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
          "time.sleep(120)\n"],
         tmp_path, executable=sys.executable,
     )
-    _await_exec(peer.pid, str(peer_workerd))
+    # ⛔ THE DECOY IS SPAWNED BEFORE THE `try:` THAT OWNS ITS `finally: _reap(...)`
+    # further down, so every assertion added here is a leak path for a 120 s process in
+    # its own session. This guard reaps on those paths only; the later `finally` still
+    # reaps on the rest (a double reap is a suppressed no-op).
+    try:
+        _await_exec(peer.pid, str(peer_workerd))
+    except BaseException:
+        _reap(peer.pid)
+        raise
     # The decoy must really BE a `workerd` process, or this test proves nothing about the
     # name `pkill workerd` matched (#12039 replaced the symlinked `sleep` with an
     # interpreter under that argv[0] + `prctl`, so the pin moves from "the symlink exists"
@@ -663,12 +675,20 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
             if comm == "workerd":
                 break
             time.sleep(0.02)
-        assert comm == "workerd", (
-            f"the peer decoy is named {comm!r}, not `workerd` — the shape #10283's "
-            "pre-fix machine-global `pkill workerd` matched is not reproduced"
-        )
-    result = _record_when_running("app", peer.pid, env=peer_state)
-    assert result.returncode == 0, _recorded(result, peer.pid, peer_state)
+        try:
+            assert comm == "workerd", (
+                f"the peer decoy is named {comm!r}, not `workerd` — the shape #10283's "
+                "pre-fix machine-global `pkill workerd` matched is not reproduced"
+            )
+        except BaseException:
+            _reap(peer.pid)
+            raise
+    try:
+        result = _record_when_running("app", peer.pid, env=peer_state)
+        assert result.returncode == 0, _recorded(result, peer.pid, peer_state)
+    except BaseException:
+        _reap(peer.pid)
+        raise
 
     # Job A: a real tree (a supervisor + two children, like wrangler + workerd).
     own = _spawn(["bash", "-c", "sleep 120 & sleep 120"], tmp_path)
@@ -703,6 +723,26 @@ def test_stop_all_leaves_a_peer_jobs_decoy_workerd_alone(tmp_path: Path, state) 
         )
     finally:
         _reap(own.pid, *children, peer.pid)
+
+
+def test_await_exec_REFUSES_a_decoy_that_never_shows_its_name(tmp_path: Path) -> None:
+    """`_await_exec` is the predicate that can refuse — pin the refusal, not just the pass.
+
+    #12039 replaced a liveness read that could only ever say "alive" in the window that
+    matters. Mutating `_await_exec` to a bare `return` leaves every other test in this
+    file green, because a healthy decoy is visible to both predicates; only the refusal
+    tells the two apart. A pid that is gone is the cheapest input it must reject.
+    """
+    victim = _spawn(["/bin/sleep", "60"], tmp_path)
+    _wait_alive(victim.pid)
+    _reap(victim.pid)
+    deadline = time.time() + 10
+    while time.time() < deadline and _pid_alive(victim.pid):
+        time.sleep(0.02)
+    assert not _pid_alive(victim.pid), "the harness cannot measure: the decoy survived its own kill"
+
+    with pytest.raises(pytest.fail.Exception):
+        _await_exec(victim.pid, "/nonexistent/never-shown", timeout=0.3)
 
 
 def test_stop_refuses_a_pid_whose_start_time_changed(tmp_path: Path, state) -> None:

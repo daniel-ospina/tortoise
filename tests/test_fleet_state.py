@@ -3741,12 +3741,20 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
     `executable=` runs this interpreter under the long path — exactly the argv[0] the
     matcher reads — with no dependence on a copied binary accepting its new name.
 
-    ⛔ BOUNDED POLL, because `Popen` returns at FORK time (#12039). The census can run
-    in the window before the child has exec'd — its row still carries the PARENT's
-    command line, so `basename(argv[0]) == "pi"` matches nothing and the probe answers
-    `pids seen: []` about a process that is about to exist. One-shot, that window is a
-    per-run coin flip on a loaded runner: measured redding `test (h)` and `test (a)` on
-    main at `4b1d6cd0d4`. Polling removes the window without widening the match.
+    ⛔ A BOUNDED POLL, AND THE REASON IS NOT A FORK WINDOW (#12039, measured). `Popen`
+    returns only after a successful `execve` on CPython/Linux (the parent blocks on the
+    CLOEXEC errpipe), so a row naming this child exists as soon as the spawn returns —
+    measured on this box, `/proc/<pid>/cmdline` carried our argv[0] the instant `Popen`
+    returned in 38/40 spawns (the other 2 were already gone). What this test has actually
+    measured is worse for the one-shot form: at `70116a870dbb` the census redded with
+    `pids seen: []` AFTER the full 10 s poll, which a window cannot produce — a window
+    resolves inside the deadline, so that red was the FIXTURE (a copied multi-call
+    `sleep` that refuses its new name on `ubuntu-26.04`), which `executable=` fixes.
+
+    The poll is kept because it costs nothing on the green path and it makes a red
+    legible (the deadline plus the table's own row, below), NOT because a race here was
+    measured. It does not widen the match, so the truncation pin keeps its power: a
+    `-ww`-less census truncates on every sample, burns the deadline and fails.
     """
     import shutil
     import subprocess
@@ -3767,7 +3775,8 @@ def test_pi_processes_sees_a_real_long_path_lane(monkeypatch) -> None:
                                 executable=sys.executable,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            # Bounded poll on the CENSUS ITSELF — never a widened or loosened match.
+            # Bounded poll on the CENSUS ITSELF — never a widened or loosened match
+            # (see the docstring: the reason is a legible red, not a measured race).
             # A census missing `-ww` still never matches (its rows are cut before the
             # basename), so the truncation pin keeps its discriminating power: it takes
             # the FULL deadline and fails, it does not go green.
