@@ -2601,6 +2601,20 @@ def test_live_job_abstains_when_total_count_is_not_an_int(monkeypatch, total):
     assert Q.read_run_live_job("o/r", 1) is None
 
 
+@pytest.mark.parametrize("total", ["250", True, 250.0, {"n": 250}])
+def test_live_job_abstains_on_a_SHORT_page_whose_total_count_is_present_but_not_an_int(
+        monkeypatch, total):
+    """`total_count` PRESENT and non-int must abstain even on a SHORT page.
+
+    Pre-fix the non-int path fell THROUGH to the page-fullness heuristic, so a one-row page
+    carrying `"total_count": "250"` returned `False` — a proof of non-execution taken from
+    a list whose own payload said 250 rows exist. `False` SUBTRACTS from `pr_running`.
+    """
+    payload = {"total_count": total, "jobs": [{"status": "completed"}]}
+    monkeypatch.setattr(Q, "gh_json", lambda args, timeout=None, p=payload: p)
+    assert Q.read_run_live_job("o/r", 1) is None
+
+
 def test_live_job_false_on_a_short_page_even_without_total_count(monkeypatch):
     """The counter-arm: a SHORT page IS a complete read, so it may still prove idleness.
 

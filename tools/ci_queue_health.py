@@ -2011,9 +2011,15 @@ def read_run_live_job(
       * a job row is MALFORMED or carries no ``status`` — it could be the live one;
       * ``attempt`` was supplied and a job's ``run_attempt`` does not match it (or is
         missing) — the payload is speaking about a different attempt;
-      * the list is NOT PROVABLY COMPLETE while every job on it had completed: either
-        ``total_count`` says there is more than this page returned, or there is no usable
-        ``total_count`` and the page is FULL (see the completeness rule below).
+      * the list is NOT PROVABLY COMPLETE while every job on it had completed. THREE
+        routes, and all three abstain (see the completeness rule below):
+          - `total_count` is an int LARGER than this page returned;
+          - `total_count` is PRESENT and is NOT an int (a string, bool, float or dict
+            count abstains on ANY page shape, SHORT pages included — the payload itself
+            is telling us the count is not what we could use);
+          - there is NO `total_count` at all (absent or JSON `null`) and the page is
+            FULL, so it may be one of several. A short page with no count IS a complete
+            read and still proves inaction.
 
     A non-terminal job on the page is enough to answer ``True`` regardless of paging,
     which is why paging cannot make this abstain in the direction that matters.
@@ -2098,22 +2104,39 @@ def read_run_live_job(
     # ⛔ ONLY A PROVABLY COMPLETE LIST MAY PROVE NON-EXECUTION. The two answers are not
     # symmetric: ``False`` subtracts a run from `pr_running`, and a low `pr_running` is
     # what makes ``PR-STARVED`` reachable — a verdict that authorises a destructive
-    # cancel-then-rerun. Completeness is therefore accepted from EITHER signal, and the
-    # absence of a usable one abstains.
+    # cancel-then-rerun. Completeness is therefore accepted from exactly TWO shapes —
+    # an int `total_count` no larger than the page, or a SHORT page when no count is
+    # PRESENT at all — and everything else abstains. (`EITHER signal` was the pre-fix
+    # rule and is no longer true: a count that is present and not an int abstains even
+    # on a short page, because the payload itself says the count is not usable.)
     total = data.get("total_count")
-    if type(total) is int:
-        return False if total <= len(statuses) else None
-    # No usable `total_count` (absent, a string, a bool — `type(x) is int` rejects
-    # `True`, which `isinstance` would accept as 1): a SHORT page is still a complete read —
-    # the endpoint never returns more than `per_page` — so it proves the same thing, while a
-    # FULL page may be a cut list and must abstain. An earlier revision tested only
-    # `isinstance(total, int)`, so a missing or string-valued count fell through to ``False``
-    # on a page that could have been one of several (review finding, 2026-11-12; reproducible
-    # with 100 completed jobs and no `total_count`, and with `total_count` as the string
-    # "250"). ⚠️ When `total_count` IS an int it is AUTHORITATIVE and is not cross-checked
-    # against page fullness: a count that under-reports the rows actually returned would
-    # still prove idleness. That is an API contract this module relies on, not a signal it
-    # can independently verify.
+    if total is not None:
+        # ⛔ PRESENT-BUT-NOT-AN-INT MUST ABSTAIN, NOT FALL THROUGH. An earlier revision
+        # tested only `type(total) is int` and then let every OTHER type reach the
+        # page-fullness heuristic below — so a SHORT page carrying
+        # `"total_count": "250"` returned ``False`` (this function's PROOF of
+        # non-execution) from a list whose own payload said 250 rows exist. That is the
+        # same string-valued drift the note below records, one page shape narrower, and
+        # it SUBTRACTS from `pr_running` — the direction that manufactures
+        # ``PR-STARVED`` and with it the destructive cancel-then-rerun.
+        return False if type(total) is int and total <= len(statuses) else None
+    # `total_count` ABSENT (or JSON `null` — `data.get` cannot tell them apart, and
+    # neither is a count): a SHORT page is still a complete read — the endpoint never
+    # returns more than `per_page` — so it proves the same thing, while a FULL page may
+    # be a cut list and must abstain. A string/bool/float/dict count never reaches here:
+    # it is PRESENT, so the branch above abstains on it. ⚠️ When `total_count` IS an int it
+    # is AUTHORITATIVE and is not cross-checked against page fullness: a count that
+    # under-reports the rows actually returned would still prove idleness. That is an API
+    # contract this module relies on, not a signal it can independently verify.
+    #
+    # RECORDED SO THE FALL-THROUGH IS NOT RE-INTRODUCED: an earlier revision tested only
+    # `isinstance(total, int)`, so a missing or string-valued count fell through to
+    # ``False`` — a proof of non-execution taken from a list whose payload said more rows
+    # existed (review finding, 2026-11-12; reproducible with 100 completed jobs and no
+    # `total_count`, and with `total_count` as the string "250"). The first fix then
+    # closed only the FULL-page shape, leaving the string case to fall through on a SHORT
+    # page; this branch closes both. Both halves are stated because each was got wrong
+    # separately.
     return False if len(statuses) < per_page else None
 
 

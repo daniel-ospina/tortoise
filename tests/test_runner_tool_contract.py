@@ -772,21 +772,47 @@ def _command_haystacks(line: str) -> list[str]:
         echo hi & bash "tools/install-ci-runner-x64.sh"        # the SECOND cut (no `&`)
 
     The rule is therefore POSITIONAL, never textual: a quoted span is prose only when it
-    sits OUTSIDE a `$( … )`/backtick substitution; inside one, everything (quotes
-    included) is kept. `_code_only` is deliberately NOT used for this arm — it blanks
-    every quoted span, including the second shape's.
+    sits OUTSIDE a substitution — `$( … )`, a backtick, or `<( … )`/`>( … )` (the fourth
+    class below); inside one, everything (quotes included) is kept. `_code_only` is
+    deliberately NOT used for this arm — it blanks every quoted span, including the
+    second shape's.
+
+    ⛔ THE FOURTH FALSE NEGATIVE — a PROCESS SUBSTITUTION is a substitution too. `<( … )`
+    and `>( … )` run their body as a command, so its contents are executable text
+    exactly like a `$( … )` body; a printer line whose helper sits QUOTED inside one was
+    read as prose by every cut up to the third (measured on `edcac493a5`, both shapes):
+
+        echo <(bash 'tools/ci_timing.py')
+        echo >(python3 'tools/ci_timing.py')
+
+    Zero live instances exist in the 41 workflows (`python-ci.yml:1582` is the only
+    `<(`/`>(` any of them contains — `done < <(printf … | python3 -c …)` — and it names
+    no helper), so this closes a latent hole rather than a red. Measured across the
+    WORKFLOWS, which is the scope this reader scans; `.github/scripts/*.sh` carry 8 more
+    (3764 tree-wide), none of which names a gh-executing helper either.
+    Found by #12149's pins.
 
     Stated residuals, all over-reporting (the fail-closed direction for this gate): a
     `$( … )` inside SINGLE quotes is treated as executable though bash would not expand
     it there; a parenthesised subshell `( … )` inside a substitution closes the
-    substitution at its own `)`, so the tail of that command is read as raw text.
+    substitution at its own `)`, so the tail of that command is read as raw text; an
+    UNBALANCED quote inside a substitution keeps the substitution open to end of line,
+    so the tail is read as executable text rather than prose.
     """
     haystacks: list[str] = []
     raw: list[str] = []  # the command as written
     live: list[str] = []  # …with its literal quoted prose blanked
     i, n = 0, len(line)
     quote = ""  # open top-level quote character, or ""
-    parens = 0  # `(`/`)` depth inside a `$( … )` — a subshell's own parens count too
+    # ⛔ ONE QUOTE SLOT PER OPEN SUBSTITUTION LEVEL — a STACK, not a single flag. bash
+    # parses each `$( … )`/`<( … )` body in its own quoting context and resumes the outer
+    # level's after the `)`, so `"$(basename "$(pwd)")"` has an empty slot at depth 1 and
+    # a `"` slot at depth 2. A single flag breaks exactly there: the `"` opened at depth 1
+    # would swallow the `)` that CLOSES depth 2, the depth would never fall back, and the
+    # rest of the message would stay substitution-verbatim — a FALSE HIT on ordinary
+    # operator prose, the defect class #12133 exists to remove (#12149 review cycle 2,
+    # P2). `len(sub_quotes)` IS the depth, so the depth and the quote state cannot drift.
+    sub_quotes: list[str] = []
     backtick = False  # inside a backtick substitution
 
     def flush() -> None:
@@ -801,22 +827,40 @@ def _command_haystacks(line: str) -> list[str]:
         ch = line[i]
         if ch == "\\" and i + 1 < n:
             raw.append(line[i : i + 2])
-            if parens or backtick or not quote:
+            if sub_quotes or backtick or not quote:
                 live.append(line[i : i + 2])
             i += 2
             continue
         # ── inside a substitution: verbatim in BOTH views, quotes do NOT blank ──
-        if parens or backtick:
+        if sub_quotes or backtick:
             if line.startswith("$(", i):
-                parens += 1
+                sub_quotes.append("")
                 raw.append("$(")
                 live.append("$(")
                 i += 2
                 continue
-            if parens and ch == "(":
-                parens += 1
-            elif parens and ch == ")":
-                parens -= 1
+            if sub_quotes:
+                # ⛔ COUNTING-ONLY quote state, ONE SLOT PER LEVEL. A `)` inside a QUOTED
+                # span does not close the substitution, and the counter must know that or
+                # it ends the substitution early: `<(grep -E "xml)" f) ; bash 'tools/h.py'`
+                # closed at the `)` inside the quotes, the string's own closing `"` then
+                # OPENED a top-level quote, and the real invocation after `;` was blanked
+                # away — a MISS, i.e. a regression in the fail-open direction this gate
+                # exists to prevent (#12149 review, P1). The nesting is equally load-bearing
+                # the other way (#12149 review cycle 2, P2), which is why this is a STACK:
+                # a `$(` opened while an outer quote is open must get its OWN empty slot, so
+                # its `)` still closes it. The state is for COUNTING only — the two haystack
+                # views stay verbatim here, so quoted text inside a substitution is still
+                # executable text as far as the name arm is concerned.
+                if sub_quotes[-1]:
+                    if ch == sub_quotes[-1]:
+                        sub_quotes[-1] = ""
+                elif ch in _QUOTE_CHARS:
+                    sub_quotes[-1] = ch
+                elif ch == "(":
+                    sub_quotes.append("")
+                elif ch == ")":
+                    sub_quotes.pop()
             elif ch == "`":
                 backtick = not backtick
             raw.append(ch)
@@ -826,7 +870,7 @@ def _command_haystacks(line: str) -> list[str]:
         # ── top level. An OPENER is recognised BEFORE the quote branch: bash expands
         #    `$( … )` and backticks inside double quotes, so a quote must not swallow it.
         if line.startswith("$(", i):
-            parens = 1
+            sub_quotes.append("")
             raw.append("$(")
             live.append("$(")
             i += 2
@@ -843,6 +887,17 @@ def _command_haystacks(line: str) -> list[str]:
                 quote = ""
                 live.append("''")  # the prose placeholder, emitted where it ended
             i += 1
+            continue
+        # ── top level, NO quote open: `<( … )` / `>( … )` is a process substitution.
+        #    Placed after the quote branch on purpose — bash does NOT perform process
+        #    substitution inside double quotes, so a `<(` in a message's prose is
+        #    literal text (`echo "<( … )"` prints it) and must stay blanked. The body
+        #    of a real one is a command, so it joins the verbatim claim above.
+        if ch in "<>" and i + 1 < n and line[i + 1] == "(":
+            sub_quotes.append("")
+            raw.append(line[i : i + 2])
+            live.append(line[i : i + 2])
+            i += 2
             continue
         if ch in _QUOTE_CHARS:
             quote = ch
@@ -882,7 +937,7 @@ def _segment_executes_a_helper(line: str, script_ref: re.Pattern[str]) -> bool:
     defect, not the workflow's prose.
 
     ⛔ ONLY A MESSAGE'S OWN LITERAL ARGUMENTS ARE INERT. See `_command_haystacks` for the
-    three false negatives the earlier cuts produced and the positional rule that replaced
+    false negatives the earlier cuts produced and the positional rule that replaced
     them; the threat surface is pinned by
     `test_the_message_exclusion_cannot_hide_a_real_invocation`.
     """
@@ -1088,6 +1143,139 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
     assert _gh_hazards([f"            printf 'run tools/{helper} by hand\\n'"], scripts) == []
     assert _gh_hazards([f'            echo "a & b: run tools/{helper} by hand"'], scripts) == []
     assert _gh_hazards([f'            echo "a; b: run tools/{helper} by hand"'], scripts) == []
+    assert _gh_hazards([f'            echo "a | b: run tools/{helper} by hand"'], scripts) == []
+    assert _gh_hazards([f'            echo "a || b: run tools/{helper} by hand"'], scripts) == []
+
+
+def test_every_printer_prefixed_shape_that_still_runs_a_command_is_a_hazard():
+    """Every way a message EMITTING on a line can still EXECUTE a helper (#12133/#12149).
+
+    The prose fix itself is pinned by `test_a_script_named_only_in_an_operator_message_...`
+    and `test_the_message_exclusion_cannot_hide_a_real_invocation` above; this pins the
+    SHAPE MATRIX, one assertion per shell mechanism. It came out of #12149's review
+    cycles, where each of the first three cuts missed one of these and was caught only
+    by writing the shape down:
+
+      * a printer followed by a second command  — `;`, `&&`, `|`, a bare `&`
+      * a substitution the printer expands      — `$( … )`, a backtick
+      * a PROCESS substitution                  — `<( … )`, `>( … )`
+      * a `(`/`)` INSIDE a quoted span in a substitution body — it must not be read as
+        the substitution's own closer, or the rest of the line is blanked away
+
+    ⛔ WHICH ROWS DISCRIMINATE AND WHICH ARE ARMOR — stated, because a pin that would
+    pass against an older reader proves nothing about this change. Replayed against
+    `origin/main`'s walker (`edcac493a5`), three rows FLIP: the two `<(`/`>(`) quoted
+    spellings and the `$( … )`-whose-body-contains-a-quoted-`)` row, all of which main
+    misses. Every `;`/`&&`/`|`/`&`/backtick row already flags on main and is ARMOR
+    against a future narrowing. Rows 10-11 (`<(`/`>(` with a `)` inside a quoted span)
+    are armor with a specific job: the first cut of this very change REGRESSED there —
+    it ended the substitution at the quoted `)` and blanked the tail, where main (which
+    never entered substitution mode) caught it — so those two rows are what stop the
+    counting-quote state from being dropped again. Both kinds are kept deliberately:
+    armor is what stops the next cut from re-opening a closed class, and the
+    discriminating rows are what this change adds.
+
+    The `<( … )`/`>( … )` class is why the walker tracks process substitution at all: a
+    printer whose helper sits QUOTED inside one was read as prose on `edcac493a5` (both
+    spellings), while the unquoted spelling was caught — so the hole was exactly the
+    quote-blanking of an executable body. Zero live instances exist in the 41 workflows
+    (measured: `python-ci.yml:1582` is the only `<(`/`>(` they contain, and it names no
+    helper), which is why it needs a pin rather than a red to keep it closed.
+
+    WHY IT DOES NOT WEAKEN THE PROSE FIX: every shape here EXECUTES its helper, and the
+    inert shapes (`echo "run tools/h.sh by hand"`, prose carrying `;`, `&`, `|`) stay
+    asserted inert in the tests above and below. Both halves are required — a suite that
+    only pins the hazards can be satisfied by reverting the fix, and one that only pins
+    the prose can be satisfied by opening this gate.
+    """
+    scripts = _gh_executing_scripts()
+    assert "ci_timing.py" in scripts, "the derivation no longer sees the helper this pin uses"
+    for chained in (
+        # ── a second command after the printer (armor) ──
+        '        run: echo "==> timing" && python3 "$GITHUB_WORKSPACE/tools/ci_timing.py"',
+        '        run: echo "==> timing"; bash "tools/install-ci-runner-x64.sh"',
+        '        run: printf \'%s\\n\' "$CHANGED" | python3 "$GITHUB_WORKSPACE/tools/ci_timing.py"',
+        "        run: echo start & bash 'tools/ci_timing.py'",
+        # ── a substitution the printer EXPANDS (armor) ──
+        '        run: echo "$(bash tools/ci_timing.py)"',
+        '        run: echo "`tools/ci_timing.py`"',
+        # ── a PROCESS substitution: body runs, and quoting inside it does not make it
+        #    prose (DISCRIMINATING — main misses both quoted spellings) ──
+        "        run: echo <(bash 'tools/ci_timing.py')",
+        "        run: echo >(python3 'tools/ci_timing.py')",
+        "        run: while read -r x; do :; done < <(printf '%s' \"$Y\" | python3 'tools/ci_timing.py')",
+        # ── a `(`/`)` INSIDE a quoted span of a substitution body must not be read as
+        #    the closer. Without the counting-quote state the substitution ends at the
+        #    `)` inside the quotes, the string's own closing quote OPENS a top-level
+        #    quote, and the real invocation after `;` is blanked — a MISS, and a
+        #    REGRESSION vs `main`, which never entered substitution mode on `<(`.
+        #    ARMOR, and the rows that pin THIS CHANGE's own first regression — found in
+        #    #12149's review, not by a red (restoring the pre-fix counter reds here). ──
+        "        run: echo <(grep -E \"xml)\" /etc/hostname) ; bash 'tools/ci_timing.py'",
+        "        run: echo <(sed -e 's/x)y/z/' /etc/hostname) ; bash \"tools/ci_timing.py\"",
+        # ── …and the same quoted `)` on `$( … )`, which `main` MISSES as well (latent
+        #    before this change): DISCRIMINATING. ──
+        '        run: echo "$(bash -c "x)")" ; bash \'tools/ci_timing.py\'',
+    ):
+        assert _gh_hazards([chained], scripts), chained
+
+    # …and process substitution does NOT run inside double quotes, so a message that
+    # merely SPELLS one stays prose — the conservative direction must not be bought by
+    # flagging text bash never executes.
+    assert (
+        _gh_hazards(['        run: echo "a <(b: run tools/install-ci-runner-x64.sh) c"'], scripts)
+        == []
+    )
+    # …and a NESTED substitution inside an operator message is prose, not a hazard. This
+    # is the FAIL-CLOSED side of the counting-quote state, and it is why that state is a
+    # per-level STACK rather than one flag: with a single flag the `"` opened at depth 1
+    # swallowed the `)` closing the `$(pwd)` at depth 2, the depth never fell back, and
+    # the rest of the message stayed substitution-verbatim — a false hit on an ordinary
+    # idiom (measured: both lines below flagged before the stack, neither flags on
+    # `edcac493a5` or now). `bash` prints both literally. (#12149 cycle 2, P2.)
+    for nested_prose in (
+        '        run: echo "dir $(basename "$(pwd)") — repair with tools/install-ci-runner-x64.sh"',
+        '        run: echo "$(printf "%s" "$(date)") run tools/ci_timing.py by hand"',
+    ):
+        assert _gh_hazards([nested_prose], scripts) == [], nested_prose
+
+
+def test_a_script_named_only_in_an_operator_message_is_not_a_gh_hazard():
+    """The false positive that red `test-carve-out (c)` on every PR (#12133).
+
+    `python-ci.yml::test-record-postgres` names `tools/install-ci-runner-x64.sh` in its
+    `::error::` REMEDY text — an operator instruction, never an invocation. The name arm
+    reads the RAW command (a real invocation is usually quoted), so the job was reported
+    as a `gh` user and the remedy the scan demanded (`ensure gh`, a step that fails closed
+    on a no-egress pool runner) would have reddened a healthy job.
+
+    ⛔ THE ROW IS READ FROM THE WORKFLOW, not paraphrased: the live remedy line is one
+    long physical line whose wording has changed twice, and a hand-copied paraphrase
+    would pin a shape the tree does not contain (`#12149` review, P2 — the first cut of
+    this test did exactly that). Reading the job's own body means the pin tracks the
+    real text, and the `assert` that it still NAMES the helper stops it going vacuous if
+    the remedy is ever reworded to drop the script name.
+    """
+    scripts = _gh_executing_scripts()
+    job_body = dict(_jobs(WORKFLOWS / "python-ci.yml"))["test-record-postgres"]
+    # the scan ignores comment lines, so the pin does too — the job also carries a
+    # `#` comment naming the helper, which is prose for the same reason the echo is.
+    mentioning = [
+        ln for ln in job_body if "install-ci-runner-x64.sh" in ln and not ln.strip().startswith("#")
+    ]
+    assert len(mentioning) == 1, mentioning
+    # the live line: an operator message, so prose — this is #12133's exact red.
+    assert _gh_hazards(mentioning, scripts) == []
+    assert (
+        _gh_hazards(["        run: printf '%s\\n' 'see tools/install-ci-runner-x64.sh'"], scripts)
+        == []
+    )
+    # …a launcher's quoted ARGUMENT is still code…
+    assert _gh_hazards(
+        ['        run: bash "$GITHUB_WORKSPACE/tools/install-ci-runner-x64.sh"'], scripts
+    )
+    # …and an unquoted name after a bare `echo` still counts (conservative residual).
+    assert _gh_hazards(["        run: echo run tools/install-ci-runner-x64.sh"], scripts)
 
 
 def test_the_poolable_label_reader_sees_every_yaml_shape():

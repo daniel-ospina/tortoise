@@ -235,6 +235,15 @@
 #  117. #9361 review P2: an app-controlled status string is REDACTED before it
 #      is published (the file's contract for every app-derived value), and the
 #      20-char secret rule does not swallow legitimate long status names
+#  118. #12135: the `aws` CLI is an UNDECLARED runtime dependency. With no `aws`
+#      on PATH (the actual state of a self-hosted pool runner) the run is RED and
+#      names the CLI at the TOP, does not probe R2 or publish an R2_DOWN it never
+#      measured, attempts no filing (so no "conditional write rejected" — the
+#      message that sent the operator after Cloudflare instead of a missing
+#      binary), and STILL RUNS THE SWEEP, which is the only hourly backup trigger
+#  119. #12135: the declaration side — the workflow's ensure-aws-cli.sh is a
+#      strict no-op when a working `aws` is present (no network on GitHub-hosted
+#      runners) and carries a well-formed pinned version + 64-hex digests
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -551,13 +560,16 @@ case "$url" in
   *"/v1/internal/reconcile"*)
     if [ -n "${STUB_RECONCILE_RC:-}" ]; then printf '%s' "${STUB_RECONCILE_CODE:-000}"; exit "$STUB_RECONCILE_RC"; fi
     emit '{}' "${STUB_RECONCILE_CODE:-200}" ;;
-  *"/v1/internal/driver/heartbeat"*) printf '{}' ;;
+  *"/v1/internal/driver/heartbeat"*) printf '%s\n' "$data" >> "${STUB_LOG}.heartbeat"; printf '{}' ;;
   *) printf '{}' ;;
 esac
 exit 0
 CURL_EOF
 
 chmod +x "$BIN/aws" "$BIN/date" "$BIN/curl"
+# The REAL PATH, captured before the stub dir is prepended: case 118 has to run
+# the driver on a PATH where `aws` genuinely does not exist.
+BASE_PATH="$PATH"
 export PATH="$BIN:$PATH"
 export STUB_LOG="$LOG"
 
@@ -3337,6 +3349,277 @@ assert_not_contains "$(cat "$LOG")" "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" \
   "117. no credential shape reaches the filed issue body"
 assert_not_contains "$OUT" "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" \
   "117. no credential shape reaches the public Actions log"
+
+# ── 118. #12135: the aws CLI is an UNDECLARED runtime dependency ───────────
+# The driver shells out to `aws s3api` for EVERY R2 operation, and nothing used to
+# install it — the design inherited it from the runner image. On the fleet's
+# self-hosted pool (which advertises the `ubuntu-latest` label without the CLI)
+# the first R2 call died with `aws: command not found` INSIDE the dedup error
+# ("conditional write rejected"), every incident filing that hour was refused,
+# and the run still swept for 20 minutes before going red (run 43208529968).
+# This case runs the driver with no `aws` on PATH and pins the corrected
+# behaviour end to end.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+# The fixture must make the driver DETECT something (review P2): with a healthy
+# /status the `file_alert` guard is never entered, so the two assertions below
+# ("no conditional write rejected", "no filing is attempted") would pass because
+# nothing was detected rather than because the guard held — deleting the guard
+# would leave them green. An enabled app reporting `storage_error` files
+# R2_UNLISTABLE at section 1b, which is the shape that used to reach
+# r2_put_once and produce the misleading dedup error.
+export STUB_STATUS_BODY="$(status_body true null '"storage broken"')"
+export STUB_SWEEP_BODY='{"status":"backed_up","graph_totals":{"attempted":1,"backed_up":1}}'
+# ⛔ The PATH must be CONTROLLED, not inherited (review P1): filtering only by
+# PREPENDING a directory still resolves a real `aws` from the caller's PATH, so on
+# a GitHub-hosted runner (which ships the CLI) this case asserted the opposite of
+# reality and red the harness. Build a directory that contains every tool the
+# driver needs EXCEPT `aws`, and run the driver on THAT PATH alone — the case is
+# then a property of the diff on any host, and the suite stays self-contained.
+mkdir -p "$FIX/noaws"
+for d in "$BIN" /usr/local/bin /usr/bin /bin; do
+  for f in "$d"/*; do
+    [ -e "$f" ] || continue
+    b="$(basename "$f")"
+    case "$b" in aws|aws.*) continue ;; esac
+    [ -e "$FIX/noaws/$b" ] || ln -s "$f" "$FIX/noaws/$b"
+  done
+done
+if PATH="$FIX/noaws" command -v aws >/dev/null 2>&1; then
+  bad "118. the aws-free PATH still resolves an aws (case premise broken)"
+fi
+# An OPEN incident the self-heal would otherwise close: with the CLI missing it
+# must stay open (review P1 — a close could not dispose of its sentinel or
+# persist the recovery window).
+export GH_ISSUE_APP_DOWN=4242
+set +e
+OUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+RC=$?
+set -e
+assert_eq "$RC" 1 "118. missing aws CLI exits RED (1)"
+assert_contains "$OUT" "the aws CLI is NOT installed on this runner" \
+  "118. the missing dependency is named at the TOP of the run"
+assert_contains "$OUT" "Ensure the AWS CLI" "118. the install step that fixes it is named too"
+assert_contains "$OUT" "R2 preflight SKIPPED" "118. R2 is not probed by a client that cannot run"
+assert_not_contains "$OUT" "filing R2_DOWN" \
+  "118. a missing client never publishes an R2_DOWN reachability claim"
+assert_not_contains "$OUT" "conditional write rejected" \
+  "118. the dedup error no longer blames the conditional write"
+assert_not_contains "$OUT" "command not found" \
+  "118. no raw shell-level failure leaks from any aws call site"
+assert_not_match "$(cat "$LOG")" 'GH POST .*/issues' \
+  "118. no filing is attempted (its dedup object cannot be written)"
+assert_contains "$OUT" "R2_UNLISTABLE DETECTED but NOT FILED" \
+  "118. the detected incident is reported as DETECTED-but-unfiled, in the dependency's own words"
+assert_contains "$OUT" "sweep status: backed_up" \
+  "118. the SWEEP still ran — losing it would be a durability regression"
+assert_not_match "$(cat "$LOG")" 'GH PATCH .*/issues/4242' \
+  "118. no incident is CLOSED either — its R2 sentinel and recovery window are unmanageable"
+assert_contains "$OUT" "leaving APP_DOWN unchanged" \
+  "118. … and the driver says it left it open, instead of claiming a resolve"
+# Review C4: the pre-existing "closed open incidents for a healthy run" line is
+# UNCONDITIONAL, and `resolve_global` is a no-op while the CLI is missing — so a
+# RED run listed seven "leaving … unchanged" lines and then claimed it closed
+# incidents for a healthy run. Nothing was closed; the operator must be told so.
+assert_not_contains "$OUT" "closed open incidents for a healthy run" \
+  "118. … and never claims closes it deferred"
+assert_contains "$OUT" "incidents left UNCHANGED" \
+  "118. … saying instead that self-heal changed nothing"
+assert_contains "$OUT" "backed up normally" \
+  "118. … and qualifies the sweep arm by what it measured"
+# Review C5: the same terminal line used to carry a CATEGORICAL "backups are NOT
+# the part that failed". This arm exits before the NO_COVERAGE one, so a run
+# whose sweep really did fail ended on a line denying the fault its own output
+# had just measured — and its SWEEP_NO_COVERAGE arm never ran. Re-run the
+# aws-missing case with a FAILED sweep and require the contradiction gone.
+export STUB_SWEEP_BODY='{"status":"error","graph_totals":{"attempted":1,"backed_up":0}}'
+set +e
+FOUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+FRC=$?
+set -e
+assert_eq "$FRC" 1 "118. a failed sweep is still RED with the CLI missing"
+assert_not_contains "$FOUT" "backups are not the part that failed" \
+  "118. … and the terminal line does NOT deny the sweep fault the run just measured"
+assert_contains "$FOUT" "SECOND fault" \
+  "118. … it names the coverage fault the missing CLI left unfiled"
+# Review C6: `degraded` is backed_up-with-per-graph-errors — the sweep-status case
+# takes `backed_up|degraded ;;` and leaves NO_COVERAGE=0 (suite 31a/46 pin that), so
+# a coverage fault was neither detected nor attempted. The first C5 fix invented
+# one anyway; this arm must NOT claim an incident that does not exist.
+export STUB_SWEEP_BODY='{"status":"degraded","graph_totals":{"attempted":2,"backed_up":1,"error":1}}'
+set +e
+DOUT="$(PATH="$FIX/noaws" "$DRIVER" 2>&1)"
+DRC=$?
+set -e
+assert_eq "$DRC" 1 "118. a degraded sweep is still RED with the CLI missing"
+assert_not_contains "$DOUT" "SWEEP_NO_COVERAGE incident could not be filed" \
+  "118. … and no coverage incident is invented for a status that never files one"
+assert_contains "$DOUT" "coverage is not the part that failed" \
+  "118. … degraded is reported as backed-up coverage, per its own classification"
+assert_contains "$OUT" "RED: the aws CLI is missing" \
+  "118. the terminal line names the cause, not just 'a broken pipeline'"
+# The unfiled notice must report the run's OWN detection, not assert the condition
+# (review P2): SWEEP_OFF_STALE's "pool unverifiable" arm fires BECAUSE the pool could
+# not be measured — its own body says freshness "cannot be established" — so a
+# universal "The condition is real" asserted a stale pool that was never listed.
+assert_contains "$OUT" "what this run measured" \
+  "118. the unfiled notice reports this run's own detection"
+assert_not_contains "$OUT" "The condition is real" \
+  "118. … instead of asserting a condition the 'pool unverifiable' arm never measured"
+# The heartbeat is the driver's audit record of its own r2_ok, and this run never
+# probed R2 (review P2): `false` would publish a reachability verdict the runner
+# could not take. Only a missing-CLI run produces null, so no other case can
+# satisfy this.
+assert_contains "$(cat "$LOG.heartbeat" 2>/dev/null)" '"r2_ok":null' \
+  "118. the driver heartbeat records r2_ok as UNMEASURED (null), not a measurement it never took"
+
+# ── 119. #12135: the declaration side is honest about both runner families ─
+# ensure-aws-cli.sh is the half that PREVENTS case 118 in production, so its
+# no-op branch is the one that has to be exact: GitHub-hosted runners already
+# have the CLI and must pay nothing (no network, no download). The pin is
+# asserted because this runs inside an hourly DR cron — an unverified download
+# would put third-party bytes on the path that decides whether backups and DR
+# alerts work.
+ENSURE="$SCRIPT_DIR/ensure-aws-cli.sh"
+mkdir -p "$FIX/awsok"
+cat > "$FIX/awsok/aws" <<'AWSOK_EOF'
+#!/usr/bin/env bash
+echo "aws-cli/2.31.27 Python/3.11.9 Linux/exe/x86_64"
+AWSOK_EOF
+chmod +x "$FIX/awsok/aws"
+set +e
+# NOTE: invoked DIRECTLY (it carries a shebang + exec bit), never `bash <path>`:
+# the worktree guard reads a `bash <script>` invocation as unverifiable script
+# indirection and blocks it (`run_driver` above carries the same note).
+EOUT="$(PATH="$FIX/awsok:$BASE_PATH" GITHUB_PATH="" "$ENSURE" 2>&1)"
+ERC=$?
+set -e
+assert_eq "$ERC" 0 "119. a runner that already has the CLI is a no-op (exit 0)"
+assert_contains "$EOUT" "already installed" "119. … and says so instead of reinstalling"
+assert_not_contains "$EOUT" "downloading" \
+  "119. … with no download, so GitHub-hosted runners pay nothing"
+assert_match "$(grep -E '^PIN_VERSION=' "$ENSURE")" '="[0-9]+\.[0-9]+\.[0-9]+"' \
+  "119. the CLI version is pinned to an exact release"
+for v in PIN_SHA256_X86_64 PIN_SHA256_AARCH64; do
+  assert_match "$(grep -E "^$v=" "$ENSURE")" '="[0-9a-f]{64}"' "119. $v is a 64-hex digest"
+done
+assert_file_match "$ENSURE" 'sha256sum --check --status' \
+  "119. the installer source carries a digest check"
+# The download is bounded per attempt (review P2): `--retry 3 --max-time 300`
+# allowed ~20 min against ≈12 min of job headroom, so a HANGING mirror could get
+# the driver killed mid-sweep by the job ceiling. Both halves are pinned — this
+# per-attempt bound and the workflow's whole-leg `timeout` below.
+assert_file_match "$ENSURE" '--max-time 120' \
+  "119. each download attempt is time-bounded well inside the job's headroom"
+# The workflow half needs its own pin (review P2): `continue-on-error` is what
+# keeps a failed install from skipping the hour's sweep, and nothing else in the
+# suite reads it — deleting the flag, or the step, used to leave the suite green.
+WF="$SCRIPT_DIR/../workflows/registry-backup-cron.yml"
+assert_file_match "$WF" '^        continue-on-error: true$' \
+  "119. the install step cannot fail the job and skip the hour's sweep"
+assert_file_match "$WF" 'run: timeout [0-9]+ bash \.github/scripts/ensure-aws-cli\.sh' \
+  "119. the workflow runs the installer UNDER A TIME BOUND (a hanging download must not eat the job ceiling — review P2)"
+# The digest check must FAIL CLOSED on a tampered/incomplete archive, and it must
+# fail BEFORE anything lands on PATH (review P2: a source grep cannot tell that
+# ordering, and one stray commented line satisfies it). Drive the real code path
+# with a `curl` that serves junk — no network, no 62 MB download.
+#
+# ⛔ The tree the installer discards is named from `uname -m`, so every seeded
+# path below must be derived the same way (review C4: hardcoding x86_64 made an
+# arm64 host report a false red on the discard assertion while its "installs
+# NOTHING" sibling passed vacuously — the host-dependence C1 removed from case
+# 118, reintroduced one case later). The version comes from the script too, so a
+# deliberate pin bump does not silently un-name these trees.
+TPIN="$(sed -n 's/^PIN_VERSION="\([^"]*\)".*/\1/p' "$ENSURE" | head -1)"
+case "$(uname -m)" in
+  x86_64|amd64)  TARCH=x86_64 ;;
+  aarch64|arm64) TARCH=aarch64 ;;
+  *)             TARCH="" ;;
+esac
+if [ -z "$TPIN" ]; then bad "119. could not read PIN_VERSION from the installer"; fi
+if [ -z "$TARCH" ]; then
+  # The installer refuses an unpinned arch outright, so there is no install path
+  # to exercise — say so instead of asserting against a tree nobody builds.
+  ok "119. install-path assertions skipped — host arch $(uname -m) has no pinned AWS CLI build"
+else
+TREE="aws-cli-${TPIN}-${TARCH}"
+mkdir -p "$FIX/tamper"
+cat > "$FIX/tamper/curl" <<'TAMPER_EOF'
+#!/usr/bin/env bash
+# Stands in for a download: write junk to the -o/--output target and succeed, so
+# the only thing standing between a tampered archive and an installed CLI is the
+# digest. Both spellings are handled — the installer uses `--output`, and a stub
+# that matched only `-o` wrote to an EMPTY path, which made the script die at the
+# curl step and would have passed the "nothing installed" assertion for the
+# wrong reason.
+out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--output) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -z "$out" ]; then echo "tamper-curl: no --output given" >&2; exit 2; fi
+printf 'not-a-real-awscli-archive' > "$out"
+TAMPER_EOF
+chmod +x "$FIX/tamper/curl"
+set +e
+TOUT="$(PATH="$FIX/tamper:$FIX/noaws" GITHUB_PATH="" RUNNER_TOOL_CACHE="$FIX/toolcache" \
+  "$ENSURE" 2>&1)"
+TRC=$?
+set -e
+assert_eq "$TRC" 1 "119. a tampered archive exits non-zero (fail closed)"
+assert_contains "$TOUT" "sha256 MISMATCH" "119. … naming the digest failure"
+assert_eq "$([ -e "$FIX/toolcache/${TREE}/bin/aws" ] && echo present || echo absent)" "absent" \
+  "119. … and installs NOTHING (no aws on PATH from a rejected archive)"
+# A BROKEN cached tree must not be trusted either (review P1: a cancelled install
+# leaves $root/v2/<version> with no working bin/aws, and the installer then skips
+# the re-install, wedging the host forever). The probe must run the binary, not
+# just stat it — so a cache holding a broken `aws` must fall through to the
+# download (and here, to the digest failure).
+mkdir -p "$FIX/toolcache-broken/${TREE}/bin"
+cat > "$FIX/toolcache-broken/${TREE}/bin/aws" <<'BROKEN_EOF'
+#!/usr/bin/env bash
+exit 1
+BROKEN_EOF
+chmod +x "$FIX/toolcache-broken/${TREE}/bin/aws"
+set +e
+BOUT="$(PATH="$FIX/tamper:$FIX/noaws" GITHUB_PATH="" RUNNER_TOOL_CACHE="$FIX/toolcache-broken" \
+  "$ENSURE" 2>&1)"
+BRC=$?
+set -e
+assert_eq "$BRC" 1 "119. a BROKEN cached tree is not reused (the probe runs the binary, so it falls through to the download)"
+assert_contains "$BOUT" "downloading" \
+  "119. … so a stat-only probe cannot call a broken cache good"
+# ⛔ The RE-INSTALL path carries the P1 fix (cycle 2): a cancelled install leaves
+# `$root/v2/<version>` with no working `bin/aws`, the installer then prints
+# "Found same AWS CLI version … Skipping install" and exits 0, and the post-check
+# fails — forever, since the step is continue-on-error. The discard that prevents
+# it must therefore be PINNED, not just present. A pre-seeded partial tree + a
+# tampered download is enough: the discard runs BEFORE the download, so the tree
+# must be GONE even though the run fails at the digest.
+mkdir -p "$FIX/toolcache-partial/${TREE}/v2/${TPIN}"
+printf 'partial install' > "$FIX/toolcache-partial/${TREE}/v2/${TPIN}/marker"
+set +e
+POUT="$(PATH="$FIX/tamper:$FIX/noaws" GITHUB_PATH="" RUNNER_TOOL_CACHE="$FIX/toolcache-partial" \
+  "$ENSURE" 2>&1)"
+PRC=$?
+set -e
+assert_eq "$PRC" 1 "119. a partial install tree still aborts on a bad archive"
+assert_eq "$([ -e "$FIX/toolcache-partial/${TREE}/v2/${TPIN}/marker" ] && echo present || echo gone)" \
+  "gone" "119. … and the unusable tree is DISCARDED first (without it the installer skips and wedges the host forever)"
+# A source-order pin as well: the discard must precede the installer invocation,
+# because moving it later re-creates the wedge while the assertion above (which
+# only sees the pre-download state) would still pass.
+DISCARD_LINE="$(grep -n 'rm -rf "\$root"' "$ENSURE" | head -1 | cut -d: -f1 || true)"
+INSTALL_LINE="$(grep -n 'aws/install" --bin-dir' "$ENSURE" | head -1 | cut -d: -f1 || true)"
+if [ -n "$DISCARD_LINE" ] && [ -n "$INSTALL_LINE" ] && [ "$DISCARD_LINE" -lt "$INSTALL_LINE" ]; then
+  ok "119. the discard precedes the installer call"
+else
+  bad "119. the discard is missing or comes after the installer (discard=${DISCARD_LINE:-none}, install=${INSTALL_LINE:-none})"
+fi
+fi  # TARCH guard
 
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
