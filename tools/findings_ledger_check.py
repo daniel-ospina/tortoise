@@ -922,6 +922,84 @@ def _bare_list_members(masked: str) -> set[str]:
     return out
 
 
+def _listed_letters(sentence: str) -> set[str]:
+    """The letters `sentence` LISTS — its members of a list RUN, in any spelling.
+
+    ⛔ THIS IS *NOT* `_named_letters`, AND THE DIFFERENCE IS A MEASURED FAIL-OPEN (#11902
+    review round 7, P1). `_named_letters` reads a MARKED letter UNCONDITIONALLY, which is
+    correct where the markup IS the claim (verdict ATTRIBUTION: `row (c) still read as
+    written` names `c`), but the COMPLEMENT comparison compares a LIST, and ordinary prose
+    marks letters too: `(i)` is the standard roman-numeral enumerator and `(a)`/`(c)` are
+    this page's own cross-reference idiom. So with a marker read unconditionally, a list
+    that OMITS `i` read CLEAN beside a tail of prose:
+
+        `**(a)**, **(f)**, **(h)** and **(j)** still read as written (see (i)).`  -> CLEAN
+        `**(f)**, **(h)**, **(i)** and **(j)** still read as written, unlike (a).` -> CLEAN
+
+    Both were measured against the shipped page before this function existed; both RED now.
+    ⛔ AND `_bare_list_members` ALONE IS NOT THE FIX: it SKIPS masked items, so it would
+    drop every member of the page's own `**(a)**, **(f)**, **(h)** and **(j)**` spelling —
+    the false-accusation class this arm must not create. Membership here is RUN membership
+    for EVERY spelling: a marked member holds its run together and is counted with it.
+
+    ⛔ THE ONE-MEMBER CASE, STATED RATHER THAN IMPLIED. A run of ONE contributes its item
+    ONLY IF the item is MARKED (bold, code or italic) — never if it is PARENTHESISED. That
+    is not a new rule, it is the page's own candidacy rule applied to the comparison:
+    `PAREN` has always been "a LIST ITEM only, never a standalone match", because a single
+    `row (c) …` in prose is not a list. The consequence is the DECLARED OVER-REFUSAL side
+    of the A/B trade (fail-open is A, over-block is B): a one-member complement written as
+    a lone `(a)` is no longer read, so a table with exactly one STILL-TRUE row must spell
+    it marked (`` `a` `` / `**a**` / `*a*`) rather than parenthesised. The alternative —
+    reading a lone parenthesised letter — is the phantom above, and a false PASS outranks
+    an over-block.
+    """
+    marked: list[tuple[str, bool]] = []
+
+    def _take(match: re.Match[str]) -> str:
+        letter = next(g for g in match.groups() if g).lower()
+        # A PARENTHESISED spelling is the only alternative in `_LETTER_ALT_MARKED` that
+        # begins with `(`; every other one begins with `*` or a backtick.
+        marked.append((letter, match.group(0).startswith("(")))
+        return _MEMBER_MASK
+
+    masked = _NAMED_LETTER_RE.sub(_take, sentence)
+    # ⛔ NOT AN OFFSET MAP. A masked item is ONE character wherever it sat, so `masked`'s
+    # offsets are not the sentence's; `sub` walks its matches left to right, so the k-th
+    # placeholder is the k-th recorded spelling, and the counter below is that pairing.
+    marked_at: dict[int, tuple[str, bool]] = {}
+    seen = 0
+    for pos, char in enumerate(masked):
+        if char == _MEMBER_MASK:
+            marked_at[pos] = marked[seen]
+            seen += 1
+    items = [(m.start(), m.end(), m.group(1)) for m in _RUN_ITEM_RE.finditer(masked)]
+    runs: list[list[tuple[int, int, str | None]]] = []
+    for item in items:
+        if runs and _LIST_SEP_RE.fullmatch(masked[runs[-1][-1][1] : item[0]]):
+            runs[-1].append(item)
+        else:
+            runs.append([item])
+    out: set[str] = set()
+    for run in runs:
+        for pos, (start, end, letter) in enumerate(run):
+            if letter is None:  # a masked item — its letter is in `marked_at`
+                marked_letter, paren_only = marked_at[start]
+                if len(run) >= 2 or not paren_only:
+                    out.add(marked_letter)
+                continue
+            # A BARE member keeps `_bare_list_members`'s two rules verbatim: it is a
+            # member only inside a run of two or more, and `a`/`i` additionally need
+            # separator-side evidence (they are English words).
+            if len(run) < 2:
+                continue
+            if letter.lower() in _PROSELIKE_LETTERS and not _proselike_has_evidence(
+                masked, run, pos, start, end
+            ):
+                continue
+            out.add(letter.lower())
+    return out
+
+
 def _proselike_has_evidence(
     masked: str,
     run: list[tuple[int, int, str | None]],
@@ -1456,6 +1534,20 @@ def check_verdict_tally(text: str) -> list[str]:
     # negate: "**(h)**, **(i)** and **(j)** still read as written — **(c)**, **(d)**,
     # **(e)** and **(g)** do not". Slicing at the verb alone keeps `(c)…(g)` (measured),
     # so the governed group is stripped from the end, separator and dash included.
+    # ⛔ STRIPPING IS NOT VALIDATING, AND IT WAS NOT (#11902 review round 7, P1). The
+    # governed group is the COMPLEMENT of the still-list, so every letter it names must be a
+    # row the table does NOT call STILL-TRUE — a check with no new ambiguity, since the
+    # table is right there. Discarding it instead let the sentence contradict both the table
+    # and ITSELF at rc 0 (measured on the shipped page before this block existed):
+    #
+    #   `… **(a)**, **(f)**, **(h)**, **(i)** and **(j)** still read as written — **(a)** and
+    #   **(f)** do not.`                                -> CLEAN
+    #   `… **(a)**… **(j)** still read as written — **(a)**, **(f)**, **(h)**, **(i)** and
+    #   **(j)** do not.`                                -> CLEAN (contradicts itself, twice)
+    #
+    # The letters are collected as they are stripped, so the group the page WROTE is what
+    # gets validated — never a re-parse of the trimmed clause.
+    governed_letters: list[str] = []
     while True:
         governed = re.search(
             r"(?:\s*(?:,|and|;|—|–|-)\s*)?" + _LETTER_ITEM_ANY + r"\s*$",
@@ -1464,13 +1556,33 @@ def check_verdict_tally(text: str) -> list[str]:
         )
         if not governed:
             break
+        # `_LETTER_ITEM_ANY` is the one spelling list, and its MARKED alternatives are the
+        # only ones with a capture group — so an empty `groups()` means the item is BARE.
+        # The separator branch has no group, so it cannot contribute a phantom letter
+        # (the connector `and` alone would otherwise supply `a` and `d`).
+        marked_group = next((g for g in governed.groups() if g), None)
+        if marked_group:
+            governed_letters.append(marked_group.lower())
+        else:
+            bare = re.search(r"\b([a-l])\b", governed.group(0), re.IGNORECASE)
+            if bare:
+                governed_letters.append(bare.group(1).lower())
         still_clause = still_clause[: governed.start()]
-    named_still = _named_letters(still_clause)
+    # The clause's own members: LIST membership, not every marked letter (see
+    # `_listed_letters` — a marked letter in prose supplied a phantom complement member).
+    named_still = _listed_letters(still_clause)
     if named_still != set(still_true):
         problems.append(
             f"§3 tally: the paragraph's STILL-TRUE list names "
             f"{sorted(named_still) or '(none)'}, but the table's STILL-TRUE rows are "
             f"{still_true}"
+        )
+    wrong_governed = sorted(set(governed_letters) & set(still_true))
+    if wrong_governed:
+        problems.append(
+            f"§3 tally: the negated complement clause names {wrong_governed} as NOT still "
+            f"reading as written, but the table calls those row(s) STILL-TRUE "
+            f"({still_true}) — the sentence contradicts the cells beside it"
         )
 
     expected_overtaken = (

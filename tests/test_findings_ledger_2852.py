@@ -1388,6 +1388,114 @@ def test_the_complement_clause_is_read_in_every_spelling(tmp_path, monkeypatch):
             )
 
 
+def test_a_marked_letter_outside_a_list_run_is_not_a_complement_member(tmp_path, monkeypatch):
+    """FAILS open if a marked letter ANYWHERE in the clause certifies list membership.
+
+    `_named_letters` reads a MARKED letter unconditionally — correct for verdict
+    ATTRIBUTION, where the markup IS the claim, and wrong for the complement COMPARISON,
+    which compares a LIST. Ordinary prose marks letters: `(i)` is the standard
+    roman-numeral enumerator and `(a)`/`(c)` are this page's own cross-reference idiom.
+    Measured on the shipped page before `_listed_letters` existed — both of these read
+    CLEAN with `i` (resp. `a`) missing from the list they were compared against:
+
+        **(a)**, **(f)**, **(h)** and **(j)** still read as written (see (i)).  -> CLEAN
+        **(f)**, **(h)**, **(i)** and **(j)** still read as written, unlike (a). -> CLEAN
+
+    WHY IT IS REACHABLE: the parenthetical cross-reference is this page's normal prose, so
+    a lane that drops a row from the list inherits a green check from the sentence that
+    comments on it. The non-still list was protected by a second arm (verdict
+    attribution); the complement had none.
+
+    ⛔ THE FIX IS RUN MEMBERSHIP FOR EVERY SPELLING, NOT `_bare_list_members` — that
+    helper SKIPS masked items and would drop every member of the page's own
+    `**(a)**, **(f)**, **(h)** and **(j)**` spelling. The one-member case is a DELIBERATE
+    over-refusal, pinned here so a change of mind must move it: a lone PARENTHESISED
+    `(a)` is prose (the page's own candidacy rule: `PAREN` is "a LIST ITEM only, never a
+    standalone match"), so a one-member complement must be spelled marked.
+    """
+    anchor = "**(a)**, **(f)**,\n**(h)**, **(i)** and **(j)** still read as written."
+    # The stale list each mutation writes OMITS a STILL-TRUE row; the only thing that could
+    # certify it is the marked letter carried by the prose tail.
+    for tail in (
+        " (see (i)).",
+        ", unlike (a).",
+        " — cf. (j).",
+    ):
+        stale = "**(a)**, **(f)**, **(h)** and **(j)** still read as written" + tail
+        if "(a)" in tail:
+            stale = "**(f)**, **(h)**, **(i)** and **(j)** still read as written" + tail
+        with monkeypatch.context() as patch:
+            _mutated(tmp_path, patch, lambda t, s=stale: t.replace(anchor, s, 1))
+            problems = _doc_problems()
+            assert any("STILL-TRUE list names" in p for p in problems), (
+                "a marked letter in the prose tail must not certify the complement list: "
+                f"{tail!r} left {problems}"
+            )
+    # The documented spellings still read every member — the run, not the prose, decides.
+    assert flc._listed_letters("Only **(a)**, **(f)**, **(h)**, **(i)** and **(j)**.") == {
+        "a", "f", "h", "i", "j"
+    }
+    assert flc._listed_letters("Only a, f, h, i, j.") == {"a", "f", "h", "i", "j"}
+    # THE OVER-REFUSAL, pinned: a lone parenthesised letter is prose; a lone MARKED one is a
+    # one-member list and is read.
+    assert flc._listed_letters("Only (a) still read as written.") == set()
+    for spelling in ("`a`", "**a**", "*a*"):
+        assert flc._listed_letters(f"Only {spelling} still read as written.") == {"a"}, (
+            f"a one-member complement written {spelling!r} must still be read"
+        )
+
+
+def test_the_negated_complement_clause_is_validated_against_the_table(tmp_path, monkeypatch):
+    """FAILS open if the governed group is STRIPPED and never validated.
+
+    `still_clause = text[: negation.start()]` discards everything after `do not` /
+    `no longer`, so the group it governs was never compared with anything. Measured on the
+    shipped page before this arm existed — BOTH of these read CLEAN:
+
+        … still read as written — **(a)** and **(f)** do not.             (names STILL-TRUE rows)
+        … still read as written — **(a)**, **(f)**, **(h)**, **(i)** and **(j)** do not.
+                                                                   (contradicts itself, twice)
+
+    WHY IT IS REACHABLE: it is the second half of the page's own documented spelling, so a
+    lane editing the complement by hand can name the wrong rows while the tally above it
+    stays correct and the arm stays green. The governed group is the COMPLEMENT of the
+    still-list, so every letter it names must be a row the table does NOT call STILL-TRUE —
+    a check with no new ambiguity, because the table is beside it.
+    """
+    anchor = "**(a)**, **(f)**,\n**(h)**, **(i)** and **(j)** still read as written."
+    # The CORRECT complement stays clean: the arm must not accuse the documented spelling.
+    with monkeypatch.context() as patch:
+        _mutated(
+            tmp_path,
+            patch,
+            lambda t: t.replace(
+                anchor,
+                anchor[:-1] + " — **(c)**, **(d)**, **(e)** and **(g)** do not.",
+                1,
+            ),
+        )
+        assert not any("negated complement" in p for p in _doc_problems())
+    # …while naming a STILL-TRUE row as "does not [still] read" is a self-contradiction.
+    for governed in (
+        "**(a)** and **(f)**",
+        "**(a)**, **(f)**, **(h)**, **(i)** and **(j)**",
+        "(a), (f)",
+        "a, f",
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(
+                tmp_path,
+                patch,
+                lambda t, g=governed: t.replace(
+                    anchor, anchor[:-1] + f" — {g} do not.", 1
+                ),
+            )
+            problems = _doc_problems()
+            assert any("negated complement" in p for p in problems), (
+                f"the governed group {governed!r} names STILL-TRUE rows and must red: {problems}"
+            )
+
+
 def test_a_still_list_may_spell_its_own_complement(tmp_path, monkeypatch):
     """FAILS if the STILL-TRUE list swallows the letters its negation governs.
 

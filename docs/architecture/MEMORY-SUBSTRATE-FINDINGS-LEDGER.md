@@ -383,7 +383,26 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   **complement** list ("still read as written"), which was joined across sentences and compared as a
   set-union: a second complement sentence could assert a STILL-TRUE letter the real sentence does not,
   so the page could say *seven of the twelve no longer read as written* beside *only `**(a)**` still
-  read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). ⚠️ WHAT MAKES A SENTENCE A CANDIDATE IS WIDER THAN "a letter list of two or
+  read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). ⛔ **THE COMPLEMENT IS
+  COMPARED BY LIST MEMBERSHIP, NOT BY EVERY MARKED LETTER.** The extractor reads a marked letter
+  unconditionally, which is right where the MARKUP IS THE CLAIM (a per-letter verdict attribution),
+  and wrong for a LIST: this page's own prose marks letters — `(i)` is the roman-numeral enumerator
+  and `(a)`/`(c)` are its cross-reference idiom — so a stale complement list inherited a green check
+  from the sentence commenting on it (`… and **(j)**` plus a tail reading `(see (i))` left `i`
+  undetected; measured, fixed, pinned). Membership is now run membership for every spelling, so the
+  documented bold/code/italic/bare forms all still read. ⚠️ The one-member case is the DECLARED
+  OVER-REFUSAL that buys it: a lone PARENTHESISED letter is prose (the same rule that keeps a stray
+  `(c)` out of candidacy), so a complement naming a single row must write it marked — `a` in code,
+  bold or italic — rather than as a bare parenthetical. ⛔ **AND THE CLAUSE THE NEGATION GOVERNS IS
+  VALIDATED, NOT DISCARDED.** Everything after `do not` / `no longer` used to be sliced off unread, so
+  the group it governs could name any rows at all — including the STILL-TRUE ones, i.e. the sentence
+  could contradict the table and itself at rc 0 (measured, fixed, pinned). It is the complement, so
+  every letter it names must be a row the table does NOT call STILL-TRUE. ⚠️ **Residual, stated:** the
+  "exactly one" rule is scoped to the tally's own paragraph, so a second complementary or "no longer"
+  sentence **two newlines below** it is not counted. Widening it to the whole page is not available
+  (this section discusses both phrases) and a section-scoped widening is not yet measured, so read it
+  as a known hole rather than a guarantee (#12028).
+  ⚠️ WHAT MAKES A SENTENCE A CANDIDATE IS WIDER THAN "a letter list of two or
   more", and the code says so: a sentence qualifies if EITHER the four-form gate matches — which
   admits a SINGLE marked letter (``Note `c` still read as written.`` is a candidate on one letter) — OR
   the extractor names two or more letters, in any spelling and with NO join required between them
@@ -417,9 +436,12 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   evidence to consult — a choice, not a proof (see the residuals below);
   and the END of a run is read only when the sentence's own ending follows — a full stop that
   does not begin an abbreviation, the end of the sentence, a closing parenthesis (`)`; the
-  class is `[):—–]`, so `]` and `}` are not accepted), a colon or an em/en dash (a plain
-  hyphen is not accepted), or one of the list's own predicates as a whole word
-  (`still read` yes, `still-unsolved` no). ⛔ A bare comma is NOT an ending for the last item:
+  class is `[):—–]`, so `]` and `}` are not accepted), a colon or an em/en dash (a plain  hyphen is not accepted), or one of the list's own predicates as a whole word
+  (`still read` yes, `still-unsolved` no). ⛔ **SCOPE OF THAT RULE, STATED BECAUSE THE PAGE ONCE
+  OVERSTATED IT:** the ending test is consulted for `a` and `i` ONLY, since they are the only single
+  letters that are also English words — every other bare member is decided by the run it sits in, so
+  `b, c, d` followed by ordinary prose reads all three. A one-letter run is never a list, in either
+  form. ⛔ A bare comma is NOT an ending for the last item:
   a comma there means the
   run did not end, so `Only a, f, h, i, and then some.` must not read `i` (measured — an
   ordering that tested the LEFT side first did read it). ⚠️ FIVE OVER-READINGS remain open and
