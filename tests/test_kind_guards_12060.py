@@ -2329,6 +2329,96 @@ depends_on: []
         assert reg.errors == {}, reg.errors
         assert "acme" in reg.packs
 
+    def test_validation_is_TOTAL_for_a_malformed_value(self):
+        """A malformed VALUE must be a message, never an exception — #8661's class.
+
+        Round-15 review P2, measured: the previous commit's seven guards were
+        pinned by NOTHING. A full revert of them left the whole suite green
+        (`417 passed`) while `objectKinds: [[w]]` raised
+        `TypeError: unhashable type: 'list'` again — the round's own evidence line
+        could not tell the two builds apart. Each shape below raises on the
+        reverted build and names its field on this one.
+
+        ⛔ AND THE MESSAGE MUST NOT DENY A DECLARATION THAT IS RIGHT THERE: an
+        invalidly-typed axis kind used to produce, beside the real error,
+        `references 'widget' which is not declared in this pack`.
+        """
+        import pathlib as _pathlib
+        import tempfile
+
+        from tortoise.pack_registry import PackRegistry
+
+        def errors(body):
+            d = _pathlib.Path(tempfile.mkdtemp())
+            (d / "acme").mkdir()
+            (d / "acme" / "manifest.yaml").write_text(
+                "namespace: acme\nname: Acme\nversion: \"0.1.0\"\ntier: free\n"
+                + body + "depends_on: []\n")
+            reg = PackRegistry(d)
+            reg.load_all()
+            return " ".join(reg.errors.get("acme") or [])
+
+        def guard(rule):
+            return f"""ontology:
+  extends: core
+  objectKinds: [widget]
+  guards:
+  - kind: widget
+    layer: object
+    onConfusion:
+      - when: nameMatches
+        pattern: '^x-[0-9]+$'
+        rule: {rule}
+        redirect: core:WorkItem
+        fallback: core:WorkItem
+        reason: r
+"""
+
+        cases = (
+            ("ontology:\n  extends: core\n  objectKinds: [[widget]]\n",
+             "ontology.objectKinds: invalid kind value"),
+            ("ontology:\n  extends: core\n  pointKinds: [{x: 1}]\n",
+             "ontology.pointKinds: invalid kind value"),
+            ("ontology:\n  extends: core\n  objectKinds: [widget]\n"
+             "  equivalentTo:\n    widget: [1]\n",
+             "equivalentTo: target for 'widget'"),
+            ("ontology:\n  extends: core\n  objectKinds: [widget]\n"
+             "  kindDefs:\n    widget:\n      description: d\n"
+             "      storeAs: [[1]]\n",
+             "kindDefs 'widget': 'storeAs'"),
+            ("ontology:\n  extends: core\n  objectKinds: [widget]\n"
+             "  kindDefs:\n    widget:\n      description: d\n"
+             "      enforcement: [warn]\n",
+             "kindDefs 'widget': 'enforcement'"),
+            ("ontology:\n  extends: core\n  objectKinds: [widget]\n"
+             "  chains:\n    - id: c1\n      steps: [a, b]\n"
+             "      enforcement: [warn]\n",
+             "chains: 'c1': 'enforcement'"),
+            (guard("[r1]"), "onConfusion[0].rule: must be a non-empty string"),
+        )
+        for body, token in cases:
+            joined = errors(body)
+            assert token in joined, (token, joined)
+            for raw in ("unhashable", "object is not", "has no attribute",
+                        "Traceback"):
+                assert raw not in joined, (token, raw, joined)
+
+        # the invalid axis kind does not ALSO claim the kind is undeclared
+        bad_axis = errors(
+            "ontology:\n  extends: core\n  objectKinds: [[widget]]\n"
+            "  relations:\n    - predicate: usesThing\n      mechanism: IMPL\n"
+            "      fromKind: acme:widget\n      toKind: acme:widget\n")
+        assert "not a VALID kind there" in bad_axis, bad_axis
+        assert "is not declared in this pack" not in bad_axis, bad_axis
+
+        # ── and the valid values stay accepted, so these are shape guards only
+        for store in ("claim", "decision", "entity", "event", "tag"):
+            assert "storeAs" not in errors(
+                "ontology:\n  extends: core\n  objectKinds: [widget]\n"
+                "  kindDefs:\n    widget:\n      description: d\n"
+                f"      storeAs: {store}\n"), store
+        assert "rule" not in errors(guard("my-rule"))
+
     def test_a_fromKinds_scope_naming_no_CORE_kind_is_refused(self):
         """`core:WrokItem` is a typo the own-namespace arm cannot see.
 

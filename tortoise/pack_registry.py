@@ -2184,12 +2184,14 @@ class PackRegistry:
             #
             # ⛔ ONLY STRINGS — an unhashable element (`objectKinds: [[widget]]`)
             # passed every container arm and then raised `TypeError: unhashable
-            # type: 'list'` straight out of `_validate`, which its own contract
-            # forbids ("Return errors list"); `load_all`'s except turned it into
+            # type: 'list'` straight out of `_validate`, whose `-> list[str]`
+            # contract forbids it (#8661, the "validator not total" class);
+            # `load_all`'s except turned it into
             # `✗ acme: unhashable type: 'list'` — no field, no index (round-14
             # review P2, measured). The element loop above already refuses a
             # non-string with a NAMED message, so this filter stops the set-build
-            # from outrunning it.
+            # from outrunning it. This closes the KIND-AXIS half of #8661; the
+            # relations/namespace shapes of that class are recorded there.
             for kf in KIND_FIELDS:
                 all_pack_kinds.update(
                     k for k in (ont.get(kf) or []) if isinstance(k, str))
@@ -2244,10 +2246,30 @@ class PackRegistry:
                             elif ref_ns == ns:  # noqa: SIM102
                                 # Self-reference — must be in this pack's kinds
                                 if ref_kind not in all_pack_kinds:
+                                    # ⛔ "NOT DECLARED" IS FALSE WHEN IT IS
+                                    # declared INVALIDLY (round-15 review P3,
+                                    # measured): `objectKinds: [["widget"]]` plus a
+                                    # relation to `acme:widget` printed this
+                                    # alongside the real `invalid kind value`
+                                    # error, sending the author to look for a
+                                    # missing declaration that is right there.
+                                    _declared_badly = any(
+                                        _v == ref_kind
+                                        or (isinstance(_v, list)
+                                            and ref_kind in _v)
+                                        for _kf in KIND_FIELDS
+                                        if isinstance(ont.get(_kf), list)
+                                        for _v in ont[_kf])
                                     errors.append(
                                         f"relation '{pred}': {direction} '{kind_val}' "
-                                        f"references '{ref_kind}' which is not "
-                                        f"declared in this pack"
+                                        f"references '{ref_kind}' "
+                                        + (
+                                            "which is declared on a *Kinds axis "
+                                            "but is not a VALID kind there (see "
+                                            "the ontology.*Kinds error above)"
+                                            if _declared_badly else
+                                            "which is not declared in this pack"
+                                        )
                                     )
                             # Cross-pack refs (ref_ns != ns): validate in load_all()
                         else:
@@ -3217,6 +3239,16 @@ class PackRegistry:
                     errors.append(f"{cw}: expected a map")
                     continue
                 rule = c.get("rule") or f"{ns}:{kind_ref}:{j}"
+                if not isinstance(rule, str) or not rule.strip():
+                    # ⛔ `rule: [r1]` raised `TypeError: unhashable type: 'list'`
+                    # out of `_validate` — on THIS feature's own surface, one
+                    # side of the seen_rules dedupe (round-15 review P2,
+                    # measured). The id is echoed into every problem string, so a
+                    # non-string one breaks the report as well as the dedupe.
+                    errors.append(
+                        f"{cw}.rule: must be a non-empty string — got "
+                        f"{type(rule).__name__}")
+                    rule = f"{ns}:{kind_ref}:{j}"
                 if rule in seen_rules:
                     errors.append(f"{cw}: duplicate rule id '{rule}'")
                 seen_rules.add(str(rule))
