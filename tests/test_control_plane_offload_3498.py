@@ -416,8 +416,11 @@ def test_a_domain_failure_that_lands_with_the_bound_is_not_a_bound_miss():
     ``run_control_plane_call`` disambiguates THREE ``TimeoutError``s by
     inspecting the future, but a bare ``raise`` in the ``except TimeoutError``
     arm re-raises the BOUND's expiry — the one this coroutine MINTS — so a
-    domain failure that merely landed as the bound fired is reported as
-    "exceeded its 0.05s bound". The class is identical, so nothing upstream can
+    domain failure that merely landed as the bound fired is reported as the
+    seam's own bare ``TimeoutError`` (empty message, ``context=CancelledError``
+    — measured on the pre-fix bodies), and never as the
+    ``ControlPlaneOffloadError`` ("... exceeded its 0.05s bound") its bound-miss
+    path builds. The class is identical, so nothing upstream can
     tell the two apart: ``_cp_offload`` maps only ``ControlPlaneOffloadError``,
     so the mislabelled error escapes as a bare unlabelled 500 and skips every
     arm the route declares (the measured case: ``/v1/search``'s
@@ -441,8 +444,14 @@ def test_a_domain_failure_that_lands_with_a_re_armed_bound_is_not_a_bound_miss()
 
     ``reawait_control_plane_call`` carries the same discrimination — and the
     same bare ``raise`` — so a re-awaited read whose callable failed on its own
-    while the re-armed bound expired reported a ``bound_miss_running``
-    saturation event for a pool that was never saturated.
+    while the re-armed bound expired reported the BOUND's ``TimeoutError`` and
+    discarded the callable's own failure.
+
+    Pre-fix the recorded ``outcome`` stays ``domain_error``: the bare ``raise``
+    returns before ``outcome = "bound_miss_running"`` is assigned, so the
+    saturation child was never incremented for this ordering. That is why this
+    row pins the propagated EXCEPTION and not the recorded label — asserting
+    ``bound_miss_running`` here would prove nothing about the fix.
     """
     def _boom():
         raise ValueError("store exploded")
