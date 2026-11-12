@@ -77,9 +77,9 @@ Three consequences decide the shape of the measurement, and none of them was on 
 ## 2. Method, and what is real
 
 The harness runs the real code path: names harvested from this box's **real capture corpus**
-(`~/.tortoise/session-events`, 9 daily files, 8,218 real session records, 45.3 M characters — **as of the
-measurement run**; the corpus is live, so re-measure rather than trusting the record count and the character
-total, which the artifact does not carry — the file count it does carry, as `corpus.files`) into a **real FalkorDB**
+(`~/.tortoise/session-events`, 9 daily files — **as of the measurement run**; the corpus is live, so re-measure
+rather than trusting any census beyond the file count, which is the one the artifact carries, as `corpus.files`)
+into a **real FalkorDB**
 through the real projection (`_upsert_object`, id-keyed per `#3590`), queried by `sdk.tortoise_fts_query` with the
 exact flags `_fts_rows` passes (`include_terminal=True`, `_record_reads=False`, `_valid_time_rerank=False`) and
 production's own query sanitisation.
@@ -121,8 +121,12 @@ The capture prior is the **fused** read. A venv without the `embeddings` extra h
 `battery/runner/retrieval_preflight.py` names (*"the numbers were published as product measurements"*). So both
 modes were measured and both artifacts are committed; each records which mode ran in its `retrieval` block
 (`has_embedder`, `legs_seen`), and the note there is derived from the **legs that actually ran**, not from the
-embedder being available — a model that loads and whose leg then fails to answer is labelled
-`KEYWORD-ONLY DESPITE AN EMBEDDER`, because that is a different measurement again. The two runs sampled the same
+embedder being available — a run whose dense leg never answered a single query is labelled
+`KEYWORD-ONLY DESPITE AN EMBEDDER`, because that is a different measurement again. ⚠️ `legs_seen` answers *did this
+leg run at all during the sweep*, not *on how many queries*: the harness accumulates each leg once-True across
+every query of the sweep, so a leg that answers the first few and then fails (an encode failure, an open breaker)
+still labels the whole run `hybrid`, and `retrieval` carries no per-query failure count to see it. The label is a
+floor, not a certificate; a per-query denominator would need the artifacts regenerated. The two runs sampled the same
 live corpus but not the identical population (§2).
 
 ---
@@ -328,9 +332,12 @@ from the evidence.
 §3, §3.1, §4 (both the arm table and the decomposition) and §5 (§5's first row is the DEFINITIONAL baseline — no
 harness has a prior-off arm — and is pinned as text); §3's prose derivatives (past-this-k, absent-at-15, the
 identifier share, the crowding mean and median); §6's and §7's restatements (the recall pair, the pooled mean, the
-fold's two denominators, the width residual, the class deltas, the wall clock); and §8's `rows_zero` claim. **Not
-pinned:** §2's corpus census (file count, record count, characters — the artifact carries only the first, and the
-corpus is live). One unpinned sentence is the honest state; an unpinned TABLE is not.
+fold's two denominators, the width residual, the class deltas, the wall clock); §2's between-run drift (the
+`corpus.harvested_distinct` pair and the percentage between them) and §3's keyword-only miss split and k=5 mean
+rank; and §8's `rows_zero` claim. **Not pinned:** the file count is carried as `corpus.files`, but the corpus is
+live, so nothing about its growth is pinned — and the record and character totals this section used to quote are
+gone: they were not in the artifact and did not reproduce against the corpus they named. One unpinned sentence is
+the honest state; an unpinned TABLE is not.
 
 ## 10. Write-back
 

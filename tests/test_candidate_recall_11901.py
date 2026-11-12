@@ -592,6 +592,34 @@ def test_the_briefs_restatements_all_recompute(report, control):
     assert f"(median {median:g})" in text, (
         f"§3 does not state the recomputed crowding median ({median:g})")
 
+    # ── §3: the keyword-only miss split and the k=5 mean rank. Both DERIVED
+    # (28 + 106 = 134; rank_sum / in_window), and both were unpinned until a
+    # review round mutated them with a green suite — the "derived figure, not
+    # the stored one" class the k=3 mean-rank guard above already closed for
+    # ONE of the two ranks.
+    ck3 = control["arms"]["exact"]["3"]
+    kw_past, kw_absent = ck3["miss_past_k"], ck3["miss_absent_at_max_k"]
+    assert (f"Keyword-only: {kw_past} of {kw_past + kw_absent}, "
+            f"with {kw_absent} absent at 15") in text, (
+        "§3 does not state the recomputed keyword-only miss split "
+        f"({kw_past} + {kw_absent})")
+    h5 = report["arms"]["exact"]["5"]
+    mean_rank5 = h5["rank_sum"] / h5["in_window"]
+    assert f"{mean_rank5:.1f} at k=5" in text, (
+        f"§3 does not state the k=5 mean rank ({mean_rank5:.1f})")
+
+    # ── §2: the between-run drift. `corpus.harvested_distinct` IS in the
+    # artifact, so this pair and the percentage derived from it are pinnable —
+    # they were simply never pinned, which is how §9 could claim the artifact
+    # carried no corpus census at all.
+    d_hyb = report["corpus"]["harvested_distinct"]["definite"]
+    d_ctl = control["corpus"]["harvested_distinct"]["definite"]
+    drift = 100 * (d_ctl - d_hyb) / d_hyb
+    assert f"{d_hyb:,} (hybrid) and {d_ctl:,} (control)" in text, (
+        f"§2 does not state the harvested_distinct pair ({d_hyb:,} / {d_ctl:,})")
+    assert f"a {drift:.2f} % drift" in text, (
+        f"§2 does not state the recomputed between-run drift ({drift:.2f} %)")
+
     # ── §6: the headline restated in the external-findings section.
     exact = report["arms"]["exact"]
     n = report["corpus"]["sample"]
