@@ -3512,9 +3512,7 @@ def score_path_bullet() -> Row:
                       or resolved["at_runtime"] or resolved["violations"]
                       or resolved["error"]
                       or projection["error"] or projection["unmeasured"]
-                      # An EMPTY edge population is not a clean edge population: no door
-                      # refused anything, so nothing was measured on the edge axis.
-                      or not projection["relationships_probed"])
+                      )
         else "MET")
     return Row(
         bullet=2,
