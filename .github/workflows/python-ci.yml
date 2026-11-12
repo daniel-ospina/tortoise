@@ -4753,14 +4753,15 @@ jobs:
           if [ -n "${ImageOS:-}" ]; then
             identity="$identity hosted-image=${ImageOS}/${ImageVersion:-unknown}"
           fi
-          # ⛔ THREE WAYS THIS STEP CAN FAIL TO GET A pg16 CLIENT, AND EACH ONE IS NAMED.
+          # ⛔ FOUR WAYS THIS STEP CAN FAIL TO GET A pg16 CLIENT, AND EACH ONE IS NAMED.
           # Under `set -e`/`set -u` every one of them would otherwise surface as apt's, curl's
           # or the shell's own text — which reads as a typo in THIS step rather than as the
           # client's SOURCE failing under a drill whose artifact depends on the client's major
           # (#12051). They are guarded SEPARATELY because they have different remedies:
           #   1. the signing key cannot be FETCHED (egress/DNS/503) — guarded at the fetch;
-          #   2. the repo does not RESOLVE once added (suite name, key, archive) — `apt-get update`;
-          #   3. the repo resolves but has no `postgresql-client-<major>` — the probe below.
+          #   2. the box carries no VERSION_CODENAME, so there is no suite to name — guarded below;
+          #   3. the repo does not RESOLVE once added (suite name, key, archive) — `apt-get update`;
+          #   4. the repo resolves but has no `postgresql-client-<major>` — the probe below.
           # ⚠️ The key fetch and the `apt-get update` are BOTH fatal on purpose: swallowing
           # either would let the install fall back to the DISTRO archive, which carries whatever
           # major the release ships and is the mechanism #12051 round 1 died on.
@@ -4787,7 +4788,15 @@ jobs:
             exit 1
           fi
           if ! apt-cache show postgresql-client-16 >/dev/null 2>&1; then
-            echo "::error::postgresql-client-16 is not resolvable from ANY configured archive on this runner [$identity] — BOTH provisioned servers are pg16 and the drill's client major is part of the artifact's contract (#12051), so it cannot run here. apt-get update SUCCEEDED, so the PGDG repo resolved; this branch means the package is absent from it. SELF-HOSTED runner: this box may not be the release that claims the label, i.e. the routing drift #10289 — on it run CI_RUNNER_OS_LABEL=off tools/install-ci-runner-x64.sh --repair-labels --count <N> (an on/auto install KEEPS the pin, so a BARE --repair-labels changes nothing)."
+            # ⛔ THIS BRANCH'S REMEDY IS NAMED FROM ITS OWN CAUSE, not from release drift.
+            # MEASURED, review cycle 4 of `3c2946ce9c`: the committed step exits 0 on
+            # `ubuntu:26.04` — the very "box is not the release that claims the label"
+            # case — because `${VERSION_CODENAME}-pgdg` is resolute's own suite and PGDG
+            # publishes 16 for it; and a release PGDG does NOT publish (no suite) exits
+            # 100 at `apt-get update`, i.e. the guard ABOVE. So #10289 routing drift cannot
+            # land here, and the old `--repair-labels` remedy here was advice that could
+            # not change apt's answer.
+            echo "::error::a PGDG suite RESOLVED but carries no postgresql-client-16 for this codename [$identity] — apt-get update succeeded and the probe still found nothing, so this is the PACKAGE, not the repo. BOTH provisioned servers are pg16, so this job cannot run here (#12051): either the pin and the two 'pgvector/pgvector:pg16' servers must move together, or '${VERSION_CODENAME:-this release}' is one PGDG no longer publishes PG16 for (it keeps a rolling window of versions). Check 'apt-cache policy postgresql-client-16' and the suite derived from /etc/os-release."
             exit 1
           fi
           sudo apt-get install -y --no-install-recommends postgresql-client-16

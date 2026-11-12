@@ -446,6 +446,36 @@ def _runs_on_labels(job: dict) -> list[str]:
     return [str(label) for label in runs_on]
 
 
+def test_no_reserved_error_message_asks_the_shell_to_do_something(job: dict) -> None:
+    """⛔ A BACKTICK INSIDE `echo "…"` IS COMMAND SUBSTITUTION, WHICH SILENTLY EDITS THE MESSAGE.
+
+    MEASURED TWICE WHILE BUILDING #12051 — cycle 1 and again in cycle 5. A message like
+    ``echo "::error::… via `/etc/os-release`'s …"`` does not print the filename: bash RUNS
+    it, the span is replaced by its (empty) stdout, and the diagnostic loses the very token
+    a reader needs. When the span happens to be a command that exists, the step EXECUTES it.
+
+    Nothing else in this file could see that: every other assertion only asks whether
+    `::error::` and `exit 1` are PRESENT, so a mangled message passes all of them. This is
+    the one property of the printed text no evidence-shaped assertion covers, so it is
+    asserted structurally, over every `echo` in the step: no backticks, and no unescaped
+    `$(…)` either (same substitution, same silent edit).
+    """
+    _, pin = _pin_step(_steps(job))
+    offenders: list[str] = []
+    for line in _code_only(_run_text(pin)).splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("echo "):
+            continue
+        if "`" in stripped or "$(" in stripped:
+            offenders.append(stripped[:140])
+    assert not offenders, (
+        "a message this step PRINTS asks the shell to substitute something — a backtick "
+        "or `$(` inside a double-quoted `echo` runs as a command and its output replaces "
+        "the text, so the diagnostic silently loses (or executes) that span. Name the "
+        "thing in plain words or single quotes: " + repr(offenders)
+    )
+
+
 def test_the_pin_runs_on_a_named_image_that_carries_the_servers_major(job: dict) -> None:
     """The image is NAMED, and its release has been measured for this major.
 
@@ -610,15 +640,21 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
     # stayed GREEN, while the equivalent `install -D -m 0644 …` (which creates the
     # leading components; verified rc=0) FALSE-REDDED.
     key_install = re.search(
-        r"install\s+(?P<flags>-[A-Za-z]+)\s+[^\n]*apt\.postgresql\.org\.asc", code
+        r"install\s+[^\n]*apt\.postgresql\.org\.asc", code
     )
     assert key_install, (
         "the PGDG keyring is never installed with `install … apt.postgresql.org.asc` — "
         "the `signed-by` on the sources line would point at nothing"
     )
-    if "D" not in key_install.group("flags"):
-        # `-D` creates the leading components itself; without it the directory must be
-        # created FIRST, and that ordering is the whole fact.
+    # ⛔ `-D` IS SEARCHED ACROSS EVERY OPTION TOKEN on that line, not just the first.
+    # `install -D -m 0644 …` and `install -m 0644 -D …` are the SAME behaviour (both
+    # create the leading components; verified rc=0 in a container), and reading only
+    # the first token false-redded the second spelling — measured, review cycle 4 of
+    # `3c2946ce9c`. The lowercase `-d` of the `mkdir` form is a different flag and
+    # does not appear on the key-install line, so `D` alone is the discriminator.
+    creates_dirs = re.search(r"(?:^|\s)-[A-Za-z]*D", key_install.group(0))
+    if not creates_dirs:
+        # Without `-D` the directory must be created FIRST, and that ordering is the fact.
         mkdir = re.search(
             r"install\s+(?:-[A-Za-z]+\s+)*-d\s+/usr/share/postgresql-common/pgdg", code
         )
