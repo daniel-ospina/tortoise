@@ -366,7 +366,7 @@ _ALIASABLE_CALL_NAMES: frozenset[str] = (
 #:     cannot see an aliased call), so dropping a doubtful alias makes the writer INVISIBLE
 #:     (measured `{}`), which is the empty-map fail-open this module exists to close. There,
 #:     over-credit is the safe direction.
-#: `_is_alias_home` is the one place that encodes the split; both readers use it.
+#: `_accepted_homes` is the one place that encodes the split; both readers call it.
 _ALIAS_HOMES: dict[str, frozenset[str]] = {
     "set_embedding_clause": frozenset({"tortoise.vector_write", "vector_write"}),
     "clear_then_set_prefix": frozenset({"tortoise.vector_write", "vector_write"}),
@@ -750,29 +750,6 @@ def _import_aliases(*roots: ast.AST, own_scope_only: bool) -> dict[str, str]:
                     continue  # a same-named function from somewhere else is not this seam
                 found[alias.asname or alias.name] = alias.name
     return found
-
-
-def _is_alias_home(name: str, module: str, level: int) -> bool:
-    """Whether an `ImportFrom` binds `name` to THAT name's real home (`#12020`).
-
-    The one predicate both readers use, because the two directions are not the same for every name
-    (see `_ALIAS_HOMES`). `level` is `ast.ImportFrom.level`: `0` = absolute, `> 0` = relative.
-
-    * `SEAM_CALL` — crediting it makes the writer `gated`, which is OUTSIDE `NEEDS_A_DECLARATION`,
-      so an over-credit HIDES the writer. There the BARE spelling is the home only for a RELATIVE
-      import; an absolute import must name the package. ⛔ A SUBPACKAGE's `from .embeddings import …`
-      also lands nowhere near `tortoise.embeddings`, and this does NOT resolve package depth — the
-      walker is handed a root, not the importing module's package. That shape is LATENT (measured
-      `gated` — the dangerous direction — with no subpackage doing it today: no `tortoise/**/embeddings.py`
-      exists) and is filed rather than fixed here, because resolving it needs the file's package,
-      which this walk does not carry.
-    * everything else — the alias is the ONLY discovery signal, so dropping a doubtful one makes the
-      writer INVISIBLE. Over-credit is the safe direction: both spellings are accepted, as before.
-    """
-    homes = _ALIAS_HOMES.get(name, frozenset())
-    if name != SEAM_CALL:
-        return module in homes
-    return module in {home for home in homes if ("." not in home) == bool(level)}
 
 
 def _locally_bound(node) -> set[str]:

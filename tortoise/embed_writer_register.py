@@ -252,7 +252,12 @@ claim and a slogan:
   unclassified nor refused, which is the fail-open direction this whole module exists to close.
   `probe._import_aliases` resolves the alias back to the primitive it names, so the writer lands in
   `unresolved_write` and owes a declaration here; an aliased `encode_for_row` classes `gated`
-  instead, because it really does reach the gate and therefore owes nobody a declaration — ⛔ and
+  instead, because it really does reach the gate and therefore owes nobody a declaration — ⛔ but
+  ONLY when the import actually names the seam's module: resolution is home-checked (`_ALIAS_HOMES`)
+  AND level-checked (`_accepted_homes`), so a RELATIVE import may use the bare `from .embeddings`
+  spelling while an ABSOLUTE one must write `from tortoise.embeddings` — otherwise the same generic
+  name from a foreign module is NOT credited and the writer stays in `unresolved_write`, owing a
+  declaration. ⛔ And
   `gated` means exactly that: CREDITED as a reach, never VERIFIED as one. SEVERAL named residuals
   are `gated` on a reach that need not be the one the reader assumes — the `global`-family module
   rebinding, the never-run call (whose `gated` can also MASK a live ungated reach, see its entry),
