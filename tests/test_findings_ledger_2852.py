@@ -1193,7 +1193,7 @@ def test_an_evidence_cell_of_prose_is_rejected(tmp_path, monkeypatch):
 
 
 def test_an_owner_repo_issue_ref_counts_as_evidence(tmp_path, monkeypatch):
-    """FAILS if `owner/repo#N` is not accepted as an issue reference.
+    r"""FAILS if `owner/repo#N` is not accepted as an issue reference.
 
     §8 calls that spelling "the form this repo writes everywhere", and §1 accepts "an
     issue" without prescribing a spelling — but the bare-`#N` pattern refused it as
