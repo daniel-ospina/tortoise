@@ -366,7 +366,14 @@ _ALIASABLE_CALL_NAMES: frozenset[str] = (
 #:     cannot see an aliased call), so dropping a doubtful alias makes the writer INVISIBLE
 #:     (measured `{}`), which is the empty-map fail-open this module exists to close. There,
 #:     over-credit is the safe direction.
-#: `_accepted_homes` is the one place that encodes the split; both readers call it.
+#: ⛔ `_accepted_homes` is the one place that encodes the LEVEL split, and both its readers call it —
+#: but it is NOT the only place this module encodes a credit direction. `_keep_shadowed_aliases`
+#: answers a different question (does a REBINDING of the alias name remove the reach?) on a
+#: different partition (`SEAM_CALL` dropped; `UNGATED_CALLS` dropped, where the writer falls to
+#: `unresolved_write` if it has its own write clause and to `{}` — losing a `producer`, which owes
+#: nothing — if it has none; `WRITE_CLAUSE_BUILDERS` kept). The two must not be "unified": a reader
+#: who folds this bucket into `_accepted_homes`' would either hide writers or invent declarations
+#: (`#12020` round 7 review P3).
 _ALIAS_HOMES: dict[str, frozenset[str]] = {
     "set_embedding_clause": frozenset({"tortoise.vector_write", "vector_write"}),
     "clear_then_set_prefix": frozenset({"tortoise.vector_write", "vector_write"}),
@@ -759,17 +766,38 @@ def _import_aliases(*roots: ast.AST) -> dict[str, str]:
 def _keep_shadowed_aliases(aliases: dict[str, str], shadowed: set[str]) -> dict[str, str]:
     """Drop the aliases `shadowed` rebinds — EXCEPT the clause builders (`#12020` round 7).
 
-    ⛔ The split is `_accepted_homes`', and it is measured in both directions:
+    ⛔ ⛔ THIS IS NOT `_accepted_homes`' PARTITION, and saying it was cost a review round (round 7
+    P3). `_accepted_homes` splits on the LEVEL axis (`SEAM_CALL` vs "bare home is enough", which
+    admits both builders AND `UNGATED_CALLS`); this splits on the CREDIT axis, and the two groupings
+    are different. There are THREE buckets here, not two:
 
-    * `SEAM_CALL` / `UNGATED_CALLS` — dropping the shadowed alias is the SAFE direction: the writer
-      falls to `unresolved_write`, which OWES a declaration, while keeping it classes the writer
-      `gated`, which is OUTSIDE `NEEDS_A_DECLARATION` — an over-credit that HIDES it (`#12020`
-      round 3, measured: a writer-local `_enc = lambda p: p` still credited `encode_for_row`).
-    * `WRITE_CLAUSE_BUILDERS` — dropping it is the DANGEROUS direction: `_EMBED_WRITE` cannot see
+    * `SEAM_CALL` — DROP. Dropping leaves the writer a function that reaches nothing, so it cannot be
+      `gated`; keeping a shadowed one can make it `gated`, which is OUTSIDE `NEEDS_A_DECLARATION` —
+      an over-credit that HIDES it (`#12020` round 3, measured: a writer-local `_enc = lambda p: p`
+      still credited `encode_for_row`).
+    * `UNGATED_CALLS` (`encode_for_store`, `compute_session_embedding`) — DROP, but not for the
+      reason `SEAM_CALL` is dropped, and the outcome is not always `unresolved_write` (round 7 P3,
+      measured): a shadowed ungated alias leaves the writer `unresolved_write` when it has its OWN
+      write clause (it owes a declaration) and leaves it `{}` — ABSENT — when it has none, where
+      keeping the alias yields `producer`. The entry lost in that second case is a `producer`, which
+      owes no declaration, so the drop is still the safe side; `_ALIAS_HOMES`' "dropping a doubtful
+      alias makes the writer INVISIBLE (measured `{}`) … over-credit is the safe direction" note
+      speaks about the LEVEL rule, not about this one, and the two are not interchangeable.
+    * `WRITE_CLAUSE_BUILDERS` — KEEP. Dropping is the DANGEROUS direction: `_EMBED_WRITE` cannot see
       `SET y += $p`, so the alias is the ONLY discovery signal, and dropping it does not demote the
       writer, it DELETES it (measured `{}` for three idiomatic module-level rebindings that still
       reach the builder: a `try/except ImportError` fallback, a `functools.partial` wrapper, and an
-      `if False:` assignment). Over-crediting a builder only ADDS a writer that owes a declaration.
+      `if False:` assignment).
+
+    ⛔ What builder over-credit COSTS, stated as measured rather than as a bound (`#12020` round 7 P3):
+    it either ADDS a writer that owes a declaration, or — when the kept alias was genuinely rebound
+    to a non-builder — RECLASSIFIES an existing `producer` as `ungated`, imposing a declaration on a
+    writer that stores nothing (`_writes_an_embedding` is satisfied by the kept `_set(…)` call;
+    measured `ungated` where the blanket drop yields `producer`). Both outcomes stay INSIDE
+    `NEEDS_A_DECLARATION`, so the arm is fail-closed; the second is the "false declaration" direction
+    — the cost `WRITE_CLAUSE_BUILDERS`' own residual already names — and it has no live instance
+    (measured: the 32-entry population and its kinds are identical under this helper and the blanket
+    drop).
 
     ⛔ The shadow set is scope-wide ON PURPOSE (a rebinding anywhere in the module makes a bare
     name ambiguous for a GATE spelling); the builder arm is the one place where that ambiguity costs
@@ -4350,8 +4378,8 @@ def _sdk_methods_on_vector_leg(
     # belongs, in the mention walk (`lam_bound`), and `lambda_param_does_not_shade_the_body` pins
     # the difference — this sentence said "lambda parameters" and asserted the suppression the
     # code refuses (`#12020` round 7 review P3). What is STILL not modelled, and named rather than
-    # (they rebind a name whose scope this walk does not track) — those produce a
-    # spurious entry rather than a missed one. The UNDER-report half was closed in
+    # implied: `global`/`nonlocal` (they rebind a name whose scope this walk does not track) — those
+    # produce a spurious entry rather than a missed one. The UNDER-report half was closed in
     # `_in_module_receiver`: `cls.<name>`, `<Class>.<name>`, `self.__class__.<name>`
     # and `getattr(self.__class__, '<name>')` are in-module receivers, alongside the
     # `self` / `super()` / `type(self)` forms. Under-
