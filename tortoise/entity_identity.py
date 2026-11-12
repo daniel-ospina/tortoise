@@ -883,34 +883,34 @@ def name_key_space_same_entity(var: str, name: str) -> tuple[str, dict]:
 
     Returns ``("", {})`` when the name folds away — a ZERO-ROW answer the caller
     must honour (skip the query), never a degenerate ``WHERE ()``.
-    ⛔ That is DELIBERATELY not the shape its twins over the same union use:
-    :func:`_name_holder_ids_same_entity` and
-    :func:`_live_holders_same_entity` fall back to a raw ``name`` read for a blank
-    fold (``if not folded: return _read(g, label, name)``). ⚠️ **The two answers
-    DO differ, and the difference is a stated BLIND SPOT, not a cost.** Measured
-    (review round 14): ``create_object("   ")`` / ``create_subject("   ")`` DO
-    mint a node whose ``name`` is the whitespace string — the earlier claim here
-    that "a blank name is not a name any write door mints" was FALSE — and the
-    twins' raw fallback matches it while this helper answers zero rows. The
-    behaviour is kept anyway, because the resolver the WRITER uses
-    (:func:`resolve_fold_name`) returns nothing for that node too (measured), so a
-    by-name reader that named it would disagree with the write it describes — the
-    very defect this module exists to remove. What that costs is one dropped
-    attachment edge (``hosted_api``'s Point anchor wrote it on ``main``, with its
-    raw ``{name:$name}`` match), and it is recorded rather than silent. The node
-    itself is unaddressable by every fold reader; whether a blank-named entity
-    should be mintable at all is a write-door question, filed separately
-    (#12242). A caller that genuinely needs the literal whitespace match must ask
-    for it explicitly, not rely on a silent fallback.
+    ⛔ The twins over the same union (``_name_holder_ids_same_entity`` /
+    ``_live_holders_same_entity``) keep a raw ``name`` fallback for a blank fold;
+    this helper does not. ⚠️ **They agree TODAY, and not because of the fold.**
+    Measured (review round 15): ``create_object("   ")`` DOES mint a node whose
+    ``name`` is the whitespace string (three spaces, readable BY ID), while an
+    indexed equality filter on that value matches NOTHING — the #9599 backend
+    behaviour, and it is the same for a padded non-blank name (``"  Widget  "``
+    matches nothing either). So the twins' raw fallback returns zero rows for the
+    same reason this arm does, and ``main``'s raw ``{name:$name}`` anchor wrote no
+    edge for such a node either (measured: 0 edges). The earlier text here claimed
+    the two answers differ, that a blank name is not mintable, and that ``main``
+    wrote the edge — all three were wrong, and the last one was measured at 0.
+    ⛔ What that means for a caller: the zero-row answer is **engine-contingent**,
+    not a fold decision. On a backend whose equality filter can see a
+    whitespace-bearing key, this helper would answer zero rows while the twins
+    (and the writer, ``resolve_or_mint``) address the node — the very
+    reader/writer disagreement this module exists to remove. Nothing in the tree
+    relies on the blank arm today, and the durable fix is on the WRITE side (no
+    blank-named holder), filed as #12242. Until then a caller must not treat
+    ``("", {})`` as "the graph is proven to hold no such name".
     """
     folded = normalize_entity_name(name) or ""
     if not folded:
         # Blank (or all-whitespace) name: the ZERO-ROW answer documented above,
-        # NOT a props-only clause. Answering `n.name = ''` here would match a
-        # placeholder label nothing writes, and a caller that skipped the check
-        # would run a query whose result means nothing. A blank-NAMED holder (a
-        # real, mintable node) is the documented blind spot above — skipped on
-        # purpose, because the writer's resolver skips it too.
+        # NOT a props-only clause. A blank-NAMED holder is real and mintable (see
+        # the docstring) but invisible to an indexed equality filter on this
+        # backend (#9599), which is why every other name-keyed read misses it too.
+        # The answer stays; its ENGINE-DEPENDENCE is stated rather than implied.
         return "", {}
     return _name_key_predicate(
         var, name, name_props=("name", "canonical_name"),

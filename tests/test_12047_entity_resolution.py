@@ -3141,8 +3141,20 @@ class TestThe12120ReviewRound9:
             warn=lambda m, *a, **k: msgs.append(m % a if a else m))
         return applied, skips, msgs
 
-    def test_a_duplicate_survivor_id_refuses_instead_of_raising(self, sdk_factory):
-        """A corrupt id is a REFUSAL, never an exception out of the batch."""
+    def test_a_duplicate_successor_id_applies_instead_of_raising(self, sdk_factory):
+        """A duplicate SUCCESSOR id is not a refusal, and must never raise.
+
+        The round-9 fix here was "a corrupt graph must be REFUSED, never an
+        exception that aborts the rest of the batch". Round 15 showed the other
+        half: on THIS fixture the fetched duplicate claimants are themselves live,
+        id-bearing and distinct from the target, so they are a visible successor —
+        the fold APPLIES. What must not happen is an exception, and what must not
+        happen again is the sibling fixture's outcome (terminal claimants, where a
+        fetch that discarded the carriers refused a fold `main` applied — see
+        `TestThe12120ReviewRound15`). The ref-side duplicate-id refusal
+        (`ambiguous object id`) is a different shape, pinned in
+        `TestThe12120ReviewRound14`.
+        """
         sdk = sdk_factory()
         try:
             g = sdk._get_proj().g
@@ -3161,12 +3173,17 @@ class TestThe12120ReviewRound9:
             applied, skips, msgs = self._apply(sdk, [
                 {"superseded": "Old Co", "supersedes_by": "Widget",
                  "evidence": "test"}])
-            # Either outcome is acceptable EXCEPT an exception, and the batch
-            # must still have been judged: the record is accounted for.
-            assert applied in (0, 1), (applied, skips, msgs)
-            assert applied == 1 or skips, (
-                "the record was neither applied nor reported: "
-                f"{(applied, skips, msgs)!r}")
+            # The record is NOT ambiguous: two live claimants of one id are a
+            # visible successor in their own right, and `r9-carrier` is another, so
+            # the fold must APPLY — and nothing may raise out of the batch. ⛔ This
+            # fixture does NOT discriminate the round-15 `[*group, dup]` fix (the
+            # claimants are live, so the gate applies with or without the
+            # carriers); `TestThe12120ReviewRound15`'s terminal-claimant pin is
+            # the one that does.
+            assert applied == 1, (applied, skips, msgs)
+            state = g.query("MATCH (o:Object {name:'Old Co'}) "
+                            "RETURN o.status").result_set
+            assert state and state[0][0] == "superseded", state
             # The rest of a batch must still be processed (no abort).
             applied2, skips2, msgs2 = self._apply(sdk, [
                 {"superseded": "Old Co", "supersedes_by": "Widget",
@@ -4072,5 +4089,63 @@ class TestThe12120ReviewRound14:
                 "WHERE s.supersededBy = 'Older Team' RETURN count(s)").result_set
             assert row and row[0][0] == 1, (
                 f"the terminal claimant's successor was overwritten: {row}")
+        finally:
+            sdk.close()
+
+
+class TestThe12120ReviewRound15:
+    """The duplicate-survivor FETCH must not discard the carriers it resolved.
+
+    Round 15: `_entity_rows` reports `(dup, key, [dup])` when two nodes claim a
+    survivor's id — replacing the carriers the widened probe matched with the two
+    claimants. Both consumers read `members`, so when the claimants are TERMINAL and
+    the only visible successor is one of those carriers, the record was refused
+    "no visible successor" and the fold `main` applied was lost. `TestThe12120ReviewRound9`'s
+    duplicate-id fixture cannot see this (its claimants are live); this one can.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r15",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_a_terminal_duplicate_pair_does_not_hide_the_live_carrier(
+            self, sdk_factory):
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("Old Co", "document")
+            # Two nodes claim one id and BOTH are terminal, so neither is a
+            # visible successor; the only visible successor is `r15-carrier`,
+            # which holds the successor name and points at that id.
+            g.query(
+                "CREATE (a:Object {id:'r15-dup', name:'Duplicated', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Elsewhere'}) "
+                "CREATE (b:Object {id:'r15-dup', name:'Duplicated Two', "
+                "objectKind:'document', status:'superseded', "
+                "supersededBy:'Elsewhere'}) "
+                "CREATE (c:Object {id:'r15-carrier', name:'Widget', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'widget', resolved_from:'r15-dup'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Co", "supersedes_by": "Widget",
+                 "evidence": "test"}])
+            assert applied == 1, (
+                "the duplicate-survivor fetch hid the only LIVE carrier and the "
+                f"fold was refused: {skips!r} {msgs!r}")
+            row = g.query(
+                "MATCH (o:Object {name:'Old Co'}) "
+                "RETURN o.status, o.supersededBy").result_set
+            assert row and tuple(row[0]) == ("superseded", "Widget"), (
+                "the recorded successor must be the spelling the record "
+                f"resolved (the carrier's), not a duplicate's: {row}")
         finally:
             sdk.close()

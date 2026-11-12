@@ -1045,7 +1045,18 @@ def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
                 # corrupt-id graph must be REFUSED, never an exception that
                 # aborts the rest of the batch (review round 9, P1).
                 if with_groups:
-                    out.extend((dup, key, [dup]) for dup in fetched)
+                    # ⛔ The MEMBERS must survive the fetch (review round 15): the
+                    # group's carriers are the rows the widened probe matched, and
+                    # one of them may be the record's only VISIBLE successor.
+                    # Sending `[dup]` alone replaced them with nodes that MAY be
+                    # terminal, or MAY be the target itself — so when that was the
+                    # whole member set, the successor-visibility gate reported
+                    # "no visible successor" about a live, id-bearing successor and
+                    # a fold `main` applied was lost (measured round 15: applied=0,
+                    # the target left live and search-visible). The spellings set
+                    # lost the resolved spelling the same way.
+                    out.extend((dup, key, [*group, dup])
+                               for dup in fetched)
                 else:
                     out.extend(fetched)
                 continue

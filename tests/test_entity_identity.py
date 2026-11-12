@@ -1356,24 +1356,29 @@ def test_sweep_catches_evasive_query_forms():
 
 
 class TestThe12120BlankNameBlindSpot:
-    """A whitespace-only name IS mintable — the zero-row answer is a STATED gap.
+    """A whitespace-only name IS mintable, and equality cannot see it (#9599).
 
-    #12120 review round 14: `name_key_space_same_entity`'s docstring justified its
-    `("", {})` answer with "a blank name is not a name any write door mints", and
-    measurement falsifies that: `create_object("   ")` mints a node whose `name` is
-    the whitespace string. The behaviour is kept because the WRITER's resolver
-    reports that node as unheld too — a reader that named it would disagree with
-    the write it describes — but the agreement is what makes it defensible, so both
-    halves are pinned here. Whether the door should mint such a name at all is
-    #12242.
+    #12120 review round 14 introduced this pin on a docstring claim that a blank
+    name is not mintable; round 15 falsified the claim AND its replacement. What is
+    actually true, measured on this backend:
+
+    * ``create_object("   ")`` mints a node named three spaces, readable BY ID;
+    * an indexed equality filter on that value matches NOTHING — the #9599
+      behaviour, identical for a padded non-blank name — so ``main``'s raw
+      ``{name:$name}`` anchor wrote no edge for it either (measured: 0), and
+      ``name_key_space_same_entity``'s ``("", {})`` answer is
+      engine-contingent rather than a fold decision;
+    * every name-keyed read in the fold agrees today only because of that filter.
+
+    So the pin holds the two facts the helper's contract now states, and the
+    write-door question (should such a name be mintable at all) is #12242.
     """
 
-    def test_a_blank_named_holder_is_unheld_for_every_fold_reader(
+    def test_a_blank_named_holder_exists_and_equality_cannot_see_it(
             self, sdk_factory):
         from tortoise.entity_identity import (
             _live_holders_same_entity,
             name_key_space_same_entity,
-            resolve_fold_name,
         )
 
         sdk = sdk_factory()
@@ -1381,15 +1386,19 @@ class TestThe12120BlankNameBlindSpot:
             g = sdk._get_proj().g
             made = sdk.create_object("   ", "document")
             assert made and made.get("name") == "   ", made
-            # read back BY ID: an indexed equality filter on a whitespace value is
-            # not a probe this test can rely on (#9599).
-            row = g.query("MATCH (o:Object {id:$id}) RETURN o.name",
+            # read back BY ID: the point of the test is that equality cannot.
+            row = g.query("MATCH (o:Object {id:$id}) RETURN o.name, size(o.name)",
                           params={"id": made["id"]}).result_set
-            assert row and row[0][0] == "   ", row
+            assert row and row[0][0] == "   " and int(row[0][1]) == 3, row
+
+            assert g.query("MATCH (o:Object) WHERE o.name = $n RETURN o.id",
+                           params={"n": "   "}).result_set == [], (
+                "#9599 no longer hides a whitespace-bearing name from equality: "
+                "`name_key_space_same_entity`'s zero-row answer is no longer "
+                "agreement with the rest of the fold — re-derive that contract")
 
             assert name_key_space_same_entity("o", "   ") == ("", {})
             holders, _props = _live_holders_same_entity(g, "Object", "   ")
             assert holders == [], holders
-            assert resolve_fold_name(g, "Object", "   ", mention=True) is None
         finally:
             sdk.close()
