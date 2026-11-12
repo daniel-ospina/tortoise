@@ -2183,6 +2183,20 @@ surfaces:
   # `test_9664_premise_census.py` precedent). ⛔ NOT in `battery`: a docs census
   # has no business running on a battery-only diff.
   - test_11739_quote_population_probe.py
+
+  # #11855: pins the BLAST RADIUS of an unreadable belief operand — a batch
+  # containing a legacy `List`-valued α still returns every requested row, and
+  # the healthy row keeps its own value. Dual-registered: this `core` arm is for
+  # the `annotate_ep_batch`/`search_engine` half, and the `ep` arm below is
+  # LOAD-BEARING for the ranker half, because `tortoise/ranking.py` selects `ep`
+  # and a named-surface match REPLACES the `core` fallback: a `ranking.py` diff
+  # therefore does NOT run this `core` arm at all, so without the `ep` entry this
+  # file is absent from the selection on the one diff class most likely to break
+  # it — the #1349/#2938 silent-drop class. (No file count is quoted: the size of
+  # a `ranking.py` selection re-stales with every test the repo adds, and the
+  # mechanism is what a reader needs — `tools/ci_selection.py --changed-files
+  # tortoise/ranking.py` re-measures it in one command.)
+  - test_11855_poison_sibling.py
   - test_curation_11469.py
   - test_percent_value_11915.py
   # ⛔ `test_pack_hierarchy_11001.py` is registered ONCE, further down this list
@@ -5842,6 +5856,18 @@ surfaces:
   # failure-mode tables run on the change that can break them. URI-less (pure
   # unit), so it runs on the docker leg exactly as its money sibling does.
   - test_value_normalizer_2817.py
+  # #11915: the `percent` STORING shape (`tortoise/percent.py`) — a bounded
+  # basis-point int plus `verbatim` as its own evidence, the shape a shipped
+  # pack already declared with nothing able to store it (#9663). Its diffs fall
+  # through to `core` (`percent.py` matches no SOURCE_PATTERNS entry and is no
+  # SHARED_MODULE), which is why its `money`/`value_normalizer` siblings sit
+  # above. ⛔ NO `surfaces:` ENTRY HERE — `main` registered the file itself in
+  # `26592c2600` (#11966) while this branch's base (`927c24e233`) predated it, so
+  # keeping this branch's `core` row would leave TWO on the merged tree and
+  # `--integrity` reds on a duplicate (measured on the merge result: "duplicate
+  # entry 'test_percent_value_11915.py' at .surfaces.core[] (lines 2201, 5872)" —
+  # the #11210/#11211/#11222 recurrence this file already records). Only the
+  # WEIGHT row below is still this PR's to add: `main` carries none for the file.
   # #2814: authoritative-config durability across rebuild_all — the config
   # registry + sidecar section live in tortoise/projection/ (core fallback),
   # and pack_state/pack_manifest_store are the writer modules whose labels
@@ -7152,6 +7178,15 @@ surfaces:
   - test_11822_goal_judgement.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
+  # #11855: the ranker half of the unreadable-operand pins. `GraphRanker` and
+  # `StateRanker`'s `_fetch_point_signals` live in `tortoise/ranking.py`, which
+  # selects `ep`, REPLACING the `core` fallback — so the `core` registration
+  # alone left the `test_both_rankers_keep_the_healthy_row[...]` cases asleep on
+  # exactly the diff that can regress them (the #1349/#2938/#3154 silent-drop
+  # class; the sibling `test_11702_absent_belief_state.py` is dual-registered for
+  # the same reason). Measured with `tools/ci_selection.py --changed-files
+  # tortoise/ranking.py`: selected=False before this arm, True after.
+  - test_11855_poison_sibling.py
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
   # `tortoise/**`, and `tortoise/analyze.py` / `dream.py` / `ranking.py` select
@@ -9802,6 +9837,8 @@ durations_floors:
   test_calibration.py: {value: 355.0, pinned: true}
   eval/write_path/test_write_path_operator_lane.py: {value: 355.0, pinned: true}
 durations:
+  test_percent_value_11915.py: 2.0  # new in #11915, registered in the repair that followed it — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"), and the `core` registration above is what puts it in `fast_pool()`. ⛔ No case count and no local timing are quoted here on purpose: the count is the file's own business (`tools/ci_selection.py --integrity` is the authority on it) and a measured-on-this-box timing is not a shard-layout input; `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. What the weight covers: the `percent` shape end to end — `percent_props` / `read_percent_value`'s bounds, the evidence field and the refusal arms, plus the arms that write through the SDK's own door (a `create_point` carrying `percent_props`, the read back, and the declared-property arms). ⛔ The file is NOT uniformly DB-free, and this row says which half is which: the SDK-door cases take a per-test EMBEDDED engine (`TortoiseSDK(str(tmp_path / "percent_11915.db"), event_log_path=…)`) and do real graph writes, while the remaining cases are pure unit — no docker, no network, no model call. That distinction is what a reader uses to decide whether a `core`-registered file needs a `uri_requiring` declaration, so it is stated rather than glossed. ⚠️ An earlier revision of this row said "each case" opens an engine; that was false (most cases construct none), and it is recorded here rather than silently dropped because the same overstatement is the easy one to re-introduce.
+  test_11855_poison_sibling.py: 2.0  # new in #11855 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core`/`ep` registrations above put it in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. The recorded readings live in `WORKTREE-REPORT.md` (suite runs with their verbatim commands and counts), and this row records the WEIGHT only — no hand-quoted timing figure is repeated here, because a figure copied beside a weight row re-stales against the report it came from. What the weight covers: five properties x three poison operands (`[1,2]` / `"abc"` / `True`), each on a two-point batch — the batch row set from `annotate_ep_batch`, the unreadable row's `None`/absent answer, both rankers' signal fetches keeping the healthy row, `get_relationships_bounded`'s fail-open marker with an operator-anchored peer, and `TortoiseEP.get_contested_claims` still listing a genuinely contested healthy row. Each test a fresh EMBEDDED engine (`TortoiseSDK(db_path=str(tmp_path / "t.db"))`) with real graph writes plus a raw-Cypher seed of the legacy shape; no docker, no network, no model call. ⛔ The CASE COUNT is deliberately not quoted as a weight input (`tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it).
   test_11822_goal_judgement.py: 2.0  # new in #11822 — the #3400/#4348 trap: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts it in `fast_pool()`. ⚠️ MEASURED LOCALLY as context for a human, NOT as the weight: **64 collected / 64 passed in ~32 s** whole-file through this worktree's interpreter with `TORTOISE_TEST_CARVE_OUT=1` (embedded `redislite`, one throwaway DB per case via the shared `sdk_factory`), so the flat 2.0 UNDERSTATES it on the fast pool until a sweep re-bases it — the same understatement every embedded-fixture row here records. What the weight covers: the decision table's completeness (every cell of the input product matched by exactly one row), the comparator/dwell unit arms, the supersession-on-flip arms (including the flip-count invariance of BOTH the operator count and the goal's belief), `latest_readings`/`latest_judgement`, and the EP arms that read real posterior numbers out of `compute_confidence()` (plus the two negative controls). ⛔ That count is CONTEXT, never a weight input and never a pin: it has already moved twice inside this PR (three review rounds added twenty-five finding pins), which is exactly why the weight comes from `tools/ci_timing.py --refresh-durations` over junit and `tools/ci_selection.py --integrity` is the authority on the denominator.
   test_11702_absent_belief_state.py: 2.0  # new in #11702 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `ep`/`core` registrations above put it in `fast_pool()`, and `--integrity` stays green either way (a 0.90 ratio floor with headroom), so only this row records the weight. ⚠️ MEASURED LOCALLY as context, NOT as the weight: **87 cases in ~37 s whole-file** on a private lane box (`tools/test_lane.py`) at this PR's head — re-measured when the file grew from 13 cases (the earlier reading here said "13 cases in ~138 s"; that is the SAME arithmetic against a file that no longer exists, and a stale reading beside a weight row is exactly what the "a default is not a reading" doctrine forbids). The live arms build per-test graphs, so the flat 2.0 UNDERSTATES it on the fast pool until a sweep re-bases it, exactly as every other embedded-fixture row here records. What the weight covers: the ranking/why/sdk read surfaces — `ep_state` vocabulary + presence predicate, the null-not-0.5 answers on annotate_ep_batch / the `ep` block / GraphRanker / StateRanker / GapsRanker / SubgraphExpander, the sort-TIER that keeps an absent row behind every row with a belief, `min_confidence` refusing an absent belief at any floor above 0.0, and the `n.confidence` mirror agreeing with the prior it was rewritten from. ⛔ The CASE COUNT is deliberately not quoted as a weight input (`tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it).
   test_11739_quote_population_probe.py: 2.0  # new in #11739 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core`/`tier1` registrations above put it in `fast_pool()`. What the weight covers: hermetic — the probe is imported by path (`importlib`, since `11739-quote-population` is not a legal module name) and driven against a fake MCP client over canned pages, so no DB, no graph, no network, no key, no model call; the completeness arms assert `SystemExit(4)` rather than a published count. ⚠️ MEASURED LOCALLY as context, NOT as the weight: ~3.4 s whole-file on a lane box. ⛔ The CASE COUNT is deliberately not quoted: a hand-written count re-stales on every case a review round adds. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
@@ -10776,10 +10813,10 @@ durations:
   test_suspension_parity.py: 2.0  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.2
   test_substrate_map.py: 0.9  # #5086: 44 cases (`grep -c '^def test_'` -> 44; pytest collects 47, re-derived at this head, which is the cycle-9 union of 34 plus #10356's shallow-channel control (landed on `main` independently as `test_a_shallow_checkout_cannot_call_an_ancestor_drift`, which the #10406 merge of `main` KEEPS under its own name with every assertion — no landed control was renamed or retired — EXTENDED with #10420's unresolvable arm where `_is_shallow_clone()` answers `None`) plus #10420's real-git premise control `test_status_1_for_a_PRESENT_yet_grafted_commit_is_the_real_git_verdict` plus #10406's fix-lane control `test_an_unreadable_completeness_answer_cannot_certify_drift`). The 4.33 s wall / 4.4 s testcase sum quoted below was measured at an EARLIER head and is deliberately NOT re-attributed to this one. ⚠️ Do NOT read the seconds as a property of the file — its cost is the repo conftest import/teardown plus a bounded `git merge-base`, one `git ls-files` population read and a few `Path.read_text` spies, and re-timings of the SAME cases on this box have ranged 1.95 s to 8.99 s (`--junitxml` sum; the 8.99 s reading was taken while other suites ran on the host). The weight is 0.9, the `tools/ci_timing.py --refresh-durations` replacement reading this note names as authoritative for the WEIGHT (#10575's 2026-11-02 junit sweep, run 41375596528) — but that reading was taken at the 38-case predecessor, so #10452's added control is not in it: treat 0.9 as a LOWER bound for this 44-case file, and the 3.7 it replaced sat inside the 1.95 s–8.99 s range above. ⛔ This count has gone stale EIGHTEEN times (17 -> 19 -> 21 -> 22 -> 25 -> 28 -> 30 -> 31 -> 33 -> 34 -> 35 -> 36 -> 37 -> 38 -> 39 -> 40 -> 41 -> 43 -> 44) — the cycle-3 fixes added two cases and left "17", the cycle-4 fixes added two more and left "19", the leaf-row control left "21", the cycle-5 controls left "22", the cycle-6 controls (the timeout arm's one report token, the test oracle's bound, and the module-scope `try:` leaf control) left "25", the cycle-7 controls (the class/loop/`TYPE_CHECKING`-`else:` leaf arms and the non-allowlisted-prefix family control) left "28", the cycle-8 per-row family control left "30", and the two cycle-9 lanes left "31" and then "33" — their union was the 34 that #10356's shallow-channel control carried to 35, and the merge of that fix with #10420's (whose stub control supersets it, plus a real-git control for the premise) leaves the 36 there, and #10406's fix-lane control for an UNREADABLE exit-0 completeness answer (`_is_shallow_clone()` may not read `yes`/`TRUE`/empty as `False`, which is what certifies drift) carries it to the 37 here — and #10468's lane adds the control for a FALSE RED that patch produced (`Path.read_text` is patched on the CLASS, so a reaper worker thread's `/proc/<pid>/stat` read (`tortoise/embedded_reaper.py:991`) was recorded as `_label_hits`'s own and compared against the tracked population, reddening the required `test` job — CI `test (a)`, run 41319892722, job 124892295398 — with no defect behind it; the recorder is now thread-scoped), carrying it to the 38 there — and #10452's lane, REBASED onto that landed fix, kept ONE thing it did not have and dropped the duplicate: the foreign-thread artifact control is #10468's (it asserts both halves and stages the race deterministically, so this lane's second copy of it was deleted rather than shipped beside it), while main's control cannot see the VACUITY direction — it asserts the scoped list is non-empty and wholly tracked, both true of a recorder that silently drops every path outside the index, which would report CLEAN for a `_label_hits` that had wandered off the population; `test_a_same_thread_read_outside_the_index_is_still_drift` pins that direction and `_population_drift()` names the drifting paths in the population control's failure message instead of leaving them in a set-diff repr, carrying it to the 39 there — and PR #11004's review lane adds §5's cited-line pin (`test_every_cited_line_in_this_section_still_carries_the_prose_it_describes`: every `cache_eviction.py:<n>` citation in §5 must still carry `:Document` at the number cited, so the evidence pointer can no longer drift off it silently — the P2 that lane was dispatched for was exactly a pointer left at 611 while the comment moved to 616), carrying it to the 40 there — and the lane's follow-up widens that rule to §5's `SYMBOL` (`file:line`) citations (`test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names`: `projection/entities.py:1584` had pointed at an unrelated comment for 2,000 lines while no pin could see it), carrying it to the 41 there — and #10976's fix lane pins the OTHER half of that same §5 pointer (`test_the_docstring_pointer_pins_both_halves_of_the_one_measurement`: the pin above reads only `_doc()`, so this file's OWN docstrings were free to rot — `8b4297afa2c8` moved the `:Document` line 870 → 894 and re-measured only the markdown, leaving the same number quoted twice in `tests/test_substrate_map.py`) plus `test_a_historical_pointer_is_excused_only_by_the_commit_it_was_true_at` (the historical exemption needs `` at `<sha>` `` AFTER the pointer, so prose alone — or an unrelated sha on the line — cannot excuse a CURRENT citation), carrying it to the 43 there, and #11770's §5 `:Document` population pins (`test_a_second_population_in_FRONT_of_the_pinned_span_is_read`, landed as `e4a1eb5fa28b` after this chain was last extended) carry it to the 44 here — and the chain above terminates on that asserted 44, as its own ENTRY RULE requires; ⛔ ENTRY RULE: every entry in that chain is the count AFTER that cycle's controls, never before, and the number must be re-derived with `grep -c '^def test_'` rather than trusted from this note — this row has already carried a past state as a current one (#10021's defect) more often than any other. The pre-fix 0.4 covered a 13-case file whose only cost was the conftest import/teardown; the cases added by the #5086 review fixes drive `sys.executable` subprocesses, real `git` calls, a `git ls-files` population read and a `Path.read_text` spy, so the weight carries real seconds. ⚠️ Still DB-free, graph-free and network-free. — ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 3.7
 
-  test_problem_map_2820.py: 1.8  # #2820: 58 collected cases from 56 test
+  test_problem_map_2820.py: 1.8  # #2820: 59 collected cases from 57 test
   # functions (ONE is parametrised — 3 arms, one per status token — so
-  # `grep -c '^def test_'` -> 56 while pytest collects 58); re-derive with `pytest --collect-only -q | tail -1`
-  # rather than trusting this note. The ANCHORED grep is exact here: 56
+  # `grep -c '^def test_'` -> 57 while pytest collects 59); re-derive with `pytest --collect-only -q | tail -1`
+  # rather than trusting this note. The ANCHORED grep is exact here: 57
   # definitions and no prose line matches it. An UNANCHORED `grep -c 'def test_'`
   # INFLATES, because docstring lines that discuss the token match too (4 at this
   # head) — so an unanchored count is never the current one. ⛔ Prose lines are
@@ -10787,7 +10824,7 @@ durations:
   # earlier version quoted their line numbers, and every edit above them rotted
   # them (so a reader grepped a number that no longer held the token); the count
   # rots the same way. Prose INFLATES a grep, it never deflates one.
-  # The 56 -> 58 gap is (three arms − one function) = 2, exactly as the
+  # The 57 -> 59 gap is (three arms − one function) = 2, exactly as the
   # header above says. One count per head, in
   # FUNCTIONS, measured per commit
   # (`git show <sha>:tests/test_problem_map_2820.py | grep -c '^def test_'`):
@@ -10845,6 +10882,17 @@ durations:
   # DRIFT code, about a merely mislabelled document; the sibling's A↔C swap
   # preserves the label set and never reaches it, and with the branch deleted this
   # control fails with `KeyError: 'WS-F'` while the other 57 pass).
+  # -> 57 once #11904's re-cut control landed
+  # (`test_the_recut_row_and_survivors_hold_their_status_by_ISSUE`): every other
+  # comparison in the file is a COUNT, so an edit that holds every tally while
+  # swapping two rows' statuses is invisible to all of them — measured at
+  # #11904's head, reverting §2's `#2782` to `OPEN` and promoting `#2684` to
+  # `VERIFIED-FIXED` left `tools/problem_map_check.py --check` CLEAN. The arm
+  # pins the two sets the page asserts BY NAME. This is the move that made the
+  # leading count above stale: #11904 (#2820) added the function but did not
+  # re-derive this row, so `test_no_durations_row_states_a_stale_case_count`
+  # red on `main` at 43db5c0f — fixed here because a stale citation in the map
+  # this PR edits blocks every landing, not only this one.
   # Round 14's own guard exists because `Path.exists()` re-raises
   # `PermissionError` (only the ENOENT family is swallowed) — each of these
   # controls is mutation-verified: it FAILS with its guard reverted.
@@ -10856,11 +10904,14 @@ durations:
   # deliberately a
   # LOWER bound and is NOT a junit measurement; the cost is a bounded `git
   # cat-file`/`merge-base` per anchor, a few `Path.read_text` calls, and a
-  # throwaway `git init` repo in three cases. Measured on this box at the landed
-  # head with `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_problem_map_2820.py -q`:
-  # `58 passed in 12.51s` including the repo conftest's import/teardown, so the
-  # file's own testcase time is well under it. Re-measure rather than quoting
-  # this line: it is a datum at ONE head. DB-free, graph-free, network-free (hence the `TORTOISE_TEST_CARVE_OUT=1`
+  # throwaway `git init` repo in three cases. Re-measured at this head with
+  # `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_problem_map_2820.py -q`:
+  # `59 passed` (a shared-box wall clock, NOT the weight and NOT a junit
+  # measurement). ⛔ No wall-clock seconds are quoted beside this row: it is the
+  # figure a reader would use to route the file, and a copied reading re-stales
+  # against the host it was taken on — one earlier revision of this line carried
+  # a per-case stall from a loaded box and read as the file's own cost. Re-measure
+  # rather than trusting a number here: it is a datum at ONE head. DB-free, graph-free, network-free (hence the `TORTOISE_TEST_CARVE_OUT=1`
   # lane; without it the suite refuses a target it does not need). — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 0.5
   test_2206_confidence_surfaces.py: 3.0  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.3
   test_2350_validity_precision.py: 11.0  # #2350: required for the durations coverage half as well as the surface half (#4348 trap — do not drop the row without re-deriving the floor at that head) — ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 5.6 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 9.5
