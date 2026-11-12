@@ -1470,16 +1470,16 @@ class EpBreakdown:
     # point WHENEVER one is persisted — THOSE TWO READ α/β ONLY, so a readable
     # mirror is the first stated divergence (they answer the pair mean where
     # this field answers the mirror's value). The second is the pairs R1
-    # REJECTS: those two coalesce each MISSING operand to `1.0` and then divide
-    # bare, so where R1 answers ``None`` they answer a number built from those
-    # defaults — α/(α+1) for a half pair, above 1 for a negative β, below 0 for
-    # a negative α, 0.5 when the total is ≤ 0 — or they RAISE on an operand
-    # Python cannot coerce at all (a Boolean is coercible, so it is silently
-    # served as 1.0). ⛔ A pair whose SUM OVERFLOWS is not one of those: R1
-    # ACCEPTS it and answers the overflow-free identity, so (1.7e308, 1e307)
-    # serves 0.944 here while those two divide bare and answer 0.0 — a
-    # divergence in VALUE, not in presence. ⛔ Do not assume the two readers
-    # agree on a shape because they agree on the pairs R1 accepts. A claim with NO operands at all also answers 0.5 there (the
+    # REJECTS: those two coalesce each MISSING operand to `1.0`, then divide
+    # bare, so where R1 answers ``None`` they answer whatever those defaults
+    # produce — α/(α+1) for a half pair, above 1 or below 0 for a negatively
+    # signed pair, 0.5 when the total is ≤ 0, `nan` for a present-but-NON-FINITE
+    # operand — and they RAISE only on an operand Python cannot coerce at all.
+    # A pair whose SUM OVERFLOWS is not one of those: R1 ACCEPTS it and answers
+    # the overflow-free identity, so (1.7e308, 1e307) serves 0.944 here while
+    # those two divide bare and answer 0.0 — a divergence in VALUE, not in
+    # presence. ⛔ Do not assume the two readers agree on a shape because they
+    # agree on the pairs R1 accepts. A claim with NO operands at all also answers 0.5 there (the
     # per-operand defaults); that is the divergence recorded in the #11702
     # decision
     # comment (issuecomment-6781252637) — it is the one place a claim with NO
@@ -5451,9 +5451,9 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     with ``ep_state: "absent"``, never 0.5. A claim that DOES carry a
     persisted belief keeps its number: a computed posterior of 0.5 still
     reads 0.5 — the distinction is presence, not value. contention is computed
-    from EDGES, not from the belief: a matched Point keeps its edge-derived NAND
-    fraction, and 0.0 means there is no NAND fraction to report — an ID this
-    read did not MATCH, or a matched Point with no IMPL/NAND edge at all.
+    from EDGES, not from the belief: `0.0` means `nand_count == 0` — no
+    IMPL/NAND edges at all, ONLY IMPL edges (that IS a real `0/N` fraction), or
+    an ID this read did not MATCH; it never means "no belief".
     variance/contested are computed from the PERSISTED posterior
     (posterior_alpha/beta, falling back to ep_alpha/beta priors) (posterior
     stability), not from edge ratios.
