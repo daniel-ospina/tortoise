@@ -63,17 +63,38 @@ CLIENT_PKG_RE = re.compile(r"postgresql-client-(\d+)\b")
 #: write line itself, never from an `export` elsewhere in the step.
 GITHUB_PATH_PREPEND_RE = re.compile(
     r"echo\s+(?P<quote>['\"]?)/usr/lib/postgresql/(?P<major>\d+)/bin(?P=quote)"
-    r"\s*>>\s*['\"]?\$GITHUB_PATH"
+    r"\s*>>\s*['\"]?\$\{?GITHUB_PATH\}?['\"]?"
 )
 
-#: The fail-closed branch as ONE unit (#12051 review round 4, P1): the `if` line
-#: that compares `$major`, its body, and its `fi`. "`::error::` and `exit 1`
-#: appear somewhere in the step" is NOT the claim — `if false && [ "$major" !=
-#: "16" ]; then` keeps both tokens in the text and can never fire.
+#: Anything that puts a value on the job's path, with the PRODUCER not assumed
+#: (#12051 review round 6). `GITHUB_PATH_PREPEND_RE` above spells `echo`, so a
+#: write by any other producer was invisible: measured, a later step running
+#: `printf '%s\n' /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"` (and the same
+#: through `tee -a`, and a plain `echo "/usr/bin" >> "$GITHUB_PATH"`) left all
+#: five rows GREEN while the leg resolved `pg_dump` from pg17 — the #12051
+#: artifact, restored. The redirect (`>`/`>>`) and `tee` are the two ways a
+#: shell can reach that file, so this detector reads the WRITE and the
+#: assertion then requires the write to be one the guard can CLASSIFY.
+GITHUB_PATH_WRITE_RE = re.compile(
+    r"(?:>>?|\btee\b[^\n]*?)\s*['\"]?\$\{?GITHUB_PATH\b"
+)
+
+#: The fail-closed branch as ONE unit (#12051 review rounds 4 and 6): the `if`
+#: line that compares `$major`, its body, and its `fi`. "`::error::` and `exit
+#: 1` appear somewhere in the step" is NOT the claim — `if false && [ "$major"
+#: != "16" ]; then` keeps both tokens in the text and can never fire.
+#: ⛔ THE BODY MAY NOT CONTAIN NESTED SHELL STRUCTURE. It used to stop at the
+#: FIRST `fi`, so a nested `if false; then echo ::error::…; exit 1; fi` inside
+#: the branch satisfied both tokens while the outer branch could never be
+#: entered — round 4's disjunction one level down (measured GREEN, round 6).
+#: Refusing the structure lines rather than counting nesting keeps this a text
+#: guard: the branch must be FLAT, and a message that merely says "if" is not a
+#: structure line.
 FAIL_CLOSED_BRANCH_RE = re.compile(
     r'^[ \t]*if[ \t]+\[[ \t]*"\$major"[ \t]*!=[ \t]*"(?P<major>\d+)"[ \t]*\][ \t]*;'
     r'[ \t]*then[ \t]*\n'
-    r'(?P<body>(?:[ \t]*(?!fi\b)[^\n]*\n)*?)'
+    r'(?P<body>(?:(?![ \t]*(?:if|elif|else|fi|for|while|until|case|esac|do|done)\b)'
+    r'[^\n]*\n)*?)'
     r'[ \t]*fi[ \t]*$',
     re.MULTILINE,
 )
@@ -109,8 +130,8 @@ def _run_code(step: dict) -> str:
     STATED LIMIT: this strips COMMENT LINES only (a line whose first non-space
     character is `#`), and the fail-closed branch is matched structurally by
     `FAIL_CLOSED_BRANCH_RE` for the same reason: presence is not gating. A
-    TRAILING comment on a live line is dropped by `_run_commands()` for the two
-    searches that read a line as a unit — measured, a trailing `# was: …`
+    TRAILING comment on a live line is dropped by `_run_commands()` for every
+    search that reads a line as a unit — measured, a trailing `# was: …`
     carrying the versioned write made a live `/usr/bin` line satisfy the
     prepend, and a correct `apt-get` line whose trailing comment named the
     capstone made the pin step look like the leg (`assert 4 < 4`, a false RED).
@@ -127,7 +148,7 @@ def _run_commands(step: dict) -> str:
     """`_run_code()` with trailing comments removed, for line-as-a-unit searches.
 
     ` #…` (whitespace before the `#`) is the shell's comment start outside
-    quotes, which is what both call sites need: they match a whole write/entry
+    quotes, which is what every call site needs: they match a whole write/entry
     line, and a trailing comment there is either a tombstone (the value it
     names is NOT what runs) or noise (the capstone's name in the pin step).
     STATED LIMIT: a `#` inside a quoted string is not special-cased — it is
@@ -139,6 +160,39 @@ def _run_commands(step: dict) -> str:
         re.split(r"\s+#", line, maxsplit=1)[0]
         for line in _run_code(step).splitlines()
     )
+
+
+def _github_path_writes(steps: list[dict]) -> list[tuple[int, str, int | None]]:
+    """Every `$GITHUB_PATH` write in the job, as `(step, line, major | None)`.
+
+    `major` is `None` when the guard cannot CLASSIFY the write — a producer it
+    does not read, a directory it cannot see, a value built at runtime. Both
+    assertions below refuse that, because an unclassifiable write is exactly the
+    fail-open this guard exists to remove: the branch could be pointed at
+    another major and every row would stay green (#12051 review round 6,
+    measured on `printf`/`tee -a`/a plain `/usr/bin` append in a later step).
+
+    STATED LIMIT: `$GITHUB_PATH` is read from the step's CODE with trailing
+    comments stripped, so a write assembled indirectly (`d=/usr/lib/postgresql/17
+    /bin; echo "$d" >> "$GITHUB_PATH"`) is detected as a WRITE and refused as
+    unclassifiable rather than silently passed — the refusal is the point, and
+    the remedy is a literal write the guard can read.
+    """
+
+    return [
+        (index, line.strip(), classified)
+        for index, step in enumerate(steps)
+        for line in _run_commands(step).splitlines()
+        if GITHUB_PATH_WRITE_RE.search(line)
+        for classified in [_classify_path_write(line)]
+    ]
+
+
+def _classify_path_write(line: str) -> int | None:
+    """The major a write puts on PATH, or `None` if this guard cannot tell."""
+
+    match = GITHUB_PATH_PREPEND_RE.fullmatch(line.strip())
+    return int(match.group("major")) if match else None
 
 
 def _pin_step(steps: list[dict]) -> tuple[int, dict]:
@@ -228,8 +282,9 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # ONE regex over the WHOLE command: the versioned dir must be the value
     # WRITTEN TO `$GITHUB_PATH`. A bare `CLIENT_PATH_RE`/`"GITHUB_PATH" in text`
     # pair is satisfiable by two different lines and by an inert `export`.
-    prepends = list(GITHUB_PATH_PREPEND_RE.finditer(_run_commands(pin)))
-    assert prepends, (
+    pin_index = steps.index(pin)
+    in_pin = [write for write in _github_path_writes(steps) if write[0] == pin_index]
+    assert in_pin, (
         "the pin step never writes a `/usr/lib/postgresql/<major>/bin` entry to "
         "`$GITHUB_PATH`; a prepend that only exists as an `export` inside this "
         "step cannot reach the pytest leg, so the leg would resolve `pg_dump` "
@@ -238,18 +293,28 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     # ⛔ EVERY write, not just the first (#12051 review round 5). `search()`
     # returns the FIRST match, so a SECOND append naming another major was
     # invisible: measured, `/usr/lib/postgresql/16/bin` followed by
-    # `/usr/lib/postgresql/17/bin` left all four rows GREEN while the leg ran on
+    # `/usr/lib/postgresql/17/bin` left every row GREEN while the leg ran on
     # pg17 — the #12051 defect, restored. The runner reads the file in ORDER and
     # does `PrependPath.RemoveAll(x => x == line); PrependPath.Add(line);` per
     # line (actions/runner `FileCommandManager.AddPathFileCommand.
     # ProcessCommand`), so the LAST line is the one that wins on PATH.
-    wrong = [m.group("major") for m in prepends if int(m.group("major")) != server_major]
+    # ⛔ And the producer is not assumed (#12051 review round 6): the write is
+    # detected as a WRITE first, then classified, so a `printf`/`tee`/`/usr/bin`
+    # append is refused instead of not being seen at all.
+    unreadable = [line for _, line, major in in_pin if major is None]
+    assert not unreadable, (
+        "the pin step writes `$GITHUB_PATH` in a form this guard cannot read, so "
+        "it cannot prove which client major wins on the leg: "
+        f"{unreadable!r}. Write the versioned dir as a literal "
+        f'`echo "/usr/lib/postgresql/<major>/bin" >> "$GITHUB_PATH"` line.'
+    )
+    wrong = [str(major) for _, _, major in in_pin if major != server_major]
     assert not wrong, (
         f"the pin step writes pg{', pg'.join(wrong)} to `$GITHUB_PATH` alongside "
         f"its pg{server_major} entry — the runner adds each line in file order, "
         "so the LAST one wins on the leg and the versioned binaries lose to "
-        "another major (measured, round 5: a second append naming pg17 left all "
-        "four rows green; this is how #12051 came back)"
+        "another major (measured, round 5: a second append naming pg17 left "
+        "every row green; this is how #12051 came back)"
     )
 
 
@@ -269,26 +334,30 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
     """
     steps = _steps(job)
     server_major = _postgres_image_majors(job)[0]
+    pin_index, _ = _pin_step(steps)
 
-    writes = [
-        (index, match)
-        for index, step in enumerate(steps)
-        for match in GITHUB_PATH_PREPEND_RE.finditer(_run_commands(step))
-    ]
+    writes = _github_path_writes(steps)
     assert writes, (
         "no step in this job writes a `/usr/lib/postgresql/<major>/bin` entry to "
         "`$GITHUB_PATH` — see the pin-step assertion above"
     )
 
+    # A write the guard cannot classify is refused wherever it lives: "nobody
+    # else undoes it" is not a claim a search for ONE producer can support.
     offenders = sorted(
-        {f"step {index} (major {match.group('major')})" for index, match in writes
-         if int(match.group("major")) != server_major}
+        {
+            f"step {index} writes `$GITHUB_PATH` as {line!r}, "
+            + (f"putting pg{major} on PATH" if major is not None else "which this guard cannot classify")
+            for index, line, major in writes
+            if index != pin_index or (major is not None and major != server_major)
+        }
     )
     assert not offenders, (
-        "a `$GITHUB_PATH` write outside the pin puts a client major other than "
-        f"pg{server_major} on the job's PATH: {', '.join(offenders)}. The runner "
+        "a `$GITHUB_PATH` write outside the pin (or an unreadable one) changes "
+        f"which client major the leg runs: {'; '.join(offenders)}. The runner "
         "adds each line in file order, so a later write WINS and the pin becomes "
-        "inert — the leg would run on that client instead (#12051)"
+        "inert — the leg would run on that client instead (#12051). The pin's "
+        f"own literal pg{server_major} append is the only write this job may make."
     )
 
 
