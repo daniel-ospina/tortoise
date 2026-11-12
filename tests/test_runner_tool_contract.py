@@ -950,10 +950,12 @@ def test_a_remediation_message_is_not_read_as_a_gh_call_site():
     both files pin): this copy additionally pins the `e2e-live-reconcile` substitution,
     both process substitutions (`<(…)`/`>(…)`), the two `echo`-printed substitutions,
     the leading-space and mid-span variants, the quoted argv word, the three
-    message-FIRST operator forms, and the backtick and `printf` forms. #12102's copy
+    message-FIRST operator forms, the backtick and `printf` forms, and a
+    `then`-prefixed PRINTED message that must still be exempt. #12102's copy
     additionally pins an `if`-prefixed compound whose `then` clause holds the
-    invocation, and the returned strings' positions (`hazards[2].startswith("if")`,
-    `len(hazards) == 4`).
+    invocation, a `#`-comment line naming the script (inside a list that must produce no
+    hazard — skipped, not exempted), and the returned strings' positions
+    (`hazards[2].startswith("if")`, `len(hazards) == 4`).
 
     The second lander drops the other copy. A duplicate same-named `def` is NOT a git
     conflict and pytest does not complain (it binds the later definition), but
