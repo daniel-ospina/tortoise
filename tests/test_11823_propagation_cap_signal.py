@@ -725,15 +725,30 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
     operator-edged, so the negated term already excluded it — measured).
 
     Drifts that are INERT on this fixture are NOT caught here, and saying so is
-    the point: an ADDITIVE widening of the excluded status vocabulary needs a
-    node of the new status to be observable, and dropping the `is_operator`
-    clause cannot be observed at all because the public API cannot build an
-    edge-less operator (`create_operator` always wires one through it). Those are
-    pinned BEHAVIOURALLY instead, by the dream passes that must trivially stamp a
-    fresh isolated claim (`tests/test_epic903_freshness.py`
-    `test_local_pass_trivially_stamps_fresh_isolated_claim`) — a widened
-    `is_operator` test would drop such a claim from that population and redden
-    them.
+    the point. Two of them, with different residuals:
+
+    * dropping the `is_operator` clause cannot be observed HERE — this fixture
+      carries no operator for the clause to exclude. Such a node is one public
+      call away (`create_point(..., is_operator=True)` is accepted and yields an
+      `is_operator` Point with no edges, while `create_operator` itself always
+      wires one), and fixtures that DO carry the shape exist
+      (`tests/test_graphcopy_boolean_index_3154.py::_seed_points`,
+      `tests/test_sdk_legacy_coverage.py::_make_operator`) — but none of them
+      exercises `_trivial_stamp`, so the drift is unobservable where it would
+      matter: no test that OBSERVES the trivial-stamp population carries an
+      edge-less operator. It IS pinned behaviourally in the drop-claims
+      direction: a widened `is_operator` test would drop an isolated claim from
+      that population and redden the passes that must trivially stamp one
+      (`tests/test_epic903_freshness.py`
+      `test_local_pass_trivially_stamps_fresh_isolated_claim`).
+    * an ADDITIVE widening of the excluded status vocabulary is **not pinned
+      anywhere** — a known, stated residual, not a covered case. It needs a node
+      of the newly-excluded status, and no test has one: this fixture would need
+      that node added, and the `_trivial_stamp` behaviour tests exercise only
+      `live` and `draft` statuses, so they cannot see it either (measured: with
+      an extra excluded status patched into the constant, both behaviour
+      scenarios are byte-identical). Whoever widens the vocabulary must add such
+      a node here.
     """
     from tortoise.dream import TRIVIAL_STAMP_PREDICATE
     _chain(sdk, 3)

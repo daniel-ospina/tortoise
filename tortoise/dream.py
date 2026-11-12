@@ -149,9 +149,15 @@ EMBEDDED_LATENCY_BUDGET_S = 0.5
 # reddens that test instead of forking the population silently (measured:
 # dropping the status clause 2→3, dropping the negated-edge term 2→6; before
 # #12138 it compared against a third hand-copied literal and could not see this
-# constant move at all). An additive widening of the excluded vocabulary is not
-# observable on that fixture — it needs a node of the new status — and is pinned
-# by the `_trivial_stamp` behaviour tests instead.
+# constant move at all). ⛔ TWO drift classes are NOT caught by that test: an
+# ADDITIVE widening of the excluded status vocabulary has NO pin anywhere (a
+# stated residual — the fix is to add a node of the newly-excluded status to the
+# §6 fixture), and an EDGE-LESS operator is carried only by fixtures that never
+# exercise `_trivial_stamp` (`create_point(..., is_operator=True)` builds one;
+# `create_operator` always wires an edge), so dropping the `is_operator` clause is
+# unobservable where it would matter — that drift is pinned only in the
+# drop-claims direction, by the passes that must trivially stamp an isolated
+# claim.
 TRIVIAL_STAMP_PREDICATE = (
     "(n.is_operator IS NULL OR n.is_operator = false) "
     "AND (n.status IS NULL OR n.status <> 'draft') "
