@@ -523,14 +523,14 @@ boost = similarity * ENTITY_BOOST_WEIGHT * memory_count_weight
 
 with `ENTITY_BOOST_WEIGHT = 0.5` (`mem0/utils/scoring.py:57`) and the fusion **additive and normalised**,
 not RRF: `combined = min((semantic + bm25 + entity_boost) / max_possible, 1.0)` (formula in
-`score_and_rank`'s docstring at `scoring.py:72`; the **executable** line is `:118-119`; `:94-101` is the
+`score_and_rank`'s docstring at `mem0/utils/scoring.py:72`; the **executable** line is `:118-119`; `:94-101` is the
 `max_possible` accumulation). The
 entity extractor is **deterministic spaCy-NER + heuristics**, not an LLM call
 (`mem0/utils/entity_extraction.py`: `_add_ner_candidates`, `_add_proper_name_candidates`,
 `_add_quoted_candidates`, `_add_topic_phrase_candidates`, `_resolve_candidates`).
 
 ⛔ **And Mem0's lexical and entity arms are RANKERS, not candidate generators:** Step 7 of
-`_search_vector_store` builds the candidate set from `semantic_results` only (`main.py:1680-1691`) and
+`_search_vector_store` builds the candidate set from `semantic_results` only (`mem0/memory/main.py:1680-1691`) and
 `score_and_rank` re-scores that pool. A BM25-only or entity-only match that the dense leg did not return
 **cannot enter the result set at all**. That is a deliberate trade (cheap, precise) with a recall cost —
 ⚠️ **copy the signal, not the pool construction**, because our measured ceiling is a recall problem
@@ -763,7 +763,7 @@ from it, not verified against Senzing's or Wikidata's own documentation this lan
 | **Blast-radius rule** — never auto-merge above a degree/evidence threshold | writeitai/remember-stack; granveo | ⛔ **NO** |
 | **Persisted no-merge assertions**, honoured by the clustering step so an un-merge is not a treadmill | erikevenson (*"a steward's 'these are not the same' must be persisted"*) | ✅ **YES** — `dedup_target_id` / `dedup_rejected_targets` are read by `_ENTITY_READ` (`entity_resolver.py:203-214`) |
 | **Merge = redirect, not rewrite** (Wikidata QIDs never reused; a dead ID resolves to the survivor forever) | writeitai; and the SAME_AS pattern | ✅ **YES** — see below |
-| **Un-merge is deleting one edge** and re-clustering, not a recovery exercise | archtin (*"Unmerging is deleting one `SAME_AS` edge and re-clustering"*) | ✅ **structurally yes**; ⛔ **but nothing in-tree issues it** — `rg 'resolved_from'` over `tortoise/` finds **one write** (`apply_entity_merge`) and **reads only** (the `_ENTITY_READ` predicate at `:199-214`, `follow_resolved_from`, its **two** call sites in `entity_identity.py` — `:384` and `:594` — plus the independent chain walk in `onboarding/seed.py:306-315`); there is **no clear/REMOVE/reverse path at all** |
+| **Un-merge is deleting one edge** and re-clustering, not a recovery exercise | archtin (*"Unmerging is deleting one `SAME_AS` edge and re-clustering"*) | ✅ **structurally yes**; ⛔ **but nothing in-tree issues it** — `rg 'resolved_from'` over `tortoise/` finds **one write** (`apply_entity_merge`) and **reads only** (the `_ENTITY_READ` predicate at `:199-214`, `follow_resolved_from`, its **two** call sites in `entity_identity.py` — `:384` and `:594` — plus the independent chain walk in `tortoise/onboarding/seed.py:306-315`); there is **no clear/REMOVE/reverse path at all** |
 | **`score`, `method`, `decidedAt` recorded ON the link** so *"why are these one customer"* is one query | archtin (*`SET r.score=$score, r.method=$method, r.decidedAt=datetime()`*); "Senzing — every merge records *why*" is **writeitai's** characterisation, quoted not verified | ⛔ **NO — `method`/`similarity` reach the return value only (`entity_resolver.py:809-811`); `score`/`decidedAt` exist nowhere** |
 | **Append-only decision rows + pre-merge membership snapshot** (what makes un-merge possible) | writeitai; granveo | ⚠️ **partly** — the journal gives replay (`derived == replay(journal)`), but there is no pre-merge *membership* snapshot |
 | **Cluster-size distribution** as a health metric (*"emerging giant cluster = over-merge in progress"*) | writeitai | ⛔ **NO** |
@@ -862,7 +862,7 @@ reporting half and drop the refusal. ⚠️ Cannot be measured on this box (§7.
 
 ### M-11 **Entity-boost over the UNION candidate set** — Mem0's signal without Mem0's pool
 
-Mem0's entity boost is a good signal applied to a **narrow** pool (semantic-only, `main.py:1680-1691`). Ours
+Mem0's entity boost is a good signal applied to a **narrow** pool (semantic-only, `mem0/memory/main.py:1680-1691`). Ours
 would be a **per-document additive boost** over `rrf_fusion`'s union — so a BM25-only or entity-only match can
 still surface. ⚠️ **Deliberately NOT Mem0's construction:** copying the pool would deepen the recall problem
 `#11901` measured, and §7.2's ⛔ warns exactly there.
