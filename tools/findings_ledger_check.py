@@ -744,7 +744,18 @@ def check_verdict_tally(text: str) -> list[str]:
     # complement.)` red the complement arm here while the parent stayed clean. Quoted
     # spans are therefore removed before the phrase test, which is what the phrase's own
     # meaning requires: a quote names the words, it does not claim any letter.
-    quoted = re.compile(r'"[^"]*"|\'[^\']*\'')
+    # ⛔ AND THE DELIMITER IS NOT `'` ITSELF. Treating every apostrophe as a quote
+    # delimiter blanked everything between two of them, which in English prose is the
+    # span between two POSSESSIVES: measured, appending `The review's summary — seven of
+    # the twelve rows no longer read as written, **(c)** is STILL-TRUE — is what the
+    # ledger's author repeats.` left `--check` at rc 0 and `check_verdict_tally` CLEAN,
+    # while the parent refused the identical page — a second stale tally AND a falsified
+    # verdict, hidden by two apostrophes. A single quote therefore delimits a quoted
+    # span only when it does NOT sit inside a word (`(?<![A-Za-z])` / `(?![A-Za-z])`), and
+    # the double quote needs no such guard because prose does not use `"` as an
+    # apostrophe. Pinned by
+    # `test_a_possessive_apostrophe_cannot_hide_a_second_tally`.
+    quoted = re.compile(r'"[^"]*"|(?<![A-Za-z])\x27[^\x27]*\x27(?![A-Za-z])')
     tally_sentences = [
         s for s in sentences
         if "no longer read as written" in quoted.sub(" ", s) and letter_sentence.search(quoted.sub(" ", s))
