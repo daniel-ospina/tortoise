@@ -178,9 +178,10 @@ def test_mutation_population_is_pinned():
     bullets; a total that contradicts the OPEN row) — the exact defect the page
     shipped green — and the review of #11902 added four more (an unclassifiable §3
     row, an emptied evidence column, an unclassifiable §6 row, a citation shape the
-    resolver declines), plus the DECOY arm, which is the only pin on
-    `check_survivor_arithmetic`'s `len(matches) > 1` branch: deleting that branch left
-    every other arm, every test and `--check` green (measured).
+    resolver declines), plus the DECOY arm. (Which arm pins which branch of
+    `check_survivor_arithmetic` is recorded in the tool, on the arm's own comment; this
+    docstring does not restate it, because a second copy of that mapping is a claim that
+    can drift from the code and nothing here tests it.)
 
     #11902's review added the arm where a marker-less `host:port` prose token used to be
     installed as the shorthand ANCHOR before the marker test ran, so inserting one in
@@ -212,10 +213,10 @@ def test_mutation_population_is_pinned():
     ⛔ NO SENTENCE IN THIS PARAGRAPH NAMES AN ARM BY A NUMBER — ordinal OR bare. An arm
     position is a count: it moves whenever an arm is inserted above it, and nothing tests
     it (the terminal count below IS tested, against `len(MUTATIONS)`, which is why it can
-    stay). Five arm numbers were written here and all five are gone: three were correct
-    when written and one position low after the next insertion, and two were the
-    population count written where a position belonged, so they were wrong on the day they
-    were written. Name the arm by what it does, or read the position off `MUTATIONS`.
+    stay). Name the arm by what it does, or read the position off `MUTATIONS`. This rule
+    is here because arm numbers were written in this paragraph repeatedly, and every one
+    of them became false — some shifted by a later insertion, some written from the
+    population size instead of a position, so wrong on arrival.
 
     Two further arms close two holes the review of that pass found in the fixes
     themselves: a §1 row whose first cell merely BEGINS with `Verdict` (the header skip
