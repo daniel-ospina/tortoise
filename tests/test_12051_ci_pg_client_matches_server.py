@@ -209,17 +209,18 @@ not a tenth spelling — it is the one a text guard cannot reach:
   segment, with redirect targets and `-`-prefixed options skipped. SIX residuals
   are stated rather than claimed closed, and each spares or refuses for its OWN
   mechanism — they are not one: an option whose value is a SEPARATE token written
-  AFTER the target (`rsync … "$b/17/bin/" "$b/16/bin/" --log-file
-  "$SCRATCH/x.log"`, `-e "ssh -o X=/a"`) moves the last-path reading past the
-  real target, while the `=`-joined form (`--log-file=…`) starts with `-` and is
-  skipped, so it stays REFUSED; a base quoted separately from its token
+  AFTER the target (`rsync … "$b/17/bin/" "$b/16/bin/" -e "ssh -o X=/a"`) moves
+  the last-path reading past the real target, while the `=`-joined form
+  (`--log-file=…`) starts with `-` and is skipped, so it stays REFUSED; a base
+  quoted separately from its token
   (`"$b"/16/bin/`, `"${b}"/17/bin/`) is never MATCHED, so the last-path
   machinery is not reached at all; a quoted command word (`sh -c 'rsync …'`) puts
-  both mentions in COMMAND position, so the arm is skipped; a destination reached
-  through an EXPANSION or an assigned variable (`rsync -a "$b/17/bin/" "$d/"`)
-  names no token the pattern can read, so again the arm is not reached (a
+  both mentions in COMMAND position, so the arm is skipped; a destination whose
+  VERSION component is itself a variable (`rsync -a "$b/17/bin/" "$d/"`) names
+  no token the pattern can read, so again the arm is not reached — a
+  `$var/<digits>/bin` destination IS matched and refused (next residual), and a
   preceding `d=…` assignment on the same line is itself spared by COMMAND
-  POSITION, like the residual above); a versioned path under a VARIABLE base is
+  POSITION, like the residual above; a versioned path under a VARIABLE base is
   the OPPOSITE direction —
   it is REFUSED (`d=$RUNNER_TEMP/tools; sudo chmod -R a+rX "$d/16/bin"` red, the
   same act on a literal path with an extra component green), which is fail-closed
@@ -550,8 +551,13 @@ def _code_quoted(line: str, position: int) -> bool:
     )
 
 
-def _redirects_into_a_client_binary(line: str) -> bool:
+def _redirects_into_a_client_binary(line: str, spared=None) -> bool:
     """Does this line WRITE OVER a client binary by REDIRECTION? (#12069 P1)
+
+    `spared`, when given, is a predicate on a position: a redirect whose operator
+    sits in the pin's own INSTALL SEGMENT is not graded (#12069 review round 25 —
+    the exemption used to be the whole LINE, so a replacement chained onto the
+    install command with `&&` was GREEN).
 
     A redirection needs no verb, so the rule above cannot see it. A target is an
     offence when it is a client BINARY NAME, a path under a versioned client
@@ -583,6 +589,8 @@ def _redirects_into_a_client_binary(line: str) -> bool:
     # file's own (`BINARY_MUTATION_POLARITY`): `sudo sh -c "cat $b/17/bin/pg_dump >
     # $b/16/bin/pg_dump"`, verbatim the shape the guard exists for.
     for match in REDIRECT_TARGET_RE.finditer(line):
+        if spared is not None and spared(match.start()):
+            continue
         # ⛔ IS THE `>` ITSELF INSIDE A QUOTED MESSAGE? (#12069 review 12, measured
         # FAIL-OPEN). The previous cut inferred that from the SHAPE of what followed
         # the captured word, so appending two characters defeated the whole rule:
@@ -1162,12 +1170,27 @@ def _replaces_a_client_binary(line: str) -> bool:
     The pin's own install line is excluded.
     """
 
-    if CLIENT_PKG_RE.search(line):
-        return False
+    # ⛔ THE PIN'S OWN INSTALL LINE IS EXEMPT — ITS OWN COMMAND SEGMENT ONLY
+    # (#12069 review round 25, measured GREEN). A LINE-wide bail spared every other
+    # command chained onto the install, and the pin step is exactly where a reader
+    # would chain one:
+    #
+    #     sudo apt-get install -y postgresql-client-16 && sudo rsync -a "$b/17/bin/" "$b/16/bin/"
+    #
+    # was GREEN — the full #12051 regression, after the step's own
+    # `pg_dump --version` assertion, i.e. statically invisible to the job. The same
+    # line without the package text was RED, and the redirect and binary-name arms
+    # were spared the same way (`… && : > …/16/bin/pg_dump`).
+    pkg = CLIENT_PKG_RE.search(line)
+    exempt = _segment_bounds(line, pkg.start()) if pkg is not None else None
+
+    def _spared(position: int) -> bool:
+        return exempt is not None and exempt[0] <= position < exempt[1]
+
     # ⛔ BEFORE the verb rule, because a redirection has NO verb (#12069 review
     # P1): `: > /usr/lib/postgresql/16/bin/pg_dump` rewrote the pinned binary with
     # every row green. See `REDIRECT_TARGET_RE`.
-    if _redirects_into_a_client_binary(line):
+    if _redirects_into_a_client_binary(line, _spared):
         return True
     verb = BINARY_MUTATION_RE.search(line)
     if not verb:
@@ -1213,24 +1236,34 @@ def _replaces_a_client_binary(line: str) -> bool:
     # "$RUNNER_TEMP/snap"` refused a plain READ, because the first verb's missing
     # direction was applied to a copy verb's operand. One verb cannot answer for
     # another command.
-    if "GITHUB_PATH" not in line and "GITHUB_ENV" not in line:
-        for dir_match in CLIENT_DIR_ANY_BASE_RE.finditer(line):
-            if _is_command_position(line, dir_match.start()):
-                continue
-            owner = _owning_verb(line, dir_match.start())
-            if owner is None:
-                # No verb the guard RECOGNISES in this mention's own segment. An
-                # EXTRACTOR can still write into the directory (`tar -xf … -C`,
-                # `dpkg-deb -x`), and that is a STATED residual rather than a
-                # graded spelling — see the docstring's residual list and the
-                # admitted rows in `BINARY_MUTATION_POLARITY` (#12069 round 24).
-                continue
-            if owner.group(0).strip() in _DESTINATION_VERBS and not _is_last_path_token(
-                line, dir_match.start(), dir_match.end(), owner
-            ):
-                # A path follows in the verb's own segment: this mention is a SOURCE.
-                continue
-            return True
+    # ⛔ AND THE COMMAND-FILE EXEMPTION IS PER SEGMENT (#12069 review round 25,
+    # measured GREEN). `$GITHUB_PATH`/`$GITHUB_ENV` are PATH APPENDS that the pin and
+    # job-wide rows own — a property of the command that mentions them, not of every
+    # other command on the line. As a line-wide test it spared the whole arm:
+    #
+    #     echo "pin goes to $GITHUB_PATH" >/dev/null; sudo rsync -a "$b/17/bin/" "$b/16/bin/"
+    #
+    # was GREEN, and the same line without the `echo` was RED.
+    for dir_match in CLIENT_DIR_ANY_BASE_RE.finditer(line):
+        if _is_command_position(line, dir_match.start()) or _spared(dir_match.start()):
+            continue
+        seg_start, seg_end = _segment_bounds(line, dir_match.start())
+        if COMMAND_FILE_MENTION_RE.search(line, seg_start, seg_end):
+            continue
+        owner = _owning_verb(line, dir_match.start())
+        if owner is None:
+            # No verb the guard RECOGNISES in this mention's own segment. An
+            # EXTRACTOR can still write into the directory (`tar -xf … -C`,
+            # `dpkg-deb -x`), and that is a STATED residual rather than a
+            # graded spelling — see the docstring's residual list and the
+            # admitted rows in `BINARY_MUTATION_POLARITY` (#12069 round 24).
+            continue
+        if owner.group(0).strip() in _DESTINATION_VERBS and not _is_last_path_token(
+            line, dir_match.start(), dir_match.end(), owner
+        ):
+            # A path follows in the verb's own segment: this mention is a SOURCE.
+            continue
+        return True
     # ⛔ A NAME IN COMMAND POSITION IS BEING RUN, NOT WRITTEN (#12069 review 12,
     # measured). `BINARY_NAME_RE.search(line, verb.end())` accepted a name ANYWHERE
     # after the verb, so a mutating verb earlier on the line was enough — and with
@@ -1244,6 +1277,8 @@ def _replaces_a_client_binary(line: str) -> bool:
     # command word after a list separator is the COMMAND. Only the former is an
     # offence.
     for match in BINARY_NAME_RE.finditer(line, verb.end()):
+        if _spared(match.start()):
+            continue
         if not _is_command_position(line, match.start()):
             return True
     return False
@@ -1296,10 +1331,20 @@ _SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|&]")
 #: NOT an operand of the verb, so it must never decide the verb's direction.
 _REDIRECT_RE = re.compile(r"\d*>>?\s*\S+")
 
+#: A `$GITHUB_PATH`/`$GITHUB_ENV` mention, as a property of ITS OWN segment.
+COMMAND_FILE_MENTION_RE = re.compile(r"\b(?:GITHUB_PATH|GITHUB_ENV)\b")
+
 #: `cp -t DIR` / `--target-directory=DIR` NAMES the destination (#12069 review
 #: round 22, measured GREEN): with the operand order inverted, the trailing source
 #: had `-t`'s value looked like an option and the real target was skipped.
-_TARGET_OPTION_RE = re.compile(r"(?:^|\s)(?:-t|--target-directory)(?:=|\s)\s*(?P<value>[^\s]+)")
+#: ⛔ AND THE ATTACHED SHORT FORM COUNTS (#12069 review round 25, measured GREEN):
+#: `cp -t"$b/16/bin" /tmp/stage/*` was GREEN — `(?:=|\s)` demanded a separator, so
+#: the attached value was skipped as an option and the SOURCE glob became "the last
+#: path". The `attached` group reads that spelling.
+_TARGET_OPTION_RE = re.compile(
+    r"(?:^|\s)(?:-t|--target-directory)(?:=|\s)\s*(?P<value>[^\s]+)"
+    r"|(?:^|\s)-t(?P<attached>[^\s-]\S*)"
+)
 
 #: Extractors write INTO a directory named by a FLAG or a POSITIONAL, and they are
 #: a STATED RESIDUAL, not a graded arm (#12069 review round 24). The verbs are
@@ -1385,14 +1430,20 @@ def _is_last_path_token(line: str, start: int, end: int, verb: re.Match[str]) ->
     # that is itself a flag (`-t -v`) names no directory either; both are skipped
     # into the positional scan below. See `_TARGET_OPTION_VERBS`.
     target = _TARGET_OPTION_RE.search(segment)
+    target_value = None
+    if target is not None:
+        target_value = target.group("value") or target.group("attached")
+        target_start = (
+            target.start("value") if target.group("value") else target.start("attached")
+        )
+        target_end = target.end("value") if target.group("value") else target.end("attached")
     if (
         target is not None
+        and target_value
         and verb_word in _TARGET_OPTION_VERBS
-        and not target.group("value").startswith("-")
+        and not target_value.startswith("-")
     ):
-        v_start = target.start("value") + seg_start
-        v_end = target.end("value") + seg_start
-        return start >= v_start and end <= v_end
+        return start >= target_start + seg_start and end <= target_end + seg_start
 
     # Blank the redirect targets (same length, so offsets stay absolute).
     segment = _REDIRECT_RE.sub(lambda m: " " * len(m.group(0)), segment)
@@ -4821,11 +4872,40 @@ BINARY_MUTATION_POLARITY = [
         "verdict is admitted rather than claimed (#12069 round 24)",
     ),
     (
+        'sudo apt-get install -y --no-install-recommends postgresql-client-16',
+        False,
+        "CONTROL: the PIN's own install line is exempt — but only its own SEGMENT "
+        "(#12069 round 25; the exemption used to be the whole line)",
+    ),
+    (
+        'sudo apt-get install -y --no-install-recommends postgresql-client-16 && sudo rsync -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-25 P1: a replacement CHAINED onto the install line was GREEN "
+        "— the exemption is the install SEGMENT, not the line (measured)",
+    ),
+    (
+        'sudo apt-get install -y --no-install-recommends postgresql-client-16 && : > /usr/lib/postgresql/16/bin/pg_dump',
+        True,
+        "#12069 round-25 P1: the redirect arm was spared by the same line-wide bail",
+    ),
+    (
+        'echo "pin goes to $GITHUB_PATH" >/dev/null; sudo rsync -a "$b/17/bin/" "$b/16/bin/"',
+        True,
+        "#12069 round-25 P1: a `$GITHUB_PATH` mention in ANOTHER segment spared the "
+        "whole directory arm (measured GREEN); the exemption is per segment",
+    ),
+    (
+        'sudo cp -t"$b/16/bin" /tmp/stage/*',
+        True,
+        "#12069 round-25 P1: the ATTACHED `-tDIR` short form was unread, so the SOURCE "
+        "glob became the last path (measured GREEN)",
+    ),
+    (
         'sudo cpio -idmv -D "$b/16/bin"',
         False,
-        "STATED RESIDUAL: `cpio` is not in `_OPERAND_TAKING_WORDS`, so "
-        "`_is_command_position` calls it a COMMAND and the arm is skipped; pinned "
-        "so closing it is a deliberate edit (#12069 round 24)",
+        "STATED RESIDUAL: `cpio` is not in `BINARY_MUTATION_RE`, so `_owning_verb` "
+        "answers None; the destination is a POSITIONAL, so recognising the verb is "
+        "all that is missing — no flag grammar (#12069 round 24, corrected r25)",
     ),
     (
         'sudo unzip -o pg17.zip -d "$b/16/bin"',
@@ -4836,8 +4916,9 @@ BINARY_MUTATION_POLARITY = [
     (
         'sudo dpkg-deb -x x.deb "$b/16/bin"',
         False,
-        "STATED RESIDUAL: `dpkg-deb -x` takes NO flag value (the destination is "
-        "positional), so no flag grammar can read it; pinned as above (#12069 round 24)",
+        "STATED RESIDUAL: `dpkg-deb -x` is not in `BINARY_MUTATION_RE` (so "
+        "`_owning_verb` answers None); its destination IS positional, so adding the "
+        "verb would grade it with no flag grammar at all (#12069 round 24, corrected r25)",
     ),
     (
         'tar -czf "$RUNNER_TEMP/pg_dump-output.tgz" "$b/16/bin"',
