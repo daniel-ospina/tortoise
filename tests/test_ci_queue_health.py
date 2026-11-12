@@ -2905,6 +2905,21 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # self-disarmed it too until round 12 removed that token as a gate noun; the
         # mechanism is unchanged, only the token that carries it.
         ("doc", "once it has been PROBED and its jobs read back all-completed"),
+        # ⛔ AND THE ALERT'S OWN CAUSE, which is EMITTED to operators (#12166 review round 15).
+        # The census-unwitnessed branch told the operator the count "is the pre-#12037
+        # status-string census" — false for the population this PR creates, where the probe DID
+        # read the run and the settle gate withheld the proof; the same branch's
+        # `${census_lever}` three lines above names the retry route, so one payload carried two
+        # incompatible causes. Nothing pinned this text (the alert is a shell `echo`, not a
+        # Python reason line), so the reword was silent — a revert measured GREEN.
+        ("workflow", "so the count is an UPPER BOUND on executing work rather than a census of it"),
+        # ⛔ AND THE MODULE DOCSTRING'S cause (c), the same defect one surface over (#12166
+        # review round 15). It named the three routes and then concluded "so that count is the
+        # pre-#12037 status-string census" — which contradicts the route list in the SAME
+        # sentence, since a settle-downgraded run WAS read. No needle reached it: the suite was
+        # GREEN with the two-route gloss and again with the three-route gloss plus the wrong
+        # conclusion, so the presence pin is what keeps the conclusion honest.
+        ("module", "so that count is an UPPER BOUND on executing work and cannot"),
     ]
     # ⛔ PER-FILE, NOT "SOMEWHERE" (review NIT, round 11). The comments above name a SITE, so
     # a presence check over all four surfaces passes when the named site loses the clause and
@@ -2913,8 +2928,9 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
     for where, phrase in must_state:
         needle = flat(phrase)
         assert needle in flats[where], (
-            f"a MANDATORY clause went SILENT in the {where} — it must be PRESENT there, and "
-            f"it is not: {phrase!r}"
+            f"a MANDATORY clause is not PRESENT VERBATIM in the {where} — EITHER it was "
+            f"DELETED (the failure this leg exists to catch) OR it was REWORDED (re-pin it if "
+            f"the new wording still states the clause): {phrase!r}"
         )
 
     for phrase in pre_fix:
@@ -3592,6 +3608,20 @@ def test_read_health_where_EVERY_probe_times_out_is_not_OK(monkeypatch):
         "a census made entirely of abstained probes is not a measurement"
     )
     assert health.congests_pr is None, "no destructive authorisation may rest on it"
+    # ⛔ THE EMITTED CAUSE IS PINNED HERE, NOT JUST THE VERDICT (#12166 review round 15).
+    # This clause is SHARED by all the routes into `census_unwitnessed`, and it used to name
+    # ONE of them — "the pre-#12037 status-string census" — which is true of the unprobed
+    # surplus and FALSE of a run the probe did read (a read that did not prove the run idle,
+    # and the settle gate withholding the proof). An operator reading it would rule out the
+    # shape that produced it. This fixture is the abstain route; the PIN is on the wording,
+    # which is emitted identically for the other two, and nothing asserted it before — a
+    # revert to the retracted clause measured GREEN.
+    census_reason = next(r for r in health.reasons if r.startswith("PR-UNWITNESSED"))
+    assert "the count is an UPPER BOUND" in census_reason, census_reason
+    assert "status-string census" not in census_reason, (
+        "the census clause is naming the old status-string reading as THE cause again; it is "
+        f"one of the shapes that land here, not the only one: {census_reason}"
+    )
 
 
 def test_a_legacy_caller_and_an_abstained_probe_are_DIFFERENT():
@@ -3729,7 +3759,7 @@ def test_backlogged_does_not_assert_execution_it_never_measured():
     assert unmeasured.verdict == Q.PR_BACKLOGGED
     assert unmeasured.congests_pr is True, "still fail-closed: this is a reporting defect only"
     claim = next(r for r in unmeasured.reasons if r.startswith("PR-BACKLOGGED"))
-    assert "is REPORTED executing" in claim and "NONE of them was measured" in claim
+    assert "is REPORTED executing" in claim and "NONE of them was MEASURED" in claim
     assert "PR CI IS executing" not in claim
 
     measured = classify(
@@ -4107,7 +4137,7 @@ def test_every_reason_line_that_says_executing_is_as_strong_as_its_evidence():
     )
     assert unreadable_wait.verdict == Q.PR_UNWITNESSED
     claim = next(r for r in unreadable_wait.reasons if r.startswith("PR-UNWITNESSED"))
-    assert "is REPORTED executing" in claim and "NONE of them was measured" in claim, claim
+    assert "is REPORTED executing" in claim and "NONE of them was MEASURED" in claim, claim
     assert "PR CI is executing (" not in claim
 
     # not-a-flood: a reporting workflow leads the queue, the PR census is fully unmeasured
@@ -4138,7 +4168,7 @@ def test_every_reason_line_that_says_executing_is_as_strong_as_its_evidence():
     )
     partial_claim = next(r for r in partial.reasons if r.startswith("not a flood"))
     assert "PR CI IS executing (2 run(s))" in partial_claim, partial_claim
-    assert "NONE of them was measured" not in partial_claim
+    assert "NONE of them was MEASURED" not in partial_claim
 
     # ... and a MEASURED census keeps the strong claim on both arms
     executing = [Q.QueuedRun(id=13, name="Python CI", event="pull_request",
@@ -4237,7 +4267,8 @@ def test_the_unmeasured_count_is_SPLIT_into_never_reached_and_read_failed(monkey
     assert legacy.pr_running_unmeasured_unread is None
     assert legacy.pr_running_unmeasured_unprobed is None
     assert Q._unmeasured_because(None, None) == (
-        " (the probe budget did not reach them, or their jobs could not be read)"
+        " (unprobed, of unread jobs, or of a read that did not prove them idle — the caller "
+        "did not split them, so this cannot say which)"
     )
     # ... and the split is never emitted as a pair of zeroes when there is nothing to split
     assert Q._unmeasured_because(0, 0) == ""

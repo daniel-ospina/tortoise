@@ -51,7 +51,8 @@ name: ci-queue-health
 # reading reaches no trim. A trim-safe offender CAN be present when the queue is
 # merely PR-dominated, so its absence is NOT the bound.
 # `PR-BACKLOGGED` (PR CI is COUNTED as executing — `pr_running > 0`, and that count
-# may include runs whose jobs were never read, so it is not a proof — and a queued
+# may include runs whose jobs were never read, or whose read did not PROVE them idle,
+# so it is not a proof — and a queued
 # PR run has
 # waited past the wait budget — the shape that used to print `CI: OK`, measured
 # 2026-10-28 on #10237) is an `::warning` at exit 0 for the same reason, and the
@@ -404,7 +405,7 @@ jobs:
               # the census needs its own. Emitting the flat "NOT --max-pages" there sent the
               # operator away from the only lever the cut leg has — the mirror of round 5.
               pages_tail="$(python3 -c "import json; d=json.load(open('/tmp/ci-queue-health.json')); print('the FEED IS ALSO CUT in this same reading (feed=truncated), so it has a second unwitnessed dimension whose lever is --max-pages — pull both' if d.get('truncated') else 'NOT --max-pages for THIS dimension; see the step summary for the dimension that was not measured')" 2>/dev/null || echo 'NOT --max-pages for THIS dimension; see the step summary for the dimension that was not measured')"
-              echo "::warning::${state} — the RUNNING CENSUS was not witnessed: every run counted as executing was unmeasured, so the count is the pre-#12037 status-string census and PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here. ${census_lever}. ${pages_tail}."
+              echo "::warning::${state} — the RUNNING CENSUS was not witnessed: every run counted as executing was unmeasured, so the count is an UPPER BOUND on executing work rather than a census of it (for the surplus it is exactly the pre-#12037 status-string reading; for a run the probe DID read it is not), and PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here. ${census_lever}. ${pages_tail}."
             else
               echo "::warning::${state} — the PR wait was not witnessed (a feed was cut at the page cap — the queued or the in-progress one, which share one flag — or the pending/requested leg was cut at its page cap, or a WAITING PR-event run — queued, pending or requested — has no measurable current-attempt age), so PR starvation is neither witnessed nor disproved. Nothing is inferred healthy here; for a truncated feed raise --max-pages to read further back, and see the step summary for the dimension that was not measured."
             fi

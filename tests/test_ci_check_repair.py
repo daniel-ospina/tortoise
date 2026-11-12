@@ -1860,7 +1860,7 @@ def test_the_zero_job_floor_is_past_the_measured_queue_wait():
 
     `docs/ops/ci-wall-clock.md` §1 line 50 (54 `python-ci` runs) measures the wait for a
     run's FIRST job: p50 29.9 min, p95 77.0 min, max 81.9 min. The budget derivation
-    this floor defers to is `tools/ci_queue_health.py:341`
+    this floor defers to is `tools/ci_queue_health.py:345`
     (`DEFAULT_MAX_PR_WAIT_SECONDS = 90 * 60.0`, "the first round number past" that max),
     and `ci-wall-clock.md` §6 lines 439-441 records the same derivation in its own
     words ("max first-job wait 81.9 min → 90 min, so it fires past the measured-normal

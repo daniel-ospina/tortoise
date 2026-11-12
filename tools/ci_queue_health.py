@@ -96,8 +96,12 @@ SIX STATES, DELIBERATELY NOT INTERCHANGEABLE
               for ``JOB_SETTLE_SECONDS`` — it, not the callee, holds the run
               projection); and the probe BUDGET. ⛔ NO ROUTE COUNT IS GIVEN:
               only the LAYER count is stable (see `pr_running_unmeasured`), so that
-              count is the pre-#12037 status-string
-              census and cannot certify health. Case (c) is about the CENSUS, not
+              count is an UPPER BOUND on executing work and cannot certify health.
+              ⛔ AND NOT "the status-string census": that is what the BUDGET layer leaves
+              (nothing was read about those runs), while a run the settle gate downgraded
+              WAS read — naming the whole population that way is false for it, and it is
+              the reading the emitted reason line used to assert.
+              Case (c) is about the CENSUS, not
               the wait: the wait may be perfectly measured while the census is not,
               and the module still refuses ``OK`` on it. (c) is deliberately a
               degradation and not ``UNKNOWN``: a measured wait and a lower-bounded
@@ -951,7 +955,8 @@ class QueueHealth:
         per-PR report claim "CI is not running" about a repo where the census says it
         is, which is a false statement in the instrument that exists to refuse them.
         ("COUNTED" rather than "demonstrably": `PR-BACKLOGGED` requires
-        `pr_running > 0`, and that count may be runs whose jobs could not be read — the
+        `pr_running > 0`, and that count may be runs whose jobs could not be read, or
+        whose read did not PROVE them idle — the
         state is reachable on an unmeasured census, which is why `_executing_claim`
         reports that case separately instead of asserting the stronger fact. #12037
         review rounds 5, 9 and 10.)
@@ -968,7 +973,8 @@ class QueueHealth:
 
         The superset of `starves_pr`: it adds `PR-BACKLOGGED`, the state where PR CI
         is counted as executing (see `_executing_claim` — the count may include runs
-        whose jobs were never read) but the oldest queued PR run has waited past its budget
+        whose jobs were never read, or whose read did not PROVE them idle) but the oldest
+        queued PR run has waited past its budget
         (`DEFAULT_MAX_PR_WAIT_SECONDS`, derived from the measured max first-job wait
         in `docs/ops/ci-wall-clock.md` §1). Both readings describe the same thing for
         a caller deciding whether a per-PR action would help: the wait is the queue's,
@@ -1293,7 +1299,10 @@ def _unmeasured_because(unprobed: int | None, unread: int | None) -> str:
     call) there is nothing to distinguish, and this says so rather than guessing.
     """
     if unprobed is None or unread is None:
-        return " (the probe budget did not reach them, or their jobs could not be read)"
+        return (
+            " (unprobed, of unread jobs, or of a read that did not prove them idle — the "
+            "caller did not split them, so this cannot say which)"
+        )
     parts = []
     if unprobed:
         parts.append(f"{unprobed} the probe budget never REACHED")
@@ -1314,11 +1323,12 @@ def _executing_claim(pr_running: int, pr_running_unmeasured: int) -> str:
     ⛔ THIS EXISTS BECAUSE THE SAME OVERCLAIM WAS FIXED ONE ARM AT A TIME, THREE TIMES. The
     pre-#12037 module read `pr_running` off the run `status` string, so "PR CI is executing"
     was as true as the string was. This change declares that string non-evidence: a counted
-    run may have been PROVED to have a live job, or merely be UNMEASURED (the probe abstained
-    and the count is the old census). A reason line that keeps the old phrasing over a census
-    of nothing-but-unmeasured runs contradicts the `UNMEASURED … counted as executing` note in
-    the SAME reason list, and the whole payload is concatenated into the step summary an
-    operator reads.
+    run may have been PROVED to have a live job, or merely be UNMEASURED — the probe
+    abstained, its read did not prove the run idle, or the budget never reached it — and the
+    count is then an upper bound rather than the old status-string census. A reason line that
+    keeps the old phrasing over such a census contradicts the `UNMEASURED … counted as
+    executing` note in the SAME reason list, and the whole payload is concatenated into the
+    step summary an operator reads.
 
     One function so a fourth site cannot drift: `pr_running > 0 and pr_running ==
     pr_running_unmeasured` means NO run was proved executing, and nothing else qualifies.
@@ -1326,8 +1336,10 @@ def _executing_claim(pr_running: int, pr_running_unmeasured: int) -> str:
     if pr_running > 0 and pr_running == pr_running_unmeasured:
         return (
             f"PR CI is REPORTED executing ({pr_running} run(s)) — NONE of them was "
-            "measured: every job probe abstained, so this is the pre-#12037 status-string "
-            "census, not a job-level proof"
+            "MEASURED to be executing: each is counted only because its execution was not "
+            "disproved (the read FAILED, the read did not prove the run idle, or the probe "
+            "budget never reached it), so this is a census UPPER BOUND, not a job-level "
+            "proof"
         )
     return f"PR CI IS executing ({pr_running} run(s))"
 
@@ -1603,7 +1615,10 @@ def classify_queue(
         # the authorisation. Raising the constant would only move the horizon.
         #
         # So the verdict degrades instead: when EVERY run counted in `pr_running` is
-        # unmeasured, the count is the old status-string census and cannot certify health. It
+        # unmeasured, the count cannot certify health. It is an UPPER BOUND — for the budget
+        # surplus that IS the old status-string census (nothing was read about those runs),
+        # but a settle-downgraded run WAS read, so naming the whole population the
+        # status-string census is false for it (#12166 review round 15). It
         # is still useful as a LOWER BOUND (`pr_running >= pr_running_unmeasured`), which is why
         # this is a degradation and not a `MeasureError`. When at least one counted run was
         # READ as executing, `pr_running > 0` is a measurement and `PR-BACKLOGGED` stands.
@@ -1635,8 +1650,10 @@ def classify_queue(
             reasons.append(
                 f"PR-UNWITNESSED: all {pr_running} run(s) counted in pr_running were UNMEASURED "
                 f"{_unmeasured_because(unmeasured_unprobed, unmeasured_unread)}, so "
-                "the count is the pre-#12037 status-string census, not a census of executing "
-                "work; with no run PROVED to be executing, health is neither witnessed nor "
+                "the count is an UPPER BOUND, not a census of executing work (it is not "
+                "necessarily the pre-#12037 status-string reading either — the settle gate can "
+                "withhold a proof from a run that WAS read); with no run PROVED to be executing, "
+                "health is neither witnessed nor "
                 "disproved — not reported as OK, and no destructive caller may read it as clear"
             )
         base: dict[str, Any] = {
@@ -1794,7 +1811,8 @@ def classify_queue(
         # cancelled" here would contradict the payload it is printed in.
         # ⛔ AND IT MUST NOT ASSERT AN EXECUTION FACT THAT WAS NEVER MEASURED (#12037
         # review round 5). This clause is reached whenever `pr_running > 0`, and that
-        # count may be made entirely of runs whose jobs could not be read — the very
+        # count may be made entirely of runs whose jobs could not be read, or of runs whose
+        # read did not prove them idle — the very
         # census the `OK`-gated degradation above refuses to certify. The verdict STAYS
         # (the direction is fail-closed: `congests_pr is True`, no destructive
         # authorisation), but the sentence the fleet quotes has to say which of the two
@@ -2418,7 +2436,7 @@ def build_parser() -> argparse.ArgumentParser:
             "is starving PR CI; PR-STARVED says PR CI is not running and the "
             "dominance clause declined; PR-BACKLOGGED says PR CI is COUNTED as "
             "running (`pr_running > 0`, which may include runs whose jobs were never "
-            "read — a count, not a proof) and the "
+            "read, or whose read did not PROVE them idle — a count, not a proof) and the "
             "backlog behind it is past any measured wait (#10237). Exit: 0 "
             "OK/PR-STARVED/PR-BACKLOGGED, 1 FLOOD, 2 could not measure."
         ),
