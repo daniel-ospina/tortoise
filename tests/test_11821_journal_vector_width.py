@@ -2657,8 +2657,14 @@ def test_a_declared_width_reads_a_one_shot_iterable_exactly_once(tmp_path):
     DROP", under `f32` as "declared over an EMPTY vector", while
     `stamp_journal_embedding({"embedding": (x for x in [0.1, 0.2])})` returns
     `[0.1, 0.2]`. Both messages named a cause that is not the cause. Falsifier for
-    the record rows: drop the `record.get("embedding") is values` write-back and
-    the record rows red with those two belt refusals (measured).
+    the record rows: drop the record write-back and this row reds at the FIRST
+    record emit — `p-rec-gen-f64`, "declared over a value the seam can only DROP"
+    (measured). ⛔ The `f32` "declared over an EMPTY vector" refusal is real but is
+    NOT co-observed here: the row aborts on the `f64` emit before the `f32` one
+    runs, so it reproduces only when that shape is probed alone (measured). An
+    earlier revision of this sentence claimed the record rows red "with those two
+    belt refusals", which this row's own control flow falsifies (#11996 review
+    round 24).
 
     ⛔ What is NOT pinned here, stated rather than implied (review round 24,
     measured) — `iter(x) is x` is the arm's CONSERVATIVE test for a one-shot
@@ -2812,3 +2818,53 @@ def test_the_two_one_shot_shapes_outside_the_write_back_keep_their_residual(tmp_
     assert records[0]["embedding"] == [0.1, 0.2], (
         "the envelope channel must journal the materialised vector, not the "
         f"one-shot object, got {records[0].get('embedding')!r}")
+
+
+def test_an_envelope_carried_one_shot_iterable_is_not_written_onto_the_record(
+        tmp_path):
+    """The write-back is scoped by IDENTITY, not by "the value is one-shot".
+
+    The round-23 write-back exists because the STAMP and the post-stamp BELT both
+    read the MERGED view (`{**payload, **record}`, the record winning per key), so
+    a channel left holding the object the guard consumed is read a SECOND time and
+    refuses a value the guard had just ACCEPTED. It is therefore scoped to the
+    channel that actually CARRIED the vector: `record.get("embedding") is values`.
+
+    ⛔ THE IDENTITY HALF WAS UNPINNED until this row (#11996 review round 24,
+    measured): the neighbouring rows exercise the arm's OTHER half — `iter(x) is
+    x` — so replacing the whole gate with `if iter(values) is values:` leaves this
+    row as the SOLE red in this file (measured; every other row stays green at
+    both heads this was measured on). What that mutation changes is not cosmetic,
+    because the RECORD WINS the merge: a one-shot generator riding the ENVELOPE
+    gets written onto the RECORD as well, and the journalled `point` gains an
+    `embedding` key it never carried.
+
+    FAILS IF: the record gains an `embedding` it did not carry (the gate lost its
+    identity half), or the envelope stops carrying the materialised vector (the
+    write-back was removed rather than scoped).
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    events = tmp_path / "envelope-one-shot"
+    events.mkdir(parents=True)
+    journal = events / "events.jsonl"
+    api = EventAPI(EventLog(journal), initiated_by="extractor", projection=None)
+
+    # The ENVELOPE carries the generator; the RECORD carries the WIDTH and nothing
+    # else — no `embedding` key at all, so nothing on the record is the object the
+    # guard consumed and there is nothing there to write back onto.
+    api._emit("PointAdded", {"id": "p-env", "content": "c",
+                             JOURNAL_VECTOR_WIDTH_KEY: JOURNAL_VECTOR_WIDTH_F64},
+              embedding=(x for x in [0.1, 0.2]))
+
+    records = [json.loads(ln) for ln in
+               journal.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(records) == 1, f"one emit must journal one line, got {len(records)}"
+    assert records[0]["embedding"] == [0.1, 0.2], (
+        "the ENVELOPE still carries the materialised vector — the write-back is "
+        f"scoped by channel, not a no-op; got {records[0].get('embedding')!r}")
+    assert "embedding" not in records[0]["point"], (
+        "the RECORD did not carry the vector, so the write-back must not put one "
+        "there: the record WINS the merged view, so adding it changes what lands — "
+        f"got {records[0]['point'].get('embedding')!r}")
