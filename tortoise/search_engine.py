@@ -1469,29 +1469,34 @@ class EpBreakdown:
     # TortoiseEP.compute_confidence / sdk.get_confidence return for the same
     # point WHENEVER one is persisted — THOSE TWO READ α/β ONLY, so a readable
     # mirror is the first stated divergence (they answer the pair mean where
-    # this field answers the mirror's value). The second is the pairs R1
-    # REFUSES: those two read each operand on its OWN `1.0` default
-    # (`coalesce(posterior_α, ep_α, 1.0)` and the β twin), then answer
-    # `α / (α + β)` — with a `total <= 0` guard that answers 0.5 instead of
-    # dividing. ⛔ So the outcome is a property of the stored COLUMNS, not of
-    # the defect class: a missing β answers α/(α+1), a missing α answers
-    # 1/(1+β), and a negative or non-finite pair can come back negative, above
-    # 1, 0.0, 0.5 or nan. Compute it, do not predict it. They raise only on an
-    # operand Python cannot coerce at all.
+    # this field answers the mirror's value). ⛔ Scope of that second reader: the
+    # EP read under an explicit `require_calibration=False`; under its own
+    # default every uncalibrated claim raises `CalibrationError` there whatever
+    # its shape, so that raise is the calibration gate, not this arithmetic.
+    # The second divergence is the pairs R1 REFUSES: those two read each operand
+    # on its OWN `1.0` default (`coalesce(posterior_α, ep_α, 1.0)` and the β
+    # twin), then answer `α / (α + β)` — with a `total <= 0` guard that answers
+    # 0.5 instead of dividing. ⛔ So the outcome is a property of the stored
+    # COLUMNS, not of the defect class: a missing β answers α/(α+1), a missing α
+    # answers 1/(1+β), and a negative or non-finite pair can come back negative,
+    # above 1, 0.0, 0.5 or nan. Compute it, do not predict it. That arithmetic
+    # raises only on an operand Python cannot coerce at all.
     # A pair whose SUM OVERFLOWS is not one of those: R1 ACCEPTS it and answers
     # the overflow-free identity, so (1.7e308, 1e307) serves 0.944 here while
     # there the total becomes `inf` and the division answers 0.0 — a divergence
     # in VALUE, not in presence. ⛔ Do not assume the two readers agree on a
     # shape because they agree on the pairs R1 accepts. A claim with NO operands
-    # at all also answers 0.5 there — via that same `total <= 0` guard, not via a
-    # default operand; that is the divergence recorded in the #11702 decision
+    # at all also answers 0.5 there — via those `1.0` defaults, `1.0/(1.0+1.0)`,
+    # NOT via the guard; that is the divergence recorded in the #11702 decision
     # comment (issuecomment-6781252637) — it is the one place a claim with NO
     # operands at all still answers 0.5, and it is outside this field's contract
     # rather than a second vocabulary for it.
     # Historically this
     # field was the structural edge-ratio impl/(impl+nand); it is NOT that
     # quantity anymore — a claim EP converged at 0.88 with no incoming IMPL
-    # edges reads 0.88 here, and 0.0 only for a genuinely impossible store.
+    # edges reads 0.88 here, and the old quantity's 0.0 was reserved for a
+    # genuinely impossible store — a real 0.0 HERE is a claim whose belief IS
+    # 0.0.
     #
     # #11702: ``None`` when R1 finds NOTHING READABLE — see the three rules above
     # `ep_measured_cypher`. Stated as the rule, not as a list of shapes: no
