@@ -653,6 +653,39 @@ def _verdicts_by_label(text: str) -> dict[str, str]:
     return out
 
 
+#: A letter a sentence names as a LIST MEMBER, in every spelling the candidate filter
+#: accepts — plus the two markdown shapes it does not use for candidacy but a writer
+#: does use for a list member: a bolded letter WITHOUT parentheses (`**a**`). ⛔ ONE
+#: extractor for all of them, never `parens or plain`: `set(findall(parens)) or
+#: set(findall(plain))` short-circuits, and the shipped tally sentence always carries
+#: `**(c)**`, so the plain branch was DEAD — measured: appending `, and a, f too` to the
+#: tally sentence left `--check` at rc 0 over a page naming two STILL-TRUE rows as
+#: overtaken. The same dead-branch shape hid `**a**` and the complement arm entirely
+#: (which read `\*\*\(x\)\*\*` only).
+#:
+#: Letters are restricted to `[a-l]` — the page's own twelve rows — which is what keeps
+#: ordinary prose out: `is and`, `or a` and `to and fro` contain no `a`..`l` single-letter
+#: form. The plain alternative is matched by its SEPARATOR (`,\s*` or `and\s+`) rather
+#: than by lookahead so that the LAST member of a list (`… and a.`) is caught too.
+#: The cue set is the words that INTRODUCE a member (`and`, `or`, `also`, `plus`, or a
+#: comma): a bare letter elsewhere in prose is not collected, which is what keeps
+#: `as a rule` out while still reaching `, also c`.
+_NAMED_LETTER_RE = re.compile(
+    r"\*\*\(([a-l]{1,2})\)\*\*"  # **(a)**
+    r"|\*\*([a-l]{1,2})\*\*"  # **a**
+    r"|\(([a-l]{1,2})\)"  # (a) / (a), (b)
+    r"|(?:,\s*|\b(?:and|or|also|plus)\s+)([a-l])\b"  # ", f" / "and f" / "also f"
+)
+
+
+def _named_letters(sentence: str) -> set[str]:
+    """The letters a sentence names as list members, in any accepted spelling."""
+    return {
+        next(g for g in m.groups() if g)
+        for m in _NAMED_LETTER_RE.finditer(sentence)
+    }
+
+
 def check_verdict_tally(text: str) -> list[str]:
     """§3's headline tally must be DERIVED from the verdict cells it summarises.
 
@@ -842,9 +875,7 @@ def check_verdict_tally(text: str) -> list[str]:
             "one can assert a letter the real sentence does not; keep exactly one"
         )
     still_sentence = still_sentences[0] if still_sentences else ""
-    named = set(re.findall(r"\(([a-z]{1,2})\)", non_still_sentence)) or set(
-        re.findall(r"\b([a-z]{1,2})\b(?=\s*(?:,|and\b))", non_still_sentence)
-    )
+    named = _named_letters(non_still_sentence)
     if named != set(non_still):
         problems.append(
             f"§3 tally: the paragraph names {sorted(named) or '(none)'} as no longer "
@@ -1019,7 +1050,7 @@ def check_verdict_tally(text: str) -> list[str]:
         if not governed:
             break
         still_clause = still_clause[: governed.start()]
-    named_still = set(re.findall(r"\*\*\(([a-z])\)\*\*", still_clause))
+    named_still = _named_letters(still_clause)
     if named_still != set(still_true):
         problems.append(
             f"§3 tally: the paragraph's STILL-TRUE list names "
