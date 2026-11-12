@@ -794,16 +794,24 @@ class TestProbeDbBoundedAcquisition:
         """#11962 review — the SUCCESS half of that same ``done()`` window.
 
         The sibling row pins the failure half (a landed error keeps its own
-        message and ``observed`` bit). When the acquisition SUCCEEDED inside the
-        window, ``future.exception()`` is None, and an arm that handles only the
-        failure case falls through to the synthesized phase timeout: a false
-        "no answer" for an SDK that was built, with ``observed=False`` per #3683
-        — which can send the health report to ``unknown`` for a healthy SDK. The
-        control-plane seam's ``_bounded_graph_size`` answers this window the
-        other way, so this branch is the parity claim its sibling makes.
+        message and its ``observed`` bit, because both are read from the FUTURE).
+        When the acquisition SUCCEEDED inside the window, ``future.exception()``
+        is None, and an arm that handles only the failure case has no answer to
+        hand over: it falls through with the acquisition reported as answer-less,
+        so the probe never runs against a handle that WAS built. Called directly
+        rather than through ``probe_db`` so the row asserts this arm's answer and
+        not the plumbing after it.
 
-        RED when the success branch is removed (measured): the report becomes
-        ``probe sdk acquisition timeout after …`` with ``ok=False``.
+        RED with the success branch disabled (measured, both shapes of the
+        mutant): the arm can then only report a FAILURE about a handle that
+        exists — ``(None, 'None', True)`` when it falls through to the failure
+        return (``str(None)`` is truthy, so the synthesized spelling never
+        replaces it), or the QUEUED spelling with ``observed=False`` when the
+        block is skipped and the never-set ``started`` event decides. This row
+        asserts ``error is None``, which both shapes red. On the PRE-FIX tree (the
+        arm read the caught ``e``) the same window spells
+        ``… acquisition timeout after 2.0s`` with ``observed=True``: one window,
+        three answers, none of them the handle's.
         """
         class _LandedSuccessAfterTheWaitExpired:
             """The ``done()`` window, with a successful outcome."""
@@ -822,32 +830,16 @@ class TestProbeDbBoundedAcquisition:
             def exception(self):
                 return None
 
-        # Only the FIRST submission is the acquisition, and only it gets the fake
-        # future: ``_probe_once`` submits its own phases to the same worker, so a
-        # worker that kept answering with the fake would poison the setup phase
-        # and this would pass or fail for the wrong reason.
-        real_worker = monitoring._SingleSlotWorker(
-            "test-11962-landed-success", workers=1)
-        submitted = {"n": 0}
+        monkeypatch.setattr(
+            monitoring, "_probe_worker",
+            lambda: SimpleNamespace(
+                submit=lambda fn: _LandedSuccessAfterTheWaitExpired()))
 
-        class _FirstLandingThenReal:
-            def submit(self, fn):
-                submitted["n"] += 1
-                if submitted["n"] == 1:
-                    return _LandedSuccessAfterTheWaitExpired()
-                return real_worker.submit(fn)
-
-        monkeypatch.setattr(monitoring, "_probe_worker",
-                            lambda: _FirstLandingThenReal())
-
-        result = monitoring.probe_db(acquire=lambda: FakeSDK())
-        assert submitted["n"] > 1, (
-            f"the probe never reached its own phases ({submitted!r}) — the "
-            "acquisition's value was not used")
-        assert result["ok"] is True, result
-        assert "acquisition timeout" not in str(result.get("error")), (
-            "an acquisition that SUCCEEDED inside the window was reported as a "
-            f"phase timeout: {result!r}")
+        value, error, observed = monitoring._acquire_on_probe_worker(
+            lambda: FakeSDK(), monitoring.PROBE_SDK_ACQUISITION_BUDGET)
+        assert error is None, error
+        assert observed is True, observed
+        assert isinstance(value, FakeSDK), value
 
     def test_ambiguous_phase_ownership_is_rejected(self):
         """Passing BOTH an sdk and an acquire callable is a CALL error.

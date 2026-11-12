@@ -3771,8 +3771,13 @@ def _acquire_on_probe_worker(acquire, budget):
             # class. Its own message, never a synthesized phase timeout — the
             # same discrimination ``_probe_once`` applies to its setup phase.
             # The two differ on ``observed`` (#3683): (b) produced an ANSWER,
-            # (a) did not. ``_probe_once`` resolves the same ambiguity with the
-            # same ``isinstance`` test.
+            # (a) did not. ``_probe_once`` resolves the same REFUSAL with the
+            # same ``isinstance`` test — but its own arms still read the CAUGHT
+            # exception, so inside THIS window (bound expired, error landed) they
+            # report the bound: filed as #12010, not fixed here, because that
+            # function is untouched by this PR. The future is the witness at
+            # every seam this PR CHANGES; it is not yet the witness at every seam
+            # in the module.
             #
             # ⛔ Read the FUTURE's outcome, never the caught exception (#11962
             # review). The budget can expire FIRST and the worker can land
