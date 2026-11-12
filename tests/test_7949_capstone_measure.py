@@ -4583,6 +4583,64 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
         f"only {checked} live cites were resolved — the sweep is not reading the bundle")
 
 
+def _pin_row_failures(rows, docs, sources, default_source: str = "extractor_v2"):
+    """Resolve `(doc, phrase, ((number, anchor), …), [source])` rows; return failures.
+
+    ONE implementation, because two copies of this resolution rule would be two
+    contracts and the one that drifts is the one that stops being true (the same
+    reason `_SYMBOL_CITATION` has one definition). The row SHAPE is shared; the
+    `docs` / `sources` maps are the caller's, because they encode WHICH relation
+    the caller is pinning, not how a row is checked:
+
+      * `test_the_bare_continuation_cites_name_what_they_say` passes the bundle's
+        own six documents and the `extractor_v2`-keyed sources, because a bare
+        `` `:NNNN` `` continuation is invisible to `_BUNDLE_CITE`;
+      * `test_the_epic_bundle_cites_the_branch_rederived_resolve` passes the epic
+        bundle's `00-plan.md` / `03-test-design.md` and `RECONCILE-A1-A2-A5.md`,
+        which `_BUNDLE_DOCS` does not contain at all — no sweep read their
+        numbers in ANY form, bare or named (#11837 review).
+
+    A row scopes to exactly ONE line of the document, found by `phrase` — so the
+    clause checked is the SENTENCE's, never a markdown line number (which would
+    rot exactly as fast as the cites do), and an ambiguous phrase is a failure
+    rather than a silent bind to the easier of two matches.
+    """
+    failures: list[str] = []
+    for row in rows:
+        doc_label, phrase, cites = row[0], row[1], row[2]
+        # a row may name its SOURCE; `default_source` is the caller's default
+        source_key = row[3] if len(row) > 3 else default_source
+        source_label = f"{source_key}.py"
+        lines = docs[doc_label].read_text(encoding="utf-8").splitlines()
+        hits = [ln for ln in lines if phrase in ln]
+        if len(hits) != 1:
+            failures.append(
+                f"{doc_label}: the scoping phrase {phrase!r} occurs {len(hits)} "
+                f"time(s) — this pin needs exactly one line to scope the cite "
+                f"to, so re-word the pin's phrase rather than letting it bind "
+                f"the easier of two matches")
+            continue
+        line = hits[0]
+        for number, anchor in cites:
+            if f":{number}" not in line and f"-{number}" not in line:
+                failures.append(
+                    f"{doc_label}: the sentence containing {phrase!r} does not "
+                    f"cite :{number} — a bare continuation is invisible to "
+                    f"_BUNDLE_CITE, so this pin is the only thing reading it")
+                continue
+            got = sources[source_key][int(number) - 1]
+            if isinstance(anchor, tuple):
+                if got.strip() != anchor[1]:
+                    failures.append(
+                        f"{source_label}:{number} (cited by {doc_label}) reads "
+                        f"{got.strip()!r}, not exactly {anchor[1]!r}")
+            elif anchor not in got:
+                failures.append(
+                    f"{source_label}:{number} (cited by {doc_label}) reads "
+                    f"{got.strip()!r}, which carries no {anchor!r}")
+    return failures
+
+
 def test_the_bare_continuation_cites_name_what_they_say():
     """A BARE `:NNNN` continuation is invisible to the sweep above — pin it here.
 
@@ -4922,39 +4980,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
     sources = {name: path.read_text(encoding="utf-8").splitlines()
                for name, path in (*_BUNDLE_SOURCES.items(),
                                   *_BUNDLE_TOOL_SOURCES.items())}
-    failures: list[str] = []
-    for row in rows:
-        doc_label, phrase, cites = row[0], row[1], row[2]
-        # a row may name its SOURCE; the bundle's own three are the default
-        source_key = row[3] if len(row) > 3 else "extractor_v2"
-        source_label = f"{source_key}.py"
-        lines = docs[doc_label].read_text(encoding="utf-8").splitlines()
-        hits = [ln for ln in lines if phrase in ln]
-        if len(hits) != 1:
-            failures.append(
-                f"{doc_label}: the scoping phrase {phrase!r} occurs {len(hits)} "
-                f"time(s) — this pin needs exactly one line to scope the cite "
-                f"to, so re-word the pin's phrase rather than letting it bind "
-                f"the easier of two matches")
-            continue
-        line = hits[0]
-        for number, anchor in cites:
-            if f":{number}" not in line and f"-{number}" not in line:
-                failures.append(
-                    f"{doc_label}: the sentence containing {phrase!r} does not "
-                    f"cite :{number} — a bare continuation is invisible to "
-                    f"_BUNDLE_CITE, so this pin is the only thing reading it")
-                continue
-            got = sources[source_key][int(number) - 1]
-            if isinstance(anchor, tuple):
-                if got.strip() != anchor[1]:
-                    failures.append(
-                        f"{source_label}:{number} (cited by {doc_label}) reads "
-                        f"{got.strip()!r}, not exactly {anchor[1]!r}")
-            elif anchor not in got:
-                failures.append(
-                    f"{source_label}:{number} (cited by {doc_label}) reads "
-                    f"{got.strip()!r}, which carries no {anchor!r}")
+    failures = _pin_row_failures(rows, docs, sources)
     for doc_label, quoted, source_key in quotes:
         source_label = f"{source_key}.py"
         doc_text = " ".join(docs[doc_label].read_text(encoding="utf-8").split())
@@ -4971,6 +4997,97 @@ def test_the_bare_continuation_cites_name_what_they_say():
     assert not failures, (
         "a bare `:NNNN` continuation names code it does not name — re-derive the "
         "number from the tree before changing this pin:\n  " + "\n  ".join(failures))
+
+
+#: The epic bundle's documents and the two sources its re-derived cites name.
+#: ⛔ NEITHER side is in the bundle sweep: `_BUNDLE_DOCS` carries the bundle's own six
+#: documents, so `00-plan.md`, `03-test-design.md` and `RECONCILE-A1-A2-A5.md` were
+#: swept by NOTHING, and `search_engine.py` is in neither `_BUNDLE_SOURCES` nor
+#: `_BUNDLE_TOOL_SOURCES`. Every number below was verified by READING, which is why
+#: four of them were still wrong when the commit that re-derived them landed.
+_EPIC_CITE_DOCS = {
+    "RECONCILE-A1-A2-A5.md":
+        _REPO / "docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md",
+    "00-plan.md":
+        _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/00-plan.md",
+    "03-test-design.md":
+        _REPO / "docs/epics/2026-11-04-7949-extractor-v4-capstone/03-test-design.md",
+}
+_EPIC_CITE_SOURCES = {
+    "sdk": _REPO / "tortoise/sdk.py",
+    "search_engine": _REPO / "tortoise/search_engine.py",
+}
+
+
+def test_the_epic_bundle_cites_the_branch_rederived_resolve():
+    """The cites this branch re-pointed OUTSIDE every sweep — resolve them here.
+
+    ⛔ WHY (#11837 review at `a08f7bce3d`, 2×P1 + 2×P2). The commit that re-derived
+    this bundle's cites re-pointed the CALL and the CONSUME pair and left their
+    neighbours on the previous merge's numbers, in the same sentences it edited:
+
+      * `RECONCILE-A1-A2-A5.md`'s `relation_write` sentence names the call correctly
+        and says the import is "the line above it, `:17804`" — the import is `:17921`
+        (the call moved and the import moved WITH it), and `:17804` is
+        `content[:80],` in an unrelated helper. The commit's own arithmetic
+        (`17922 - 1`) proves the miss.
+      * `` `subject_binding_available` ``'s DEFINITION is `:6588`
+        (`def subject_binding_available(graph) -> bool:`); `:6509` is the operator
+        loop inside `get_relationships_bounded`. Both documents state the
+        definition — `00-plan.md` and `03-test-design.md` — and both kept `:6509`
+        while the CONSUME pair beside them was re-pointed.
+      * `00-plan.md`'s `bind_point_subjects` cite named `:16892` (a comment: `# real
+        relation of THIS occurrence and folding would be`); the call is `:17569`.
+
+    Nothing could see any of them: they are not in `_BUNDLE_DOCS` at all, so not
+    even the `unmatched` arm fired. Non-vacuity: every row below FAILS on the
+    pre-fix documents (the number is on the sentence's line and the cited line
+    carries other code), and the helper reds with the line's actual text.
+
+    ⚠️ WHAT THIS DOES NOT CLOSE, stated rather than left to a reader: this pins the
+    cites these findings named, not every number in the three documents. That
+    broader sweep is the bundle's D5 residual (`05-verify.md`: "the sweep is still
+    incomplete"). Pinning the named ones is what makes the NEXT insertion above
+    them red instead of silent.
+    """
+    rows = (
+        # The call, the import one line above it, and the CONSUMER docstring — the
+        # whole sentence's three numbers, so a re-derivation of one cannot leave
+        # its neighbours behind the way it did at `a08f7bce3d`.
+        ("RECONCILE-A1-A2-A5.md", "`TortoiseSDK._extract_session_v2` at", (
+            ("17922", "relation_write = apply_relation_edges("),
+        ), "sdk"),
+        ("RECONCILE-A1-A2-A5.md", "is the line above it, `:", (
+            ("17921", "from tortoise.relation_write import apply_relation_edges"),
+        ), "sdk"),
+        ("RECONCILE-A1-A2-A5.md", "`relation_write.py:7`, `sdk.py:", (
+            ("17909", "# `#10999` made the channel TRANSPORT ONLY"),
+        ), "sdk"),
+        # `subject_binding_available`'s DEFINITION, in both documents that state it
+        # — a row per document, because a row scopes to one FILE and the pair was
+        # re-pointed in one while the definition stayed wrong in both.
+        ("00-plan.md", "is a **fail-OPEN** probe, defined at", (
+            ("6588", "def subject_binding_available(graph) -> bool:"),
+        ), "search_engine"),
+        ("03-test-design.md", "is a **fail-OPEN** probe (`search_engine.py:", (
+            ("6588", "def subject_binding_available(graph) -> bool:"),
+        ), "search_engine"),
+        # The A5 binder's CALL SITE (its `def` is in `subject_binding.py`; the plan
+        # names the call), keyed by the quoted form the sentence prints.
+        ("00-plan.md", "point-creation path at", (
+            ("17569", "bind_point_subjects(proj, self, point_id=pid,"),
+        ), "sdk"),
+    )
+    assert len(rows) >= 6, (
+        f"only {len(rows)} rows — an emptied table would pass vacuously, and these "
+        "are the six cites the review found wrong on the pre-fix documents")
+    sources = {name: path.read_text(encoding="utf-8").splitlines()
+               for name, path in _EPIC_CITE_SOURCES.items()}
+    failures = _pin_row_failures(rows, _EPIC_CITE_DOCS, sources)
+    assert not failures, (
+        "an epic-bundle cite names code it does not name, in a document no sweep "
+        "reads — re-derive the number from the tree before changing this pin:\n  "
+        + "\n  ".join(failures))
 
 
 def test_a_cite_that_names_a_directory_names_a_file_that_exists():
