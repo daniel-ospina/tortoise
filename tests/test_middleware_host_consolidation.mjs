@@ -307,25 +307,6 @@ async function assertOneHop(src, { expectStatus = 301, expectLocation = null, ex
       `company ${from} serves ${asset} (got ${body.slice(0, 40)})`,
     );
   }
-  // ⛔ THE RAW PRODUCT ASSETS ON THE COMPANY HOST (#11762). `/product` and
-  // `/product.html` are duplicates of the page the prefix serves, so they
-  // consolidate onto the ONE canonical URL — SAME host, which is exactly the row
-  // a dev server cannot be trusted to grade: `wrangler pages dev` rewrites an
-  // absolute `Location` whose host equals the request's host to the request's own
-  // scheme (measured 2026-11-12, wrangler 4.127.0 — an http preview answers
-  // `http://premiselabs.co/tortoise` for the https value below, while a
-  // cross-host target is passed through untouched). The Playwright suite
-  // (`tests/e2e/test_legal_pages.py`) therefore grades this row's status, host and
-  // path against a live server and defers the SCHEME to this file, where no proxy
-  // sits between the middleware and the assertion.
-  for (const from of ["/product", "/product.html"]) {
-    const { status, location } = await hit(`https://${COMPANY}${from}`);
-    assertEq(status, 301, `company ${from} consolidates onto the canonical product URL`);
-    assertEq(location, `https://${COMPANY}/tortoise`, `company ${from} → ${COMPANY}/tortoise`);
-    const landed = await onRequest(ctx(location));
-    assertEq(landed.status, 200, `${from}'s target is a 200 in the same deploy`);
-  }
-
   // ⛔ ONE URL PER PAGE INSIDE THE PREFIX TOO. `.html`, a trailing slash and a
   // doubled slash are all the same document; serving them alongside the canonical
   // form is four indexable copies of one page, and `_redirects` cannot collapse

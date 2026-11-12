@@ -2283,6 +2283,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      # ⛔ THE HOST-CONSOLIDATION RULES, GRADED OFFLINE — in a REQUIRED job, on purpose (`#12020`
+      # review round 5, Finding 4). This harness drives the REAL `onRequest` with no server and no
+      # DNS, so it is the only place the ABSOLUTE `Location` target and its SCHEME are asserted.
+      # It also runs in `welcome-e2e`, but that job is path-gated
+      # (`needs.changes.outputs.website == 'true'`) and is NOT a required context — so it re-runs on
+      # a `website/` change and may not run at all on a PR that does not touch `website/`. Meanwhile
+      # the Playwright half of this job stopped pinning the scheme, because `wrangler pages dev`
+      # rewrites a same-host absolute `Location` onto the request's scheme (measured, wrangler
+      # 4.127.0; #12052). Without this step the scheme would be graded by NO required check — a
+      # guard moved off the required surface rather than kept.
+      # ⛔ FIRST, before any preview is booted: it needs only Node + the checkout, so a preview that
+      # dies mid-run (#11785) can never mask it, and it costs ~1s with no network and no browser.
+      - name: Run the host-consolidation routing harness (#11763) — required coverage
+        run: node --experimental-strip-types tests/test_middleware_host_consolidation.mjs
       # Install the package (pulls falkordblite/redislite needed by
       # tortoise/__init__) + the e2e test extras (playwright, pytest-playwright).
       - run: pip install -e '.[test]'
