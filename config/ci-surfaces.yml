@@ -5858,18 +5858,16 @@ surfaces:
   - test_value_normalizer_2817.py
   # #11915: the `percent` STORING shape (`tortoise/percent.py`) — a bounded
   # basis-point int plus `verbatim` as its own evidence, the shape a shipped
-  # pack already declared with nothing able to store it (#9663). Registered
-  # here because `tortoise/percent.py` matches no SOURCE_PATTERNS entry and is
-  # not a SHARED_MODULE, so its diffs fall through to `core` — the same reason
-  # its `money`/`value_normalizer` siblings sit above. ⛔ This entry repairs
-  # `main`-owned drift, not this PR's: `#11915` (927c24e233) added the test file
-  # without a manifest entry, so `tools/ci_selection.py --integrity` reported it
-  # as unregistered on `main`'s own head and the UNCONDITIONAL `manifest-integrity`
-  # job reds on it — which is why no landing on a tree carrying that commit can
-  # be graded green until it is named. Hermetic: the SDK-door cases take a
-  # per-test EMBEDDED engine and the rest are pure unit — no docker, no network,
-  # no model call.
-  - test_percent_value_11915.py
+  # pack already declared with nothing able to store it (#9663). Its diffs fall
+  # through to `core` (`percent.py` matches no SOURCE_PATTERNS entry and is no
+  # SHARED_MODULE), which is why its `money`/`value_normalizer` siblings sit
+  # above. ⛔ NO `surfaces:` ENTRY HERE — `main` registered the file itself in
+  # `26592c2600` (#11966) while this branch's base (`927c24e233`) predated it, so
+  # keeping this branch's `core` row would leave TWO on the merged tree and
+  # `--integrity` reds on a duplicate (measured on the merge result: "duplicate
+  # entry 'test_percent_value_11915.py' at .surfaces.core[] (lines 2201, 5872)" —
+  # the #11210/#11211/#11222 recurrence this file already records). Only the
+  # WEIGHT row below is still this PR's to add: `main` carries none for the file.
   # #2814: authoritative-config durability across rebuild_all — the config
   # registry + sidecar section live in tortoise/projection/ (core fallback),
   # and pack_state/pack_manifest_store are the writer modules whose labels
