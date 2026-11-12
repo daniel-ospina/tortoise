@@ -301,8 +301,14 @@ def _imports_of_archive(root: Path) -> list[tuple[str, str]]:
                 )
                 if name not in ("import_module", "__import__"):
                     continue
-                if node.args and _literal_text(node.args[0]).startswith("archive"):
-                    out.append((rel, _literal_text(node.args[0])))
+                # The SAME separator test as the static arms: `archive` or `archive.<x>`, never
+                # a mere prefix. `archive_utils.tidy` is a different module that a product file
+                # may import legitimately — flagging it reds a required check on a PR that
+                # touched nothing archived, and the message would assert a claim the gate cannot
+                # support (measured, round 11).
+                text = _literal_text(node.args[0]) if node.args else ""
+                if text == "archive" or text.startswith("archive."):
+                    out.append((rel, text))
     return out
 
 

@@ -1049,6 +1049,16 @@ def test_a_product_module_that_imports_the_archive_is_reported(tree: Path) -> No
         for problem in arch.package_violations(tree)
     )
 
+    # …but a module that merely STARTS with the letters (a legitimate `archive_utils` package)
+    # is not the archive: the separator test is what keeps this arm from a false red.
+    (tree / "tortoise" / "live.py").write_text(
+        "import importlib\n_m = importlib.import_module('archived_helpers.core')\n",
+        encoding="utf-8",
+    )
+    assert not any("imports `archive" in problem for problem in arch.package_violations(tree)), (
+        "`archived_helpers` is not `archive` — a prefix match would false-red a live PR"
+    )
+
     # …and a MENTION in prose is not an import: the scan parses, it does not grep.
     (tree / "tortoise" / "live.py").write_text(
         'def f():\n    """Restored from archive.modules.b1.tortoise.memory_scope."""\n    return 1\n',
