@@ -338,10 +338,23 @@ def entity_candidates(graph, *, limit: int = 50,
             if len(members) < 2:
                 continue
             members.sort(key=lambda e: (str(e["createdAt"] or ""), e["id"]))
+            settled: set[str] = set()
             for i, left in enumerate(members):
                 for right in members[i + 1:]:
+                    if right["id"] in settled:
+                        continue
+                    # EXACT bound: difflib ratio <= 2*min/(sum), so a pair that
+                    # cannot reach the review floor is skipped without comparing.
+                    _la, _lb = len(left["folded"]), len(right["folded"])
+                    if _la and _lb and 2 * min(_la, _lb) < review_threshold * (_la + _lb):
+                        continue
                     fuzzy_sim = (1.0 if left["folded"] == right["folded"]
                                  else similarity(left["folded"], right["folded"]))
+                    if fuzzy_sim >= 1.0:
+                        # A 1.0 match is the best this candidate can score, and
+                        # the queue keeps only its best row — so stop spending
+                        # comparisons on it.
+                        settled.add(right["id"])
                     sem_sim = sem.get((left["id"], right["id"]))
                     if sem_sim is None:
                         sem_sim = sem.get((right["id"], left["id"]))
