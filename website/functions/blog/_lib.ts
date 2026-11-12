@@ -42,7 +42,74 @@ export interface Env {
   ASSETS: { fetch: (req: Request | string) => Promise<Response> };
 }
 
-export const SITE_URL = "https://tortoise.premiselabs.co";
+// ⛔ THE BLOG'S CANONICAL ORIGIN, AND THE ONLY PLACE IT IS WRITTEN (#11765).
+//
+// It flipped from `tortoise.premiselabs.co` to `premiselabs.co` because the blog
+// is content marketing and belongs on the company domain (epic #11762, owner
+// decision 2026-11-10). The PATH does not change — `/blog` stays `/blog` — so
+// this constant is the whole behavioural delta: canonical, `og:url`, the three
+// JSON-LD graphs, the blog sitemap's `loc`s, the feed's `link`/`guid`/`atom:link`,
+// the edge-purge URLs, the IndexNow `host`/`urlList`, and the agent API's `url`
+// all derive from it. Nothing reaches the head from the request origin: the
+// Function reads `new URL(request.url)` for the PATH only, so a request on the
+// retired host still renders canonical URLs on this one.
+//
+// Compile-time on purpose — deliberately NOT an `Env` binding. A per-deploy
+// runtime canonical is the drift this constant exists to prevent, and it would
+// make the same page emit two different canonicals depending on the deploy.
+export const SITE_URL = "https://premiselabs.co";
+
+/**
+ * Hosts that used to be a site origin and are now a PERMANENT 301 to `SITE_URL`
+ * (#11762 decision: `tortoise.premiselabs.co` is never deleted, it redirects).
+ *
+ * ⛔ Why a list and not "any stored origin": see `normaliseRetiredHostUrl`.
+ */
+export const RETIRED_SITE_HOSTS: readonly string[] = ["tortoise.premiselabs.co"];
+
+/**
+ * Map a STORED absolute URL's host onto `SITE_URL` when — and only when — it names
+ * a retired host. The path (and query/hash) is preserved verbatim.
+ *
+ * ⛔ WHY THIS EXISTS AT ALL, INSTEAD OF A DATA MIGRATION (owner decision on
+ * #11765). `blog_posts.author_image_url` carries the retired host in every
+ * published row, and the writers that put it there (the agent API's insert
+ * default, the console's editor prefill, two backfill migrations) all still
+ * write it. A Supabase migration could rewrite the rows we can count — the six
+ * published ones — and silently miss drafts and archived rows, which are RLS- or
+ * status-invisible, and would then emit a redirecting host inside
+ * `BlogPosting.author.image`: structured data consumed by machines that never
+ * show a 404 to a human. Normalising at RENDER covers every row that exists,
+ * every row that is a draft, and every row an older admin build writes; it needs
+ * no production write, so it cannot half-succeed; and it is reversible by
+ * reverting a commit. The column keeps whatever the author typed, which keeps it
+ * honest about its own history.
+ *
+ * ⛔ WHY IT IS SCOPED TO RETIRED HOSTS AND NOT "rewrite every origin". These are
+ * AUTHOR-SUPPLIED URLs: a `gravatar`/company-CDN avatar or a cover on another
+ * project's origin is a perfectly valid value. Rewriting such an origin onto
+ * `SITE_URL` would point it at a path we do not serve — a 404 in the byline and
+ * inside structured data, which is the exact silent failure the render-time
+ * decision is meant to remove. So an unrecognised host is left untouched.
+ *
+ * A value that is not an absolute URL is returned unchanged, so the callers' own
+ * `validUrl` scheme check remains the one gate (`javascript:`, `data:` and
+ * protocol-relative values are still dropped there, not here).
+ */
+export function normaliseRetiredHostUrl(u: string | null | undefined): string | null {
+  if (!u) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(u);
+  } catch {
+    return u;
+  }
+  if (!RETIRED_SITE_HOSTS.includes(parsed.hostname)) return u;
+  const site = new URL(SITE_URL);
+  parsed.protocol = site.protocol;
+  parsed.host = site.host;
+  return parsed.toString();
+}
 
 // The link-preview card every coverless blog surface falls back to — the index,
 // tag pages, and a post whose cover_image_url is NULL. It is the SAME 1200x630
@@ -164,6 +231,34 @@ function rqlHeaders(env: Env): Record<string, string> {
 const POST_COLS =
   "id,slug,title,body,excerpt,cover_image_url,tags,author,author_image_url,meta_title,meta_description,published_at,updated_at";
 
+/**
+ * The render-time seam for STORED URLs (#11765): every row the blog renders passes
+ * through here, so no template has to remember the rule.
+ *
+ * ⛔ WHY THE SEAM IS AT THE ROW SOURCE AND NOT PER TEMPLATE. `cover_image_url` reaches
+ * the page by four different routes — `og:image` through `headHtml`, `image` through
+ * `blogPostingJsonLd`, and the index card's plus the article hero's
+ * `style="background-image:url('…')"`, which go STRAIGHT from the row and pass no
+ * helper at all — and `author_image_url` by two more (the byline and
+ * `BlogPosting.author.image`). A per-template rule is six chances to miss one, and a
+ * missed one is invisible: the page still renders, it just names a host that 301s.
+ * Normalising the row means a NEW template is covered by default.
+ *
+ * The helpers keep their own call as well (`authorBylineHtml`, `authorJsonLd`,
+ * `headHtml`, `blogPostingJsonLd`): they are exported and can be called with a row that
+ * never went through this seam, and the map is idempotent — normalising a normalised URL
+ * is a no-op — so the second pass costs one host comparison and removes the ordering
+ * question entirely.
+ */
+function normaliseStoredUrls(r: BlogPost): BlogPost {
+  return {
+    ...r,
+    tags: r.tags ?? [],
+    author_image_url: normaliseRetiredHostUrl(r.author_image_url),
+    cover_image_url: normaliseRetiredHostUrl(r.cover_image_url),
+  };
+}
+
 export async function fetchPublishedPosts(env: Env): Promise<BlogPost[]> {
   // Index does NOT need body — omit it (no N+1, no 100KB/post over-fetch).
   const cols = POST_COLS.replace(",body", "");
@@ -172,7 +267,7 @@ export async function fetchPublishedPosts(env: Env): Promise<BlogPost[]> {
   const res = await fetch(url, { headers: rqlHeaders(env) });
   if (!res.ok) throw new Error(`supabase ${res.status}`);
   const rows = (await res.json()) as BlogPost[];
-  return rows.map((r) => ({ ...r, tags: r.tags ?? [] }));
+  return rows.map(normaliseStoredUrls);
 }
 
 export async function fetchPostBySlug(env: Env, slug: string): Promise<BlogPost | null> {
@@ -181,7 +276,7 @@ export async function fetchPostBySlug(env: Env, slug: string): Promise<BlogPost 
   const res = await fetch(url, { headers: rqlHeaders(env) });
   if (!res.ok) throw new Error(`supabase ${res.status}`);
   const rows = (await res.json()) as BlogPost[];
-  return rows[0] ?? null;
+  return rows[0] ? normaliseStoredUrls(rows[0]) : null;
 }
 
 // ── Markdown → HTML (zero-dep, escape-first — plan §6 markdown contract) ───
@@ -914,7 +1009,7 @@ export function authorBylineHtml(
   post: Pick<BlogPost, "author" | "author_image_url"> | null | undefined,
 ): string {
   const name = escapeHtml(post?.author ?? DEFAULT_AUTHOR);
-  const imageUrl = post?.author_image_url ?? null;
+  const imageUrl = normaliseRetiredHostUrl(post?.author_image_url ?? null);
   const avatar = imageUrl && validUrl(imageUrl)
     ? `<img class="byline-avatar" src="${escapeHtml(imageUrl)}" alt="" width="22" height="22" loading="lazy">`
     : "";
@@ -939,7 +1034,7 @@ export function authorJsonLd(
     "@type": "Person",
     name: post?.author ?? DEFAULT_AUTHOR,
   };
-  const imageUrl = post?.author_image_url ?? null;
+  const imageUrl = normaliseRetiredHostUrl(post?.author_image_url ?? null);
   if (imageUrl && validUrl(imageUrl)) node.image = imageUrl;
   return node;
 }
@@ -953,7 +1048,9 @@ function blogPostingJsonLd(post: BlogPost, url: string): unknown {
     headline: post.title,
     description,
     url,
-    image: post.cover_image_url ?? undefined,
+    // Same render-time host normalisation as the byline: a hand-pasted cover on a
+    // retired host must not survive into `BlogPosting.image` (#11765).
+    image: normaliseRetiredHostUrl(post.cover_image_url) ?? undefined,
     author: authorJsonLd(post),
     datePublished: post.published_at,
     dateModified: post.updated_at,
@@ -1093,7 +1190,12 @@ export function headHtml(opts: {
   // to advertise a large image and ship none, which renders as a bare title.
   // The fallback is the shared 1200x630 card the static pages use
   // (`website/assets/og-tortoise.jpg`), a static asset under `/assets/`.
-  const safeImage = image && validUrl(image) ? escapeHtml(image) : DEFAULT_OG_IMAGE;
+  // ⛔ The stored cover is author-supplied and may name a retired host; normalise
+  // at RENDER so `og:image` / `twitter:image` never advertise a redirecting URL
+  // (#11765). The check is BEFORE `isDefaultCard`, so a normalised image can never
+  // be mistaken for the authored card (or vice versa).
+  const normalised = image && validUrl(image) ? normaliseRetiredHostUrl(image) : null;
+  const safeImage = normalised ? escapeHtml(normalised) : DEFAULT_OG_IMAGE;
   // Dimensions are declared ONLY for the card we authored. A post cover is
   // whatever the author uploaded, and stating 1200x630 for it would be a
   // promise the bytes do not keep — scrapers that trust the tag then crop the

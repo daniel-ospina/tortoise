@@ -23,10 +23,13 @@ import { rateLimited, __resetRateLimits } from "../website/functions/blog/_share
 import {
   headHtml,
   htmlPage,
+  navHtml,
   DEFAULT_OG_IMAGE,
   DEFAULT_OG_IMAGE_WIDTH,
   DEFAULT_OG_IMAGE_HEIGHT,
   DEFAULT_OG_IMAGE_TYPE,
+  SITE_URL,
+  RETIRED_SITE_HOSTS,
 } from "../website/functions/blog/_lib.ts";
 import { constraints } from "../website/functions/blog/_shared/seo-constraints.ts";
 import {
@@ -1815,7 +1818,7 @@ console.log("the tagless prompt SEEDS candidate keywords and honours the model's
 console.log("");
 console.log("the blog's link preview and icon");
 {
-  const url = "https://tortoise.premiselabs.co/blog";
+  const url = "https://premiselabs.co/blog";
   const index = headHtml({ title: "Blog — Tortoise", description: "Memory for agents.", url });
 
   const ogImage = (h) => (h.match(/<meta property="og:image" content="([^"]*)"/) ?? [])[1] ?? null;
@@ -1961,8 +1964,8 @@ console.log("the blog's link preview and icon");
   // The fallback asset is really on disk, at the size the tags promise, in the
   // format the tags declare, and with enough in it to BE a card.
   const card = readFileSync(new URL("../website/assets/og-tortoise.jpg", import.meta.url));
-  assertEq(DEFAULT_OG_IMAGE, "https://tortoise.premiselabs.co/assets/og-tortoise.jpg",
-    "the fallback card is the shared site card served from the site root");
+  assertEq(DEFAULT_OG_IMAGE, "https://premiselabs.co/assets/og-tortoise.jpg",
+    "the fallback card is the shared site card served from the site root, on the blog's canonical host (#11765)");
   assertEq(card.subarray(0, 2).toString("hex"), "ffd8", "the card on disk is a JPEG, as og:image:type says");
 
   // JPEG frame size: walk the segment chain to the SOF marker.
@@ -2081,6 +2084,171 @@ console.log("the blog's link preview and icon");
     "the fallback card declares its real format");
   assertEq(attr(withCover, "property", "og:image:type"), null,
     "a post cover declares no format, because the author's upload decides it");
+}
+
+// ── THE RETIRED-HOST GUARD (#11765) ────────────────────────────────────────
+//
+// The blog's canonical origin flipped from `tortoise.premiselabs.co` — a PERMANENT
+// 301 since epic #11762 — to `premiselabs.co`.
+//
+// ⛔ THE FAILURE THIS EXISTS FOR IS NOT "the constant is wrong". A wrong constant
+// reds a dozen assertions in this file. The failure that survives is a page that
+// still NAMES the retired host somewhere the constant does not reach: a stored
+// author avatar, a hand-pasted cover, a template literal written out by hand, a
+// fallback that was typed rather than derived. Such a page looks correct, keeps the
+// retired host alive in exactly the population the epic is trying to shrink, and is
+// invisible to every assertion that compares a constant to itself. So this is a
+// NEGATIVE assertion on RENDERED output, driven through the real handlers.
+console.log("");
+console.log("no rendered blog page names the retired host (#11765)");
+{
+  // The ONE explicit pin of the origin in this file. Everything else derives from
+  // SITE_URL (a literal in 30 places is how the second host survives); this is what
+  // reds if the constant itself is edited to the wrong value.
+  assertEq(SITE_URL, "https://premiselabs.co",
+    "the blog's canonical origin is the company host (#11762 decision)");
+  assert(RETIRED_SITE_HOSTS.includes("tortoise.premiselabs.co"),
+    "the product host is recorded as RETIRED (a permanent 301), not merely dropped");
+  assert(!RETIRED_SITE_HOSTS.includes(new URL(SITE_URL).hostname),
+    "the canonical host is NOT in the retired list — that would make the normaliser a no-op or a loop");
+
+  // ⛔ THE ONE ALLOWLIST. `navHtml`'s three PRODUCT links stay absolute on the
+  // product host deliberately: `/docs`, `/#pricing` and `/auth` do not exist on the
+  // company host until child 2 (#11764) creates them, so a relative rewrite today
+  // would 404 the blog's own navigation. They are a DESTINATION question, not an
+  // origin one, and #11764 owns the moment to repoint them. So the guard's claim is
+  // precise and falsifiable: the retired host appears ONLY in those three hrefs, and
+  // nowhere else on any rendered surface. A new leak anywhere else fails, and the day
+  // #11764 repoints them the occurrences drop to zero and this stays green.
+  const NAV_PRODUCT_HREFS = [
+    "https://tortoise.premiselabs.co/docs",
+    "https://tortoise.premiselabs.co/#pricing",
+    "https://tortoise.premiselabs.co/auth",
+  ];
+
+  // Every occurrence, as the URL text it sits in — so a failure names the value
+  // instead of a character offset.
+  const RETIRED_URL_RE = /https?:\/\/tortoise\.premiselabs\.co[^\s"'<>)]*/g;
+  const assertNoRetiredHost = (label, doc, { allowNav = false } = {}) => {
+    const found = [...new Set([...doc.matchAll(RETIRED_URL_RE)].map((m) => m[0]))];
+    const unexpected = found.filter((u) => !(allowNav && NAV_PRODUCT_HREFS.includes(u)));
+    assert(
+      unexpected.length === 0,
+      `${label}: no absolute URL on the retired host` +
+        (allowNav ? " (outside the three nav product links #11764 owns)" : "") +
+        (unexpected.length ? `\n      found: ${JSON.stringify(unexpected)}` : ""),
+    );
+  };
+
+  // The rows simulate PRODUCTION, not a tidy fixture: `author_image_url` is the value
+  // every published row actually holds today (measured on #11765) and
+  // `cover_image_url` is the hand-pasted shape a data migration could never fix,
+  // because drafts and archived rows are invisible to a backfill.
+  const ROWS = [{
+    id: "1",
+    slug: "retired-host-check",
+    title: "A post",
+    body: "## A section\n\nProse.",
+    excerpt: "An excerpt",
+    cover_image_url: "https://tortoise.premiselabs.co/assets/og-tortoise.jpg",
+    tags: ["memory"],
+    author: "Daniel Ospina",
+    author_image_url: "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg",
+    meta_title: null,
+    meta_description: null,
+    published_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-02T00:00:00Z",
+  }];
+
+  const realFetch = globalThis.fetch;
+  const withStub = async (fn) => {
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify(ROWS), { status: 200, headers: { "content-type": "application/json" } });
+    try {
+      return await fn();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  };
+  const env = {
+    SUPABASE_URL: "https://project.supabase.co",
+    SUPABASE_ANON_KEY: "anon-key",
+    ASSETS: { fetch: async () => new Response("", { status: 404 }) },
+  };
+
+  const { onRequestGet: blogGet } = await import("../website/functions/blog/[[path]].ts");
+  const { onRequestGet: feedGet } = await import("../website/functions/blog/feed.xml.ts");
+  const { onRequestGet: sitemapGet } = await import("../website/functions/blog/sitemap.xml.ts");
+
+  const render = (handler, path, params) => withStub(async () => {
+    const res = await handler({
+      request: new Request(`${SITE_URL}${path}`),
+      env,
+      params,
+      waitUntil() {},
+    });
+    assertEq(res.status, 200, `${path} renders (status 200) — a guard over an error page is vacuous`);
+    return res.text();
+  });
+
+  // ── the article page: head + byline + JSON-LD + nav, one document ──
+  const article = await render(blogGet, "/blog/retired-host-check", { path: ["retired-host-check"] });
+  assertNoRetiredHost("a rendered article", article, { allowNav: true });
+  // The positive half: the stored avatar and cover RENDERED, on the canonical host,
+  // with their paths intact — a guard that passes because the values vanished is not
+  // a guard. Path preservation is the whole contract of the normaliser.
+  assert(article.includes(`<link rel="canonical" href="${SITE_URL}/blog/retired-host-check">`),
+    "the article's canonical names the canonical host, self-referentially");
+  assert(article.includes(`<meta property="og:url" content="${SITE_URL}/blog/retired-host-check">`),
+    "og:url names the canonical host");
+  assert(article.includes(`<img class="byline-avatar" src="${SITE_URL}/blog/author-daniel-ospina.jpg"`),
+    "the STORED avatar renders on the canonical host, path preserved (no data migration)");
+  assert(article.includes(`<meta property="og:image" content="${SITE_URL}/assets/og-tortoise.jpg">`),
+    "a cover stored on the retired host renders normalised in og:image");
+  assert(article.includes(`"image":"${SITE_URL}/assets/og-tortoise.jpg"`),
+    "...and in BlogPosting.image, the copy a machine reads and no human can see break");
+  assert(article.includes(`"image":"${SITE_URL}/blog/author-daniel-ospina.jpg"`),
+    "...and BlogPosting.author.image");
+
+  // ── the index: its cards put the cover straight into a CSS url(...), which is the
+  // route no head helper sees — the reason the normalisation sits at the row source.
+  const index2 = await render(blogGet, "/blog", { path: [] });
+  assertNoRetiredHost("a rendered blog index", index2, { allowNav: true });
+  assert(index2.includes(`background-image:url('${SITE_URL}/assets/og-tortoise.jpg')`),
+    "the index card's cover is normalised too (it never passes through headHtml)");
+  assert(index2.includes(`<link rel="canonical" href="${SITE_URL}/blog">`),
+    "the index canonical names the canonical host");
+
+  // ── the feed: link, guid and atom:link self-reference ──
+  const feed = await render(feedGet, "/blog/feed.xml", {});
+  assertNoRetiredHost("the rendered feed", feed);
+  assert(feed.includes(`<link>${SITE_URL}/blog/retired-host-check</link>`),
+    "the feed's item link is on the canonical host");
+  assert(feed.includes(`<guid isPermaLink="true">${SITE_URL}/blog/retired-host-check</guid>`),
+    "the feed's guid is on the canonical host — a guid on a redirecting host is a new item to a reader");
+  assert(feed.includes(`<atom:link href="${SITE_URL}/blog/feed.xml"`),
+    "the feed's atom:link self-reference is on the canonical host");
+
+  // ── the sitemap: every loc ──
+  const sitemap = await render(sitemapGet, "/blog/sitemap.xml", {});
+  assertNoRetiredHost("the rendered sitemap", sitemap);
+  assert(sitemap.includes(`<loc>${SITE_URL}/blog/retired-host-check</loc>`),
+    "the sitemap's post loc is on the canonical host");
+  assert(sitemap.includes(`<loc>${SITE_URL}/blog</loc>`),
+    "...and so is the index loc");
+
+  // The guard must be able to FAIL. A negative assertion over a document that
+  // happens to contain no URLs at all passes for the wrong reason, so this feeds a
+  // retired-host URL through the same reader and requires it to be reported.
+  assert(
+    [...`<a href="https://tortoise.premiselabs.co/blog/x">x</a>`.matchAll(RETIRED_URL_RE)].length === 1,
+    "the guard's own matcher detects a retired-host URL (it is not a regex that matches nothing)",
+  );
+  assertNoRetiredHost("the nav alone", navHtml("blog"), { allowNav: true });
+  assert(
+    [...new Set([...navHtml("blog").matchAll(RETIRED_URL_RE)].map((m) => m[0]))].length === NAV_PRODUCT_HREFS.length,
+    "the nav's retired-host hrefs are exactly the three product links #11764 owns — no fourth appeared",
+  );
 }
 
 console.log("");
