@@ -1226,7 +1226,19 @@ def _landed_object_lifecycle_clause(ontology: str) -> str:
 
 
 def _newest_block_body(changelog: str) -> str:
-    """The newest block's text: from its header to the next block's header."""
+    """The newest block's text, from the line AFTER its header to the next header.
+
+    ⛔ ITS EXTENT IS NOT `_block_bodies(changelog)[0]`'s, and the difference is
+    not cosmetic: `_block_bodies` starts AT the header line, this starts at the
+    newline that ends it. Measured at `7e6baffc5d`: 11,269 chars against 11,375,
+    so **a citation written in the header line is invisible to this function**
+    and therefore to the pin that reads it (#12089 finding 3, found by a fresh
+    review at the merged head of #12004). The earlier docstring said "from its
+    header", which describes `_block_bodies`' extent, not this one's. Widening
+    the extent is deliberately NOT done here: it would loosen the citation pin
+    (more text seen means more citations accepted), so the residual is stated
+    instead.
+    """
     start = changelog.index("> **Changelog v3.")
     match = _BLOCK_VERSION_RE.match(changelog[start:changelog.index("\n", start)])
     assert match, "the changelog's newest block header must be readable"
@@ -1263,10 +1275,40 @@ def _block_bodies(changelog: str) -> list[str]:
     for 39 blocks, one of them a fragment starting at the quoted header.
     """
     starts = [m.start() for m in _BLOCK_VERSION_RE.finditer(changelog)]
-    return [changelog[a:b] for a, b in zip(starts, starts[1:] + [len(changelog)])]
+    # ⛔ THIS HELPER SHIPPED THE TWO RUFF FINDINGS THAT LEFT MAIN LINT-RED, AND THE
+    # RECORD OF IT MATTERS ENOUGH TO BE ACCURATE (#12087). #12004 — the PR that
+    # added this helper — merged at 08:04:55Z carrying RUF005
+    # (`starts[1:] + [len(changelog)]`) and B905 (an unparameterised `zip()`);
+    # its own `lint` job then concluded `failure` at 08:10:33Z, so the merge
+    # preceded its own lint verdict by ~5.6 minutes, and the post-merge
+    # `main-lint` notice on that PR (bot comment 6818383099, 08:13:50Z) stood
+    # unaddressed until here. NOT "nobody saw it" — the notice existed; the gap
+    # was a merge that landed before its check returned. The repair keeps the
+    # invariant explicit instead of silencing the rule: with no version header
+    # there is nothing to pair, and every real block pairs against the next
+    # header or EOF, so `strict=True` is TRUE rather than decoration.
+    if not starts:
+        return []
+    ends = [*starts[1:], len(changelog)]
+    return [changelog[a:b] for a, b in zip(starts, ends, strict=True)]
 
 
-def test_a_4_3_change_must_be_quoted_verbatim_by_some_changelog_block() -> None:
+def test_block_bodies_degrades_to_empty_without_a_version_header() -> None:
+    """`_block_bodies`' `if not starts` arm is load-bearing, not defensive padding.
+
+    `zip(..., strict=True)` makes the pairing an assertion, so a changelog with
+    NO version header has to be decided BEFORE the zip: without the arm, `ends`
+    is one longer than `starts` and the helper raises `ValueError` instead of
+    returning no blocks. `[]` is the correct reading of "every release block's
+    text" for a file that has none — and what the pre-`strict` implementation
+    returned. Deleting the arm is otherwise INVISIBLE (measured: the rest of
+    this module stays 51-green), so the branch is pinned by observation.
+    """
+    assert _block_bodies("") == []
+    assert _block_bodies("prose\nwith no version header\n") == []
+
+
+def test_a_4_3_bold_clause_change_must_be_quoted_verbatim_by_some_changelog_block() -> None:
     """A changelog that quotes a sentence the model does not carry is a false record.
 
     ``docs/ONTOLOGY.md:39`` and ``ONTOLOGY-CHANGELOG.md:32`` both require
@@ -1282,16 +1324,28 @@ def test_a_4_3_change_must_be_quoted_verbatim_by_some_changelog_block() -> None:
     an approved artifact came to disagree with itself. Nothing else in the tree
     compares them.
 
-    ⛔ SCOPE OF THE CLAIM — read this before trusting the name. What is enforced
-    is *"§4.3 may not change without SOME block quoting the new text"*, not
-    "the release that changed it quotes it": the comparison target is the newest
-    block that quotes the clause AT ALL, so a lane could change §4.3 and paste
-    the new sentence into an OLDER block's quote and this pin would pass
-    (measured: new text into v3.34's quote plus a quoteless v3.35 → both pins
-    green). Tying the quote to the version that actually made the change needs
-    the previous release's clause, which the file does not carry; the residual
-    is stated rather than papered over, and the cheap half — "the model and its
-    record disagree" — is fully covered.
+    ⛔ SCOPE OF THE CLAIM — read this before trusting the name, because the name
+    is narrower than §4.3 as a whole and, before this change, was WIDER than the
+    code (#12089). TWO narrowings apply, and neither is optional:
+
+    1. **The bold clause only.** `_landed_object_lifecycle_clause` extracts
+       exactly the span from `OBJECT_CLAUSE_START` to `OBJECT_CLAUSE_END` — the
+       §4.3 `status` row's **bold** lifecycle sentence. The rest of that cell
+       (including its opening sentence, which the v3.34 block itself records as
+       already WRONG about the code and parks on #9974) and **every other §4.3
+       row** are invisible to the comparison, so a lane can rewrite them with
+       both pins green. `docs/ONTOLOGY.md:39`'s CRITICAL RULE would still want
+       approval of those changes; this pin does not supply that check, and the
+       earlier SCOPE paragraph claimed it did.
+
+    2. **Some block, not the releasing one.** The comparison target is the
+       newest block that quotes the clause AT ALL, so a lane could change the
+       bold clause and paste the new sentence into an OLDER block's quote and
+       this pin would pass (measured: new text into v3.34's quote plus a
+       quoteless v3.35 → both pins green). Tying the quote to the version that
+       actually made the change needs the previous release's clause, which the
+       file does not carry. The residual is stated rather than papered over, and
+       the cheap half — "the model and its record disagree" — is fully covered.
 
     ⛔ THE RULE IS "MAY NOT CHANGE WITHOUT A BLOCK RECORDING IT", NOT "EVERY
     BLOCK MUST QUOTE". An earlier cut of this pin demanded a §4.3 quote in the
@@ -1334,12 +1388,10 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     person's answer lives. The sibling entries do it by comment id —
     ``#11827 (comment 6805834755)``, ``#11083 (comment 6667121779)`` — and the
     v3.34 entry did not: it asserted *"the owner answered `ok` to a three-item
-    amendment proposal"* while three independent passes measured **zero**
-    standalone ``ok`` and zero ``three-item`` occurrences on the issue it named.
-    The answer existed in a decision lane's pane, not on any surface the next
-    lane could read (``DECISION RELAY``: recorded nowhere the next lane reads is
-    a default, not a decision). The relay comment that finally recorded it
-    (``6815950417``) is what this entry must cite.
+    amendment proposal"*. The answer existed in a decision lane's pane, not on
+    any surface the next lane could read (``DECISION RELAY``: recorded nowhere
+    the next lane reads is a default, not a decision). The relay comment that
+    finally recorded it (``6815950417``) is what this entry must cite.
 
     Pinned as a SHAPE, not as that id: a later entry cites its own relay, and a
     shape is what stays true.
@@ -1360,15 +1412,19 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     ⛔ SCOPED TO A RELEASE THAT RECORDS §4.3, because the unconditional form was
     measured to false-block. Demanding a comment id in EVERY newest block reds
     the next release that touches §4.5 (verified with a synthetic `v3.35`), and
-    the file's practice does not support the demand: **3 of 39** blocks cite a
-    comment id, and v3.33 — the block that landed `D2 — A` for this very
-    question — cites none. What the approval rule actually needs is that no
-    release RECORDS owner-approved §4.3 text without naming where that approval
-    lives. The requirement is scoped to §4.3, like the sibling pin, but it is NOT
-    the sibling pin's gate: it is armed only when the newest block quotes the
-    clause, which makes it strictly narrower — the sibling pin also speaks when
-    an OLDER block quotes it, and reds in the state where an older block still
-    carries pre-change text while the newest quotes nothing.
+    the file's practice does not support the demand: measured at this head with
+    this module's own `_block_bodies` and `_CITATION_RE`, **4 of 39** blocks cite
+    a comment id — and only 3 of those cite it as their OWN approval: the v3.33
+    block that landed `D2 — A` for this very question cites
+    `#issuecomment-5619843002`, but on #2725 and in a passage withdrawing a
+    correction about §4.5, never as its own approval. What the approval rule
+    actually needs is that no release RECORDS owner-approved §4.3 text without
+    naming where that approval lives. The requirement is scoped to §4.3, like
+    the sibling pin, but it is NOT the sibling pin's gate: it is armed only when
+    the newest block quotes the clause, which makes it strictly narrower — the
+    sibling pin also speaks when an OLDER block quotes it, and reds in the state
+    where an older block still carries pre-change text while the newest quotes
+    nothing.
     """
     block = _newest_block_body(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
     if _quoted_clause(block) is None:
