@@ -363,12 +363,59 @@ UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
 }
 
 
-def _import_aliases(*roots: ast.AST) -> dict[str, str]:
+#: Node types that OPEN A SCOPE. An import or a binding inside one is a fact about THAT scope, not
+#: about the module or the enclosing writer — the axis along which the alias map leaked (#12020 r4).
+_NEW_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _walk_own_scope(root: ast.AST):
+    """`ast.walk(root)`, never crossing into a nested `def`/`class`/`lambda`.
+
+    ⛔ Round 3 fixed the fail-open where an aliased import was credited to a call it does not bind;
+    round 4 measured the same leak one axis over — `_import_aliases(tree)` walked the WHOLE module,
+    so an `ImportFrom` inside any function or class body became a module-level alias for EVERY
+    writer (a SIBLING's import classed another writer `gated`, i.e. outside `NEEDS_A_DECLARATION`).
+    Module-level `if`/`try`/`with` bodies are NOT scopes, so conditional imports still resolve.
+    """
+    stack: list[ast.AST] = [root]
+    while stack:
+        current = stack.pop()
+        yield current
+        stack.extend(child for child in ast.iter_child_nodes(current)
+                     if not isinstance(child, _NEW_SCOPE_NODES))
+
+
+def _scope_bound_names(root: ast.AST) -> set[str]:
+    """Names bound in `root`'s OWN scope (nested scopes excluded) — what shadows an import alias.
+
+    The rule `_locally_bound` applies to a writer, at module scope: `import … as _enc` followed by a
+    module-level `_enc = lambda …` means `_enc` no longer names the imported object (measured at
+    round 4 on the reviewed head: still `gated` — the round-3 fix could not see it, because it only
+    inspected the writer's subtree).
+    """
+    bound: set[str] = set()
+    for sub in _walk_own_scope(root):
+        if isinstance(sub, ast.Name) and isinstance(sub.ctx, (ast.Store, ast.Del)):
+            bound.add(sub.id)
+        elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(sub.name)
+        elif isinstance(sub, ast.arg):
+            bound.add(sub.arg)
+        elif isinstance(sub, ast.ExceptHandler) and sub.name:
+            bound.add(sub.name)
+    # ⛔ `ast.alias` is deliberately NOT counted — the import is what CREATES the alias.
+    return bound
+
+
+def _import_aliases(*roots: ast.AST, own_scope_only: bool = False) -> dict[str, str]:
     """Local name -> the name it was IMPORTED AS, for the seams and clause builders (`#11274`).
 
     Both scopes a writer can import in: the MODULE (`from … import X as Y` at module level) and the
-    WRITER'S OWN SUBTREE (a function-level import). An import inside a NESTED function contributes
-    to its enclosing writer's map — that can only credit a reach the writer's subtree really holds.
+    WRITER'S OWN SCOPE (a function-level import). ⛔ `own_scope_only` is what keeps those two apart
+    from every OTHER scope in the file: an import in a SIBLING function is not this writer's reach,
+    and crediting it classed a writer `gated` while it never reached the gate (#12020 round 4).
+    Callers pass `own_scope_only=True` for both the module pass and the writer pass, which leaves
+    the writer `unresolved_write` in the ambiguous cases — the direction that OWES a declaration.
 
     Only names in `WRITE_CLAUSE_BUILDERS`, `SEAM_CALL` and `UNGATED_CALLS` are resolved, and ONLY
     when the import's module is that name's real home (`_ALIAS_HOMES`): an alias of anything else
@@ -382,7 +429,8 @@ def _import_aliases(*roots: ast.AST) -> dict[str, str]:
     """
     found: dict[str, str] = {}
     for root in roots:
-        for sub in ast.walk(root):
+        walker = _walk_own_scope(root) if own_scope_only else ast.walk(root)
+        for sub in walker:
             if not isinstance(sub, ast.ImportFrom):
                 continue
             module = sub.module or ""
@@ -1004,7 +1052,15 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
         module_labels = {lab for _v, lab in _NODE_LABEL.findall(_strings(tree))}
         # The MODULE's import aliases, computed once per FILE: an alias map rebuilt inside the
         # per-function loop below would walk the whole tree once per writer (`#11274`).
-        module_aliases = _import_aliases(tree)
+        # ⛔ OWN-SCOPE ONLY, and filtered by module-scope bindings (#12020 round 4): the previous
+        # `_import_aliases(tree)` descended into every function body, so a SIBLING's import became
+        # this writer's alias and a sibling's `encode_for_row` classed it `gated` — outside
+        # `NEEDS_A_DECLARATION`, i.e. the writer stopped owing a declaration.
+        module_aliases = _import_aliases(tree, own_scope_only=True)
+        module_shadowed = _scope_bound_names(tree)
+        if module_shadowed:
+            module_aliases = {k: v for k, v in module_aliases.items()
+                              if k not in module_shadowed}
         file_src = path.read_text(encoding="utf-8")
         lines = file_src.splitlines()
         for node in ast.walk(tree):
@@ -1015,7 +1071,7 @@ def _embedding_writers(root: Path) -> dict[str, dict]:
             # aliased `encode_for_row` reds the population as an unresolved producer (a false
             # declaration owed) and an aliased clause builder is a SILENT MISS (a false `bypass`
             # answer, the direction that matters).
-            aliases = {**module_aliases, **_import_aliases(node)}
+            aliases = {**module_aliases, **_import_aliases(node, own_scope_only=True)}
             # ⛔ `#12020` round 3: an alias the writer REBINDS is not that reach. Measured —
             # `from … import encode_for_row as _enc` followed by a writer-local `_enc = lambda p: p`
             # still credited `encode_for_row`, classing a writer that never reaches the gate as
