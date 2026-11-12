@@ -2578,21 +2578,19 @@ def _iterated_store_problem(node: ast.AST, constant: str, lines: list[str],
                 f"`{'`, `'.join(sorted(rebound))}` is RE-BOUND inside the loop over {constant}, so "
                 "the store is no longer built from the iterated value — the labels are no longer "
                 "derived from that constant")
-        # ⛔ `#12020` round 4: the store must execute in the LOOP's OWN scope. `ast.walk` descends
-        # into a nested `def`/`class`/`lambda`, so the same defect round 2 fixed in
-        # `_carrying_statements` was still open here: a store moved into a nested function the loop
-        # never calls — or one whose PARAMETER shadows the loop binding, or a class-body string —
-        # satisfied the row while nothing stored per iteration (measured: all three GREEN).
-        hits = [n for outer in body for n in _walk_own_scope(outer)
-                if isinstance(n, ast.stmt) and _executes_a_call(n)
-                and _carrier_issues_a_call(n)
-                # ⛔ `#12020` review round 12: a CONTAINER's slice spans its body, so without this
-                # the `If label == "Point":` block inside the loop was the "store" whenever the real
-                # store statements had been replaced by discarded clauses — the row stayed GREEN.
-                and not isinstance(n, _COMPOUND_STATEMENTS)
-                and (_STORE_CARRIER.search(_slice_own_scope(lines, n))
-                     or (merge_store
-                         and _MERGE_STORE_CARRIER.search(_slice_own_scope(lines, n))))]
+        # ⛔ `#12020` rounds 4 and 12: the store must execute in the LOOP's OWN scope, and it must be
+        # EXECUTED rather than merely held. `ast.walk` descends into a nested `def`/`class`/`lambda`,
+        # so the same defect round 2 fixed in `_carrying_statements` was still open here: a store
+        # moved into a nested function the loop never calls — or one whose PARAMETER shadows the loop
+        # binding, or a class-body string — satisfied the row while nothing stored per iteration
+        # (measured: all three GREEN).
+        # ⛔ AND IT MUST NOT KEEP ITS OWN COPY OF THAT PREDICATE (round 13, P2). This arm restated
+        # `_executes_a_call` + a bespoke gate, so when the discard shape was closed in the other arms
+        # this one still credited a CONTAINER's body (`If label == "Point":`) and reverting the fix
+        # left all 47 tests green — the drift class rounds 10-12 kept re-finding, inside the last arm
+        # holding a copy. It now calls the choke point, so the two cannot diverge.
+        pattern = _MERGE_STORE_CARRIER if merge_store else _STORE_CARRIER
+        hits = [n for outer in body for n in _statements_that_store(outer, lines, pattern)]
         # ⛔ The MINIMAL store statements: without this, the enclosing `for` itself matches (its text
         # contains every store in its body) and any mention of the binding anywhere inside would
         # satisfy the target check — i.e. the arm would degrade to "something in the loop names it".
@@ -2683,13 +2681,17 @@ def _carrier_issues_a_call(statement: ast.stmt) -> bool:
     `bound_store` (its definition is the label PLUS a store), so the one kind that DOES owe an
     executed store was left on the gate that cannot see the discard shape.
 
-    ⚠️ Residual, stated (`#12020` round 10): this does not reach a store clause built into an
-    ASSIGNMENT that is never issued — `_unused = "…" + set_embedding_clause("e")` — nor a
-    `return`/`with`/`yield` that carries it. Those bind or scope a value and proving the built string
-    never reaches a `query(…)` is DATA FLOW, the same limit `UNDECIDABLE_WRITE_SHAPES` names for the
-    map merge. Measured on the reviewed head: the assignment mutation stayed GREEN. It is pinned as a
-    named residual by `test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual`, so the
-    blind spot can narrow in neither direction silently.
+    ⚠️ Residual, stated (`#12020` round 10, widened round 13): this does not reach a store clause
+    BUILT into a value and never issued — `_unused = "…" + set_embedding_clause("e")`, and the same
+    for an `AnnAssign`/`AugAssign`/tuple-or-attribute target, an `.append(…)` that only buffers the
+    clause, and a `raise`/`return`/`yield`/`with` that carries it. Those bind, buffer or escape the
+    value, and proving the built string never reaches a `query(…)` is DATA FLOW — the same limit
+    `UNDECIDABLE_WRITE_SHAPES` names for the map merge. Measured on the reviewed head: the assignment
+    and `raise` mutations stayed GREEN. They are pinned as named residuals by
+    `test_a_carrier_that_only_HOLDS_the_store_text_is_the_named_residual`, so the blind spot can
+    narrow in neither direction silently. ⛔ `raise` is NAMED rather than decided on purpose (round
+    13): its value escapes into the exception, so it is the same data-flow class as `return` —
+    unlike `assert`, which discards what it evaluated.
     """
     if isinstance(statement, ast.Expr):
         return isinstance(statement.value, ast.Call)
@@ -3470,6 +3472,41 @@ def test_a_DISCARDED_clause_stores_nothing_on_EVERY_claim_kind() -> None:
     assert _statements_that_store(ast.parse(match_discarded).body[0],
                                   match_discarded.splitlines()) == [], (
         "`ast.Match` is being counted as a store by its slice")
+
+    # ── the ITERATED arm routes through the same choke point (round 13, P2) ──────────────────────
+    # A loop with a GENUINE store that is NOT built from the binding, plus a discarded clause inside
+    # a container that IS. The statement arm passes (the real store carries the needle), so only the
+    # iterated arm can red — and before round 13 it kept its own copy of the predicate, credited the
+    # `If` container's slice, saw `{label}` in it, and answered GREEN. Reverting that half left all
+    # 47 tests green, which is why this fixture exists: the fix was unpinned.
+    iterated_mutant = (
+        '_KEYS = ("Point",)\n\n\n'
+        'def w(g):\n'
+        '    for label in _KEYS:\n'
+        '        if label == "Point":\n'
+        "            f\"MATCH (n:{label}) SET n += {set_embedding_clause('n')}\"\n"
+        '        g.query("MATCH (q)", {"p": set_embedding_clause("q")})\n')
+    problem_iterated = _evidence_violation(iterated_mutant, "w", "MATCH (q)", claim="store",
+                                           iterated="_KEYS")
+    assert problem_iterated is not None, (
+        "a discarded clause inside a loop CONTAINER still satisfied the iterated arm — that arm "
+        "kept its own copy of the store predicate instead of calling `_statements_that_store`")
+    assert "drives a store" in problem_iterated, (
+        f"the red is not the ITERATED arm's, so this fixture does not pin the copy that drifted: "
+        f"{problem_iterated}")
+
+    # ── `raise` is NAMED, not decided (round 13, P3) ──────────────────────────────────────────────
+    # An `assert` discards what it evaluated, so it is decidable (round 11). A `raise` ESCAPES its
+    # value into the exception, so it is the `return` class — data flow — and is named in the
+    # residual instead. Both directions asserted: the shape stays GREEN and the name stays present.
+    raise_src = ('def w(g):\n'
+                 "    raise ValueError(f\"MERGE (e:Event) {set_embedding_clause('e')}\")\n")
+    assert violation(raise_src, "MERGE (e:Event)", "store") is None, (
+        "`raise` is now DECIDED against — if that is intended, delete the residual clause that "
+        "names it as data flow, so the two do not disagree")
+    assert "raise" in (_carrier_issues_a_call.__doc__ or ""), (
+        "`raise` is credited by the choke point and not named as a residual — an undisclosed "
+        "fail-open is the claim being wider than the mechanism")
 
 
 def test_a_deleted_vector_write_reds_the_BOUND_STORE_row() -> None:
