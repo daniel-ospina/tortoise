@@ -6141,14 +6141,10 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
     # asserted a sentence with no token, so the assert passed for a reason
     # unrelated to the property it claimed to pin (review, P1).
     for true_sentence in (
-            "it is NOT the credibility word that reads 0.75 — the explicit "
-            "pair is",
             "the ``credibility=`` word is NOT 0.75 — it is 0.7561 on top of "
             "the default",
             "``credibility=`` never reads 0.75: the default plus the word is "
             "Beta(3.1,1)",
-            "the credibility word is dropped against an explicit pair, which "
-            "reads 0.75",
             # …and this is what pins the `(?!\d)` / `0\.750*` tail: drop the
             # lookahead and `0.7561` matches as `0.75`, so this reds.
             "``credibility=`` reads 0.7561 on top of the default",
@@ -6188,7 +6184,10 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             "the credibility word loses to a pair and reads 0.75",
             "the credibility word lost to a pair and reads 0.75",
             # …the COMMA stop: quiet only because the window cannot cross the
-            # comma to reach "reads 0.75" (cycle 7, P2).
+            # comma to reach the bare `0.75` that follows `so` (cycle 7, P2;
+            # the quoted fragment was corrected in cycle 14 — this row carries
+            # no `reads` at all, so citing "reads 0.75" described a sentence
+            # that is not here).
             "the credibility word is one body, so 0.75 stays the default's "
             "mean",
             # …and the ANCHOR: compound identifiers are a DIFFERENT object. T2 is
@@ -6255,6 +6254,19 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             "the credibility word reads a body e.g. 0.75 is the default's"):
         assert not _cred_word_yields_075(true_sentence), (
             f"the credibility guard fires on TRUE prose: {true_sentence!r}")
+    # ⛔ INERT WORDING RECORD — these two are NOT pins, and they were removed
+    # from the loop above because they cannot exercise the guard at all:
+    # `_CRED_WORD_YIELDS_075.findall(...)` returns [] for both, so inside that
+    # loop they asserted a tautology and implied coverage they never had
+    # (review cycle 14, P1). The exemption's own docstring (~5809) already
+    # recorded that neither ever matched; they are kept here, OUT of the loop,
+    # as the wording record so the next lane does not re-add them as pins.
+    #   • "it is NOT the credibility word that reads 0.75 — the explicit pair
+    #     is" — quiet because `that` stops the PRE-VERB window, not because of
+    #     `not`; the `that` stop has its own row above (cycle 13).
+    #   • "the credibility word is dropped against an explicit pair, which reads
+    #     0.75" — quiet three times over (pre-verb comma, post-verb `which`, and
+    #     the `dropped` demoter); the demoter has its own rows above.
     # ⛔ KNOWN FALSE PASS, pinned as a BOUNDARY, not as correctness: a pre-verb
     # COMMA stops the window, so this false attribution is NOT reported today.
     # It gets its OWN row, outside the TRUE-prose loop above, because the only
@@ -6302,7 +6314,14 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
         "the corpus no longer holds a sentence naming both the `credibility` "
         "word and 0.75, so the class-4 guard has nothing to be checked "
         "against — re-anchor this control before trusting the guard")
-    assert not _CRED_WORD_YIELDS_075.search(shipped), (
+    # The PREDICATE, not the raw pattern: this line's message claims the GUARD
+    # does not report the shipped sentence, so it must read the same function
+    # every other row reads. It measured `_CRED_WORD_YIELDS_075.search` before
+    # cycle 14 — a different question ("does the regex reach this sentence"),
+    # which for this sentence is a tautology: the number precedes the token, so
+    # the raw search can never match, while a rewrite to exemption-covered TRUE
+    # prose would make it match and blame the guard for a report it never makes.
+    assert _cred_word_yields_075(shipped) == [], (
         "the class-4 guard reports the SHIPPED sentence, which is true")
     mutated = shipped.replace(
         "the decide-part system default Beta(3,1) mean 0.75, or an author "
