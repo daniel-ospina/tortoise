@@ -780,11 +780,16 @@ def test_the_item_extent_is_the_parsers_map():
 
     # ⛔ THE PARAGRAPH-BREAK FIXTURE — the one case that separates the PARSER's `map` from a
     # hand-rolled "end at the first blank line" boundary, and the reason it is here (`review r45
-    # P3 #2`, measured): without it, swapping `token.map[1]` for the r40-shaped blank-line rule
-    # left this whole test GREEN, because none of the fixtures above puts a blank line INSIDE a
-    # single item — and neither does any item of the record, so the pin could not see the
-    # regression it exists to catch. A blank line followed by a paragraph indented to the item's
-    # content column is still THAT item in CommonMark; a blank-line rule ends the block at 2.
+    # P3 #2`, measured): without it, swapping `token.map[1]` for a PURE "end at the first blank
+    # line" terminator left this whole test GREEN (measured: `9 passed`), because none of the
+    # fixtures above puts a blank line INSIDE a single item — and neither does any of the seven
+    # LOCATED SITES of the record (measured: sites 2/3/4 -> map [286,302], sites 5/6/7 ->
+    # [302,329], site 1 is a table row) — so the pin could not see the regression it exists to
+    # catch. ⛔ The r40-era boundary is NOT that rule: rebuilt verbatim it is already caught by
+    # the `lazy` fixture above, so naming it here would give "r40-shaped" a second, incompatible
+    # meaning against the note at the top of this section. A blank line followed by a paragraph
+    # indented to the item's content column is still THAT item in CommonMark; a pure blank-line
+    # rule ends the block at 2.
     two_paragraphs = "1. **A** first\n\n   same item, second para\n\n2. **B** second\n"
     assert _parser_item_end(two_paragraphs, 0) == 4   # a second paragraph is INSIDE the item
 
@@ -799,8 +804,8 @@ def test_every_restatement_site_label_names_the_item_that_states_it():
     such section at all — so the map could not be followed, and FOUR rows named the
     WRONG item while reading perfectly plausible (review r27 P3 #1: the "pull only"
     consequence is stated in the `Hosted cloud agents get NEITHER hook` item, the
-    three sentences beside it in `"IDE-only" is NOT the right absolute` — four rows,
-    the count PR #11810's own table carries). Guidance
+    three sentences beside it in `"IDE-only" is NOT the right absolute` — the four ❌
+    legend rows, indices 4/5/6/7). Guidance
     that misdirects is how the NEXT round re-derives what this one already measured.
 
     So the labels are pinned twice over, and each half is a distinct failure:
