@@ -356,7 +356,7 @@ itself (every other `partial`-hold fixture injects the sentinel string, so nothi
 derivation to `PARTIAL_LABEL_PREFIX` — see the note below), and one added by `#11437` that drives
 the residual pin's polarity as an executor over its own row set rather than a table in a message —
 and
-reads 178 passed, 1 skipped on the docker lane at this head. The
+reads 179 passed, 1 skipped on the docker lane at this head. The
 skip is the `<3.12` re-derive. The three `main` reds this row recorded for a day are CLEARED:
 `#12045`'s undeclared `tortoise.api::_emit` / `tortoise.api::_verify_record_vector_width` writers were
 the width verifier and a docstring-quoted call, and `#12042` (`b367c54214a2`) CLASSED both
@@ -371,11 +371,11 @@ these nodeids red again at `origin/main` `edcac493a5` (measured there: `3 failed
 A branch sha is a moving tree — the same discipline the paragraph below already imposes on the
 population COUNT — so the claim is bound to the tree it was measured on, and this PR carries the
 declaration that clears it.
-⛔ The SPLIT is lane-bound, and the same tree reads **177 passed, 2 skipped** under
+⛔ The SPLIT is lane-bound, and the same tree reads **178 passed, 2 skipped** under
 `TORTOISE_TEST_CARVE_OUT=1` with no `TORTOISE_DB_URI` — the second skip is
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies. Both splits add
-to the same `179` the pin re-derives, so **neither is a stale figure**: a carve-out run that
-"corrects" 178/1 to 177/2 rewrites a true record into a false one, and the pin deliberately does
+to the same `180` the pin re-derives, so **neither is a stale figure**: a carve-out run that
+"corrects" 179/1 to 178/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
 head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is

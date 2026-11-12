@@ -7792,7 +7792,7 @@ def test_the_residual_pin_separates_the_claim_from_its_inverse(monkeypatch):
     # existed, but the note that enrols it did not until `#12000`'s F1b note),
     # and a provenance asserted here would be the false record this note exists
     # to prevent. ⛔ The count is SCOPED
-    # to that head rather than re-cut, because this file collects 179 now and no
+    # to that head rather than re-cut, because this file collects 180 now and no
     # run of it can report
     # 152; an unscoped figure here would be the stale-measurement defect §6 of the
     # census doc exists to forbid. What closed the gap is the AST guard below —
@@ -7880,13 +7880,13 @@ def test_the_census_doc_collects_what_the_file_collects():
     `--collect-only`, so adding a test reds this row until the figure is re-cut.
     The passed/skipped **split** is deliberately NOT pinned — it moves with the
     interpreter and the LANE, so pinning it would red on a box rather than on a
-    defect. Measured at this tree: the docker lane reads `178 passed, 1 skipped`
+    defect. Measured at this tree: the docker lane reads `179 passed, 1 skipped`
     (the skip is the `<3.12` re-derive; the three `main` reds this docstring used
     to record — `#12045`'s undeclared `tortoise.api::_emit` /
     `_verify_record_vector_width` writers — are cleared by `#12042`, landed as
-    `b367c54214a2`) and the carve-out lane reads `177 passed, 2 skipped` (that
+    `b367c54214a2`) and the carve-out lane reads `178 passed, 2 skipped` (that
     skip plus `tests/_live_utils.py`'s live-graph fixture, which only a lane with
-    a `TORTOISE_DB_URI` satisfies). Both splits add to the `179` re-derived
+    a `TORTOISE_DB_URI` satisfies). Both splits add to the `180` re-derived
     below, which is why the doc states its split as
     lane-bound: a carve-out run must not "correct" the docker lane's figure.
     """
@@ -8200,6 +8200,11 @@ def test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently():
     which is the half the lint job cannot cover. `load()` in
     `tortoise/embed_writer_register.py` already fails loud on the register's
     tuple-of-pairs for the same reason; the dicts here had no equivalent.
+
+    ⛔ `main` was red from TWO causes at `9828250732`, and this pin closes the
+    second: the register's duplicate raised at import (so this whole file could not
+    even collect), while the dict duplicates here were caught only by `ruff`'s
+    `F601` after the merge.
     """
     src = (probe.REPO_ROOT / "tools/dod_5090_probe.py").read_text(encoding="utf-8")
     tree = ast.parse(src)

@@ -1145,9 +1145,10 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
         "it does for `tortoise.projection::_prewipe_synthetic_write_scope`'s"),
     # ⛔ ONE entry per name: a second literal key for the same name SILENTLY OVERRIDES the
     # first (Python's last-wins dict semantics — the LATER row wins and the earlier one is
-    # dead; an active override, not a harmless no-op) — `ruff`'s F601 is the only thing that
-    # catches it, and it caught this one only post-merge on `main` (#9314: pytest does not).
-    # Provenance and the carrier rationale are merged into this row so neither reading is lost.
+    # dead; an active override, not a harmless no-op). `ruff`'s F601 is the only LINTER that
+    # catches it, and it caught this one only post-merge on `main` — the pytest lane could
+    # not, until `#9314`'s pin below. Provenance and the carrier rationale are merged into
+    # this row so neither reading is lost.
     "tortoise.sdk::create_source": (
         CENSUS_EXEMPT,
         "`tortoise/sdk.py::create_source` — the `#11858` guard's OWN message is the only "
