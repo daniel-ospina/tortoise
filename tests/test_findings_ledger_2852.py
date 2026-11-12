@@ -1182,7 +1182,14 @@ def test_the_s8_citation_carve_outs_stay_skippable(tmp_path, monkeypatch):
                # permalink (and an out-of-range `~/` `path:line`) read CLEAN while no
                # revision of the page ever carried one (measured over all 37 commits
                # that touch it: zero). §5.1 already called such a citation BROKEN.
-               "~/.swarm/x.md#L999999")
+               "~/.swarm/x.md#L999999",
+               # An HTTP status after a PATH is refused wherever it appears — §8 names
+               # ONLY the `.html`/`.htm` form as an HTTP carve-out, because that is the
+               # only shape the exemption tests. This spelling is here so the doc and
+               # the code cannot drift apart again in the direction §8 used to claim
+               # ("a status inside error text"): measured, it reds, and a lane told
+               # otherwise would red the required `docs` job on prose the page exempts.
+               "upstream /v1/context 503")
     for spelling in refused:
         with monkeypatch.context() as patch:
             _mutated(
