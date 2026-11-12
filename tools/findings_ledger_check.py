@@ -357,13 +357,15 @@ VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
 #: "PASS (0 failing arm(s))" and exited 0 (measured), so every gate stayed green
 #: over a self-test that proved nothing — a gate that reports OK when it cannot
 #: run. `tools/test_design_map_check.py` ships the same floor for the same reason.
-#: ⛔ IT IS AN EQUALITY, NOT A FLOOR THAT CAN SLIDE DOWN: 44 as of the figure arms
+#: ⛔ IT IS AN EQUALITY, NOT A FLOOR THAT CAN SLIDE DOWN: 46 as of the figure arms
 #: (`a falsified §3 count beside a list-free decoy`, `a falsified overtaken figure
 #: beside a compliant decoy`), which closed the paragraph-scoped presence test, plus
-#: the three #11902-review arms (`a §6 state row naming the same issue twice`, `a §3
-#: row whose claim cell is blank`, `a §3 row whose correction cell is blank`). Bump
-#: it with any arm added or removed — the population is what the pin compares.
-MIN_SELF_TEST_MUTATIONS = 44
+#: the #11902-review arms — `a §6 state row naming the same issue twice`, `a §3 row
+#: whose claim cell is blank`, `a §3 row whose correction cell is blank`, and the
+#: second review round's `a §6 issue re-listed inside ANOTHER state row` and `a §6
+#: issue re-spelled with a leading zero`. Bump it with any arm added or removed —
+#: the population is what the pin compares.
+MIN_SELF_TEST_MUTATIONS = 46
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -1770,6 +1772,7 @@ def check_state_arithmetic(text: str) -> list[str]:
     problems: list[str] = []
     section = _region(text, "## 6. The issue index", "## 7. What this changes")
     found: dict[str, int] = {}
+    row_refs: dict[str, list[int]] = {}
     for offset, line in _table_rows(section):
         match = STATE_ROW_RE.match(line)
         if not match:
@@ -1789,21 +1792,23 @@ def check_state_arithmetic(text: str) -> list[str]:
         found[label] = count
         refs = re.findall(r"`#\d+`", which)
         listed = len(refs)
-        # ⛔ COUNT THE DISTINCT REFS, not the occurrences (#11902 review P1). Counting
-        # occurrences let a SUBSTITUTION stay green: replacing one issue with a duplicate
-        # of another keeps the total, so a census silently loses an issue while "the
-        # row's count reconciles with its own list" still holds — measured, the §6
-        # `CLOSED COMPLETED` row with `#2725` swapped for a second `#2714` read
-        # `count=32 listed=32` over 31 distinct issues and the guard returned `[]`. This
-        # is the shape `MEMORY.md`'s `[pin-defensive-claim]` names — pin the list by
+        # ⛔ NORMALISE every ref to its ISSUE NUMBER, and let the census below judge the
+        # four rows as ONE population (#11902 review rounds 1 and 2). Two separate
+        # fail-opens lived here, and each was measured on the shipped document:
+        #
+        #   1. counting OCCURRENCES let a substitution stay green — swapping `#2725` for
+        #      a second `#2714` inside one row kept `count=32 listed=32` over 31 distinct
+        #      issues;
+        #   2. judging each row IN ISOLATION and comparing raw STRINGS let the same
+        #      substitution move one level up, and let a re-spelling slip through: moving
+        #      `#2787` out of `CLOSED other` while duplicating a `#2714` already listed in
+        #      `CLOSED COMPLETED` reconciles EVERY row, and writing `#02714` beside
+        #      `#2714` is a different string — both left `check_document()` at `[]` over a
+        #      census the pinned population could no longer account for.
+        #
+        # This is the shape `MEMORY.md`'s `[pin-defensive-claim]` names: pin the list by
         # SHAPE, not by size, because a size or equality pin is replaced by substitution.
-        duplicates = sorted({ref for ref in refs if refs.count(ref) > 1})
-        if duplicates:
-            problems.append(
-                f"§6 row {label!r}: its own list names {', '.join(duplicates)} more than "
-                "once — a duplicated ref stands in for a dropped issue while the row's "
-                "count still reconciles, so the census can lose an issue in silence"
-            )
+        row_refs[label] = [int(ref.strip("`#")) for ref in refs]
         if listed != count:
             problems.append(
                 f"§6 row {label!r}: declares {count} but its own list names {listed} "
@@ -1819,6 +1824,33 @@ def check_state_arithmetic(text: str) -> list[str]:
             f"§6 arithmetic: the state rows sum to {total}, but the pinned indexed "
             f"population is {PINNED_INDEXED_ROWS} (40 issues + 2 PRs) — a row moved "
             "state without the population being reconciled"
+        )
+
+    # The four rows are ONE census: an issue may be named by exactly one of them. Checked
+    # over the UNION, which is the only place a cross-row substitution or a re-spelling
+    # can show up at all — every row's own count reconciles in both shapes.
+    seen: dict[int, list[str]] = {}
+    for label, nums in row_refs.items():
+        for number in nums:
+            seen.setdefault(number, []).append(label)
+    duplicated = {number: labels for number, labels in seen.items() if len(labels) > 1}
+    if duplicated:
+        named = ", ".join(
+            f"#{number} ({' and '.join(sorted(set(labels)))}) "
+            for number, labels in sorted(duplicated.items())
+        )
+        problems.append(
+            f"§6: {named}named more than once across the state rows — a duplicated ref "
+            "stands in for a dropped issue while each row's count still reconciles, so "
+            "the census can lose an issue in silence"
+        )
+    census = len(seen)
+    if census != PINNED_INDEXED_ROWS:
+        problems.append(
+            f"§6 census: the four state rows name {census} distinct issue(s), but the "
+            f"pinned indexed population is {PINNED_INDEXED_ROWS} (40 issues + 2 PRs) — "
+            "a substitution keeps every row's OWN count and still drops an issue from "
+            "the set the rows exist to account for"
         )
     return problems
 
@@ -2637,6 +2669,29 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         # This arm fails if the count goes back to occurrences instead of distinct refs.
         "a §6 state row naming the same issue twice",
         lambda t: t.replace("incl. `#2714`, `#2725`", "incl. `#2714`, `#2714`", 1),
+        "more than once",
+    ),
+    (
+        # #11902 review round 2: the round-1 fix judged each state row IN ISOLATION, so the
+        # same substitution moved one level up — dropping `#2787` from `CLOSED other` while
+        # duplicating a `#2714` already listed in `CLOSED COMPLETED` reconciles EVERY row
+        # (4/4, 32/32, 4/4, 2/2) and lost an issue from the census in silence (measured:
+        # `check_document()` `[]`). The four rows are one population; this arm fails if the
+        # check goes back to per-row only.
+        "a §6 issue re-listed inside ANOTHER state row",
+        lambda t: t.replace(
+            "`#1509` (`NOT_PLANNED`) · `#2787` (`NOT_PLANNED`)",
+            "`#1509` (`NOT_PLANNED`) · `#2714` (`NOT_PLANNED`)",
+            1,
+        ),
+        "more than once",
+    ),
+    (
+        # The same hole, spelled differently: `#2714` and `#02714` are distinct STRINGS, so a
+        # duplicate test on the raw match saw nothing while the census was one issue short
+        # (measured: `check_document()` `[]`). Refs are compared as ISSUE NUMBERS now.
+        "a §6 issue re-spelled with a leading zero",
+        lambda t: t.replace("incl. `#2714`, `#2725`", "incl. `#2714`, `#02714`", 1),
         "more than once",
     ),
     (

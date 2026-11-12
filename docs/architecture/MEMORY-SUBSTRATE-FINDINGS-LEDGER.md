@@ -504,10 +504,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   stored* defect, inside the correction that exists to stop it — and the reason two reviewers could
   each "prove" the other side was the stale one.
 
-The self-test that proves the arms its 44 mutations exercise still fire has its own **population
+The self-test that proves the arms its 46 mutations exercise still fire has its own **population
 floor** (`MIN_SELF_TEST_MUTATIONS`). An emptied arm set used to print `PASS (0 failing arm(s))` and
 exit 0 — a gate reporting OK when it cannot run — so a shrunk population now reds instead. ⛔ **The
-population is 44 mutations of the PAGE, not a proof of the guard**, and every one of them edits the
+population is 46 mutations of the PAGE, not a proof of the guard**, and every one of them edits the
 page's text (a falsified tally, a deleted correction row, a second survivor sentence), so anything an
 arm reads that is not the page's CONTENT is outside it. Of the arms `check_document()` calls, exactly
 two are blind this way — `check_section_presence`, the FIRST one called, and `check_registration`,

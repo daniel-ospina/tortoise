@@ -242,7 +242,7 @@ def test_mutation_population_is_pinned():
     invented claim class left `check_document()` at `[]` where the parent returned a
     problem — so the exemption is the shape `| Verdict | … |`, and a reworded header is a
     deliberate two-place edit rather than a silent one.
-    44 is the population at this head.
+    46 is the population at this head.
     """
     # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
     # at this head two merges of two 25-arm populations produced 26 arms while the
@@ -253,8 +253,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 44, (
-        "this line RECORDS the population (44 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 46, (
+        "this line RECORDS the population (46 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -1834,6 +1834,47 @@ def test_a_duplicated_ref_cannot_stand_in_for_a_dropped_issue(tmp_path, monkeypa
     assert any("more than once" in p and "#2714" in p for p in problems), problems
     # The count still reconciles, so the duplicate arm is the ONLY thing that can red:
     # an arm that also tripped the `listed != count` check would prove nothing new.
+    assert not any("is not derived from the list" in p for p in problems), problems
+
+
+def test_a_substitution_across_state_rows_is_rejected():
+    """FAILS if §6 judges each state row IN ISOLATION instead of as one census.
+
+    Reachable, and not covered by the same-row arm beside it: dropping `#2787` from
+    `CLOSED other` while duplicating a `#2714` already listed in `CLOSED COMPLETED`
+    leaves EVERY row reconciling with its own count (4/4, 32/32, 4/4, 2/2) and loses
+    an issue from the four-row census — measured on the round-1 tool:
+    `check_document()` returned `[]`. The four rows are one population, so the check
+    is over their UNION.
+    """
+    text = flc.read_doc(REPO)
+    assert flc.check_state_arithmetic(text) == []
+    moved = text.replace(
+        "`#1509` (`NOT_PLANNED`) · `#2787` (`NOT_PLANNED`)",
+        "`#1509` (`NOT_PLANNED`) · `#2714` (`NOT_PLANNED`)",
+        1,
+    )
+    assert moved != text, "the §6 anchor moved — re-derive this mutation"
+    problems = flc.check_state_arithmetic(moved)
+    assert any("more than once" in p and "CLOSED other" in p for p in problems), problems
+    # No row's own count is disturbed, so only the union arm can be what reds here.
+    assert not any("is not derived from the list" in p for p in problems), problems
+
+
+def test_a_re_spelled_ref_cannot_hide_a_duplicate():
+    """FAILS if §6 compares refs as raw STRINGS rather than as issue numbers.
+
+    Reachable by a plain re-spelling: `#2714` and `#02714` are distinct strings, so a
+    duplicate test over the raw match saw nothing while the census was one issue short
+    (measured on the round-1 tool: `check_document()` `[]`). Normalising to `int` makes
+    the two spellings the same issue, which is what the row means.
+    """
+    text = flc.read_doc(REPO)
+    assert flc.check_state_arithmetic(text) == []
+    respelled = text.replace("incl. `#2714`, `#2725`", "incl. `#2714`, `#02714`", 1)
+    assert respelled != text, "the §6 anchor moved — re-derive this mutation"
+    problems = flc.check_state_arithmetic(respelled)
+    assert any("more than once" in p and "#2714" in p for p in problems), problems
     assert not any("is not derived from the list" in p for p in problems), problems
 
 
