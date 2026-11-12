@@ -752,7 +752,7 @@ _SHELL_SEP = re.compile(r"&&|\|\||;&|;|&|\|")
 #: Skipping a keyword can only change the answer when the command AFTER it is a message command,
 #: and a substitution inside that message is still read positionally — so this cannot hide a real
 #: call site, which is the direction that would matter.
-_SEGMENT_KEYWORDS = "then|else|do|elif|if"
+_SEGMENT_KEYWORDS = "then|else|do|elif|if|while|until"
 _SEGMENT_CMD = re.compile(
     r"^(?:-\s+)?(?:run:\s*)?(?:\{\s*|(?:" + _SEGMENT_KEYWORDS + r")\s+)?([A-Za-z_][\w.-]*)"
 )
@@ -813,9 +813,9 @@ def _command_haystacks(line: str) -> list[str]:
 
     ⛔ AND A MESSAGE IN COMMAND POSITION BEHIND AN UN-SKIPPED PREFIX IS STILL A FALSE
     POSITIVE (#12088, measured through this reader's own `_gh_hazards`): `_SEGMENT_CMD` skips the
-    statement keywords (`then|else|do|elif|if`) and a leading `{`, which is what the loop/branch/
-    `if …; then` shapes need. A message behind any OTHER command-position prefix still
-    reads as a command named by that prefix, so the helper name inside it becomes a
+    statement and loop keywords (`then|else|do|elif|if|while|until`) and a leading `{`, which is
+    what the branch/loop/`if …; then` shapes need. A message behind any OTHER command-position
+    prefix still reads as a command named by that prefix, so the helper name inside it becomes a
     HAZARD — `( echo "run tools/<h> by hand" )`, `case x in a) echo … ;; esac`,
     `! echo …`, `time echo …`, `command echo …`, `function f { echo …; }`. ⛔ PRE-EXISTING
     on `main`, latent (no such shape in `.github/workflows`), and listed rather than
@@ -823,6 +823,14 @@ def _command_haystacks(line: str) -> list[str]:
     one-line widening, and a widening that gets command position WRONG buys a FALSE
     NEGATIVE — the fail-open direction this whole gate exists to refuse. Extend the skip
     with the shape and a pin that measures both directions; never widen it blind.
+
+    `while`/`until` were a listed residual and are NOT one any more (`#12088` review, P3):
+    the DIRECT shapes `while echo "run tools/<h> by hand"` / `until echo …` answered HAZARD
+    while nothing pinned the choice at all — the two rows pinned here pass through `do`, not
+    through the loop keyword. Adding the two keywords to the skip turns those shapes inert and
+    leaves the fail-open direction untouched (`while bash tools/<h>` reads `bash` AFTER the
+    keyword and stays a hazard); both directions are now pinned in
+    `test_the_message_exclusion_cannot_hide_a_real_invocation`.
     """
     haystacks: list[str] = []
     raw: list[str] = []  # the command as written
@@ -1199,6 +1207,12 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
         f'            for d in a b; do echo "run tools/{helper} by hand"; done',
         f'            while true; do echo "run tools/{helper} by hand"; done',
         f'            until false; do echo "run tools/{helper} by hand"; done',
+        # the DIRECT loop-keyword shapes: a message immediately after `while`/`until`, which the
+        # `do` keyword does not rescue. Listed as residuals before this row existed, and the
+        # choice was pinned by NOTHING (#12088 review P3) — measured HAZARD with
+        # `_SEGMENT_KEYWORDS` = `then|else|do|elif|if`.
+        f'            while echo "run tools/{helper} by hand"',
+        f'            until echo "run tools/{helper} by hand"',
         f'            elif echo "run tools/{helper} by hand"',
         f'            if echo "run tools/{helper} by hand"',
         f'            {{ echo "run tools/{helper} by hand"; }}',
@@ -1213,6 +1227,10 @@ def test_the_message_exclusion_cannot_hide_a_real_invocation():
         f'            else echo "$(python3 tools/{helper})"',
         f"            for f in a; do bash tools/{helper}; done",
         f"            while true; do bash tools/{helper}; done",
+        # …and the DIRECT loop-keyword shape stays a hazard: the word AFTER the keyword is
+        # `bash`, so skipping the keyword cannot hide the call it launches.
+        f"            while bash tools/{helper}",
+        f"            until bash tools/{helper}",
         f"            if bash tools/{helper}; then x; fi",
         f"            {{ bash tools/{helper}; }}",
     ]

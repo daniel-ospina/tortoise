@@ -321,10 +321,10 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 173 collected, 172 passed, 1 skipped
+                                 # this tree: 174 collected, 173 passed, 1 skipped
 ```
 
-(115 collected before #11088's round 7; the file collects **173 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **174 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
 by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, one by `#11437`, and five by `#11747`
 (which brought the cache projection into row 2's served-set comparison — the write path the source
@@ -333,12 +333,14 @@ close review findings on that change: the falsifier for the probe's DIRECT-WRITE
 guard on a node the CALLER builds, which the probe had not measured — the pin that a record label
 with no `KEY_PROPERTY` HOLDS the row instead of taking the whole report down with a `KeyError`, and
 the falsifier for the PLANTED property set, without which reverting that derivation to the literal
-`embedding` red no row at all), and two by `#12015` (the EDGE doors: a relationship has
+`embedding` red no row at all), and three by `#12015` (the EDGE doors: a relationship has
 no label at all, so the projection's edge writer can store a vector nothing can query — and
 the row could not see it, because the node measurement only ever asked about labels. One pin
 measures the edge doors on the fixed tree, the other is the falsifier that empties the decline
-and watches row 2 go `NOT MET`)
-(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 2 = 173`). ⚠️ No figure here names what `main` collects TODAY: every
+and watches row 2 go `NOT MET`; the third pins the PROBED POPULATION as drop-derived rather
+than input-derived, so an arm that stops planting cannot still report full coverage — measured
+UNPINNED: the input-derived variant stayed at 171 passed, 2 skipped)
+(`122 + 9 + 19 + 1 + 14 + 1 + 5 + 3 = 174`). ⚠️ No figure here names what `main` collects TODAY: every
 addition but the last is already merged, and the last lands with this document, so any "`main` at N"
 would be a moving reference this paragraph forbids — the total is bound to THIS TREE alone): seven
 row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
@@ -354,12 +356,12 @@ itself (every other `partial`-hold fixture injects the sentinel string, so nothi
 derivation to `PARTIAL_LABEL_PREFIX` — see the note below), and one added by `#11437` that drives
 the residual pin's polarity as an executor over its own row set rather than a table in a message —
 and
-reads 172 passed, 1 skipped on the docker lane. The
-skip is the `<3.12` re-derive. ⛔ The SPLIT is lane-bound, and the same tree reads **171 passed,
+reads 173 passed, 1 skipped on the docker lane. The
+skip is the `<3.12` re-derive. ⛔ The SPLIT is lane-bound, and the same tree reads **172 passed,
 2 skipped** under `TORTOISE_TEST_CARVE_OUT=1` with no `TORTOISE_DB_URI` — the second skip is
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies. Both splits add
-to the same `173` the pin re-derives, so **neither is a stale figure**: a carve-out run that
-"corrects" 172/1 to 171/2 rewrites a true record into a false one, and the pin deliberately does
+to the same `174` the pin re-derives, so **neither is a stale figure**: a carve-out run that
+"corrects" 173/1 to 172/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
 head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is

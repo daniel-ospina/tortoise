@@ -658,6 +658,35 @@ def test_re_introducing_an_EDGE_vector_flips_row_two_to_NOT_MET(monkeypatch):
     assert "stored-without-a-query-path: none" not in row.observed, row.observed
 
 
+def test_an_edge_arm_that_stops_PLANTING_cannot_report_full_coverage(monkeypatch):
+    """The population is DROP-derived, not INPUT-derived (#12015 review, finding C).
+
+    `cache_projection_store_labels` documents that `relationships_probed` is *"recorded only
+    where a door RECORDED A DROP"*, so that an arm which stops planting cannot still report
+    full coverage. That promise was pinned by NOTHING: deriving the population from the input
+    list (`edge_probed.add(rel_type)` at the top of the per-type loop — the exact variant the
+    probe's own comment calls MEASURED wrong) left this file **171 passed, 2 skipped**. Only
+    the empty-the-integer direction was pinned by the test above.
+
+    So this disables the PLANT: with no stored-vector property to plant, no door can record a
+    drop, and the population must collapse — while the shipped code stays green (the plant is
+    empty, not the door missing).
+    """
+    import tortoise.cache_projection as cp
+
+    monkeypatch.setattr(cp, "stored_vector_props", frozenset)
+    measured = probe.cache_projection_store_labels()
+    assert measured["error"] is None, measured["error"]
+    assert measured["relationships_probed"] == frozenset(), (
+        "an arm that planted nothing still reported a PROBED population, so the population "
+        "is derived from its input rather than from an observed refusal: "
+        f"{sorted(measured['relationships_probed'])}")
+    # …and the row must not then rest on that emptiness as if it were a measurement.
+    monkeypatch.setattr(probe, "cache_projection_store_labels", lambda: measured)
+    assert probe.score_path_bullet().verdict != "MET", (
+        "a row reported MET over an edge arm that never planted a vector")
+
+
 def test_a_record_label_without_a_key_HOLDS_the_row_instead_of_crashing(monkeypatch):
     """`#11747` review, finding 4 — the per-label derivation is inside the envelope.
 
