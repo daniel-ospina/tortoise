@@ -10897,7 +10897,11 @@ def _mechanism_conflicts_for_pairs(proj, pairs):
 
     The bare-edge arm compares against the NEW MECHANISM, never its storage type:
     a bare edge's mechanism IS its rel type, so every bare type that is not the
-    new mechanism conflicts.
+    new mechanism conflicts. It fires on any 2-SUBSET of the pair — the same
+    criterion the operator arm uses (`len(shared) >= 2`) — because that is the
+    door's own rule for an n-ary operator: a bare `NAND b→c` conflicts with
+    `coherence a→[b, c]`, and an equality test would let the door write it while
+    Phase 1 refused the mirror (#12067 review round 6, P2).
     """
     from tortoise.pack_registry import CORE_PREDICATES
 
@@ -10934,7 +10938,7 @@ def _mechanism_conflicts_for_pairs(proj, pairs):
             out.setdefault(pair, []).append(
                 ("operator", otype, sorted(shared), oid))
         for _a, _b, _t in bare:
-            if _t != mechanism and {_a, _b} == set(pair):
+            if _t != mechanism and (_a in pair and _b in pair):
                 out.setdefault(pair, []).append(
                     ("direct_edge", _t, [_a, _b], None))
     return out
@@ -29014,10 +29018,15 @@ class TortoiseSDK:
         for key, found in _mechanism_conflicts_for_pairs(proj, graph_pairs).items():
             for i, names, mechanism in pair_index.get(key, []):
                 for _kind, other, _shared, oid in found:
+                    # The two arms need different words: an OPERATOR is removed by
+                    # deleting a point, a bare EDGE by removing the edge — and a
+                    # message that says "operator None" names neither (#12067
+                    # review round 6, P2).
+                    _where = (f"operator {oid!r}" if _kind == "operator"
+                              else "a direct edge")
                     violations.append(self._mechanism_violation(
                         i, mechanism,
-                        f"it already carries the {other!r} mechanism "
-                        f"(operator {oid!r})",
+                        f"it already carries the {other!r} mechanism ({_where})",
                         sorted(names)))
 
     def _mechanism_violation(self, index: int, mechanism: str, because: str,
@@ -29100,16 +29109,26 @@ class TortoiseSDK:
         """``{ref: group_representative}`` for the refs this bundle MINTS (#12067).
 
         ⛔ Two refs can denote ONE node: `create_point` folds on the item's `key`
-        and, when the key misses, on ``(pointKind, content_hash)`` — so two
+        and, when the key MISSES, on ``(pointKind, content_hash)`` — so two
         `points` items repeating the same content (the documented #6110 retry
         shape) land on one node. Judging their connection endpoints as two
         distinct bundle-local names hid the conflict, and the bundle then aborted
         MID-WRITE with the points already committed (measured, #12067 review
         round 5, P1).
 
-        A UNION-FIND over the writer's own fold aliases, so the grouping is the
-        writer's, not an invention: two minted refs are one node iff they share a
-        normalised `key` or a ``(kind, content_hash)`` pair.
+        ⛔ ORDER-AWARE, because the writer's fold is (#12067 review round 6, P2).
+        A key hit DISCARDS the item's content — it is never stored, so it never
+        becomes a node and must not bridge two refs. Walking the items in bundle
+        order and suppressing the content alias on a key hit is what keeps this
+        grouping from inventing a node the writer does not create: with
+        ``{key: K, content: alpha}``, ``{key: K, content: beta}`` and
+        ``{content: beta}`` the writer mints TWO nodes (K/alpha and beta), so the
+        second ref must not fold the third onto the first (a false refusal of a
+        legitimate bundle — measured).
+
+        The alias kind is the POSITIONAL kind (`_item_point_kind`), the value
+        `create_point` dedups by; the `pointKind` prop only renames the stored
+        value and does not scope the fold (#9819).
         """
         parent: dict[str, str] = {}
 
@@ -29127,30 +29146,54 @@ class TortoiseSDK:
             if ra != rb:
                 parent[max(ra, rb)] = min(ra, rb)
 
-        alias_owner: dict[tuple, str] = {}
+        key_owner: dict[tuple, str] = {}
+        content_owner: dict[tuple, str] = {}
         for item in bundle.get("points") or []:
             if not isinstance(item, dict):
                 continue
             ref = item.get("ref")
-            if not isinstance(ref, str) or not ref or ref not in names:
+            if not isinstance(ref, str) or not ref:
                 continue
             if landing.get(ref):
                 continue                      # a real node: its id is the key
-            _find(ref)
             kind = _item_point_kind(item)
-            aliases: list[tuple] = []
             key = _item_dedup_key(item)
-            if key:
-                aliases.append(("k", kind, key))
             content = item.get("content")
-            if isinstance(content, str) and content.strip():
-                aliases.append(("c", kind, _content_hash(content)))
-            for alias in aliases:
-                owner = alias_owner.get(alias)
+            has_content = isinstance(content, str) and bool(content.strip())
+            tracked = ref in names
+            if key:
+                owner = key_owner.get((kind, key))
                 if owner is None:
-                    alias_owner[alias] = ref
-                else:
+                    key_owner[(kind, key)] = ref
+                    if tracked:
+                        _find(ref)
+                    # No key hit ⇒ the item's content IS stored, so it may bridge.
+                    if has_content:
+                        cowner = content_owner.get((kind, _content_hash(content)))
+                        if cowner is None:
+                            content_owner[(kind, _content_hash(content))] = ref
+                        elif tracked:
+                            _union(cowner, ref)
+                    continue
+                # KEY HIT: `create_point` keeps the existing node and DISCARDS
+                # this item's content, so it must not bridge anything.
+                if tracked:
+                    _find(ref)
                     _union(owner, ref)
+                continue
+            if not has_content:
+                if tracked:
+                    _find(ref)
+                continue
+            alias = (kind, _content_hash(content))
+            cowner = content_owner.get(alias)
+            if cowner is None:
+                content_owner[alias] = ref
+                if tracked:
+                    _find(ref)
+            elif tracked:
+                _find(ref)
+                _union(cowner, ref)
         return {ref: _find(ref) for ref in list(parent)}
 
     def ingest(self, bundle: dict, granularity: str = "bulk", *,

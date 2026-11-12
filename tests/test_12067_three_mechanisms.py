@@ -833,6 +833,84 @@ def test_two_REFS_that_fold_onto_one_minted_node_are_ONE_pair(sdk):
     assert rows[0][0] == 0, rows
 
 
+def test_a_bare_edge_on_an_NARY_SUBPAIR_is_refused_by_BOTH_doors(sdk):
+    """⛔ The door's rule is "share ≥2 endpoints", and the bare-edge arm must use
+    it too (#12067 review round 6, P2 — measured).
+
+    The bare arm required the bare edge's endpoints to EQUAL the whole endpoint
+    set, so a bare `NAND b→c` sat beside `coherence a→[b, c]` — two mechanisms on
+    the pair (b, c) — while the mirrored `ingest` refused the same state. The
+    doc's claim ("one shared reader, one rule") has to be true of both arms, so
+    this pins the SAME shape through `create_operator` and through `ingest`.
+    """
+    from tortoise.exceptions import BundleValidationError
+
+    a, b, c = _points(sdk, 3)
+    sdk.create_direct_edge("NAND", b, c)
+    with pytest.raises(ValueError) as exc:
+        sdk.create_operator("coherence", a, [b, c])
+    assert "NAND" in str(exc.value), str(exc.value)
+    # ... and the ingest door reports the mirror instead of raising mid-bundle.
+    with pytest.raises(BundleValidationError) as exc2:
+        sdk.ingest({"connections": [
+            {"operator": "coherence", "from": a, "to": [b, c]}]})
+    violations = getattr(exc2.value, "violations", []) or []
+    assert any("direct edge" in (v.get("message") or "") for v in violations),         violations
+
+
+def test_a_bare_edge_conflict_names_the_EDGE_not_an_operator(sdk):
+    """⛔ The two arms need different words (#12067 review round 6, P2).
+
+    A dropped kind-aware branch printed `it already carries the 'NAND' mechanism
+    (operator None)` — telling the caller to look at an operator that does not
+    exist, when the remedy is to remove an edge.
+    """
+    from tortoise.exceptions import BundleValidationError
+
+    a, b = _points(sdk)
+    sdk.create_direct_edge("NAND", a, b)
+    with pytest.raises(BundleValidationError) as exc:
+        sdk.ingest({"connections": [
+            {"operator": "IMPL", "from": a, "to": b}]})
+    msgs = [v.get("message") or "" for v in
+            (getattr(exc.value, "violations", []) or [])]
+    assert any("a direct edge" in m for m in msgs), msgs
+    assert not any("operator None" in m for m in msgs), msgs
+
+
+def test_a_key_hit_DISCARDS_the_content_so_it_cannot_bridge(sdk):
+    """⛔ Order-aware folding (#12067 review round 6, P2 — a FALSE REFUSAL).
+
+    `create_point` resolves the key FIRST and, on a key hit, DISCARDS the incoming
+    content: it is never stored, so it never becomes a node. Grouping on the item's
+    DECLARED content made it a bridge, so
+    `{key: K, content: alpha}`, `{key: K, content: beta}`, `{content: beta}`
+    collapsed onto ONE group and `ingest` refused a bundle the writer handles —
+    two nodes (K/alpha, beta), two mechanisms, no conflict at all.
+    """
+    z1 = sdk.create_point("statement", "target one")["id"]
+    z2 = sdk.create_point("statement", "target two")["id"]
+    res = sdk.ingest({
+        "points": [
+            {"key": "K", "content": "alpha", "ref": "r1"},
+            {"key": "K", "content": "beta", "ref": "r2"},
+            {"content": "beta", "ref": "r3"},
+        ],
+        "connections": [
+            {"operator": "IMPL", "from": "r1", "to": z1},
+            {"operator": "coherence", "from": "r3", "to": z1},
+            {"operator": "IMPL", "from": "r2", "to": z2},
+        ],
+    })
+    assert res is not None
+    # The writer minted TWO points (K/alpha and beta) — the shape the grouping
+    # must model.
+    rows = sdk._get_proj().g.query(
+        "MATCH (p:Point) WHERE p.key = 'K' OR p.content = 'beta' "
+        "RETURN p.key, p.content").result_set
+    assert len(rows) == 2, rows
+
+
 def test_an_absorbed_coherence_leg_lands_on_the_STORAGE_edge(sdk):
     """⛔ The ingest partial-absorb leg mapped every non-IMPL/NAND op_type to
     `hasPart`, so an absorbed coherence input landed as a structural edge the
