@@ -44,11 +44,12 @@ retired host as LEGITIMATE, so a retired-host `<loc>` passes there) — because 
 counts what the RUNTIME emits in its own surface, not every occurrence in the tree. Every file that reads 0 has
 NO row and stays in `RUNTIME_FILES` — the landed allowlist has never carried a row for ANY of
 them: three were re-aimed to 0 by main's #12058 (which landed before this branch's base and
-never touched this file), and six never carried one,
-`website/functions/blog/_lib.ts` among them: #11977 repointed its three `navHtml` hrefs in the
-same commit that introduced this list, so the count
-reached 0 before a row could describe it — so a literal coming back REDS the guard instead
-of leaving the surface, and neither group is a leftover — which is why this guard
+never touched this file), five were never described by a row anywhere (`email_notify.py`,
+`abuse.py`, the two `SKILL.md`s and `.env.example`), and `website/functions/blog/_lib.ts`
+reached 0 in the commit that introduced this list — #11977 repointed its three `navHtml`
+hrefs in `7e6baffc5d`, so the LANDED count was 0 from the list's first revision (the drafts'
+`_lib.ts` row, 4 then 3, is the one the map note below records) — so a literal coming back REDS the guard instead
+of leaving the surface, and no group is a leftover — which is why this guard
 cannot report GREEN over a file it never opened, and why a sweep that removes one of
 those literals must remove its recorded reason too.
 
@@ -296,14 +297,16 @@ RETIRED_HOST_ALLOWLIST = {
     # named the admin client and the dashboard Function but not `_lib.ts`, which is
     # what the blog's canonicals, OG tags, JSON-LD, sitemap and feed are built from.
     # ⛔ THIS FILE HAS NO ROW, and that is the deferral being PAID rather than
-    # moved. Two landings did it, NEITHER of them in this PR's diff: #11765
-    # (PR #11976) re-aimed `SITE_URL` to `premiselabs.co`, leaving the three
-    # `navHtml` product hrefs deferred to #11764; #11764 then CLOSED
-    # (2026-11-12T07:23:26Z, COMPLETED, by PR #12058) WITHOUT repointing them and
-    # #12057 explicitly excludes this file — so the deferral pointed at a closed
-    # issue, which this file's own OWNERSHIP note forbids ("a note deferring to it
-    # defers nowhere"). The repoint is #11977's: its commit `7e6baffc5d` moved
-    # those three hrefs to the terminal forms (`premiselabs.co/tortoise/docs`
+    # moved. TWO landings took it to zero, NEITHER of them in this PR's diff:
+    # #11765 (PR #11976) re-aimed `SITE_URL` to `premiselabs.co`, taking the file
+    # from 4 occurrences to the THREE `navHtml` product hrefs, which it deferred to
+    # #11764; #11764 then CLOSED (2026-11-12T07:23:26Z, COMPLETED, by PR #12058,
+    # which touched neither this test file nor `_lib.ts` and so removed nothing
+    # here) WITHOUT repointing those three, and #12057 explicitly excludes this
+    # file — so the deferral pointed at a closed issue, which this file's own
+    # OWNERSHIP note forbids ("a note deferring to it defers nowhere"). The repoint
+    # is #11977's: its commit `7e6baffc5d` moved those three hrefs to the terminal
+    # forms (`premiselabs.co/tortoise/docs`
     # answers 200; `/tortoise` is the product page; `/auth` 301s to the app origin)
     # and introduced this allowlist with NO `_lib.ts` row, because the count was
     # already 0. The sibling blog guard lands with it, not with this PR: it pinned
