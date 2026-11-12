@@ -31,6 +31,7 @@ import json
 import re
 import subprocess
 import sys
+import textwrap
 import types
 from pathlib import Path
 
@@ -1020,6 +1021,110 @@ ONTOLOGY_CHANGELOG = REPO_ROOT / "docs/ONTOLOGY-CHANGELOG.md"
 # which read the ISSUE number in the rejected shape below as a comment citation.
 _CITATION_RE = re.compile(r"#issuecomment-(\d{6,})|comment(?:-id)?\s*[:`]?\s*(\d{6,})")
 _REJECTED_CITATION_SHAPE = "See the discussion comments 118245"
+
+# ⛔ ONE TABLE, THREE READERS (#12068): the denial VOCABULARY, the REGEX the arm
+# matches with, and the FIXTURES that drive every row. A regex spelled beside a test
+# that drives only its first alternative is how six of these eight rows went
+# undriven in the first cut of this arm (measured: deleting them left the suite
+# green). Each row is (label, fragment, sentence) — the sentence carries the denial
+# AND an attributed quotation, so a row still refuses when the denial arm alone is
+# removed, and `test_the_approval_arm_refuses_a_bare_or_
+# disclaimed_citation` iterates this table rather than restating it.
+#
+# ⛔ THE DENIAL SCOPE IS THE WHOLE ENTRY, and an earlier cut of THIS comment said the
+# opposite ("beside the id, not anywhere in the entry") while the arm already refused
+# entry-wide — a comment that promised a leniency the code did not grant, which is the
+# same class of false statement the pin exists to remove. A release that advertises
+# the absence of the approval it owes does so in the entry, not in a sentence; the
+# COST (an entry DISCLOSING a past state is refused, and must rephrase) is stated at
+# the arm.
+_APPROVAL_DENIAL_SHAPES: tuple[tuple[str, str, str], ...] = (
+    ("the absence is stated outright", r"\bno\s+approval\b",
+     "No approval is recorded anywhere, so comment {id}: *\"the clause stands as "
+     "landed\"* is cited for it."),
+    ("approval is negated", r"\bnot\s+approved\b",
+     "The change was not approved, and comment {id}: *\"the clause stands as "
+     "landed\"* is the closest relay."),
+    ("approval was never given (past tense)",
+     r"\bapproval\s+was\s+not\b",
+     "The owner's approval was not on record; comment {id}: *\"the clause stands "
+     "as landed\"* records only the wording."),
+    ("approval is not on record (present tense)",
+     r"\bapproval\s+is\s+not\b",
+     "The owner's approval is not on record; comment {id}: *\"the clause stands as "
+     "landed\"* records only the wording."),
+    ("the owner never approved it", r"\bnever\s+approved\b",
+     "The owner never approved this clause, so comment {id}: *\"the clause stands "
+     "as landed\"* is not its home."),
+    ("it landed without approval", r"\bwithout\s+approval\b",
+     "The clause landed without approval; comment {id}: *\"the clause stands as "
+     "landed\"* is cited for its wording only."),
+    ("the clause is unapproved", r"\bunapproved\b",
+     "The clause is unapproved, and comment {id}: *\"the clause stands as landed\"* "
+     "is cited only for its wording."),
+    # ⛔ ONE ROW PER ALTERNATIVE, because an alternative inside a shared fragment is a
+    # shape no fixture can narrow: `(?:records?|states?|approves?)` driven by a sentence
+    # that only ever says `records` was measured narrowable to `records?` with the suite
+    # green, after which `states`/`approves` denials were ACCEPTED.
+    ("the cited id is said not to record it", r"\bno\s+comment\b.{0,60}\brecords?\b",
+     "no comment {id}: *\"the clause stands as landed\"* records it; the relay "
+     "happened elsewhere."),
+    ("the cited id is said not to state it", r"\bno\s+comment\b.{0,60}\bstates?\b",
+     "no comment {id}: *\"the clause stands as landed\"* states it; the relay "
+     "happened elsewhere."),
+    ("the cited id is said not to approve it",
+     r"\bno\s+comment\b.{0,60}\bapproves?\b",
+     "no comment {id}: *\"the clause stands as landed\"* approves it; the relay "
+     "happened elsewhere."),
+    ("the cited id is called unrelated",
+     r"\bcomment\b.{0,80}\bis\s+unrelated\b",
+     "the only comment {id}: *\"the clause stands as landed\"* is unrelated."),
+)
+_APPROVAL_DENIAL_RE = re.compile(
+    "|".join(fragment for _, fragment, _ in _APPROVAL_DENIAL_SHAPES), re.I)
+# ⛔ THE VOCABULARY IS PINNED SEPARATELY, as (label, fragment) PAIRS, because both
+# readers DERIVE from the table: deleting a row shrinks the regex AND the fixtures
+# together, and NARROWING a fragment leaves its own fixture still refusing, so either
+# edit would leave the suite green (both measured under #12068's review — deletion was
+# caught by a labels-only pin, narrowing was not). A cut that really means to change a
+# shape must edit this line too, which is a visible change under review rather than a
+# silent narrowing. The SENTENCES stay out of the pin: their wording is a fixture, the
+# fragment is the protection.
+_EXPECTED_DENIAL_SHAPES: tuple[tuple[str, str], ...] = (
+    ("the absence is stated outright", r"\bno\s+approval\b"),
+    ("approval is negated", r"\bnot\s+approved\b"),
+    ("approval was never given (past tense)", r"\bapproval\s+was\s+not\b"),
+    ("approval is not on record (present tense)", r"\bapproval\s+is\s+not\b"),
+    ("the owner never approved it", r"\bnever\s+approved\b"),
+    ("it landed without approval", r"\bwithout\s+approval\b"),
+    ("the clause is unapproved", r"\bunapproved\b"),
+    ("the cited id is said not to record it",
+     r"\bno\s+comment\b.{0,60}\brecords?\b"),
+    ("the cited id is said not to state it",
+     r"\bno\s+comment\b.{0,60}\bstates?\b"),
+    ("the cited id is said not to approve it",
+     r"\bno\s+comment\b.{0,60}\bapproves?\b"),
+    ("the cited id is called unrelated",
+     r"\bcomment\b.{0,80}\bis\s+unrelated\b"),
+)
+# ⛔ A QUOTATION ONLY DISCHARGES THE ARM WHEN IT IS ATTRIBUTED TO THE CITATION. The
+# first cut accepted any quoted span within 400 characters, which a landing entry
+# satisfies with a code token or a file path mentioned for another reason (measured:
+# `The owner approved the change (comment <id>) that makes "superseded" mean
+# replaced.` was green). So the introduction itself is pinned: the id, then an
+# optional closing backtick, an introducer (`:`/`—`/`-`/`(`), optional emphasis, and
+# the quotation. ⛔ THE FLOOR IS TWO THINGS: eight characters AND a run of four
+# letters, because a character count alone admits `"        "` and `"........"` —
+# measured, both discharged the arm, so "eight characters keeps `\"ok\"` out" was a
+# claim the code did not enforce.
+# ⛔ THE QUOTED SENTENCE IS NOT CAPPED IN LENGTH. The first cut matched against a
+# 40-character slice, so the CLOSING quote had to fall inside it and any real
+# approving sentence was refused (measured: a 37-character body was green only by
+# luck and a 90-character one was red, with a message telling the lane to write
+# exactly what it had written). The pattern is anchored immediately after the id, so
+# no further bound is needed.
+_ATTRIBUTED_QUOTE_RE = re.compile(
+    r'^[`\']?\s*(?:[:—–(]|-)\s*[*_]{0,2}"(?=[^"\n]{8,}")[^"\n]*[A-Za-z]{4,}[^"\n]*"')
 PLAN = REPO_ROOT / "docs/plans/2026-08-25-1714-memory-capture-onboarding.md"
 
 
@@ -1340,6 +1445,227 @@ def _refuse_unresolvable_evidence(prose: str, block_texts: list[str], *,
             f"points at carries {sorted(carried)}")
 
 
+def _unfold_block(block: str) -> str:
+    """The block with its markdown wrapping removed and its quote prefixes stripped.
+
+    ⛔ UNFOLDED, because a soft wrap is not a semantic boundary. The arm is
+    wrap-SENSITIVE in two places — a denial and its citation can be split across a
+    wrap, and the quoted sentence can be wrapped MID-QUOTATION — and folding means a
+    re-flow of an entry cannot change what this arm decides. Measured at this head,
+    the landed entry's accepted citation and its quotation DO share a physical line,
+    so unfolding changes no current verdict: it removes a re-wrap false BLOCK, and
+    the wrap is driven from synthetic text below rather than assumed away.
+    """
+    return " ".join(re.sub(r"^>\s?", "", line).strip()
+                    for line in block.splitlines())
+
+
+def _top_level_calls_of(source: str) -> set[str]:
+    """The functions a `def` at the top of `source` calls as a BARE STATEMENT.
+
+    ⛔ A CALL NODE, NOT A SUBSTRING. A substring search for a call name is satisfied
+    by a comment or a string, and it is satisfied by a call nested in an `if False:`
+    left behind when a lane disables an arm — measured at #12068's review: deleting
+    the call and leaving `# … used to run here` in the body left both tests green, and
+    an `if False:` wrapper kept the name in the source too. Only a call that executes
+    on every path is a wiring, and that is what this reads.
+    """
+    tree = ast.parse(textwrap.dedent(source))
+    function = next(node for node in tree.body
+                    if isinstance(node, ast.FunctionDef))
+    return {statement.value.func.id
+            for statement in function.body
+            if isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Name)}
+
+
+_MARK_CHARS_RE = re.compile(r"[*_`'\"]")
+
+
+def _without_quotations(text: str, citations: list[re.Match[str]]) -> str:
+    """`text` with each ATTRIBUTED quotation collapsed to an empty pair of quotes.
+
+    ⛔ ONLY THE QUOTATION THAT BELONGS TO A CITATION, and the first cut of this helper
+    collapsed EVERY quoted span — which erased a denial whose pivotal word the entry
+    had put in its own quotation marks (`No "approval" is recorded anywhere`) and
+    left the pin green over it (measured under #12068's review). The quoted words of
+    the cited comment are the comment's statement, not the entry's; quotation marks
+    the entry uses for anything else are the entry's own prose.
+
+    Collapsing the attributed span is also what makes the two rows with an internal
+    character bound (`no comment … records`, `comment … is unrelated`) reachable when
+    a REAL quotation sits between the two halves — a 76-character quotation carried
+    both shapes past those bounds, and the pin reported OK (measured).
+    """
+    out: list[str] = []
+    last = 0
+    for citation in citations:
+        span = _ATTRIBUTED_QUOTE_RE.match(text[citation.end():])
+        if span is None:
+            continue
+        out.append(text[last:citation.end()])
+        out.append('""')
+        last = citation.end() + span.end()
+    out.append(text[last:])
+    return "".join(out)
+
+
+# The spans `_collapse_all_quotations` removes: every way this document marks words
+# as QUOTED or as a CODE SPAN — both quote conventions, backticks, and bold/italic —
+# so an interposed one contributes no filler to a row's internal bound.
+# ⛔ THE `_` AND `*` ALTERNATIVES ARE BOUNDED BY NON-WORD CHARS so an identifier
+# (`superseded_by`) is not read as emphasis.
+_MARKED_SPAN_RE = re.compile(
+    r'\*\*[^*\n]+\*\*'          # **bold**
+    r'|(?<![A-Za-z0-9])__[^_\n]+__(?![A-Za-z0-9])'   # __bold__
+    r'|`[^`\n]+`'               # `code`
+    r'|"[^"\n]*"'              # "double quoted"
+    r"|'[^'\n]*'"              # 'single quoted'
+    r'|\*(?!\*)[^*\n]+\*'       # *italic*
+    r'|(?<![A-Za-z0-9])_[^_\n]+_(?![A-Za-z0-9])')   # _italic_
+
+
+def _collapse_all_quotations(text: str) -> str:
+    """Every double-quoted span collapsed to an empty pair of quotes.
+
+    ⛔ THE SECOND VIEW, and it exists for one measured bypass: rows 7 and 8 carry an
+    internal width bound, and an interposed quotation the ENTRY owns (`… — the annex
+    "archived does not close policy B" — records the approval`) fills that bound with
+    characters no fixture reaches. Collapsing every quotation here means such filler
+    contributes nothing, so the two halves are as close as they are in plain prose.
+    ⛔ IT CANNOT REPLACE THE ATTRIBUTED-ONLY VIEW: collapsing everything erases a
+    denial whose pivotal word the entry itself quoted (`No "approval" is recorded`),
+    which is why the arm searches BOTH and either may refuse.
+    ⛔ IT COLLAPSES BOTH QUOTE CONVENTIONS, BACKTICKS AND EMPHASIS, because an earlier
+    cut collapsed only `"…"` and an interposed span written the document's other way
+    (`*archived does not close policy B*`, `'…'`, `` `…` ``) carried a disclaimer past
+    the same bound (all measured). See `_MARKED_SPAN_RE`.
+    """
+    return _MARKED_SPAN_RE.sub('""', text)
+
+
+def _fuse_marks(text: str) -> str:
+    """`text` with marking characters DELETED, so a mark inside a word cannot split it.
+
+    ⛔ THE COMPANION OF `_deemphasise`, NOT A REPLACEMENT FOR IT, and the pair is why
+    the vocabulary is matched on FOUR views. Replacing a mark with a SPACE keeps
+    `No**approval**` adjacent but splits a mark written INSIDE a token
+    (`un**approved**` → `un approved`), while DELETING it does the reverse
+    (`No**approval**` → `Noapproval`, `un**approved**` → `unapproved`). Both forms are
+    this document's own idiom, and each was measured accepted while only the other
+    view existed.
+    """
+    return _MARK_CHARS_RE.sub("", text)
+
+
+def _denial_views(unfolded: str, citations: list[re.Match[str]]) -> list[str]:
+    """Every view the denial vocabulary is matched on — four, and all of them needed.
+
+    Two QUESTION scopes (the attributed quotation collapsed so a quoted statement is
+    the comment's, then EVERY marked span collapsed so interposed filler contributes
+    nothing to a row's internal bound) crossed with two MARK treatments (marks spaced,
+    marks deleted, per `_deemphasise` / `_fuse_marks`). Any one view alone was
+    measured bypassable; the arm refuses if ANY view refuses.
+    """
+    return [treatment(base)
+            for base in (_without_quotations(unfolded, citations),
+                         _collapse_all_quotations(unfolded))
+            for treatment in (_deemphasise, _fuse_marks)]
+
+
+def _deemphasise(text: str) -> str:
+    """`text` with markdown emphasis markers and code ticks replaced by spaces.
+
+    ⛔ THE DENIAL VOCABULARY IS MATCHED ON THIS, NOT ON THE RAW ENTRY. This document
+    bolds mid-phrase as its own idiom (`docs/ONTOLOGY-CHANGELOG.md` carries dozens of
+    mid-sentence `**…**` insertions), so a vocabulary that matched only plain prose
+    refused nothing real: `No **approval** is recorded anywhere` was ACCEPTED, and so
+    were `not *approved*` and ``without `approval``` (all measured under #12068's
+    review). Replaced by a SPACE rather than deleted, so `no**approval**` cannot fuse
+    into a token that neither the pattern nor a reader would recognise.
+    ⛔ QUOTATION MARKS ARE IN THE CLASS TOO, BOTH CONVENTIONS: an entry's own
+    quotation marks around the pivotal word (`No "approval" is recorded anywhere`,
+    `No 'approval' is recorded anywhere`) are formatting as well, and leaving them in
+    broke the adjacency the vocabulary needs — the single-quote form is this
+    document's own idiom and was measured green until it was added here.
+    """
+    return re.sub(r"[*_`'\"]", " ", text)
+
+
+def _refuse_a_bare_or_disclaimed_citation(block: str) -> None:
+    """The cited comment's WORDS must be ATTRIBUTED to it, and not disclaimed.
+
+    ⛔ THE TWO SHAPES #12068 MEASURED AS PASSING, and why a form check is not enough:
+    a release could advertise the ABSENCE of the approval it owes — a denial beside
+    the citation — or cite an id only to disclaim it, and the enumerated-forms arm
+    accepted both. Each is refused here under its own message, so a red tells the lane
+    which half failed rather than that "the entry is bad".
+
+    ⛔ THE DENIAL SCOPE IS THE WHOLE ENTRY, and two narrower cuts were each measured
+    bypassable before it: breaking the window on `; ` or `: ` let a denial escape by
+    punctuation alone, and breaking it only on `. ` let the same denial escape into
+    the PREVIOUS or the FOLLOWING sentence (both measured green). A release
+    advertising the absence of the approval it owes is a property of the ENTRY, not of
+    a sentence inside it.
+    ⛔ WHAT THAT COSTS, stated as the code performs it: an entry that DISCLOSES a past
+    state in one of the enumerated words (*"an earlier cut said no approval was
+    recorded"*) is refused too; the remedy is to rephrase the disclosure or keep it in
+    the issue. Measured at this head, the landed entry carries none of them, so the
+    cost is a possible future false block — the safer error than the false PASS this
+    arm exists to close.
+
+    ⛔ THE RESIDUAL OF THE LEXICAL DENIAL DETECTOR, stated because it is the last one
+    and it cannot be closed by a bigger pattern: two of the eight rows (the ones that
+    say the cited id does not record the approval) carry an internal bound, and a
+    disclaimer PADDED WITH PLAIN PROSE between the two halves
+    (`no comment <id>: "…", and the annex on policy B sets out the retirement route
+    in full, records the signoff`) is accepted. Everything MARKED is refused — both
+    quote conventions, backticks, bold and italic, before or after the citation —
+    because a marked span is collapsed before the bound is measured, and the fixtures
+    drive one of each. What remains needs no pattern: an author who writes that
+    sentence has written the disclaimer, and a reviewer reads it.
+
+    ⛔ ATTRIBUTED, not merely quoted. A quotation anywhere near the id is not
+    evidence for it: an earlier cut accepted one, and `The owner approved the change
+    (comment <id>) that makes "superseded" mean replaced.` was green — the arm
+    discharged by a code token quoted for another reason (measured). The
+    introduction the entry must write is `comment <id>: "…"`.
+
+    ⛔ THE RESIDUAL IS STATED, NOT PAPERED OVER: this arm reads TWO FILES, so a
+    release can still pair a REAL, resolvable id with a FABRICATED quotation in
+    exactly the accepted shape. Closing that needs the comment's own text, which is a
+    reviewer step (this suite is static by design — see
+    `tests/test_extractor_v4_citation_rot.py` on its own citations), and it is
+    recorded in #12068.
+    """
+    unfolded = _unfold_block(block)
+    citations = list(_CITATION_RE.finditer(unfolded))
+    assert citations, (
+        "the block carries no citation for this arm to read — the enumerated-forms "
+        "check above must refuse it first")
+    denial = next((match for match in
+                   (_APPROVAL_DENIAL_RE.search(view)
+                    for view in _denial_views(unfolded, citations))
+                   if match is not None), None)
+    assert denial is None, (
+        "the entry DISCLAIMS the approval rather than offering it as evidence: "
+        f"{unfolded[max(0, denial.start() - 120):denial.end() + 120]!r}\n  what "
+        "failed: the release states, in one of the enumerated forms, that the "
+        "approval is absent or that the cited id does not record it\n  what to do: "
+        "cite the comment that RECORDS the owner's approval and quote its words — "
+        "and if this entry is disclosing a past state, rephrase the disclosure (a "
+        "release that advertises the absence of the approval it owes is the shape "
+        "this arm exists to refuse, #12068)")
+    assert any(_ATTRIBUTED_QUOTE_RE.match(unfolded[match.end():])
+               for match in citations), (
+        "no citation in the block INTRODUCES the cited comment's own words, so the "
+        "entry names a place to look without recording what was found there\n  what "
+        "failed: the comment id is bare, or the quotation beside it is attributed to "
+        "nothing\n  what to do: write `comment <id>: \"the approving sentence\"` — the "
+        "id, an introducer, then the words a reader can check against the comment")
+
+
 def _assert_no_stale_citation_claim(text: str, blocks: list[str], citing: list[str],
                                     *, lands_first: bool) -> list[str]:
     """Refuse every STALE restatement of this changelog's citation measurement.
@@ -1656,12 +1982,13 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     stale number in bold), every ``the N blocks that cite nothing``, every
     ``the first/second of the two v3.33 entries`` in a sentence that also names
     ``D2 — A``, and every ``#issuecomment-<id>`` in a DOCSTRING — one that SOME block
-    must carry in an accepted citation form, and, in the sibling docstring ALONE, one
-    the landing block itself must carry (the ``carrier`` arm). The earlier sentence
-    said "the landing block" for both, which no code performs: it read as a refusal
-    for another block's permalink that does not happen (measured — a docstring citing
-    the v3.32 block's id stays green), i.e. a scope sentence claiming more enforcement
-    than the code performs, which is finding 2's class.
+    must carry in an accepted citation form, and, in the sibling docstring AND this
+    pin's own, one the landing block itself must carry (the ``carrier`` arm). Two
+    earlier cuts of this sentence were wrong in opposite directions: the first said
+    "the landing block" for BOTH arms, which no code performs (measured — a docstring
+    citing the v3.32 block's id stays green); the second said the carrier arm covered
+    "the sibling docstring ALONE", which this pin's own arm made false. Both claimed
+    different enforcement than the code performs — finding 2's class.
 
     A count restated OUTSIDE those shapes is prose this pin does not read —
     measured, and green: *"Only 3 of 39 blocks cite a comment id."*, *"measured 3
@@ -1747,13 +2074,15 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     # arms live in `_assert_no_stale_citation_claim` (bold count, complement, ordinal),
     # and they are driven from synthetic text by
     # `test_every_declared_sweep_arm_refuses_a_stale_restatement`. ⛔ DRIVING THEM IS
-    # HALF: `test_the_citation_pin_calls_every_arm_it_declares` reads THIS function's
-    # source and requires the call, because a helper test says nothing about whether
-    # the pin still reaches it (measured: deleting three call sites left the file at
-    # 55 passed). So deleting an arm OR its call site reds, instead of silently
-    # narrowing this sweep while the paragraph above still promises it. Both measured values are accepted by the bold arm, because BOTH are
-    # TRUE statements about the file; a count matching neither is stale, and a bold
-    # count about something counted in OTHER units is not read at all.
+    # HALF: `test_the_citation_pin_calls_every_arm_it_declares` RECORDS the arguments
+    # this function actually passes (it monkeypatches the arms and calls the pin), so a
+    # helper test says nothing about whether the pin still reaches an arm — only that
+    # test does. (Measured on an earlier source-reading cut at ``b4de89b4e5``: deleting
+    # three call sites gave ``1 failed, 55 passed`` of 56 — one red, not a green suite,
+    # and the call-site deletions already redded. Only dropping the ``carrier=``
+    # keyword was silent.) Both measured values are accepted by the bold arm, because
+    # BOTH are TRUE statements about the file; a count matching neither is stale, and a
+    # bold count about something counted in OTHER units is not read at all.
 
     assert (int(stated.group(1)), int(stated.group(2))) == (len(citing), len(blocks)), (
         f"the docstring states {stated.group(1)} of {stated.group(2)} blocks citing a "
@@ -1796,9 +2125,17 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     assert lands_d2[0] == v333[0], (
         "the block that lands `D2 — A` is not the first of the two v3.33 entries, "
         "so the SCOPE paragraph points at the wrong block")
-    assert "#issuecomment-5619843002" in lands_d2[0], (
-        "the block that lands `D2 — A` no longer carries the permalink the SCOPE "
-        "paragraph cites as its evidence")
+    # ⛔ THE LANDER'S PERMALINK IS ENFORCED DYNAMICALLY, never as a literal. A
+    # hardcoded `assert "#issuecomment-5619843002" in lands_d2[0]` stood here and was
+    # WRONG IN BOTH DIRECTIONS (#12089 residual): it re-FROZE an id the changelog is
+    # free to move (a legitimate re-issued block reds it with a message blaming the
+    # prose), and it covered only the one copy someone remembered to write —
+    # measured: with it deleted, editing THIS pin's own docstring to cite another
+    # block's real permalink left the suite at 56 passed, because the module-wide
+    # arm only requires an id to resolve to SOME block. The contract the sentence
+    # actually makes is `cited ⊆ carried` over every docstring that makes it, which
+    # is the `carrier=` arm — applied below to the sibling docstring AND to this
+    # one. A literal cannot state that contract; the carrier arm is what does.
     # ⛔ AND THE PROSE CLAIMS ABOUT THAT BLOCK, not only the block's own facts: a
     # sentence that names the WRONG one of two same-version blocks, or cites an id
     # the block does not carry, is exactly what C5 found. Each claim is PARSED, so
@@ -1860,12 +2197,19 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
         assert f"issue #{named}" in lander_issue_line, (
             f"the SCOPE paragraph names issue #{named} beside the block's path, but "
             "the block it points at records " + repr(lander_issue_line[:100]))
-    # ⛔ EVERY PERMALINK IN THE MODULE'S PROSE must belong to the block the prose
-    # points at — scoped to DOCSTRINGS so the synthetic ids in code comments (the
-    # negative-test fixtures) do not join the sweep. The pin's own docstring cited
-    # the permalink a second time and nothing read that copy (measured: editing it
-    # to a nonexistent id left the suite green), which is the failure the paragraph
-    # above says it closes.
+    # ⛔ EVERY PERMALINK IN A DOCSTRING must RESOLVE to some block; in the sibling
+    # docstring AND this pin's own it must also BELONG to the block the prose points
+    # at (the `carrier=` arm). Scoped to DOCSTRINGS so the synthetic ids in code
+    # comments (the negative-test fixtures) do not join the sweep. ⛔ A universal
+    # "every permalink must belong to the block its prose points at" stood here and
+    # is FALSE of the code: attribution is carried for those two docstrings only, and
+    # measured, a third docstring pointing at v3.32 while citing the lander's
+    # permalink stays green. The pin's own docstring cited
+    # the permalink a second time and nothing tied that copy to the LANDER. ⛔ NOT
+    # "nothing read it" — this arm DOES read it, so an id no block carries was
+    # already refused here (measured: a nonexistent id reds the module-wide arm);
+    # what was unread was the ATTRIBUTION, and with another block's REAL id the suite
+    # stayed green. The `carrier=` arm is what closes that.
     tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
     prose = " ".join(
         filter(None, (ast.get_docstring(node) for node in ast.walk(tree)
@@ -1887,6 +2231,51 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     assert set(re.findall(r"#issuecomment-(\d{6,})", doc)), (
         "the sibling docstring must name the permalink it relies on")
     _refuse_unresolvable_evidence(doc, blocks, carrier=lands_d2[0])
+    # ⛔ AND THIS PIN'S OWN DOCSTRING MAKES THE SAME CLAIM, so it is scoped to the
+    # SAME arm the sibling's is.
+    # ⛔ WHAT WAS AND WAS NOT ENFORCED BEFORE THIS (measured; two earlier cuts of
+    # this comment got it wrong in opposite directions). RESOLVABILITY *was*
+    # enforced — `prose` includes this docstring, so an id no block carries reds at
+    # the module-wide arm. ATTRIBUTION was *not*: the hardcoded literal asserted a
+    # substring of a CHANGELOG BLOCK, never of a docstring, so with that literal still
+    # in place, editing THIS docstring's permalink to another block's REAL id left the
+    # suite at 56 passed. That gap — `cited ⊆ carried` for the block the paragraph
+    # points at — is what this arm closes.
+    # ⛔ BY IDENTITY, NOT BY A NAMED VARIABLE (review finding, measured, twice). The
+    # subject is spelled INLINE at the call below rather than bound to a local. A
+    # local was tried and could not be defended: naming it pinned the NAME, so
+    # `own_doc = doc` (a one-line "dedupe", and the shape of the sibling read above)
+    # silently pointed the arm at the SIBLING's docstring; checking the binding then
+    # needed `any` on assignments (a later re-assignment won at runtime), `all` on
+    # them (which false-reds `own_doc = re.sub(...)`, a normalisation this module
+    # already performs elsewhere), `ast.Assign` only (blind to `own_doc: str = doc`
+    # and to tuple targets), and a value-shape whitelist (`doc or pin.__doc__` merely
+    # MENTIONS the right attribute). Each spelling revealed the next. Inlining deletes
+    # the surface instead of enumerating it: no LOCAL binding can be wrong, and a lane
+    # that reintroduces one reds the wiring check visibly rather than silently.
+    # ⛔ WHAT REPLACED IT, and why the residual above is gone: the wiring test now
+    # RECORDS THE ARGUMENTS the pin actually passes (monkeypatched arms, the pin
+    # CALLED), so it asserts values, not spellings. That closes, by construction, the
+    # whole family the source checks kept re-opening: a call in a deferred `def`/
+    # `lambda` body runs nothing and records nothing (red); a call under a runtime-
+    # false guard likewise (red — the reachability hole is now fail-closed rather
+    # than undecidable); `prose = doc` changes the RECORDED subject; `carrier=doc`,
+    # `carrier=None` and `carrier=" ".join(blocks)` change the RECORDED carrier; and a
+    # rebinding of this pin's own NAME makes the recorded subject the sibling's
+    # docstring. Each of those was measured green under the source-shape checks that
+    # preceded this one, and each reds here.
+    # `prose` also keeps the enumeration that cannot lose a duplicate-named docstring:
+    # a `{name: docstring}` map would have dropped one of the EIGHT this module has
+    # sharing three names (`__init__`x3, `query`x3, `factory`x2) — measured, giving a
+    # duplicate-named `query` a docstring that cites an unresolvable permalink stayed
+    # green through the map and reds through the enumeration.
+    assert set(re.findall(
+        r"#issuecomment-(\d{6,})",
+        test_the_citation_scope_docstring_states_the_measured_count.__doc__ or "")), (
+        "this pin's own docstring must name the permalink it relies on")
+    _refuse_unresolvable_evidence(
+        test_the_citation_scope_docstring_states_the_measured_count.__doc__ or "",
+        blocks, carrier=lands_d2[0])
 
 
 
@@ -2034,41 +2423,240 @@ def test_every_declared_sweep_arm_refuses_a_stale_restatement() -> None:
 
 
 
-def test_the_citation_pin_calls_every_arm_it_declares() -> None:
-    """The pin's own source must CALL each arm — a helper test proves only the helper.
+def test_the_citation_pin_calls_every_arm_it_declares(monkeypatch) -> None:
+    """Every arm the pin declares is REACHED, and with the RIGHT SUBJECT.
 
     ⛔ THE OTHER HALF OF THE PREVIOUS TEST, measured separately. Driving the helpers
     from synthetic text pins the ARM; it says nothing about whether the pin still
-    reaches it. Measured at ``6dca05bd`` on the helper-based cut: deleting the
-    `_refuse_unresolvable_evidence(prose, …)` call, the `carrier=` call, or the
-    uniqueness call left the file at 55 passed — three silent unwirings of checks the
-    comments above them still promised. This reads the pin's SOURCE and requires each
-    call, so an unwiring reds here with the arm's name.
+    reaches it. Measured at ``b4de89b4e5`` on the helper-based cut (56 tests there),
+    the source check of the day covered call-site DELETION: removing the
+    `_refuse_unresolvable_evidence(prose, …)` call or the uniqueness call redded
+    it. What stayed GREEN was the one thing a substring cannot see — dropping the
+    ``carrier=`` keyword from a call that still matched its marker (measured: 56
+    passed), which is a silent unwiring of the arm while the comment above it went
+    on promising the check.
 
-    ⛔ A WIRING check, not a behaviour check: it does not prove the arm refuses the
-    right input (the previous test does), only that it is reached — and it names the
-    ARGUMENTS too, because reverting the module-wide arm to the lander alone is
-    invisible to a helper-level test: measured, `_refuse_unresolvable_evidence(
-    prose, [lands_d2[0]])` left the file at 56 passed while the sweep's paragraph
-    above still said "SOME block". Both checks are needed, and neither substitutes
-    for the other.
+    ⛔ VALUES, NOT SOURCE SHAPES, and that is the whole design (it took four review
+    cycles to get here). The arms are monkeypatched to recorders and the pin is
+    CALLED, so what is asserted is the ARGUMENTS ACTUALLY PASSED. Every earlier
+    attempt read the pin's source instead, and every one leaked, each in a single
+    token:
+
+    * a source SUBSTRING was satisfied by the call's prefix, so dropping the
+      ``carrier=`` keyword that makes a call a carrier arm left this test green;
+    * matching the carrier arm by its first argument's NAME let ``own_doc = doc``
+      point the arm at the sibling's docstring while this test stayed green;
+    * policing that binding then needed ``any`` over assignments (a later
+      reassignment won at runtime), ``all`` over them (which false-red a legitimate
+      ``own_doc = re.sub(…)``), ``ast.Assign`` only (blind to ``own_doc: str = doc``
+      and to tuple targets), and a value-shape whitelist (``doc or pin.__doc__``
+      merely MENTIONS the right attribute);
+    * and pinning the module-wide arm by the NAME ``prose`` was still satisfied by
+      ``prose = doc``, while ``carrier=doc`` was accepted because only the keyword's
+      presence and non-nullness were checked — both measured green.
+
+    None of those spellings can survive here, because nothing is read as text: a call
+    that does not run records nothing, and a call that runs records the object it was
+    given. ``prose = doc`` changes the recorded SUBJECT; ``carrier=doc`` changes the
+    recorded CARRIER; an arm moved into a deferred ``def`` records nothing at all.
+
+    ⛔ WHAT THIS STILL CANNOT DECIDE, stated rather than implied: the expected
+    module-wide subject is REBUILT here from the same nodes the pin reads, so the two
+    can only disagree — which is what makes a narrowing alone red. An edit that
+    narrows BOTH the pin and this oracle in the same token (dropping a node class from
+    each) redefines "FULL" to whatever was just removed, and nothing in this test can
+    see that. It takes a deliberate two-place edit to do, which is why it is a stated
+    residual and not machinery: a value-recording check cannot supply the missing
+    oracle, only a second one.
+    And it records CALLS: an arm wrapped in ``try: … except AssertionError: pass`` is
+    still recorded and still neutralised (measured: 57 passed). Deciding that would
+    mean reading source again, which is the mechanism this test was rewritten to stop
+    relying on — so it is named here and left to review.
     """
-    source = inspect.getsource(
-        test_the_citation_scope_docstring_states_the_measured_count)
-    required = {
-        "the sweep arms (bold, complement, ordinal)":
-            "_assert_no_stale_citation_claim(",
-        "the uniqueness scan": "_refuse_a_duplicated_statement(",
-        "the module-wide permalink arm against EVERY block":
-            "_refuse_unresolvable_evidence(prose, blocks)",
-        "the carrier arm": "_refuse_unresolvable_evidence(doc, blocks, carrier=",
-    }
-    missing = sorted(name for name, marker in required.items()
-                     if marker not in source)
+    recorded: dict[str, list[tuple[tuple[object, ...], dict[str, object]]]] = {}
+
+    def recorder(name: str, real=None):
+        def record(*args: object, **kwargs: object):
+            recorded.setdefault(name, []).append((args, kwargs))
+            return real(*args, **kwargs) if real is not None else None
+        return record
+
+    pin = test_the_citation_scope_docstring_states_the_measured_count
+    module = sys.modules[__name__]
+    # ⛔ THE TWO ARMS THE PIN CONSUMES A RETURN VALUE FROM PASS THROUGH: the pin
+    # asserts on the ordinals `_assert_no_stale_citation_claim` returns, so a bare
+    # recorder would red a CORRECT pin for a reason that has nothing to do with
+    # wiring. `_refuse_unresolvable_evidence` is called only for its side effect
+    # (raising), so it is recorded without running — which is what lets this test
+    # reach the subject values even where the real arm would refuse them.
+    for arm in ("_assert_no_stale_citation_claim", "_refuse_a_duplicated_statement"):
+        monkeypatch.setattr(module, arm, recorder(arm, getattr(module, arm)))
+    monkeypatch.setattr(module, "_refuse_unresolvable_evidence",
+                        recorder("_refuse_unresolvable_evidence"))
+    pin()
+
+    missing: list[str] = []
+    # ⛔ REACHED IS NOT ENOUGH FOR THESE TWO — their SUBJECT and MULTIPLICITY are
+    # asserted too (review finding, measured). Checking only "was called ≥ once" left
+    # the same narrowing that `prose = doc` performs available one line away, on the
+    # arms that carry the pin's OTHER module-wide sweeps: `_assert_no_stale_citation_-
+    # claim(module_source, ...)` → `(doc, ...)`, or `_refuse_a_duplicated_statement(
+    # module_source, ...)` → `(flat_doc, ...)`, each stayed at 56 passed while a stale
+    # bold count planted in another docstring went unread; deleting two of the three
+    # uniqueness calls did too. The subject is the whole module text, and the three
+    # patterns are all required.
+    module_source = re.sub(r"\s+", " ", Path(__file__).read_text(encoding="utf-8"))
+    if not any(args and args[0] == module_source
+               for args, _ in recorded.get("_assert_no_stale_citation_claim", [])):
+        missing.append("the sweep arms over the FULL module text")
+    uniqueness = recorded.get("_refuse_a_duplicated_statement", [])
+    scanned = {args[1] for args, _ in uniqueness if len(args) > 1}
+    if scanned != {_CITATION_PAIR_PATTERN, _CITATION_VERSION_PATTERN,
+                   _CITATION_COMPLEMENT_PATTERN}:
+        missing.append(
+            f"the uniqueness scan over all three patterns (reached "
+            f"{len(scanned)} of 3: a patterned statement can be duplicated without "
+            "any scan reading it)")
+    if not all(args and args[0] == module_source for args, _ in uniqueness):
+        missing.append("the uniqueness scan over the FULL module text")
+
+    changelog = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")
+    blocks = _block_bodies(changelog)
+    lander = [block for block in blocks if "D2 — A" in block]
+    assert len(lander) == 1, f"{len(lander)} blocks record `D2 — A`"
+    # ⛔ THE MODULE-WIDE SUBJECT BY VALUE: the FULL enumeration, rebuilt here from the
+    # same nodes `prose` is built from. A pin that narrowed it would record a
+    # different string and red below — which is what ``prose = doc`` did, measured
+    # green under every source-shape check this test has had.
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    module_wide = " ".join(filter(None, (
+        ast.get_docstring(node) for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.FunctionDef,
+                             ast.AsyncFunctionDef, ast.ClassDef)))))
+    permalinks = recorded.get("_refuse_unresolvable_evidence", [])
+    # ⛔ THE STATED PAIR IS RE-ASSERTED HERE (review finding, measured). The bold arm
+    # in `_assert_no_stale_citation_claim` accepts BOTH true pairs — the citing count
+    # and its complement — so if the pin's own `stated` assertion were deleted, a
+    # docstring claiming 35 of 39 blocks cite a comment id (4 do) would pass it.
+    # Measured: deleting that assertion plus editing the sentence left 57 passed. The
+    # sibling's pair is read from its docstring and compared against the block counts
+    # the pin itself handed to the sweep arm.
+    # ⛔ THE RESOLVABLE SET IS AN ARGUMENT TOO (a finding on this file's own cut, and
+    # a gap in the first value-recording draft): `_refuse_unresolvable_evidence(
+    # prose, [lands_d2[0]])` keeps the SUBJECT right and narrows what it resolves
+    # AGAINST to one block, so the module-wide arm stops being module-wide while every
+    # source-shape check — including a substring matching `(prose, blocks)` — can stay
+    # green (measured on the substring cut: 56 passed). Every permalink call must
+    # therefore receive the FULL block list.
+    sweep = recorded.get("_assert_no_stale_citation_claim", [])
+    counted = next((args for args, _ in sweep if len(args) > 2), None)
+    if counted is None:
+        missing.append("the sweep arm's (text, blocks, citing) arguments")
+    else:
+        measured_pair = (len(counted[2]), len(counted[1]))
+        sibling = re.sub(r"\s+", " ",
+                         test_the_newest_block_recording_4_3_cites_a_comment_id.__doc__
+                         or "")
+        pair = re.search(_CITATION_PAIR_PATTERN, sibling)
+        if not pair or (int(pair.group(1)), int(pair.group(2))) != measured_pair:
+            missing.append(
+                f"the sibling docstring's stated pair (it must state "
+                f"{measured_pair[0]} of {measured_pair[1]} citing; the bold arm "
+                "accepts the complement too, so the pin's own assertion is what "
+                "refuses a stale pair)")
+        # ⛔ AND THIS PIN'S OWN DOCSTRING, WHICH THE BOLD ARM CANNOT REFUSE EITHER
+        # (review finding, measured). `allowed_bold` accepts the citing count AND its
+        # complement in ANY position, so changing this docstring's `count is **4 of
+        # 39**` to `**35 of 39**` — a false claim, since four blocks cite — left the
+        # whole suite at 57 passed. The sentence makes a CITING claim (`the count is
+        # <N of M>`), so the citing pair is what it must state.
+        # ⛔ AND THE TWO ADJACENT CLAIMS ON THE SAME SENTENCE (review finding,
+        # measured). Closing the `stated` pair only closed ONE of the four facts the
+        # sibling docstring enumerates as "derivable mechanically, so all four are
+        # checked": deleting the pin's complement assert and restating the complement
+        # as a claim that four cite nothing (4 do cite, so 35 cite none) left 57 passed, and
+        # the same held for deleting the version-list assert and substituting the
+        # non-citing v3.31. Both are re-derived from the block counts and citing
+        # blocks the pin itself handed to the sweep arm.
+        absent = len(counted[1]) - len(counted[2])
+        total = len(counted[1])
+        complement = re.search(_CITATION_COMPLEMENT_PATTERN, sibling)
+        if not complement or (int(complement.group(1)),
+                              int(complement.group(2))) != (absent, total):
+            missing.append(
+                f"the sibling docstring's stated complement (it must state {absent}"
+                f" of {total} citing nothing; the bold arm accepts either count in "
+                "any position, so nothing else refuses a false complement)")
+        versions = re.search(_CITATION_VERSION_PATTERN, sibling)
+        stated_versions = tuple(sorted(
+            part.strip() for part in (versions.group(1) if versions else "").split(",")
+            if part.strip()))
+        measured_versions = tuple(sorted(
+            "v" + _BLOCK_VERSION_RE.match(block).group(1) for block in counted[2]))
+        if stated_versions != measured_versions:
+            missing.append(
+                f"the sibling docstring's stated citing versions (it names "
+                f"{stated_versions}; the blocks measured {measured_versions} \u2014 a "
+                "version named here that cites nothing, or a citing one left out, is "
+                "finding 1's second half)")
+        own = re.sub(r"\s+", " ", pin.__doc__ or "")
+        own_pair = re.search(r"count is \*\*(\d+) of (\d+)\*\*", own)
+        if not own_pair or (int(own_pair.group(1)),
+                            int(own_pair.group(2))) != measured_pair:
+            missing.append(
+                f"this pin's own stated count (it says `count is ...`; it must "
+                f"state {measured_pair[0]} of {measured_pair[1]} citing — the "
+                "bold arm accepts the complement in any position, so nothing else "
+                "refuses a false citing count there)")
+    if not permalinks or not all(len(args) > 1 and args[1] == blocks
+                                 for args, _ in permalinks):
+        missing.append(
+            "the FULL block list as each permalink call's second argument (a "
+            "narrowed list makes the module-wide arm resolve against fewer blocks)")
+    # ⛔ AND IT MUST STAY CARRIER-FREE (review finding, measured). The mis-scoping check
+    # below compares carrier VALUES, so supplying the RIGHT value on the WRONG arm was
+    # invisible: adding ``carrier=lands_d2[0]`` to this call left 59 passed while a
+    # docstring citing another block's real id began to red \u2014 reinstating the false
+    # block this file records as previously fixed, and falsifying the three sentences
+    # that say attribution is carried for two docstrings only. Fail-closed rather than a
+    # false PASS, but the scope claims are load-bearing prose.
+    if not any(args and args[0] == module_wide and "carrier" not in kwargs
+               for args, kwargs in permalinks):
+        missing.append(
+            "the module-wide permalink arm over the FULL docstring sweep, WITHOUT a "
+            "`carrier=` (with one it becomes a third attribution arm, and the two "
+            "docstrings the prose names would no longer be the only ones)")
+    carried = [(args[0], kwargs.get("carrier"))
+               for args, kwargs in permalinks if "carrier" in kwargs]
+    subjects = {subject for subject, _ in carried}
+    for label, subject in (
+            ("the carrier arm over the sibling docstring",
+             test_the_newest_block_recording_4_3_cites_a_comment_id.__doc__),
+            ("the carrier arm over THIS pin's own docstring", pin.__doc__)):
+        if subject not in subjects:
+            missing.append(label)
+    # ⛔ EVERY carrier arm, not merely one of them (measured against this very test):
+    # `any(carrier == lander[0])` let a single correct carrier mask a vacuous sibling
+    # — `carrier=doc` (whose docstring carries the same id, so nothing changes
+    # behaviourally), `carrier=" ".join(blocks)`, or `carrier=None`, which
+    # `_refuse_unresolvable_evidence` treats as "no carrier arm at all". Each of those
+    # stayed at 56 passed under the `any` form.
+    mis_scoped = [carrier for _, carrier in carried if carrier != lander[0]]
+    if mis_scoped:
+        kind = type(mis_scoped[0]).__name__ if mis_scoped[0] is not None else "None"
+        missing.append(
+            f"a carrier arm scoped at something other than the block that lands "
+            f"`D2 — A` ({len(mis_scoped)} of {len(carried)} carrier call(s) passed "
+            f"{kind!r} — `None` disables the arm, a docstring or a block "
+            "collection scopes it to the wrong evidence)")
     assert not missing, (
         f"the pin no longer calls {missing} — the sweep's comment above it still "
-        "claims those checks run, and no other test reads the call sites (a "
-        "helper-level test says nothing about whether the pin reaches it)")
+        "claims those checks run. This test records the ARGUMENTS the pin actually "
+        "passes, so the failure means an arm was not reached (deleted, commented out, "
+        "or moved into a deferred `def`/`lambda` body) or was reached with the wrong "
+        "subject (a narrowed module-wide sweep, or a carrier pointing at a different "
+        "docstring or block).")
+
 
 
 def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
@@ -2094,12 +2682,22 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     not every form the fleet writes; the plural ``comments <id>`` is refused on
     purpose, because accepting it re-opens the issue-number arm (*"the discussion
     comments 118245"*). It does **not** verify that the referenced comment is an
-    approval. Measured at this head: a block reading *"No approval is recorded
-    anywhere; the only comment 999999 is unrelated"* passes, and so does one that
-    cites the id only to disclaim it. (An issue number, a "comments <n>" form and
-    a bare parenthesised number do not — that arm is closed above.) Closing the
-    rest needs the comment's own text, an API read this pin cannot make, so the
-    residual is tracked in #12068 rather than grown here.
+    approval, and an earlier cut of this paragraph said only that. Measured then at
+    this head, a block reading *"No approval is recorded anywhere; the only comment
+    999999 is unrelated"* passed, and so did one that cited the id only to disclaim
+    it — the two shapes a release takes when it ADVERTISES the absence of the
+    approval it owes. Both are now refused by `_refuse_a_bare_or_disclaimed_citation`:
+    no citation's claim window may carry a denial, and at least one citation must be
+    accompanied by a verbatim quotation of what the cited comment says. (An issue
+    number, a "comments <n>" form and a bare parenthesised number were already
+    refused above.)
+    ⛔ THE RESIDUAL IS NOW ONE SHAPE AND IT IS STATED ON PURPOSE. This arm reads TWO
+    FILES, so a release can still pair a real, resolvable id with a quotation the
+    cited comment does not contain. Closing THAT needs the comment's own text —
+    `gh api repos/daniel-ospina/tortoise/issues/comments/<id> --jq .body` read against
+    the block's quotation — which is a reviewer step, because this suite is static by
+    design (`tests/test_extractor_v4_citation_rot.py` states the same limit for its
+    own citations); it is recorded in #12068.
 
     ⛔ SCOPED TO A RELEASE THAT RECORDS §4.3, because the unconditional form was
     measured to false-block. Demanding a comment id in EVERY newest block reds
@@ -2171,6 +2769,368 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
         "verify — cite the comment that records it (``comment <id>`` or the "
         "permalink). NOTE: the plural ``comments <id>`` is refused on purpose; if "
         "you cited two ids that way, rewrite them in the singular.")
+    # ⛔ A FORM IS NOT AN APPROVAL (#12068). The check above accepts any citation in
+    # an enumerated form; this refuses the two shapes a release takes when it
+    # ADVERTISES the absence of the approval it owes, and requires the cited
+    # comment's words be quoted rather than merely named.
+    _refuse_a_bare_or_disclaimed_citation(block)
+
+
+def test_the_approval_arm_refuses_a_bare_or_disclaimed_citation() -> None:
+    """Every row of the denial table, plus the attribution shape — and the landed
+    entry still passes.
+
+    ⛔ DRIVEN, NOT DESCRIBED, and the WIRING is asserted here in the same test. The
+    arm is a helper so it is reachable from synthetic text, and the call site is read
+    from the pin's own source: a helper-level test says nothing about whether the pin
+    still reaches it, which is how three arms of the sibling sweep were unwired in
+    silence at ``6dca05bd`` while the prose above them promised the checks.
+
+    ⛔ THE DENIAL FIXTURES ARE THE TABLE ITSELF (``_APPROVAL_DENIAL_SHAPES``), not a
+    hand-picked subset: the first cut drove two of eight rows, so six could be
+    deleted with the suite green (measured — a review round narrowed the arm and
+    nothing reddened). Each row's sentence carries the denial AND an attributed
+    quotation, so every row is refused by the DENIAL arm alone and deleting that arm
+    reds all of them.
+
+    ⛔ AND THE ISSUE'S OWN SHAPES ARE NAMED FOR WHAT THEY ARE. #12068 measured three:
+    the absence of approval advertised, an id cited only to disclaim it, and a PR
+    NUMBER counted as the approval. The third is refused by the enumerated-forms
+    detector (``_REJECTED_CITATION_SHAPE``, asserted in the pin above) and is not
+    this arm's job; the first two are rows here. The remaining fixtures below pin the
+    ATTRIBUTION requirement — a quotation that is not introduced by the citation is
+    not evidence for it — which a review round measured as green ("… (comment <id>)
+    that makes \"superseded\" mean replaced.").
+
+    ⛔ THE FIXTURES ARE BUILT FROM THE LANDED BLOCK AT RUNTIME — the comment id is
+    read from it, never written here — so this file states no id of its own and the
+    arm cannot go stale against the file it guards.
+    """
+    block = _newest_block_body(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
+    assert _quoted_clause(block) is not None, (
+        "the landed block no longer records the §4.3 clause, so this arm's only "
+        "accepting direction cannot be exercised against it")
+    identifiers = _citation_ids(block)
+    assert identifiers, (
+        "the landed block carries no comment id, so there is no citation to build "
+        "the rejected shapes from")
+    identifier = identifiers[0]
+    # Padding at least as long as the entry this arm guards, so a denial placed at
+    # the far end of the fixture is beyond ANY window a future cut might introduce.
+    entry_scale_padding = ("padding " * (len(block) // 8 + 2))[:len(block) + 1]
+    assert tuple((label, fragment) for label, fragment, _sentence
+                 in _APPROVAL_DENIAL_SHAPES) == _EXPECTED_DENIAL_SHAPES, (
+        "the denial vocabulary changed — a row was added, removed, renamed or "
+        "NARROWED\n  what failed: the table no longer matches the (label, fragment) "
+        "pairs pinned above it\n  what to do: keep `_EXPECTED_DENIAL_SHAPES` and "
+        "`_APPROVAL_DENIAL_SHAPES` in step, and drive any new row (the loop below "
+        "does it automatically). Both readers derive from this table, so a deleted "
+        "ROW shrinks its own fixtures, and a narrowed FRAGMENT still refuses the "
+        "fixture written for it — both were measured green without this pin")
+    rejected = {label: sentence.format(id=identifier)
+                for label, _fragment, sentence in _APPROVAL_DENIAL_SHAPES}
+    rejected.update({
+        "a bare citation with no quotation":
+            f"the owner approved the change (comment {identifier})",
+        "a quotation attributed to another subject":
+            f'the owner approved the change (comment {identifier}) that makes '
+            '"superseded" mean replaced.',
+        "a quotation somewhere after the id":
+            f'the owner approved it (comment {identifier}); see "sdk.py records '
+            'the id-only row" for the tooling note',
+        "a quotation after a clause boundary":
+            f'No approval is recorded anywhere for this change; the relay is '
+            f'comment {identifier} and it says "the clause stands as landed".',
+        # ⛔ THE DENIAL-SCOPE FIXTURES, one per punctuation position the arm was
+        # measured bypassable at. Each ATTRIBUTES a quotation to the id, so the
+        # attribution arm is satisfied and only the denial arm can refuse it. The
+        # first two were green under a sentence-scoped window (the denial sits one
+        # sentence away); the third was green under a three-terminator window (the
+        # `;`/`:` moved it out). Measured at #12068's review.
+        "the absence advertised in the PREVIOUS sentence":
+            f'No approval is recorded anywhere for this change. The relay is '
+            f'comment {identifier}: *"the clause stands as landed"*.',
+        "the absence advertised in the FOLLOWING sentence":
+            f'The relay is comment {identifier}: *"the clause stands as landed"*. '
+            'No approval was recorded for it.',
+        "the absence advertised before a semicolon":
+            f'No approval is recorded anywhere for this change; the relay is '
+            f'comment {identifier}: *"the clause stands as landed"*.',
+        "the absence advertised before a colon":
+            f'The change is unapproved: the relay is comment {identifier}: '
+            '*"the clause stands as landed"*.',
+        "approval denied with a colon, then a quotation":
+            f'The change is unapproved: the owner relay (comment {identifier}) '
+            'wrote "the clause stands as landed".',
+        # ⛔ MARKDOWN EMPHASIS IS THIS DOCUMENT'S OWN IDIOM, so a vocabulary matched
+        # only on plain prose refuses nothing real (all three were measured green).
+        "the denial emphasised mid-phrase":
+            f'No **approval** is recorded anywhere; the relay is comment '
+            f'{identifier}: *"the clause stands as landed"*.',
+        "the negation emphasised mid-phrase":
+            f'The change was not *approved*; comment {identifier}: '
+            '*"the clause stands as landed"* is the relay.',
+        "the prepositional form in code ticks":
+            f'The clause landed without `approval`; comment {identifier}: '
+            '*"the clause stands as landed"* is cited for its wording.',
+        # ⛔ DISTANCE IS DRIVEN AT THE ENTRY'S OWN SCALE, not at a comfortable one. An
+        # earlier cut used a 2,463-character fixture while the entry this arm guards
+        # unfolds to ~12.4k, so narrowing the scope to any window wider than the
+        # fixture stayed green (measured: ±2500/±3000/±4000 around the citation all
+        # passed, and a denial 3,082 characters from it went through). The padding is
+        # derived from the LANDED entry's own length, so this fixture grows with the
+        # artifact and a window can never again be wider than what is driven.
+        "the absence advertised far before the id":
+            "No approval is recorded anywhere for this change. " + entry_scale_padding
+            + f'The relay is comment {identifier}: *"the clause stands as landed"*.',
+        "the absence advertised far after the id":
+            f'The relay is comment {identifier}: *"the clause stands as landed"*. '
+            + entry_scale_padding + "No approval was recorded for it.",
+        # ⛔ THE ATTRIBUTION FLOOR IS DRIVEN: `"ok"` is the v3.34 entry's own defect
+        # shape (#12068), and a one-digit edit of `{8,}` would otherwise admit it.
+        "a two-character quotation":
+            f'the owner approved it (comment {identifier}: "ok")',
+        "a five-character quotation":
+            f'the owner approved it (comment {identifier}: "fine")',
+        # ⛔ AND THE NO-SPACE EMPHASIS FORM, so `_deemphasise`'s substitution has to
+        # be a SPACE: deleting rather than replacing the markers fuses the words and
+        # this fixture then passes (measured).
+        # ⛔ THE TWO ROWS WITH AN INTERNAL CHARACTER WINDOW ARE DRIVEN WITH A REAL
+        # QUOTATION BETWEEN THE HALVES — the quoted words are collapsed before the
+        # search, so neither a long quotation nor a full stop inside it carries the
+        # shape past the window (both measured green under #12068's review).
+        "the cited id is said to record nothing, past a quotation":
+            f'no comment {identifier}: *"the clause stands as landed."* records it; '
+            "the relay happened elsewhere.",
+        "the cited id is called unrelated, past a long quotation":
+            f'the only comment {identifier}: *"archived does not close policy B, '
+            'which is the retirement route rather than the replacement-not-yet-known '
+            'one"* is unrelated.',
+        # ⛔ AND THE NO-SPACE EMPHASIS FORM, so `_deemphasise`'s substitution has to
+        # be a SPACE: deleting rather than replacing the markers fuses the words and
+        # this fixture then passes (measured).
+        "the denial with adjacent emphasis":
+            f'No**approval** is recorded anywhere; comment {identifier}: '
+            '*"the clause stands as landed"*.',
+        # ⛔ THE ENTRY'S OWN QUOTATION MARKS ARE FORMATTING, NOT A HIDING PLACE: the
+        # pivotal word wrapped by the entry itself must still be read (measured
+        # green while only the ATTRIBUTED quotation was collapsed).
+        "the pivotal word in the entry's own quotes":
+            f'No "approval" is recorded anywhere; comment {identifier}: '
+            '*"the clause stands as landed"*.',
+        "the negation in the entry's own quotes":
+            f'The change is "unapproved"; comment {identifier}: '
+            '*"the clause stands as landed"*.',
+        # ⛔ A FULL STOP BETWEEN THE HALVES IS THE NATURAL WAY TO WRITE THE DISCLAIMER,
+        # and it carried rows 7 and 8 past their internal `[^.]` bound (measured):
+        # the attributed quotation ends with `".` and the verdict follows it.
+        "the cited id is called unrelated across a full stop":
+            f'The only comment {identifier}: *"the clause stands as landed"*. '
+            "It is unrelated.",
+        "the cited id is said to record nothing across a full stop":
+            f'No comment {identifier}: *"the clause stands as landed"*. It records '
+            "the discussion, not the approval.",
+        # ⛔ A CONTENTLESS QUOTATION IS NOT THE COMMENT'S WORDS (measured: eight
+        # characters was satisfied by spaces and by dots).
+        "a quotation of eight spaces":
+            f'the owner approved it (comment {identifier}: "        ")',
+        "a quotation of eight dots":
+            f'the owner approved it (comment {identifier}: "........")',
+        # ⛔ AN INTERPOSED QUOTATION THE ENTRY OWNS IS THE LAST FILLER HOLE: it carried
+        # rows 7 and 8 past their internal bound (measured end-to-end through the
+        # pin, both green). The search now runs over BOTH views, and the all-collapsed
+        # view removes this filler — so a cut that drops it reds here.
+        "the cited id is said to record nothing past an interposed own-quote":
+            f'No comment {identifier}: *"the clause stands as landed"* — the annex '
+            '"archived does not close policy B" — records the approval.',
+        "the cited id is called unrelated past an interposed own-quote":
+            f'The only comment {identifier}: *"the clause stands as landed"* — which '
+            'the annex at "archived does not close policy B, which is the retirement '
+            'route" discusses — is unrelated.',
+        # ⛔ EVERY MARKING CONVENTION IS DRIVEN, one fixture each, because
+        # `_deemphasise` and `_MARKED_SPAN_RE` claim to cover all of them and a class
+        # member with no fixture is narrowable in one character with the suite green
+        # (measured: dropping `'` or `_` stayed green).
+        "the pivotal word in the entry's own single quotes":
+            f"No 'approval' is recorded anywhere; comment {identifier}: "
+            '*"the clause stands as landed"*.',
+        "the pivotal word in an underscore emphasis":
+            f'No _approval_ is recorded anywhere; comment {identifier}: '
+            '*"the clause stands as landed"*.',
+        # ⛔ AND AN INTERPOSED SPAN IN EACH CONVENTION, which is what the second view
+        # exists for — a `"…"`-only collapse left three of these green (measured).
+        "row 7 past an italic interposition":
+            f'No comment {identifier}: *"the clause stands as landed"* — the annex '
+            '*archived does not close policy B, which is the retirement route* — '
+            "records the approval.",
+        "row 7 past a single-quoted interposition":
+            f'No comment {identifier}: *"the clause stands as landed"* — the annex '
+            "'archived does not close policy B, which is the retirement route' — "
+            "records the approval.",
+        "row 7 past a backticked interposition":
+            f'No comment {identifier}: *"the clause stands as landed"* — the annex '
+            '`archived does not close policy B, which is the retirement route` — '
+            "records the approval.",
+        "row 8 past an italic interposition":
+            f'The only comment {identifier}: *"the clause stands as landed"* — which '
+            '*archived does not close policy B, which is the retirement route* '
+            "discusses — is unrelated.",
+        # ⛔ A MARK INSIDE A TOKEN SPLITS IT under the spaced treatment, so each row's
+        # interior gets its own fixture — measured: `un**approved**`, `un__approved__`,
+        # `N**o** approval`, `app**roved**`, `rec**ords**` and `unre**lated**` were all
+        # ACCEPTED while only the spaced view existed.
+        "a mark inside the pivotal token":
+            f'The clause is un**approved**; comment {identifier}: '
+            '*"the clause stands as landed"* is cited.',
+        "an underscore mark inside the pivotal token":
+            f'The clause is un__approved__; comment {identifier}: '
+            '*"the clause stands as landed"* is cited.',
+        "a mark between the first two letters":
+            f'N**o** approval is recorded anywhere; comment {identifier}: '
+            '*"the clause stands as landed"*.',
+        "a mark inside the negation":
+            f'The change was not app**roved**; comment {identifier}: '
+            '*"the clause stands as landed"* is the relay.',
+        "a mark inside row 7's verb":
+            f'no comment {identifier}: *"the clause stands as landed"* rec**ords** '
+            "it; the relay happened elsewhere.",
+        "a mark inside row 8's verdict":
+            f'the only comment {identifier}: *"the clause stands as landed"* is '
+            "unre**lated**.",
+        "a mark inside `without`":
+            f'The clause landed with**out** approval; comment {identifier}: '
+            '*"the clause stands as landed"* is cited for its wording only.',
+        "a mark inside `never`":
+            f'The owner ne**ver** approved this clause; comment {identifier}: '
+            '*"the clause stands as landed"* is not its home.',
+        "a mark inside the present-tense negation":
+            f"The owner's approval is n**ot** on record; comment {identifier}: "
+            '*"the clause stands as landed"* records only the wording.',
+        "a mark inside the past-tense negation":
+            f"The owner's approval w**as** not on record; comment {identifier}: "
+            '*"the clause stands as landed"* records only the wording.',
+        "a mark inside row 7's `states`":
+            f'no comment {identifier}: *"the clause stands as landed"* st**ates** '
+            "it; the relay happened elsewhere.",
+        "a mark inside row 7's `approves`":
+            f'no comment {identifier}: *"the clause stands as landed"* ap**proves** '
+            "it; the relay happened elsewhere.",
+        # ⛔ THE UNDERSCORE CONVENTION IS DRIVEN: the guarded document uses none, so a
+        # lane may treat both underscore alternatives as dead code. Dropping ONE is
+        # inert (the italic pattern also spans `__…__`), dropping BOTH reopens both
+        # rows — measured both ways — so the fixture pins the convention rather than
+        # an alternative.
+        "row 7 past an underscore-italic interposition":
+            f'No comment {identifier}: *"the clause stands as landed"* — the annex '
+            '_archived does not close policy B, which is the retirement route_ — '
+            "records the approval.",
+        "row 8 past an underscore-bold interposition":
+            f'The only comment {identifier}: *"the clause stands as landed"* — which '
+            '__archived does not close policy B, which is the retirement route__ '
+            "discusses — is unrelated.",
+    })
+    for label, text in rejected.items():
+        try:
+            _refuse_a_bare_or_disclaimed_citation(text)
+        except AssertionError:
+            continue
+        raise AssertionError(
+            f"the arm refused nothing for {label} — {text!r} is a citation that "
+            "offers no evidence the cited comment was consulted, and that is the "
+            "shape #12068 measured as passing. If the arm (or a row of the denial "
+            "table) was narrowed or deleted, the pin's docstring still claims it "
+            "runs.")
+    # ⛔ THE ACCEPTING DIRECTIONS, so a future cut cannot pass this test by refusing
+    # everything: the shape the entry must write, and the same shape with the quoted
+    # sentence WRAPPED — which is what `_unfold_block` is for, driven rather than
+    # asserted (folding removed, the wrapped quotation no longer matches).
+    _refuse_a_bare_or_disclaimed_citation(
+        f'an owner relay (comment {identifier}: *"the clause stands as landed"*)')
+    _refuse_a_bare_or_disclaimed_citation(
+        f'an owner relay (comment {identifier}: *"the clause\nstands as landed"*)')
+    _refuse_a_bare_or_disclaimed_citation(block)
+    # ⛔ EVERY INTRODUCER THE PATTERN ACCEPTS IS DRIVEN IN THE ACCEPTING DIRECTION,
+    # not only in the rejecting one: dropping `(`, `—`, `–` or `-` from
+    # `_ATTRIBUTED_QUOTE_RE` otherwise leaves the suite green while a release that
+    # writes that introducer is refused with a message telling it to write exactly
+    # what it wrote (measured).
+    for introducer in (": ", " — ", " – ", " - ", " ("):
+        _refuse_a_bare_or_disclaimed_citation(
+            f'an owner relay (comment {identifier}{introducer}*"the clause stands '
+            'as landed"*)')
+    # ⛔ A REAL SENTENCE IS LONGER THAN THE FIRST CUT ALLOWED. The attribution window
+    # is unbounded now, so a full approving sentence must be accepted — measured, a
+    # 37-character body was green and a 90-character one was refused.
+    _refuse_a_bare_or_disclaimed_citation(
+        f'an owner relay (comment {identifier}: *"archived does not close policy B, '
+        'which is the retirement route rather than the replacement-not-yet-known one '
+        'that this clause is buildable without"*)')
+    _refuse_a_bare_or_disclaimed_citation(
+        f'an owner relay (comment {identifier}: *"there is no approval gap here, the '
+        'owner signed off on the exact wording"*)')
+    # ⛔ THE WIRING IS READ AS AST, NOT AS A SUBSTRING, and the reader is driven here
+    # so the check cannot be satisfied by prose. Measured: the substring form stayed
+    # GREEN when the call was deleted and its name left in a comment, and when the
+    # call was wrapped in `if False:` — neither is a wiring.
+    for label, source, is_wiring in (
+            ("a bare call",
+             'def pin():\n    guard(block)\n', True),
+            ("a call that is only a comment",
+             'def pin():\n    "# guard(block)"\n', False),
+            ("a call inside a dead branch",
+             'def pin():\n    if False:\n        guard(block)\n', False)):
+        measured = "guard" in _top_level_calls_of(source)
+        assert measured is is_wiring, (
+            f"`_top_level_calls_of` reads {label} as a wiring={measured}; the "
+            "wiring check below would then accept a name that is only mentioned "
+            "in the source")
+    assert "_refuse_a_bare_or_disclaimed_citation" in _top_level_calls_of(
+        inspect.getsource(test_the_newest_block_recording_4_3_cites_a_comment_id)), (
+        "the approval pin no longer CALLS the arm — the helper test would stay green "
+        "with the pin's own entry unexamined, which is the unwiring this assertion "
+        "exists to refuse")
+
+
+def test_the_pin_itself_refuses_a_synthetic_entry_that_disclaims_its_approval(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """END TO END: the PIN, driven by a synthetic changelog, refuses the shape.
+
+    ⛔ THE WIRING CHECK ABOVE IS A STRUCTURE CHECK, and a structure check cannot see
+    an early `return`, a call handed a CONSTANT instead of the entry, or any other
+    edit that leaves a top-level call of the right name in the body. Measured under
+    #12068's review: inserting `return` above the call, and passing a literal string
+    to it, EACH left the whole module at 57 passed while the pin accepted a synthetic
+    entry that advertises the absence of its approval. So the pin is DRIVEN here.
+
+    ⛔ THE CONTROL IS THE SAME ENTRY WITHOUT THE DENIAL, so a refusal produced by any
+    OTHER assertion (a malformed synthetic block, a missing clause, a bad id) cannot
+    pass for a refusal of this shape — and `match=` names the arm's own message, so
+    the red is attributable to the arm rather than to the file.
+
+    ⛔ IT IS DRIVEN THROUGH `ONTOLOGY_CHANGELOG`, the only module global the pin reads
+    for its block text; the §4.3 clause it quotes is the LANDED one, so the synthetic
+    entry is shaped exactly like a real release and only the approval half differs.
+    """
+    clause = _landed_object_lifecycle_clause(ONTOLOGY.read_text(encoding="utf-8"))
+    identifier = _citation_ids(
+        _newest_block_body(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")))[0]
+    header = "> **Changelog v3.34 (2026-11-12 — synthetic entry, #12068):**\n"
+    cited = (f"> The relay is comment {identifier}: "
+             '*"the clause stands as landed"*.\n')
+    control = f"{header}> > {clause}\n{cited}> The owner approved the exact changes.\n"
+    disclaimed = (f"{header}> > {clause}\n{cited}"
+                  "> No approval is recorded anywhere; this entry records only the "
+                  "discussion.\n")
+
+    def drive(entry: str) -> None:
+        path = tmp_path / "ONTOLOGY-CHANGELOG.md"
+        path.write_text(entry, encoding="utf-8")
+        monkeypatch.setattr(sys.modules[__name__], "ONTOLOGY_CHANGELOG", path)
+        test_the_newest_block_recording_4_3_cites_a_comment_id()
+
+    drive(control)
+    with pytest.raises(AssertionError, match="DISCLAIMS the approval"):
+        drive(disclaimed)
 
 
 def _assert_no_block_records_a_version_above_the_declared_one(

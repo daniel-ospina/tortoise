@@ -65,8 +65,11 @@ def test_nand_defaults_to_bidirectional(sdk):
     a = make_point(sdk, "a")
     b = make_point(sdk, "b")
     c = make_point(sdk, "c")
+    # #12067: one pair carries at most ONE mechanism, so the IMPL probe uses its
+    # own target — this test is about the DIRECTION default, not about the pair.
+    d = make_point(sdk, "d")
     nand = sdk.create_operator("NAND", a["id"], [b["id"]])
-    impl = sdk.create_operator("IMPL", a["id"], [b["id"]])
+    impl = sdk.create_operator("IMPL", a["id"], [d["id"]])
     directed = sdk.create_operator("NAND", a["id"], [c["id"]], direction="unidirectional")
     proj = sdk._get_proj()
     d_nand = proj.g.query(

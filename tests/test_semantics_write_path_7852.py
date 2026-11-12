@@ -130,9 +130,12 @@ def test_absent_direction_still_derives_from_semantics(sdk):
                              semantics="addresses")
     assert _stored(sdk, op["id"]) == ("->", "semantics")
     # absent + no meaning -> canonicalize per op_type, basis `default`
+    # (fresh pair: one pair carries at most one mechanism, #12067)
+    a, b = _point(sdk, "a"), _point(sdk, "b")
     op2 = sdk.create_operator("NAND", a["id"], [b["id"]], direction=None)
     assert _stored(sdk, op2["id"]) == ("unidirectional", "default")
     # absent + PART/WHOLE op_type -> IMPL-class default (bidirectional)
+    a, b = _point(sdk, "a"), _point(sdk, "b")
     op3 = sdk.create_operator("composedOf", a["id"], [b["id"]], direction=None)
     assert _stored(sdk, op3["id"]) == ("bidirectional", "default")
 
@@ -202,6 +205,10 @@ def test_every_ruled_semantics_records_its_model_direction(sdk):
     for semantics in sorted(SEMANTICS_VALUES):
         # The mechanism the meaning declares (#9963), so the write is
         # consistent on all three legs and the mechanism leg stays silent.
+        # A FRESH pair per iteration: one pair carries at most one mechanism
+        # (#12067's closed set), so a shared pair would be refused from the
+        # second mechanism-bearing semantics onwards.
+        a, b = _point(sdk, "a"), _point(sdk, "b")
         op = sdk.create_operator(SEMANTICS_MECHANISMS.get(semantics, "IMPL"),
                                  a["id"], [b["id"]], semantics=semantics)
         assert _stored(sdk, op["id"]) == (SEMANTICS_DIRECTIONS[semantics],

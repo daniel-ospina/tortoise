@@ -176,7 +176,19 @@ class TestNANDCalibrationAtRealWeights:
         # To trigger input_ops > 0 in compute_operator_weight (w *= 2.0),
         # the NAND operator must have an outgoing edge to another operator.
         # Create a dummy operator and add an edge from op_id to it.
-        dummy = sdk.create_operator("IMPL", claim_a_id, [claim_b_id],
+        # ⛔ The dummy's own endpoints are FRESH points: one pair carries at most
+        # one mechanism (#12067's closed set), so re-wiring `claim_a/claim_b`
+        # with an IMPL would be refused. This keeps the test measuring what it
+        # was written to measure — the NAND's weight at the 16 → 10 clamp — and
+        # removes the incidental cross-talk the old comment noted (`claim_b` was
+        # being pulled UP by the dummy IMPL).
+        dummy_target = sdk.create_point(
+            "statement", "dummy operator target")["id"]
+        # The dummy target needs the same calibrated prior as the claims, or the
+        # run refuses with "uncalibrated evidence points" — the old shape reused
+        # an already-calibrated claim, which the closed set no longer permits.
+        sdk.set_point_baseline(dummy_target, self.T0_ALPHA, self.T0_BETA)
+        dummy = sdk.create_operator("IMPL", claim_a_id, [dummy_target],
                                     direction="unidirectional")
         proj = sdk._get_proj()
         proj.g.query(
@@ -211,10 +223,9 @@ class TestNANDCalibrationAtRealWeights:
             f"(mitigated NAND at w=10.0)"
         )
         # At w=10.0 the pull is stronger than the plain w=8.0 case.
-        # Note: the dummy IMPL operator also connects to both claims,
-        # so claim_b may be slightly pulled UP by IMPL while claim_a
-        # gets the full bidirectional NAND pull. We only bound claim_a
-        # which receives the unambiguous NAND penalty.
+        # Note: the dummy IMPL operator now runs a→its own fresh target, so the
+        # only pull on `claim_a` by the dummy is the unidirectional IMPL leg out
+        # of it; `claim_a` still receives the unambiguous NAND penalty.
         assert conf_a < 0.905, (
             f"NAND at w=10.0 pull too weak: {conf_a:.4f} (expected < 0.905)"
         )
