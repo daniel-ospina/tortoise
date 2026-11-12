@@ -1251,15 +1251,15 @@ def test_signup_acceptance_dom_structure(page: Page) -> None:
 
     # ⛔ THE DESTINATION IS PINNED, NOT THE SPELLING (#12058). This page belongs
     # to the APP origin (`_app_url`), which is its own Pages project, so a
-    # root-relative `/tos` here answers 404 — measured, and the reason the
-    # markup carries the company host ABSOLUTELY. Reading
-    # `a.getAttribute('href')` pinned the spelling instead: once the markup was
-    # corrected to `https://premiselabs.co/tos`, `"/tos" in hrefs` reddened a
-    # tree that had just been fixed, and it stayed green on the defect it exists
-    # for (a relative link that 404s). `a.href` is the browser-resolved URL, so
-    # the pin is the destination — while a root-relative `/tos` on this origin
-    # still FAILS, because it resolves to the app host, which serves no legal
-    # page.
+    # root-relative `/tos` here answers 404 — measured, and the reason the markup
+    # carries the company host ABSOLUTELY. The ORIGINAL pin was a substring of the
+    # raw attribute (`"/tos" in hrefs`), which reddened a tree that had just been
+    # corrected to `https://premiselabs.co/tos`; the pin this change REPLACES went
+    # the other way and compared the PATH only, so a root-relative `/tos` still
+    # passed it and the 404 the guard exists for stayed green. `a.href` is the
+    # browser-resolved URL and the origin is compared whole, so the pin is the
+    # destination — while a root-relative `/tos` on this origin still FAILS,
+    # because it resolves to the app host, which serves no legal page.
     #
     # The required pair is a SUBSET, not the whole set: the statement may gain a
     # further legal link (a DPA, say) without this guard calling it wrong, and a

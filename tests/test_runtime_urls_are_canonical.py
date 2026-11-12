@@ -30,7 +30,7 @@ pages, the blog origin, and the dashboard's docs links used to spell the retired
 origin. Every file in `RUNTIME_FILES` that STILL spells it is in
 `RETIRED_HOST_ALLOWLIST` with an EXACT occurrence count, its TERMINATOR — a 301
 onto a canonical origin (the DEFAULT `/blog*` 301 for five of them, so those five
-name no status: it is stated once, in the census below), or NOT REDIRECTED AT
+name no status: it is stated in the census below), or NOT REDIRECTED AT
 ALL, where the retired host answers in place — and, for the DEFERRALS, the issue
 that owns the re-aim. ⛔ BOUNDED TWICE, and both bounds matter: the ten DEFERRALS
 carry a terminator, while the four non-deferral KEEP rows (CORS and redirect
