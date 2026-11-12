@@ -2281,13 +2281,13 @@ surfaces:
   # `.surfaces.api[]` for exactly that reason.
   #
   # ⛔ #12003 (2026-11-12): that recurrence DID happen to this row — `origin/main`
-  # at `7f7ac34a` carried FOUR `core` rows for this one file (`#11837`'s, two from
-  # the #12005 / #12023 repairs, and one a conflicted rebase offered to add as a
-  # third) plus a DUPLICATED `durations:` key, and `tools/ci_selection.py
-  # --integrity` refused `main` itself with `duplicate mapping key
-  # 'test_pricing_storage_dimensions.py'`. Every copy is now deleted and this ONE
-  # row + the `api` row at `#11758`'s original registration are the two that
-  # remain — `grep -n '^  - test_pricing_storage_dimensions.py'` prints exactly
+  # at `7f7ac34a` carried FOUR rows for this one file, ONE `api` (`#11837`'s) and
+  # THREE `core` (the `#12005` and `#12023` repairs, plus a `#1262` block a `#11965`
+  # sweep carried in) — and it declared this file's `durations:` weight TWICE. So
+  # `tools/ci_selection.py --integrity` refused `main` itself with `duplicate
+  # mapping key 'test_pricing_storage_dimensions.py'`. The duplicates are now
+  # deleted and exactly two rows remain, the `api` row `#11837` registered and this
+  # `core` one — `grep -n '^  - test_pricing_storage_dimensions.py'` prints exactly
   # two lines. ⚠️ The row's own guidance, now applied: when a peer PR lands the
   # same repair first, DELETE the extra row; never add a third.
   - test_pricing_storage_dimensions.py
