@@ -6003,7 +6003,12 @@ def _cred_word_yields_075(
 #: guard report it; a row that survives every one of them is quiet for two
 #: reasons at once, asserts a tautology, and implies boundary coverage it does
 #: not have. Three review cycles in a row found rows of exactly that shape in
-#: the true-prose loop (~6211-6218) by hand, so the property is mechanical now.
+#: the must-not-fire loop (`for true_sentence in …`, below) by hand, so the
+#: property is mechanical now. ⚠️ Name that loop, do NOT cite its line numbers:
+#: this pointer said `~6211-6218`, which is the MUST-FIRE loop (the false-prose
+#: spellings asserted to FIRE), so it sent a reader to rows with the opposite
+#: expectation — and it was already wrong when written, not shifted by a later
+#: edit (review cycle 19, P3).
 #: Each splice ASSERTS the text it edits rather than substituting blindly: a
 #: pattern reworded away from these spellings would otherwise yield an
 #: unchanged mutant — an inert mutant quietly certifying every row.
