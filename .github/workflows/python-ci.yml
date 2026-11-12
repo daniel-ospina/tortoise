@@ -4606,11 +4606,20 @@ jobs:
     # fallback (it is a determinism pin; availability was never its job). Two
     # consequences, neither hypothetical:
     #   · a hosted outage CAN still be absorbed by the pool here;
-    #   · on a pool box that is not noble, the archive has no PG16 client — so
-    #     the in-step `apt-cache show` precondition below is what fails closed,
-    #     naming the RUNNER, not just the image — `RUNNER_*` is set on BOTH
-    #     classes while `ImageOS`/`ImageVersion` are hosted-only. #10289: a `=on`
-    #     non-noble x64 box can carry this label.
+    #   · on a pool box that is a PGDG-SUPPORTED release, the client now RESOLVES
+    #     from that box's own `<codename>-pgdg` suite and the drill simply RUNS.
+    #     ⛔ That is NOT the old mechanism, and the old sentence here ("the
+    #     archive has no PG16 client — so the in-step `apt-cache show`
+    #     precondition is what fails closed") is why it is worth spelling out:
+    #     the client no longer comes from the box's ARCHIVE at all (#12051 round
+    #     3 installs from apt.postgresql.org), so a supported release needs no
+    #     fail-closed branch. The artifact contract is held by the in-step
+    #     `pg_dump --version` / `pg_restore --version` assertion, which is
+    #     box-independent. What still fails closed — and names the RUNNER, not
+    #     just the image: `RUNNER_*` is set on BOTH classes while
+    #     `ImageOS`/`ImageVersion` are hosted-only — is a release PGDG does not
+    #     publish (the named `apt-get update` guard), or one whose os-release
+    #     carries no codename. #10289: a `=on` x64 box can carry this label.
     runs-on: ubuntu-24.04
     # Measured on the lane where this was built: 63 passed / 0 skipped in 70–73s
     # against a warm database, and ~100s when the container first applies the
@@ -4735,11 +4744,6 @@ jobs:
           # major for every supported release (`16.15-1.pgdg26.04+2` on resolute,
           # `16.15-1.pgdg24.04+2` on noble — both verified in a container running
           # THIS script), so the pin resolves the same way wherever the label goes.
-          sudo install -d /usr/share/postgresql-common/pgdg
-          curl -fsSL -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
-          sudo install -m 0644 /tmp/pgdg.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
-          . /etc/os-release
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           # Identity must survive BOTH runner classes: `ImageOS`/`ImageVersion` are set ONLY
           # on GitHub-hosted runners, so naming them alone reports `unknown` on a self-hosted
           # box — and a self-hosted box is exactly the #10289 path these messages exist for.
@@ -4749,13 +4753,35 @@ jobs:
           if [ -n "${ImageOS:-}" ]; then
             identity="$identity hosted-image=${ImageOS}/${ImageVersion:-unknown}"
           fi
-          # ⛔ FAIL CLOSED WITH A NAME — BOTH ways this step can fail to get a pg16 client.
-          # The two failure classes below are DIFFERENT and are named separately, because
-          # `set -e` would otherwise surface apt's own text for one of them: a repo or
-          # signing key that does not resolve aborts at `apt-get update` (exit 100), and a
-          # resolved archive without the package aborts at the install. Both read as a typo
-          # in THIS step rather than as the client's SOURCE failing under a drill whose
-          # artifact depends on the client's major.
+          # ⛔ THREE WAYS THIS STEP CAN FAIL TO GET A pg16 CLIENT, AND EACH ONE IS NAMED.
+          # Under `set -e`/`set -u` every one of them would otherwise surface as apt's, curl's
+          # or the shell's own text — which reads as a typo in THIS step rather than as the
+          # client's SOURCE failing under a drill whose artifact depends on the client's major
+          # (#12051). They are guarded SEPARATELY because they have different remedies:
+          #   1. the signing key cannot be FETCHED (egress/DNS/503) — guarded at the fetch;
+          #   2. the repo does not RESOLVE once added (suite name, key, archive) — `apt-get update`;
+          #   3. the repo resolves but has no `postgresql-client-<major>` — the probe below.
+          # ⚠️ The key fetch and the `apt-get update` are BOTH fatal on purpose: swallowing
+          # either would let the install fall back to the DISTRO archive, which carries whatever
+          # major the release ships and is the mechanism #12051 round 1 died on.
+          if ! curl -fsSL -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc; then
+            echo "::error::could not FETCH the PGDG signing key (ACCC4CF8.asc) [$identity] — the client this drill needs comes from apt.postgresql.org, so without the key nothing can be installed and BOTH provisioned servers are pg16 (#12051). Check network egress from this runner to www.postgresql.org."
+            exit 1
+          fi
+          # The keyring's DIRECTORY is created here rather than assumed: PGDG publishes it inside
+          # `postgresql-common`, which a bare runner image does not carry, so `install -m 0644`
+          # below would fail `No such file or directory` — unnamed, one line before the guard.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo install -m 0644 /tmp/pgdg.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          . /etc/os-release
+          # ⛔ `${VERSION_CODENAME}` IS CHECKED, not left to `set -u`: an unbound-variable abort
+          # at the sources line is exactly the unnamed failure the three guards exist to replace,
+          # and a box whose os-release carries no codename is a state this step can NAME.
+          if [ -z "${VERSION_CODENAME:-}" ]; then
+            echo "::error::/etc/os-release on this runner carries no VERSION_CODENAME [$identity] — the PGDG suite name cannot be derived, so the pg16 client this drill needs cannot be installed (#12051). A Debian/Ubuntu box always sets it; a non-apt-derived image does not."
+            exit 1
+          fi
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
           if ! sudo apt-get update -qq; then
             echo "::error::apt-get update FAILED after the PGDG source was added (suite ${VERSION_CODENAME:-unknown}-pgdg) [$identity] — the repository or its signing key did not resolve, so the pg16 client this drill needs cannot be installed, and BOTH provisioned servers are pg16 (#12051). Check the key at /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc, the suite name derived from /etc/os-release, and network egress."
             exit 1

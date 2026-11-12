@@ -594,6 +594,18 @@ def test_the_client_comes_from_pgdg_not_the_distro_archive(job: dict) -> None:
         "so under `set -u` it aborts on an unset variable instead of naming the "
         "cause"
     )
+    assert '${VERSION_CODENAME:-}' in code, (
+        "the codename is used unguarded, so a box whose os-release carries none "
+        "aborts `set -u` at the sources line with no `::error::` — the exact "
+        "unnamed failure the guards exist to replace. Guard it explicitly."
+    )
+    assert "install -d /usr/share/postgresql-common/pgdg" in code, (
+        "the keyring's DIRECTORY is not created. PGDG publishes it inside "
+        "`postgresql-common`, which a bare runner image does not carry, so the "
+        "`install -m 0644` of the key fails `No such file or directory` — unnamed, "
+        "one line before the guard. MEASURED: deleting this line alone left the "
+        "whole file green."
+    )
 
     # ⛔ ORDER IS THE MECHANISM. Sources added, THEN the indexes refreshed, THEN the
     # install. Any other order installs from the distro archive (or from an index
@@ -677,7 +689,6 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     )
 
     os_release = tmp_path / "os-release"
-    os_release.write_text('ID=ubuntu\nVERSION_CODENAME=noble\n', encoding="utf-8")
     substituted = prefix.count(". /etc/os-release")
     assert substituted == 1, (
         "the prefix is expected to source `/etc/os-release` exactly once so this "
@@ -688,11 +699,20 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     prefix = prefix.replace(". /etc/os-release", f". {os_release}")
 
     def run_with(
-        stub: str, apt_get: str = "apt-get() { return 0; }"
+        stub: str,
+        apt_get: str = "apt-get() { return 0; }",
+        curl_stub: str = "curl() { return 0; }",
+        codename: str = "noble",
     ) -> subprocess.CompletedProcess[str]:
+        # The fixture is rewritten per arm, so the codename guard can be exercised
+        # without ever reading the host's file.
+        os_release.write_text(
+            "ID=ubuntu\n" + (f"VERSION_CODENAME={codename}\n" if codename else ""),
+            encoding="utf-8",
+        )
         script = tmp_path / "precondition.sh"
-        # ⛔ `sudo`, `apt-*` AND THE REPO-SETUP COMMANDS are stubbed. Without the
-        # first two the prefix runs the HOST's real `sudo apt-cache` / `sudo apt-get
+        # ⛔ `sudo`, `apt-*`, `curl` AND THE REPO-SETUP COMMANDS are stubbed. Without
+        # the first two the prefix runs the HOST's real `sudo apt-cache` / `sudo apt-get
         # update`: on a box where sudo is passwordless and the package is known to
         # apt the probe SUCCEEDS, the failure branch is never taken, and the test
         # reports a disarmed guard that is actually armed — and reads the host's
@@ -701,9 +721,8 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         # they either abort the prefix before the guard runs or write the host.
         script.write_text(
             'sudo() { "$@"; }\n'
-            f"{apt_get}\n"
+            f"{apt_get}\n{curl_stub}\n"
             "install() { return 0; }\n"
-            "curl() { return 0; }\n"
             "tee() { cat >/dev/null; }\n"
             f"{stub}\n{prefix}\n"
             "echo REACHED_PAST_PRECONDITION\n",
@@ -765,4 +784,48 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
         "`apt-get update` stopped the step but nothing NAMED it — the whole point "
         "of the update guard is that a PGDG key/suite/egress failure reads as "
         f"THIS defect rather than as apt's opaque exit 100: {update_combined!r}"
+    )
+
+    # ⛔ AND THE KEY FETCH — the most likely PGDG failure of all (egress, DNS, a
+    # 503 from www.postgresql.org). `set -e` would abort at curl with its own
+    # rc=22 and NO name, which is the class this step exists to remove.
+    curl_failed = run_with(
+        "apt-cache() { return 0; }",
+        curl_stub=(
+            'curl() { echo "curl: (22) The requested URL returned error: 503" >&2; '
+            "return 22; }"
+        ),
+    )
+    curl_combined = curl_failed.stdout + curl_failed.stderr
+    assert curl_failed.returncode != 0, (
+        "with `curl` FAILING the step carried on — on a runner that cannot reach "
+        "www.postgresql.org the key is never installed and every later branch is "
+        f"misleading: {curl_combined!r}"
+    )
+    assert "REACHED_PAST_PRECONDITION" not in curl_failed.stdout, (
+        "a failed key fetch did not stop the script, so the step proceeds without "
+        f"the signing key it just claimed to install: {curl_combined!r}"
+    )
+    assert "::error::" in curl_combined, (
+        "the key fetch stopped the step but named nothing — `set -e` would surface "
+        f"curl's exit 22 as an opaque failure: {curl_combined!r}"
+    )
+
+    # ⛔ AND AN os-release WITHOUT A CODENAME — the `set -u` abort the explicit
+    # guard replaces. `[ -z "${VERSION_CODENAME:-}" ]` must fire and NAME it.
+    no_codename = run_with("apt-cache() { return 0; }", codename="")
+    codename_combined = no_codename.stdout + no_codename.stderr
+    assert no_codename.returncode != 0, (
+        "a fixture without VERSION_CODENAME did not stop the step, so the sources "
+        "line would be built from an empty suite name (or `set -u` would abort "
+        f"unnamed): {codename_combined!r}"
+    )
+    assert "REACHED_PAST_PRECONDITION" not in no_codename.stdout, (
+        "the codename guard let the script continue without a suite name: "
+        f"{codename_combined!r}"
+    )
+    assert "::error::" in codename_combined, (
+        "a missing VERSION_CODENAME stopped the step but named nothing — the "
+        "whole point of the guard is that it reads as THIS defect rather than as "
+        f"an unbound-variable abort: {codename_combined!r}"
     )
