@@ -4801,26 +4801,25 @@ jobs:
           # `pg_dump`/`pg_restore`. It is deliberately outside this list: this list is about
           # GETTING a client onto the leg, that one is about the client it GOT.
           # ⛔ THE BOX IS POOL-ELIGIBLE, SO WHAT THIS STEP ADDS TO APT IS REMOVED AGAIN.
-          # /etc/apt/sources.list.d/pgdg.list changes apt resolution for EVERY later job on the
-          # same box, and a leftover sources file is worse than none once this step's keyring is
-          # gone: an unverifiable key turns the next job's `apt-get update` into exactly the SOFT
-          # failure the ORIGIN check below exists to catch. Registered BEFORE the first write so a
-          # failure anywhere later still cleans up, and the SOURCE is removed FIRST so there is no
-          # window in which it outlives the key that signs it. `${key_file:-}` because the trap can
-          # fire before that mktemp call, where `set -u` in the trap would itself abort.
-          # ⛔ OWN ONLY WHAT THIS STEP WROTE. A pool box may ALREADY carry an operator's
-          # `apt.postgresql.org.asc` — created by PGDG's own manual procedure, at exactly
-          # this path — so an unconditional `rm` would DELETE state this job never created,
-          # on any later failure and not just the success path (MEASURED: with an operator
-          # file planted and the key fetch forced to fail, an unconditional trap removed it).
-          # ⚠️ The flag decides REMOVAL only: the `tee` below REPLACES a pre-existing sources
-          # file's contents (it does not append), so what the trap restores is the FILE's
-          # existence, not its contents.
-          had_sources=0
-          if [ -e /etc/apt/sources.list.d/pgdg.list ]; then had_sources=1; fi
-          had_keyring=0
-          if [ -e /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc ]; then had_keyring=1; fi
-          trap 'if [ "${had_sources:-0}" = 0 ]; then sudo rm -f /etc/apt/sources.list.d/pgdg.list || true; fi; if [ "${had_keyring:-0}" = 0 ]; then sudo rm -f /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc || true; fi; sudo rm -f "${key_file:-}" || true' EXIT
+          # A leftover sources file is worse than none once this step's keyring is gone: an
+          # unverifiable key turns the next job's `apt-get update` into exactly the SOFT
+          # failure the ORIGIN check below exists to catch. Registered BEFORE the first write so
+          # a failure anywhere later (including the key fetch) still cleans up, and the SOURCE is
+          # removed FIRST so there is no window in which it outlives the key that signs it.
+          # `${key_file:-}` because the trap can fire before that mktemp call, where `set -u`
+          # in the trap would itself abort.
+          # ⛔ AND IT OWNS ONLY STEP-PRIVATE PATHS, so the trap is UNCONDITIONAL. Keying removal
+          # on "did it pre-exist" is measurably wrong in one direction: a box carrying an
+          # operator `sources.list.d/pgdg.list` but NO keyring at the shared path
+          # (`had_sources=1`, `had_keyring=0` — PGDG's legacy `trusted.gpg.d` install) has its
+          # file REWRITTEN to point at the keyring, which the trap then deletes — leaving
+          # exactly the unverifiable source this block exists to prevent. So the keyring and the
+          # list are this step's OWN names: they cannot collide with an operator's, are never
+          # derived from someone else's, and are removed unconditionally. ⚠️ An existing
+          # `pgdg.list`/`pgdg.asc` is left COMPLETELY untouched — not truncated, not deleted.
+          # Every removal carries `|| true`: `errexit` IS in force inside an EXIT trap, so one
+          # failing `rm` would red a step that SUCCEEDED and skip the rest of the cleanup.
+          trap 'sudo rm -f /etc/apt/sources.list.d/tortoise-12051-pgdg.list || true; sudo rm -f /etc/apt/keyrings/tortoise-12051-pgdg.asc || true; sudo rm -f "${key_file:-}" || true' EXIT
           # ⚠️ `mktemp`, not a fixed `/tmp/pgdg.asc`: this job is pool-eligible and `curl -o`
           # FOLLOWS symlinks, so a co-tenant could pre-create that path and redirect this write.
           key_file="$(mktemp)"
@@ -4828,11 +4827,11 @@ jobs:
             echo "::error::could not FETCH the PGDG signing key (ACCC4CF8.asc) [$identity] — the client this drill needs comes from apt.postgresql.org, so without the key nothing can be installed and BOTH provisioned servers are pg16 (#12051). Either this runner cannot reach www.postgresql.org (egress/DNS/503), or curl/ca-certificates are not installed on it — test with 'command -v curl' before chasing the firewall."
             exit 1
           fi
-          # The keyring's DIRECTORY is created here rather than assumed: PGDG publishes it inside
-          # `postgresql-common`, which a bare runner image does not carry, so `install -m 0644`
-          # below would fail `No such file or directory` — unnamed, one line before the guard.
-          sudo install -d /usr/share/postgresql-common/pgdg
-          sudo install -m 0644 "$key_file" /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          # The keyring's DIRECTORY is created here rather than assumed: `/etc/apt/keyrings` is
+          # the modern location but not every image carries it, so `install -m 0644` below would
+          # fail `No such file or directory` — unnamed, one line before the guard.
+          sudo install -d /etc/apt/keyrings
+          sudo install -m 0644 "$key_file" /etc/apt/keyrings/tortoise-12051-pgdg.asc
           # ⛔ THE SOURCE IS GUARDED, not just the variable it sets. `.` on a box with no
           # readable /etc/os-release aborts under `set -e` with bash's own text (`No such file
           # or directory`) and NO `::error::` — the unnamed-abort class every other line here
@@ -4850,9 +4849,9 @@ jobs:
             echo "::error::/etc/os-release on this runner carries no VERSION_CODENAME [$identity] — the PGDG suite name cannot be derived, so the pg16 client this drill needs cannot be installed (#12051). A Debian/Ubuntu box always sets it; a non-apt-derived image does not."
             exit 1
           fi
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          echo "deb [signed-by=/etc/apt/keyrings/tortoise-12051-pgdg.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/tortoise-12051-pgdg.list >/dev/null
           if ! sudo apt-get update -qq; then
-            echo "::error::apt-get update FAILED after the PGDG source was added (suite ${VERSION_CODENAME:-unknown}-pgdg) [$identity] — the repository or its signing key did not resolve, so the pg16 client this drill needs cannot be installed, and BOTH provisioned servers are pg16 (#12051). Check the key at /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc, the suite name derived from /etc/os-release, and network egress."
+            echo "::error::apt-get update FAILED after the PGDG source was added (suite ${VERSION_CODENAME:-unknown}-pgdg) [$identity] — the repository or its signing key did not resolve, so the pg16 client this drill needs cannot be installed, and BOTH provisioned servers are pg16 (#12051). Check the key at /etc/apt/keyrings/tortoise-12051-pgdg.asc, the suite name derived from /etc/os-release, and network egress."
             exit 1
           fi
           # ⛔ THE ORIGIN IS THE FACT; A BARE PROBE'S EXIT STATUS IS NOT. `apt-get update`
