@@ -129,6 +129,7 @@ from .live import classify_lifecycle_fanout  # #7822 fan-out-wide lifecycle verd
 from .live import LIFECYCLE_FANOUT_QUERY  # #7822 the shared fan-out statement
 from .live import EPISTEMIC_LABELS  # #7902 epistemic-label write widening (shared with #7853 read widening)
 from .live import status_as_reported, refuse_terminal_event_state  # #9974 R1 + #11825
+from .live import event_label_names  # #11825 the label-renderer union (Phase-1 door)
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -27452,8 +27453,16 @@ class TortoiseSDK:
         for i, item in enumerate(bundle.get("entities") or []):
             if not isinstance(item, dict):
                 continue
-            if _ENTITY_ITEM_LABELS.get(
-                    str(item.get("type") or "").strip().lower()) != "Event":
+            # ⛔ THE TYPE IS RESOLVED UNDER BOTH RENDERERS, exactly as the API
+            # sweep asks the label (review cycle 8, P1): a `str` SUBCLASS whose
+            # content is `event` and whose `__str__` says something else resolved
+            # to no label here — Phase 1 reported ZERO violations — while step 3
+            # routes by CONTENT and refused mid-write, after the points had
+            # committed. The predicate is shared with `api._emit` / `emit_belief`
+            # (`live.label_names_an_event`), so the door and this arm cannot
+            # disagree about what an Event is.
+            if not any(_ENTITY_ITEM_LABELS.get(name.strip().lower()) == "Event"
+                       for name in event_label_names(item.get("type"))):
                 continue
             # ⛔ THE KEY AXIS, and the `None` value, are part of this arm too
             # (review cycle 5: one P1, one P2, both measured). `_item_declared_status`

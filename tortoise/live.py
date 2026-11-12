@@ -661,6 +661,38 @@ def _event_state_key_names(key) -> tuple[str, ...]:
     return tuple(dict.fromkeys(names))
 
 
+def event_label_names(value) -> tuple[str, ...]:
+    """EVERY name this LABEL can be filed under — the union of the two renderers.
+
+    The same asymmetry ``_event_state_key_names`` records for KEYS, one axis over,
+    and it bites the same way: the LIVE writers interpolate the label into the
+    Cypher pattern by ``str(label)``, while the JOURNAL serialises the record with
+    ``json.dumps``, which writes a ``str`` SUBCLASS by its CONTENT. A label whose
+    content is ``Event`` and whose ``__str__`` returns ``harmless`` therefore
+    passes a ``str(label)`` test, lands on ``n:harmless`` live, and REPLAYS as a
+    terminal ``:Event`` — measured at this gate (review cycle 8, P1): the refusal
+    was skipped, the journal carried ``"label": "Event"`` + the terminal state,
+    and folding it produced ``status='superseded'`` on an ``:Event`` node.
+    ⛔ The guard must ask the union, and the CONTENT rendering is the dangerous
+    one — it is the one the durable record keeps.
+    """
+    names: list[str] = []
+    if isinstance(value, bytes):
+        with contextlib.suppress(UnicodeDecodeError):
+            names.append(value.decode())
+    else:
+        names.append(str(value))                 # the live writer's rendering
+        if isinstance(value, str):
+            names.append(str.__str__(value))     # the journal's rendering (content)
+    return tuple(dict.fromkeys(names))
+
+
+def label_names_an_event(value) -> bool:
+    """True when ``value`` names the ``:Event`` label under ANY renderer."""
+    return any(name.strip().lstrip(":").lower() == "event"
+               for name in event_label_names(value))
+
+
 def declares_status_key(props) -> bool:
     """True when ``props`` declares ``status`` under ANY key that renders to it.
 

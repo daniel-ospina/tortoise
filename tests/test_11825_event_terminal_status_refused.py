@@ -771,6 +771,29 @@ class TestTheBeliefSeam:
                 state={"status": status})
         assert _props(sdk, eid) == before
 
+    def test_a_label_that_renders_two_ways_is_still_an_event(self, sdk):
+        """Review cycle 8, P1 — `str(label)` is not the only renderer.
+
+        The live writers interpolate `str(label)`; the JOURNAL keeps a `str`
+        subclass by its CONTENT. So a label whose content is `Event` and whose
+        `__str__` says `harmless` passed a `str(label)` test, landed on
+        `n:harmless` live, and REPLAYED as a terminal `:Event` — a bypass that
+        exists only on the record path, which is the path the whole half-class is
+        about. Both doors ask `live.label_names_an_event` now.
+        """
+        class Lie(str):
+            def __str__(self):  # the live rendering
+                return "harmless"
+
+        for door in ("_emit", "emit_belief"):
+            eid = _event(sdk, name=f"LabelLie-{door.strip('_')}")
+            before = _props(sdk, eid)
+            with pytest.raises(ValueError, match=":Event"):
+                getattr(self._api(sdk), door)(
+                    "EntityMutated", id=eid, label=Lie("Event"), op="restatus",
+                    state={"status": "superseded"})
+            assert _props(sdk, eid) == before, door
+
     def test_the_chokepoint_refuses_the_same_state_op(self, sdk):
         """Review cycle 6/7, P1 — the seam, on EVERY channel `_emit` accepts.
 
@@ -866,6 +889,26 @@ class TestTheBundleValidationDoor:
             f"a bundle item with status={status!r} passed Phase 1 — ingest would "
             "then raise mid-write with the point already committed")
         assert any("event" in v["message"].lower() for v in violations)
+
+    def test_a_type_that_renders_two_ways_is_still_an_event(self, sdk):
+        """Review cycle 8, P1 — Phase 1 must route a label the way step 3 does.
+
+        `create_entity` routes by CONTENT (the journal's rendering), so a
+        `str` subclass whose content is `event` reached the `:Event` door and was
+        refused THERE — after the points had committed. Phase 1 resolved the type
+        through `str(type)` alone and reported zero violations.
+        """
+        class Lie(str):
+            def __str__(self):
+                return "harmless"
+
+        bundle = {
+            "points": [{"content": "must-not-commit"}],
+            "entities": [{"type": Lie("event"), "name": "LieType",
+                          "eventKind": "deployment", "status": "superseded"}],
+        }
+        violations = sdk._validate_bundle(bundle)
+        assert violations, "Phase 1 passed a type step 3 routes to the :Event door"
 
     def test_a_non_terminal_event_item_is_not_a_violation(self, sdk):
         """No over-block: the door accepts `scheduled`, so Phase 1 must too."""

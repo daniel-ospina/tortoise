@@ -23,7 +23,7 @@ from .kind_fallbacks import named_kind
 # Event node, after `create_entity` and `_update_entity` — refuses the terminal
 # half of the status vocabulary too. `live` is the leaf status module (it
 # imports nothing from here), so this adds no cycle.
-from .live import refuse_terminal_event_state
+from .live import label_names_an_event, refuse_terminal_event_state
 
 # #2782: the money value's WRITE gate, at the one seam that bypasses
 # `_sanitize_props`. `money` imports only `numeric_domain` (no cycle).
@@ -780,10 +780,20 @@ class EventAPI:
             # value raised a bare ``TypeError: unhashable type`` out of
             # ``emit_belief`` (measured, review cycle 6 P3) — the un-named
             # 500-class this gate exists to replace with a diagnosis.
+            # ⛔ THE LABEL IS ASKED UNDER BOTH RENDERERS, for the reason the
+            # `EventRecorded` arm above states about KEYS: the live writers
+            # interpolate `str(label)` while the JOURNAL keeps a `str` subclass by
+            # its CONTENT, so a label whose content is `Event` and whose
+            # `__str__` says `harmless` passed a `str(label)` test, landed on
+            # `n:harmless` live, and REPLAYED as a terminal `:Event` (measured,
+            # review cycle 8 P1 — the journal carried `"label": "Event"` and
+            # folding it stored `status='superseded'`). `live.label_names_an_event`
+            # is that union, shared with the Phase-1 arm in `sdk._validate_bundle`
+            # so the two cannot disagree.
             _op = _map.get("op")
             if (isinstance(_op, str)
-                    and str(_map.get("label") or "").strip().lstrip(":").lower()
-                    == "event" and _op in _ENTITY_MUTATION_STATE_OPS):
+                    and label_names_an_event(_map.get("label"))
+                    and _op in _ENTITY_MUTATION_STATE_OPS):
                 _state = _map.get("state")
                 refuse_terminal_event_state(
                     _state if isinstance(_state, dict) else {},
@@ -1115,7 +1125,7 @@ class EventAPI:
         # escaped this door as a bare ``TypeError: unhashable type`` (measured,
         # cycle 6 P3), which is the un-named 500-class the eager refusal exists to
         # replace.
-        elif str(payload.get("label") or "").strip().lstrip(":").lower() == "event" \
+        elif label_names_an_event(payload.get("label")) \
                 and isinstance(payload.get("op"), str) \
                 and payload.get("op") in _ENTITY_MUTATION_STATE_OPS:
             _state = payload.get("state")
