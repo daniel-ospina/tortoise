@@ -492,6 +492,15 @@ grep -q 'GH ' "$STUB_TMP/calls.log" 2>/dev/null && bad "case 12: gh was called w
 run_checker_no_jq
 assert_eq "$RC" 1 "case 13: missing jq → exit 1"
 assert_contains "$OUT" "jq is required" "case 13: names jq"
+# The refusal must be the script's OWN dependency check, not a casualty of the
+# stripped PATH: an external tool needed before it (the old `dirname`-based
+# SCRIPT_DIR) made the same case abort with a `dirname: command not found` and
+# `cd: null directory` pair — pass locally (bash ≤5.2 treats `cd ""` as a no-op)
+# and FAIL on the runner (bash 5.3 errors), with the operator never told about
+# jq. This assertion catches that regression on EVERY bash version, because it
+# forbids the symptom instead of relying on the shell's `cd ""` behaviour.
+assert_not_contains "$OUT" "command not found" "case 13: needs NO external tool before its dependency checks (a dirname-less PATH must still reach the jq refusal)"
+assert_not_contains "$OUT" "dirname" 'case 13: nothing in the refusal path depends on `dirname`'
 # Non-vacuity, both directions: the case means "jq is hidden", not "PATH is
 # empty". Without these pins the case passes on a PATH that hides every
 # binary, which is the #12077 false RED — `dirname` gone, the checker dead at

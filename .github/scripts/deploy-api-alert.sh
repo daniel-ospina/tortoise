@@ -293,14 +293,15 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
         # anything cut (the measured 2026-09-04 report was 509 bytes, so the cap
         # is not normally reached).
         # `tail -c` cuts at a BYTE, so it can land inside a multibyte character.
-        # TWO paths follow and the body's promise differs between them: the SQUEEZE
-        # below drops the split sequence, so the pasted excerpt is valid UTF-8; the
-        # RAW FALLBACK (further down) pastes the tail unsqueezed and SAYS SO, so a
-        # split character can reach the body only on a path that discloses it. The
-        # fence is then made longer than any backtick run in the excerpt: the report
-        # carries repo-controlled text (migration filenames, version names), and a
-        # report containing ``` would close the block early and render the rest as
-        # live markdown. (Round-5 review, P3-2.)
+        # TWO paths follow and NEITHER can put an undecodable byte in an issue body:
+        # the SQUEEZE below drops the split sequence, so the pasted excerpt is valid
+        # UTF-8; the FALLBACK (further down, when the squeeze yields NOTHING) drops
+        # every non-ASCII byte, so its output is ASCII and therefore valid UTF-8 too.
+        # Both paths DECLARE what they dropped, so the body never reads as a verbatim
+        # report it does not carry. The fence is then made longer than any backtick
+        # run in the excerpt: the report carries repo-controlled text (migration
+        # filenames, version names), and a report containing ``` would close the
+        # block early and render the rest as live markdown. (Round-5 review, P3-2.)
         #
         # ⛔ #12077 — the SQUEEZE'S EXIT STATUS IS NOT THE ALERT'S, and it is not
         # EVIDENCE either: on glibc 2.43 (`ubuntu-26.04`, the runner image) `iconv -c`
@@ -343,13 +344,24 @@ build_body() { # <out-file> <job> <step-id> <failed-step-raw>
           echo "⚠️ **The report file held no excerpt-able text** (nothing but line endings or NUL bytes, or it could not be re-read); the gate's own output is in the run link above."
           echo
         elif [ -z "$excerpt" ]; then
-          # An iconv that is absent, or that refuses without emitting anything,
-          # would otherwise paste an EMPTY block under a heading that promises the
-          # report verbatim. Paste the raw tail instead and SAY so, so the body
-          # never overstates what it carries (a silent empty block reads as "the
-          # gate reported nothing").
-          excerpt="$raw_tail"
-          echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit); it is pasted raw, so the 6000-byte cut may land inside a multibyte character."
+          # An iconv that is absent, or that refuses without emitting anything, would
+          # otherwise paste an EMPTY block under a heading that promises the report.
+          # TWO properties must hold at once here, and neither is optional:
+          #
+          #   (a) the body is VALID UTF-8. The 6000-byte cut can land inside a
+          #       multibyte character, and this branch is reached precisely when no
+          #       converter is available to drop it — so the RAW tail cannot be pasted:
+          #       an undecodable issue body is not a report. `tr -d '\200-\377'` is
+          #       coreutils, its output is pure ASCII, hence valid UTF-8.
+          #   (b) the body never OVERSTATES what it carries. Dropping every non-ASCII
+          #       byte loses more than the split character, so the loss is DECLARED
+          #       rather than absorbed — a silent empty (or silently mangled) block
+          #       reads as "the gate reported nothing".
+          #
+          # Both are pinned: "the fallback body is valid UTF-8 (non-ASCII bytes are
+          # dropped, never split)" and "does NOT claim a squeeze it did not perform".
+          excerpt="$(printf '%s' "$raw_tail" | LC_ALL=C tr -d '\200-\377')"
+          echo "⚠️ **The report could not be byte-squeezed** (\`iconv\` is unavailable or refused to emit); it is pasted with its non-ASCII bytes dropped, so any non-ASCII character in it is LOST — the run link above holds the full text."
           echo
         elif [ "$(printf '%s' "$excerpt" | wc -c)" -lt "$(printf '%s' "$raw_tail" | wc -c)" ]; then
           squeeze_incomplete=1

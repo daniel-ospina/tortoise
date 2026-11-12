@@ -530,9 +530,19 @@ export PATH="$ICONV_BROKEN_DIR:$PATH_BEFORE_ICONV_SHIM"
 reset_case
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
 assert_eq "$RC" "0" "an iconv that emits nothing still files the alert"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "could not be byte-squeezed" "and says the excerpt is RAW, never a verbatim report it does not carry"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "could not be byte-squeezed" "and says the excerpt is an ASCII fallback, never a verbatim report it does not carry"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "non-ASCII" "and DECLARES the non-ASCII loss, so a mangled report never reads as the gate's own text"
 assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "NOT byte-identical" "and it does NOT claim a squeeze it did not perform"
-assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "and the raw tail is still carried"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "and the ASCII report is still carried, so the operator sees what is blocking"
+# This arm is reached only when NO converter ran, so the split character is still in
+# the raw bytes: the fallback must drop it (not paste it), or the issue body is
+# undecodable. Pinned here as well as in case 17g, because a "fix" that swaps this
+# branch back to `excerpt="$raw_tail"` reds THIS row on any host.
+if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')" "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null; then
+  ok "and the fallback body is valid UTF-8 — the non-ASCII cut is dropped, never pasted"
+else
+  bad "the fallback body is NOT valid UTF-8 — the raw tail reached the issue"
+fi
 export PATH="$PATH_BEFORE_ICONV_SHIM"
 
 # ── case 17b (arm c): the disclosure is a BYTE MEASURE, not the status ─────────────────
@@ -609,6 +619,52 @@ if command -v timeout >/dev/null 2>&1; then
 else
   ok "case 17f: SKIPPED on this host — no \`timeout\` binary (macOS); the FIFO guard is pinned by CI (ubuntu-latest)"
 fi
+
+# ── case 17g: main's own #12077 pin — the same two arms, converter-independent ────────
+# Kept from `main` (it landed the same fix independently) and RENUMBERED: this block
+# and case 17c above both used to be called "17c". The overlap with 17b is deliberate
+# — 17b wraps the HOST's real `iconv`, so on a host without one its arm (a) refuses to
+# pass vacuously, while this block stubs `iconv` outright and therefore runs everywhere.
+# Both shapes pin the same two properties: a non-zero status must not abort the alert,
+# and a converter that emits NOTHING must leave a VALID UTF-8 body that still carries
+# the report (17b's fallback arm pins the same invariant from the other side).
+# `iconv -c` guarantees valid UTF-8 OUTPUT; its EXIT STATUS is not part of that
+# contract (GNU libiconv, and newer glibc builds, return 1 having dropped an
+# invalid sequence). Under `set -e` + `pipefail` that status killed the notifier
+# before the body was built, so NOTHING was filed — observed on CI as
+# "the alert succeeds on a report cut mid-character (got '1', want '0')". A
+# fail-closed notifier is precisely the silence this script exists to remove, so
+# both shapes are pinned here: status 1 WITH valid output, and status 1 with no
+# output at all (where the ASCII fallback must still carry the remediation).
+# The stub shadows the real iconv through the harness PATH, so this case does
+# not depend on the host's iconv build.
+cat > "$BIN/iconv" <<'ICONV_EOF'
+#!/usr/bin/env bash
+# STUB_ICONV_MODE=status → pass the bytes through, then report GNU libiconv's
+# "some sequence was dropped" status.  =silent → report it and emit nothing.
+[ "${STUB_ICONV_MODE:-status}" = "silent" ] && exit 1
+cat
+exit 1
+ICONV_EOF
+chmod +x "$BIN/iconv"
+reset_case
+export STUB_ICONV_MODE=status
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+assert_eq "$RC" "0" "an iconv status of 1 with valid output does not abort the alert (the notifier is the safety net)"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")" "gh workflow run supabase-deploy.yml --ref main" "and the excerpt still reaches the body"
+reset_case
+export STUB_ICONV_MODE=silent
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+assert_eq "$RC" "0" "an iconv status of 1 with NO output does not abort the alert"
+UTF8_FALLBACK_BODY="$(cat "$RUNNER_TEMP/deploy-api-alert-body.md")"
+assert_contains "$UTF8_FALLBACK_BODY" "gh workflow run supabase-deploy.yml --ref main" "the ASCII fallback still carries the report (not an empty fenced block)"
+if printf '%s' "$UTF8_FALLBACK_BODY" | python3 -c "import sys; sys.stdin.buffer.read().decode('utf-8')" 2>/dev/null; then
+  ok "the fallback body is valid UTF-8 (non-ASCII bytes are dropped, never split)"
+else
+  bad "the fallback body is NOT valid UTF-8"
+fi
+unset STUB_ICONV_MODE
+rm -f "$BIN/iconv"   # every later case must see the real converter again
 
 # A job with no declared note still alerts, with an honest generic sentence
 # rather than a wrong one (the workflow's site set is pinned by pytest).
