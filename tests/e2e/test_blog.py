@@ -98,17 +98,21 @@ _SEPARATE_HOSTS = APP not in (COMPANY, TORTISE)
 # URL cannot be both 200 and a 301, so that leg self-skips.
 _BLOG_HOSTS_DIFFER = COMPANY != TORTISE
 
-# ⛔ THE ORIGINS THAT ACTUALLY SERVE THE BLOG (#11976 review, round 5). A run pointed
-# at one of these grades the HOST that robots.txt names; ANY other target — a local
-# wrangler server, a preview deployment, a staging host — grades its own PATH.
-# robots.txt names an ABSOLUTE production URL, so fetching it as written from a target
-# that does not serve that URL reads and asserts on the DEPLOYED document instead of
-# the server under test: a false green, plus an unintended production read. Keying on
-# `ALLOW_PROD` was wrong twice over (it says "https targets are permitted", so a local
-# http run slipped through; and every https preview is forced to set it), and keying
-# on the scheme was wrong once more (a preview is https too). Only "is this target a
-# production origin" is the property the two arms actually need.
-# Keep this list in step with #11766's repoint.
+# ⛔ THE PRODUCTION ORIGINS THIS SUITE MAY GRADE A HOST AGAINST (#11976 review, rounds
+# 5-6). A run pointed at one of these grades the HOST that robots.txt names; ANY other
+# target — a local wrangler server, a preview deployment, a staging host — grades its
+# own PATH. robots.txt names an ABSOLUTE production URL, so fetching it as written from
+# a target that does not serve that URL reads and asserts on the DEPLOYED document
+# instead of the server under test: a false green, plus an unintended production read.
+# Keying on `ALLOW_PROD` was wrong twice over (it says "https targets are permitted", so
+# a local http run slipped through; and every https preview is forced to set it), and
+# keying on the scheme was wrong once more (a preview is https too). Only "is this
+# target a production origin" is the property the two arms actually need.
+# `tortoise.premiselabs.co` is in the set on purpose even though it no longer SERVES the
+# blog — it 301s /blog* to the company origin (`_middleware.ts:513-521`,
+# `_lib.ts:63-68`) — because it is the host robots.txt names TODAY, and grading it is
+# the whole point of the as-written arm. Keep this list in step with #11766's repoint.
+# Membership is tested against `.hostname` (lower-case, port-stripped), not `.netloc`.
 _PRODUCTION_ORIGIN_HOSTS = frozenset(
     {"premiselabs.co", "www.premiselabs.co", "tortoise.premiselabs.co"}
 )
@@ -350,7 +354,7 @@ def test_robots_txt_lists_blog_sitemap() -> None:
         # (`_PRODUCTION_ORIGIN_HOSTS`), never `ALLOW_PROD` (which says "https targets
         # are permitted") and never the scheme (a preview is https too).
         target = sitemap_url
-        if urlparse(COMPANY).netloc not in _PRODUCTION_ORIGIN_HOSTS:
+        if urlparse(COMPANY).hostname not in _PRODUCTION_ORIGIN_HOSTS:
             parsed = urlparse(sitemap_url)
             target = urljoin(f"{COMPANY}/", parsed.path.lstrip("/"))
             if parsed.query:
