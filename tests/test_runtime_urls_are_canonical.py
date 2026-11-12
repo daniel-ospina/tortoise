@@ -263,12 +263,14 @@ RETIRED_HOST_ALLOWLIST = {
     # issue, which this file's own OWNERSHIP note forbids ("a note deferring to it
     # defers nowhere"). The destinations exist and were measured 2026-11-12
     # (`premiselabs.co/tortoise/docs` answers 200; `/tortoise` is the product page;
-    # `/auth` 301s to the app origin), `tests/test_blog_seo_meta.mjs` pins an UPPER
-    # BOUND (`navRetired.length <= NAV_PRODUCT_HREFS.length`, deliberately `<=` so
-    # it "survives the repoint"), so this PR emits the terminal forms and the count
-    # goes to 0. The file STAYS in `RUNTIME_FILES` on purpose: with no allowlist
-    # row its expected count is 0, so a literal coming back REDS this guard instead
-    # of silently leaving the surface.
+    # `/auth` 301s to the app origin), and the sibling blog guard moves with it:
+    # `tests/test_blog_seo_meta.mjs` pinned an UPPER BOUND (`<= 3`) only so it would
+    # "survive the repoint", and THIS PR flips it to `navRetired.length === 0` in
+    # the same commit — an exemption that outlives the deferral it excused is the
+    # false-PASS class that guard exists to refuse. So this PR emits the terminal
+    # forms and the count goes to 0. The file STAYS in `RUNTIME_FILES` on purpose:
+    # with no allowlist row its expected count is 0, so a literal coming back REDS
+    # this guard instead of silently leaving the surface.
     "website/apps/dashboard/functions/admin/[[path]].ts": (
         1,
         "#11767 item 4 — the 403 page's `<a>← Back to the blog</a>` link (line "
