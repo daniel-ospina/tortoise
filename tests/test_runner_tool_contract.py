@@ -542,17 +542,23 @@ def _step_defusers(lines: list[str], at: int) -> list[str]:
     The bound is the `run:` line's own indent, so it follows the block rather than assuming
     the repo's 8 spaces.
 
-    ⛔ DECLARED MISS — A GUARD SUPPLIED THROUGH A YAML MERGE KEY. This is a TEXTUAL reader,
-    so `- <<: *guarded` (with the anchored mapping carrying `if:`) reads key `<<`, matches no
-    defuser, and the step reports clean in BOTH arms. GitHub Actions does not support merge
-    keys (`actions/runner#1182`), so the shape cannot run in CI, which is why it is declared
-    here rather than modelled; a live instance would need one and there is none (measured: 0
-    anchors, aliases or merge keys across the 41 workflows). The neighbouring spellings are
-    NOT silent: an alias standing in for a whole step (`- *guarded`) carries no literal
-    `run:` line, so it fails CLOSED (flagged as "no `run:` in command position", coverage
-    False), and an alias as a VALUE (`if: *x`) leaves the literal key readable. Pinned as a
-    declared miss by `test_a_merge_key_guard_is_a_declared_miss`, so closing it reds a pin
-    and must update this paragraph.
+    ⛔ A MERGE KEY (`<<:`) IS FAIL-CLOSED, NOT DECLARED. This is a textual reader, so a step
+    written `- <<: *guarded` — where the anchored mapping carries `if: always()` — exposes no
+    readable guard. The first version of this paragraph DECLARED that as an unrunnable shape on
+    the strength of `actions/runner#1182`, and the citation was wrong twice: that issue is
+    "Support YAML Anchors", it is CLOSED, and its own top note reads "Support has been added"
+    (August 2025) — so anchors and aliases DO resolve in Actions and a merge could in
+    principle supply the guard (#12167 review round 4). A residual whose whole justification
+    is an unverified claim about the platform is not a residual, it is a silent hole. So `<<`
+    is now returned as a defuser: the step is never counted as coverage, and the ordering arm
+    reports it, which is the direction this file must err in. `_contract_violations` words it
+    differently from a guard, because "you cannot show this step runs unguarded" is not the
+    same claim as "this step carries `if:`".
+
+    The neighbouring spellings need no such treatment, and the pin asserts it: an alias
+    standing in for a whole step (`- *guarded`) carries no literal `run:` line, so it fails
+    CLOSED as a contract step that is not there, and an alias as a VALUE (`if: *x`) leaves the
+    literal key readable.
     """
     start, end = _step_bounds(lines, at)
     key_indent = len(lines[at]) - len(lines[at].lstrip())
@@ -575,6 +581,10 @@ def _step_defusers(lines: list[str], at: int) -> list[str]:
         key = _STEP_DASH.sub("", stripped).split(":")[0].strip().strip("'\"")
         if key in _STEP_DEFUSERS:
             out.append(key)
+        elif key == "<<":
+            # A merge key: the step's own guard may live in the anchored mapping this reader
+            # cannot resolve. Fail closed rather than declare it — see the docstring.
+            out.append("<<")
     return out
 
 
@@ -670,6 +680,13 @@ def _contract_violations(block: str, scripts: frozenset[str]) -> list[str]:
         )
     if not free:
         for key in _step_defusers(lines, at):
+            if key == "<<":
+                out.append(
+                    "the contract step takes its keys from a YAML merge (`<<:`) that this "
+                    "textual reader cannot resolve, so the step cannot be shown to run "
+                    "unguarded — spell the keys out (#9018)"
+                )
+                continue
             out.append(
                 f"the contract step carries a `{key}:`, so it may never run and the "
                 "job can reach `gh` with no runner-tool contract at all (#9018)"
@@ -842,6 +859,16 @@ def test_a_guarded_contract_step_is_not_compliant():
     # step that does no work, while coverage — correctly — called the job covered. Measured:
     # `['the contract step carries a `if:`', …]` against `True`. A job that provisions `gh`
     # is compliant; only a job whose EVERY contract step is guarded violates.
+    #
+    # ⛔ AND THE AGREEMENT IS PRODUCED BY A PAIR, so BOTH halves get a row. `free[0]` chooses
+    # WHICH step is judged (and therefore which prefix `early = _gh_hazards(lines[:at])`
+    # scans); the `if not free:` gate decides whether a guard is reported at all. Reverting
+    # only `at = free[0]` to `at = matches[0]` leaves every row below green, because the
+    # reporting row is the gate's — so the `live_between` row is what pins the SELECTION: with
+    # the first occurrence judged, the `gh` step that sits between the guarded attempt and the
+    # live contract step falls outside the prefix and the job reads CLEAN (measured, #12167
+    # review round 4 — exactly the "correct arm, unexercised arm" gap this file's
+    # `test_the_precontract_arm_is_load_bearing` exists for).
     twice = (
         "  job:\n    steps:\n      - name: contract\n        if: always()\n"
         + body
@@ -851,6 +878,19 @@ def test_a_guarded_contract_step_is_not_compliant():
     assert _contract_violations(twice, scripts) == [], (
         "a job with a guarded contract attempt AND a live one still red-flagged — the "
         "ordering arm judged the first occurrence instead of the one that provisions `gh`"
+    )
+    live_between = (
+        "  job:\n    steps:\n      - name: contract\n        if: always()\n"
+        + body
+        + "      - name: peek\n        run: gh pr view 1 --json number\n"
+        + f"      - name: retry\n{body}"
+    )
+    assert _live_contract_step(live_between.splitlines()) is True
+    got = _contract_violations(live_between, scripts)
+    assert got and "gh pr view 1" in got[0], (
+        "a `gh` step sitting between a guarded contract attempt and the live one was not "
+        f"seen — the arm judged the first occurrence, so the prefix it scanned stopped "
+        f"before the hazard ({got!r})"
     )
     both_guarded = (
         "  job:\n    steps:\n      - name: contract\n        if: always()\n"
@@ -863,29 +903,36 @@ def test_a_guarded_contract_step_is_not_compliant():
     )
 
 
-def test_a_merge_key_guard_is_a_declared_miss():
-    """A guard hidden behind `<<:` is NOT modelled — declared, not silently missed.
+def test_a_merge_key_is_fail_closed():
+    """A step whose keys come from `<<:` is NOT treated as provisioned — fail-closed.
 
-    ⛔ PINNED AS A MISS: if this reds, someone either modelled merge keys (good — update the
-    DECLARED MISS paragraph in `_step_defusers`) or broke the literal-key path (bad). GitHub
-    Actions does not support merge keys (`actions/runner#1182`), so the shape cannot run in
-    CI and there is no live instance to close it against; what this pin buys is that the
-    residual is written down where the reader is, the way this file treats every other
-    residual it does not close.
+    ⛔ A MERGE KEY CAN SUPPLY THE GUARD, so a textual reader must not read its absence as
+    "unguarded". The first version of this pin declared the shape a miss on the strength of
+    `actions/runner#1182`, and that citation was wrong twice — the issue is "Support YAML
+    Anchors", it is CLOSED, and its own note says "Support has been added" (August 2025), so
+    anchors and aliases DO resolve in Actions (#12167 review round 4). A residual justified by
+    an unverified platform claim is a silent hole, so the shape is now CLOSED in the safe
+    direction: `_step_defusers` returns the `<<` marker, the coverage arm therefore refuses
+    the job, and the ordering arm says why in its own words.
 
-    The neighbouring spellings are NOT silent, and the contrast is the point: an alias
-    standing in for a whole step has no literal `run:` line, so it fails CLOSED.
+    If this reds, either the reader stopped recognising a merge key (bad) or it started
+    resolving one (fine — then the specific keys it resolved must become the assertion).
     """
     scripts = _gh_executing_scripts()
     body = f"        run: bash .github/scripts/{CONTRACT_STEP}\n"
     merged = "  job:\n    steps:\n      - <<: *guarded\n" + body
-    assert _step_defusers(merged.splitlines(), 3) == [], (
-        "a merge key now yields a defuser — model it and delete this pin, or explain the "
-        "key you think you read"
+    assert _step_defusers(merged.splitlines(), 3) == ["<<"], (
+        "a merge key no longer yields the fail-closed defuser — the step would be counted as "
+        "provisioning `gh` on the strength of keys this reader cannot see"
     )
-    assert _live_contract_step(merged.splitlines()) is True
-    # …while an alias AS THE WHOLE STEP fails CLOSED: no literal `run:` line, so nothing is
-    # covered and the job is reported.
+    assert _live_contract_step(merged.splitlines()) is False
+    got = _contract_violations(merged, scripts)
+    assert got and "YAML merge" in got[0], got
+    # …and the message must be DISTINCT from a guard's: "cannot show it runs" is a different
+    # claim from "it carries `if:`", and a reader grepping for one must not get the other.
+    assert "carries a" not in got[0], got
+    # …while an alias AS THE WHOLE STEP fails CLOSED for a different, literal reason: no
+    # `run:` line to read at all.
     aliased = "  job:\n    steps:\n      - *guarded\n"
     assert _live_contract_step(aliased.splitlines()) is False
     assert _contract_violations(aliased, scripts), (
