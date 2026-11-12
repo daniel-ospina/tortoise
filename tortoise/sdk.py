@@ -32583,9 +32583,11 @@ class TortoiseSDK:
         #
         # ⛔ #12138 §1 — `graph_ep_reachable` is NOT the denominator the pass ran
         # against; this comment said it was, and a consumer following it computed
-        # a coverage the pass never reported (measured: `affected=3`,
+        # a coverage the pass never reported (e.g. `affected=3`,
         # `window_reachable=4`, `graph_ep_reachable=8` → the pass reports
-        # `3/4 = 0.75`, the misreading gives `3/8 = 0.375`). The pass's OWN
+        # `3/4 = 0.75`, the misreading gives `3/8 = 0.375`; the ILLUSTRATION of the
+        # misreading, not a pinned fixture — the measured case is the test cited
+        # below). The pass's OWN
         # denominator is `window_reachable`, recorded beside `affected` by
         # `_record_pass_reach`; `graph_ep_reachable` is the GRAPH-scoped
         # `ep_reachable_claims` — a DIFFERENT population, and not a conservative
