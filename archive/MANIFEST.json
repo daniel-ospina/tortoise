@@ -6,7 +6,7 @@
       "symbol": "tortoise.archived.search_legacy",
       "batch": "pre-mechanism-legacy-search",
       "reason": "pre-mechanism archive: shipped importable inside the package; moved out of the product (#11609 batch 0)",
-      "file": "archive/modules/pre-mechanism-legacy-search/search_legacy.py",
+      "file": "archive/modules/pre-mechanism-legacy-search/tortoise/archived/search_legacy.py",
       "archived_from": "tortoise/archived/search_legacy.py",
       "archived_at": "f0da5505b38c8656c7ef54a91f91be05348a8fe9",
       "sources": [

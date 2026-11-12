@@ -4,8 +4,8 @@
 THE RULE THIS IMPLEMENTS
     IN THE TARGET SET  →  kept, as the product surface
     EVERYTHING ELSE    →  REMOVED from the product, and the CODE ARCHIVED so it is
-                          recoverable and inspectable (kept in the repo, NOT importable,
-                          NOT exposed)
+                          recoverable and inspectable (kept in the repo, NOT importable
+                          FROM THE SHIPPED PACKAGE, NOT exposed)
 
 Owner ruling, 2026-11-17 verbatim in substance (comment `6831894340` on #11609):
 *"we simply ended with the target ones and nothing more. anything outside the target gets
@@ -96,6 +96,7 @@ import re
 import subprocess
 import sys
 import tomllib
+from functools import cache
 from pathlib import Path
 
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
@@ -124,7 +125,18 @@ SOURCE_OF = {
     SDK_METHOD: "tortoise/sdk.py",
     MODULE: "tortoise/archived/",
 }
-METADATA_KEYS = ("ARCHIVED_KIND", "ARCHIVED_SYMBOL", "ARCHIVED_BATCH", "ARCHIVED_FROM")
+#: The `ARCHIVED_*` constants, each paired with the manifest field it must equal.
+#: ⚠ `ARCHIVED_AT` belongs here: written into every archived file but left out of this table
+#: once, so the file's own record of its source commit could be hand-edited while `check`
+#: stayed green (measured in review — the file and the manifest disagreed about the commit).
+METADATA_FIELDS = (
+    ("ARCHIVED_KIND", "kind"),
+    ("ARCHIVED_SYMBOL", "symbol"),
+    ("ARCHIVED_BATCH", "batch"),
+    ("ARCHIVED_FROM", "archived_from"),
+    ("ARCHIVED_AT", "archived_at"),
+)
+METADATA_KEYS = tuple(key for key, _field in METADATA_FIELDS)
 
 #: A batch slug becomes a DIRECTORY name under `archive/`, so it is validated rather than
 #: trusted: a `--batch ../../tortoise` would otherwise write archived code back INSIDE the
@@ -132,6 +144,9 @@ METADATA_KEYS = ("ARCHIVED_KIND", "ARCHIVED_SYMBOL", "ARCHIVED_BATCH", "ARCHIVED
 #: exact outcome the archive exists to prevent.
 _BATCH_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+#: One segment of a mirrored archive path. A symbol is a dotted path of these, so
+#: `..`, `-x`, `.hidden` and `` are all refused before a path is ever built.
+_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: The header banner every archived module must carry for each frozen source block. Its
 #: presence is what distinguishes a real archive from a file that merely repeats the
 #: metadata (a body lost in a merge reads green otherwise — measured).
@@ -178,9 +193,18 @@ def save_manifest(data: dict, path: Path | None = None) -> None:
 
 # ── the live surface (executed, never parsed) ───────────────────────────────────
 
-def live_surface() -> dict:
-    """The live surface and the two retirement maps, imported rather than read as text."""
+def live_surface(root: Path | None = None) -> dict:
+    """The live surface and the two retirement maps, imported rather than read as text.
+
+    `root` is the checkout this call is GRADING, and it is required in effect: the surface is
+    whatever `import tortoise` resolves to, so a call that reads one tree's manifest while
+    grading another's package is a silent false CLEAN (#11609 review). When the imported
+    package is not inside `root`, this refuses rather than answering about someone else's
+    code.
+    """
+    root = Path(root or ROOT).resolve()
     try:
+        import tortoise
         from tortoise.sdk import TortoiseSDK
         from tortoise.sdk_retired import REMOVED_SDK_METHODS, RETIRED_SDK_METHODS
         from tortoise.tool_registry import RETIRED_USE_INSTEAD, TOOL_REGISTRY
@@ -188,6 +212,13 @@ def live_surface() -> dict:
         raise ArchiveRefused(
             f"could not import the live surface: {type(exc).__name__}: {exc}"
         ) from exc
+    imported = Path(tortoise.__file__ or "").resolve()
+    if not imported.is_relative_to(root):
+        raise ArchiveRefused(
+            f"`import tortoise` resolves to {imported}, which is NOT inside {root} — the gate "
+            "would grade a different package than the manifest it read, and report CLEAN. "
+            "Install this checkout (editable) or fix PYTHONPATH first"
+        )
     return {
         "tools": {entry.name for entry in TOOL_REGISTRY},
         "methods": {
@@ -201,10 +232,108 @@ def live_surface() -> dict:
         # archived `module` symbol must not appear here: a file under `tortoise/` is
         # importable and ships in the wheel.
         "modules": {
-            path.relative_to(ROOT).as_posix()
-            for path in (ROOT / "tortoise").rglob("*.py")
+            path.relative_to(root).as_posix()
+            for path in (root / "tortoise").rglob("*.py")
         },
     }
+
+
+def _anchor_violations(
+    root: Path, symbol: str, rel: str, entry: dict, source_path: str, body: str
+) -> list[str]:
+    """Does the recorded commit actually hold this frozen block?
+
+    The sha256 arm proves file ↔ manifest; both come from the same renderer, so it cannot tell
+    "the source that was removed" from "a body re-rendered under a different anchor". This arm
+    reads the anchored commit and requires the block to be IN it (containment, not equality: a
+    block is a segment — one function, one registry literal — of a larger file).
+
+    ⚠ THREE-VALUED ON PURPOSE. A clone that does not hold the object cannot distinguish a
+    forged anchor from an un-fetched one, and turning that absence into a refusal would red the
+    gate on a HEALTHY shallow clone (`actions/checkout` defaults to `fetch-depth: 1`, and the
+    anchor is an ANCESTOR of the head, not the head). So:
+      · object readable here → the block must be in it, or this is a violation;
+      · object absent        → `check --anchors` reports it and refuses; plain `check` prints
+        nothing (see `anchor_unverified()`, which the strict verb uses).
+    That is the same shape `tools/surface_manifest.py::cut_commit_verdict` uses for provenance,
+    and for the same reason.
+    """
+    sha = str(entry.get("archived_at") or "")
+    if not _git_has_commit(root, sha):
+        return []
+    blob = _git_blob(root, sha, source_path)
+    if blob is None:
+        return [
+            f"{symbol}: {rel}'s block cites {sha}:{source_path}, which the anchored commit does "
+            "NOT hold — the commit IS present in this clone, so its absence is not a fetch gap: "
+            "the anchor names a commit that never contained this code"
+        ]
+    if body.strip("\n") not in blob:
+        return [
+            f"{symbol}: {rel}'s block from {source_path} is NOT in {sha}:{source_path} — the "
+            "recorded commit does not describe this body, so restoring it would not restore "
+            "what the manifest cites"
+        ]
+    return []
+
+
+@cache
+def _git_has_commit(root: Path, sha: str) -> bool:
+    """Is the anchored COMMIT object readable here? (Distinct from "does it hold the path".)
+
+    Without this split, "the commit does not hold that file at all" and "this clone never
+    fetched that commit" collapse into one failed `git show` — and the first, which is what a
+    re-anchored body looks like, would be silently skipped.
+    """
+    if not _SHA_RE.match(sha or ""):
+        return False
+    try:
+        proc = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:  # pragma: no cover - env
+        return False
+    return proc.returncode == 0
+
+
+@cache
+def _git_blob(root: Path, sha: str, path: str) -> str | None:
+    """`git show <sha>:<path>`, or None when this clone cannot answer (see the docstring above)."""
+    try:
+        proc = subprocess.run(
+            ["git", "show", f"{sha}:{path}"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:  # pragma: no cover - env
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def anchor_unverified(root: Path | None = None) -> list[str]:
+    """Entries whose anchor this clone cannot read — the strict verb's question.
+
+    Kept separate from `file_violations` so the ordinary `check` stays honest on a shallow
+    clone while `check --anchors` (full history, or a fetch) still refuses an unprovable one.
+    """
+    root = Path(root or ROOT)
+    entries = load_manifest(root / "archive" / "MANIFEST.json")["entries"]
+    out: list[str] = []
+    for entry in entries:
+        sha = str(entry.get("archived_at") or "")
+        for row in entry.get("blocks") or []:
+            path = str(row.get("path") or "")
+            if not _git_has_commit(root, sha) or _git_blob(root, sha, path) is None:
+                out.append(
+                    f"{entry.get('symbol')}: cannot read {sha}:{path} — this clone does not "
+                    "hold the anchored commit, so the frozen body's provenance is UNPROVEN "
+                    "(fetch the history, or treat the entry as unjustified)"
+                )
+    return out
 
 
 # ── violations: the surface half (pure — no filesystem) ─────────────────────────
@@ -348,12 +477,7 @@ def file_violations(entries: list[dict], archive_dir: Path | None = None,
             continue
         text = path.read_text(encoding="utf-8")
         meta = _module_metadata(path)
-        for key, field in (
-            ("ARCHIVED_KIND", "kind"),
-            ("ARCHIVED_SYMBOL", "symbol"),
-            ("ARCHIVED_BATCH", "batch"),
-            ("ARCHIVED_FROM", "archived_from"),
-        ):
+        for key, field in METADATA_FIELDS:
             if meta.get(key) != entry.get(field):
                 out.append(
                     f"{symbol}: {rel} says {key}={meta.get(key)!r} but the manifest says "
@@ -391,6 +515,14 @@ def file_violations(entries: list[dict], archive_dir: Path | None = None,
                             "sha256 — the archived code drifted away from the source that was "
                             "removed, so restoring it would restore something else"
                         )
+                        continue
+                    # The digests prove FILE ↔ MANIFEST agreement, and both are produced by the
+                    # same renderer — so on their own they cannot tell "the source that was
+                    # removed" from "a body re-rendered under a changed anchor". Only the
+                    # recorded commit can. This is the check that makes `archived_at` a
+                    # citation rather than a number (measured in review: an entry re-anchored
+                    # to a commit that does not hold its body passed every other arm).
+                    out += _anchor_violations(root, symbol, rel, entry, path, body)
         anchor = str(entry.get("archived_at") or "")
         if not _SHA_RE.match(anchor) or anchor == "0" * 40:
             out.append(
@@ -491,7 +623,7 @@ def check(root: Path | None = None) -> list[str]:
     problems: list[str] = []
     problems += manifest_violations(manifest, root / "archive")
     problems += file_violations(entries, root / "archive", root)
-    problems += surface_violations(entries, live_surface())
+    problems += surface_violations(entries, live_surface(root))
     problems += package_violations(root)
     problems += index_violations(entries, root)
     return problems
@@ -768,6 +900,20 @@ def _require_sources_match_head(root: Path, paths: list[str]) -> None:
         )
 
 
+def archive_rel(kind: str, batch: str, symbol: str) -> str:
+    """`archive/<subdir>/<batch>/<mirrored symbol>.py` — one symbol, one path, always.
+
+    A `module` symbol is a DOTTED path, so its file mirrors that path
+    (`tortoise.archived.legacy` → `archive/modules/<batch>/tortoise/archived/legacy.py`).
+    Flattening it to its basename made two distinct modules collide on one file, and the
+    second write silently destroyed the first frozen body — a loss, from a command that
+    exited 0 (measured in review). A bare name (`tortoise_search`) mirrors to itself, so the
+    MCP/SDK layout is unchanged.
+    """
+    mirror = symbol.replace(".", "/") if kind == MODULE else symbol
+    return f"archive/{SUBDIR[kind]}/{batch}/{mirror}.py"
+
+
 def archive_symbol(
     kind: str,
     symbol: str,
@@ -797,9 +943,14 @@ def archive_symbol(
         )
     if not symbol or "/" in symbol or ".." in symbol:
         raise ArchiveRefused(f"symbol {symbol!r} is not a bare symbol/module name")
-    symbol_file = symbol.replace(".", "/")
-    if any(part.startswith((".", "_")) and part == ".." for part in symbol_file.split("/")):
-        raise ArchiveRefused(f"symbol {symbol!r} carries a path traversal component")
+    # The real traversal guard: every segment of the mirrored path must be a plain identifier.
+    # (The previous check compared `part == ".."`, already excluded one line above, so it could
+    # never fire while reading as the guard — the containment check below is what actually ran.)
+    if any(not _NAME_RE.match(part) for part in symbol.replace(".", "/").split("/")):
+        raise ArchiveRefused(
+            f"symbol {symbol!r} is not a dotted path of plain identifiers — a segment becomes a "
+            "path component under archive/"
+        )
 
     manifest_path = root / "archive" / "MANIFEST.json"
     manifest = load_manifest(manifest_path)
@@ -816,13 +967,24 @@ def archive_symbol(
     archived_from = blocks[0][0] if kind == MODULE else SOURCE_OF[kind]
     sha = _head_sha(root)
     _require_sources_match_head(root, sorted({p for p, _ in blocks}))
-    rel = f"archive/{SUBDIR[kind]}/{batch}/{symbol_file.rsplit('/', 1)[-1]}.py"
+    rel = archive_rel(kind, batch, symbol)
     path = root / rel
     # Containment, belt-and-braces after the slug/symbol validation: resolve and refuse
     # anything that escapes `archive/` (a traversal here writes into the shipped package).
     resolved = path.resolve()
     if not resolved.is_relative_to((root / "archive").resolve()):
         raise ArchiveRefused(f"{rel} resolves outside archive/ — refusing to write it")
+    # A path collision is a DESTRUCTION, not a naming preference: `archive module tortoise.a.foo`
+    # then `archive module tortoise.b.foo` used to overwrite the first frozen body under exit 0
+    # (measured in review), leaving two manifest rows pointing at one file. `archive_rel` mirrors
+    # the dotted path so distinct symbols cannot collide, and this refuses the remaining case —
+    # a file already on disk that belongs to someone else.
+    if path.exists():
+        existing = _module_metadata(path).get("ARCHIVED_SYMBOL")
+        raise ArchiveRefused(
+            f"{rel} already holds archived code ({existing!r}) — refusing to overwrite a frozen "
+            "body; archive it under a different batch, or move it deliberately"
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     text, frozen = render_archive_file(
         kind, symbol, batch, reason, archived_from, sha, blocks
@@ -855,7 +1017,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("check", help="assert the archive is consistent (exit 1 on violations)")
+    check_parser = sub.add_parser(
+        "check", help="assert the archive is consistent (exit 1 on violations)"
+    )
+    check_parser.add_argument(
+        "--anchors",
+        action="store_true",
+        help=(
+            "also require every `archived_at` commit to be readable in this clone AND to "
+            "hold the frozen body (needs real history: a fetch-depth-1 clone cannot "
+            "answer, and will refuse)"
+        ),
+    )
 
     index_parser = sub.add_parser("index", help="regenerate archive/INDEX.md")
     index_parser.add_argument("--check", action="store_true", help="assert it is current")
@@ -871,6 +1044,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "check":
             problems = check()
+            if args.anchors:
+                problems += anchor_unverified()
             if problems:
                 print(f"ARCHIVE NOT CONSISTENT — {len(problems)} violation(s):")
                 for problem in problems:

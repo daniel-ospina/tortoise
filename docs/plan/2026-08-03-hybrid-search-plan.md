@@ -148,7 +148,7 @@ class EpEvidence:
 ### `search()` — Removed
 
 `search()` is removed. Legacy code archived at `tortoise/archived/search_legacy.py` —
-**moved in #11609** to `archive/modules/pre-mechanism-legacy-search/search_legacy.py` (the in-package location was importable and shipped in
+**moved in #11609** to `archive/` (the in-package location was importable and shipped in
 the wheel; see `archive/README.md`).
 
 ### Indexes (created in `_ensure_indexes()`)
@@ -225,7 +225,7 @@ All search logic in dedicated module. SDK is ~62K lines — adding ~600 lines of
 
 | File | Change |
 |------|--------|
-| `tortoise/sdk.py` | Add `tortoise_fts_query()`, remove `search()` (archive to `archive/modules/pre-mechanism-legacy-search/search_legacy.py` since #11609), update `tortoise_query()` |
+| `tortoise/sdk.py` | Add `tortoise_fts_query()`, remove `search()` (archive to `archive/` since #11609), update `tortoise_query()` |
 | `tortoise/search_engine.py` | **NEW** (~600 lines) — all search logic |
 | `tortoise/embeddings.py` | Add `compute_embedding()` + `EmbeddingModel` lazy singleton, wire into `create_point()`, `ingest()`, `PointRevised` |
 | `tortoise/projection/__init__.py` | Extend `_ensure_indexes()` with FTS + vector, add FalkorDB version check |
@@ -296,7 +296,7 @@ def tortoise_query(
 ### `search()` — Removed
 
 `search()` is removed. Legacy code archived at `tortoise/archived/search_legacy.py` —
-**moved in #11609** to `archive/modules/pre-mechanism-legacy-search/search_legacy.py` (the in-package location was importable and shipped in
+**moved in #11609** to `archive/` (the in-package location was importable and shipped in
 the wheel; see `archive/README.md`).
 
 **Migration:** `sdk.search(q, kind=k, context=c)` → `sdk.tortoise_fts_query(q, kind=k, context=c)`
@@ -344,7 +344,7 @@ def _serialize_search_results(results: list[SearchResult]) -> list[dict]:
 | 0.7 | `search_engine.py` | `_degradation_chain()`: orchestrates per-strategy fallback, logs warnings at each skip | — |
 | 0.8 | `search_engine.py` | `_annotate_ep_batch(result_ids)`: single Cypher query fetching EP data (impl_count, nand_count, confidence_mean) for ALL result IDs at once. Computes contention = nand_count/total. | — |
 | 0.9 | `sdk.py` | `tortoise_fts_query()`: public API wiring all of the above. Also update `tortoise_query()` to route `text` param through `tortoise_fts_query()`. | — |
-| 0.10 | `sdk.py` | Remove `search()`. Archive to `archive/modules/pre-mechanism-legacy-search/search_legacy.py` (moved there in #11609 from `tortoise/archived/`). Update call sites to `tortoise_fts_query()`. | — |
+| 0.10 | `sdk.py` | Remove `search()`. Archive to `archive/` (moved there in #11609 from `tortoise/archived/`). Update call sites to `tortoise_fts_query()`. | — |
 
 ### Phase 1: Embeddings + MCP Wiring (parallel streams)
 

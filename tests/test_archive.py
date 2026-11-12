@@ -536,6 +536,111 @@ def test_a_manifest_file_outside_the_archive_is_reported(tree: Path) -> None:
     assert any("not a path inside archive/" in problem for problem in problems)
 
 
+def test_an_in_package_archive_directory_is_reported(tree: Path) -> None:
+    """`tortoise/archive` is importable as `tortoise.archive` and ships in the wheel."""
+    (tree / "tortoise" / "archive").mkdir()
+    problems = arch.package_violations(tree)
+    assert any("tortoise/archive exists" in problem for problem in problems)
+
+
+def test_a_package_find_pattern_that_matches_the_archive_is_reported(tree: Path) -> None:
+    (tree / "pyproject.toml").write_text(
+        '[tool.setuptools.packages.find]\ninclude = ["tortoise*", "archive*"]\n',
+        encoding="utf-8",
+    )
+    problems = arch.package_violations(tree)
+    assert any("matches the archive" in problem for problem in problems)
+    (tree / "pyproject.toml").write_text(
+        '[tool.setuptools.packages.find]\ninclude = ["*"]\n', encoding="utf-8"
+    )
+    assert any(
+        "matches the archive" in problem for problem in arch.package_violations(tree)
+    )
+
+
+def test_a_resolvable_tortoise_archive_module_is_reported(tree: Path) -> None:
+    """The import arm, with the import stubbed: the detector must FIRE, not merely be present."""
+    fake = type("Spec", (), {"name": "tortoise.archive"})()
+    real = arch.importlib.util.find_spec
+    arch.importlib.util.find_spec = (  # type: ignore[assignment]
+        lambda name, *a, **k: fake if name == "tortoise.archive" else real(name, *a, **k)
+    )
+    try:
+        problems = arch.package_violations(tree)
+    finally:
+        arch.importlib.util.find_spec = real  # type: ignore[assignment]
+    assert any("import tortoise.archive` resolves" in problem for problem in problems)
+
+
+# ── 9. the restore anchor is a CITATION, not a number ────────────────────────
+
+def test_a_block_the_anchored_commit_does_not_hold_is_reported(tree: Path) -> None:
+    """The digests prove file↔manifest; only the commit can prove what was removed."""
+    entry = arch.archive_symbol(
+        arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree
+    )
+    path, body = arch.frozen_blocks((tree / entry["file"]).read_text(encoding="utf-8"))[0]
+    head = arch._head_sha(tree)
+    # A commit that IS present here but never held this path: the repository's ROOT commit (the
+    # fixture's `--allow-empty` init) is in the object store and contains no files at all.
+    later = subprocess.run(
+        ["git", "rev-list", "--max-parents=0", "HEAD"],
+        cwd=tree, check=True, capture_output=True, text=True,
+    ).stdout.strip().splitlines()[0]
+    assert later != head
+    assert arch._anchor_violations(tree, "tortoise_search", entry["file"], entry, path, body) == []
+    problems = arch._anchor_violations(
+        tree, "tortoise_search", entry["file"], dict(entry, archived_at=later), path, body
+    )
+    assert len(problems) == 1
+    assert "does NOT hold" in problems[0]
+
+
+def test_an_unreadable_anchor_is_UNPROVEN_not_silently_green(tree: Path) -> None:
+    """A clone that cannot answer must say so — the strict verb's whole purpose."""
+    entry = arch.archive_symbol(
+        arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree
+    )
+    entry["archived_at"] = "e5a5611f4" + "0" * 31
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    assert arch.anchor_unverified(tree), "an anchor this clone cannot read must be reported"
+    assert arch.anchor_unverified(arch.ROOT) == [], (
+        "the real archive's anchors are readable here, so the strict verb must be quiet"
+    )
+
+
+def test_two_module_symbols_cannot_share_one_archived_file(tree: Path) -> None:
+    """A basename-only path made the second write destroy the first frozen body (exited 0)."""
+    (tree / "tortoise" / "a").mkdir()
+    (tree / "tortoise" / "b").mkdir()
+    (tree / "tortoise" / "a" / "foo.py").write_text("ALPHA = 1\n", encoding="utf-8")
+    (tree / "tortoise" / "b" / "foo.py").write_text("BETA = 2\n", encoding="utf-8")
+    _commit(tree, "tortoise/a/foo.py", "tortoise/b/foo.py")
+    first = arch.archive_symbol(arch.MODULE, "tortoise.a.foo", "b1", "r", root=tree)
+    second = arch.archive_symbol(arch.MODULE, "tortoise.b.foo", "b1", "r", root=tree)
+    assert first["file"] != second["file"]
+    assert "ALPHA = 1" in (tree / first["file"]).read_text(encoding="utf-8")
+    assert "BETA = 2" in (tree / second["file"]).read_text(encoding="utf-8")
+
+
+def test_the_writer_refuses_to_overwrite_an_archived_file(tree: Path) -> None:
+    entry = arch.archive_symbol(
+        arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree
+    )
+    target = tree / entry["file"]
+    # Same path, a row the manifest does not know about: the file is somebody's frozen body.
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    with pytest.raises(arch.ArchiveRefused, match="refusing to overwrite"):
+        arch.archive_symbol(arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree)
+    assert target.exists()
+
+
+def test_a_symbol_segment_that_is_not_an_identifier_is_refused(tree: Path) -> None:
+    for symbol in ("tortoise..foo", "tortoise.-x", "tortoise.1foo"):
+        with pytest.raises(arch.ArchiveRefused):
+            arch.archive_symbol(arch.MODULE, symbol, "b1", "r", root=tree)
+
+
 def test_a_pre_mechanism_in_package_archive_location_is_reported(tree: Path) -> None:
     """`tortoise/archived/` is the pre-mechanism location and it ships — refuse it."""
     (tree / "tortoise" / "archived").mkdir()

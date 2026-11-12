@@ -77,12 +77,19 @@ ruling, not this one.
 | `INDEX.md` | **generated** view of the manifest, for a human reader. Regenerate with `tools/archive_surface.py index`; `check` fails when it drifts |
 | `mcp-tools/<batch>/<tool>.py` | a frozen `ToolDefinition` literal plus the `mcp_server.py` handler(s) that implement the tool — matched by NAME (`def tortoise_<tool>`) or by the name appearing in the body |
 | `sdk-methods/<batch>/<method>.py` | a frozen `TortoiseSDK` method, verbatim |
-| `modules/<batch>/<module>.py` | a whole module frozen from `tortoise/`, verbatim |
+| `modules/<batch>/<dotted/path>.py` | a whole module frozen from `tortoise/`, verbatim, at the **mirrored** dotted path (`tortoise.archived.legacy` → `modules/<batch>/tortoise/archived/legacy.py`) so two module symbols can never collide on one file |
 
 ## Adding to the archive (the batch procedure)
 
-An archived symbol is removed in the **same** batch that archives it — a removal with no
-archive entry, or an archive entry with the symbol still live, is red either way.
+An archived symbol is removed in the **same** batch that archives it. Of the two directions,
+`check` enforces the one that protects the archive — **an archive entry whose symbol is still
+live is RED** (still in `TOOL_REGISTRY`, still a public `TortoiseSDK` method, still importable
+from the package, or still a `RETIRED_USE_INSTEAD` forward entry). The other direction — code
+deleted with no archive entry — is **not** enforced by this gate: it grades the manifest against
+the surface, and a symbol that is simply gone from both is invisible to it. That direction is
+[#12237](https://github.com/daniel-ospina/tortoise/issues/12237) (`cut`-time enforcement),
+**not** a property of this mechanism — so the batch procedure below is the only guarantee for
+it: run step 1 **before** step 2.
 
 The `module` kind is how code that was archived **inside** the package before this mechanism
 existed is moved out. `tortoise/archived/` is refused by the gate for that reason: a file under
@@ -117,7 +124,15 @@ uv run python tools/surface-guard.py
 
 # 4. Assert the archive and the live surface agree.
 uv run python tools/archive_surface.py check
-uv run pytest tests/test_archive.py -q
+uv run python tools/test_lane.py run -- tests/test_archive.py -q
+#    (a bare `pytest` refuses without TORTOISE_DB_URI — epic #1647 P4 — so use the lane runner
+#     even though this file is hermetic)
+
+# Optional, and STRICTER: also require every `archived_at` commit to be readable in this clone
+# and to actually hold the frozen body. Plain `check` skips the arm when the object is absent
+# (`actions/checkout` defaults to fetch-depth: 1), so an un-fetched anchor is not silently green
+# forever — it is UNPROVEN, and this verb says so.
+uv run python tools/archive_surface.py check --anchors
 ```
 
 ## Restoring a removed symbol
