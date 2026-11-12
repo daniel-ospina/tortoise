@@ -1814,7 +1814,7 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     changes something else. (Re-measured at head
     ``7e6baffc5d`` with this module's own ``_block_bodies`` and ``_CITATION_RE``;
     the counts and versions stated here are that measurement, and they are stated
-    ONCE — the pin below refuses a duplicate. (What that arm buys, precisely: a
+    ONCE — the citation pin ABOVE refuses a duplicate. (What that arm buys, precisely: a
     second copy in BOLD is swept against the measurement and a second copy of a
     PATTERNED sentence is refused by shape, while a PLAIN restatement — "Only 3 of
     39 blocks cite a comment id." — is prose no pin reads, which is why the
