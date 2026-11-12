@@ -1776,11 +1776,15 @@ class EventAPI:
                 f"set via {type_}'s payload: the envelope is built here, so a "
                 f"colliding caller key re-types or re-attributes the record "
                 f"instead of adding a field")
-        # ⛔ `event_id` IS ONE OF TWO ENVELOPE NAMES `_ENVELOPE_KEYS` LEAVES OUT
-        # (the other is `projection_version`, kept out so the RECORD doors can pass
-        # the producers' own keyword — see `_RECORD_ENVELOPE_EXTRA`), and leaving it
-        # out here was a hole big enough to re-identify any record
-        # (#11996 review round 21, measured). The exclusion is justified by
+        # ⛔ `event_id` IS ABSENT FROM `_ENVELOPE_KEYS`, so the generic presence
+        # refusal above does not cover it — it is one of FOUR envelope names that
+        # set leaves out by design, with `corrects` / `actor` (bound as `_emit`
+        # KEYWORDS, and covered at the three passthrough doors by
+        # `_ENVELOPE_KEYS_AT_PASSTHROUGH`) and `projection_version` (kept out so
+        # the RECORD doors can pass the producers' own keyword — see
+        # `_RECORD_ENVELOPE_EXTRA`). Leaving it out HERE was a hole big enough to
+        # re-identify any record (#11996 review round 21, measured), because this
+        # channel serves every type. The exclusion is justified by
         # `add_document`'s recorded `#125` pin, which passes `event_id=` as ITS OWN
         # named parameter — but this channel serves EVERY type, so the exclusion
         # applied far wider than the reason for it:
