@@ -1514,6 +1514,21 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "kept, not dropped: carry it where EP can read it (a :Point "
                 "operator the engine evaluates), never by re-attaching it to a "
                 "successor that cannot carry it")
+        elif s["carrier_count"] == 1 and (s["carrier_status"] or "") == DRAFT_STATUS:
+            # ⛔ The DRAFT row contradicted itself: the destination withdrew the name
+            # ("NOT the one it names … because it is 'draft'") while THIS disposition
+            # said "an IMPL may CARRY to the successor" and ``_chain_tail`` said
+            # "promoting it to live is the repair" (#12210 review, P2). Measured: the
+            # edge write onto the draft as-is builds no factor (`confidences {}`, the
+            # node absent), and the SAME write after `status='live'` restores it
+            # (`effective_n 2.263`) — so the draft IS the destination, one promotion
+            # away, and the disposition names that precondition instead of denying it.
+            disposal = (
+                "a DRAFT successor is the destination ONCE PROMOTED: set it "
+                "``status='live'`` first, then CARRY the IMPL (and any NAND that "
+                "STILL APPLIES) onto it — measured, the same edge write builds the "
+                "factor after the promotion (``effective_n 2.263``) and builds none "
+                "before it. Drop only a refutation that MOTIVATED the correction")
         elif s["carrier_count"] == 1 and s["carrier_terminal"] and not neutral:
             # ⛔ …and NOT on a NEUTRAL row, which transfers nothing: a CARRY there is
             # false (measured: carrying a neutral input onto a live node leaves both
@@ -1720,8 +1735,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         tail = _chain_tail(s)
         neutral = s["neutral_row"]
         _status = s["carrier_status"] or ""
+        # ⛔ A DRAFT is deliberately NOT folded in here, for the same reason
+        # ``_succ_unread`` excludes it: promoting it measurably repairs (measured
+        # ``effective_n 2.263`` after the promotion, ``confidences {}`` without it),
+        # so the draft IS the destination — one promotion away. Withdrawing the name
+        # here made the string deny the node its OWN triage and ``_chain_tail`` send
+        # the reader to (#12210 review, P2).
         carrier_unread = (s["carrier_count"] == 1 and not s["neutral_row"]
-                          and (_succ_unread(s) or _status == DRAFT_STATUS))
+                          and _succ_unread(s))
         if carrier_unread:
             _why = ("it is operator-shaped, which EP refuses as a factor input"
                     if _succ_refused(s) else
@@ -1760,7 +1781,11 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                    f"re-point this {s['edge_type']} input onto {dest}, "
                    "deleting the edge into the old endpoint")
                 + ". "
-                + ("" if s["neutral_row"] else tail)
+                # ``tail`` is "" here by construction (``_chain_tail`` returns "" at
+                # ``carrier_count`` 0), so no neutral guard is needed — and none may
+                # be claimed: a guard that can never change the output is not a
+                # defence (#12210 review, P3).
+                + tail
                 + _archive_clause(s))
         if not s["carrier_count"]:
             # ⛔ "Nothing to re-point onto" would be FALSE whenever a :Subject or

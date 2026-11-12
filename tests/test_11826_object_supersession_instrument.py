@@ -2621,11 +2621,19 @@ def test_a_neutral_shaped_row_gets_no_chain_tail(sdk):
                  if i.node_id == v1["id"])
     fix = issue.fix
     assert "DELETE it instead — §3.1's disposition here is DROP" in fix, fix
+    # ⛔ ``prefix`` needs TWO carriers of the successor name and this fixture has one,
+    # so a prefix assertion here could not fail — the twin-carrying
+    # ``test_a_shaped_neutral_row_is_not_told_to_move_the_edge`` is where it lives
+    # (#12210 review, P3). The ``tail`` needles below ARE reachable: `_chain_tail`
+    # emits for this row (sufficient carrier_count, a DRAFT/terminal status).
     for advice in ("target THAT, not the immediate successor",
-                   "target a CLAIM successor", "re-point onto the intended one"):
+                   "target a CLAIM successor"):
         assert advice not in fix, (
             f"{advice!r} is re-point advice on a row whose instruction is DELETE: "
             + fix)
+
+
+DRAFT_TIER = "draft"
 
 
 def test_a_non_live_successor_is_not_the_destination(sdk):
@@ -2639,6 +2647,11 @@ def test_a_non_live_successor_is_not_the_destination(sdk):
     """
     for lane, status in (("direct", "archived"), ("direct", "draft"),
                          ("operator", "retracted"), ("operator", "draft")):
+        # ⛔ A DRAFT is the boundary case: EP refuses it AS-IS, and promoting it
+        # measurably repairs (measured ``effective_n 2.263`` after the promotion,
+        # ``confidences {}`` without it) — so it is named, with the promotion as the
+        # precondition, and never withdrawn (#12210 review, P2).
+        promote = status == DRAFT_TIER
         p = sdk.create_point("statement", f"gateway {lane} {status}")
         v1 = _obj(sdk, f"PolicyV1-{lane}-{status}")
         v2 = _obj(sdk, f"PolicyV2-{lane}-{status}")
@@ -2654,9 +2667,16 @@ def test_a_non_live_successor_is_not_the_destination(sdk):
                      if i.node_id == v1["id"])
         fix = issue.fix
         named = f"PolicyV2-{lane}-{status}"
-        assert f"NOT the one it names ('{named}')" in fix, fix
-        assert f"onto the successor ('{named}')" not in fix, (
-            f"a '{status}' successor is not a destination EP reads: " + fix)
+        if promote:
+            assert f"to the successor ('{named}')" in fix, (
+                f"a '{status}' successor IS the destination once promoted: " + fix)
+            assert f"NOT the one it names ('{named}')" not in fix, (
+                "a draft is promoted, not withdrawn: " + fix)
+            assert "ONCE PROMOTED" in fix, fix
+        else:
+            assert f"NOT the one it names ('{named}')" in fix, fix
+            assert f"the successor ('{named}')" not in fix.split("NOT the one")[0], (
+                f"a '{status}' successor is not a destination EP reads: " + fix)
 
 
 def test_an_id_less_flowing_row_also_routes_the_destination(sdk):
