@@ -544,6 +544,41 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         "bound to 127.0.0.1:6380, this sweep targets",
         'res = _stale_sweep("docker://:falkordb@:6379/tortoise_test_matrix")',
     ],
+    "tests/test_test_lane_tool.py": [
+        # ⛔ EVERY site here is a NAME, a MOCK, or an ASSERTION — never a dial.
+        # The file is in the population because it pins `tools/test_lane.py`'s
+        # `lane_seam_env` against `tests/_live_utils`, so it must READ the seam;
+        # the literals below are the expected VALUES that pin produces, and the
+        # only `docker port` output it ever sees is `_R(0, …)` (a fake), never a
+        # container it started. The ports cannot be derived from the seam: a
+        # guard that computed its own expectation from the function under test
+        # would pass on any export the function emitted — which is exactly the
+        # phantom red #12019 exists to stop.
+        #
+        # `falkordb-16379` is a CONTAINER NAME — `test_lane.py` derives the name
+        # from the port, so the literal is the name under assertion, not a
+        # target (lines 2087, 2113, 2567).
+        '"falkordb-16379"',
+        # The #12019 assertion MESSAGE: prose naming the port that a missing
+        # legacy export would fall back to. A string in a failure explanation
+        # dials nothing (line 5152).
+        "without the legacy export this resolves 16379",
+        # Mocked `docker port` READ-BACK output — `_R` is a fake CompletedProcess
+        # and the test asserts the mapping it describes, so the port is text
+        # being parsed, not an endpoint being reached (lines 2325, 2987).
+        "127.0.0.1:16390->6379",
+        "127.0.0.1:16399:6379",
+        # A STALE cross-lane URI exported into a `bash -c` script that simulates
+        # a lane whose one-line `eval "$(…)"` form failed to abort
+        # (`tools/test_lane.py`'s USAGE: the two steps are deliberate, because a
+        # failed run prints nothing on stdout and `eval ""` returns 0). Nothing
+        # dials it: that tool only PRINTS a URI and never reads
+        # `TORTOISE_DB_URI` from the environment, and its own docker call is
+        # forced to fail (`DOCKER_HOST=tcp://127.0.0.1:1`), so the assertion is
+        # on the ABORT (rc=1, empty stdout, no `REACHED`) — the value is the
+        # contamination being proved harmless, not a target (line 2894).
+        "127.0.0.1:6379/stale_shared_lane",
+    ],
 }
 
 
