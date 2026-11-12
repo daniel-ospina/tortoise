@@ -1200,6 +1200,113 @@ def test_a_model_version_bump_with_no_changelog_block_fails() -> None:
     _assert_declared_version_is_recorded(bumped, recorded)
 
 
+# ── the newest block's §4.3 quote must BE the landed §4.3 sentence ──────
+
+OBJECT_CLAUSE_START = "**Core Object types accept"
+OBJECT_CLAUSE_END = (
+    "Pack-declared kinds validate against their own declared words.**")
+
+
+def _landed_object_lifecycle_clause(ontology: str) -> str:
+    """The §4.3 `status` row's bold lifecycle clause, as the model states it."""
+    for line in ontology.splitlines():
+        if line.startswith("| `status` |") and OBJECT_CLAUSE_START in line:
+            start = line.index(OBJECT_CLAUSE_START)
+            end = line.index(OBJECT_CLAUSE_END, start) + len(OBJECT_CLAUSE_END)
+            return line[start:end]
+    raise AssertionError(
+        "docs/ONTOLOGY.md §4.3's `status` row carries no lifecycle clause — the "
+        "sentence this file's vocabulary is built from is missing")
+
+
+def _newest_block_body(changelog: str) -> str:
+    """The newest block's text: from its header to the next block's header."""
+    start = changelog.index("> **Changelog v3.")
+    match = _BLOCK_VERSION_RE.match(changelog[start:changelog.index("\n", start)])
+    assert match, "the changelog's newest block header must be readable"
+    rest = changelog[changelog.index("\n", start):]
+    following = _BLOCK_VERSION_RE.search(rest)
+    return rest[:following.start()] if following else rest
+
+
+def _quoted_clause(block: str) -> str | None:
+    """The block's `> > ` quote of the §4.3 lifecycle clause, normalised.
+
+    Markdown line wrapping is not part of the quoted text, so the quote's lines
+    are joined with single spaces — the comparison is of the SENTENCE.
+    """
+    lines = block.splitlines()
+    starts = [i for i, line in enumerate(lines)
+              if line.startswith("> > ") and OBJECT_CLAUSE_START in line]
+    if not starts:
+        return None
+    quote: list[str] = []
+    i = starts[0]
+    while i < len(lines) and lines[i].startswith("> > "):
+        quote.append(lines[i][4:])
+        i += 1
+    return " ".join(quote)
+
+
+def test_the_newest_block_quotes_the_landed_4_3_clause_verbatim() -> None:
+    """A changelog that quotes a sentence the model does not carry is a false record.
+
+    ``docs/ONTOLOGY.md:39`` and ``ONTOLOGY-CHANGELOG.md:32`` both require
+    *explicit approval of the exact changes*, and the approval is of **exact
+    text** — so the block's quote of the §4.3 lifecycle sentence is either the
+    landed sentence or it is a record of something that never shipped.
+
+    Measured pre-fix at head ``6057b6d4``: the v3.34 block still quoted the
+    PRE-restatement wording ("At the write door `superseded` requires the
+    successor …") while §4.3 carried the definition form ("`superseded` means
+    *replaced by* …"). It was verbatim before that commit and the commit updated
+    only one of the two copies, which is how an approved artifact came to
+    disagree with itself. Nothing else in the tree compares them.
+
+    Fail-closed on ABSENCE as well: the newest block must quote the clause, in
+    the same way ``_assert_declared_version_is_recorded`` requires the newest
+    block to exist. If a release genuinely does not touch §4.3 this pin should be
+    re-read rather than silently skipped — a check that does nothing when it
+    cannot run is the no-op gate this file's own conventions reject.
+    """
+    ontology = ONTOLOGY.read_text(encoding="utf-8")
+    block = _newest_block_body(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
+    landed = _landed_object_lifecycle_clause(ontology)
+    quoted = _quoted_clause(block)
+    assert quoted is not None, (
+        "the newest ONTOLOGY-CHANGELOG.md block does not quote the §4.3 "
+        "lifecycle clause, so nothing records which sentence this release "
+        "landed — quote it verbatim, or re-read this pin if §4.3 was not touched")
+    assert quoted == landed, (
+        "the newest changelog block quotes a §4.3 sentence the model does not "
+        f"carry\n  quoted: {quoted}\n  landed: {landed}\n"
+        "the approval in the entry is of EXACT text, so the two must be identical")
+
+
+def test_the_newest_block_discharges_its_approval_with_a_comment_id() -> None:
+    """An approval asserted with no readable home is the artifact grading itself.
+
+    The file's CRITICAL RULE names a PERSON, so the entry has to name where that
+    person's answer lives. The sibling entries do it by comment id —
+    ``#11827 (comment 6805834755)``, ``#11083 (comment 6667121779)`` — and the
+    v3.34 entry did not: it asserted *"the owner answered `ok` to a three-item
+    amendment proposal"* while three independent passes measured **zero**
+    standalone ``ok`` and zero ``three-item`` occurrences on the issue it named.
+    The answer existed in a decision lane's pane, not on any surface the next
+    lane could read (``DECISION RELAY``: recorded nowhere the next lane reads is
+    a default, not a decision). The relay comment that finally recorded it
+    (``6815950417``) is what this entry must cite.
+
+    Pinned as a SHAPE, not as that id: a later entry cites its own relay, and a
+    shape is what stays true.
+    """
+    block = _newest_block_body(ONTOLOGY_CHANGELOG.read_text(encoding="utf-8"))
+    cited = re.findall(r"comment\s*`?(\d{6,})`?", block)
+    assert cited, (
+        "the newest changelog block names no comment id, so its owner approval "
+        "has no home a reader can verify — cite the comment that records it")
+
+
 def _assert_no_block_records_a_version_above_the_declared_one(
         ontology: str, changelog: str) -> None:
     """No block may record a release NEWER than the model document declares.
