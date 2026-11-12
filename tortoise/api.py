@@ -327,10 +327,11 @@ _RECORD_ENVELOPE_EXTRA = frozenset({"projection_version"})
 def _refuse_non_str_keys(fields, channel: str) -> None:
     """Refuse a caller-supplied key that is not an EXACT `str`, with its own reason.
 
-    ⛔ THE KEYS ARE WRITTEN BY VALUE, THE GUARDS READ THEM BY HASH (#11996 review
-    round 8, measured). A `str` SUBCLASS whose `__hash__` differs from `str`'s
-    passes every hash-membership test (`k in frozenset(...)`,
-    `set(keys) & forbidden`) and is then journalled under the name it claims:
+    ⛔ THE KEYS ARE WRITTEN BY VALUE, THE HASH-MEMBERSHIP GUARDS READ THEM BY
+    HASH (#11996 review round 8, measured). A `str` SUBCLASS whose `__hash__`
+    differs from `str`'s passes every hash-membership test
+    (`k in frozenset(...)`, `set(keys) & forbidden`), and before this arm
+    existed it was journalled under the name it claimed:
 
         class K(str):
             def __hash__(self): return 0x5f3a1
@@ -339,23 +340,36 @@ def _refuse_non_str_keys(fields, channel: str) -> None:
         k in frozenset({"evidence_fold"}) # False  ← what the guards asked
         json.dumps({k: True})             # '{"evidence_fold":true}'  ← what lands
 
-    Measured: `_emit("PointAdded", {"id": "p1", "content": "c", K("evidence_fold"): True})`
+    Measured at that head: `_emit("PointAdded", {"id": "p1", "content": "c", K("evidence_fold"): True})`
     LANDED and `projection.record_is_evidence_fold` read it as a fold; the same
     carrier re-typed a record (`K("type")`) and re-identified one (`K("event_id")`),
     and it works on the keyword payload too (Python keeps the subclass in `**`).
     This is refused BEFORE any family guard so each of those guards keeps keeping
     its own, true reason: a key that is not an exact `str` is not a name any of
     them can classify, and the encoder does not write it as one.
+    ⛔ AND THIS ARM IS NOT THE LAST LINE OF DEFENCE — say what it actually buys
+    (#11996 review round 17, measured). The `_named_from_caller` belt refuses a
+    non-`str` key by type too, so deleting this arm does NOT let a carrier land
+    (measured: 0 records written). What it buys is the DIAGNOSIS: the belt reports
+    ANY non-`str` key as a member of its own family, so without this arm
+    `K("myCustomProp")` is told it is a `RECORD-SHAPED journal payload` — a name it
+    does not have — while with it the caller is told the true reason. That is the
+    whole difference, and it is why the message names the hash-membership arms
+    rather than claiming the key would otherwise land.
     """
     for key in fields:
         if type(key) is not str:
             raise ValueError(
                 f"{channel} carries a key that is not an exact `str` "
                 f"({type(key).__name__}): the journal writes a key by its STRING "
-                f"VALUE while the HASH-membership arms here (`_forged_envelope`, "
-                f"`_forged_markers`, `add_point`'s `_forged_keys`) test it by hash, "
-                f"so such a key can pass one of those refusals and land under the "
-                f"name it claims (#11948). Pass plain `str` keys.")
+                f"VALUE, while the HASH-membership arms here (`_forged_envelope`, "
+                f"`_forged_markers`, `add_point`'s `_forged_keys`) read it by hash "
+                f"and so cannot classify it. It is refused HERE, before them, so "
+                f"the reason given is the true one — deeper in it is still refused, "
+                f"but by whichever family guard reaches it first, which reports ANY "
+                f"non-`str` key as one of its own (measured: `myCustomProp` called a "
+                f"RECORD-SHAPED journal payload), misnaming the problem (#11948). "
+                f"Pass plain `str` keys.")
 
 
 def _named_from_caller(keys, forbidden) -> list[str]:
