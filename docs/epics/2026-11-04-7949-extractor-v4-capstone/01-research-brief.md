@@ -43,7 +43,7 @@ argument; it was re-run cleanly and is one of the five counted above. A quoting 
 that failed to run.)
 
 **Adoption gate (Step 5.6):** `owner question` for the cross-batch mechanism (§13.8 Q1) — the field
-converges on a **tiered** pipeline, but D6 (`EXTRACTOR-V4-ARCHITECTURE.md:1400`) records "both sets
+converges on a **tiered** pipeline, but D6 (`EXTRACTOR-V4-ARCHITECTURE.md:1418`) records "both sets
 model-proposed" as the decision that stands, and a converging standard cannot override a recorded decision;
 the finding is therefore **evidence for the reopen**, which is what §Cross-Phase Contradictions states.
 
@@ -193,7 +193,7 @@ check against. Unvalidated, and out of this epic's scope.
 | Assumption | Confidence | Source | Validation Plan |
 |---|---|---|---|
 | **A-a** `live-v4` baseline is accurate (0 object→object edges; 62.3 % `the <X>`; 26 Subjects) | **high** | owner-measured 2026-11-04, per-kind breakdowns | C1's extended census re-derives it |
-| **A-b** packs declare part-whole object relations; schema + writers admit them | **high** | tree (`dev:142,148,193`; `edges.py:621-630`; ONTOLOGY §3.7) **and** the literature's declarative-ontology pattern [1], [4] | C3 |
+| **A-b** packs declare part-whole object relations; schema + writers admit them | **high** | tree (`dev:142,148,239`; `edges.py:717-726`; ONTOLOGY §3.7) **and** the literature's declarative-ontology pattern [1], [4] | C3 |
 | **A-c** the gap is the declaration→consumer seam, not a missing writer | **high** | zero `create_edge` in `extractor_v2.py`; `hierarchies` validated-only | C3 |
 | **A-d** a corpus through the fleet's **transport** exists or is capturable | **medium** | registered corpus is a fixture; the committed arm drives the SDK, not `POST /v1/sessions`; **E1b's `m2` control has no committed artifact** | C1 + C2 |
 | **A-e** `TAGGED: 0` is a gap | **rejected** | no extraction path writes `tags` | none — recorded so it never becomes a target |
@@ -239,8 +239,8 @@ not closed by anything found here.** A4's target remains unset.
 ## Cross-Phase Contradictions (research vs recorded decisions)
 
 **⚠️ The tiered-linking finding contradicts D6 unless it is routed — and it is routed.**
-`EXTRACTOR-V4-ARCHITECTURE.md:1400` records D6: *"Two distinct connection sets — within-batch and to-graph,
-both **proposed by the model**"*, and `:1095` says *"D6 as ruled — the model proposes both sets"* (`:977` is the
+`EXTRACTOR-V4-ARCHITECTURE.md:1418` records D6: *"Two distinct connection sets — within-batch and to-graph,
+both **proposed by the model**"*, and `:1113` says *"D6 as ruled — the model proposes both sets"* (`:995` is the
 `#5087` seam STATUS block, not D6). The field's convergent answer (tiered:
 mechanical candidates + LLM only for borderline) is **not** D6. Per the **contradiction test** and the
 Adoption Gate, a convergent standard that contradicts a recorded decision is **not adoptable at all** — the

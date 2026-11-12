@@ -14225,7 +14225,17 @@ class FalkorProjection(
                         inputs: list[str] = []
                         try:
                             op_type_val = props.get("op_type", "IMPL")
-                            edge_rel = "hasPart" if op_type_val not in ("IMPL", "NAND") else op_type_val
+                            # #12067: the FIFTH op_type→rel map, and the same
+                            # defect the two replay maps had — a `coherence`
+                            # operator is stored on `:IMPL`, so scanning
+                            # `hasPart` returned `inputs = []` and the synthetic
+                            # `OperatorAdded` then carried an operator with NO
+                            # inputs (the block below is written to fail closed on
+                            # exactly that outcome, but an empty result is not an
+                            # exception, so nothing fired). Read the map from its
+                            # one home.
+                            from tortoise.ep import MECHANISM_REL_TYPES as _MECH_REL
+                            edge_rel = _MECH_REL.get(op_type_val, "hasPart")
                             edge_rows = self.g.query(
                                 f"MATCH (n:Point {{id:$id}})-[r:{edge_rel}]->(m:Point) "
                                 f"RETURN m.id ORDER BY r.idx",
@@ -22708,13 +22718,51 @@ class FalkorProjection(
 
         factors = []
         degenerate_count = 0
+        unpriceable: dict[str, int] = {}
         for op_id, op_type in op_types.items():
             input_ids = op_inputs.get(op_id, [])
+            if op_type not in _SVBP_PRICED_MECHANISMS:
+                # ⛔ THE TILT HAS TWO POTENTIALS, SO A THIRD MECHANISM IS PRICED
+                # AS SUPPORT (#12067 review round 14, P2). `_tilt_log_prob`
+                # selects `nand_term` on `is_nand` and takes the `else` branch
+                # otherwise — and that else IS the IMPL potential
+                # (`-(c_a - c_b) ** 2`). A `coherence` factor therefore lands on
+                # the IMPL term: the exact substitution the closed set exists to
+                # forbid, on `EventAPI.get_confidence`. SVBP is DEPRECATED with no
+                # production caller (#7927), so the honest move is to DECLINE the
+                # mechanism loudly rather than mis-price it silently; EP prices
+                # all three.
+                #
+                # ⛔ THE WARNING NAMES THE MECHANISMS IT EXCLUDED, not the ones it
+                # can price (#12067 review round 15, P2): the first cut
+                # interpolated `_SVBP_PRICED_MECHANISMS` into the parenthetical,
+                # so it read "carry a mechanism this engine cannot price (IMPL,
+                # NAND) and were EXCLUDED" — naming exactly the two mechanisms it
+                # CAN price as the reason for exclusion.
+                unpriceable[op_type] = unpriceable.get(op_type, 0) + 1
+                continue
             if len(input_ids) >= 2:
                 weight = 3.0 if op_type == "NAND" else 1.0
                 factors.append((op_id, op_type, input_ids, weight))
             else:
                 degenerate_count += 1
+
+        if unpriceable:
+            logger.warning(
+                "extract_svbp_factors: %d operators were EXCLUDED because they "
+                "carry a mechanism this engine has no potential for (%s) — "
+                "SVBP prices IMPL and NAND only, so pricing them would have "
+                "substituted the IMPL potential. Their beliefs are computed by "
+                "EP (tortoise/ep.py), which prices all three mechanisms.",
+                sum(unpriceable.values()),
+                # ⛔ `str(m)`: the keys are raw `o.op_type` values off the
+                # graph, and `op_type IS NULL` is an admitted shape — sorting a
+                # `None` key beside a `str` raises TypeError and turns this
+                # WARNING into a crashed belief read (#12067 review round 16).
+                ", ".join(f"{m}×{n}"
+                          for m, n in sorted(unpriceable.items(),
+                                             key=lambda kv: str(kv[0]))),
+            )
 
         if degenerate_count > 0:
             logger.warning(
@@ -22780,3 +22828,11 @@ def is_missing_graph_error(e: Exception) -> bool:
     return any(k in s for k in ("graph not found", "no such graph",
                                 "does not exist", "unknown graph",
                                 "invalid graph operation", "empty key"))
+
+
+#: The mechanisms SVBP's tilt actually has a potential for (#12067 review round
+#: 14, P2). `tortoise/svbp.py::_tilt_log_prob` selects `nand_term` on `is_nand`
+#: and falls through to the IMPL term otherwise, so every other op_type would be
+#: priced as SUPPORT. Kept beside the extractor that consumes it so a fourth
+#: mechanism cannot silently inherit the IMPL term.
+_SVBP_PRICED_MECHANISMS = frozenset({"IMPL", "NAND"})

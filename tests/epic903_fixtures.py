@@ -353,10 +353,18 @@ def f3_nonconvergent() -> F3NonConvergent:
     sdk.set_point_baseline(a, 10.0, 1.0)
     sdk.set_point_baseline(b, 1.0, 1.0)
 
+    # ⛔ #12067 closes the mechanism set: ONE mechanism per pair. The NAND attack
+    # lands on (a, b); the two opposing IMPLs come from two OTHER strongly-true
+    # claims INTO b, which is the same push-pull on b (strong support in, attack
+    # in, bidirectional both ways) without a second mechanism on one pair.
+    c = _make_claim(sdk, "C: strongly true claim")["id"]
+    d = _make_claim(sdk, "D: strongly true claim")["id"]
+    sdk.set_point_baseline(c, 10.0, 1.0)
+    sdk.set_point_baseline(d, 10.0, 1.0)
     nand = sdk.create_operator("NAND", a, [b], direction="bidirectional")["id"]
     impls = [
-        sdk.create_operator("IMPL", a, [b], direction="bidirectional")["id"],
-        sdk.create_operator("IMPL", a, [b], direction="bidirectional")["id"],
+        sdk.create_operator("IMPL", c, [b], direction="bidirectional")["id"],
+        sdk.create_operator("IMPL", d, [b], direction="bidirectional")["id"],
     ]
     return F3NonConvergent(
         sdk=sdk, db_path=db_path,

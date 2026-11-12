@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests._legacy_mechanisms import legacy_nand_operator
 from tortoise.live import TERMINAL_EXCLUDED_STATUSES
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -803,13 +804,15 @@ def test_prune_scope_empty_pool_returns_empty(sdk_factory, tmp_path, monkeypatch
     assert result["prune"] == []
 
 
+
+
 def test_prune_flags_contradictory_impl_nand(sdk_factory, tmp_path):
     """A pair linked by BOTH an IMPL and a NAND operator is contradictory."""
     sdk = sdk_factory(tmp_path)
     a = sdk.create_point("statement", "the deployment succeeded")
     b = sdk.create_point("statement", "the deployment failed")
     sdk.create_operator("IMPL", a["id"], [b["id"]], label="supports")
-    sdk.create_operator("NAND", a["id"], [b["id"]], label="opposes")
+    legacy_nand_operator(sdk, a["id"], b["id"], label="opposes")
     # Control pair: IMPL-only → NOT contradictory.
     c = sdk.create_point("statement", "calm claim")
     d = sdk.create_point("statement", "its supported claim")

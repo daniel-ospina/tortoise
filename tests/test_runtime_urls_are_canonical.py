@@ -507,6 +507,41 @@ RUNTIME_FILES = (
     "website/apps/blog-admin/src/pages/PostsList.tsx",
 )
 
+#: The members the guard opens and expects to find ZERO occurrences of the retired
+#: origin in — and therefore the population a tidy-up is most tempted to DELETE,
+#: because a zero looks like a leftover. Two roles sit in this one group:
+#:
+#:   * six RUNTIME EMITTERS — `tortoise/email_notify.py` (the invite link's base),
+#:     `tortoise/abuse.py` (the appeal URL), `website/functions/blog/_lib.ts` (the
+#:     blog origin), and the three dashboard landing surfaces
+#:     `invite-accept.html`, `welcome.html`, `wizardPrompts.js`. Each measures 0
+#:     occurrences today; the file STAYS in the surface so a literal coming back
+#:     REDS the count check instead of leaving the surface silently.
+#:   * three DOCUMENTS a human copies — the two onboarding `SKILL.md` copies and
+#:     `.env.example` — which `test_documents_humans_copy_do_not_name_the_retired
+#:     _host` (BELOW) pins by name and which must never name the retired host in
+#:     any form.
+#:
+#: ⛔ THIS BLOCK ASSERTS ONLY WHAT THE TEST BELOW RE-MEASURES: these nine paths are
+#: members of `RUNTIME_FILES`, and each carries 0 occurrences of `RETIRED_ORIGIN`
+#: today. WHICH landing took a given file to zero is recorded ELSEWHERE in this file —
+#: at `RUNTIME_FILES` (`re-aimed by #12058 (row removed)`) and in the module
+#: docstring (#12058's three rows, and #11765/PR #11976 for `_lib.ts`). This block
+#: keeps no second copy of that history on purpose: a claim nobody re-measures is the
+#: class this module exists to refuse, and the one thing here that IS re-measured is
+#: the zero.
+EXPECTED_ZERO_COUNT_FILES = frozenset({
+    "tortoise/email_notify.py",
+    "tortoise/abuse.py",
+    "tortoise/onboarding/SKILL.md",
+    "website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md",
+    ".env.example",
+    "website/apps/dashboard/public/invite-accept.html",
+    "website/apps/dashboard/public/welcome.html",
+    "website/apps/dashboard/src/wizardPrompts.js",
+    "website/functions/blog/_lib.ts",
+})
+
 
 def test_retired_origin_literals_match_the_recorded_allowlist():
     offenders = {}
@@ -585,6 +620,81 @@ def test_every_allowlisted_occurrence_has_a_reason():
         "these files carry an allowlist entry but are NOT in RUNTIME_FILES, so no "
         f"test counts them: {orphans} — add the path to RUNTIME_FILES or drop the "
         "entry; an allowlist row for a file the guard never opens is invisible")
+
+
+def test_the_runtime_surface_is_the_whole_population_it_claims():
+    """#12144 — the SET is pinned, not only the direction of one relation.
+
+    `RUNTIME_FILES` is this guard's entire surface: `test_retired_origin_literals
+    _match_the_recorded_allowlist` walks it, and every other check here is about a
+    member of it. Nothing pinned the set itself. The one set relation above is
+    one-directional, so it reds when an allowlist row names a file the guard never
+    opens and stays GREEN when a file the guard used to open LEAVES. A member at 0
+    occurrences carries no row, so it sits in neither side of that relation — and
+    deleting its line was a one-line diff that left all 16 tests GREEN over a file
+    the guard had stopped opening: the exact false PASS the module docstring above
+    refuses ("this guard cannot report GREEN over a file it never opened"), on the
+    very file whose docstring argues the point.
+
+    Both directions now red. An unexpected member moves the count; a deleted
+    zero-count member leaves BOTH `EXPECTED_ZERO_COUNT_FILES` and the
+    no-allowlist-row set, so the equality below names it. The count alone would not
+    name it, which is why the group assertions come first.
+    """
+    duplicates = sorted({rel for rel in RUNTIME_FILES if RUNTIME_FILES.count(rel) > 1})
+    assert not duplicates, (
+        "a duplicated entry inflates the population count, so a DELETED member "
+        f"could hide behind it: {duplicates}")
+    # ⛔ THE GROUP ASSERTIONS RUN BEFORE THE COUNT ON PURPOSE. Every member is either
+    # allowlisted (14 — a deletion from the tuple reds `test_every_allowlisted
+    # _occurrence_has_a_reason`'s `orphans` check, which NAMES it) or zero-count (9 —
+    # a deletion is invisible to `orphans` and to every count check, so this group is
+    # its only detector). Asserting the count FIRST would mask this: the count moves
+    # for both classes, so it would fire first and never name the zero-count member.
+    # ⛔ THE GROUP EQUALS "EVERY MEMBER WITH NO ALLOWLIST ROW", EXACTLY. Containment
+    # alone was not enough: the group's OWN membership was unpinned, so deleting a
+    # line from it left the suite GREEN — and the next deletion of that member from
+    # `RUNTIME_FILES` then red only as "22 members, not 23", naming nothing. Equality
+    # pins both roles at once, and it is the definition the group already has: a
+    # member with no row has an expected count of 0 (`test_retired_origin_literals
+    # _match_the_recorded_allowlist` looks the row UP, defaulting to 0).
+    zero_count_now = set(RUNTIME_FILES) - set(RETIRED_HOST_ALLOWLIST)
+    missing = sorted(EXPECTED_ZERO_COUNT_FILES - zero_count_now)
+    unexpected = sorted(zero_count_now - EXPECTED_ZERO_COUNT_FILES)
+    assert not missing and not unexpected, (
+        "EXPECTED_ZERO_COUNT_FILES no longer equals the set of RUNTIME_FILES members "
+        "with no allowlist row (the members whose expected count is 0)."
+        + (" LISTED BUT NO LONGER A ZERO-COUNT MEMBER: either the file LEFT the "
+           "surface — the #12144 regression, where the guard stops opening it — or "
+           f"it gained an allowlist row and is no longer zero-count: {missing}."
+           if missing else "")
+        + (" A ZERO-COUNT MEMBER IS NOT LISTED: it measures 0 today and carries no "
+           f"row, so add it — otherwise deleting it is only a count move: {unexpected}."
+           if unexpected else "")
+        + " A zero-count member is invisible to `orphans` and to every count check, "
+        "so this group is the only place a deletion of one can be NAMED: #12144."
+    )
+    # ⛔ AND THE GROUP IS RE-MEASURED, NOT JUST DECLARED. The equality above ties
+    # membership to the allowlist; this ties it to the TREE, so the constant's own
+    # claim ("expects to find ZERO occurrences") is falsified here rather than
+    # inferred from another test.
+    counts = {rel: (REPO / rel).read_text(encoding="utf-8").count(RETIRED_ORIGIN)
+              for rel in sorted(EXPECTED_ZERO_COUNT_FILES)}
+    stale = [(rel, n) for rel, n in counts.items() if n]
+    assert not stale, (
+        "these files are declared ZERO-count in EXPECTED_ZERO_COUNT_FILES but the "
+        f"tree now carries {RETIRED_ORIGIN} in them: {stale}. A literal coming back "
+        "is what the count check exists to catch — if it came back ON PURPOSE, take "
+        "an allowlist row with its reason AND move the path out of "
+        "EXPECTED_ZERO_COUNT_FILES in the same commit, so the group stops claiming "
+        "a zero it no longer measures."
+    )
+    assert len(RUNTIME_FILES) == 23, (
+        f"the runtime surface has {len(RUNTIME_FILES)} members, not 23 — a member "
+        "was added or removed. Adding one is a deliberate act (record why); "
+        "removing one takes the guard off a file it used to open. Update this pin "
+        "in the same commit, and say which member moved and why."
+    )
 
 
 def test_canonical_origin_set_is_what_the_runtime_may_emit():

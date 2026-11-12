@@ -62,8 +62,10 @@ O8_SEMANTICS_VOCABULARY = {
     "managedBy",
 }
 
-#: ONTOLOGY §3.9: "Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label)."
-O39_MECHANISM_PAIR = {"IMPL", "NAND"}
+#: ONTOLOGY §3.9 / §8: "the operator mechanism vocabulary is THREE — support,
+#: attack, coherence" (#12067). `IMPL` is support, `NAND` is attack, and
+#: `coherence` is the third (what `dependsOn`/`hasPart` mean).
+O39_MECHANISM_PAIR = {"IMPL", "NAND", "coherence"}
 
 #: A predicate that IS declared — but by a PACK (agent-ops/product-strategy),
 #: never by core. It is the control proving the declared set is a UNION.

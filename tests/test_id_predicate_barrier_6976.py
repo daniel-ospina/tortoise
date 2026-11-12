@@ -151,6 +151,45 @@ def test_audit_superseded_active_edges_keeps_its_predicate_bound() -> None:
         _assert_barrier(q, "sup")
 
 
+def test_audit_object_supersession_checks_keep_their_predicate_bound() -> None:
+    """#11826: the two ``:Object``-anchored checks carry the same barrier.
+
+    Selected by the entity anchor rather than by the Point one, because a
+    ``(sup:Point)`` filter cannot see them: without this, dropping a ``WITH sup``
+    from either new check would re-open #6976 on the Object population (the
+    predicate vanishes at the re-binding MATCH and the count inflates) with no
+    test red.
+    """
+    proj = _StubProj()
+    audit_graph(proj)
+    obj_queries = [q for q in proj.g.cypher if "(sup:Object)" in q]
+    assert len(obj_queries) >= 4, (
+        "expected the four #11826 statements (count+rows for both checks): "
+        f"{obj_queries}")
+    for q in obj_queries:
+        where = q.find("WHERE")
+        assert where != -1, f"no WHERE in the emitted query: {q!r}"
+        # The invariant is the same one `_assert_barrier` pins — predicate, then
+        # the barrier, then any clause that reads `sup` again — but the two
+        # checks are not identical shapes: 4b RE-BINDS `sup` as a pattern
+        # endpoint (plain MATCH), while 4c only reads `sup.supersededBy` in an
+        # `OPTIONAL MATCH (carrier:…)`. So the shared assertion here is the
+        # barrier's POSITION, and `_assert_barrier` is applied where a re-binding
+        # MATCH exists at all.
+        barrier = q.find("WITH sup", where)
+        assert barrier != -1, (
+            f"#6976: the superseded-Object predicate is UNBOUND — no `WITH sup` "
+            f"after the WHERE, so on FalkorDB the predicate is dropped at the "
+            f"next MATCH and the count inflates: {q!r}")
+        nxt = re.search(r"\bMATCH\b", q[where:])
+        if nxt is not None:
+            assert barrier < where + nxt.start(), (
+                f"#6976: `WITH sup` sits AFTER the next MATCH, so it binds "
+                f"nothing: {q!r}")
+        if re.search(r"\bMATCH\s+(?:path\s*=\s*)?\(\s*sup\b", q[where:]):
+            _assert_barrier(q, "sup")
+
+
 # ── #7162: the handle-level seam ─────────────────────────────────────────────
 #
 # Every test below is DISCRIMINATING: deleting the normaliser call (or the

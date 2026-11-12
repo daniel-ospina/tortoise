@@ -1,6 +1,7 @@
 """Gauss-Jacobi quadrature on [0,1] for Beta-weighted integrals.
 
-Used by TortoiseEP for numerical moment projection of NAND/IMPL factors.
+Used by TortoiseEP for numerical moment projection of the three epistemic
+mechanisms' factors (#12067): support (`IMPL`), attack (`NAND`), coherence.
 
 phi_nand = exp(-w * ca * cb): contradiction potential — penalizes both
 claims being simultaneously true, compatible with NAND semantics.
@@ -9,6 +10,10 @@ phi_impl = exp(-w * (ca - cb)^2): difference (level-matching) coupling —
 the target is pulled toward the source's LEVEL, so a strong source raises
 a weak target AND a weakened source's damage cascades downstream (#855).
 Directionality is enforced structurally by EP's back-message guard.
+
+phi_coherence = exp(-w * (1 - ca) * cb): NECESSARY-CONDITION potential —
+charges only the corner "b is asserted while a is absent" (#12067).
+Directionality is enforced structurally, exactly as for the other two.
 
 scipy.special.roots_jacobi uses weight (1-x)^a * (1+x)^b on [-1,1].
 For Beta(α,β) weight x^(α-1)*(1-x)^(β-1) on [0,1]:
@@ -133,3 +138,47 @@ def phi_impl(ca, cb, w=1.0):
     source produced essentially zero cascade downstream (#855).
     """
     return np.exp(-w * (ca - cb) ** 2)
+
+
+def phi_coherence(ca, cb, w=1.0):
+    """Coherence potential: "a is necessary for b" — loss flows, gain does not.
+
+    Product coupling on ONE corner:
+
+        exp(-w * (1 - ca) * cb)
+
+    The penalty is charged only when **b is asserted while a is absent**, which
+    is the truth condition of "a is necessary for b" (`Acc(b) => Acc(a)`). The
+    three behaviours of the mechanism (#12067, ONTOLOGY §8) therefore fall out
+    of the potential rather than out of a convention:
+
+    * **a falls ⇒ b falls.** As `ca → 0` the penalty grows, pushing `cb` down.
+      Measured at w=1.0 against a `(10,1)` b: a=0.909 → Δb = −0.00059,
+      a=0.30 → −0.00492, a=0.05 → −0.00692. Monotone in a's absence.
+    * **a rises ⇒ b does NOT rise.** Raising `ca` only *removes* a downward
+      force; it never adds an upward one. At a fully present (0.909) the
+      residual is −0.00059, i.e. b stays at its own baseline (0.06 % of the
+      belief) instead of being inflated. This is the property that support
+      (difference coupling, `phi_impl`) cannot express — it charges BOTH
+      corners, so a weak supporter drags its target down and a strong one
+      inflates it.
+    * **weighted by how much evidence each side carries.** The charge is
+      `(1 - ca) * cb`: the missing supporter's absence scales it, and the
+      supported claim's own assertion scales it. No new constant is introduced.
+
+    WHY THIS SHAPE, and not a difference coupling: bipolar argumentation theory
+    states necessary support as `Acc(b) => Acc(a)` — *"a is a necessary
+    condition, but not necessarily a sufficient reason"* — i.e. the SAME edge
+    `a → b` carries the dependence in the opposite direction from deductive
+    support. A difference coupling cannot express one direction of entailment:
+    it is symmetric by construction. See ONTOLOGY §8 and #12067's research
+    comment for the sources.
+
+    RESIDUAL, stated rather than hidden: at `ca == cb` fully present the
+    potential still charges a tiny penalty (−0.00059 at 0.909), because a
+    product coupling cannot be exactly flat at the corner's far edge. It is
+    bounded, monotone, and 0.06 % of the belief; driving it to zero would need
+    a different functional form (a reopen of the "product vs difference" ruling
+    recorded on #855/#11935), not a constant.
+    """
+    return np.exp(-w * (1.0 - ca) * cb)
