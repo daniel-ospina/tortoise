@@ -1230,7 +1230,12 @@ WRITER_CENSUS: dict[str, tuple[str, str]] = {
     # dead; an active override, not a harmless no-op). `ruff`'s F601 is the only LINTER that
     # catches it, and it caught this one only post-merge on `main` — the pytest lane could
     # not, until `#9314`'s pin
-    # (`tests/test_dod_5090_probe.py::test_a_duplicate_literal_key_in_the_census_dicts_cannot_land_silently`).
+    # (`tests/test_dod_5090_probe.py::test_the_census_has_no_DUPLICATE_dict_key_in_its_source`).
+    # ⛔ That pin exists TWICE this merge: `main`'s `#9314` version and #12182's review cycle-7 P2
+    # version are the same detector written independently, and this rebase keeps ONE of them — the
+    # `#12182` one, which also covers `WRITER_LABEL_OVERRIDES` and asserts each literal's key count
+    # still equals its runtime dict's. Only the NAME changed here; re-derive the pin, never cite the
+    # deleted name.
     # Provenance and the carrier rationale are merged into this row so neither reading is lost.
     "tortoise.sdk::create_source": (
         CENSUS_EXEMPT,
