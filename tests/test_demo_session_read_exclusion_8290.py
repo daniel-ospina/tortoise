@@ -666,7 +666,7 @@ def test_the_lifetime_baseline_excludes_the_sample_at_the_query(tmp_path):
 #: ``LIFETIME_MEMORY_QUERY``. Spelled here rather than imported — the NUMBER is
 #: the claim's subject, and importing the API module for it would pull the whole
 #: stack into a fast suite.
-_PIVOT = 23466
+_PIVOT = 23477
 
 #: The one pattern that defines a "cite target" lives in
 #: ``tools/hosted_api_cite_census.py`` — ONE implementation, so the note's stated
@@ -706,7 +706,12 @@ def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
     scorecard figures stop being arithmetic (below + above + the pivot target =
     the total), or the pivot cite stops being the ``LIFETIME_MEMORY_QUERY`` site.
     """
-    from tools.hosted_api_cite_census import census, pivot_is_the_lifetime_site
+    from tools.hosted_api_cite_census import (
+        DEFAULT_PIVOT,
+        census,
+        lifetime_query_sites,
+        pivot_is_the_lifetime_site,
+    )
 
     scorecard = _src("tortoise/activation_scorecard.py")
     hosted = _src("tortoise/hosted_api.py")
@@ -735,6 +740,25 @@ def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
         f"hosted_api.py:{_PIVOT} is no longer the LIFETIME_MEMORY_QUERY site — "
         "re-derive the pivot and both notes' figures with "
         "`uv run python tools/hosted_api_cite_census.py --pivot <line>`")
+
+    # ... and the TOOL's own fallback pivot agrees with it. No shipped path reads
+    # that constant (every one derives the site from the tree, and this test passes
+    # its own `_PIVOT`), which is exactly why its drift is invisible to every other
+    # check. The two wrongnesses start at different heads: `--pivot 23466` reports
+    # `site: False` from #11803 onward (the CALL moved to 23477 while the note still
+    # cited 23466), but its COUNT SPLIT only goes wrong once a re-derivation moves
+    # the notes and leaves the constant behind — at #11950's first commit
+    # `5d35cd58f6` the same invocation read `at the pivot 0` / `above 13` over a
+    # CORRECT tree (12 above / 1 at the pivot before it). Pinning it is the only
+    # thing that can red.
+    assert lifetime_query_sites()[0] == DEFAULT_PIVOT, (
+        f"the census tool's fallback pivot {DEFAULT_PIVOT} is not the site "
+        f"{lifetime_query_sites()} — nothing shipped reads it, but `census()` and "
+        "`pivot_is_the_lifetime_site()` default to it; re-derive it in the same "
+        "commit that moves the site. ⚠ The module docstring's `--pivot <line>` "
+        "EXAMPLE is hand-written and NOT covered by this pin (measured: mutating "
+        "it to `--pivot 99999` leaves `--check` at exit 0) — move it too, or the "
+        "documented command reports `site: False` over a correct tree")
 
     # the census command is the notes' stated remedy, so it must work and must not
     # collapse to nothing (that, and only that, about the population is pinned here)
