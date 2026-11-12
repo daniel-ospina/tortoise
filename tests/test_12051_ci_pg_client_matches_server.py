@@ -92,9 +92,25 @@ not a tenth spelling — it is the one a text guard cannot reach:
   | sort -V | tail -1`) is caught only because the rule treats a client dir it
   cannot read as an offender; the same derivation hidden inside an invoked
   script is not.
-- **An invoked script is read as one line** (`run: bash x.sh`). No in-repo
-  script this job calls names or moves a client dir — kept that way, because
+- **An invoked script or a `uses:` step is read as one line.** `run: bash
+  x.sh` is that one line, and `uses: ./.github/actions/x` is not read at all
+  — a composite action that appends to `$GITHUB_PATH` moves the leg's PATH
+  with every row green (measured, round 10). This job already runs four
+  composite actions; none touches PATH, and that is the invariant to keep.
+  No in-repo script this job calls names or moves a client dir — kept that way, because
   this guard cannot follow one.
+- **`shell:` is read at TWO scopes only** — the step's, and the job's
+  `defaults.run.shell` (the workflow-level `defaults` is folded into the
+  job because it applies here too). A `shell:` reached through a
+  reusable workflow (`uses: ./.github/workflows/x.yml`) is outside this
+  file and outside this guard.
+- **The mutating-verb rule costs some precision.** The client name is
+  read only AFTER the verb, so `rm -f "$RUNNER_TEMP/pg_dump.log"` and
+  `pg_dump --version | tee -a x` are not replacements — but a genuinely
+  read-only command whose verb IS in the list (`rm`, `tee`, `install`,
+  `chmod`) and which names a client binary after it is refused. That is
+  the right polarity here: nothing legitimate rewrites those binaries,
+  and the message names the accepted form.
 - **The extraction's arithmetic** (`sed -E 's/.*/16/'`) cannot be proven; the
   in-job assertion is what makes a constant visible.
 
@@ -152,7 +168,12 @@ BINARY_MUTATION_RE = re.compile(
     r"update-alternatives|install|sed[ \t]+-i|dpkg[ \t]+-i|perl[ \t]+-i"
     r")\b"
 )
-BINARY_NAME_RE = re.compile(r"\b(?:pg_dump|pg_restore|pg_ctl|pg_wrapper)\b")
+#: Only a binary NAME, never a filename that contains one: the `(?![\w.])` is
+#: what keeps `rm -f "$RUNNER_TEMP/pg_dump.log"` (a tidy step) and
+#: `pg_dump --version | tee -a "$RUNNER_TEMP/v.txt"` (the guard's OWN recommended
+#: compensating control) from reading as replacements — both measured RED, round
+#: 10. The call site also reads the name only AFTER the verb.
+BINARY_NAME_RE = re.compile(r"\b(?:pg_dump|pg_restore|pg_ctl|pg_wrapper)(?![\w.])")
 
 #: The `$GITHUB_PATH` write as ONE unit: the versioned dir IS the value written.
 #: `echo <dir> >> "$GITHUB_PATH"` — read the major from the
@@ -283,9 +304,27 @@ DEAD_CHAIN_RE = re.compile(
 
 @pytest.fixture(scope="module")
 def job() -> dict:
+    """The job, with the WORKFLOW-level `defaults` folded in.
+
+    `defaults.run.shell` is valid at WORKFLOW scope and applies to every `run:`
+    step of every job in the file (actions/runner `ScriptHandler.cs` falls back to
+    `Global.JobDefaults`, which `JobExtension` fills from `message.Defaults`), so
+    a shell set there is EXECUTED for this job's steps. Reading only the job's own
+    `defaults` left
+
+        defaults: {run: {shell: "bash -c 'export PATH=/usr/lib/postgresql/17/bin:$PATH; exec bash {0}'"}}
+
+    GREEN with the leg on pg17 (measured, #12051 review round 10) — while the same
+    shell at JOB scope correctly red. The job's own `defaults` still win over the
+    workflow's, exactly as at runtime.
+    """
+
     workflow = yaml.safe_load(PYTHON_CI.read_text())
     assert JOB in workflow["jobs"], f"{JOB} is the record's only armed Postgres job"
-    return workflow["jobs"][JOB]
+    resolved = dict(workflow["jobs"][JOB])
+    if "defaults" not in resolved and workflow.get("defaults"):
+        resolved["defaults"] = workflow["defaults"]
+    return resolved
 
 
 def _steps(job: dict) -> list[dict]:
@@ -450,6 +489,42 @@ def _unreachable_guards(steps: list[dict], start: int, end: int) -> list[str]:
             if CONSTANT_GUARD_RE.match(line) or DEAD_CHAIN_RE.search(line):
                 found.append(f"step {index}: {line.strip()}")
     return found
+
+
+def _replaces_a_client_binary(line: str) -> bool:
+    """Does this line REPLACE a client binary? (#12051 review rounds 9-10)
+
+    The verb and the binary must both be present, and the binary must be named
+    AFTER the verb: reading the pair anywhere on the line made a tidy step
+    (`rm -f "$RUNNER_TEMP/pg_dump.log"`) and the guard's OWN recommended
+    compensating control (`pg_dump --version | tee -a "$RUNNER_TEMP/v.txt"`) read
+    as replacements — both measured RED, with a message saying the step replaced
+    a binary it only mentioned. The pin's own install line is excluded.
+    """
+
+    if CLIENT_PKG_RE.search(line):
+        return False
+    verb = BINARY_MUTATION_RE.search(line)
+    if not verb:
+        return False
+    return bool(BINARY_NAME_RE.search(line, verb.end()))
+
+
+#: `if:` values that cannot SKIP the step. `success()` is the default, and
+#: `always()` runs even when a previous step failed — strictly safer than absent.
+#: Round 10 measured `always()` being refused, with a message asserting a false
+#: condition the step does not have.
+NON_SKIPPING_IF = frozenset({"success()", "always()", "${{ success() }}", "${{ always() }}"})
+
+
+def _conditional_skip(step: dict) -> str | None:
+    """The `continue-on-error` / `if:` VALUE that can skip this step, or None."""
+
+    if step.get("continue-on-error"):
+        return f"continue-on-error: {step['continue-on-error']!r}"
+    if "if" in step and step["if"] is not True and step["if"] not in NON_SKIPPING_IF:
+        return f"if: {step['if']!r}"
+    return None
 
 
 def _pin_step(steps: list[dict]) -> tuple[int, dict]:
@@ -717,9 +792,7 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
             for index, step in enumerate(steps)
             if index >= pin_index
             for line in _run_commands(step).splitlines()
-            if BINARY_MUTATION_RE.search(line)
-            and BINARY_NAME_RE.search(line)
-            and not CLIENT_PKG_RE.search(line)
+            if _replaces_a_client_binary(line)
         }
         | {
             f"step {index} writes the runner's own command file: {line!r}"
@@ -855,18 +928,18 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
             }
             | {index for index, _ in hits}
         )
-        if steps[index].get("continue-on-error")
-        or (
-            "if" in steps[index]
-            and steps[index]["if"] not in (True, "success()", "success")
-        )
+        if _conditional_skip(steps[index])
     ]
     assert not skippable, (
         "the step(s) carrying the client pin and its assertion are SKIPPABLE — "
-        f"step(s) {skippable} set `continue-on-error: true` (its `exit 1` sets "
-        "`Result = TaskResult.Succeeded`, actions/runner "
-        "`ExecutionContext.ApplyContinueOnError`) or a non-`success()` `if:` (a "
-        "false condition skips the pin and the assertion with it). Either way "
+        + "; ".join(
+            f"step {index} sets {_conditional_skip(steps[index])}"
+            for index in skippable
+        )
+        + ". `continue-on-error: true` makes `exit 1` set "
+        "`Result = TaskResult.Succeeded` (actions/runner "
+        "`ExecutionContext.ApplyContinueOnError`), and a false condition skips "
+        "the pin and the assertion with it. Either way "
         "the leg runs on the inherited client and the job can stay green "
         "(#12051). Only steps CARRYING the write or the branch are checked — an "
         "unrelated step's `continue-on-error` is none of this row's business."
