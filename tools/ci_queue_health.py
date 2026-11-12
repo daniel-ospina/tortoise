@@ -1191,11 +1191,11 @@ def _unmeasured_because(unprobed: int | None, unread: int | None) -> str:
     """Name WHICH abstention the unmeasured runs are, or admit that we cannot (#12037 13).
 
     The two have opposite remedies — a run the budget never REACHED is fixed by raising
-    `--max-job-probes`; a run whose jobs read FAILED is fixed by retrying, and a bigger budget
-    only probes more runs that fail the same way. A disjunction is therefore not a diagnosis,
-    and an alert that lists both remedies hands the operator a coin flip. When the caller did
-    not probe (a legacy `classify_queue` call) there is nothing to distinguish, and this says
-    so rather than guessing.
+    `--max-job-probes`; a run whose jobs read did not PROVE it idle is fixed by retrying
+    once it has settled, and a bigger budget only probes more runs the same way. A
+    disjunction is therefore not a diagnosis, and an alert that lists both remedies hands
+    the operator a coin flip. When the caller did not probe (a legacy `classify_queue`
+    call) there is nothing to distinguish, and this says so rather than guessing.
     """
     if unprobed is None or unread is None:
         return " (the probe budget did not reach them, or their jobs could not be read)"
@@ -1204,8 +1204,9 @@ def _unmeasured_because(unprobed: int | None, unread: int | None) -> str:
         parts.append(f"{unprobed} the probe budget never REACHED")
     if unread:
         parts.append(
-            f"{unread} whose jobs read did not PROVE them idle (the read FAILED, or the "
-            f"run had not been still for {JOB_SETTLE_SECONDS:.0f}s — RETRY)"
+            f"{unread} whose jobs read did not PROVE them idle (the read FAILED, or it "
+            "returned nothing usable — an empty, partial, malformed or other-attempt job "
+            f"list — or the run had not been still for {JOB_SETTLE_SECONDS:.0f}s; RETRY)"
         )
     if not parts:   # defensive: says nothing false if a caller passes zeroes
         return ""
@@ -1441,8 +1442,8 @@ def classify_queue(
             )
         if pr_running_unmeasured:
             notes.append(
-                f"{pr_running_unmeasured} run(s) UNMEASURED (jobs not read, or not "
-                "provably complete), counted as executing"
+                f"{pr_running_unmeasured} run(s) UNMEASURED (jobs not read, or their read "
+                "did not prove them idle), counted as executing"
             )
         reasons.append("; ".join(notes))
 
@@ -1897,11 +1898,14 @@ def read_run_live_job(
 ) -> bool | None:
     """Does run ``run_id`` still have a job that has not COMPLETED? (#12037)
 
-    The evidence a run's `status` string cannot give. A run whose every job is
-    `completed` is running NOTHING, no matter what `status` reports — measured on three
-    runs frozen at `in_progress` since 2026-11-05 while their only job completed the same
-    day, and unrepairable: `/cancel` and `/force-cancel` both answer 409 with
-    contradictory reasons.
+    The evidence a run's `status` string cannot give. A run whose every **VISIBLE** job is
+    `completed` **and whose own `updated_at` has been STILL for `JOB_SETTLE_SECONDS`** is
+    running NOTHING, no matter what `status` reports — measured on three runs frozen at
+    `in_progress` since 2026-11-05 while their only job completed the same day, and
+    unrepairable: `/cancel` and `/force-cancel` both answer 409 with contradictory
+    reasons. ⛔ The stillness half is NOT decoration — see the candidate-proof bullet in
+    the Returns block below: an all-`completed` list WITHOUT it can describe a dynamic
+    matrix that is about to expand.
 
     Returns ``True`` (a non-terminal job exists), ``False`` (jobs READ, non-empty, all
     `completed`), or ``None`` when NOT MEASURED. ``None`` is
@@ -2170,9 +2174,11 @@ def read_health(
         for run in projected
     ]
     # ⛔ THE DISCRIMINATOR (#12037 review round 13). `has_live_job is None` means EITHER "the
-    # budget never reached this run" OR "its jobs read failed" — and the two have OPPOSITE
-    # remedies (raise the budget vs retry), so the count alone cannot answer "which lever do I
-    # pull?". Only this function knows the slice it spent, so only it can split the abstention.
+    # budget never reached this run" OR "its read did not PROVE it idle" — the latter covers a
+    # FAILED read, an EMPTY/partial/malformed/other-attempt list, AND the settle-gate downgrade
+    # added later — and the two have OPPOSITE remedies (raise the budget vs retry once it has
+    # settled), so the count alone cannot answer "which lever do I pull?". Only this function
+    # knows the slice it spent, so only it can split the abstention.
     # It must run over the MERGED list: `projected` still holds the pre-probe values, so
     # reading it here would call a run "read-failed" merely because it was in the slice.
     attempted_ids = {run.id for run in attempted}
