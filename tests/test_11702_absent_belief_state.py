@@ -6168,8 +6168,11 @@ def _mirror_sources_the_value(sentence: str) -> bool:
 
       The construct's OWN text is in the span for SYMMETRY only — it is a NO-OP
       today and will stay one. Measured: removing it changes 0 verdicts across
-      12,675 sentences (the corpus plus 648 constructed negator × break ×
-      mention-form × order combinations), because the span is built from
+      the whole probe — 12,022 corpus sentences PLUS 648 constructed
+      negator × break × mention-form × order combinations = 12,670 (the corpus
+      count is the sum of `_sentences()` over the five `_BELIEF_PROSE` modules,
+      measured at this head and identical at `e4703a286a`) — because the span is
+      built from
       `_MIRROR_MENTION` match positions and the AFTER window already runs from
       the noun to the next break, so any filler and negator sit inside it. In
       particular it does NOT guard against "a future widening that admits
