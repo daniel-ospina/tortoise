@@ -45,7 +45,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 >
 > > **Core Object types accept `draft`, `live`, `superseded`, `deprecated`, `archived`, `in_progress`,
 > > `completed`; an Object created without a status stores none and reads as `live` (#9974 R1 — never a
-> > fabricated `live` write). `superseded` means *replaced by*: it names the successor, and a retirement
+> > fabricated `live` write). `superseded` means replaced: it names the successor; a retirement
 > > with no successor is `archived`; `deprecated` is an independent terminal state and needs no successor.
 > > A journal rebuild is unchanged and still restores a supersession recorded without a successor.
 > > `outdated` and `retracted` are not Object lifecycle words (read-only, retained for legacy data).
@@ -58,7 +58,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > is `archived`"* redirected **every** `deprecated` write to `archived`, because a deprecated Object is
 > terminal and by definition has no successor — erasing the difference between *something replaced this*
 > and *this was wrong*. The clause is now stated through the replacement reading ("`superseded` means
-> *replaced by*: it names the successor"), and `deprecated` is stated as an independent terminal state. ⚠️ The
+> replaced: it names the successor"), and `deprecated` is stated as an independent terminal state. ⚠️ The
 > landed wording still says *"a **retirement** with no successor is `archived`"*, and `deprecated` is a
 > retirement — so the two clauses sit in tension even with the `deprecated` carve-out beside them. That is
 > **owner-approved text**, so it is a follow-up on #11824, not a defect fixed here. (3) **The successor clause is stated as a DEFINITION OF THE WORD, not as a description of a door.** The
@@ -66,7 +66,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > generic doors (`create_object(..., status='superseded')` and `update_entity(<object>, status='superseded')`
 > both store `status='superseded'` with `supersededBy` absent), so a guard builder reading it concluded the
 > door was already covered or built a refusal `sdk.py` calls an **over-block**. The clause now says what the
-> word MEANS — *`superseded` means **replaced by**: it names the successor, and a retirement with no
+> word MEANS — *`superseded` means replaced: it names the successor; a retirement with no
 > successor is `archived`* — which is true of the vocabulary and enforceable by the unbuilt guard, because
 > `archived` is a legal successorless route for a **retirement**. ⚠️ **That does NOT retire `sdk.py`'s
 > over-block objection**, and an earlier draft of this entry wrongly said it did. The shape `sdk.py` protects
