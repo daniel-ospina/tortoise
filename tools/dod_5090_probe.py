@@ -2825,16 +2825,18 @@ def score_rule_bullet() -> Row:
         # #12016, P3). The `#11455` reading moved into the arm where a template really
         # does arm it, which is the only shape it describes.
         if armed_deployment_files:
-            # ⛔ The noun is scoped to the population it interpolates. This arm names
-            # `deployment["armed"]` — the per-FILE DEPLOYMENT subset — so calling them
+            # ⛔ The population is stated ONCE, for exactly what it interpolates.
+            # `deployment["armed"]` is the per-FILE DEPLOYMENT subset, so calling it
             # "the surface(s) that do arm it" claimed the WHOLE armed population was
-            # deployment files. It is not: arm 2 below is reached by exactly the case
-            # where a non-deployment surface arms it too, and on the real tree
-            # `.env.example` does (fresh review of PR #12016, P3).
+            # deployment files — false whenever a non-deployment surface arms it and no
+            # deployment file does, which is the arm-2 case immediately below (fresh
+            # review of PR #12016, P3). The old noun also produced a tautology
+            # ("deployment file(s) are themselves deployment files"), so it is gone
+            # rather than reworded around.
             armed_clause = (
-                f"armed deployment file(s) ({', '.join(armed_deployment_files)}) are "
-                "themselves deployment files, so a build that uses one of them "
-                "carries the flag — this reading is per FILE and does not model that "
+                f"the flag is armed in deployment file(s) "
+                f"({', '.join(armed_deployment_files)}), so a build that uses one of "
+                "them carries it — this reading is per FILE and does not model that "
                 "merge"
             )
         elif shipped["armed"]:

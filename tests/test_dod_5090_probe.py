@@ -2355,13 +2355,15 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
         tmp_path, monkeypatch):
     """The `#11455` CLAUSE, SCORED — one armed TEMPLATE must not complete row 1.
 
-    ⛔ Fresh review of PR #12016 (P2): of the 35 `probe.score_rule_bullet()` call sites
-    in this file (count them, do not state `31 + 1` — and a bare `grep -c` returns 36,
-    because THIS sentence contains the string it greps for), 31
-    feed a reading in which `shipped["on"]` and `shipped["deployment"]["on"]` AGREE —
-    `_fake_shipped` sets both from one argument, and `_row_one_fixture` arms
-    `docker-compose.yml`, which is both an any-surface and a deployment surface. The
-    four that DIVERGE are this test (twice), the `#11455` row-holds test below, and
+    ⛔ Fresh review of PR #12016 (P2): nearly every `probe.score_rule_bullet()` call
+    site in this file feeds a reading in which `shipped["on"]` and
+    `shipped["deployment"]["on"]` AGREE — `_fake_shipped` sets both from one argument,
+    and `_row_one_fixture` arms `docker-compose.yml`, which is both an any-surface and a
+    deployment surface. ⛔ NO COUNT IS STATED HERE ON PURPOSE: every commit that adds a
+    call site moves it, and this PR's own fix commits already did, three times over. Do
+    not substitute `31 + 1` either — measure. And a bare `grep -c` over this file also
+    matches THIS sentence, so it over-reports by one (fresh review of PR #12016, P3).
+    The call sites that DIVERGE are this test, the `#11455` row-holds test below, and
     `test_the_shipped_default_is_searched_not_assumed` — which scores the REAL tree but
     asserts only the note, never `row.verdict`. So reverting the one line
     `on_by_default = deployment["on"]` to `shipped["on"]`, or folding `ambient` back
@@ -2392,7 +2394,7 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
     # uses one of them carries the flag" (EMPTY parentheses: the clause interpolates the
     # intersection, which the mutated condition never computes).
     assert "do not deploy the container's environment on their own" in hold, hold
-    assert "themselves deployment files" not in hold, hold
+    assert "the flag is armed in deployment file(s)" not in hold, hold
     # ⛔ The `#11455` sentence lives in THIS arm and must be PINNED here (fresh review
     # of PR #12016, P3): it was moved out of the shared tail, and nothing asserted its
     # presence — deleting it left the whole file green while the real tree, which takes
@@ -2400,9 +2402,13 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
     assert "no armed non-deployment surface makes this a shipped default" in hold, hold
     assert "`#11455` reading" in hold, hold
     # ⛔ …and the noun is population-neutral ON PURPOSE: this arm is reached by ANY
-    # armed non-deployment surface, and `config/` and `.github/workflows` arm the flag
-    # too, so calling it "a TEMPLATE" named a shape the walk had not measured.
+    # armed non-deployment surface, and `config/` and `.github/workflows` are IN that
+    # population, so calling it "a TEMPLATE" would name a shape narrower than the arm's.
+    # ⛔ Stated as a SHAPE, not a measurement: on this tree both read OFF, so asserting
+    # that they arm it would be a measurement the walk never made (fresh review of PR
+    # #12016, P3 — this comment previously said they "arm the flag", which is false).
     assert "one armed TEMPLATE" not in hold, hold
+    assert "the flag is armed in deployment file(s)" not in hold, hold
 
     # ⛔ And the THIRD shape, where NOTHING arms the flag at all (fresh review of PR
     # #12016, P3). The two-arm form published "the surfaces that do arm it (none) do
@@ -2680,7 +2686,13 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     # not deploy the container's environment on their own" — a build using it carries
     # the flag. The clause is scoped to templates; here it states the opposite fact.
     assert "do not deploy the container's environment on their own" not in hold, hold
-    assert "themselves deployment files" in hold, hold
+    # ⛔ The arm-1 wording, pinned by a phrase ONLY it produces. The old pin
+    # (`"themselves deployment files" in hold`) could not discriminate, because the
+    # old noun made the sentence a tautology — every rewording kept the pin green, so
+    # reverting to the over-claiming form went unnoticed (fresh review of PR #12016,
+    # P3). The negative arm is what stops that noun returning.
+    assert "the flag is armed in deployment file(s) (Dockerfile.selfhost)" in hold, hold
+    assert "the surface(s) that do arm it" not in hold, hold
     # ⛔ …and the clause must name the armed VARIANT, not the surface ROOT (fresh
     # review of PR #12016, P3). The population this clause speaks about is per FILE,
     # so interpolating the root intersection published "(Dockerfile) … a build that
