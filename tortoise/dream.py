@@ -145,12 +145,13 @@ EMBEDDED_LATENCY_BUDGET_S = 0.5
 # not by text, and `tests/test_11823_propagation_cap_signal.py`
 # (`test_untested_operator_less_population_matches_trivial_stamp`) is what keeps
 # them equal. ⛔ That test builds ITS query FROM this constant (#12138 §6), so a
-# drift in the status VOCABULARY or in the `IMPL|NAND` alternation reddens it —
-# measured on this fixture, whose true count is 2: dropping the status clause
-# 2→3, narrowing the alternation to `IMPL` 2→4, and un-negating the edge term
-# 2→6 (removing that term entirely 2→8). Before #12138 the test compared
-# against a third hand-copied literal and could not see this constant move at
-# all.
+# drift that RE-SPELLS the excluded status, or that moves the `IMPL|NAND`
+# alternation, reddens it — measured on this fixture, whose true count is 2:
+# dropping the status clause 2→3, substituting the excluded status (`<> 'draft'`
+# → `<> 'archived'`) 2→3, narrowing the alternation to `IMPL` 2→4, and
+# un-negating the edge term 2→6 (removing that term entirely 2→8). Before
+# #12138 the test compared against a third hand-copied literal and could not see
+# this constant move at all.
 # Two of this constant's clauses are NOT observable on that fixture, measured:
 # every Point there carries an explicit status (so the `status IS NULL` arm is
 # invisible — and it is load-bearing, since it is what keeps a status-absent

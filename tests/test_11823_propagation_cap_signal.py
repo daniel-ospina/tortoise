@@ -767,8 +767,12 @@ def test_untested_operator_less_population_matches_trivial_stamp(sdk):
                              status="draft")["id"]
     sdk.create_operator("IMPL", live, [draft])
     # The STATUS observable: a draft with NO edge, so only the status conjunct
-    # can keep it out of the constant's population (a widened status vocabulary
-    # would count it and redden the equality below).
+    # can keep it out of the constant's population. ⛔ RE-SPELLING the excluded
+    # status counts it and reddens the equality below (measured: `<> 'draft'` →
+    # `<> 'archived'` gives 2 vs 3). An ADDITIVE widening is INVISIBLE here
+    # (measured: also excluding `'archived'` leaves the count at 2 and this test
+    # GREEN) — see `dream.py`'s residual note, which says the fixture needs a
+    # node of the newly-excluded status before that class is pinned.
     sdk.create_point("statement", "un-edged draft", dedup=False,
                      status="draft")
     # The NAND observable: a claim whose only `IMPL|NAND` edge is a NAND one, so
