@@ -366,7 +366,11 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   sentence, so a second one in the same paragraph could supply the letters, the per-letter verdict
   attributions and the overtaken count while the sentence a lane quotes went stale (measured on the
   pre-fix tool: falsifying the real sentence beside a compliant decoy returned `[]`). This is the §6
-  survivor arm's "keep exactly one" rule, one level down;
+  survivor arm's "keep exactly one" rule, one level down. ⛔ The SAME rule applies to the
+  **complement** list ("still read as written"), which was joined across sentences and compared as a
+  set-union: a second complement sentence could assert a STILL-TRUE letter the real sentence does not,
+  so the page could say *seven of the twelve no longer read as written* beside *only `**(a)**` still
+  read as written* — 7 + 1 against a table of twelve — at rc 0 (measured);
 - every **§3 evidence cell** names a `path:line`, an issue, a command or a §N (§1's own rule), and
   the §N must name a heading that EXISTS — accepting any `§<digit>` let all twelve cells be replaced
   with a reference to a section the page does not have (measured, rc 0). Without this, the whole
@@ -382,7 +386,10 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   appending one left the guard CLEAN). The §1 case is the one that matters most, because §1 is what
   this section names as the authority for the vocabulary §3 is checked against: a sixth claim class
   shaped any other way there is a verdict with **no handling rule**, which is the state §1 exists to
-  prevent. That
+  prevent. §1's header is the **FIRST `|` row and nothing else**: the skip used to be a prefix test on
+  the word `Verdict`, so any row whose first cell merely began with it (`| Verdicts | … |`) escaped the
+  very arm beside it (measured, rc 0), and a table with no header at all is refused too.
+  That
   refusal counts the first table's ROWS and every other `|` line in the section, not only table
   separators, because a lone `|` row appended under a blank line brings no separator: measured, it
   carried the invented verdict `FIXED-IT` and left `--check` at rc 0;
