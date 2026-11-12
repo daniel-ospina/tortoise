@@ -965,6 +965,11 @@ LEG_INVOCATION_RE = re.compile(
 #: (#12069 review round 20, measured false RED on `sudo chmod -R 755 "$b/16/bin"`).
 _PERMISSION_WORDS = frozenset({"chmod", "chown", "chgrp"})
 
+#: Options whose NEXT word is their argument, so it is not the command word.
+_OPTIONS_TAKING_A_VALUE = frozenset(
+    {"-u", "-g", "-C", "-o", "-t", "--user", "--group", "--target-directory"}
+)
+
 
 def _leg_indexes(steps: list[dict]) -> list[int]:
     """Steps that RUN the D8 record capstone — the leg the pin must precede.
@@ -1021,12 +1026,41 @@ def _leg_indexes(steps: list[dict]) -> list[int]:
                 begin += 1
             line_start = commands.rfind("\n", 0, begin) + 1
             line = commands[line_start:]
-            if CAPSTONE_FILE not in line:
+            # ⛔ AN INVOCATION INSIDE A COMMENT IS NOT AN INVOCATION (#12069 review
+            # round 21, measured FAIL-OPEN). `;#` is not a list separator, so the
+            # command-position walk reached the PREVIOUS command and answered
+            # "command" — `true;# python -m pytest <capstone>` and
+            # `set -euo pipefail;# … pytest …` both became the leg, collapsing the
+            # window end exactly as the prose decoy did. `_run_commands` strips only
+            # a whitespace-led `#`, so the `;#`/`:;#`/`&&#` family needs this read.
+            head = line[: begin - line_start]
+            if head != _without_comment(head):
                 continue
             if _is_command_position(line, begin - line_start):
                 found.append(index)
                 break
     return found
+
+
+def _window_end(leg_indexes: list[int]) -> int:
+    """The step at which the pin/leg window CLOSES: the LAST step that runs the leg.
+
+    ⛔ `min()` WAS THE DECOY (#12069 review round 21, measured FAIL-OPEN). The four
+    rows that grade `[pin_index, leg_start)` read this index as the window END, so
+    `min()` meant that ANY earlier step the leg-rule believed in — a `grep -rn
+    "pytest tests/test_9567_record_capstone.py"`, a `cat <<EOF` body, a step inside
+    `if false; then … fi` — truncated the window, and the real leg's
+    `env: PATH: /usr/bin:/bin` (which replaces the pinned PATH outright) fell
+    outside it. Seven such decoys were measured GREEN on `e155d5eeaf`.
+
+    `max()` makes the whole class fail CLOSED instead: a decoy BEFORE the real leg
+    can no longer shorten the window (the real leg is still inside it), and a step
+    between two legs is graded, which is what "a PATH set after the leg cannot move
+    it" means for a job that runs the capstone twice. Rows that ask whether the pin
+    comes first still use `min()` — the pin must precede the FIRST leg.
+    """
+
+    return max(leg_indexes)
 
 
 def _unreachable_guards(
@@ -1146,13 +1180,32 @@ def _replaces_a_client_binary(line: str) -> bool:
             # rest of this file already declares for variable resolution.
             if _segment_verb(line, dir_match.start()) in _PERMISSION_WORDS:
                 continue
-            # `CLIENT_DIR_ANY_BASE_RE` stops at `bin`, so the residue carries the
-            # rest of THIS token (a trailing `/`, a closing quote) — strip that,
-            # and only a residue that can start ANOTHER WORD is a second operand.
-            rest = re.sub(r"^[\"'/]+", "", line[dir_match.end() :]).lstrip()
-            if rest[:1] and (rest[0].isalnum() or rest[0] in "$\"'/\u007e.-_"):
-                continue
-            return True
+            rest = line[dir_match.end() :]
+            # `CLIENT_DIR_ANY_BASE_RE` stops at `bin`, so a residue that does not
+            # start a NEW word (`/`, `"`, `.`, the rest of the same token) is not an
+            # operand of its own — drop it before deciding.
+            if rest[:1] and not rest[0].isspace():
+                rest = re.sub(r"^\S+", "", rest)
+            nxt = rest.lstrip()
+            # ⛔ A TRAILING OPTION IS NOT A SECOND OPERAND (#12069 review round 21,
+            # measured FAIL-OPEN — a regression this round introduced): reading any
+            # word-start residue as "another operand" made the pinned dir a SOURCE
+            # one option later, so appending `-v` (or `--delete`) to the rewrite
+            # turned it GREEN again:
+            #
+            #     sudo cp -a /tmp/pkg/. "$b/16/bin" -v          accepted
+            #     sudo rsync -a /tmp/pkg/ "$b/16/bin" --delete  accepted
+            #     sudo cp -a /tmp/pkg/. "$b/16/bin"             refused
+            #
+            # Only `-t`/`--target-directory` makes what follows the DESTINATION; any
+            # other trailing option leaves the pinned dir as the last operand.
+            if nxt[:1] == "-":
+                if nxt.split()[0] in {"-t", "--target-directory"}:
+                    continue
+                return True
+            if not nxt or nxt[0] in "&;|)`>":
+                return True
+            continue
     # ⛔ A NAME IN COMMAND POSITION IS BEING RUN, NOT WRITTEN (#12069 review 12,
     # measured). `BINARY_NAME_RE.search(line, verb.end())` accepted a name ANYWHERE
     # after the verb, so a mutating verb earlier on the line was enough — and with
@@ -1201,8 +1254,23 @@ def _segment_verb(line: str, start: int) -> str:
     """
 
     segment = re.split(r"[;&|()`\n]", line[:start])[-1]
-    for token in segment.split():
-        if token in _WRAPPER_WORDS or "=" in token or token.startswith("-"):
+    tokens = segment.split()
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token in _WRAPPER_WORDS or "=" in token:
+            index += 1
+            continue
+        if token in _OPTIONS_TAKING_A_VALUE:
+            # ⛔ AN OPTION'S VALUE IS NOT THE VERB (#12069 review round 21,
+            # measured false RED): skipping only the option left its ARGUMENT as
+            # the command word, so `sudo -u postgres chmod -R 755 "$b/16/bin"`
+            # read as `postgres` — the permission exemption never fired and a
+            # correct tree was refused, while the same line without `-u` passed.
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
             continue
         return token.rsplit("/", 1)[-1]
     return ""
@@ -2908,7 +2976,7 @@ def test_the_client_pin_names_the_servers_major_and_prepends_it(job: dict) -> No
     text = _run_commands(pin)
     leg_indexes = _leg_indexes(steps)
     assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
-    leg_start = min(leg_indexes)
+    leg_start = _window_end(leg_indexes)
 
     # ⛔ A PREPEND INSIDE A CONSTANT-CONDITION BLOCK IS PRESENT AND INERT (#12051
     # review round 8). Every rule below reads a line as a unit, so an enclosing
@@ -3035,7 +3103,7 @@ def test_no_step_rewrites_the_client_path_to_another_major(job: dict) -> None:
         "the record capstone (D8) is not in any run step of this job — see the "
         "pin-step assertion above"
     )
-    leg_start = min(leg_indexes)
+    leg_start = _window_end(leg_indexes)
 
     mentions = _github_path_writes(steps, job)
     assert mentions, (
@@ -3199,7 +3267,7 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     server_major = _postgres_image_majors(job)[0]
     leg_indexes = _leg_indexes(steps)
     assert leg_indexes, "the record capstone (D8) is not in any run step of this job"
-    leg_start = min(leg_indexes)
+    leg_start = _window_end(leg_indexes)
 
     # INERT-BUT-PRESENT first: an enclosing constant-condition block leaves every
     # structural assertion below satisfied and the branch unable to fire.
@@ -4779,6 +4847,8 @@ def test_a_step_that_only_NAMES_the_capstone_is_not_the_leg() -> None:
         'echo "about to run pytest on tests/test_9567_record_capstone.py"',
         "echo about to run python -m pytest tests/test_9567_record_capstone.py",
         "echo hi;# pytest tests/test_9567_record_capstone.py",
+        "true;# python -m pytest tests/test_9567_record_capstone.py",
+        "set -euo pipefail;# we will run python -m pytest tests/test_9567_record_capstone.py",
         "true # pytest tests/test_9567_record_capstone.py",
     ):
         assert _leg_indexes([{"run": prose}, steps[1]]) == [1], (
@@ -4805,12 +4875,74 @@ def test_a_step_that_only_NAMES_the_capstone_is_not_the_leg() -> None:
             "refuses a correct tree and the `$GITHUB_PATH` row crashes"
         )
 
+    # ⛔ A REAL LEG WHOSE FILES COME FROM A VARIABLE (#12069 review round 21,
+    # measured false RED — a regression round 20 introduced). Requiring the
+    # capstone's NAME on the same LINE as the invocation refused an ordinary step
+    # where the file list is an argument:
+    #
+    #     FILES="tests/test_9567_record_capstone.py tests/other.py"
+    #     python -m pytest $FILES -q
+    #
+    # — four rows then failed with "the record capstone (D8) is not in any run step
+    # of this job", which is untrue. The conjunction is the STEP's (the filename
+    # and an invocation at a command position), not one physical line's.
+    assert _leg_indexes(
+        [
+            {
+                "run": "FILES=\"tests/test_9567_record_capstone.py tests/other.py\"\n"
+                "python -m pytest $FILES -q"
+            }
+        ]
+    ) == [0], "a leg whose file list lives in a variable was not recognised"
+
     # A real leg BELOW an `echo` line in the same script is still the leg: the
     # command-position walk must not read the previous line's `echo` as this
     # line's verb (that was the shape a naive per-script walk got wrong).
     assert _leg_indexes([{"run": "echo pin\npytest tests/test_9567_record_capstone.py"}]) == [
         0
     ], "a multi-line step lost its leg because an earlier line began with `echo`"
+
+
+def test_a_decoy_before_the_leg_cannot_shorten_the_pin_window() -> None:
+    """The window END is the LAST leg, so a decoy cannot truncate it.
+
+    ⛔ `min(_leg_indexes(...))` WAS ITSELF THE FAIL-OPEN (#12069 review round 21,
+    measured). Seven sentences that the leg-rule still believes in — a `grep -rn
+    "pytest <capstone>"`, a `cat <<EOF` body, an `if false; then pytest …; fi` step,
+    `command -v pytest && ls …`, `[ -n pytest ] && grep …`, a `$CMD …` — were
+    measured GREEN on `e155d5eeaf`: each became the window end, so the real leg's
+    `env: PATH: /usr/bin:/bin` fell outside `[pin, leg_start)` and the bypass the
+    `env:`/`PATH` rows exist to refuse went ungraded.
+
+    Reading the window end as the LAST leg makes the whole class fail CLOSED — the
+    real leg is inside the window even when a decoy is believed too — which is why
+    this row is worth more than any number of per-decoy rules.
+    """
+
+    for decoy in (
+        'grep -rn "pytest tests/test_9567_record_capstone.py" .github/',
+        "cat <<EOF\npython -m pytest tests/test_9567_record_capstone.py\nEOF",
+        "if false; then pytest tests/test_9567_record_capstone.py; fi",
+        "command -v pytest && ls tests/test_9567_record_capstone.py",
+        "$CMD tests/test_9567_record_capstone.py",
+    ):
+        steps = [
+            {"run": "apt-get install -y postgresql-client-16"},  # 0: the pin
+            {"run": decoy},  # 1: the decoy
+            {
+                "run": "pytest tests/test_9567_record_capstone.py",  # 2: the real leg
+                "env": {"PATH": "/usr/bin:/bin"},
+            },
+        ]
+        end = _window_end(_leg_indexes(steps))
+        assert end == 2, (
+            f"{decoy.splitlines()[0]!r} moved the window end to {end}: the leg's own "
+            "`env: PATH` is outside every window and the pin bypass is ungraded"
+        )
+        assert _env_path_replacements(steps, 16, start=1, end=end), (
+            f"{decoy.splitlines()[0]!r} shortened the window past the real leg's "
+            "`env: PATH` — the row that exists to refuse it stayed green"
+        )
 
 
 def test_a_step_env_outside_the_pin_leg_window_is_not_an_offender() -> None:
@@ -5779,6 +5911,26 @@ DIRECTORY_REPLACE_POLARITY = [
         "a backup copies the pinned dir OUT: it is the SOURCE, not the target",
     ),
     ('sudo chmod -R 755 "$b/16/bin"', False, "a mode change installs no other major"),
+    (
+        'sudo cp -a /tmp/pkg/. "$b/16/bin" -v',
+        True,
+        "a trailing option is not a second operand: still the pinned dir",
+    ),
+    (
+        'sudo rsync -a /tmp/pkg/ "$b/16/bin" --delete',
+        True,
+        "`--delete` after the destination does not make it a source",
+    ),
+    (
+        'cp -a "$b/16/bin" -t "$RUNNER_TEMP/backup"',
+        False,
+        "`-t` makes the pinned dir the SOURCE of a backup",
+    ),
+    (
+        'sudo -u postgres chmod -R 755 "$b/16/bin"',
+        False,
+        "an option's VALUE is not the verb, so the permission exemption still fires",
+    ),
     ('sudo chown -R postgres "$b/16/bin"', False, "…and neither does an ownership change"),
     ('mkdir -p "$RUNNER_TEMP/tools/bin"', False, "an ordinary scratch dir"),
     ('rm -rf "$RUNNER_TEMP/tools/bin"', False, "a scratch dir whose token is a word"),
