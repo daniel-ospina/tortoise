@@ -728,3 +728,41 @@ def test_the_phrase_offset_survives_case_and_spacing(monkeypatch):
         assert body[held[0]["phrase_offset"]:held[0]["phrase_offset"] + 10].lower() == "the former", (
             f"the offset must point AT the phrase (got "
             f"{held[0]['phrase_offset']}: {body[held[0]['phrase_offset']:][:14]!r})")
+
+
+def test_the_phrase_offset_does_not_share_a_coordinate_base_with_span(monkeypatch):
+    """``span[0] + phrase_offset`` is not a document index, and the gap is not 1.
+
+    The code's COORDINATE BASE note forbids combining the two fields of one
+    record — ``phrase_offset`` indexes the section's STRIPPED body, ``span`` is
+    document coordinates. That note used to claim the combination "lands one
+    char left of the surface", which does NOT reproduce (#12102 review P3): the
+    gap is the WIDTH OF THE STRIPPED PREFIX — 0 for a flush-left body and -3 for
+    a body indented three spaces. A constant-offset story is worse than no
+    story, because it invites a caller to apply a constant correction; this
+    measures both arms so the note cannot drift back into a plausible wrong
+    number.
+    """
+    monkeypatch.setenv(FLAG, "1")
+    payload = {"subjects": [{"name": "it", "subjectKind": "other"}],
+               "objects": [], "aboutEntities": []}
+    monkeypatch.setattr(extractor_mod, "_SemanticStage", _FixedStage)
+    monkeypatch.setattr(_FixedStage, "payload", payload, raising=False)
+    ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
+
+    for pad in ("", "   "):
+        api, _proj, _log = _proj_api()
+        doc = ("## Product Strategy\n" + pad
+               + "The team met with the vendor and it was decided.\n")
+        held = ext.extract_entities(doc, "strategy.md", api)["held_subjects"]
+        assert len(held) == 1, f"expected one hold, got {held!r}"
+        span, offset = held[0]["span"], held[0]["phrase_offset"]
+        assert offset is not None, (
+            f"the phrase is present (pad={pad!r}); a None offset here is the "
+            "'genuinely absent' value")
+        true_index = doc.index("it was")
+        assert (span[0] + offset) - true_index == -len(pad), (
+            "the offset is documented as indexing the STRIPPED body, so "
+            f"span[0]+offset must miss the document index by exactly the stripped "
+            f"prefix width ({-len(pad)}) for pad={pad!r}; measured "
+            f"{span[0] + offset} against {true_index}")
