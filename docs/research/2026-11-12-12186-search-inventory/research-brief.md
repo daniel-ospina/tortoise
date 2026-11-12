@@ -433,7 +433,7 @@ block** (`:20785-20788`) — so the index is on vendor defaults: default languag
 |---|---|---|
 | `tortoise/sparse.py:13-14` | RediSearch's *"TFIDF scorer"* ranks by term-overlap, *"which is the BM25-style rank behavior the epic's scope prescribes"* | ⛔ **wrong on the mapping.** TF-IDF is not BM25-style: it has **no document-length normalisation** (that is Redis's separate `TFIDF.DOCNORM`), and its idf is the vendor's own documented `log2(1 + total_docs / docs_with_term(term))` rather than BM25's probabilistic form (`ln(1 + (N−n+0.5)/(n+0.5))`, whose `+1` inside the log is what keeps the score non-negative). So a length-heavy profile scores differently under the two. The vendor calls it TF-IDF; so should we. |
 | `tortoise/bm25.py:7-10` | quotes `sparse.py` (`bm25.py:5`, citing `sparse.py:13-14`), then reports the **measurement**: on the embedded (falkordblite) lane the shipped scorer *"behaves like a per-matched-term count whose weight is NOT driven by rarity and whose score is NOT driven by document length"* | ✅ the measurement is the authority for **that lane only**: the *embedded* scorer prices **neither idf nor length**. ⚠️ It does **not** characterise the hosted `db.idx.fulltext` leg — `SEARCH-ARCHITECTURE.md:250-251` itself records that leg as unmeasured — so the hosted leg's idf/length behaviour is an **open measurement**, not a finding of this row. |
-| `SEARCH-ARCHITECTURE.md:§6.2` (`:163`, `:241-246`, `:268-269`) | *"The FalkorDB leg is RediSearch's TF-IDF scorer"* (`:163`), the 8–23 nDCG@10 gap is *"measured against a BM25 implementation"* (`:246`), **how far our hosted leg sits from that baseline is unmeasured** (`:246`), and *"the text index **stays** until **M3** measures…"* (`:268-269`) | ✅ **correct, and more careful than its own epic row** |
+| `SEARCH-ARCHITECTURE.md:§6.2` (`:163`, `:241-246`, `:268-269`) | *"The FalkorDB leg is RediSearch's TF-IDF scorer"* (`:244`; the section table restates it at `:163`), the 8–23 nDCG@10 gap is *"measured against a BM25 implementation"* (`:246`), **how far our hosted leg sits from that baseline is unmeasured** (`:246`), and *"the text index **stays** until **M3** measures…"* (`:268-269`) | ✅ **correct, and more careful than its own epic row** |
 
 ⇒ **The epic's C2 row title, "BM25 instead of TF-IDF", is literally accurate for the product lane.** Round 1
 corrected the status (which was right) but also proposed dropping the **"build BM25"** reading — its §4 C2
@@ -828,7 +828,7 @@ persists a merge.
    `resolved_from` write retires the node in every reader: `_ENTITY_READ` excludes it
    (`entity_resolver.py:207`), `find_live_holder` hops it (`:624`), and `entity_identity` collapses it on the
    identity path (`:589-594`). `dedup_reviewed='link'` would be **read by nothing** — the tree reads only
-   `'merge'` (`entity_resolver.py:694`, `sdk.py:23664`, `:23674`) and `'reject'` (`sdk.py:24324`) — so the write
+   `'merge'` (`entity_resolver.py:227`, `:694`, `sdk.py:23664`, `:23674`) and `'reject'` (`entity_resolver.py:229`, `sdk.py:24557`) — so the write
    would be an unlabelled merge, not a link-without-merge band. ⛔ **N-4's dispatch readiness is therefore
    unchanged**: the mid band still needs the `SAME_AS` edge (the 2730 owner question) or a distinct read path
    for a linked-not-merged pair. Declare that, do not assume a redirect buys it —
