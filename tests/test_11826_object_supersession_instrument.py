@@ -2848,3 +2848,57 @@ def test_the_direct_ambiguous_confirm_clause_demands_no_op_type(sdk):
     assert "no ``op_type`` set" in fix, (
         "a direct edge refuses an op_type-only carrier, so the clause must say so: "
         + fix)
+
+
+def test_a_neutral_row_with_a_DRAFT_successor_keeps_DROP(sdk):
+    """Promote-then-carry is a FLOWING repair; on a neutral row it restores nothing.
+
+    The draft arm was added for a flowing row (promoting measurably repairs there),
+    but ``_triage`` fires on carrier state alone, so a neutral row got BOTH the DROP
+    sentence and "CARRY the IMPL … onto it". Measured: promote the draft, then carry
+    the neutral input → ``effective_n 2.0`` (the bare prior), against ``2.5236`` for
+    the flowing control after the same two steps (#12210 review, P2).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    op = sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
+    assert _q(sdk, "MATCH (o {id:$i}) RETURN o.direction", {"i": op["id"]}) == [["-"]]
+    _supersede_object(sdk, "PolicyV1", "PolicyV2")
+    sdk.update_entity(v2["id"], status="draft")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == v1["id"])
+    fix = issue.fix
+    assert "§3.1's disposition is DROP" in fix, fix
+    assert "CARRY the IMPL" not in fix, (
+        "promote-then-carry transfers nothing on a neutral edge: " + fix)
+    assert "ONCE PROMOTED" not in fix, fix
+
+
+def test_a_neutral_id_less_row_gets_no_chain_tail(sdk):
+    """The id-less arm's ``tail`` is live, and must be suppressed on a neutral row.
+
+    ``sup_id is None`` is not ``carrier_count == 0``: the ``supersededBy`` NAME still
+    resolves, so ``_chain_tail`` emits "re-point onto whatever now carries the claim"
+    / "promote it to live as well" / "target a CLAIM successor" beside this arm's own
+    DROP (#12210 review, P3).
+    """
+    p = sdk.create_point("statement", "the gateway enforces the policy")
+    v1 = _obj(sdk, "PolicyV1")
+    v2 = _obj(sdk, "PolicyV2")
+    sdk.create_operator("IMPL", p["id"], [v1["id"]], semantics="related")
+    _q(sdk, "MATCH (o:Object {id:$i}) SET o.status='superseded', "
+            "o.supersededBy='PolicyV2' REMOVE o.id", {"i": v1["id"]})
+    sdk.update_entity(v2["id"], status="archived")
+
+    issue = next(i for i in _issues(sdk, "superseded_object_active_edges")
+                 if i.node_id == "PolicyV1")
+    fix = issue.fix
+    assert "No id-keyed repair is possible" in fix, fix
+    assert "delete this edge: §3.1's disposition here is DROP" in fix, fix
+    for advice in ("re-point onto whatever now carries the claim",
+                   "target a CLAIM successor", "promote it to live"):
+        assert advice not in fix, (
+            f"{advice!r} is transfer advice on a row whose instruction is DELETE: "
+            + fix)

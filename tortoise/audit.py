@@ -1514,7 +1514,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "kept, not dropped: carry it where EP can read it (a :Point "
                 "operator the engine evaluates), never by re-attaching it to a "
                 "successor that cannot carry it")
-        elif s["carrier_count"] == 1 and (s["carrier_status"] or "") == DRAFT_STATUS:
+        elif (s["carrier_count"] == 1
+              and (s["carrier_status"] or "") == DRAFT_STATUS and not neutral):
             # ⛔ The DRAFT row contradicted itself: the destination withdrew the name
             # ("NOT the one it names … because it is 'draft'") while THIS disposition
             # said "an IMPL may CARRY to the successor" and ``_chain_tail`` said
@@ -1523,6 +1524,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             # node absent), and the SAME write after `status='live'` restores it
             # (`effective_n 2.263`) — so the draft IS the destination, one promotion
             # away, and the disposition names that precondition instead of denying it.
+            # ⛔ …and NOT on a NEUTRAL row: promote-then-carry on a neutral edge
+            # restores nothing (measured ``effective_n 2.0``, the bare prior, versus
+            # ``2.5236`` for the flowing control), so the DROP sentence stands
+            # (#12210 review, P2).
             disposal = (
                 "a DRAFT successor is the destination ONCE PROMOTED: set it "
                 "``status='live'`` first, then CARRY the IMPL (and any NAND that "
@@ -1781,11 +1786,17 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                    f"re-point this {s['edge_type']} input onto {dest}, "
                    "deleting the edge into the old endpoint")
                 + ". "
-                # ``tail`` is "" here by construction (``_chain_tail`` returns "" at
-                # ``carrier_count`` 0), so no neutral guard is needed — and none may
-                # be claimed: a guard that can never change the output is not a
-                # defence (#12210 review, P3).
-                + tail
+                # ⛔ ``tail`` IS guarded here, and the guard is live: this arm is
+                # ``sup_id is None``, not ``carrier_count == 0`` — the
+                # ``supersededBy`` NAME can still resolve to one Object, in which
+                # case ``_chain_tail`` emits ("re-point onto whatever now carries the
+                # claim", "promote it to live as well", "target a CLAIM successor")
+                # beside this arm's own DROP. Measured on neutral id-less rows with an
+                # archived / draft / operator-shaped successor: every one of those
+                # clauses was emitted and none of them can transfer anything
+                # (#12210 review, P3). An earlier comment here claimed the tail was
+                # "" by construction — it is not, and that claim cost a round.
+                + ("" if s["neutral_row"] else tail)
                 + _archive_clause(s))
         if not s["carrier_count"]:
             # ⛔ "Nothing to re-point onto" would be FALSE whenever a :Subject or
