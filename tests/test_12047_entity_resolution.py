@@ -2728,6 +2728,135 @@ _PIPELINE_DECL = {
 }
 
 
+class TestThe12120ReviewRound6:
+    """Round 6: the never-guess COUNT must ask the writer's (LIVE-only) question,
+    and a duplicate id must not make the merge hop order-dependent.
+
+    `_live_holders_same_entity` is live-only, so the create door legitimately mints
+    a second live node under one folded key beside a SUPERSEDED ex-incarnation.
+    Counting rows without a status filter turned that dead incarnation into a
+    "competing carrier" and refused a fold that used to apply — the same
+    reader/writer disagreement, in the other direction.
+    """
+
+    @staticmethod
+    def _apply(sdk, records):
+        from tortoise.commit_ops import apply_supersessions
+
+        msgs: list[str] = []
+        skips: list[dict] = []
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk, records, session_id="s-12120-r6",
+            skipped=skips,
+            warn=lambda m, *a, **k: msgs.append(m % a if a else m))
+        return applied, skips, msgs
+
+    def test_a_terminal_ex_incarnation_does_not_block_a_live_fold(self, sdk_factory):
+        """A superseded node is not a competing carrier."""
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            dead = sdk.create_object("Acme Corp", "document")["id"]
+            sdk.update_entity(dead, status="superseded")
+            live = sdk.create_object("ACME CORP", "document")["id"]
+            assert live != dead
+            g.query("MATCH (o:Object {id:$id}) SET o.canonical_name='acme corp'",
+                    params={"id": live})
+            sdk.create_object("Gamma Ltd", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "ACME CORP", "supersedes_by": "Gamma Ltd",
+                 "evidence": "test"}])
+            assert applied == 1, (
+                "a SUPERSEDED ex-incarnation was counted as a competing "
+                f"carrier: {(applied, skips, msgs)!r}")
+            row = g.query("MATCH (o:Object {id:$id}) RETURN o.status",
+                          params={"id": live}).result_set
+            assert row and row[0][0] == "superseded", row
+            dead_row = g.query("MATCH (o:Object {id:$id}) RETURN o.supersededBy",
+                               params={"id": dead}).result_set
+            assert dead_row and dead_row[0][0] != "Gamma Ltd", dead_row
+        finally:
+            sdk.close()
+
+    def test_a_terminal_ex_incarnation_does_not_block_a_live_subject_fold(
+            self, sdk_factory):
+        """The Subject twin of the same count."""
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            dead = sdk.create_subject("Acme Corp", "organization")["id"]
+            g.query("MATCH (s:Subject {id:$id}) SET s.status='superseded', "
+                    "s.supersededBy='Old Corp'", params={"id": dead})
+            live = sdk.create_subject("ACME CORP", "organization")["id"]
+            g.query("MATCH (s:Subject {id:$id}) SET s.canonical_name='acme corp'",
+                    params={"id": live})
+            sdk.create_subject("Gamma Ltd", "organization")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "ACME CORP", "supersedes_by": "Gamma Ltd",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            row = g.query("MATCH (s:Subject {id:$id}) RETURN s.status",
+                          params={"id": live}).result_set
+            assert row and row[0][0] == "superseded", row
+        finally:
+            sdk.close()
+
+    def test_an_id_less_object_refusal_is_reported(self, sdk_factory):
+        """The id-less Object drop reaches `skipped`, like its Subject twin."""
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (o:Object {name:'Legacy Thing', objectKind:'document', "
+                "status:'live', canonical_name:'legacy thing'})")
+            sdk.create_object("New Thing", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Legacy Thing", "supersedes_by": "New Thing",
+                 "evidence": "test"}])
+            assert applied == 0, (applied, skips, msgs)
+            assert skips, (
+                "the id-less Object refusal never reached the caller's skipped "
+                f"list: {skips!r} (warnings: {msgs!r})")
+            assert any("id-less" in str(s.get("reason", "")) for s in skips), skips
+        finally:
+            sdk.close()
+
+    def test_a_duplicate_id_with_one_pointer_is_refused_either_way(
+            self, sdk_factory):
+        """The merge hop must not make the verdict depend on row order.
+
+        Two nodes claim one id and exactly ONE carries `resolved_from`;
+        `follow_resolved_from` reads a single row for the id, so the group key —
+        and with it whether the never-guess refusal fires at all — used to depend
+        on which row the backend returned first.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "CREATE (s:Object {id:'r6-survivor', name:'Kept', "
+                "objectKind:'document', status:'live'}) "
+                "CREATE (a:Object {id:'r6-dup', name:'Widget', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'widget', resolved_from:'r6-survivor'}) "
+                "CREATE (b:Object {id:'r6-dup', name:'Widget', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'widget'})")
+            sdk.create_object("New Widget", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Widget", "supersedes_by": "New Widget",
+                 "evidence": "test"}])
+            assert applied == 0, (
+                "a duplicated id was collapsed through the merge hop: "
+                f"{(applied, skips, msgs)!r}")
+            assert skips, f"the never-guess refusal did not report: {skips!r}"
+            statuses = g.query(
+                "MATCH (o:Object {id:'r6-dup'}) RETURN o.status").result_set
+            assert all(r[0] != "superseded" for r in statuses), statuses
+        finally:
+            sdk.close()
+
+
 class TestThe12120ReviewRound3:
     """The three defects review round 3 found in the round-2 fix itself.
 

@@ -971,6 +971,14 @@ _ALLOWED_OPERATOR = {
     },
     'tortoise/hosted_api.py': {
         '_space = f"({_space}) AND o.name = $exact"': 1,
+        # #12120 review round 6: the EVENT channel's twin of the same narrowing.
+        # Its reference is resolved in §6a AFTER the writes land, so the
+        # exactness constraint cannot ride on the probe's WHERE clause; the
+        # deferred resolution asks for the exact spelling instead (a fold-only
+        # carrier would be the un-gated `#4934` edge, while F6's exact carrier
+        # keeps its edge). Same disposition as the line above — the fold is the
+        # writer's, and this only refuses a fold-only carrier.
+        '_exact_rows = proj.g.query( "MATCH (o:Object) WHERE o.name = $n RETURN o.id", params={"n": _name}).result_set': 1,
     },
     'tortoise/session_link.py': {
         # D: the suffix probe already enforces EXACTLY-ONE (`if len(rows) == 1`),

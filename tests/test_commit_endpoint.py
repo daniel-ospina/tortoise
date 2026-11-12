@@ -5738,6 +5738,36 @@ class TestThe12120HostedAboutObjectAnchor:
             "the claim's fold-equivalent about name dropped its `aboutObject` "
             "edge — the hosted anchor resolved on the raw name")
 
+    def test_an_event_keeps_the_edge_for_an_exact_name_carrier(self, client):
+        """Round 6: F6 holds on the EVENT channel too — narrow, don't drop.
+
+        The reference `the team` fold-equals a declared subject-kind entity
+        `The Team`, and an Object `the team` exists whose name IS the reference:
+        that carrier keeps its `aboutObject` edge (the same rule the Point anchor
+        pins), while a fold-only carrier would not get one.
+        """
+        _seed_objects(client, "s12120-ev-f6-1", ["the team"])
+        raw = _raw_payload(
+            1, session_id="s12120-ev-f6-2",
+            entities=[{"name": "The Team", "kind": "organization",
+                       "passes_frequency_gate": True},
+                      {"name": "the team", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            points=[_point(0, about_entities=[])],
+            events=[{"id": "ev_" + "1" * 62, "eventKind": "decision",
+                     "content": "e0", "confidence": 0.8,
+                     "source_ref": "session.md",
+                     "about_entities": ["the team"]}])
+        resp = _commit(client, raw)
+        assert resp.status_code == 200, resp.text[:800]
+
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (:Event)-[:aboutObject]->(o:Object {name:'the team'}) "
+            "RETURN count(o)").result_set
+        assert rows and rows[0][0] >= 1, (
+            "F6's exact-name carrier lost its Event edge to the fold arm")
+
     def test_an_event_fold_variant_of_a_subject_kind_name_is_skipped(
             self, client):
         """#12120 review round 4: the EVENT channel needs the FOLD arm.

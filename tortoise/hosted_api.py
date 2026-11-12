@@ -21319,7 +21319,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # with pointKind event). Content-addressed ev_<sha> ids; MERGE-safe. ──
     #: (eventId, Object name) pairs the events mention — wired in step 6a, after
     #: step 6 has REGISTERED the entities (see the note at the append site).
-    _deferred_about_objects: list[tuple[str, str]] = []
+    # (event id, reference, exact_only) — `exact_only` marks a reference that
+    # only FOLD-equals a declared subject-kind name, so §6a resolves it by an
+    # exact-name match only (review round 6; the Point anchor's narrowing).
+    _deferred_about_objects: list[tuple[str, str, bool]] = []
     for ev in (payload.events or []):
         proj.g.query(
             "MERGE (e:Event {eventId:$eid}) "
@@ -21339,15 +21342,29 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             params={"eid": ev.id, "did": doc_id},
         )
         for name in ev.about_entities:
-            if str(name) in subject_entity_names or _fold(str(name)) in (
-                    subject_entity_names_folded):
+            _exact_only = False
+            if str(name) in subject_entity_names:
+                _subject_channel = True
+            elif _fold(str(name)) in subject_entity_names_folded:
+                # Fold-equal only: an EXACT-name Object is still F6's carrier and
+                # keeps its edge; a fold-only one must not get it.
+                _subject_channel = False
+                _exact_only = True
+            else:
+                _subject_channel = False
+            if _subject_channel:
                 # #1370 (F5): the FOLD arm is required here (#12120 review round
                 # 4): this channel's resolver below (`resolve_fold_name`, §6a)
                 # is fold-WIDE, so an exact-only guard left a fold-equivalent
                 # spelling of a subject-kind name free to write the un-gated
-                # `aboutObject` edge the `#4934` rule forbids. There is no F6
-                # exactness exception on THIS channel — the drop is total and
-                # deliberate (see below), so nothing intended is lost.
+                # `aboutObject` edge the `#4934` rule forbids.
+                # ⛔ Round 6 corrects the round-4 reasoning: dropping here is NOT
+                # free. F6's case — a legitimately-cased Object whose name IS the
+                # reference — must keep its edge on every channel, and the three
+                # sibling sites narrow (`AND o.name = $exact`) instead of
+                # dropping. So the fold arm only marks the reference EXACT-ONLY
+                # (see the deferral below): the exact spelling still resolves, a
+                # fold-only carrier does not.
                 # DELIBERATE drop, not a hand-off. This loop writes
                 # `aboutObject` ONLY — the binder reads a Point's `slots`, not
                 # an Event's `about_entities`, so nothing replaces this edge.
@@ -21367,7 +21384,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # registered the entity with its real minted id. Resolving HERE
             # found no holder for a name this payload introduces and dropped the
             # edge for exactly the case P2-4 was filed about.
-            _deferred_about_objects.append((ev.id, name))
+            _deferred_about_objects.append((ev.id, name, _exact_only))
 
     # ── 4. Source bridge: the session Source (#4005 — the canonical
     # ``session:<session_id>`` identity ONTOLOGY §4.6 registers, the SAME url
@@ -21825,10 +21842,21 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # (`projection/entities.py:4896` status-fold target, `:5275`
     # `EventRecorded.object`), i.e. one reference with two dispositions, the
     # live/replay parity break R8 forbids.
-    for _eid, _name in _deferred_about_objects:
-        _resolved = resolve_fold_name(proj.g, "Object", _name,
-                                      context="session-commit aboutObject",
-                                      mention=True)
+    for _eid, _name, _exact_only in _deferred_about_objects:
+        if _exact_only:
+            # Fold-equal to a declared subject-kind name: attribute an EXACT-name
+            # Object only (the `#4934` rule), never a fold-only carrier. The
+            # resolver cannot express "exact spelling", so ask directly.
+            _exact_rows = proj.g.query(
+                "MATCH (o:Object) WHERE o.name = $n RETURN o.id",
+                params={"n": _name}).result_set
+            _resolved = (_exact_rows[0][0]
+                         if len(_exact_rows) == 1 and _exact_rows[0][0]
+                         else None)
+        else:
+            _resolved = resolve_fold_name(proj.g, "Object", _name,
+                                          context="session-commit aboutObject",
+                                          mention=True)
         if _resolved:
             proj.g.query(
                 "MATCH (e:Event {eventId:$eid}), (o:Object {id:$oid}) "

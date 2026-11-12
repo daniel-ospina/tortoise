@@ -776,46 +776,53 @@ def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
     ``(ID(n), n.id, n.name, …)`` while ``_successor_candidates`` carries
     ``(n.id, n.name, n.status)``, and one column index cannot serve both.
 
-    ⛔ Two rows that CLAIM the same id without a merge pointer between them are
-    NOT one entity — that is the raw-corruption shape this module already has a
-    refusal for (``len(by_id) > 1``, ``\"ambiguous … id\"``). The group's DIRECT
-    claimants are counted, and when more than one claims the key every row of that
-    group is returned separately, so the caller's never-guess discipline still
-    sees two (review round 2: keying the group on the ``resolved_from`` return,
-    which is the id UNCHANGED when there is no pointer, merged two duplicate-id
-    nodes into one \"entity\" and let a fold that used to be refused apply to
-    both).
+    ⛔ Two rows that CLAIM the same id are NOT one entity — that is the
+    raw-corruption shape this module already has a refusal for (``len(by_id) > 1``,
+    ``\"ambiguous … id\"``). Such rows are kept apart BEFORE the merge hop, each as
+    its own entity, so the caller's never-guess discipline still sees two — and so
+    the verdict cannot depend on backend row order, which it would if the hop ran
+    for a duplicated id and only one duplicate carried ``resolved_from`` (review
+    rounds 2 and 6; keying a group on the ``resolved_from`` return, which is the id
+    UNCHANGED when there is no pointer, otherwise merges duplicate-id nodes into
+    one \"entity\"). Duplicates reached only through the survivor FETCH are caught
+    there (``LIMIT 2``).
     """
     if not rows:
         return []
     proj = projection or "ID(n), n.id, n.name, n.status, n.supersededBy"
     groups: dict = {}
-    claims: dict = {}
     # The synthesised per-row keys, kept as a SET rather than recognised by their
     # `row:` prefix — an entity id is opaque text and may itself start with
     # `row:`, and prefix-testing would then skip the survivor fetch and hand back
     # a retired CARRIER (review round 3).
     per_row_keys: set[str] = set()
+    # An id claimed by MORE THAN ONE row is the duplicate-id corruption. Such rows
+    # are kept apart BEFORE the merge hop: `follow_resolved_from` reads one row's
+    # `resolved_from` for the id, so the group key — and therefore whether the
+    # caller's never-guess fires at all — would depend on backend row order when
+    # only one of the duplicates carries a pointer (review round 6).
+    _own_counts: dict = {}
+    for row in rows:
+        _own = row[id_idx] if id_idx < len(row) else None
+        if _own:
+            _own_counts[str(_own)] = _own_counts.get(str(_own), 0) + 1
     for row in rows:
         own = row[id_idx] if id_idx < len(row) else None
         own = str(own) if own else None
         # `follow_resolved_from` returns the id UNCHANGED when there is no
         # pointer, so this is the survivor's id for a carrier and the row's own
         # id otherwise; an id-less row cannot be keyed on an id at all.
-        hop = follow_resolved_from(g, label, own) if own else None
+        hop = None
+        if own and _own_counts.get(own, 0) <= 1:
+            hop = follow_resolved_from(g, label, own)
         if hop:
             key = str(hop)
         else:
             key = f"row:{id(row)}"
             per_row_keys.add(key)
         groups.setdefault(key, []).append(row)
-        if own and own == key:
-            claims[key] = claims.get(key, 0) + 1
     out = []
     for key, group in groups.items():
-        if claims.get(key, 0) > 1:
-            out.extend(group)
-            continue
         rep = next((r for r in group
                     if r[id_idx] and str(r[id_idx]) == key), None)
         if rep is None and key in per_row_keys:
@@ -833,8 +840,8 @@ def _entity_rows(g, label: str, rows, *, id_idx: int = 1,
             if len(fetched) > 1:
                 # Two nodes claim the survivor's id: the corruption the caller's
                 # never-guess discipline exists to refuse, reached THROUGH the
-                # fetch (neither duplicate is among `rows`, so `claims` cannot see
-                # it). Returning both hands the caller the same ambiguity it
+                # fetch (neither duplicate is among `rows`, so the pre-pass cannot
+                # see it). Returning both hands the caller the same ambiguity it
                 # counts for its own rows; taking `fetched[0]` would pick the
                 # representative by backend row order — the #2164 P2-2 defect.
                 out.extend(fetched)
@@ -970,6 +977,16 @@ def _apply_subject_supersession(proj, sdk, ref, supersedes_by, sb_rows, *,
                 "RETURN ID(s), s.id, s.name, s.status, s.supersededBy",
                 params=_ref_params,
             ).result_set if _ref_space else [])
+        if len(by_name) > 1:
+            # #12120 review round 6: count the writer's question — LIVE carriers
+            # only (`entity_identity._live_holders_same_entity` is live-only, so a
+            # terminal ex-incarnation beside a live one is not ambiguity). Narrow
+            # to the live rows when one is live; keep the full set when all are
+            # terminal (the keep-first arms below own that case).
+            _live_rows = [r for r in by_name
+                          if (r[3] or "") not in SUBJECT_TERMINAL_STATUSES]
+            if _live_rows:
+                by_name = _live_rows
         if len(by_name) > 1:
             # #1423 review P2: durable record, not just a log line — the
             # Object twin's `:1184` call mirrored with `label="Subject"`.
@@ -1491,6 +1508,21 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
             # They are grouped by ENTITY (``_entity_rows``), so a merged-away
             # carrier of the SAME entity does not read as ambiguity.
             by_name = [list(_row[1:]) for _row in _name_arm_rows]
+            # #12120 review round 6: the never-guess COUNT must ask the writer's
+            # question, which is LIVE-only — a terminal ex-incarnation is not a
+            # competing carrier (the door mints a second live node under one
+            # folded key exactly because `_live_holders_same_entity` is
+            # live-only). Without this, widening the probe made a SUPERSEDED
+            # node's `canonical_name` count as a second carrier and a fold that
+            # used to apply was refused — the reader/writer disagreement this
+            # issue removes, in the other direction. Narrow to the LIVE rows when
+            # one entity is live; keep the full set when every row is terminal
+            # (the keep-first arms below own that case).
+            if len(by_name) > 1:
+                _live_rows = [r for r in by_name
+                              if (r[2] or "") not in _RECALL_OBJECT_EXCLUDED_STATUS]
+                if _live_rows:
+                    by_name = _live_rows
             if len(by_name) > 1:
                 # never-guess: two Objects claim the same name, do not pick
                 # one (a blind LIMIT 1 would fold an arbitrary carrier).
@@ -1543,6 +1575,12 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
                               shape="unaddressable-name")
             warn(f"supersession ref {ref!r} resolves to an id-less Object "
                  f"(no id to address or journal) — skipped (#3590)")
+            # #5365 (review round 6): the Subject twin already reports this
+            # (`"id-less subject target"`); an id-less Object is reachable —
+            # `_entity_rows` deliberately keeps an id-less row as its own
+            # representative — so the drop must reach the caller's `skipped`
+            # too, together with the `record_non_folded` entry above.
+            _skip(ref, supersedes_by, "id-less object target")
             continue
         # #2164 review (P1 advisory + round-2 ISSUE 4): the string-equality
         # self-guard above only catches ref == supersedes_by on the SAME
