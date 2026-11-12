@@ -71,6 +71,24 @@ MARKER_VALUES = {
 }
 
 
+def test_the_value_map_covers_the_whole_family():
+    """`MARKER_VALUES` must not drift from the constant it drives.
+
+    ⛔ Without this row the map is a hand-maintained duplicate: measured at
+    `9459156eb` (#11858 review cycle 4, P3), adding an eighth member to
+    `_SERVER_MANAGED_EMBEDDING_MARKERS` alone left **22 passed** — no row noticed,
+    while the parametrised docstring still promised "every key of the family".
+    That is the same defect class this file exists for, one level in: a family
+    enumerated by hand beside the constant that defines it.
+    """
+    from tortoise.sdk import _SERVER_MANAGED_EMBEDDING_MARKERS
+
+    assert set(MARKER_VALUES) == set(_SERVER_MANAGED_EMBEDDING_MARKERS), (
+        "MARKER_VALUES and _SERVER_MANAGED_EMBEDDING_MARKERS disagree: "
+        f"undriven={sorted(set(_SERVER_MANAGED_EMBEDDING_MARKERS) - set(MARKER_VALUES))} "
+        f"stale={sorted(set(MARKER_VALUES) - set(_SERVER_MANAGED_EMBEDDING_MARKERS))}")
+
+
 def _journal(tmp_path, name="events.jsonl"):
     journal = tmp_path / name
     sdk = TortoiseSDK(str(tmp_path / "db"), event_log_path=str(journal))
@@ -233,11 +251,13 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
     ⛔ The list is the PUBLIC props doors, and the earlier versions did not drive
     it: four rows, then six, while this file's docstring claimed the WHOLE
     population (#11858 review cycles 2 and 3, P3). Measured now — ELEVEN doors
-    take `**props`, and nine of them refuse at intake: the eight named here plus
-    `create_source`, whose guard also runs before its write. The remaining TWO —
-    `update` and `update_knowledge` — refuse on an EXISTING node and silently
-    NO-OP on an unknown id, so those two rows create a target first (a row
-    without one asserts about a call that did nothing).
+    take `**props` (13 public methods do; `query` and `paginated_query` are
+    READS), and the split is EIGHT + ONE + TWO, not "nine at intake": eight
+    refuse at INTAKE (`_sanitize_props`), `create_source` — the ninth — refuses
+    over its assembled `ev` before the write (it bypasses intake entirely,
+    `_skip_sanitize=True`), and `update` / `update_knowledge` refuse only on an
+    EXISTING node, silently NO-OPing on an unknown id (so those two rows create
+    a target first — a row without one asserts about a call that did nothing).
 
     ⛔ `ValueError` + the key named in the message, not `(ValueError, TypeError)`:
     a bare TypeError is exactly what a positional-order regression raises, and
