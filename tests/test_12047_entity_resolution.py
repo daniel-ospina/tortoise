@@ -2566,6 +2566,13 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
             # node to them: #5370's harm ("no successor record found" about a
             # live successor), re-created from the reader side.
             assert rows and tuple(rows[0][1:]) == ("superseded", "New Widget"), rows
+            # 4b's anchor is an IMPL/NAND edge INTO the superseded Object, so the
+            # fixture must give it one: without an input 4b emits NO row and its
+            # assertion below is VACUOUS (it passes for any stored value — the
+            # trap this pin fell into on its first version).
+            _pt = sdk.create_point("statement", "the widget is the factor input")
+            _wid = rows[0][0]
+            sdk.create_operator("IMPL", _pt["id"], [_wid])
             from tortoise.audit import audit_graph
             issues = audit_graph(sdk._get_proj()).issues
             assert [i for i in issues
@@ -2577,6 +2584,45 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
                         and "no OTHER Object answers its supersededBy"
                         in i.detail], (
                 "4b must still find the successor the fold recorded")
+        finally:
+            sdk.close()
+
+    def test_a_merge_hop_successor_re_ingest_is_a_silent_dedup(self, sdk_factory):
+        """A successor reached through the merge hop stores a NON-fold-equal name.
+
+        `_entity_rows` collapses a merged-away carrier onto its SURVIVOR, so a
+        record whose successor is spelled `"Acme"` stores the survivor's own
+        `"Acme Corporation"` — a name that folds DIFFERENTLY from the record's
+        (`acme corporation` vs `acme`). Without the candidate-set arm of
+        `_same_successor`, the keep-first guard reports every re-ingest of that
+        unchanged record as a DIVERGENCE plus a `skipped` entry, which is the
+        #5365 channel inverted. Reverting `_same_successor` to the raw/fold
+        comparison alone reds this test on the `skips == []` assertion.
+        """
+        sdk = sdk_factory()
+        try:
+            sdk.create_object("Widget", "document")
+            sdk.create_object("Acme Corporation", "document")
+            # The post-merge shape `apply_entity_merge` produces: the survivor
+            # carries the retired candidate's folded key in `aliases`, so the
+            # successor probe resolves "Acme" onto THIS node.
+            sdk._get_proj().g.query(
+                "MATCH (o:Object {name:'Acme Corporation'}) "
+                "SET o.aliases = ['acme']")
+            record = {"superseded": "Widget", "supersedes_by": "Acme",
+                      "evidence": "test"}
+            applied, skips, msgs = self._apply(sdk, [dict(record)])
+            assert applied == 1, (applied, skips, msgs)
+            rows = self._row(sdk, "Object", "Widget")
+            assert rows and tuple(rows[0][1:]) == (
+                "superseded", "Acme Corporation"), rows
+            # …and the SAME record again: idempotent, silent, no `skipped`.
+            applied2, skips2, msgs2 = self._apply(sdk, [dict(record)])
+            assert applied2 == 0, (applied2, skips2, msgs2)
+            assert skips2 == [], (
+                "a re-ingest of an unchanged record was reported as a "
+                f"divergence: {skips2!r} (warnings: {msgs2!r})")
+            assert not any("conflict" in m for m in msgs2), msgs2
         finally:
             sdk.close()
 
@@ -2642,6 +2688,47 @@ class TestThe12120Finding2TheSupersessionProbesAskTheWritersKeySpace:
             assert not any("ref is not a Subject" in m for m in msgs), msgs
             rows = self._row(sdk, "Subject", "Old Team")
             assert rows and tuple(rows[0][1:]) == ("superseded", "New Team"), rows
+        finally:
+            sdk.close()
+
+    def test_a_collapsed_object_carrier_does_not_shadow_the_subject_lane(
+            self, sdk_factory):
+        """The `ref carrier's survivor is gone` report must not DROP a live fold.
+
+        The Object REF arm matched a carrier whose merged survivor is gone, so
+        `_entity_rows` collapses it away and the arm looks empty. Reporting that
+        as "the ref carrier is gone" and skipping is only correct when NO other
+        family can take the record. Here the ref is an EXACT `:Subject` and the
+        successor name is carried by BOTH families (an Object routes the record
+        into the Object lane), so the Subject fold still applies (`#1423`) —
+        ungated, the report swallowed it and the Subject stayed `live` and
+        search-visible. Measured: without the `_exact_subject_ref_ids` conjunct
+        this test reds on `applied == 0` with
+        `skips == ["ref carrier's survivor is gone"]`.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            sdk.create_object("New Widget", "document")   # Object-first routing
+            sdk.create_subject("New Widget", "organization")
+            sdk.create_subject("Old Team", "organization")  # the EXACT ref
+            # An Object whose folded name IS the ref, collapsed onto a survivor
+            # the graph no longer holds: the Object ref arm matches the row and
+            # then drops it.
+            g.query(
+                "CREATE (o:Object {id:'r10-gone-ref', name:'Old Team', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'old team', "
+                "resolved_from:'obj-12120-survivor-deleted'})")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Old Team", "supersedes_by": "New Widget",
+                 "evidence": "test"}])
+            assert applied == 1, (applied, skips, msgs)
+            assert skips == [], skips
+            assert not any("survivor is gone" in m for m in msgs), msgs
+            rows = self._row(sdk, "Subject", "Old Team")
+            assert rows and tuple(rows[0][1:]) == (
+                "superseded", "New Widget"), rows
         finally:
             sdk.close()
 
@@ -2957,6 +3044,65 @@ class TestThe12120ReviewRound8:
             row = g.query("MATCH (o:Object {id:$id}) RETURN o.status",
                           params={"id": target}).result_set
             assert row and row[0][0] == "superseded", row
+        finally:
+            sdk.close()
+
+    def test_a_gone_survivor_on_the_terminal_target_path_refuses_not_raises(
+            self, sdk_factory):
+        """Round 9's `(None, key, members)` sentinel also reaches the TERMINAL arm.
+
+        `_entity_rows` reports `(None, key, members)` for a group whose
+        `resolved_from` survivor has been deleted (round 9), and round 9 adapted
+        the duplicate-id fetch for it. The terminal-target arm was the SECOND
+        consumer of the representative list, and it unpacked the representatives
+        as `(id, name, status)` triples — so this shape raised `TypeError:
+        cannot unpack non-iterable NoneType` out of `apply_supersessions`,
+        aborting the WHOLE batch with the record in neither `skipped` nor a warn.
+        On the hosted §6b path that is a deterministic payload which can never be
+        ingested; on capture it drops every supersession in the payload behind a
+        misleading warning.
+
+        The fix reads the candidate spellings from the GROUPS (the carriers), so
+        a sentinel cannot be unpacked at all. Reverting to the representative
+        unpack reds this on the raise, before any assertion.
+        """
+        sdk = sdk_factory()
+        try:
+            g = sdk._get_proj().g
+            # Terminal target: the re-record's DIVERGENT arm is the one that
+            # reads the candidate spellings.
+            sdk.create_object("Widget", "document")
+            sdk.update_entity(
+                g.query("MATCH (o:Object {name:'Widget'}) RETURN o.id")
+                .result_set[0][0],
+                status="superseded", supersededBy="Older Widget")
+            # A LIVE successor carrier whose merged survivor is gone — the
+            # round-9 sentinel shape, reached through the supported merge door.
+            g.query(
+                "CREATE (c:Object {id:'r11-gone-co', name:'Gone Co', "
+                "objectKind:'document', status:'live', "
+                "canonical_name:'gone co', "
+                "resolved_from:'obj-12120-survivor-deleted'})")
+            sdk.create_object("Alpha", "document")
+            sdk.create_object("Later Co", "document")
+            applied, skips, msgs = self._apply(sdk, [
+                {"superseded": "Widget", "supersedes_by": "Gone Co",
+                 "evidence": "test"},
+                {"superseded": "Alpha", "supersedes_by": "Later Co",
+                 "evidence": "test"}])
+            # The bad-shaped record is a REFUSAL: it reports and the batch goes
+            # on, which is the whole contract (`apply_supersessions` promises one
+            # `{ref, successor, reason}` dict for every record it did not apply).
+            assert applied == 1, (applied, skips, msgs)
+            assert [s["ref"] for s in skips] == ["Widget"], skips
+            assert skips[0]["reason"] == "terminal object target", skips
+            rows = g.query(
+                "MATCH (o:Object {name:'Alpha'}) "
+                "RETURN o.id, o.status, o.supersededBy").result_set
+            assert rows and tuple(rows[0][1:]) == (
+                "superseded", "Later Co"), (
+                "the batch stopped at the bad record instead of refusing it: "
+                f"{(applied, skips, msgs)!r}")
         finally:
             sdk.close()
 

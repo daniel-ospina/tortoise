@@ -902,12 +902,15 @@ _ALLOWED_OPERATOR = {
         # §B "Route" — successor-name candidate probe, S3/id-probe owned.
         'cand_rows = proj.g.query( "MATCH (o:Object) WHERE o.name IN $names RETURN o.name, o.id", params={"names": sb_names}).result_set': 1,
         '_name_rows = proj.g.query( "MATCH (o:Object) WHERE o.name IN $names RETURN ID(o), o.id, o.name", params={"names": refs_sorted}).result_set': 1,
-        # #12120 review round 3: the family defer asks whether the SUBJECT family
-        # holds the ref by its EXACT spelling (so a fold-only Subject does not
-        # outvote a fold-only Object on a tie). An exactness TEST, not a lookup
-        # that selects an identity: the fold itself still goes through the
+        # #12120 review rounds 3 + 8: the family defer asks whether the SUBJECT
+        # family holds the ref by its EXACT spelling (so a fold-only Subject does
+        # not outvote a fold-only Object on a tie). An exactness TEST, not a
+        # lookup that selects an identity: the fold itself still goes through the
         # writer's key space, and the row it returns is only used as a boolean.
-        '_subj_exact_ref = proj.g.query( f"MATCH (s:Subject) WHERE {_subj_ref_space} AND s.name = $ref " "RETURN s.id", params={**_subj_ref_params, "ref": ref}, ).result_set if _subj_ref_space else []': 1,
+        # Round 8 folded the two spellings (family defer + the collapse report)
+        # into `_exact_subject_ref_ids` — ONE read, one census entry, so the key
+        # space cannot drift between the two questions that ask it.
+        'return proj.g.query( f"MATCH (s:Subject) WHERE {space} AND s.name = $ref RETURN s.id", params={**params, "ref": ref}).result_set': 1,
         # ⛔ TWO ENTRIES REMOVED by #12120 supersession-probe site — the ref-side probes of the
         # supersession fold (`o.name = $ref` / the #1423 Subject twin
         # `s.name = $ref`). Both were candidate-ENUMERATION reads over a key space
@@ -1124,8 +1127,8 @@ _ALLOWED_KEYED = {
         # REFUSE where capture WRITES — does not apply.
     },
     'tortoise/sdk.py': {
-        # ⛔ NO ENTRY for the `about_entities` claim loop (removed by #12120
-        # finding 1) — nor for its id-less fallback. Its local twin is
+        # ⛔ NO ENTRY for the `about_entities` claim loop (removed by #12120's
+        # about-anchor site) — nor for its id-less fallback. Its local twin is
         # `hosted_api`'s anchor, converted with it: both attach to EVERY carrier
         # over the writer's folded spelling space, so the recorded
         # "migration-gated" objection (routing through a resolver would refuse

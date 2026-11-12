@@ -21839,9 +21839,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # Without the flag this site records `unregistered-reference` /
     # `ambiguous-entity-name` — NON-exempt — for a write where nothing was
     # folded, while the replay pass resolves the SAME reference exemptly
-    # (`projection/entities.py:4896` status-fold target, `:5275`
-    # `EventRecorded.object`), i.e. one reference with two dispositions, the
-    # live/replay parity break R8 forbids.
+    # (`projection/entities.py:5783` `_fold_object_status`, `:6295`
+    # `context="EventRecorded.object"` — line numbers re-derived at #12120
+    # review round 10; the two this comment used to name had drifted into
+    # `_upsert_subject` / `_upsert_document`), i.e. one reference with two
+    # dispositions, the live/replay parity break R8 forbids.
     for _eid, _name, _exact_only in _deferred_about_objects:
         if _exact_only:
             # Fold-equal to a declared subject-kind name: attribute EXACT-name
@@ -21869,9 +21871,18 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             #     exact -> carrier; survivor superseded -> folded None, exact
             #     carrier. Attach-to-every-carrier still holds for DISTINCT
             #     carriers — the collapse dedupes per ENTITY, never per spelling.
+            #     ⚠️ DECLARED DIVERGENCE, not parity: that Point anchor is
+            #     STATUS-BLIND (main's behaviour — it carries no liveness
+            #     predicate), while this arm is live-only because the resolver it
+            #     narrows is. So for one reference whose only exact carrier is
+            #     already terminal, the Point channel attaches and this one does
+            #     not. Left as stated rather than silently aligned: making the
+            #     Point arm live-only would change main's behaviour for every
+            #     about-edge payload, which is not this fix's surface.
             # No ambiguity record is owed here: nothing is chosen between
-            # carriers (the pre-fix `_refuse` fired because a FOLD-WIDE resolver
-            # would have had to pick one, which is exactly what this arm avoids).
+            # carriers (the pre-#12120-round-6 arm called `resolve_fold_name`,
+            # which on two carriers recorded an EXEMPT `unfolded-mention` and
+            # dropped the link — precisely the link this arm now writes, to both).
             _exact_rows = proj.g.query(
                 "MATCH (o:Object) WHERE o.name = $n AND "
                 f"{_terminal_excluded('o.status')} RETURN o.id",
