@@ -369,10 +369,26 @@ merge best practice`; (9) `Supermemory architecture how it works memory graph en
 
 Primary sources fetched (`web_fetch` / raw): `docs.falkordb.com/cypher/indexing/fulltext-index`;
 `getzep/graphiti` → `dedup_helpers.py`, `node_operations.py`, `prompts/dedupe_nodes.py`, `nodes.py`;
-`mem0ai/mem0` → `memory/main.py`, `utils/scoring.py`, `utils/entity_extraction.py`.
+`mem0ai/mem0` → `memory/main.py`, `utils/scoring.py`, `utils/entity_extraction.py`, `README.md`;
+`arxiv.org/html/2512.12818v1` (Hindsight/TEMPR full text, §4.2.3–§4.2.4); the four ER sources named in
+§7.7 (`erikevenson`, `archtin`, `granveo`, `writeitai/remember-stack`); Mem0's
+2026 report (`mem0.ai/blog`); `docs.cognee.ai/python-api/cognify`; `honcho.dev/docs/v3/…`;
+`supermemory.ai/docs/…`.
+
+**Research-skill PREFLIGHT lines** (the skill's required slots — §0 states round 1's, as a table):
+
+`Search tool:` rung 1 — `mcp__seo-intelligence__perplexity_search` (~$0.005/query) — queries:
+**9 attempted / 9 returned**; rung 2 not used; rung 3 (`web_fetch`, free) for every primary source above.
+`Graph:` **unread — no query ran.** No `/v1/search` query was made against the hosted graph (§7.9 item 1
+is the same limitation), so the Step 0.0b slot is `unread`, **not** `nothing held`: a zero here is a
+statement about no query, and the skill refuses `nothing held` at any count when no query ran.
+Write-back: **not written — the write-back is owed**, not done: this lane made no graph call at all, so
+neither a session nor a point with edges exists for §7; `#12186` and this brief are the durable record
+until a lane with a reachable tenant mints `IMPL → #12186` + its NAND edges.
 
 ⚠️ **Locators drift, and a pin is not a citation.** Round 1's `sdk.py:39588-39606` for the BM25 arm's wiring
-is **`:40737-40835`** at this head — the file grew ~1,230 lines in one day of merges. Every locator below
+is **`:40737-40835`** at this head — the file grew **1,184** lines in one day of merges (`1f28d107cf` =
+51,075 → `9828250732` = 52,259; the cited block itself shifted +1,150). Every locator below
 is re-derived at `9828250732`; a lane reading this doc at a later head must re-derive, not copy.
 
 ## 7.1 C2 SETTLED — the product lane runs TF-IDF, that is the vendor's own name for it, and BM25 is one gate away
@@ -394,13 +410,14 @@ overview repeats it once more (*"scoring based on TF-IDF"*,
 (index-level) and `weight` / `nostem` / `phonetic` (field-level); the query surface is
 `db.idx.fulltext.queryNodes(label, string)` — *a string*, no options map
 ([docs.falkordb.com/cypher/procedures](https://docs.falkordb.com/cypher/procedures)). RediSearch itself
-does expose `SCORER` (`TFIDF` default historically, `BM25STD` default from Redis 8,
+does expose `SCORER` (`BM25STD` is the current default — the page titles that section *"BM25STD (default)"* and
+records that *"the BM25 scorer was renamed BM25STD in Redis Open Source 8.4. BM25 is deprecated"*,
 [redis.io/.../scoring](https://redis.io/docs/latest/develop/ai/search-and-query/advanced-concepts/scoring/)),
 but **FalkorDB does not surface that parameter to Cypher** — so BM25 is not reachable inside our text index
 by any documented route.
 
 **And our code passes no options at all.** `_create_fulltext_index`
-(`tortoise/projection/__init__.py:20762`) issues either
+(`tortoise/projection/__init__.py:20755`; the two forms at `:20786-20787`) issues either
 `CREATE FULLTEXT INDEX FOR (n:{label}) ON ({fields_expr})` or the legacy procedure, with **no `OPTIONS`
 block** (`:20785-20788`) — so the index is on vendor defaults: default language, default stopwords, TF-IDF.
 
@@ -408,15 +425,15 @@ block** (`:20785-20788`) — so the index is on vendor defaults: default languag
 
 | site | claim | verdict |
 |---|---|---|
-| `tortoise/sparse.py:13-14` | RediSearch's *"TFIDF scorer"* ranks by term-overlap, *"which is the BM25-style rank behavior the epic's scope prescribes"* | ⛔ **wrong on the mapping.** TF-IDF is not BM25-style: it has no document-length term and no rarity weighting of the BM25 form, and `bm25.py`'s own measurement (below) found **neither**. The vendor calls it TF-IDF; so should we. |
-| `tortoise/bm25.py:4-6` | quotes `sparse.py`, then reports the **measurement**: on the embedded (falkordblite) lane the shipped scorer *"behaves like a per-matched-term count whose weight is NOT driven by rarity and whose score is NOT driven by document length"* | ✅ the measurement is the authority here, and it says the shipped scorer prices **neither idf nor length** |
-| `SEARCH-ARCHITECTURE.md:§6.2` (`:268`) | *"The FalkorDB leg is RediSearch's TF-IDF scorer"*, the 8–23 nDCG@10 gap is *"measured against a BM25 implementation"*, and **how far our hosted leg sits from that baseline is unmeasured** | ✅ **correct, and more careful than its own epic row** |
+| `tortoise/sparse.py:13-14` | RediSearch's *"TFIDF scorer"* ranks by term-overlap, *"which is the BM25-style rank behavior the epic's scope prescribes"* | ⛔ **wrong on the mapping.** TF-IDF is not BM25-style: it has **no document-length normalisation**, and its idf is the classical `log(N/df)` form rather than BM25's probabilistic `log((N−df+0.5)/(df+0.5))` — so a length-heavy or rare-term profile scores differently under the two. The vendor calls it TF-IDF; so should we. |
+| `tortoise/bm25.py:7-10` | quotes `sparse.py` (`:5`), then reports the **measurement**: on the embedded (falkordblite) lane the shipped scorer *"behaves like a per-matched-term count whose weight is NOT driven by rarity and whose score is NOT driven by document length"* | ✅ the measurement is the authority for **that lane only**: the *embedded* scorer prices **neither idf nor length**. ⚠️ It does **not** characterise the hosted `db.idx.fulltext` leg — `SEARCH-ARCHITECTURE.md:250-251` itself records that leg as unmeasured — so the hosted leg's idf/length behaviour is an **open measurement**, not a finding of this row. |
+| `SEARCH-ARCHITECTURE.md:§6.2` (`:163`, `:241-246`, `:268-269`) | *"The FalkorDB leg is RediSearch's TF-IDF scorer"* (`:163`), the 8–23 nDCG@10 gap is *"measured against a BM25 implementation"* (`:246`), **how far our hosted leg sits from that baseline is unmeasured** (`:246`), and *"the text index **stays** until **M3** measures…"* (`:268-269`) | ✅ **correct, and more careful than its own epic row** |
 
 ⇒ **The epic's C2 row title, "BM25 instead of TF-IDF", is literally accurate for the product lane.** Round 1
 corrected the status (which was right) but also proposed dropping the title reading because *"we run BM25 on
 the embedded lane"* — that is true **only on the embedded lane**, and it is not the lane the product runs.
 
-### The bound round 1 did not find: the arm is embedded-only for a latency reason, not a decision
+### The bound round 1 stated but never explained: the arm is embedded-only for a latency reason, not a decision
 
 `tortoise/search_engine.py:3103-3108`, verbatim:
 
@@ -428,17 +445,28 @@ the embedded lane"* — that is true **only on the embedded lane**, and it is no
 with `DEFAULT_BM25_CORPUS_CAP = 20000` (`:3108`) and the arm gated on `is_embedded`
 (`tortoise/sdk.py:40641`, `:40740`; `BM25_DEFAULT_ENABLED = True` at `tortoise/bm25.py:166`,
 `run_bm25_query` at `search_engine.py:3198`). So the hosted wall is **a ≤20 000-row corpus read tokenised
-in Python off the deadline**, not a decision that hosted should stay TF-IDF. `#8486` — the benchmark that
-would settle the latency — is **OPEN and never executed** (`gh issue view 8486`: *"PENDING — never executed;
-no comparable number exists"*), and `bm25.py`'s own constant records that the owner armed the arm on
-mechanism-level evidence **with #8486 still pending**.
+in Python off the deadline**, not a decision that hosted should stay TF-IDF. `#8486` — the issue the code
+names as this latency's gate — is **OPEN and never executed** (`gh issue view 8486`: *"PENDING — never
+executed; no comparable number exists"*, which is its **title**), and `bm25.py`'s own constant records that
+the owner armed the arm on mechanism-level evidence **with #8486 still pending** (`bm25.py:152-165`).
+
+⚠️ **But `#8486`'s own scope cannot answer this question, and that is a finding, not a footnote.** Its body
+is the **LongMemEval-S end-to-end QA benchmark** — `recall_all@5` (retrieval metric) plus **judged QA
+accuracy** on a 500-question run — and it contains **no `BM25` mention and no `latency` mention** (0 hits
+for each, over the body at this head; the one `corpus` hit is the dataset seal). Nothing in it varies
+`DEFAULT_BM25_CORPUS_CAP` or the label's row count, so a completed run would report **answer accuracy**,
+never a p95 of the corpus read. **The measurement the arm's own precondition demands is therefore
+unscoped** — recorded on `#8486` as a scope question (`comment 6837663346`), not assumed to be covered by
+it. M-7 inherits that: its gate is *a number nobody has scoped*, not a scheduled benchmark.
 
 ### The mechanism nobody had stated: the scorer acts on RECALL, not on order
 
-The FTS leg does `ORDER BY score DESC … LIMIT $limit` (`search_engine.py:2994-3001`), and `rrf_fusion`
+The FTS leg does `ORDER BY score DESC … LIMIT $limit` (`search_engine.py:2993-2994`), and `rrf_fusion`
 **throws the leg's score away** — the binding is literally `for rank, (pid, _score) in enumerate(ranked)`
 (`search_engine.py:4492`), and the function's own comment states the rule: *"fusion consumes leg
-POSITIONS"* (`:4519`). §6.2 says the same at `:3091-3093`. So the
+POSITIONS"* (`:4520`). §6.2 states the same rule (`SEARCH-ARCHITECTURE.md:252-254`) but carries the **stale pins**
+`search_engine.py:3021` / `:3091-3093` — at this head the fusion function opens at `:4411` and the binding is
+`:4492`, so a reader must not chase those two numbers. So the
 TF-IDF score never reaches the answer *as a score*: **it decides which rows survive the LIMIT.** That makes
 C2 a **candidate-generation (recall) lever**, not a ranking lever — i.e. it belongs to §A of the epic, and
 **M3 must measure the FTS leg's recall@k in isolation**, not only its score distribution. §6.2's word is
@@ -473,9 +501,9 @@ def _jaccard_similarity(a: set[str], b: set[str]) -> float:
 (`:357-368`), not the graph. **No edge is read anywhere in this module.** ✅ Round 1's B2 claim stands.
 
 **The ordering is the precision property, and round 1 under-stated it.** `_resolve_with_similarity`
-(`:321-380`) runs: exact-normalised (always, `:337-345`) → **if more than one node shares the normalised
-name, escalate straight to the LLM and never run fuzzy** (`:346-352`) → entropy gate (`:354-357`) → LSH
-fuzzy (`:358-380`). So an **ambiguous** exact name is a *deliberate* LLM case; the fuzzy arm only ever sees
+(`:321-380`) runs: exact-normalised (always, `:336-344`) → **if more than one node shares the normalised
+name, escalate straight to the LLM and never run fuzzy** (`:345-350`) → entropy gate (`:351-354`) → LSH
+fuzzy (`:356-380`, candidate universe from the LSH buckets at `:359-361`). So an **ambiguous** exact name is a *deliberate* LLM case; the fuzzy arm only ever sees
 the residual.
 
 ### The highest-precision non-name signal in systems that have a graph is **candidate generation**, not overlap
@@ -494,13 +522,15 @@ boost = similarity * ENTITY_BOOST_WEIGHT * memory_count_weight
 ```
 
 with `ENTITY_BOOST_WEIGHT = 0.5` (`mem0/utils/scoring.py:57`) and the fusion **additive and normalised**,
-not RRF: `combined = (semantic + bm25 + entity_boost) / max_possible` (`scoring.py:72`, `:94-101`). The
+not RRF: `combined = min((semantic + bm25 + entity_boost) / max_possible, 1.0)` (formula in
+`score_and_rank`'s docstring at `scoring.py:72`; the **executable** line is `:118-119`; `:94-101` is the
+`max_possible` accumulation). The
 entity extractor is **deterministic spaCy-NER + heuristics**, not an LLM call
 (`mem0/utils/entity_extraction.py`: `_add_ner_candidates`, `_add_proper_name_candidates`,
 `_add_quoted_candidates`, `_add_topic_phrase_candidates`, `_resolve_candidates`).
 
 ⛔ **And Mem0's lexical and entity arms are RANKERS, not candidate generators:** Step 7 of
-`_search_vector_store` builds the candidate set from `semantic_results` only (`main.py:1674-1690`) and
+`_search_vector_store` builds the candidate set from `semantic_results` only (`main.py:1680-1691`) and
 `score_and_rank` re-scores that pool. A BM25-only or entity-only match that the dense leg did not return
 **cannot enter the result set at all**. That is a deliberate trade (cheap, precise) with a recall cost —
 ⚠️ **copy the signal, not the pool construction**, because our measured ceiling is a recall problem
@@ -510,8 +540,11 @@ entity extractor is **deterministic spaCy-NER + heuristics**, not an LLM call
 TEMPR's recall runs semantic vector, BM25, **entity/causal/temporal graph traversal**, and an explicit
 temporal filter **in parallel**, fuses by reciprocal rank fusion, then **reranks the fused candidates with a
 neural cross-encoder** ([ACL 2026 demo abstract](https://aclanthology.org/2026.acl-demo.27/);
-[arXiv:2512.12818 summary](https://www.emergentmind.com/papers/2512.12818): *"After RRF fusion, TEMPR
-applies a neural cross-encoder reranker to refine precision on the top candidates"*). Edges are **weighted
+[arXiv:2512.12818 **full text** §4.2.3](https://arxiv.org/html/2512.12818v1) *"Reciprocal Rank Fusion
+(RRF)"* → [§4.2.4](https://arxiv.org/html/2512.12818v1) *"Neural Cross-Encoder Reranking"* — the four
+channels are §4.2.1–§4.2.2, the paper's own order is RRF **then** cross-encoder). ⚠️ **The abstract carries
+neither claim** — it states the four *networks* and the 83.6 %/83.2 %/91.4 % figures — so the ordering has to
+be cited to §4.2, not to the abstract and not to a third-party summary of it. Edges are **weighted
 by decay or similarity** to bias traversal. Two things follow for us: **(i)** the graph's job is to *produce
 candidates a vector leg cannot reach*, not to score pairs; **(ii)** the cross-encoder sits **after** fusion —
 which is the order C1 and A6 need, and which our `rrf_fusion` + `ask_lane_rerank` already implement in the
@@ -554,6 +587,7 @@ class EntityNode(Node):
     summary: str = Field(description='regional summary of surrounding edges', default_factory=str)
 
     async def generate_name_embedding(self, embedder: EmbedderClient):
+        …  # `start = time()` / timing around the embedder call, elided
         text = self.name.replace('\n', ' ')
         self.name_embedding = await embedder.create(input_data=[text])
 ```
@@ -597,12 +631,12 @@ vector.
 
 | # | round-1 claim | the falsification | what it changes |
 |---|---|---|---|
-| **1** | *(round-1 **comment** only)* "Zep unions **FOUR** candidate sources" | `node_operations.py:_collect_candidate_nodes` (`:456-484`) unions **three**: identity-property (`:466`), exact-normalised name (`:471`), semantic search (`:472`). LSH is a **separate, earlier, deterministic** stage. | ✅ Round 1's **doc** already corrected this (§2 A2). The comment's FOUR was never re-derived and should not be quoted. |
+| **1** | *(round-1 **comment** only)* "Zep unions **FOUR** candidate sources" | `node_operations.py:_collect_candidate_nodes` (`:456-484`) unions **three**: identity-property (`:463-467`), exact-normalised name (`:468`), semantic search (`:469`) — the union itself is `:480`. LSH is a **separate, earlier, deterministic** stage. | ✅ Round 1's **doc** already corrected this (§2 A2). The comment's FOUR was never re-derived and should not be quoted. |
 | **2** | "C2 — drop the 'build BM25' reading; the only open question is whether the **text index** moves" | The product lane has **no BM25 leg at all** and the vendor API **cannot express one** (§7.1). The embedded-only limit is a **latency** reason, not a decision, and its gate (`#8486`) is open. | A **second, cheaper route to BM25 ranking** exists that does not move the index (M-7). It does not overturn M3; it makes M3's *quality* half reachable before M3's *migration* half. |
 | **3** | "**No** surveyed system reports typed-edge neighbourhood overlap as a ranking feature" | True of memory systems; **ER practice recommends it** (archtin: *"add graph structural similarity to your score"*). | The claim narrows to *"no memory system; ER practice does, on a graph that has typed edges"* — and our substrate census (`#4211`) is what kills it here, not the absence of precedent. |
 | **4** | A3: *"name + context has **no context to embed**"* | `Object.title` exists and is written (`entities.py:1902`, `:5069`). The **fill rate** is unmeasured; `description`/`summary` = 0 rows is a different statistic. | A3 becomes **one census** away from an answer, and its remaining work moves to B1. |
 | **5** | *(round-2 brief premise, and the epic's phrasing)* `#11901` carries an **explicit DECLINE** of widening the window | The record says *"**not decided, and deliberately not changed**"*, and the DoD box is **unchecked** (`#11901` comment `6826507139`). The first comment's *"do not widen now"* was **superseded** by that comment. | Round 1 stated it correctly (*"declined neither"*). ⛔ **The window question is still UN-OWNED** — no child carries the paired decision — and a lane reading "declined" would think it closed. |
-| **6** | A2: *"419 real surface variants"* | They are **GENERATED** from real names, not observed (`#11901` comment 3, the relay). | Any sentence that says "real variants" overstates the population. |
+| **6** | A2: *"419 real surface variants"* — ⚠️ **not a round-1 quotation: this wording appears in neither round 1's doc nor the epic's body** (which says *"0 of 419 spelling variants"*). It is a **wording guard**, kept in this table so the distinction is not lost, not a falsification of anything round 1 wrote. | The population is **GENERATED** from real names, not observed (`#11901` comment `6836274599`, the relay). | Any sentence that calls the 419 a population of *real* variants overstates it; round 1's own word (`variants`) is correct. |
 | **7** | Mem0's April-2026 algorithm is documented by **an arXiv paper** | There is **no April-2026 paper**. `arXiv:2504.19413` is **2025** (ECAI 2025) and **predates** the April-2026 algorithm; Mem0's own page says so explicitly: *"this report also covers Mem0's April 2026 … update, which **post-dates** the original ECAI 2025 paper and isn't reflected in its published numbers"* ([mem0.ai/blog/state-of-ai-agent-memory-2026](https://mem0.ai/blog/state-of-ai-agent-memory-2026)). | Cite the **README + blog + code** for the April-2026 algorithm, and the **2025 paper** only for what the 2025 paper measured. The two must not be merged into one citation. |
 
 ## 7.6 EXPANDED — the performers round 1 never read, to mechanism level
@@ -627,17 +661,25 @@ against B2-as-*edge-overlap-score*.
 
 **Cognee — read from its docs
 ([docs.cognee.ai/python-api/cognify](https://docs.cognee.ai/python-api/cognify),
-[cognee.ai/grounding-ai-memory](https://www.cognee.ai/grounding-ai-memory)).** Identity is a **function of the name**: *"The identity of the stored node is
-derived from its `name` (normalized to lowercase, with spaces turned into underscores and apostrophes
-stripped), so every mention of the same name … resolves to the same `Entity` node instead of creating a
-duplicate"* (`Entity.id_for(name)`). Several same-name nodes **inside one chunk** get deterministic
-ordinal ids instead of merging. Optional **OWL ontology validation** canonicalises LLM-derived names to
+[cognee.ai/grounding-ai-memory](https://www.cognee.ai/grounding-ai-memory)) and its
+[changelog](https://docs.cognee.ai/changelog).** Identity is a **function of the name**, per the changelog
+verbatim: *"Entity ids change: they are now derived from `Entity.id_for(node.name)` rather than
+`Entity.id_for(node.id)`, so two chunks mentioning the same entity name converge on one node, while several
+distinct nodes sharing a name inside a single extracted graph keep deterministic chunk-scoped ids instead of
+collapsing together"* — i.e. same-name nodes inside one extracted graph get **chunk-scoped** ids rather than
+merging. ⚠️ The sentence this brief first quoted in quotation marks (*"identity … derived from its `name`
+(normalized to lowercase, with spaces turned into underscores and apostrophes stripped)"*) is the **code
+docstring's** wording (`cognee/infrastructure/engine/models/DataPoint.py:187-216`), not docs prose — it is
+cited there, not quoted from the docs.
+Optional **OWL ontology validation** canonicalises LLM-derived names to
 URI-derived forms via `difflib.get_close_matches()` at a **0.80** cutoff and injects `rdfs:subClassOf` /
-`owl:ObjectProperty` structure. An opt-in `PROVENANCE_TRACKING` audit ledger appends *"an entry for every
-document, chunk, entity, and relationship this run produced"* (off by default).
-⚠️ Its own documented migration hazard: nodes written before the name-derived-id change *"keep their old
-ids, so re-running `.cognify` over data that is already in the graph can create a second node alongside the
-existing one."*
+`owl:ObjectProperty` structure. An opt-in `PROVENANCE_TRACKING` audit ledger appends *"an audit-ledger entry
+for every document, chunk, entity, and relationship this run produced"*
+([docs.cognee.ai/python-api/cognify](https://docs.cognee.ai/python-api/cognify), off by default).
+⚠️ Its own documented migration hazard ([changelog](https://docs.cognee.ai/changelog)): *"Entity nodes written
+by earlier runs keep their old id-derived ids, so re-cognifying data that is already in the graph can create
+a second node for an entity that is already there — re-run the affected datasets from scratch if you need ids
+to line up."*
 → **Lesson for us:** Cognee makes duplicates **structurally impossible** by folding identity into the id.
 We did the opposite deliberately — `#3590` landed `merge_key = "id"` — so similarity-based candidate finding
 is the only mechanism left (which is exactly the KEEP ruling's premise). ⛔ **Not a candidate: it would
@@ -662,8 +704,12 @@ triples** (*"not classic entity–relation–entity triples you maintain by hand
 edges are `updates` / `extends` / `derives`. A second phase, **"dreaming"**, forms memories from *coherent
 units* rather than per-write (`dreaming: "dynamic"` by default; `"instant"` for demos) — i.e. deferred
 consolidation, like Letta's sleep-time compute. Forgetting **excludes memories from search while preserving
-their records**. Hybrid search = vector + filters + graph-edge expansion (`include: { related: true }`) +
-re-ranking.
+their records** — its own words: *"Forgotten memories are excluded from search results but preserved"*
+([supermemory.ai/docs/recall/memory-operations](https://supermemory.ai/docs/recall/memory-operations)).
+Retrieval is **three documented options, not one composite**: *"`searchMode: "hybrid"` is the default"*
+(memories + document chunks), `rerank: "order" | "aggregate"` re-scores the result set, and
+`include: { related: true }` adds graph-edge expansion
+([supermemory.ai/docs/recall/search](https://supermemory.ai/docs/recall/search)).
 → **Lesson for us:** two of the "graph" performers (Mem0, Supermemory) have **no entity nodes in the
 retrieval graph at all**. Entity resolution is not a prerequisite for a top score; it is a prerequisite for
 *our* semantics (identity, supersession, EP over a closed component).
@@ -717,8 +763,8 @@ from it, not verified against Senzing's or Wikidata's own documentation this lan
 | **Blast-radius rule** — never auto-merge above a degree/evidence threshold | writeitai/remember-stack; granveo | ⛔ **NO** |
 | **Persisted no-merge assertions**, honoured by the clustering step so an un-merge is not a treadmill | erikevenson (*"a steward's 'these are not the same' must be persisted"*) | ✅ **YES** — `dedup_target_id` / `dedup_rejected_targets` are read by `_ENTITY_READ` (`entity_resolver.py:203-214`) |
 | **Merge = redirect, not rewrite** (Wikidata QIDs never reused; a dead ID resolves to the survivor forever) | writeitai; and the SAME_AS pattern | ✅ **YES** — see below |
-| **Un-merge is deleting one edge** and re-clustering, not a recovery exercise | archtin (*"Unmerging is deleting one `SAME_AS` edge and re-clustering"*) | ✅ **structurally yes**; ⛔ **but nothing in-tree issues it** — `rg 'resolved_from'` over `tortoise/` finds **one write** (`apply_entity_merge`) and **reads only** (the `_ENTITY_READ` predicate at `:199-214`, `follow_resolved_from`, and four call sites in `entity_identity.py`); there is **no clear/REMOVE/reverse path at all** |
-| **`score`, `method`, `decidedAt` recorded ON the link** so *"why are these one customer"* is one query | archtin (*`SET r.score=$score, r.method=$method, r.decidedAt=datetime()`*); "Senzing — every merge records *why*" is **writeitai's** characterisation, quoted not verified | ⛔ **NO — the fields exist in the return value only** |
+| **Un-merge is deleting one edge** and re-clustering, not a recovery exercise | archtin (*"Unmerging is deleting one `SAME_AS` edge and re-clustering"*) | ✅ **structurally yes**; ⛔ **but nothing in-tree issues it** — `rg 'resolved_from'` over `tortoise/` finds **one write** (`apply_entity_merge`) and **reads only** (the `_ENTITY_READ` predicate at `:199-214`, `follow_resolved_from`, its **two** call sites in `entity_identity.py` — `:384` and `:594` — plus the independent chain walk in `onboarding/seed.py:306-315`); there is **no clear/REMOVE/reverse path at all** |
+| **`score`, `method`, `decidedAt` recorded ON the link** so *"why are these one customer"* is one query | archtin (*`SET r.score=$score, r.method=$method, r.decidedAt=datetime()`*); "Senzing — every merge records *why*" is **writeitai's** characterisation, quoted not verified | ⛔ **NO — `method`/`similarity` reach the return value only (`entity_resolver.py:809-811`); `score`/`decidedAt` exist nowhere** |
 | **Append-only decision rows + pre-merge membership snapshot** (what makes un-merge possible) | writeitai; granveo | ⚠️ **partly** — the journal gives replay (`derived == replay(journal)`), but there is no pre-merge *membership* snapshot |
 | **Cluster-size distribution** as a health metric (*"emerging giant cluster = over-merge in progress"*) | writeitai | ⛔ **NO** |
 | **Three outcomes** — same / different / **unresolved** | granveo | ✅ the review queue + `dedup_reviewed` exist |
@@ -756,12 +802,14 @@ persists a merge.
    following (`:556-577`). The code is right; the sentence is wrong, and it is the sentence a reviewer reads
    before deciding whether a chain can exist.
 4. **No `SAME_AS` predicate** — unchanged from round 1: `_VALID_EDGE_PREDICATES`
-   (`tortoise/projection/edges.py:717-729`) carries no `sameAs`. So B1's third band still cannot be written
+   (`tortoise/projection/edges.py:717-726`) carries no `sameAs`. So B1's third band still cannot be written
    as an edge; it can be written as **this redirect**, which needs no ontology decision at all. ⚠️ **That is a
    material change to N-4's dispatch readiness**: round 1 said the three-band ladder was *blocked on an
    ontology decision*; the **redirect already exists**, so the link-without-merge band is buildable as a
    `resolved_from` write with `dedup_reviewed='link'` and no new predicate. Declare it, do not assume it —
-   the 2730 brief's owner question (`:241`) is about `SAME_AS` as a *graph edge*, which this does not need.
+   the 2730 brief's owner question (`:241`) is an ontology **`scope` property on `:Object`**, with `sameAs`
+   named there as one of three identity primitives (`isPlaceholder`/`sameAs`/`scope`) — so a `resolved_from`
+   redirect needs no ontology decision at all.
 
 **Contradiction test:** nothing here reverses the KEEP ruling, §12.2c, V1 or §2.0. M-9/M-10 obey the
 non-destructive-merge rule (`#2730` §6.7.3, `#783` J-2) rather than revising it.
@@ -773,13 +821,17 @@ non-destructive-merge rule (`#2730` §6.7.3, `#783` J-2) rather than revising it
 The in-process Okapi BM25 leg exists, is default-ON, and is gated to `is_embedded` for a stated
 **latency** reason (a ≤`DEFAULT_BM25_CORPUS_CAP` = 20 000-row corpus read tokenised in Python outside
 `degradation_chain`'s deadline — `search_engine.py:3103-3108`). Its own recorded precondition for wider
-arming is **`#8486`**, which is OPEN and **never executed**.
+arming is **`#8486`**, which is OPEN, **never executed**, and — §7.1 — **not scoped to this number**
+(the issue is the LongMemEval-S QA benchmark).
 **Why it matters:** it reaches BM25 *ranking* on the product lane **without moving the text index**, so it
 does not touch V1's decision and does not wait on M3's migration. It is the cheapest path to the quality half
 of C2, and the inventory has no row for it because C2 was read as "the index move".
 **Falsifier:** the corpus read's p95 on a production-sized label exceeds the read deadline (or the row count
 exceeds the cap on the labels that matter) → the lever is unaffordable and M3's index move is the only route.
-⛔ **Do not arm it on a lane's judgement.** The gate is `#8486`; a lane may measure, not decide.
+⛔ **Do not arm it on a lane's judgement.** A lane may **measure**, not decide — but ⚠️ **`#8486` is not that
+measurement** (§7.1, `#8486` `comment 6837663346`): the gate has to be the corpus-read p95, and no scoped
+artifact holds it yet. An arming decision taken on "`#8486` is still open" without that number is the same
+fail-open the gate exists to prevent.
 
 ### M-8 ⭐ **The `title` census** — one query that decides whether A3 has a context field at all
 
@@ -792,7 +844,9 @@ names), and the extractor supplies the only real context. Cost: one query per gr
 
 ### M-9 **Stamp the merge link** — `method`, `similarity`, `decidedAt` (and the actor, where one exists)
 
-`apply_entity_merge` already computes all of it and throws it away. Three properties on the redirect make
+`apply_entity_merge` already receives `method` and `similarity` and throws them away; `decidedAt` (and the
+actor, where one exists) is **not computed anywhere in the function** — `update_entity`'s own write is the
+natural timestamp. Three properties on the redirect make
 *"why are these one entity"* a one-query answer (the field's own test, archtin/Senzing) and make an un-merge
 auditable. Cost: ~5 lines in a function that already validates its inputs.
 **Falsifier:** a reviewer cannot show a case where the stamp changes a decision → it is decoration; drop it.
@@ -808,7 +862,7 @@ reporting half and drop the refusal. ⚠️ Cannot be measured on this box (§7.
 
 ### M-11 **Entity-boost over the UNION candidate set** — Mem0's signal without Mem0's pool
 
-Mem0's entity boost is a good signal applied to a **narrow** pool (semantic-only, `main.py:1674-1690`). Ours
+Mem0's entity boost is a good signal applied to a **narrow** pool (semantic-only, `main.py:1680-1691`). Ours
 would be a **per-document additive boost** over `rrf_fusion`'s union — so a BM25-only or entity-only match can
 still surface. ⚠️ **Deliberately NOT Mem0's construction:** copying the pool would deepen the recall problem
 `#11901` measured, and §7.2's ⛔ warns exactly there.
@@ -820,8 +874,11 @@ still surface. ⚠️ **Deliberately NOT Mem0's construction:** copying the pool
 1. **No graph census was possible.** This box serves no tenant for these populations, so `Object.title` fill
    rate (M-8), `resolved_from` chain lengths and cluster sizes (M-10) are **declared and unmeasured**. Every
    one of them is one Cypher query away on a graph that serves them.
-2. **`#8486` is unexecuted**, so the hosted BM25 corpus-read latency (M-7's gate) has **no number**. This lane
-   did not run it — that is a benchmark, not a research read.
+2. **`#8486` is unexecuted, and it is not scoped to the number M-7 needs.** The hosted BM25 corpus-read
+   latency has **no number**, and `#8486` — the issue the code names as its gate — is the LongMemEval-S QA
+   benchmark (0 `BM25`/`latency` mentions in its body, §7.1), so running it would not produce one. This lane
+   did not run it (that is a benchmark, not a research read) and **cannot close the gap by citing it**. The
+   scope question is recorded on `#8486` (`comment 6837663346`).
 3. **There is no April-2026 Mem0 paper** (§7.5 #7). The April-2026 algorithm is documented by README/blog/code
    and is **not** reflected in `arXiv:2504.19413`; Mem0 says so itself. Any citation saying otherwise is
    wrong.
@@ -830,7 +887,12 @@ still surface. ⚠️ **Deliberately NOT Mem0's construction:** copying the pool
    91.4 % with Gemini-3 Pro — ACL demo paper + vendor board), Mastra (round 1's reading). None is comparable
    to `#11901`'s 61.3 % / 73.0 %, which is **candidate recall@k on our capture corpus**.
 5. **Letta/MemGPT and Mastra are inherited from round 1's §5.1**, not re-verified at this head. Cognee,
-   Honcho, Supermemory, Mem0 and Hindsight were read to primary sources this lane.
+   Honcho, Supermemory and Mem0 were read to **primary sources** this lane (vendor docs, repo code, README).
+   **Hindsight is a split reading and is not claimed as primary throughout**: the arXiv **abstract** + the
+   ACL demo abstract were read, **and** the paper's full text §4.2.3–§4.2.4 for the RRF → cross-encoder
+   order; the headline figures (83.6 % @20B, 91.4 % with Gemini-3 Pro) are the **abstract's**, not a
+   re-run. ⚠️ A summary site (`emergentmind`) was in the first pass of this claim and is **not** a
+   primary source — §7.2 now cites §4.2 directly, and no claim in §7 rests on the summary.
 6. **The 8–23 nDCG@10 Postgres-full-text-vs-BM25 gap** is inherited from `SEARCH-ARCHITECTURE.md:§6.2`; this
    lane did not re-read the underlying measurement. It does not need to: §7.1's C2 resolution does not rest
    on it.
@@ -844,7 +906,7 @@ still surface. ⚠️ **Deliberately NOT Mem0's construction:** copying the pool
 |---|---|---|
 | C2: product lane is TF-IDF; vendor has no scorer option | none — it **confirms** `SEARCH-ARCHITECTURE.md:§6.2` | ✅ candidate (informational; it sharpens M3) |
 | C2: the scorer acts on **recall** (LIMIT) not order (RRF discards score) | none — M3's scope already says "score distributions"; this adds a metric | ✅ candidate (it narrows M3 to a measurable question) |
-| **M-7** arm the BM25 leg on hosted | **V1 does not reach it** (V1 gates the index *location*); the gate is `#8486`, a code-recorded precondition | ⚠️ candidate **only through `#8486`** — a lane may measure, not arm |
+| **M-7** arm the BM25 leg on hosted | **V1 does not reach it** (V1 gates the index *location*); the code names `#8486` as the latency precondition | ⚠️ candidate **only through the corpus-read p95** — which `#8486`, as scoped, does not produce (§7.1) — a lane may measure, not arm |
 | B2: Zep's Jaccard is name shingles | none | ✅ confirmed, not adopted |
 | B2: the graph's job is candidate generation / per-doc boost | none | ✅ candidate |
 | **A3: context belongs in the adjudicator, not the vector** | **obeys** §12.2c (`:1319`, `:1330`) and the KEEP ruling (`#11395` `6781921075`); adds no vector, removes none | ✅ candidate |
