@@ -5182,12 +5182,22 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         #   awk '/^- test_pack_logic_writeprobe_11083.py$/{print NR}' config/ci-surfaces.yml
         # and the section bounds
         #   grep -nE '^(carve_out|uri_requiring):' config/ci-surfaces.yml
-        # At this head (rebase onto main `63f725cca1`): entry 9933, `carve_out:`
-        # opens 9807, `uri_requiring:` 10138 — so 9933 is inside the section, and
-        # the identical text also sits at 6072 and 8449, which is what the 5th
-        # element exists to refuse. ⚠️ Both of those are INDENTED sub-keys
-        # (`core:` 2235, `sdk:` 8215) of `surfaces:`, so the resolver's
-        # nearest-column-zero-key rule reports the PARENT: a cite onto 8449 refuses
+        # At `0e281a900b` (#12250): entry 9934, `carve_out:` opens 9808,
+        # `uri_requiring:` 10139 — so 9934 is inside the section, and the identical
+        # text also sits at 6073 and 8450, which is what the 5th element exists to
+        # refuse. Every one of those is +1 on the numbers this comment carried at
+        # `63f725cca1`, and the single cause is measured: `#12159` (`33781512b6`)
+        # registered `test_candidate_recall_11901.py` at `config/ci-surfaces.yml:2236`
+        # — ONE insertion above the entry. The file is tool-MAINTAINED, not generated
+        # from a source of truth: `tools/ci_selection.py::register_tests` reads the
+        # text, splices the new entry into the surface's block and writes every other
+        # line back verbatim, which is why it also carries hand-authored prose. Either
+        # way the property this row trips on holds: an insertion anywhere above the
+        # entry moves it. That is the class here — a line-number pin over a number
+        # another tool owns, not a citation anyone mis-copied.
+        # ⚠️ Both of the twins are INDENTED sub-keys
+        # (`core:` 2235, `sdk:` 8215 at `63f725cca1`) of `surfaces:`, so the
+        # resolver's nearest-column-zero-key rule reports the PARENT: a cite onto 8450 refuses
         # with `sits in section 'surfaces:', not 'carve_out:'` — measured, so a
         # re-derivation onto it does not get told `sdk:` and conclude the guard is
         # broken.
@@ -5225,7 +5235,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
             ("705", "`plan_hierarchy_edges` returns one"),
         ), "relation_write"),
         ("03-test-design.md", "`carve_out:` holds **one**", (
-            ("9933", "- test_pack_logic_writeprobe_11083.py"),
+            ("9934", "- test_pack_logic_writeprobe_11083.py"),
         ), "ci_surfaces", "carve_out:"),
     )
     assert len(rows) >= 9, (
