@@ -184,19 +184,13 @@ def test_mutation_population_is_pinned():
 
     #11902's review added the arm where a marker-less `host:port` prose token used to be
     installed as the shorthand ANCHOR before the marker test ran, so inserting one in
-    front of a bad shorthand defused its red (measured green). ⛔ No ordinal, by the rule
-    the sentence below states: the "25th" that stood here named arm 25, which is
-    `an evidence cell pointing at a section that does not exist` — the described arm is
-    arm 8. An ordinal is a count, and this one was already wrong when the sentence that
-    introduced it failed to bump the floor it had just moved (25 -> 26).
+    front of a bad shorthand defused its red (measured green).
 
     #11952 added the `#L` permalink arm: the GitHub permalink spelling (path, `#`, `L`,
     line number) matched NO pattern in this module, so both an out-of-range and an
     in-range permalink left the page CLEAN — the likeliest real-world citation form was
     also the one shape that looked verified and was not. The population and the floor
-    move together. ⛔ No ordinal here either, measured rather than assumed: the "29th"
-    that stood in this sentence named arm 29, which is `a citation separated from its
-    line by a pipe` — the permalink arm is 28.
+    move together.
 
     The #11902 re-verification added four more (the population was 31 at the head it
     re-measured), one per fail-open it found still open on the merged head: a `~`-rooted
@@ -215,12 +209,13 @@ def test_mutation_population_is_pinned():
     (measured at `6413d5e8`). The `#L` permalink arm one branch above was fixed for
     this same shape in an earlier round; this is the arm that was left behind.
 
-    ⛔ NO SENTENCE IN THIS PARAGRAPH NAMES AN ARM BY ORDINAL, because that is how the
-    last four errors here happened: every arm number written above was correct at the
-    head it was written and one position low after the next insertion (`the "25th"` was
-    arm 8, `the "29th"` was arm 28, and three sentences were still one low when this
-    rule was written). An ordinal is a count, counts rot, and this page exists to catch
-    exactly that. Name the arm by what it does, or enumerate `MUTATIONS`.
+    ⛔ NO SENTENCE IN THIS PARAGRAPH NAMES AN ARM BY A NUMBER — ordinal OR bare. An arm
+    position is a count: it moves whenever an arm is inserted above it, and nothing tests
+    it (the terminal count below IS tested, against `len(MUTATIONS)`, which is why it can
+    stay). Five arm numbers were written here and all five are gone: three were correct
+    when written and one position low after the next insertion, and two were the
+    population count written where a position belonged, so they were wrong on the day they
+    were written. Name the arm by what it does, or read the position off `MUTATIONS`.
 
     Two further arms close two holes the review of that pass found in the fixes
     themselves: a §1 row whose first cell merely BEGINS with `Verdict` (the header skip
