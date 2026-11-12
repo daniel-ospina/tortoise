@@ -894,7 +894,7 @@ def test_the_admission_check_is_a_necessary_condition_not_the_whole_pin(probe):
 # The section used to open with `uv run python tools/test_lane.py run -- true`, described as "a private
 # FalkorDB lane". `run` is the PYTEST entry point: it strips the leading `--`, finds no test target in
 # `["true"]`, PREPENDS `tests/` and invokes `python -m pytest tests/ true` — pytest then exits 4 with
-# `file or directory not found: true` while the lane container is up. It also applies the three seam
+# `file or directory not found: true` while the lane container is up. It also applies the four seam
 # variables to the CHILD only, so it can never populate the shell that the following `export` line was
 # written for. The two tests below pin the section's shape and MEASURE the defect it would reintroduce.
 
