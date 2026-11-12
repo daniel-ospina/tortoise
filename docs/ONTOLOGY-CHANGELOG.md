@@ -96,9 +96,11 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > agent-memory system surveyed uses **soft revocation** rather than deletion"*; arXiv 2609.08258v1 (*"Revoked but Still
 > Authoritative: An Empirical Study of Revocation Enforcement in Agent-Memory Systems"*) says **"Many** agent-memory systems
 > preserve history through soft revocation", and its §3.3 names two of the five it measures (cognee, langmem) as deleting the superseded
-> record outright under direct insertion — a universal claim is exactly wrong, and cognee is named three lines above. The paper
-> measured cognee on **2026-09-08**, BEFORE the 1.6.5 conflict review cited above, so it records cognee without a fact-level
-> contradiction step while the same paragraph credits it with one — both are true of their own version, and the version is named
+> record outright under direct insertion — a universal claim is exactly wrong, and cognee is named three lines above. The paper is
+> **v1 of 2026-09-08** (its submission date — it states no measurement window and names no cognee version), which is BEFORE the
+> 1.6.5 conflict review cited above, so it records cognee without a fact-level
+> contradiction step while the same paragraph credits it with one — both are true of their own version (the review's is 1.6.5, released
+> 2026-10-16), and the version is named
 > here so the two do not read as a source refuting its own example. (b) It said
 > *"mem0 and Letta have no successor concept"*, which is false of mem0 (its Supersede feature carries a system-inferred replacement
 > pointer) and was never verified for Letta from a primary source. (c) It named Cognee's `close_node()`, which cognee removed in 1.6.5
