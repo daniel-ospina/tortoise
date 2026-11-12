@@ -3649,7 +3649,7 @@ When the record is armed, the drill is: capture into the record (scenario A of
 `nodes_written`/`relations_written` (both **measured off the cache**) **and** a
 per-label count against the **RECORD's** counts — not against the flushed
 baseline: a record-sourced rebuild legitimately holds fewer nodes than the
-baseline (the six cache-only classes are dropped by design, §0.5 of
+baseline (the eight cache-only classes are dropped by design, §0.5 of
 `docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md`) and fewer
 relations (the `relations-not-hot` state above), so "equality with the baseline"
 would report a correct restore as a failure. The baseline is context for the
