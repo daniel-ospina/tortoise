@@ -435,6 +435,128 @@ class TestTheBeliefSeam:
         self._api(sdk).emit_belief(
             "ConfidenceChanged", id="pt_x", status="superseded")
 
+    # ── review cycle 3, P1: the STATE-OP shape, not just `EventRecorded` ──
+    # Gating on the record type alone left the seam open one shape over. A caller
+    # can hand this door the canonical state-op record for any label —
+    # `EntityMutated` nested under `state` is exactly what
+    # `projection._journal_entity_mutation` emits, and the fold reads it through
+    # `state["status"]` → `restatus` — so these pins hold the fifth door shut.
+
+    @pytest.mark.parametrize("status", _TERMINAL)
+    def test_emit_belief_refuses_a_terminal_state_op(self, sdk, status):
+        eid = _event(sdk, name=f"BeliefState-{status}")
+        before = _props(sdk, eid)
+        with pytest.raises(ValueError, match=":Event"):
+            self._api(sdk).emit_belief(
+                "EntityMutated", id=eid, label="Event", op="restatus",
+                state={"status": status})
+        assert _props(sdk, eid) == before
+
+    def test_emit_belief_refuses_the_flat_restatus_spelling(self, sdk):
+        """`restatus` is the flat spelling of the same value — both reach the node."""
+        eid = _event(sdk, name="BeliefStateFlat")
+        with pytest.raises(ValueError, match=":Event"):
+            self._api(sdk).emit_belief(
+                "EntityMutated", id=eid, label=":Event", op="restatus",
+                restatus="archived")
+        assert "status" not in _props(sdk, eid)
+
+    def test_emit_belief_refuses_a_terminal_flag_in_a_state_op(self, sdk):
+        eid = _event(sdk, name="BeliefStateFlag")
+        with pytest.raises(ValueError, match=":Event"):
+            self._api(sdk).emit_belief(
+                "EntityMutated", id=eid, label="Event", op="restatus",
+                state={"outdated": True})
+        assert "outdated" not in _props(sdk, eid)
+
+    def test_emit_belief_state_op_with_a_non_terminal_status_still_lands(self, sdk):
+        """No over-block: `draft`/`live` are the prop lane, and #2788 pins it."""
+        eid = _event(sdk, name="BeliefStateLive")
+        self._api(sdk).emit_belief(
+            "EntityMutated", id=eid, label="Event", op="restatus",
+            state={"status": "live"})
+        assert _props(sdk, eid)["status"] == "live"
+
+
+# ── the bundle door: Phase 1 must refuse what step 3 would refuse mid-write ──
+
+
+class TestTheBundleValidationDoor:
+    """Review cycle 3, P1 — `_validate_bundle` passed a terminal Event item.
+
+    The guard sat only at the DOOR, so a bundle item carrying a terminal status
+    passed Phase 1 and raised in step 3 AFTER the point items had committed —
+    the #2422/#7925 partial-mutation class, which is why the `:Subject`
+    vocabulary arm next to this one was put in Phase 1. Measured before the
+    fix: `_validate_bundle` returned `[]` and `ingest` left `Point 1` written.
+    """
+
+    @pytest.mark.parametrize("status", _TERMINAL)
+    def test_a_terminal_event_item_is_a_phase_1_violation(self, sdk, status):
+        violations = sdk._validate_bundle({
+            "points": [{"content": "first"}],
+            "entities": [{"ref": "e1", "type": "event",
+                          "name": f"Bundle-{status}",
+                          "eventKind": "deployment", "status": status}],
+        })
+        assert violations, (
+            f"a bundle item with status={status!r} passed Phase 1 — ingest would "
+            "then raise mid-write with the point already committed")
+        assert any("event" in v["message"].lower() for v in violations)
+
+    def test_a_non_terminal_event_item_is_not_a_violation(self, sdk):
+        """No over-block: the door accepts `scheduled`, so Phase 1 must too."""
+        assert sdk._validate_bundle({
+            "entities": [{"ref": "e1", "type": "event", "name": "Sched",
+                          "eventKind": "deployment", "status": "scheduled"}],
+        }) == []
+
+    def test_an_object_item_with_a_terminal_status_is_not_a_violation(self, sdk):
+        """`:Object` has a lifecycle — its writer stores the value (T5)."""
+        assert sdk._validate_bundle({
+            "entities": [{"ref": "o1", "type": "object", "name": "PolicyV2",
+                          "objectKind": "policy", "status": "superseded"}],
+        }) == []
+
+    def test_every_connection_shape_still_gets_a_diagnosis(self, sdk):
+        """COVERAGE is pinned, not the message count (review cycle 5 P1).
+
+        The arm must fire for EVERY shape that ends up writing a terminal
+        `:Event` in step 3 — and one shape it must not miss is a connection the
+        OTHER Event arm never inspects: that one runs only for a DIRECT-route
+        connection carrying an `operator`, so `reify: true` and
+        `relation: …` connections reach step 3 unguarded if this arm defers to
+        them (measured: a deferring revision produced ZERO violations for both
+        shapes, so `ingest` committed the point and then raised mid-write — the
+        #2422/#7925 class this arm exists to prevent). A repeated message on the
+        direct-operator shape is the accepted cost, exactly as the `:Subject`
+        vocabulary arm next door accepts it.
+        """
+        item = {"ref": "evt", "type": "event", "name": "Launch",
+                "eventKind": "sessionCaptured", "status": "superseded"}
+        point = {"ref": "pX", "kind": "statement", "content": "must-not-commit"}
+        object_item = {"ref": "o", "type": "object", "name": "Delta"}
+        shapes = {
+            "operator": {"from": "evt", "to": "o", "operator": "IMPL"},
+            "reify": {"from": "evt", "to": "o", "operator": "IMPL",
+                      "reify": True},
+            "relation": {"from": "evt", "to": "o",
+                         "relation": "extractedFrom"},
+            "to-list": {"from": "evt", "to": ["o"], "operator": "IMPL"},
+        }
+        for name, conn in shapes.items():
+            bundle = {"points": [dict(point)],
+                      "entities": [dict(item), dict(object_item)],
+                      "connections": [conn]}
+            msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
+            assert msgs, f"the {name!r} shape produced NO violation — step 3 would half-commit"
+            assert any("declares status 'superseded'" in m for m in msgs), (name, msgs)
+        # …and the unreferenced shape, which no connection arm can ever see.
+        alone = {"points": [dict(point)], "entities": [dict(item)]}
+        assert any("declares status 'superseded'" in m
+                   for m in (v["message"] for v in sdk._validate_bundle(alone))), (
+            "an unreferenced terminal Event item passed Phase 1")
+
 
 # ── T5: no over-block on the other labels ───────────────────────────────────
 

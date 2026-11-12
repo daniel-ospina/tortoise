@@ -94,14 +94,14 @@ is §7's lesson one merge later: **a count is only as good as the base it was ta
 record said nothing called.** `#11237`'s write path landed as **`#11548`** (`e49788706a`, *feat(extractor):
 S5 Job 1 remainder — the relations channel gets a write path (`#11237`)*): a new module
 `tortoise/relation_write.py` is the consumer `#10999` did not have, called from
-`TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:17984` (`relation_write = apply_relation_edges(` —
-the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:17983`, and the
+`TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:18057` (`relation_write = apply_relation_edges(` —
+the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:18056`, and the
 binding below is the result), fed **only** by
 the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
 taken on this merge:
 
 - `git grep -n 'result\["relations"\]' -- tortoise/` → **3** lines (`extractor_v2.py:11470`,
-  `relation_write.py:7`, `sdk.py:17971`), against the *"that comment and no consumer at all"* this
+  `relation_write.py:7`, `sdk.py:18044`), against the *"that comment and no consumer at all"* this
   record was written with.
 - `git grep -n 'plan_hierarchy_edges' -- tortoise/` → **8** lines, four of them in `relation_write.py`
   and one of them the **call** (`:631`): a declared hierarchy over a pair the story *states* is routed
@@ -194,7 +194,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    the capture path at `tortoise/sdk.py:18497`). (The probe's own docstring cites it too and was
    re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
    insertion then moved both, and `#11835`'s seam stamp moved them once more; both now read
-   `18497`.)  <!-- #10226 removed 26 SDK methods above this writer: the prose cite and the `sed` were re-derived with it, this bare parenthetical was not — re-derived here off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`, and again on the merge of main `edcac493a5` (this branch inserts a line at `sdk.py:129`, which moves the writer to `18497`). --> What is missing is the *declared part-whole* edge, not every structural
+   `18497`.)  <!-- #10226 removed 26 SDK methods above this writer: the prose cite and the `sed` were re-derived with it, this bare parenthetical was not — re-derived here off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`, and again on the merge of main `edcac493a5`, whose branch-side line insertion at `sdk.py:129` moves it once more. --> What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
 3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2747-2749`
@@ -717,11 +717,11 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
                                                           # count is only as good as the base it was taken at
 # ⛔ THREE hits in this record's merged tree since #11548 landed the consumer (#11237):
 # extractor_v2.py:11470 (the comment that WAS stale, corrected in place by #11001's lane),
-# relation_write.py:7, sdk.py:17971.
+# relation_write.py:7, sdk.py:18044.
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
-# `sdk.py:17984` (`_capture_session` reaches it at `sdk.py:16115`). Of the three hits only ONE was still prose-about-absence (the stale comment at
+# `sdk.py:18057` (`_capture_session` reaches it at `sdk.py:16188`). Of the three hits only ONE was still prose-about-absence (the stale comment at
 # `extractor_v2.py:11470`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
 # ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:11470` was
@@ -741,7 +741,7 @@ git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merge
                                                           # consumes it" comment; CORRECTED in
                                                           # place — see the note above),
                                                           # relation_write.py:7 (the
-                                                          # CONSUMER's docstring) and sdk.py:17971 (the
+                                                          # CONSUMER's docstring) and sdk.py:18044 (the
                                                           # #10999 transport-only note). ⛔ NOT "no
                                                           # consumer": the second hit IS the consumer
                                                           # (§0 above). (⚠️ the `-- tortoise/` scope is
