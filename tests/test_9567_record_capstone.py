@@ -1115,6 +1115,8 @@ def restored(armed, tmp_path_factory):
     from tortoise.projection import FalkorProjection
 
     mp = pytest.MonkeyPatch()
+    conn = None
+    project = None
     try:
         # ── D4: the journal is UNAVAILABLE ──
         if armed.journal.exists():
@@ -1146,9 +1148,31 @@ def restored(armed, tmp_path_factory):
             project=project,
         )
         yield Restored(outcome=outcome, view=view, project=project, conn=conn)
-        conn.close()
-        project.close()
     finally:
+        # ⛔ EVERY path, not just the happy one (#12024). This fixture's setup
+        # RAISES in the field — `read_record_view` refuses a record holding a
+        # column the placement table does not classify — and the pre-fix teardown
+        # lived AFTER the `yield`, so a setup failure kept `conn` OPEN, IDLE IN
+        # TRANSACTION, holding ACCESS SHARE on every table the view read. The
+        # exception's traceback keeps the frame (and the connection) reachable for
+        # the rest of the session, so the lock is never released: D10's
+        # `DROP POLICY … ON public.point` then waits for ACCESS EXCLUSIVE for ever,
+        # the leg is killed at its 12m budget with no junit, and the whole failure
+        # set becomes unobservable — a 3-ERROR leg reported as "UNKNOWN". MEASURED
+        # on a local two-server repro: `pg_stat_activity` shows this backend `idle
+        # in transaction` with the `SELECT * FROM public.point …` that
+        # `read_record_view` issues, and D10 blocked behind it.
+        if project is not None:
+            try:
+                project.close()
+            except Exception:      # noqa: BLE001 — teardown must not mask the cause
+                pass
+        if conn is not None:
+            try:
+                conn.rollback()    # releases the lock before the connection is gone
+            except Exception:      # noqa: BLE001
+                pass
+            conn.close()
         mp.undo()
 
 
@@ -1663,7 +1687,25 @@ def test_D10_a_record_table_without_its_policy_fails_closed(armed):
         conn.rollback()
 
         with armed.conn.cursor() as admin:
-            admin.execute("DROP POLICY point_app_tenant ON public.point")
+            # ⛔ BOUNDED, so a held lock FAILS this leg instead of eating it
+            # (#12024). `DROP POLICY` takes ACCESS EXCLUSIVE on `public.point`,
+            # and any OTHER backend still holding ACCESS SHARE from an unclosed
+            # read transaction blocks it indefinitely. Unbounded, that is not a
+            # red — it is a 4m40s pytest-timeout, then the job's 12m ceiling, then
+            # `timeout -k` SIGKILLs the leg with NO junit, so the leg reports
+            # `INCOMPLETE — failure set unobservable` and the required check is red
+            # with nothing to diagnose. With a bound, the same contention raises
+            # `55P03 lock_not_available` (PostgreSQL names the blocking pid in the
+            # server log) and the OTHER failures in this run are still reported.
+            # 15s is far above the uncontended cost of this DDL on a three-row
+            # table and far below the item's own 300s budget.
+            admin.execute("SET lock_timeout = '15s'")
+            try:
+                admin.execute("DROP POLICY point_app_tenant ON public.point")
+            finally:
+                # `armed.conn` is AUTOCOMMIT, so a refused DROP leaves the session
+                # usable and this reset always runs.
+                admin.execute("RESET lock_timeout")
 
         cur = rp.scope_connection(conn, org_a)
         cur.execute("SELECT count(*) FROM public.point")

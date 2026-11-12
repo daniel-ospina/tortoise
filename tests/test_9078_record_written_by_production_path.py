@@ -299,6 +299,34 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # documented drop-and-recreate operation, never a silent rewrite.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261109000001_record_embedding_vector.sql", None),
+    # #11827's RETIREMENT of `public.point.as_of` — the DROP of a column the
+    # 20261018 entry above ADDS. It is here, and NOT in the exclusion dict below,
+    # because the reason that put it there was measured FALSE (#12024).
+    #
+    # That reason was "a legacy container therefore reads IDENTICALLY and writes
+    # the same rows, and the only difference is that it still HOLDS the retired
+    # values". It does not read identically. The entry above RE-ADDS `as_of` on
+    # every already-migrated call, `cache_projection`'s placement table no longer
+    # classifies the name (it was retired), and the row reader refuses an
+    # unclassified column by design — so EVERY `point` row dies in
+    # `_props_from_row` (`UnknownRecordColumn: point.as_of is not classified by
+    # the placement table`). MEASURED: on a migrated container a second
+    # `_ensure_record_schema` call leaves `public.point.as_of` present; the
+    # record-postgres leg then reports D4/D5 (`read_record_view`) as ERROR and
+    # D8's `pg_restore` fails on the same column, which is the red the required
+    # `test-record-postgres` check carried on every merge ref.
+    #
+    # So the re-apply set has to apply the SUBTRACTION too, in file order — after
+    # the ADD that resurrects it. `DROP COLUMN IF EXISTS` is idempotent, so this
+    # is a no-op on a container the full tree already migrated.
+    #
+    # ⛔ The cost is accepted and it is the one the migration's own header names:
+    # on a container that still HOLDS pre-retirement `as_of` values, re-applying
+    # deletes them. The journal is the system of record and every `PointAdded`
+    # carries the value as `point.asOf`, so a replay restores it exactly — while
+    # leaving the column in place costs the whole read, not a value.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261110000001_record_point_retire_as_of_11827.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in
@@ -356,20 +384,15 @@ RECORD_REAPPLY_EXCLUDED: dict[str, str] = {
     "20261025000002_record_source_canonical_index.sql":
         "index only — no column, refusal or policy; the readers parse files, and a "
         "container without it is slower, not wrong",
-    # #11827's retire of `public.point.as_of`. Classified by the axis the two
-    # entries above sit on, and one step further: this migration REMOVES a
-    # column, so re-applying it on a legacy container would DELETE the rows'
-    # historical `as_of` values — data that is recoverable from
-    # `PointAdded.point.asOf` but not for free. Nothing needs it re-applied:
-    # the drop is in the append-only tree, so the readers (`table_columns()`,
-    # `column_types()`, `replay_plan`) already answer "no such column" and the
-    # writer cannot emit it (`money.py`'s four reserved names). A legacy
-    # container therefore reads IDENTICALLY and writes the same rows, and the
-    # only difference is that it still HOLDS the retired values — which is the
-    # reason not to touch it, not a defect.
-    "20261110000001_record_point_retire_as_of_11827.sql":
-        "a DROP COLUMN — re-applying it destroys the retired values a legacy "
-        "container still holds; the readers parse files, so nothing needs it",
+    # ⛔ #11827's retire of `public.point.as_of` USED TO SIT HERE, and the reason
+    # it gave was measured false: it claimed a container that keeps the column
+    # "reads IDENTICALLY and writes the same rows", which is only true of the
+    # FILE-parsing readers (`table_columns()`, `column_types()`, `replay_plan`).
+    # The ROW reader is the one that disagrees — `cache_projection`'s placement
+    # table no longer classifies the retired name, so `_props_from_row` REFUSES
+    # every `point` row that still carries the column while the money migration
+    # keeps re-adding it. It is on the re-apply list now, with that measurement
+    # recorded there (#12024).
 }
 
 #: The minimum Supabase-shaped substrate the record migrations need: the three
@@ -3554,6 +3577,59 @@ def test_the_reapply_set_covers_every_record_migration_after_the_base_shape():
         assert why.strip(), f"{name} is excluded from the re-apply with no reason"
         assert name in post_base, (
             f"{name} is excluded but is not a post-base record migration")
+
+
+def test_the_reapply_set_does_not_resurrect_a_column_the_tree_retired():
+    """The already-migrated path may not leave a column the row reader REFUSES.
+
+    Derived from the migration FILES, and it is the guard #12024 is missing: the
+    reader that breaks here does not parse files. `cache_projection._props_from_row`
+    classifies the columns the ROW actually carries against its placement table
+    and RAISES on a name the table does not know, so a container holding a
+    column the tree has since RETIRED refuses every row of that table.
+
+    That is reachable exactly here, because the re-apply path is not the tree:
+    a container whose `journal_event` exists takes the already-migrated branch,
+    where `RECORD_REAPPLY_STEPS` runs INSTEAD OF the file list. So the set must
+    be closed under SUBTRACTION too — an entry that ADDs a column a later
+    migration DROPs has to carry that DROP after it, or every re-apply re-creates
+    the column the reader refuses. MEASURED pre-fix on a migrated container: a
+    second `_ensure_record_schema` call leaves `public.point.as_of` present,
+    `read_record_view` raises `UnknownRecordColumn: point.as_of is not classified
+    by the placement table`, and the record-postgres leg is killed at its budget
+    with no junit (#12024).
+
+    Simulated rather than executed: `_ordered_column_ops` is the SAME reader
+    `column_types()` builds the declaration from, so the comparison is derived
+    from one parse of one file set and cannot disagree with itself. The executed
+    half is the record-postgres leg (D4/D5/D8), which is what reddened.
+    """
+    from tortoise import record_projection
+
+    simulated: dict[str, set[str]] = {}
+    for path, _creates in RECORD_REAPPLY_STEPS:
+        sql = record_projection._strip_sql_comments(path.read_text(encoding="utf-8"))
+        for _pos, table, column, kind, _type in record_projection._ordered_column_ops(sql):
+            bucket = simulated.setdefault(table, set())
+            if kind == "drop":
+                bucket.discard(column)
+            else:
+                bucket.add(column)
+
+    declared = record_projection.column_types()
+    resurrected = sorted(
+        f"{table}.{column}"
+        for table, columns in simulated.items()
+        for column in columns
+        if column not in declared.get(table, {})
+    )
+    assert not resurrected, (
+        f"the re-apply set leaves {resurrected} on an already-migrated container "
+        "while the tree no longer declares it/them. Every row of that table is "
+        "then refused by the row reader (`_props_from_row`), not merely "
+        "tolerated as an inert legacy column. Add the migration that SUBTRACTS "
+        "it to `RECORD_REAPPLY_STEPS`, AFTER the entry that adds it"
+    )
 
 
 def _tables_added_since_the_reapply_set() -> list[str]:
