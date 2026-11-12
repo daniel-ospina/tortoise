@@ -441,7 +441,15 @@ def test_the_precondition_actually_fires_when_the_package_is_absent(
     MEASURED, all of these satisfied the text assertions:
       · `... >/dev/null 2>&1 || true; then` — the probe's status thrown away
       · `exit 1` moved inside `if false; then … fi` — the token is still there
-      · the whole block wrapped in `if [ -z "${NEVER_SET:-}" ]; then … fi`
+      · the whole block wrapped in `if [ -n "${NEVER_SET:-}" ]; then … fi` — the
+        DISARMING spelling, which REDs this test (measured: absent stub → rc=0,
+        `REACHED_PAST_PRECONDITION` printed, no `::error::`).
+
+    ⚠️ NOT in that list: the same wrapper spelled `-z`. `[ -z "" ]` is TRUE, so
+    the wrapper's body still runs and the guard stays ARMED — measured: absent
+    stub → rc=1 with `::error::`, no marker, so BOTH arms stay GREEN. A wrapper
+    the guard still runs is a blind spot in this docstring's framing, not a
+    bypass; it is named here so nobody reads `-z` as a way past the guard.
 
     So this test RUNS the committed step's prefix — verbatim, from `run:`, up to
     (not including) the `apt-get install` line — under `bash`, with `sudo`,

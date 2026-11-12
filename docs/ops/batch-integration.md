@@ -1250,7 +1250,7 @@ looks unhealthy **or the hosted queue is deep enough to stall work** (owner ruli
 `scripts/ci_runner_gate.sh`), so it is not a hosted-only class; a `self-hosted` class in either form
 removes the GitHub-hosted half of the race, so a **pool-side** stall — an outage on the box, or a
 contended box — holds the fold's required legs PENDING with nothing to answer them, the exposure
-`docs/ops/ci-runner-x64.md` records for every pool-only departure (`:773-779`); and the pool is
+`docs/ops/ci-runner-x64.md` records for every pool-only departure (`:783-789`); and the pool is
 MEASURABLY slower than hosted, in both of its architectures. On the x64 box, `test-slow (a)` over the
 same 365 nodeids took **1352.5 s against 246.5 s hosted — 5.49×** (`docs/ops/ci-runner-x64.md:208`); the
 ARM64 VMs resolve `ubuntu-latest` to a **~2× slower** class (`python-ci.yml:2105`) and one of them

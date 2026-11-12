@@ -3601,10 +3601,102 @@ def test_every_tools_citation_into_the_runbook_lands_on_what_it_names():
     )
 
 
+# ── 8h-ter. the BARE runbook shorthand (`:NNN` after the file is named) ─────────────
+
+_SHORTHAND_CITING_FILES = (*_TOOLS_CITING_THE_RUNBOOK, "docs/ops/batch-integration.md")
+
+#: The runbook's own name; its presence BEFORE a shorthand handle on the same line is what makes
+#: that handle unambiguous (see `_last_md_ref`).
+_RUNBOOK_NAME = "ci-runner-x64.md"
+
+#: A backticked BARE handle — `:54-55`, `:783-789`. No file name, no digits before the colon.
+_SHORTHAND_RE = re.compile(r"`:(?P<start>\d+)(?:-(?P<end>\d+))?`")
+
+#: shorthand start line -> a regex the cited window must match (the sentence it names).
+_SHORTHAND_RUNBOOK_ANCHORS: dict[int, str] = {
+    54: r"the ARM64 VMs register `self-hosted, Linux, ARM64",
+    783: r"The OPT-IN split \(`CI_SHARD_ROUTING=pool-split`\)",
+    898: r"three pool legs were killed at their own watchdogs",
+}
+
+
+def _last_md_ref(before: str) -> str | None:
+    """The last `*.md` file named in `before`, so a shorthand handle resolves to ONE document."""
+    names = re.findall(r"([A-Za-z0-9_./-]+\.md)", before)
+    return names[-1].rsplit("/", 1)[-1] if names else None
+
+
+def test_the_bare_runbook_shorthand_lands_on_what_it_names():
+    """⛔ #12071's OWN +10-LINE INSERT MADE A BARE `:NNN` HANDLE STALE, AND NOTHING REDDED.
+
+    `docs/ops/batch-integration.md` cites the runbook's "every pool-only departure" paragraph as a
+    BARE `:773-779` after naming the file in prose — the shorthand form. The pin above explicitly
+    leaves that shape unscanned ("a bare `:NN` is ambiguous"), so when this PR inserted ten lines at
+    `:278` of the runbook, that handle kept pointing at `:773-779`, which is now item 2 (*"The pool
+    is still the slower class for long legs"*) instead of item 4 (the pool-outage/pool-split
+    exposure the sentence exists to name). A lane choosing a `runs-on:` class would have read the
+    SPEED paragraph as the reason a pool-only label is refused — the wrong trade, from the
+    paragraph cited to forbid it.
+
+    Resolution is unambiguous here and only here: the handle is resolved against the LAST `*.md`
+    named earlier on the same line. Two arms, both two-way — an unanchored handle reds until it is
+    anchored, an anchor nothing cites reds (a pin quietly shrunk to nothing), and each handle must
+    land on the sentence it names, with the message reporting where that sentence actually is.
+
+    Non-vacuity, measured: with the pre-fix handle (`:773-779`) the LANDING arm reds and names
+    `:783-789`; with the fixed handle all three arms pass.
+    """
+    doc = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text().splitlines()
+
+    cited: dict[tuple[str, int], int] = {}
+    for rel in _SHORTHAND_CITING_FILES:
+        for i, line in enumerate((REPO_ROOT / rel).read_text().splitlines()):
+            for m in _SHORTHAND_RE.finditer(line):
+                if _last_md_ref(line[: m.start()]) != _RUNBOOK_NAME:
+                    continue  # the handle belongs to a different document — out of scope
+                start = int(m.group("start"))
+                cited[(f"{rel}:{i + 1}", start)] = int(m.group("end") or start)
+
+    assert cited, (
+        "no file cites the runbook by BARE handle any more — re-anchor this pin rather than "
+        "deleting it, because the shape returning silently is exactly what it guards"
+    )
+
+    unknown = sorted({start for _, start in cited} - _SHORTHAND_RUNBOOK_ANCHORS.keys())
+    assert not unknown, (
+        "a bare runbook handle points at a line this pin does not anchor — read that line, "
+        f"re-derive the number, and add it to `_SHORTHAND_RUNBOOK_ANCHORS`: {unknown}"
+    )
+    stale = sorted(_SHORTHAND_RUNBOOK_ANCHORS.keys() - {start for _, start in cited})
+    assert not stale, (
+        "this pin anchors runbook line(s) nothing cites by bare handle any more — a pin over "
+        f"refs that were re-worded or removed is pinning nothing: {stale}"
+    )
+
+    wrong: list[str] = []
+    for (where, start), end in sorted(cited.items()):
+        assert 1 <= start <= end <= len(doc), (
+            f"{where} cites docs/ops/ci-runner-x64.md:{start}-{end}, past EOF ({len(doc)} lines)"
+        )
+        text = "\n".join(doc[start - 1:end])
+        if not re.search(_SHORTHAND_RUNBOOK_ANCHORS[start], text):
+            actual = [
+                i + 1
+                for i, line in enumerate(doc)
+                if re.search(_SHORTHAND_RUNBOOK_ANCHORS[start], line)
+            ]
+            wrong.append(
+                f"{where} cites :{start} but that window is {text.strip()[:120]!r} "
+                f"(the sentence is at {actual})"
+            )
+    assert not wrong, (
+        "a BARE runbook handle sends a reader to a line that does not say what the sentence "
+        "claims — re-derive the number from the runbook at this head: " + "; ".join(wrong)
+    )
+
+
 # ── 8h-bis. the version-pin DROP's own prose cannot DENY the mitigation it cites ────────────
 _VERSION_PIN_CITATION_RE = re.compile(r"docs/ops/ci-runner-x64\.md:(\d+)(?:-(\d+))?")
-
-#: The flag the INSTALL side spells the mitigation with. A comment about the version-pin DROP that
 #: never names it is describing the pre-2026-10-29 world, where dropping a pin was pure restoration.
 _MITIGATION_FLAG = "CI_RUNNER_OS_LABEL"
 
