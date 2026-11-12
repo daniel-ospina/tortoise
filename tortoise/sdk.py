@@ -32703,15 +32703,20 @@ class TortoiseSDK:
           ``IMPL|NAND`` edge to a live epistemic endpoint. Its OWN
           ``count(DISTINCT n)``, never ``_edged_claim_ids()``: that query is
           label-blind (``epistemic_disjunction`` admits Point|Subject|Object|
-          Event), so pairing its label-blind BELIEF count with a
-          ``:Point``-scoped denominator mixes a WIDER numerator into a NARROWER
-          denominator — the direction that yields ``belief_coverage_pct > 1`` and a
-          NEGATIVE ``no_belief`` (measured: 5.0 / -8.0). ⛔ #12138 §2: this
-          bullet used to call the label-blind set a "wider denominator", which
-          is the OTHER mistake and the one the ranges cannot see (a wider
-          denominator lowers the ratio and raises ``no_belief``, both in range —
-          see the no-clamp note below). The two directions are distinct; only
-          the numerator/denominator SCOPE mix produces the 5.0 / -8.0 pair.
+          Event), so a belief count taken over that wider epistemic population
+          — once the ``IMPL|NAND`` requirement is dropped too, which is what the
+          cited measurement does (its 10 baselined claims are operator-less) —
+          put over this ``:Point``-scoped denominator mixes a WIDER numerator
+          into a NARROWER denominator: the direction that yields
+          ``belief_coverage_pct > 1`` and a NEGATIVE ``no_belief`` (measured:
+          5.0 / -8.0). ⛔ #12138 §2: this bullet used to call the label-blind set
+          a "wider denominator", which is the OTHER mistake and the one the
+          ranges cannot see (a wider denominator lowers the ratio and raises
+          ``no_belief``, both in range — see the no-clamp note below), and it
+          then still credited that number to ``_edged_claim_ids``' own
+          population, where it is ``0/2 = 0.0`` — in range. The two directions
+          and the two populations are distinct; only the scope mix produces the
+          5.0 / -8.0 pair.
         - ``belief_present`` — the SAME population, counted through the shared
           presence predicate (`ep_has_belief_cypher`, #11702) rather than a
           private ``IS NOT NULL``: a stored (0,0) pair is not a belief and a

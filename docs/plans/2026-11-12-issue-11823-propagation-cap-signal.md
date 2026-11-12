@@ -150,14 +150,17 @@ not a fix (D2-5).
    `:Point`s participating in ≥1 `IMPL|NAND` edge to a live EPISTEMIC point (the far
    endpoint passes `epistemic_disjunction`, i.e. `Point|Subject|Object|Event`). It is **NOT** `len(_edged_claim_ids())`
    — that query is label-blind (`MATCH (n)-[r:IMPL|NAND]-(m)` + `epistemic_disjunction('n')` admits
-   `Point|Subject|Object|Event`, `live.py:509`), so reusing its label-blind BELIEF count would mix a
-   wider numerator into a narrower (`:Point`-scoped) denominator and produce `belief_coverage_pct > 1`
-   and a NEGATIVE `no_belief` (measured on this head: `belief_coverage_pct = 5.0`, `no_belief = -8.0`
-   on a 2-chain + 10 baselined islands fixture — numerator 10 over denominator 2, which only this
-   scope mix produces; ⛔ #12138 §2 corrected this sentence's "wider denominator" label, which named
-   the OTHER mistake — the one the asserted ranges cannot see, see R10 below). A second query spelling
-   is legitimate here precisely because it asks a different question; the extraction in step 1 exists
-   only so `_reachable_claim_count` keeps ONE copy of ITS predicate.
+   `Point|Subject|Object|Event`, `live.py:509`), so a belief count taken over that wider epistemic
+   population — once the `IMPL|NAND` requirement is dropped too, which is what the cited measurement
+   does (its 10 baselined claims are operator-less) — put over this `:Point`-scoped denominator mixes a
+   wider numerator into a narrower one and produces `belief_coverage_pct > 1` and a NEGATIVE
+   `no_belief` (measured on this head: `belief_coverage_pct = 5.0`, `no_belief = -8.0` on a 2-chain + 10
+   baselined islands fixture — numerator 10 over denominator 2, which only this scope mix produces;
+   ⛔ #12138 §2 corrected this sentence's "wider denominator" label, which named the OTHER mistake —
+   the one the asserted ranges cannot see, and it credited the pair to `_edged_claim_ids`' own
+   population, where it is 0/2 = 0.0, in range; see R10 below). A second query spelling is legitimate
+   here precisely because it asks a different question; the extraction in step 1 exists only so
+   `_reachable_claim_count` keeps ONE copy of ITS predicate.
    - `operator_less_claims = graph_live_claims - points_edged`, where `points_edged` is the live
      non-operator `:Point` count with ANY `IMPL|NAND` edge — the `_trivial_stamp` population
      (`tortoise/dream.py::_trivial_stamp`) derived from the POSITIVE traversal (#12116 review P2: the
