@@ -72,16 +72,21 @@ from test_9078_record_written_by_production_path import (
 
 from tortoise import record_projection as rp
 from tortoise import record_writer
+from tortoise.entity_resolver import normalize_entity_name
 from tortoise.projection import classify_entity_mutation_op
 from tortoise.record_writer import use_record_tenant
 from tortoise.sdk import TortoiseSDK
 
 
-#: The ONE record the producer emits for a rename, built exactly the way
-#: `sdk._journal_entity_mutation` builds it (`_update_entity`'s non-Point
-#: branch): identity as written, `state` = the write's own applied map.
+#: A rename record built the way `sdk._journal_entity_mutation` builds it
+#: (`_update_entity`'s non-Point branch): identity as written, `state` = the
+#: write's own applied map — which since #12120 is BOTH keys the rename applies,
+#: the surface `name` and its fold (`normalize_entity_name`, the writer's key
+#: space). A rename record carrying only `name` is a shape this producer no
+#: longer emits.
 def _producer_rename(oid: str, new_name: str, label: str = "Object") -> dict:
-    applied = {"name": new_name}
+    applied = {"name": new_name,
+               "canonical_name": normalize_entity_name(new_name)}
     return {"type": "EntityMutated", "ts": "2026-11-06T00:00:00Z",
             "id": oid, "op": classify_entity_mutation_op(applied),
             "label": label, "state": applied}
@@ -221,9 +226,15 @@ def _journal_records(path) -> list[dict]:
 
 
 def _object_rows(conn, tenant: tuple[str, str]) -> list[tuple]:
+    # `canonical_name` is selected DELIBERATELY (#12120 round-5 finding 1): the
+    # replay leg compares these rows, and without the fold in the projection a
+    # record that withheld it still compared EQUAL — live and replay both holding
+    # a STALE fold (`'acme'` against the graph's `'acmerenamed'`), so leg (d)
+    # proved the row MOVED but not that the fold was right. With it here the leg
+    # discriminates the key it is cited for.
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, node_key, name FROM public.object "
+            "SELECT id, node_key, name, canonical_name FROM public.object "
             "WHERE org_id=%s AND graph_id=%s ORDER BY id", tenant)
         return [tuple(row) for row in cur.fetchall()]
 
@@ -296,9 +307,10 @@ def test_the_public_rename_door_moves_the_records_name_live_and_on_replay(
 
         # ── (b) LIVE: the name moved, the key did not, the old name is GONE ──
         live_rows = _object_rows(conn, live)
-        assert live_rows == [(object_id, object_id, "AcmeRenamed")], (
+        assert live_rows == [(object_id, object_id, "AcmeRenamed",
+                              "acmerenamed")], (
             "the record did not apply the rename: the row must be keyed by its "
-            f"stable id and carry the NEW name (got {live_rows})")
+            f"stable id and carry the NEW name and its fold (got {live_rows})")
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT count(*) FROM public.object WHERE org_id=%s AND "
