@@ -576,47 +576,29 @@ SEAM_FILES_WITH_ALLOWED_LITERALS = {
         # narrows it against nothing. Declaring the statements is what keeps a
         # future LANE-PORT site a red instead of an exemption, which is the
         # whole job of this file (same shape as `test_wipe_server.py` above).
+        # The two port-shaped fixtures are declared as narrow anchors for the
+        # same reason: `127.0.0.1:<port>:6379` is exactly the `docker run -p`
+        # publish spec and `127.0.0.1:6379/<graph>` exactly the `docker://` URI
+        # tail, so the BARE literals would each have exempted a real dial on the
+        # same line — the failure this guard exists to catch. The assertion-
+        # MESSAGE entry is the fragment that identifies its line; it need not be
+        # a statement, and it is not one.
         #
-        # One consequence worth knowing: the first entry is the whole stripped
-        # statement INCLUDING its trailing comment, so it is anchored to that
-        # wording. Rewording `test_test_lane_tool.py:2087`'s comment makes the
-        # entry inert, and the guard then REDS on that now-unexempted line —
-        # loud, not silent. Deleting the fixture line instead leaves the entry
-        # dead with nothing watching it: the non-vacuity check is per-FILE
-        # (`_exemptions_no_file_can_consult` returns `set(allow) - population`),
-        # so it catches a file that left the population, never an entry that
-        # stopped matching a line.
+        # What each entry must be, so a future editor can add one correctly: an
+        # anchored SUBSTRING of the line the census reports for that constant —
+        # a statement prefix where the fixture is a statement, the whole
+        # stripped line where that line IS the fixture text, or the message
+        # fragment that identifies an assertion line. An entry that matches no
+        # reported line is INERT, and nothing watches that at the entry level:
+        # the non-vacuity check is per-FILE (`_exemptions_no_file_can_consult`
+        # returns `set(allow) - population`), so it catches a row whose file
+        # left the population, never an entry that stopped matching.
         #
-        # The FOUR fixtures below are full statements for the SAME reason. The
-        # two port-shaped ones especially: `127.0.0.1:<port>:6379` is exactly
-        # the `docker run -p` publish spec and `127.0.0.1:6379/<graph>` exactly
-        # the `docker://` URI tail, so the BARE literals would each have
-        # exempted a real dial on the same line — the failure this guard
-        # exists to catch. So the narrow spelling costs nothing and keeps a
-        # future lane port red.
-        #
-        # The exemption is justified WITHOUT characterising the file's internals
-        # (earlier drafts of this block enumerated which `_docker` calls are
-        # stubbed and which child processes exist; every such enumeration was
-        # false in some particular, because the file is ~5,500 lines of
-        # deliberately-real stubs-and-real-children pairs). The proof is the
-        # guard's OWN census, which is stable and is stated here in the census's
-        # own unit: a CONSTANT. It reports seven lane-port-bearing constants in
-        # the file, and those seven ARE the seven entries below. Measured at this
-        # head, every lane-port-bearing constant in that file is either one of
-        # those seven or a docstring (4 of them, which the census excludes by
-        # design) — zero unexplained. So every lane-port-bearing constant is
-        # covered, which is the whole of what this row needs to assert.
-        #
-        # The census reports a constant at its FIRST line, so a multi-line
-        # constant appears once even though its continuation lines bear the
-        # literal too (three of the seven span lines: `:2325-2326`,
-        # `:2894-2895`, `:5152-5153`). That is why an entry is a statement
-        # PREFIX matched against that first line, not a whole-line equality.
-        #
-        # The file's own TCP use is `_ping_over_host` against loopback — `:1697`
-        # port 1, `:1721` an ephemeral listener — and neither carries a
-        # lane-port literal.
+        # The census is the justification, stated in its own unit: it reports
+        # seven lane-port-bearing constants in this file, and those seven ARE
+        # the seven entries below. Measured at this head, every lane-port-bearing
+        # constant in the file is either one of those seven or a docstring (which
+        # `_port_literals_in_code` excludes by design) — none unaccounted for.
         '"falkordb-16379",      # the orchestration graph instance',
         'for shared in ("falkordb", "falkordb-16379"',
         '_remove_and_describe("falkordb-16379")',
