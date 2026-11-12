@@ -355,6 +355,44 @@ class TestNeverRefuses:
                         if d.kind is not None:
                             assert d.outcome == GuardOutcome.REDIRECT
 
+    def test_the_RUNTIME_reader_of_a_scope_is_total_too(self):
+        """The install gate refuses these shapes; the RUNTIME must not raise.
+
+        Round-18 review P2, measured: `_validate` was fixed for
+        `fromKinds`/`fromLayers` while `pack_guards` — the WRITE DOOR — kept the
+        identical code, and here the shape was worse than a refused install:
+
+          * `fromKinds: 7` raised `TypeError: 'int' object is not iterable` out of
+            `pack_guards`, which this module's own contract forbids (#1934);
+          * `'widget'` became six one-letter kinds and `'subject'` seven
+            one-letter layers, so the guard was DEAD while loading `✓ Clean`;
+          * `0`/`false`/`{}` were read as ABSENT by `or`, i.e. NIL mode silently —
+            the falsy-vs-absent conflation the same round fixed 16 lines above
+            for `rule`.
+        """
+        import tortoise.kind_guards as kg
+
+        def entry(**extra):
+            return {"kind": "widget", "layer": "object", "onConfusion": [
+                {"when": "nameMatches", "pattern": "^x-[0-9]+$",
+                 "redirect": "core:WorkItem", "fallback": "core:WorkItem",
+                 "reason": "r", **extra}]}
+
+        for bad_scope in ({}, "", 0, False, 7, "widget"):
+            # no raise, and no confusion: a scope that is not a list is SKIPPED
+            assert kg.pack_guards("acme", [entry(fromKinds=bad_scope)]) == ()
+            assert kg.pack_guards("acme", [entry(fromLayers=bad_scope)]) == ()
+        # an empty list stays a legal (absent) scope
+        assert len(kg.pack_guards("acme", [entry(fromKinds=[])])) == 1
+
+        # a falsy predicate is no longer rewritten into the default
+        assert kg.pack_guards("acme", [entry(when="")]) == ()
+
+        # and the rule id is the AUTHOR'S, falsy or not — `or` replaced it
+        assert kg.pack_guards("acme", [entry(rule="")])[0].rule == ""
+        assert kg.pack_guards("acme", [entry(rule=0)])[0].rule == "0"
+        assert kg.pack_guards("acme", [entry()])[0].rule == "acme:widget:0"
+
     def test_a_malformed_pack_guard_cannot_break_a_write(self):
         """A broken install is a broken INSTALL (#1934) — the guard just cannot
         fire, and the write is unaffected."""
@@ -2459,6 +2497,31 @@ depends_on: []
             "      fromKind: acme:widget\n      toKind: acme:widget\n")
         assert "not a VALID kind there" in bad_axis, bad_axis
         assert "is not declared in this pack" not in bad_axis, bad_axis
+
+        # ⛔ FALSEY IS NOT ABSENT, on the RELATION leg too (round-18 review P3,
+        # measured): `if not kind_val: continue  # already caught above` was
+        # FALSE — the arm above tests KEY PRESENCE, so `fromKind: 0` / `false` /
+        # `''` / `[]` / `{}` / `null` validated `✓ Clean`, loaded, and the SDK
+        # read path then raised `TypeError: argument of type 'int' is not
+        # iterable` on a later traversal.
+        for falsy in ("0", "false", "''", "[]", "{}", "null"):
+            assert "must be a non-empty string" in errors(
+                "ontology:\n  extends: core\n  objectKinds: [widget]\n"
+                "  relations:\n    - predicate: usesThing\n      mechanism: IMPL\n"
+                f"      fromKind: {falsy}\n      toKind: acme:widget\n"), falsy
+        # …while a real kind still passes both legs
+        assert not errors(
+            "ontology:\n  extends: core\n  objectKinds: [widget]\n"
+            "  relations:\n    - predicate: usesThing\n      mechanism: IMPL\n"
+            "      fromKind: acme:widget\n      toKind: core:WorkItem\n")
+
+        # ⛔ `message` is an accepted ALIAS of `reason` in `_CONFUSION_KEYS`, so
+        # the gate must not demand `reason` alone (round-18 review P3, measured:
+        # `message: r` was refused at install while the runtime honoured it).
+        mine = guard("my-rule")
+        assert "required" not in errors(
+            mine.replace("        reason: r\n", "        message: r\n"))
+        assert "required" in errors(mine.replace("        reason: r\n", ""))
 
         # ── and the valid values stay accepted, so these are shape guards only
         for store in ("claim", "decision", "entity", "event", "tag"):

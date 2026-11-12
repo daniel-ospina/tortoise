@@ -2248,8 +2248,19 @@ class PackRegistry:
                     # Cross-pack refs validated in load_all() after all packs loaded.
                     for direction, kind_val in [("fromKind", rel.get("fromKind", "")),
                                                  ("toKind", rel.get("toKind", ""))]:
-                        if not kind_val:
-                            continue  # already caught above
+                        # ⛔ `not kind_val` WAS NOT "caught above" (round-18
+                        # review P3, measured): the arm above tests KEY PRESENCE,
+                        # not the value, so `fromKind: 0` / `false` / `''` / `[]`
+                        # / `{}` / `null` validated `✓ Clean` and loaded, and the
+                        # SDK read path then raised `TypeError: argument of type
+                        # 'int' is not iterable` on a LATER traversal. The shape
+                        # check belongs here, where the field is named.
+                        if not isinstance(kind_val, str) or not kind_val.strip():
+                            errors.append(
+                                f"relation '{pred}': {direction} must be a "
+                                f"non-empty string — got "
+                                f"{type(kind_val).__name__}")
+                            continue
                         if kind_val[0].isupper():
                             # Core PascalCase kind — must be in canonical vocab
                             if kind_val not in ALL_CORE_KINDS:
@@ -3294,7 +3305,17 @@ class PackRegistry:
                         re.compile(pattern, re.IGNORECASE)
                     except re.error as exc:
                         errors.append(f"{cw}.pattern: does not compile ({exc})")
-                if not isinstance(c.get("reason"), str) or not c["reason"].strip():
+                # ⛔ `message` IS AN ACCEPTED ALIAS (round-18 review P3, measured):
+                # `_CONFUSION_KEYS` includes it precisely because `kind_guards`
+                # reads `reason or message`, and the comment above that set says
+                # the two cannot drift — but this arm demanded `reason` alone, so
+                # a manifest spelling only `message` was refused at install while
+                # the runtime would have honoured it. One owner of "which key
+                # carries the reason", not two.
+                _reason = c.get("reason")
+                if _reason is None:
+                    _reason = c.get("message")
+                if not isinstance(_reason, str) or not _reason.strip():
                     errors.append(
                         f"{cw}.reason: required — a redirect the caller cannot "
                         f"explain is a redirect it cannot judge")

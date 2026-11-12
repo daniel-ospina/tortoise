@@ -1133,15 +1133,47 @@ def pack_guards(namespace: str, guards: Any) -> tuple[Confusion, ...]:
                     "kind_guards: %s guards[%d].onConfusion[%d] has no redirect "
                     "— skipped", namespace, i, j)
                 continue
-            when = c.get("when") or "nameMatches"
+            # `is None`, not `or` (round-18 review P2, measured): a falsy
+            # predicate was silently rewritten to the default, so
+            # `when: ""` compiled as if the author had asked for nameMatches.
+            when = c.get("when")
+            if when is None:
+                when = "nameMatches"
             pattern = c.get("pattern")
             if when not in WHEN_PREDICATES or not isinstance(pattern, str):
                 _logger.warning(
                     "kind_guards: %s guards[%d].onConfusion[%d] has an "
                     "unsupported predicate/pattern — skipped", namespace, i, j)
                 continue
-            from_kinds = c.get("fromKinds") or ()
-            from_layers = c.get("fromLayers") or ("subject", "object")
+            # ⛔ THE CONTAINER, at the RUNTIME reader too (round-18 review P2,
+            # measured). `_validate` refusing these shapes closes the manifest
+            # path, but `pack_guards` takes a dict from the Python API, and here
+            # the shape was worse than a refused install:
+            #   `fromKinds: 7`      -> `TypeError: 'int' object is not iterable`
+            #                          out of the WRITE DOOR, which this
+            #                          function's contract forbids (#1934);
+            #   `fromKinds: 'widget'` -> six one-letter kinds, guard DEAD;
+            #   `fromLayers: 'subject'` -> seven one-letter layers, layer gate
+            #                          can never match, guard DEAD;
+            #   `0`/`false`/`{}`    -> `or` read as absent, silently NIL mode.
+            # A bad scope is skipped-and-logged like every other malformed
+            # entry here, never raised on a write.
+            from_kinds = c.get("fromKinds")
+            if from_kinds is None:
+                from_kinds = ()
+            elif not isinstance(from_kinds, list):
+                _logger.warning(
+                    "kind_guards: %s guards[%d].onConfusion[%d].fromKinds is not "
+                    "a list — skipped", namespace, i, j)
+                continue
+            from_layers = c.get("fromLayers")
+            if from_layers is None:
+                from_layers = ("subject", "object")
+            elif not isinstance(from_layers, list):
+                _logger.warning(
+                    "kind_guards: %s guards[%d].onConfusion[%d].fromLayers is "
+                    "not a list — skipped", namespace, i, j)
+                continue
             out.append(Confusion(
                 rule=str(rule),
                 when=str(when),
