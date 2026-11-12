@@ -1337,10 +1337,10 @@ export function navHtml(active: string): string {
   return `<nav>
 <div class="brand">Tortoise<span>.</span></div>
 <div class="links">
-  <a href="https://tortoise.premiselabs.co/docs" >Docs</a>
+  <a href="https://premiselabs.co/tortoise/docs" >Docs</a>
   <a href="/blog" class="${active === "blog" ? "active" : ""}">Blog</a>
-  <a href="https://tortoise.premiselabs.co/#pricing">Pricing</a>
-  <a href="https://tortoise.premiselabs.co/auth" class="cta">Log in</a>
+  <a href="https://premiselabs.co/tortoise#pricing-section">Pricing</a>
+  <a href="https://app.premiselabs.co/auth" class="cta">Log in</a>
 </div>
 </nav>`;
 }

@@ -63,6 +63,29 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 DASHBOARD_DIR = ROOT / "website" / "apps" / "dashboard"
 SUPABASE_MOCK = ROOT / "tests" / "e2e" / "auth" / "mock_supabase.mjs"
 
+# The price of record — the SAME file the dashboard imports at build time
+# (`website/apps/dashboard/src/pricing.js` → `planOptions()` → `price:
+# t.price_usd_monthly`) and the one the server's tier limits and the marketing
+# grid read. The plan buttons below assert the price of record instead of
+# restating it: #11981 raised `solo` from $9 to $19 (owner-confirmed on #11758)
+# and this spec's literal still said `$9/mo`, so `dashboard-e2e` went red on
+# `main` from that landing onward for every PR (measured run 43142101648: the
+# snapshot renders `Solo · $19/mo`). A restated number is a second copy that can
+# disagree with the shipped artifact; reading it cannot drift, and the assertion
+# still fails if the built bundle renders anything but pricing.json's price.
+PRICING_OF_RECORD = json.loads(
+    (ROOT / "product" / "pricing.json").read_text(encoding="utf-8"))
+
+
+def _plan_price_button(tier: str, label: str) -> str:
+    """The plan-button accessible name the dialog renders for `tier`.
+
+    Mirrors `main.jsx`'s `{p.label} · ${p.price}/mo` for the `planOptions()`
+    entry, whose `price` is `tiers[tier].price_usd_monthly` straight out of
+    `product/pricing.json`.
+    """
+    return f"{label} · ${PRICING_OF_RECORD['tiers'][tier]['price_usd_monthly']}/mo"
+
 
 def _jwt(sub: str) -> str:
     """A JWT-shaped access token whose payload carries ``sub``.
@@ -1021,9 +1044,12 @@ def test_create_team_pre_checked_at_cap(page: Page):
     dialog = page.get_by_role("dialog", name="Purchase a subscription for a new organization")
     expect(dialog.get_by_label("Organization name")).to_be_visible()
     expect(dialog.get_by_role("button", name="Continue to checkout")).to_be_visible()
-    # paid plan chooser is server-resolved (no hardcoded Stripe ids)
-    expect(dialog.get_by_role("button", name="Builder · $25/mo")).to_be_visible()
-    expect(dialog.get_by_role("button", name="Solo · $9/mo")).to_be_visible()
+    # paid plan chooser is server-resolved (no hardcoded Stripe ids) and priced
+    # from `product/pricing.json` — see PRICING_OF_RECORD above.
+    expect(dialog.get_by_role(
+        "button", name=_plan_price_button("pro", "Builder"))).to_be_visible()
+    expect(dialog.get_by_role(
+        "button", name=_plan_price_button("solo", "Solo"))).to_be_visible()
 
 
 def test_account_menu_two_sections(page: Page):
