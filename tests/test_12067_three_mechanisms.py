@@ -1917,7 +1917,7 @@ def test_the_SVBP_decline_warning_survives_a_NULL_op_type(monkeypatch):
     assert factors == [], factors
 
 
-def test_the_RUN_level_refusal_names_a_NULL_mechanism_without_raising(monkeypatch):
+def test_the_RUN_level_refusal_names_a_NULL_mechanism_without_raising():
     """⛔ THE SAME FIX ONE LAYER DOWN HAD NO PIN AT ALL (#12215).
 
     `tortoise/svbp.py`'s own refusal path makes the identical comparison one
@@ -1968,64 +1968,90 @@ def test_the_RUN_level_refusal_names_a_NULL_mechanism_without_raising(monkeypatc
         `messages`/`posteriors` are the END-STATE corroboration behind it.
 
     The companion assertion pins the other half of the block: with nothing
-    refused (`if refused:` removed) `run()` must stay SILENT, or every clean
-    belief read logs a bogus `0 factor(s) REFUSED`.
+    refused (`if refused:` removed) `run()` must emit NO REFUSAL RECORD, or every
+    clean belief read logs a bogus `0 factor(s) REFUSED`.
+
+    ⛔ THE CAPTURE IS A REAL HANDLER, AND IT SELECTS THE RECORD (#12221 review
+    round 2). An earlier version patched `logger.warning` and asserted on the
+    argument tuple by POSITION, which made the pin grade arg-passing style and
+    total silence instead of the refusal: a byte-identical f-string/reformatted
+    call, or any unrelated notice on this logger (the module header reads
+    `# DEPRECATED:`), reddened it with a message about counting. Records are
+    selected by the `REFUSED` marker — the string operators actually grep for —
+    so a rewording that keeps that marker and the counts stays green.
+
+    Reachability, stated so nobody is surprised: on a host where the SIBLING
+    test (`n_particles=4`) hits the `SIGFPE` described above, it kills the pytest
+    process for the whole module, so this pin must be selected explicitly
+    (`-k`/node-id) there. That crash is pre-existing and is not this test's.
     """
+    import logging
+
     svbp_module = pytest.importorskip("tortoise.svbp")
 
-    seen: list = []
+    records: list[str] = []
 
-    def _warn(fmt, *args, **_kw):
-        # `**_kw`: a production call that later adds `stacklevel=`/`extra=` must
-        # not fail this pin with a TypeError about THIS helper (#12221 review).
-        seen.append(args)
+    class _Cap(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
 
-    monkeypatch.setattr(svbp_module.logger, "warning", _warn)
+    log = logging.getLogger("tortoise.svbp")
+    handler = _Cap()
+    log.addHandler(handler)
+    prev_level = log.level
+    log.setLevel(logging.WARNING)
+    try:
+        eng = svbp_module.TortoiseSVBP()
+        _iters, converged = eng.run([
+            ("op-coh-a", "coherence", ["c1", "c2"], 0.5),
+            ("op-attack", "attack", ["c3", "c4"], 0.5),
+            ("op-coh-b", "coherence", ["c5", "c6"], 0.5),
+            ("op-null", None, ["c7", "c8"], 0.5),
+            ("op-attack-b", "attack", ["c9", "c10"], 0.5),
+            ("op-attack-c", "attack", ["c11", "c12"], 0.5),
+        ])
+        refusals = [r for r in records if "REFUSED" in r]
 
-    eng = svbp_module.TortoiseSVBP()
-    _iters, converged = eng.run([
-        ("op-coh-a", "coherence", ["c1", "c2"], 0.5),
-        ("op-attack", "attack", ["c3", "c4"], 0.5),
-        ("op-coh-b", "coherence", ["c5", "c6"], 0.5),
-        ("op-null", None, ["c7", "c8"], 0.5),
-        ("op-attack-b", "attack", ["c9", "c10"], 0.5),
-        ("op-attack-c", "attack", ["c11", "c12"], 0.5),
-    ])
+        # `_n` is a SUM of the counts (6, not 3 distinct mechanisms). The list is
+        # sorted by `str(op_type)` — NOT insertion order (the reverse here), and
+        # NOT by count (which would put `attack` last).
+        assert len(refusals) == 1, (
+            "exactly one refusal record must be emitted: " + repr(records))
+        assert "6 factor(s) REFUSED — None×1, attack×3, coherence×2" in refusals[0], (
+            "the refused-mechanism list must count every factor and sort by "
+            "str(op_type), so a NULL and a named mechanism can share one "
+            "warning: " + repr(refusals[0]))
+        # The remediation pointer is the reason the warning exists at all
+        # (it is agent-facing guidance, not a log line for humans to puzzle out).
+        assert "Run EP (tortoise/ep.py)" in refusals[0], refusals[0]
 
-    assert seen, (
-        "the refusal never warned — either the factors were not refused or the "
-        "warning path was lost entirely"
-    )
-    # `_n` is a SUM of the counts (6, not 3 distinct mechanisms). The list is
-    # sorted by `str(op_type)` — NOT insertion order (which is the reverse here),
-    # and NOT by count (which would put `attack` last).
-    assert seen[-1] == (6, "None×1, attack×3, coherence×2"), (
-        "the refused-mechanism list must count every factor and sort by "
-        "str(op_type), so a NULL and a named mechanism can share one warning: "
-        + repr(seen[-1])
-    )
-    # `converged` is the property worth pinning. `iters` is deliberately NOT
-    # asserted: it is an emergent property of the convergence loop (empty
-    # `posteriors` ⇒ `max_change == 0`), so a loop refactor would redden a test
-    # that is about sorting.
-    assert converged is True, "nothing was priced, so the reduced problem converges"
-    assert eng.messages == {}, "a refused factor must not reach message passing"
-    assert eng.posteriors == {}, "a refused factor must not create a posterior"
+        # `converged` is the property worth pinning. `iters` is deliberately NOT
+        # asserted: it is an emergent property of the convergence loop (empty
+        # `posteriors` ⇒ `max_change == 0`), so a loop refactor would redden a
+        # test that is about sorting.
+        assert converged is True, "nothing was priced, so the reduced problem converges"
+        assert eng.messages == {}, "a refused factor must not reach message passing"
+        assert eng.posteriors == {}, "a refused factor must not create a posterior"
 
-    # ── the other half of the block: silence when nothing is refused ──────
-    # One `input_id` per PRICEABLE factor: `_update_factor` early-returns below
-    # two (`svbp.py:269`), so this run prices nothing, warns nothing and never
-    # enters the jax path. Removing `if refused:` makes it log a bogus
-    # `0 factor(s) REFUSED — ` on every clean belief read.
-    seen.clear()
-    clean = svbp_module.TortoiseSVBP()
-    clean_converged = clean.run([
-        ("op-impl", "IMPL", ["c1"], 1.0),
-        ("op-nand", "NAND", ["c2"], 1.0),
-    ])[1]
-    assert seen == [], (
+        # ── the other half of the block: no refusal when nothing is refused ──
+        # One `input_id` per PRICEABLE factor: `_update_factor` early-returns
+        # below two (`svbp.py:269`), so this run prices nothing, warns nothing
+        # and never enters the jax path. Removing `if refused:` makes it log a
+        # bogus `0 factor(s) REFUSED — ` on every clean belief read.
+        records.clear()
+        clean = svbp_module.TortoiseSVBP()
+        clean_converged = clean.run([
+            ("op-impl", "IMPL", ["c1"], 1.0),
+            ("op-nand", "NAND", ["c2"], 1.0),
+        ])[1]
+        clean_refusals = [r for r in records if "REFUSED" in r]
+    finally:
+        log.removeHandler(handler)
+        log.setLevel(prev_level)
+
+    assert clean_refusals == [], (
         "a refused-only warning must not fire when every factor is priceable: "
-        + repr(seen)
+        + repr(clean_refusals)
     )
     assert clean_converged is True
     assert clean.messages == {}, "an unpriced single-input factor must not write"
