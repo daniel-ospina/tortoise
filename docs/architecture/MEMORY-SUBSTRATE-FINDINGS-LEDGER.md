@@ -383,21 +383,30 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   **complement** list ("still read as written"), which was joined across sentences and compared as a
   set-union: a second complement sentence could assert a STILL-TRUE letter the real sentence does not,
   so the page could say *seven of the twelve no longer read as written* beside *only `**(a)**` still
-  read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). ⛔ **THE COMPLEMENT IS
-  COMPARED BY LIST MEMBERSHIP, NOT BY EVERY MARKED LETTER.** The extractor reads a marked letter
-  unconditionally, which is right where the MARKUP IS THE CLAIM (a per-letter verdict attribution),
-  and wrong for a LIST: this page's own prose marks letters — `(i)` is the roman-numeral enumerator
-  and `(a)`/`(c)` are its cross-reference idiom — so a stale complement list inherited a green check
-  from the sentence commenting on it (`… and **(j)**` plus a tail reading `(see (i))` left `i`
-  undetected; measured, fixed, pinned). Membership is now run membership for every spelling, so the
-  documented bold/code/italic/bare forms all still read. ⚠️ The one-member case is the DECLARED
-  OVER-REFUSAL that buys it: a lone PARENTHESISED letter is prose (the same rule that keeps a stray
-  `(c)` out of candidacy), so a complement naming a single row must write it marked — `a` in code,
-  bold or italic — rather than as a bare parenthetical. ⛔ **AND THE CLAUSE THE NEGATION GOVERNS IS
-  VALIDATED, NOT DISCARDED.** Everything after `do not` / `no longer` used to be sliced off unread, so
-  the group it governs could name any rows at all — including the STILL-TRUE ones, i.e. the sentence
-  could contradict the table and itself at rc 0 (measured, fixed, pinned). It is the complement, so
-  every letter it names must be a row the table does NOT call STILL-TRUE. ⚠️ **Residual, stated:** the
+  read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). ⛔ **THE SENTENCE IS
+  SPLIT ON ITS OWN PHRASE, AND COMPARED BY LIST MEMBERSHIP.** The page's shape is `<still list>`,
+  the phrase, then the complement its negation governs, so the PHRASE is the boundary. Reading
+  membership from text adjacent to either end of that split was wrong in both directions, and each
+  was measured: a marked letter in prose — this page writes `(i)` as a roman-numeral enumerator and
+  `(a)`/`(c)`/`**(e)**`/`**(i)**` as cross-references — certified a member the list omits (fail-open)
+  and reded a correct page that refers to a non-still row (false accusation); and peeling the
+  governed group off the clause END stopped at the first word between the group and its verb (any
+  adverb) while refusing a correct complement joined by `&`, `or`, `also`, `plus`, `as well as`,
+  `followed by` or `namely`, all of which this section lists as separators. Membership is now the RUN
+  the page wrote, on each side of the phrase, so no separator set and no prose can change it. ⚠️ The
+  one-member case is the DECLARED OVER-REFUSAL that buys it: a lone PARENTHESISED letter is prose (the
+  same rule that keeps a stray `(c)` out of candidacy), so a complement naming a single row must write
+  it marked — `a` in code, bold or italic — rather than as a bare parenthetical. ⛔ **AND THE CLAUSE THE
+  NEGATION GOVERNS IS VALIDATED, NOT DISCARDED.** It used to be sliced off unread, so the group could
+  name any rows at all — including the STILL-TRUE ones, i.e. the sentence could contradict the table
+  and itself at rc 0 (measured, fixed, pinned). It is the complement, so every letter in its run must
+  be a row the table does NOT call STILL-TRUE; a lone MARKED letter there is only read when the span
+  IS that item, because otherwise it is a cross-reference and reading it accuses a correct page
+  (measured both ways). ⛔ **THE PHRASE — NOT THE WORD `no longer` — DECIDES WHICH GROUP A SENTENCE IS.**
+  Excluding every sentence containing `no longer` made that governor unreachable, so the natural
+  spelling of a STALE second sentence (`…, while the rest no longer do.`) rode out of the "exactly
+  one" rule while the CORRECT complement written the same way red (both measured, both fixed).
+  ⚠️ **Residual, stated:** the
   "exactly one" rule is scoped to the tally's own paragraph, so a second complementary or "no longer"
   sentence **two newlines below** it is not counted. Widening it to the whole page is not available
   (this section discusses both phrases) and a section-scoped widening is not yet measured, so read it

@@ -397,9 +397,11 @@ VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
 #: the #11902-review arms — a §6 row naming the same issue twice, a §3 row whose
 #: claim cell is blank, a §3 row whose correction cell is blank, then the second
 #: round's re-listing across rows and leading-zero re-spelling, then round 3's
-#: replacement by a number the index never carried. Bump it with any arm added or
+#: replacement by a number the index never carried, then round 8's two group-orientation
+#: mutants (a governed complement behind an adverb, a marked cross-reference certifying a
+#: member). Bump it with any arm added or
 #: removed — the population is what the pin compares.
-MIN_SELF_TEST_MUTATIONS = 47
+MIN_SELF_TEST_MUTATIONS = 49
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -787,6 +789,18 @@ _NAMED_LETTER_RE = re.compile(_LETTER_ALT_MARKED, re.IGNORECASE)
 #: the clause end (the negated complement), which is why attribution does not use this:
 #: there, a bare letter is prose, and `a`/`i` are English words (#12028's own finding).
 _LETTER_ITEM_ANY = "(?:" + _LETTER_ALT_MARKED + r"|\b[a-l]\b)"
+#: A span that is NOTHING BUT one list item, separators and whitespace aside. Used by the
+#: governed-complement arm: a lone MARKED letter inside a span that carries other words is
+#: this page's cross-reference idiom (`(see correction **(i)**)`), while a span that IS the
+#: item is a one-member list. The distinction is the difference between a fail-open and a
+#: false accusation — both were measured (#11902 review round 8).
+_LIST_SEPARATOR_ALT = r"(?:,|;|&|—|–|-|\band\b|\bor\b|\balso\b|\bplus\b|\bas\s+well\s+as\b|\bfollowed\s+by\b|\bnamely\b)"
+_SOLE_ITEM_RE = re.compile(
+    rf"\s*(?:{_LIST_SEPARATOR_ALT}\s*)*"
+    rf"(?:{_LETTER_ITEM_ANY})"
+    rf"(?:\s*{_LIST_SEPARATOR_ALT})*\s*",
+    re.IGNORECASE,
+)
 
 
 def _letters_in_span(span: str) -> list[str]:
@@ -922,7 +936,7 @@ def _bare_list_members(masked: str) -> set[str]:
     return out
 
 
-def _listed_letters(sentence: str) -> set[str]:
+def _listed_letters(sentence: str, *, lone_marked: bool = True) -> set[str]:
     """The letters `sentence` LISTS — its members of a list RUN, in any spelling.
 
     ⛔ THIS IS *NOT* `_named_letters`, AND THE DIFFERENCE IS A MEASURED FAIL-OPEN (#11902
@@ -984,7 +998,7 @@ def _listed_letters(sentence: str) -> set[str]:
         for pos, (start, end, letter) in enumerate(run):
             if letter is None:  # a masked item — its letter is in `marked_at`
                 marked_letter, paren_only = marked_at[start]
-                if len(run) >= 2 or not paren_only:
+                if len(run) >= 2 or (lone_marked and not paren_only):
                     out.add(marked_letter)
                 continue
             # A BARE member keeps `_bare_list_members`'s two rules verbatim: it is a
@@ -1345,10 +1359,18 @@ def check_verdict_tally(text: str) -> list[str]:
     # **(a)** still read as written` (7 + 1 != 12) at `--check` rc 0 — measured.
     # Falsifying the real still-list beside a compliant decoy did the same. One
     # sentence, or a red.
+    # ⛔ THE PHRASE DECIDES THE GROUP, NOT THE WORD `no longer` (#11902 review round 8).
+    # The filter used to drop any still-sentence CONTAINING `no longer`, which made the
+    # negation governor below unreachable for that word: `… still read as written, while the
+    # rest no longer do.` was not a candidate at all, so the natural spelling of a STALE
+    # second sentence rode out of the "exactly one" rule (measured: a compliant decoy plus
+    # that stale sentence read CLEAN), and the CORRECT complement spelled the same way red
+    # with "STILL-TRUE list names (none)". Only the non-still PHRASE belongs to the other
+    # arm, so only it is excluded here.
     still_sentences = [
         s for s in sentences
         if "still read as written" in quoted.sub(" ", s)
-        and "no longer" not in quoted.sub(" ", s)
+        and "no longer read as written" not in quoted.sub(" ", s)
         and _is_letter_list(s)
     ]
     if len(still_sentences) > 1:
@@ -1524,52 +1546,38 @@ def check_verdict_tally(text: str) -> list[str]:
             "class is not a cosmetic error"
         )
     still_true = sorted(lbl for lbl, v in verdicts.items() if v == "STILL-TRUE")
-    # The sentence may spell the COMPLEMENT too ("**(h)**, **(i)** and **(j)** still read
-    # as written — **(c)**, **(d)**, **(e)** and **(g)** do not"), and reading past its
-    # own negation accused correct prose of a wrong STILL-TRUE list (measured). Only the
-    # letters BEFORE the negation are the still-list.
-    negation = re.search(r"\b(?:do|does|did) not\b|\bno longer\b", still_sentence)
-    still_clause = still_sentence[: negation.start()] if negation else still_sentence
-    # Drop the letters the negation CLAUSE governs, which sit just BEFORE the verb they
-    # negate: "**(h)**, **(i)** and **(j)** still read as written — **(c)**, **(d)**,
-    # **(e)** and **(g)** do not". Slicing at the verb alone keeps `(c)…(g)` (measured),
-    # so the governed group is stripped from the end, separator and dash included.
-    # ⛔ STRIPPING IS NOT VALIDATING, AND IT WAS NOT (#11902 review round 7, P1). The
-    # governed group is the COMPLEMENT of the still-list, so every letter it names must be a
-    # row the table does NOT call STILL-TRUE — a check with no new ambiguity, since the
-    # table is right there. Discarding it instead let the sentence contradict both the table
-    # and ITSELF at rc 0 (measured on the shipped page before this block existed):
+    # ⛔ THE SENTENCE IS SPLIT ON ITS OWN PHRASE, NOT PEELED FROM ITS END (#11902 review
+    # round 8 — three measured fail-opens, one measured false accusation, all one cause).
+    # The page's documented shape is `<still list> still read as written [— <governed list>
+    # <negation>]`, so the PHRASE is the boundary between the two groups and the position
+    # is all that is needed. The code used to peel trailing list items off the clause
+    # instead, and every rule it encoded was narrower than English:
     #
-    #   `… **(a)**, **(f)**, **(h)**, **(i)** and **(j)** still read as written — **(a)** and
-    #   **(f)** do not.`                                -> CLEAN
-    #   `… **(a)**… **(j)** still read as written — **(a)**, **(f)**, **(h)**, **(i)** and
-    #   **(j)** do not.`                                -> CLEAN (contradicts itself, twice)
+    #   `… — **(a)** and **(f)** (both re-measured) do not.`   peel stopped at the adverb
+    #                                                          -> the governed group was
+    #                                                             never validated  (CLEAN)
+    #   `… — **(b)** & **(k)** & **(l)** do not.`               `&`/`or`/`also`/`plus` are
+    #                                                        documented separators but not
+    #                                                        peel separators -> the correct
+    #                                                        complement reded as still-true
     #
-    # The letters are collected as they are stripped, so the group the page WROTE is what
-    # gets validated — never a re-parse of the trimmed clause.
-    governed_letters: list[str] = []
-    while True:
-        governed = re.search(
-            r"(?:\s*(?:,|and|;|—|–|-)\s*)?" + _LETTER_ITEM_ANY + r"\s*$",
-            still_clause,
-            re.IGNORECASE,
-        )
-        if not governed:
-            break
-        # `_LETTER_ITEM_ANY` is the one spelling list, and its MARKED alternatives are the
-        # only ones with a capture group — so an empty `groups()` means the item is BARE.
-        # The separator branch has no group, so it cannot contribute a phantom letter
-        # (the connector `and` alone would otherwise supply `a` and `d`).
-        marked_group = next((g for g in governed.groups() if g), None)
-        if marked_group:
-            governed_letters.append(marked_group.lower())
-        else:
-            bare = re.search(r"\b([a-l])\b", governed.group(0), re.IGNORECASE)
-            if bare:
-                governed_letters.append(bare.group(1).lower())
-        still_clause = still_clause[: governed.start()]
-    # The clause's own members: LIST membership, not every marked letter (see
-    # `_listed_letters` — a marked letter in prose supplied a phantom complement member).
+    # Both directions are the same defect: membership was decided by characters ADJACENT to
+    # the end of the string rather than by the run the page wrote. Anchoring on the phrase
+    # makes the separator set irrelevant — a run is a run.
+    phrase = re.search(r"still read as written", still_sentence, re.IGNORECASE)
+    still_clause = still_sentence[: phrase.start()] if phrase else still_sentence
+    # Everything after the phrase is the page's SECOND group — its complement — and it is
+    # only a governed group when a negation governs it.
+    after_phrase = still_sentence[phrase.end() :] if phrase else ""
+    negation = re.search(r"\b(?:do|does|did) not\b|\bno longer\b", after_phrase)
+    # ⛔ THE PHRASE, NOT THE WORD `no longer`, DECIDES WHICH GROUP A SENTENCE IS — see the
+    # candidacy filter in `check_verdict_tally`'s still-sentence list. Reading the governed
+    # group out of `still_clause` (the pre-phrase half) is what makes the split sound.
+    # The still-list is the RUN the page wrote, read by LIST membership — never every marked
+    # letter in the clause. A marked letter in prose (`(see correction **(i)**)`, `(see `i`)`)
+    # is a CROSS-REFERENCE, and reading it unconditionally let a stale list that omits `i`
+    # read CLEAN while a correct page that says `unlike **(b)**` reded (both measured, round
+    # 8) — the same fail-open and the same false accusation in two spellings.
     named_still = _listed_letters(still_clause)
     if named_still != set(still_true):
         problems.append(
@@ -1577,7 +1585,28 @@ def check_verdict_tally(text: str) -> list[str]:
             f"{sorted(named_still) or '(none)'}, but the table's STILL-TRUE rows are "
             f"{still_true}"
         )
-    wrong_governed = sorted(set(governed_letters) & set(still_true))
+    # ⛔ STRIPPING IS NOT VALIDATING, AND IT WAS NOT (#11902 review round 7, P1). The
+    # governed group is the COMPLEMENT of the still-list, so every letter it names must be a
+    # row the table does NOT call STILL-TRUE — a check with no new ambiguity, since the
+    # table is right there. Discarding it instead let the sentence contradict both the table
+    # and ITSELF at rc 0 (measured before this block existed):
+    #
+    #   `… **(a)**, **(f)**, **(h)**, **(i)** and **(j)** still read as written — **(a)** and
+    #   **(f)** do not.`                                -> CLEAN
+    #   `… **(a)**… **(j)** still read as written — **(a)**, **(f)**, **(h)**, **(i)** and
+    #   **(j)** do not.`                                -> CLEAN (contradicts itself, twice)
+    #
+    # ⚠️ A LONE MARKED ITEM IS READ HERE ONLY WHEN THE SPAN *IS* THAT ITEM. In the governed
+    # half a marked letter is also how this page cross-references a row, so reading a lone
+    # marked item inside a span that carries other words would accuse a CORRECT page of
+    # naming a still-true row as overtaken (the mirror of the fail-open, measured round 8).
+    # A multi-item run is a list claim wherever it sits and is always read.
+    governed_letters: set[str] = set()
+    if negation:
+        governed_span = after_phrase[: negation.start()]
+        sole_item = bool(_SOLE_ITEM_RE.fullmatch(governed_span.strip()))
+        governed_letters = _listed_letters(governed_span, lone_marked=sole_item)
+    wrong_governed = sorted(governed_letters & set(still_true))
     if wrong_governed:
         problems.append(
             f"§3 tally: the negated complement clause names {wrong_governed} as NOT still "
@@ -3010,6 +3039,27 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
         "a §3 row whose correction cell is blank",
         lambda t: _blank_cell_of_first_correction_row(t, 3),
         "states no correction",
+    ),
+    # #11902 review round 8: the group-orientation arms had no killing mutant, so
+    # `--self-test` would have stayed green over the exact fail-opens that review found.
+    # One mutant per direction, each the shape a real author writes.
+    (
+        "a governed complement naming a STILL-TRUE row, behind an adverb",
+        lambda t: t.replace(
+            "still read as written.",
+            "still read as written — **(a)** and **(f)** certainly do not.",
+            1,
+        ),
+        "negated complement",
+    ),
+    (
+        "a marked cross-reference certifying a missing complement member",
+        lambda t: t.replace(
+            "**(h)**, **(i)** and **(j)** still read as written.",
+            "**(h)** and **(j)** still read as written (see correction **(i)**).",
+            1,
+        ),
+        "STILL-TRUE list names",
     ),
 )
 

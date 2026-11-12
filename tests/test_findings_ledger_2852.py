@@ -242,7 +242,11 @@ def test_mutation_population_is_pinned():
     invented claim class left `check_document()` at `[]` where the parent returned a
     problem — so the exemption is the shape `| Verdict | … |`, and a reworded header is a
     deliberate two-place edit rather than a silent one.
-    47 is the population at this head.
+    The round-8 review of #11902 added the two group-orientation mutants (a governed
+    complement naming a STILL-TRUE row behind an adverb; a marked cross-reference
+    certifying a missing complement member), because the arms that review changed had no
+    killing mutant and `--self-test` stayed green over both fail-opens.
+    49 is the population at this head.
     """
     # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
     # at this head two merges of two 25-arm populations produced 26 arms while the
@@ -253,8 +257,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 47, (
-        "this line RECORDS the population (47 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 49, (
+        "this line RECORDS the population (49 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -1494,6 +1498,136 @@ def test_the_negated_complement_clause_is_validated_against_the_table(tmp_path, 
             assert any("negated complement" in p for p in problems), (
                 f"the governed group {governed!r} names STILL-TRUE rows and must red: {problems}"
             )
+
+
+def _tally_problems() -> list[str]:
+    """`_doc_problems()` restricted to the §3 tally arms.
+
+    A mutated copy lives in `tmp_path`, so `check_registration` always reports it as
+    unregistered (correctly — the temp file is not in `docs/00_index.md`). The new arms
+    below assert about the TALLY, so they filter to it rather than pretending the whole
+    document is clean.
+    """
+    return [
+        p
+        for p in _doc_problems()
+        if "STILL-TRUE list names" in p or "negated complement" in p
+    ]
+
+
+def test_a_marked_cross_reference_is_not_a_complement_member(tmp_path, monkeypatch):
+    """FAILS open if a lone MARKED letter in prose certifies (or accuses) a list member.
+
+    Round 7's fix refused only the PARENTHESISED spelling of a prose cross-reference. The
+    page's own cross-reference idiom is MARKED — `See correction **(e)**.` at `:82`,
+    `see correction **(i)**` at `:199` — so all three marked spellings still supplied a
+    member, and the mirror case reded a CORRECT page. Both were measured against the
+    shipped sentence, before the group split was anchored on the phrase:
+
+        **(a)**, **(f)**, **(h)** and **(j)** still read as written (see correction **(i)**).
+                                   -> CLEAN over a list that omits `i`   (fail-open)
+        **(a)**, **(f)**, **(h)**, **(i)** and **(j)** still read as written, unlike **(b)**.
+                                   -> RED with `(b)` as a still-true member  (false accusation)
+
+    WHY IT IS REACHABLE: `**(i)**` is how this page points at a row, so the sentence that
+    comments on a list is exactly where the phantom comes from. The fix is structural —
+    membership is read from the RUN between the clause start and the phrase — so no
+    spelling of a later reference can contribute, in either direction.
+    """
+    anchor = "**(a)**, **(f)**,\n**(h)**, **(i)** and **(j)** still read as written."
+    stale = "**(a)**, **(f)**, **(h)** and **(j)** still read as written"
+    for tail in (" (see correction **(i)**).", " (see `i`).", " (see *i*)."):
+        with monkeypatch.context() as patch:
+            _mutated(tmp_path, patch, lambda t, s=stale + tail: t.replace(anchor, s, 1))
+            problems = _doc_problems()
+            assert any("STILL-TRUE list names" in p for p in problems), (
+                f"a marked cross-reference {tail!r} must not certify the list: {problems}"
+            )
+    # …and the mirror: a CORRECT list followed by a marked reference to a non-still row must
+    # not be accused of naming it.
+    with monkeypatch.context() as patch:
+        _mutated(
+            tmp_path,
+            patch,
+            lambda t: t.replace(anchor, anchor[:-1] + ", unlike **(b)**.", 1),
+        )
+        assert not _tally_problems()
+
+
+def test_the_governed_complement_is_read_by_its_run_not_by_its_tail(tmp_path, monkeypatch):
+    """FAILS if the governed group is peeled from the clause END instead of read as a run.
+
+    The peel matched `<separator>?<letter>$` repeatedly, so it was narrower than English in
+    BOTH directions, each measured against the shipped sentence:
+
+    FAIL-OPEN — any word between the group and its verb stopped the peel, and the group was
+    then neither collected nor validated:
+
+        … — **(a)** and **(f)** (both re-measured) do not.   -> CLEAN (names STILL-TRUE rows)
+        … — **(a)** and **(f)** certainly do not.             -> CLEAN
+
+    FALSE ACCUSATION — the peel's separator set was `,`/`and`/`;`/dashes, while the page
+    documents `&`, `or`, `also`, `plus`, `as well as`, `followed by`, `namely` too, so a
+    CORRECT complement reded as still-true: `… — **(b)** & **(k)** & **(l)** do not.`
+
+    WHY IT IS REACHABLE: an author writing a correct complement naturally adds a qualifier
+    or uses `&`/`or`; both are ordinary prose. The fix anchors the split on the sentence's
+    own phrase, after which the separator set is irrelevant — a run is a run.
+    """
+    anchor = "**(a)**, **(f)**,\n**(h)**, **(i)** and **(j)** still read as written."
+    for governed in ("**(a)** and **(f)**", "**(a)**, **(f)**", "(a), (f)", "a and f"):
+        for middle in (" (both re-measured)", " certainly", " usually", ""):
+            mutation = anchor[:-1] + f" — {governed}{middle} do not."
+            with monkeypatch.context() as patch:
+                _mutated(tmp_path, patch, lambda t, m=mutation: t.replace(anchor, m, 1))
+                problems = _doc_problems()
+                assert any("negated complement" in p for p in problems), (
+                    f"a governed group {governed!r} with {middle!r} must still be validated: "
+                    f"{problems}"
+                )
+    # Every documented separator joins a CORRECT complement without an accusation.
+    for join in (" & ", " or ", " ; ", " also ", " plus ", ", and ", ", "):
+        mutation = anchor[:-1] + f" — **(b)**{join}**(k)**{join}**(l)** do not."
+        with monkeypatch.context() as patch:
+            _mutated(tmp_path, patch, lambda t, m=mutation: t.replace(anchor, m, 1))
+            assert not _tally_problems(), f"a documented separator {join!r} must not red a correct page"
+
+
+def test_no_longer_governs_a_complement_and_does_not_hide_a_second_tally(tmp_path, monkeypatch):
+    """FAILS both ways if the word `no longer` — rather than the PHRASE — picks the group.
+
+    The still-sentence candidacy filter dropped any sentence CONTAINING `no longer`, which
+    made the `no longer` negation governor unreachable. Measured against the shipped
+    sentence, both directions:
+
+        … while **(b)**, **(k)** and **(l)** no longer do.        (CORRECT)  -> RED, (none)
+        <stale still-sentence> …, while the rest no longer do.   (STALE)    -> CLEAN,
+            i.e. the same-paragraph second sentence the "exactly one" rule exists to refuse
+
+    WHY IT IS REACHABLE: `no longer do` is the natural way to write the complement, so the
+    correct spelling red and the stale one hid. Only the non-still PHRASE (`no longer read
+    as written`) belongs to the other arm, and only it is excluded now.
+    """
+    anchor = "**(a)**, **(f)**,\n**(h)**, **(i)** and **(j)** still read as written."
+    with monkeypatch.context() as patch:
+        _mutated(
+            tmp_path,
+            patch,
+            lambda t: t.replace(
+                anchor, anchor[:-1] + ", while **(b)**, **(k)** and **(l)** no longer do.", 1
+            ),
+        )
+        assert not _tally_problems()
+    stale = (
+        "Only **(a)**, **(f)**, **(h)** and **(j)** still read as written, while the rest "
+        "no longer do. "
+    )
+    with monkeypatch.context() as patch:
+        _mutated(tmp_path, patch, lambda t: t.replace(anchor, stale + anchor, 1))
+        problems = _doc_problems()
+        assert any("2 sentences saying 'still read as written'" in p for p in problems), (
+            f"a stale second still-sentence spelled with `no longer do` must be counted: {problems}"
+        )
 
 
 def test_a_still_list_may_spell_its_own_complement(tmp_path, monkeypatch):
