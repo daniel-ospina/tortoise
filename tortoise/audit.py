@@ -1727,8 +1727,21 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             disposal = (
                 "a DRAFT successor is the destination ONCE PROMOTED: set it "
                 "``status='live'`` first, then CARRY the IMPL (and any NAND that "
-                "STILL APPLIES) onto it — measured, " + _draft_mech + _shape_too
-                + ". Drop only a refutation that MOTIVATED the correction")
+                "STILL APPLIES) onto it — measured, the same edge write builds the "
+                "factor after the promotion (this row's figure is in the finding's "
+                "detail) and, before it, "
+                + ("EP instead drops that input and re-scores over whatever remains "
+                   "(the arity ladder stated above)"
+                   if s["is_operator"] else
+                   # ⛔ NOT on the direct lane: EP excludes the row BEFORE evaluation
+                   # there, so there is no factor to drop an input from and no
+                   # "remaining inputs" to re-score over — the same string's
+                   #``_chain_tail`` says exactly that, and citing a ladder that is not
+                   # in the text was false twice over (#12210 review, P2).
+                   "EP builds no factor for this endpoint at all (the row is excluded "
+                   "before evaluation), so nothing is dropped or re-scored")
+                + _shape_too + ". Drop only a refutation that MOTIVATED the "
+                "correction")
         elif unread and not neutral:
             # false (measured: carrying a neutral input onto a live node leaves both
             # posteriors at the bare prior, ``effective_n 2.0``) and it contradicted
@@ -1755,7 +1768,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 # the same sentence's "would establish one" (#12210 review, P2).
                 + (" (measured: the same posteriors as before the supersession once "
                    "the edge lands on the node that carries it)"
-                   if not (s["sup_refused"] or s["sup_flag_shaped"]) else
+                   if not (s["sup_refused"] or s["sup_flag_shaped"]
+                           or neither_arm) else
                    " (measured: the prescribed edge onto a live claim successor "
                    "restores two confidences, ``effective_n 2.5255``)")
                 )
