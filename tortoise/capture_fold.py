@@ -297,8 +297,9 @@ _SINGLE_SLOTS = (
 #: `confidence`/`pointKind` differed was crossed in silence while the receipt
 #: claimed it had "no evidence of its own to carry" (measured).
 #:
-#: ⚠️ This set covers the DECLARED contract plus the capture's own provenance
-#: field, and a Point's payload is OPEN-SET (`api.add_point(**fields)` persists
+#: ⚠️ The DECLARED vocabulary (`_DECLARED_PROPS`) covers the capture contract
+#: plus the provenance pointers; THIS set is the smaller one the fold reports
+#: rather than writes. A Point's payload is OPEN-SET (`api.add_point(**fields)` persists
 #: undeclared props too, #2795) — so no list can cover every field a producer
 #: might attach. That bound is on what the fold can CARRY, not on what it
 #: discloses: a prop outside the declared vocabulary is never carried, and it
@@ -377,19 +378,25 @@ _DECLARED_PROPS = frozenset(
     | {"extractedFrom", "extractedFromAll", "provenanceSource"}
 )
 
-#: The edge ATTRIBUTES the fold carries. `confidence` is the only one a capture
-#: Point's links carry today, and it is carried by `link_entity` and read back by
-#: `_carried`.
+#: The edge ATTRIBUTES the fold carries — and the ONLY attribute it READS.
+#: `confidence` is carried by `link_entity` and read back by `_carried`.
 #:
 #: ⚠️ DECLARED BOUND, not a closed set: the graph's edge-attribute vocabulary is
 #: wider (`projection/edges.py`'s `DIRECT_EDGE_ATTR_KEYS` — direction, weight,
 #: label, batch_id — plus the record projection's `idx`), and an attribute outside
-#: this tuple is neither carried nor REPORTED. That is not silence this module
-#: chose: `link_entity` accepts only `confidence`, so carrying another key needs a
-#: writer change, which is a different issue (filed rather than absorbed here).
-#: No in-tree producer writes those attributes on a capture Point's links —
-#: `projection._create_about_edges` mints them bare — so the bound is reachable
-#: only through a producer that does, and a lane reading this must not assume the
+#: this tuple is neither carried nor REPORTED. `link_entity` accepts only
+#: `confidence`, so carrying another key needs a writer change (#12146).
+#:
+#: ⚠️ NOR IS THE BOUND LIMITED TO `about*` LINKS — an earlier version of this
+#: comment said "the only one a capture Point's links carry today" and grounded
+#: that on `projection._create_about_edges` minting them bare. That is true of the
+#: `about*` edges only: the PROVENANCE writer (`projection/edges.py::
+#: _EdgeHandlers._link_source`) stamps `r.sourceVersion` via
+#: `_anchor_on_create`, so a Point's `extractedFrom` link can carry an attribute
+#: this fold does not read — and that is the one edge the fold LETS DIE whenever
+#: the canonical already holds an edge to the same target. The provenance axis is
+#: verified as a FIELD, which says nothing about the edge's attributes.
+#: `#12146` now names this axis too; a lane reading this must not assume the
 #: attribute class is closed.
 _CARRIED_EDGE_ATTRS = ("confidence",)
 
@@ -436,6 +443,10 @@ class FoldEvidence:
     #: label (`:Point:Object`) goes with it — and a label is not a property, so
     #: `undeclared` could never see it. Read, and REPORTED as a residual.
     labels: frozenset[str] = frozenset()
+    #: Source-ref values that were present but BLANK (whitespace). Not refs, and
+    #: not nothing: `extractedFrom` is declared, so an empty ref set passes the
+    #: ref check and the value would otherwise be destroyed with the node.
+    blank_refs: tuple[str, ...] = ()
     source_refs: frozenset[str] = frozenset()
     scalar: dict[str, Any] = field(default_factory=dict)
     #: The duplicate's own span evidence is NOT a valid address — the reason is
@@ -487,8 +498,8 @@ class FoldEvidence:
     ambiguous: bool = False
 
 
-def _refs_from(scalar_ref: Any, all_refs: Any,
-               prov_source: Any = None) -> set[str] | None:
+def _refs_from(scalar_ref: Any, all_refs: Any, prov_source: Any = None,
+               blanks: list[str] | None = None) -> set[str] | None:
     """The provenance refs a row holds, from ONE normaliser.
 
     ⚠️ A string is a SEQUENCE, so `*(all_refs or ())` iterated a malformed
@@ -518,8 +529,16 @@ def _refs_from(scalar_ref: Any, all_refs: Any,
         # there".
         if not isinstance(ref, str):
             return None
-        if ref.strip():
-            refs.add(ref.strip())
+        if not ref.strip():
+            # ⚠️ A blank ref is not a ref, but it is not NOTHING either: the row
+            # DECLARES `extractedFrom`, so the ref check passes (an empty set is
+            # a subset of anything), the fold succeeds, and the value dies with
+            # the node — neither carried, nor a residual, nor `undeclared`. The
+            # caller collects it (`blanks`) and reports it.
+            if blanks is not None:
+                blanks.append(repr(ref))
+            continue
+        refs.add(ref.strip())
     return refs
 
 
@@ -630,7 +649,8 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
     (scalar_ref, all_refs, quote, span_start, span_end, source_turn_id,
      search_keys, when, validfrom, _event_id, _status, _is_operator,
      prov_source, _confidence, _point_kind, _props, _labels) = rows[0]
-    refs = _refs_from(scalar_ref, all_refs, prov_source)
+    blank_refs: list[str] = []
+    refs = _refs_from(scalar_ref, all_refs, prov_source, blank_refs)
     if refs is None:
         return None
     # The open set: what the node carries that this module does not read. Read
@@ -781,6 +801,7 @@ def read_fold_evidence(proj: Any, dup_id: str) -> FoldEvidence | None:
         unaddressable=tuple(unaddressable),
         source_refs=frozenset(refs),
         labels=labels,
+        blank_refs=tuple(blank_refs),
         scalar=scalar,
         malformed_address=malformed_address,
         inbound=tuple(inbound),
@@ -999,6 +1020,13 @@ def _carry_fold_evidence(proj: Any, dup_id: str, canonical_id: str, *,
     extra_labels = sorted(evidence.labels - {"Point"})
     if extra_labels:
         out["residual"].append("label(s) " + ", ".join(extra_labels))
+    # A blank source ref: a declared prop whose VALUE cannot be carried anywhere
+    # and whose presence in the set was the only thing the ref check could have
+    # caught.
+    if evidence.blank_refs:
+        out["residual"].append(
+            "source reference(s) that were blank: "
+            + ", ".join(evidence.blank_refs))
     # 0) An edge class this module does not know. The delete takes EVERY edge, so
     #    an unfiltered read is the only way to know none was orphaned; the
     #    refusal is the same posture as a writer-less `about*` predicate.

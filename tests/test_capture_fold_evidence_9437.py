@@ -1369,8 +1369,10 @@ def test_a_provenance_edge_the_canonical_lacks_refuses_even_when_the_ref_matches
 def test_the_carried_edge_attr_bound_is_read_by_the_module_guard(monkeypatch):
     """`_CARRIED_EDGE_ATTRS` was declared and read by NOTHING — a "second
     constant nothing reads" — so a new attribute read, or a dropped one, left the
-    declaration drifting in silence. `assert_evidence_vocabulary` now asserts it
-    against the query that reads it.
+    declaration drifting in silence. `_assert_carried_edge_attrs` now asserts it
+    against the query that reads it, called from `read_fold_evidence` (NOT from
+    `assert_evidence_vocabulary`, which covers a different vocabulary — the
+    sibling docstring at the wiring pin says so too).
     """
     capture_fold._assert_carried_edge_attrs(capture_fold._OUTBOUND_EDGES_QUERY)
     monkeypatch.setattr(capture_fold, "_CARRIED_EDGE_ATTRS",
@@ -1774,3 +1776,24 @@ def test_the_seam_prints_a_late_refusal_residual_ONCE(sdk, monkeypatch):
     said = [w for w in meta["warnings"] if "kept distinct" in w]
     assert said, meta["warnings"]
     assert said[0].count(item) == 1, said[0]
+
+
+# ── 19) round 16: the malformed shape that still vanished (a BLANK ref) ──
+
+
+def test_a_BLANK_source_ref_is_reported_not_silently_dropped():
+    """The malformed class was closed for a non-str CONTAINER and a non-str
+    ELEMENT — but a whitespace-only element was skipped: `refs` stays empty, an
+    empty set is a subset of the canonical's, the ref check passes, the fold
+    succeeds, and a DECLARED prop dies with the node — neither carried, nor a
+    residual, nor `undeclared`."""
+    row = (" ", [], None, None, None, None, None, None,
+           None, None, None, None)                 # extractedFrom = " "
+    graph = _FakeGraph(dup_row=row)
+    out = capture_fold.carry_fold_evidence(
+        _FakeProj(graph), "pt_dup", "pt_canon")
+    assert out["ok"] is True, out
+    assert any("blank" in r for r in out["residual"]), out["residual"]
+    # …and it does NOT become a refusal: a blank ref is not a MISSING ref, so the
+    # duplicate's other evidence still folds.
+    assert out["reason"] is None, out
