@@ -5725,15 +5725,39 @@ _CLAUSE_BREAK = re.compile(
 #: itself ADDS one weak body on top of the #2199 provision (Beta(3.1,1) =
 #: 0.7561) or, with no provision at all, IS the whole baseline (Beta(1.1,1) =
 #: 0.5238). A note that hands `0.75` to the word therefore names a number
-#: nothing produces. Scope is one sentence and one direction: the ASSERTION
-#: forms (`is` / `reads` / `lands at` / `equals`) fire, while a sentence that
-#: merely prints both numbers passes, because the true sentence ("0.7561 for
-#: that default plus an author word") must. The `(?!\d)` keeps `0.7561` from
-#: matching as `0.75`, which is what makes that true sentence distinguishable
-#: at all.
+#: nothing produces.
+#:
+#: Scope is one sentence and one direction: the ASSERTION forms (`is` / `reads`
+#: / `lands at` / `equals`) fire, while a sentence that merely prints both
+#: facts passes, because the true sentence ("0.7561 for that default plus an
+#: author word") must.
+#:
+#: `0\.750*` and NOT plain `0\.75` — measured: the lookahead alone let the same
+#: false claim written at 3 or 4 dp (`reads 0.750`, `reads 0.7500`) pass
+#: silently, which left one spelling of the class unpoliced. The trailing
+#: `(?!\d)` is what keeps `0.7561` — the TRUE figure — from matching as `0.75`,
+#: and the control test pins that in both directions.
 _CRED_WORD_YIELDS_075 = re.compile(
     r"credibility[^.;]{0,60}?\b(?:is|reads|lands\s+at|equals)\b"
-    r"[^.;]{0,25}?0\.75(?!\d)",
+    r"[^.;]{0,25}?0\.750*(?!\d)",
+    re.IGNORECASE)
+
+#: A NEGATED or DEMOTED attribution is the correct wording, not a finding.
+#: Measured before this exemption existed: four TRUE sentences fired —
+#: "it is NOT the credibility word that reads 0.75 — the explicit pair is",
+#: "the ``credibility=`` word is NOT 0.75 — … is 0.7561", "``credibility=``
+#: never reads 0.75: …", and "the credibility word is DROPPED against an
+#: explicit pair, which reads 0.75". A false BLOCK is this guard's expensive
+#: error, not a false pass: the failure text hands the next fixer a number, and
+#: that fixer will "correct" a sentence that is already right — the
+#: false-correction failure this file documents for the mirror guards.
+#: ⚠️ NAMED RESIDUAL, one direction: an attribution negated in an EARLIER
+#: clause ("nothing here is simple — the credibility word is 0.75") is still
+#: reported, because the scan is clause-scoped rather than a parser. That
+#: blocks a correct rewrite; it cannot pass a false claim the corpus holds.
+_CRED_WORD_EXEMPT = re.compile(
+    r"\b(?:not|never|isn'?t|no\s+longer)\b|\bdropped\b|\bdrops\b"
+    r"|\bloses\b|\blost\b",
     re.IGNORECASE)
 
 
@@ -5808,13 +5832,36 @@ def _ep_pass_claims(text: str) -> list[str]:
     return suspects
 
 
+def _cred_word_yields_075(text: str) -> list[str]:
+    """Matches that ATTRIBUTE `0.75` to the `credibility` word.
+
+    Clause-scoped exemption: a negator or a demoting verb in the CLAUSE the
+    attribution sits in means the sentence says the right thing ("the word is
+    NOT 0.75", "the word is DROPPED against an explicit pair, which reads
+    0.75"). Scoping to the clause rather than the sentence is NOT cosmetic —
+    measured on the mutation control's own corpus: `volunteer.py`'s sentence
+    carries "NO LONGER true of every unmeasured point" in an earlier clause,
+    so a sentence-scoped exemption would have exempted the very mutation it
+    exists to catch.
+    """
+    hits = []
+    for match in _CRED_WORD_YIELDS_075.finditer(text):
+        cut = max((break_.end()
+                   for break_ in _CLAUSE_BREAK.finditer(text[:match.start()])),
+                  default=0)
+        if _CRED_WORD_EXEMPT.search(text[cut:match.end()]):
+            continue
+        hits.append(match.group(0))
+    return hits
+
+
 def _cred_word_claims(rel: str) -> list[str]:
     """Sentences that hand `0.75` to the `credibility` word.
 
     Sentence-scoped on purpose: the number and the word have to be read as one
     assertion, and a sentence is the unit the corpus writes an assertion in.
     """
-    return [s for s in _sentences(rel) if _CRED_WORD_YIELDS_075.search(s)]
+    return [s for s in _sentences(rel) if _cred_word_yields_075(s)]
 
 
 def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
@@ -5915,14 +5962,33 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             "an author ``credibility='low'`` still reads 0.75 here",
             "the same Beta(3,1) plus ``credibility='low'`` still reads 0.75",
             "``credibility='low'`` lands at 0.75 on its own",
-            "Beta(3,1) with a ``credibility=`` word IS 0.75"):
-        assert _CRED_WORD_YIELDS_075.search(spelling), (
+            "Beta(3,1) with a ``credibility=`` word IS 0.75",
+            # …the same false claim at 3 and 4 dp, which the lookahead alone
+            # let through until it was measured.
+            "``credibility=`` reads 0.750",
+            "``credibility=`` reads 0.7500"):
+        assert _cred_word_yields_075(spelling), (
             f"the credibility guard misses a rewording: {spelling!r}")
-    # …and it must NOT fire on the TRUE statement, or the next fixer is steered
-    # to "correct" prose that is already right.
-    assert not _CRED_WORD_YIELDS_075.search(
-        "the word ADDS to the #2199 default: Beta(3.1,1) = 0.7561, never 0.75."), \
-        "the credibility guard fires on the TRUE statement"
+    # …and it must NOT fire on TRUE prose — the failure text hands the next
+    # fixer a number, and a fixer that "corrects" a correct sentence is the
+    # false-correction failure this file exists to prevent. Every string here
+    # CARRIES the `credibility` token: an earlier revision of this block
+    # asserted a sentence with no token, so the assert passed for a reason
+    # unrelated to the property it claimed to pin (review, P1).
+    for true_sentence in (
+            "it is NOT the credibility word that reads 0.75 — the explicit "
+            "pair is",
+            "the ``credibility=`` word is NOT 0.75 — it is 0.7561 on top of "
+            "the default",
+            "``credibility=`` never reads 0.75: the default plus the word is "
+            "Beta(3.1,1)",
+            "the credibility word is dropped against an explicit pair, which "
+            "reads 0.75",
+            # …and this is what pins the `(?!\d)` / `0\.750*` tail: drop the
+            # lookahead and `0.7561` matches as `0.75`, so this reds.
+            "``credibility=`` reads 0.7561 on top of the default"):
+        assert not _cred_word_yields_075(true_sentence), (
+            f"the credibility guard fires on TRUE prose: {true_sentence!r}")
     assert _cred_word_claims("tortoise/volunteer.py") == [], (
         "the credibility guard reports the shipped `volunteer.py` note: "
         + repr(_cred_word_claims("tortoise/volunteer.py")[:1]))
@@ -5948,7 +6014,7 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
     assert mutated != shipped, (
         "the shipped sentence was reworded, so this mutation no longer "
         "applies — re-anchor it on the new wording rather than deleting it")
-    assert _CRED_WORD_YIELDS_075.search(mutated), (
+    assert _cred_word_yields_075(mutated), (
         "the class-4 guard stays GREEN when the shipped sentence is mutated "
         "into the false attribution: " + repr(mutated[:200]))
 
