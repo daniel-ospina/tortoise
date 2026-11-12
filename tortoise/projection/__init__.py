@@ -3944,7 +3944,8 @@ def _journal_safe_params(params, cypher=None):
 #     writes that put back, verbatim, state CAPTURED FROM THIS GRAPH
 #     immediately before its wipe (`:Batch` + `batch_id`, `:Session` +
 #     `CONTAINS`, the onboarding state machine — node, `onboards` anchor and
-#     `COMPLETED_STEP` links, `:TeamMeta`, the config registry, the `#4305`
+#     `COMPLETED_STEP` links, `:TeamMeta`, the `:PackSelection` pack-set
+#     marker, the config registry, the `#4305`
 #     derived Point properties, the `:GraphEventMeta` watermark). Every one of
 #     these classes rides NO journal record — which is exactly why the replay
 #     lane's contract ("this content came FROM the record") is FALSE for them,
@@ -4881,13 +4882,14 @@ def _prewipe_restore_write_scope(reason: str):
     snapshot, and its durable `#2943` sidecar): `:Batch` markers and
     `Point.batch_id`, `:Session` containers and their `CONTAINS` edges, the
     `:OnboardingState` machine (node, `onboards` anchor, `COMPLETED_STEP`
-    links), the `:TeamMeta` first-org marker, the `#2814` config registry, the
-    `#4305` derived Point properties, and the `:GraphEventMeta` watermark.
+    links), the `:TeamMeta` first-org marker, the `:PackSelection` pack-set
+    marker, the `#2814` config registry, the `#4305` derived Point properties,
+    and the `:GraphEventMeta` watermark.
 
     **None of those writes is a projection of a journal record** — the classes
-    ride no record at all (`#5353`, `#4641`, `#990`, `#2814`, `#4653` each say
-    so at their writer), and the restore re-establishes them from the pre-wipe
-    capture instead. ⚠️ **TWO legs are exceptions in MECHANISM, not in
+    ride no record at all (`#5353`, `#4641`, `#990`, `#2814`, `#4653`, `#9752`
+    each say so at their writer), and the restore re-establishes them from the
+    pre-wipe capture instead. ⚠️ **TWO legs are exceptions in MECHANISM, not in
     lane.**
 
     * `#4305`: the journal owns `content_hash` and `embedding` when it wrote
@@ -10783,8 +10785,9 @@ class WipePreconditionRefused(RuntimeError):
     It exists because ``rebuild_all``'s wipe is unconditional over EVERY label
     while its pre-wipe snapshot covers only the sections ``_SNAPSHOT_SECTIONS``
     names (graph-only ``:Point``, ``:Batch``, ``:Session``, the onboarding
-    pair, the config registry, the ``:GraphEventMeta`` high-water mark and
-    ``:TeamMeta``; the journal-replayable labels are re-created by the replay
+    pair, ``:PackSelection``, the config registry, the ``:GraphEventMeta``
+    high-water mark and ``:TeamMeta``; the journal-replayable labels are
+    re-created by the replay
     itself). The residual is therefore ``:GraphEvent`` rows — the raw event
     log, which no replay pass recreates (#4664) — plus any label outside that
     tuple. A node from either group that appears between the emptiness probe

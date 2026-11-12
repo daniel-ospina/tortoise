@@ -6,10 +6,11 @@ for it. But the same engine also puts back, verbatim, state it CAPTURED FROM
 THE GRAPH THAT IS ABOUT TO BE DESTROYED: `:Batch` markers and
 `Point.batch_id`, `:Session` containers and their `CONTAINS` edges, the
 onboarding state machine (node, `onboards` anchor, `COMPLETED_STEP` links), the
-`:TeamMeta` first-org marker, the `#2814` config registry, the `#4305` derived
-Point properties, and the `:GraphEventMeta` watermark. **None of those writes
+`:TeamMeta` first-org marker, the `:PackSelection` pack-set marker (#9752), the
+`#2814` config registry, the `#4305` derived Point properties, and the
+`:GraphEventMeta` watermark. **None of those writes
 is a projection of a journal record** (`#990`, `#4641`, `#5353`, `#2814`,
-`#4653` each say so at their writer), so the replay lane's contract — "this
+`#4653`, `#9752` each say so at their writer), so the replay lane's contract — "this
 content came from the record" — is FALSE for them. Two legs are exceptions in
 MECHANISM only, and the `#3947` one is why it is NOT cited as a writer that
 says so: `#4305`'s journal owns `content_hash` and `embedding` when it wrote
