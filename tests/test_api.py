@@ -518,7 +518,16 @@ def test_add_operator_rejects_non_string_inputs():
 
 def test_add_operator_rejects_non_string_op_type():
     """#331: non-string op_type must raise ValueError (a bare assert vanishes
-    under python -O — validate explicitly)."""
+    under python -O — validate explicitly).
+
+    #12240: this asserted the word `gate`, which `#12067` removed when it
+    corrected the DIAGNOSIS — the refusal is this door's own limit (it
+    predates the closed mechanism set; `coherence` is SDK-only), not an
+    unknown mechanism. Pinning a word that only ever happened to be in the
+    text decayed into a red on `main` the moment the text improved. Pin the
+    SUBSTANCE instead: the type refusal, and the message naming what this
+    door does accept.
+    """
     api, _log = _api()
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
     for bad in (None, 123, b"NAND", ["NAND"]):
@@ -526,7 +535,10 @@ def test_add_operator_rejects_non_string_op_type():
             api.add_operator(bad, ["a"], prov)
             assert False, f"should have raised ValueError for {bad!r}"  # noqa: B011
         except ValueError as e:
-            assert "gate" in str(e)
+            assert "must be 'NAND' or 'IMPL'" in str(e), (
+                "the refusal must name the mechanisms this door DOES accept — "
+                f"a bare 'unknown gate' text reads as a typo rather than as "
+                f"this door's limit (#12067): {str(e)!r}")
     print("PASS test_add_operator_rejects_non_string_op_type")
 
 def test_add_operator_single_string_input_not_char_split():
