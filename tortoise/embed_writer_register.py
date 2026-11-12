@@ -252,7 +252,10 @@ claim and a slogan:
   unclassified nor refused, which is the fail-open direction this whole module exists to close.
   `probe._import_aliases` resolves the alias back to the primitive it names, so the writer lands in
   `unresolved_write` and owes a declaration here; an aliased `encode_for_row` classes `gated`
-  instead, because it really does reach the gate and therefore owes nobody a declaration. ⛔ The
+  instead, because it really does reach the gate and therefore owes nobody a declaration — ⛔ and
+  `gated` means exactly that: CREDITED as a reach, never VERIFIED as one. Two named residuals below
+  are `gated` while reaching nothing (the `global` rebinding and the never-run call), so `gated` is
+  not a synonym for "this writer passes the gate". ⛔ The
   SCOPE of that sentence is the MODULE and the WRITER'S OWN scope: an alias imported in an
   ENCLOSING function and called in a nested one is neither resolved nor named as a writer, while the
   enclosing function is credited `gated` in its place — a named residual, not a resolved case

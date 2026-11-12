@@ -410,7 +410,10 @@ UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
         "`global _enc` + `_enc = lambda …` inside a nested `def` rebinds the module alias for the "
         "whole writer, and the own-scope rule cannot see it: measured `gated` — the DANGEROUS "
         "direction, because `gated` is outside the guard's population, so the writer owes no "
-        "declaration while never reaching the gate."
+        "declaration while never reaching the gate. ⛔ The KEYWORD is not the mechanism: "
+        "`globals()[\"_enc\"] = lambda …` from the nested scope rebinds the module binding by the "
+        "other route and measures the SAME `gated`, so this entry is about writing the module "
+        "binding from a nested scope by ANY route, not about the statement."
     ),
     # ⛔ `#12020` round 6 review (P3) — the ENCLOSING-scope axis, fifth blind spelling. Not a
     # regression (`main` missed the nested writer too), but the register's alias bullet reads
@@ -470,10 +473,12 @@ UNDECIDABLE_WRITE_SHAPES: dict[str, str] = {
         "the caller builds its reach set as `_callees(node) | {aliases[name] for name in "
         "_named_callees(node)}`, and `_callees` returns a call's `id`/`attr` with NO home check "
         "and NO shadow check. Both guards therefore constrain the ALIASED spelling only, so the "
-        "same three shapes measure OPPOSITELY depending on a cosmetic `as`: a writer-local `_enc "
-        "= lambda` rebinding, a nested `def helper(…)` parameter, and `from thirdparty.lib "
-        "import encode_for_row` all measure `gated` — owed nothing — while their aliased "
-        "equivalents measure `unresolved_write`. Measured, one shape per process. Pre-existing "
+        "same three shapes measure OPPOSITELY depending on a cosmetic `as`: a writer-local "
+        "`encode_for_row = lambda` REBINDING OF THE LITERAL NAME, a nested `def helper(…)` "
+        "parameter, and `from thirdparty.lib import encode_for_row` all measure `gated` — owed "
+        "nothing — while their aliased equivalents (the same three written `… as _enc`) measure "
+        "`unresolved_write`, so the `as` is the only difference between the two columns. Measured, "
+        "one shape per process. Pre-existing "
         "(`_callees` is byte-identical on `main`) and with NO live-tree instance: a latent "
         "spelling, not a landed bypass. Named rather than repaired because closing it means "
         "deciding, for a bare name, \"which binding does this call reach\" — the same call-graph "
