@@ -120,11 +120,13 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #:     ``_point_all_source_refs`` reads.
 #:
 #: ⛔ `sourceVersionTransit` is deliberately NOT in the set although it looks
-#: like a sibling: `add_point` MINTS it (``api.py:1198``, from
-#: ``_source_version_transit``, ``projection/edges.py:852``), so it is a seam fact
-#: on the channel that carries it rather than a caller's claim. (``_point`` does
-#: not mention the key at all — an earlier draft of this comment cited a ``pairs``
-#: arm there that does not exist.)
+#: like a sibling: `add_point` MINTS it (its ``_sv`` arm, guarded by
+#: ``if _sv is not None``), from ``_source_version_transit``
+#: (``projection/edges.py``), so it is a seam fact on the channel that carries it
+#: rather than a caller's claim. (``_point`` does not mention the key at all — an
+#: earlier draft of this comment cited a ``pairs`` arm there that does not
+#: exist.) ⛔ Cited by SYMBOL, not by line: two review cycles in a row found this
+#: reference stale because the code above it grows on every commit.
 #:
 #: `#11948`-review finding at `ceae1cfcf4`: the comment here said "the marker
 #: family is verified", which was true of ONE key out of six — measured,
@@ -144,7 +146,8 @@ _SERVER_MANAGED_EMBEDDING_KEYS = frozenset({
 #: (`embedding_verbatim`, `embedding_preserved`) are refused on both channels
 #: already, but the rest are VERIFIED (`embedding_width`) or deliberately left to
 #: `add_point` (the identity triple), so folding them together would assert a
-#: treatment three of its members do not get.
+#: treatment FOUR of its members do not get (`embedding_width` plus the identity
+#: triple).
 #: ``EVIDENCE_FOLD_KEY`` is the READER's spelling (``projection/__init__.py``),
 #: imported here rather than retyped: the literal used to be its own copy, so a
 #: rename at the consumer would have left this guard refusing a name nobody reads
