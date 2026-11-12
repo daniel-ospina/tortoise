@@ -723,7 +723,7 @@ def test_tos_200_and_negation_safe_block(page: Page) -> None:
 
 def test_tos_pricing_page_hyperlink_resolves(page: Page) -> None:
     """The 'Pricing Page' phrase must be HYPERLINKED (never bare text) with the
-    ABSOLUTE canonical URL https://tortoise.premiselabs.co/#pricing-section
+    ABSOLUTE canonical URL https://premiselabs.co/tortoise#pricing-section
     (reviewer P2: the relative '/#pricing-section' form breaks on premiselabs.co,
     where '/' serves index.html with NO pricing content — the anchor exists
     only in product.html). The fragment target must EXIST in the served
@@ -860,7 +860,7 @@ def test_company_root_links_to_the_blog(page: Page) -> None:
     assert _has_blog_entry(body), (
         "premiselabs.co/ carries no /blog entry point (#3950): the blog is live but "
         "unreachable when nothing links it. Add the absolute "
-        "https://tortoise.premiselabs.co/blog to index.html's footer bar."
+        "https://premiselabs.co/blog to index.html's footer bar."
     )
 
 

@@ -6838,9 +6838,11 @@ class TestProductSetIsServedUnderTheOneHost:
     def test_no_page_links_a_product_path_from_the_root(self):
         """A root-served page (`index`, `contact`) must use the prefix too.
 
-        Its `/` link is right; its `/docs` link is not. The two cases look alike in a
-        URL sweep and only one of them moved, which is exactly how `contact.html` kept
-        `href="/self-hosted"` through a migration that rewrote every sibling beside it.
+        Its `/` link is right on `index.html` — that IS the company homepage — and wrong on
+        `contact.html`, where the label says "product". The two cases look alike in a URL
+        sweep and only one of them moved, which is exactly how `contact.html` kept
+        `href="/self-hosted"` through a migration that rewrote every sibling beside it, and
+        kept two `href="/"` links labelled "product" after the product left the root.
         """
         offenders = []
         for name in self.ROOT_SERVED:
@@ -6850,9 +6852,16 @@ class TestProductSetIsServedUnderTheOneHost:
                 if path in self.OLD_PRODUCT_PATHS:
                     offenders.append(f"{name}: href={href!r} → should be "
                                      f"'/tortoise{path}'")
+                elif path == "/" and name != "index.html":
+                    # `/` is the COMPANY page on this host. On `index.html` that is the
+                    # document itself; on any other root-served page a `/` link labelled
+                    # "product" sends the visitor to the company homepage.
+                    offenders.append(f"{name}: href={href!r} → `/` is the company page "
+                                     "here; the product is '/tortoise'")
         assert not offenders, (
-            "these links on a ROOT-served page still name a product path (one hop onto "
-            "a 301, onto the URL that already serves it):\n  " + "\n  ".join(offenders))
+            "these links on a ROOT-served page still name a pre-migration product URL "
+            "(one hop onto a 301, or onto a different document entirely):\n  "
+            + "\n  ".join(offenders))
 
     def test_an_app_origin_page_never_links_a_marketing_path_root_relative(self):
         """On `app.premiselabs.co`, `/docs` is not the docs page — it is a 404.

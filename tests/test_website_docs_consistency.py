@@ -1103,17 +1103,17 @@ def test_function_route_resolver_recognizes_both_route_kinds() -> None:
 def test_faq_avoids_root_relative_fragment_links() -> None:
     """A bare `/#anchor` link breaks on the company host — use the canonical URL.
 
-    On `tortoise.premiselabs.co` the middleware rewrites `/` to `product.html`,
-    which carries `id="pricing-section"`. On `premiselabs.co` `/` is `index.html`,
-    which has no pricing content at all — so the bare root-fragment form silently
-    lands on a page with a dangling anchor. The sibling E2E test pins
+    Since epic #11762 the product page is served at `premiselabs.co/tortoise` (the
+    retired host 301s there), and that document carries `id="pricing-section"`. On
+    `premiselabs.co` `/` is `index.html`, which has no pricing content at all — so the
+    bare root-fragment form silently lands on a page with a dangling anchor. The sibling E2E test pins
     `PRICING_PAGE_URL` for exactly this reason; this guard keeps the FAQ honest.
     """
     root_fragments = re.findall(r'href="/#([^"]+)"', _read(FAQ))
     assert not root_fragments, (
         f"website/faq.html uses the bare root-fragment form {root_fragments}, which "
         f"breaks on premiselabs.co. Use the absolute canonical "
-        f"https://tortoise.premiselabs.co/#<anchor> instead."
+        f"https://premiselabs.co/tortoise#<anchor> instead."
     )
 
 
