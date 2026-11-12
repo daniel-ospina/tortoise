@@ -31,6 +31,7 @@ import json
 import re
 import subprocess
 import sys
+import textwrap
 import types
 from pathlib import Path
 
@@ -2052,23 +2053,195 @@ def test_the_citation_pin_calls_every_arm_it_declares() -> None:
     prose, [lands_d2[0]])` left the file at 56 passed while the sweep's paragraph
     above still said "SOME block". Both checks are needed, and neither substitutes
     for the other.
+
+    ⛔ EVERY DECLARED CALL IS PINNED WITH ITS ARGUMENTS, not by its name (#12174).
+    A bare `"_assert_no_stale_citation_claim("` marker left the sweep's SCOPE
+    unpinned: measured at head ``c7499ac7`` (57 tests), rewriting that call's first
+    argument from `module_source` to `doc` — narrowing the sweep to the sibling
+    docstring alone — left the file at 57 passed, and with the narrowing in place a
+    planted stale bold count (three of the thirty-nine) in the sweep's OWN comment
+    was ALSO green, while the identical plant with the sweep intact reds. (The
+    issue records the same narrowing at its own head ``7ceebd22``, which has 56
+    tests.) That is the paragraph above losing its protection in silence.
+    The uniqueness scan was pinned by its name alone for the same
+    reason, so it carries its arguments too — narrowing it to `flat_doc`, the
+    normalised sibling text, is invisible to the value sweep, which by construction
+    passes a bold duplicate whose numbers still match.
+
+    ⛔ AND THE CANDIDATES ARE AST CALL NODES, NOT TEXT. A substring test over the
+    pin's source is satisfied by a COMMENT or a STRING LITERAL that merely mentions
+    the call, so the arm could be DELETED while the pin stayed green — the exact
+    unwiring this test exists to catch, defeated by prose. Measured at ``c7499ac7``
+    under the previous text markers: `_refuse_unresolvable_evidence(doc, blocks,
+    carrier=lands_d2[0])` -> `carrier=None`, which short-circuits the helper
+    (`if carrier is not None:`) and turns the carrier arm OFF, left the file at 57
+    passed, because the marker stopped at `carrier=` and never read the value.
+    Raw text also made a FORMATTER a false block: `ruff format`'s one-argument-per
+    -line layout with a magic trailing comma, `_refuse_unresolvable_evidence(\n
+    prose,\n blocks,\n)`, red the pin with `the pin no longer calls ['the
+    module-wide permalink arm against EVERY block']` while the arguments were
+    byte-for-byte identical — the false block this check must never emit.
+    `ast.unparse` is whitespace-, comma- and comment-independent BY CONSTRUCTION,
+    and a comment is not a `Call` node at all, so one comparison answers both.
+
+    ⛔ WHAT THIS STILL DOES NOT PROVE, stated at the scope the code reaches: it reads
+    the call as WRITTEN, not as EXECUTED. A call moved into a dead branch or behind
+    a rebound argument still yields a `Call` node, and this pin cannot see that —
+    closing it needs a behavioural control at the call site, which is a different
+    check (filed as #12223) and is not claimed here.
+
+    ⛔ THE DEFINITION IT READS MUST BE THE ONE PYTHON RUNS, and that is resolved from
+    the LIVE BINDING rather than assumed from the tree. Two edits make a tree-read
+    vacuous while the suite stays green, and both were measured at ``c7499ac7``:
+    `next(node for node in ast.walk(...) if node.name == ...)` takes the FIRST
+    same-named `FunctionDef` in source order while the namespace binds the LAST, so a
+    `pass` duplicate appended at EOF left the file at 57 passed with a raise planted
+    in the real body; and rebinding the name afterwards
+    (`... = lambda: None`) leaves exactly one `FunctionDef` in the tree while Python
+    runs the lambda, so the sweep never executes — measured, 57 passed. The
+    `inspect.getsource(<module global>)` this replaced resolved the live binding and
+    caught both, which is why the source is taken from `globals()[<name>]` HERE: a
+    same-named definition that does not run, or a name bound to anything but a
+    function, is a red that names itself — where `next()` raised a bare
+    `StopIteration`.
     """
-    source = inspect.getsource(
-        test_the_citation_scope_docstring_states_the_measured_count)
+    pins = [node for node in ast.walk(
+        ast.parse(Path(__file__).read_text(encoding="utf-8")))
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_the_citation_scope_docstring_states_the_measured_count"]
+    assert len(pins) == 1, (
+        f"this module defines the pinned test {len(pins)} time(s) — this pin must read "
+        "the definition Python RUNS, which is the LAST binding, so exactly one is "
+        "required. If the test was renamed, rename it here in the same commit; if a "
+        "second definition was appended, the first one no longer runs and this check "
+        "would be reading dead code")
+    live = globals().get("test_the_citation_scope_docstring_states_the_measured_count")
+    assert live is not None, (
+        "this module no longer binds "
+        "test_the_citation_scope_docstring_states_the_measured_count — if it was "
+        "renamed, rename it here in the same commit so the claim and the code move "
+        "together")
+    # ⛔ THE SOURCE COMES FROM THE OBJECT PYTHON RUNS, then goes through `ast`: that
+    # keeps the whitespace/comma/comment independence (a `ruff format` layout is not a
+    # different call) while refusing a same-named definition that does not run. A
+    # source STRING cannot tell the two apart, which is the whole of #12174.
+    # ⛔ `inspect.getsource` REFUSES OBJECTS IT CANNOT READ (`= 42` raises a bare
+    # `TypeError` from inspect, naming no pin and no remedy), so the read is wrapped
+    # and re-raised in this pin's own voice. A name bound to a non-function is the
+    # usual cause and is named as such; whatever the cause, the pin fails closed.
+    try:
+        pin = ast.parse(textwrap.dedent(inspect.getsource(live))).body[0]
+    except (OSError, TypeError, IndentationError, SyntaxError) as exc:
+        raise AssertionError(
+            "the source of the pinned test could not be read by `inspect.getsource` "
+            f"({type(exc).__name__}: {exc}) — this pin certifies the arms from that "
+            "source, so it must refuse rather than report green. A name bound to a "
+            "non-function (an int, a string, a builtin) is the usual cause") from exc
+    assert isinstance(pin, ast.FunctionDef), (
+        "the pinned test's name is bound to something that is not a function "
+        f"definition (got {type(pin).__name__}) — the sweep would read code this "
+        "module does not run")
+    # ⛔ A DECORATED PIN CAN BE COLLECTED AND NEVER RUN: `@pytest.mark.skip` on the
+    # pinned test leaves every arm untouched while this check reads its source and
+    # reports green (measured at ``c7499ac7``: `56 passed, 1 skipped`, exit 0, with a
+    # planted `raise` in the body still silent). Reading SOURCE cannot see a marker.
+    # ⛔ ONLY MARKERS THAT CAN SUPPRESS EXECUTION ARE REFUSED. `@pytest.mark.timeout(N)`
+    # is this repo's own budget convention and still RUNS the test, so refusing it
+    # would be a false block denying a marker doing its job.
+    # ⛔ MATCHED ON THE DECORATOR'S TEXT, not on `func.attr`: `_SKIP = pytest.mark.skip`
+    # at module level, then `@_SKIP(...)`, leaves `func.attr` empty and the pinned test
+    # SKIPPED with this pin green (measured at ``c7499ac7``). A word match cannot reach
+    # every indirection — a wrapper whose NAME carries none of these words is the
+    # residual, tracked with #12223 — but it reaches the aliases in use.
+    # ⛔ WITH STRING LITERALS BLANKED FIRST, because the word can be an ARGUMENT VALUE:
+    # `@pytest.mark.parametrize("conclusion", ["skipped", "neutral"])` cannot suppress
+    # anything, and matching its text refused it while the message claimed the marker
+    # "CAN suppress" — a false block AND a false sentence, the exact pair #12174 is
+    # about. Blanking the literals keeps the case that must still be caught
+    # (`parametrize(..., marks=pytest.mark.skip)`).
+    def _marker_words(marker: ast.expr) -> str:
+        expr = ast.parse(ast.unparse(marker), mode="eval").body
+        for node in ast.walk(expr):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                node.value = ""
+        return ast.unparse(expr)
+
+    suppressing = sorted(
+        ast.unparse(marker) for marker in pin.decorator_list
+        if re.search(r"skip|xfail", _marker_words(marker), re.I))
+    assert not suppressing, (
+        f"the pinned test carries {suppressing} — these markers CAN suppress the "
+        "item (skip always; skipif and xfail depending on a runtime condition that "
+        "source cannot decide), so the arms below may never be reached while this "
+        "pin reports green over a dead body. Drop the marker (and fix whatever made "
+        "it necessary). Deselection from the command line (-k, --deselect) stays out "
+        "of a test's reach; a suppression MARKER does not have to be")
+    called = {ast.unparse(call) for call in ast.walk(pin)
+              if isinstance(call, ast.Call)}
+    # ⛔ THE SHAPE IS THE WHOLE CALL — callee AND EVERY argument, values included. A
+    # bare `"_assert_no_stale_citation_claim("` is what let the sweep be narrowed
+    # from `module_source` to `doc` in silence (#12174); stopping at `citing,` left
+    # `lands_first=lands_first` -> `lands_first=True` green the same way; and a
+    # marker ending at `carrier=` left the carrier arm disable-able with
+    # `carrier=None` (measured at ``c7499ac7``: 57 passed). Every one of those is a
+    # different call to `ast.unparse`, so every one reds here.
     required = {
         "the sweep arms (bold, complement, ordinal)":
-            "_assert_no_stale_citation_claim(",
-        "the uniqueness scan": "_refuse_a_duplicated_statement(",
+            "_assert_no_stale_citation_claim(module_source, blocks, citing, "
+            "lands_first=lands_first)",
+        "the uniqueness scan":
+            "_refuse_a_duplicated_statement(module_source, pattern, label)",
         "the module-wide permalink arm against EVERY block":
             "_refuse_unresolvable_evidence(prose, blocks)",
-        "the carrier arm": "_refuse_unresolvable_evidence(doc, blocks, carrier=",
+        "the carrier arm":
+            "_refuse_unresolvable_evidence(doc, blocks, carrier=lands_d2[0])",
     }
-    missing = sorted(name for name, marker in required.items()
-                     if marker not in source)
+    missing = sorted(name for name, shape in required.items()
+                     if shape not in called)
+    # ⛔ AND THE ITERABLE THAT FEEDS THE UNIQUENESS SCAN, not just the call it feeds.
+    # The scan runs inside a three-element `for`; the call's shape is byte-identical
+    # whether the tuple has three entries or one, so `((pair_pattern, "the count
+    # pair"),)` — the other two scans deleted — left this pin green (measured at
+    # ``c7499ac7``). The pattern TUPLE is part of the declared surface.
+    loops = {ast.unparse(node.iter) for node in ast.walk(pin)
+             if isinstance(node, (ast.For, ast.AsyncFor))}
+    # ⛔ A COMPREHENSION SWEEPS TOO, of every kind (`ast.DictComp` included), so the
+    # iterable is collected from every form that can carry it — refusing a rewrite
+    # that still scans all three statements would be a false block denying what the
+    # code does.
+    loops |= {ast.unparse(generator.iter) for node in ast.walk(pin)
+              if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp,
+                                   ast.DictComp))
+              for generator in node.generators}
+    scan = ("((pair_pattern, 'the count pair'), (version_pattern, "
+            "'the citing-version list'), (complement_pattern, 'the complement'))")
+    # ⛔ AND A HOISTED LOCAL COUNTS: `scans = (<tuple>)` then `for ... in scans` is an
+    # ordinary refactor that changes no behaviour, so the tuple bound to a name that
+    # is iterated satisfies the same requirement (measured on this pin's earlier
+    # cut against the ``c7499ac7`` tree: the hoisted form red while all three
+    # statements were swept). The ANNOTATED form is this repo's house style, so it
+    # counts too — `scans: tuple[tuple[str, str], ...] = (<tuple>)`.
+    hoisted = {target.id for node in ast.walk(pin)
+               if isinstance(node, (ast.Assign, ast.AnnAssign))
+               and node.value is not None and ast.unparse(node.value) == scan
+               for target in (node.targets if isinstance(node, ast.Assign)
+                              else [node.target])
+               if isinstance(target, ast.Name)}
+    assert scan in loops or hoisted & loops, (
+        "no loop or comprehension in the pinned test iterates the scan's PATTERN "
+        "TUPLE (directly, or through a local bound to it), and no form of the three "
+        "scans matched — the call may still be reached while the declared sweep is "
+        "gone. If the three scans are now explicit calls rather than one loop, "
+        "extend this pin in the same commit; a narrowed iterable keeps every OTHER "
+        "check green, because the call's own shape does not change")
     assert not missing, (
-        f"the pin no longer calls {missing} — the sweep's comment above it still "
-        "claims those checks run, and no other test reads the call sites (a "
-        "helper-level test says nothing about whether the pin reaches it)")
+        f"these calls are no longer reached WITH THE PINNED ARGUMENTS: {missing} — "
+        "the sweep's comment above still claims those checks run, and no other test "
+        "reads the call sites (a helper-level test says nothing about whether the "
+        "pin reaches it). If the call is GONE, restore it. If its arguments "
+        "legitimately changed, edit this pin's shapes in the same commit so the "
+        "claim and the code move together — a shape left behind is how the sweep "
+        "was silently narrowed to one docstring")
 
 
 def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
