@@ -358,11 +358,11 @@ jobs:
               unprobed_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured_unprobed') or 0)" 2>/dev/null || echo 0)"
               unread_n="$(python3 -c "import json; print(json.load(open('/tmp/ci-queue-health.json')).get('pr_running_unmeasured_unread') or 0)" 2>/dev/null || echo 0)"
               if [ "${unread_n:-0}" -gt 0 ] && [ "${unprobed_n:-0}" -eq 0 ]; then
-                census_lever="the JOBS READ ITSELF FAILED for all ${unread_n} of them, so RETRY the reading — a bigger probe budget only probes more runs that fail the same way"
+                census_lever="the jobs read did not PROVE them idle for any of the ${unread_n} — either the read FAILED, or the run had not been still long enough for an all-completed job list to count as proof (300 s; a DYNAMIC matrix creates its shards only after its parent finishes). RETRY the reading once the runs have settled — a bigger probe budget only probes more runs the same way"
               elif [ "${unprobed_n:-0}" -gt 0 ] && [ "${unread_n:-0}" -eq 0 ]; then
                 census_lever="the probe budget never REACHED all ${unprobed_n} of them, so raise --max-job-probes (oldest-first: the surplus is the NEWEST runs)"
               elif [ "${unprobed_n:-0}" -gt 0 ] && [ "${unread_n:-0}" -gt 0 ]; then
-                census_lever="both causes are present — ${unprobed_n} run(s) the budget never REACHED (raise --max-job-probes) and ${unread_n} whose JOBS READ FAILED (RETRY the reading first, since a retry also re-probes the unread ones); if the count then stops moving, raise the budget"
+                census_lever="both causes are present — ${unprobed_n} run(s) the budget never REACHED (raise --max-job-probes) and ${unread_n} whose jobs read did not PROVE them idle (RETRY the reading first, once they have settled, since a retry also re-probes the unread ones); if the count then stops moving, raise the budget"
               else
                 census_lever="the reading did not record which abstention it was (an older caller), so neither lever can be named from this payload"
               fi

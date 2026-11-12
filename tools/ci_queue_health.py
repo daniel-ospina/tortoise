@@ -688,11 +688,17 @@ class QueueHealth:
     #: lever would then be prescribed for a wait defect. This flag is set by the clause
     #: that degrades, so it is about the census by construction.
     pr_running_census_unwitnessed: bool = False
-    #: OF THE UNMEASURED RUNS, HOW MANY THE PROBE NEVER REACHED (budget) versus NEVER READ
-    #: (the jobs read itself failed). #12037 review round 13: the census annotation promised
+    #: OF THE UNMEASURED RUNS, HOW MANY THE PROBE NEVER REACHED (budget) versus WAS NOT
+    #: PROVED IDLE BY ITS READ. #12037 review round 13: the census annotation promised
     #: "the reason line says which" of the two remedies to pull, and the reason line only
     #: offered a disjunction — no field anywhere could answer it, because `has_live_job` is
-    #: `None` in both cases by design (`read_run_live_job` swallows the failure into `None`).
+    #: `None` in every abstention case by design.
+    #: ⛔ THE SECOND BUCKET NOW CARRIES THREE CAUSES, NOT ONE (review): the read FAILED, the
+    #: read returned `False` on a run that had not been still for `JOB_SETTLE_SECONDS`
+    #: (downgraded by `read_health`), or a proof whose completeness could not be
+    #: established. They share ONE remedy — RETRY once the run has settled — which is why
+    #: they share a bucket, and the emitted text names all of them rather than claiming the
+    #: read failed (it may have SUCCEEDED and simply proved nothing yet).
     #: These are `None` when the caller did not probe (nothing to distinguish), and the two
     #: ints otherwise; they always sum to `pr_running_unmeasured`.
     pr_running_unmeasured_unprobed: int | None = None
@@ -1197,7 +1203,10 @@ def _unmeasured_because(unprobed: int | None, unread: int | None) -> str:
     if unprobed:
         parts.append(f"{unprobed} the probe budget never REACHED")
     if unread:
-        parts.append(f"{unread} whose jobs read itself FAILED")
+        parts.append(
+            f"{unread} whose jobs read did not PROVE them idle (the read FAILED, or the "
+            f"run had not been still for {JOB_SETTLE_SECONDS:.0f}s — RETRY)"
+        )
     if not parts:   # defensive: says nothing false if a caller passes zeroes
         return ""
     return " (" + ", ".join(parts) + ")"
@@ -1895,9 +1904,24 @@ def read_run_live_job(
     contradictory reasons.
 
     Returns ``True`` (a non-terminal job exists), ``False`` (jobs READ, non-empty, all
-    `completed` — a proof of non-execution), or ``None`` when NOT MEASURED. ``None`` is
+    `completed`), or ``None`` when NOT MEASURED. ``None`` is
     returned for every way the question goes unanswered, and it is the caller's job to
     abstain toward EXECUTING rather than toward starvation:
+
+      * ⛔ ``False`` IS A **CANDIDATE** PROOF, NOT A FINAL ONE, AND THE CALLER MUST
+        CORROBORATE IT. An all-``completed`` list does not by itself mean the run is
+        executing nothing: this repo's test matrix is DYNAMIC
+        (``python-ci.yml`` instantiates ``test``/``test-slow``/``test-carve-out`` from
+        ``fromJSON(needs.changes.outputs.*_matrix)``), so between the parent job
+        finishing and the shards being created, this function's own guards all pass on
+        a single ``completed`` row while the run is about to execute. The corroboration
+        is the run's own ``updated_at`` STILLNESS (``_settled_still`` /
+        ``JOB_SETTLE_SECONDS``), which only the caller can apply because only the
+        caller holds the run projection. A ``False`` that is not corroborated MUST be
+        treated as ``None`` — subtracting an unproven run manufactures ``PR-STARVED``,
+        which authorises a destructive cancel-then-rerun. ``read_health`` is the only
+        production caller and applies it; a SECOND caller that skips it reintroduces
+        the defect this module exists to remove.
 
       * the jobs read FAILED (``MeasureError``, a hang, a bad payload, auth) — swallowed
         here on purpose: one run's jobs surface is a refinement of one count, and raising

@@ -3512,7 +3512,7 @@ def test_the_unmeasured_count_is_SPLIT_into_never_reached_and_read_failed(monkey
             + health.pr_running_unmeasured_unprobed) == health.pr_running_unmeasured
     # ... and the reason line NAMES both instead of the old disjunction
     claim = next(r for r in health.reasons if r.startswith("PR-UNWITNESSED"))
-    assert "never REACHED" in claim and "jobs read itself FAILED" in claim, claim
+    assert "never REACHED" in claim and "did not PROVE them idle" in claim, claim
     # ... and the payload carries the split too, because the ANNOTATION reads it from there
     payload = health.to_dict()
     assert payload["pr_running_unmeasured_unread"] == 2
@@ -3575,7 +3575,7 @@ def test_the_split_counts_the_MERGED_list_not_the_pre_probe_one(monkeypatch):
     # each cause, which is exactly what the annotation turns into a remedy
     assert health.verdict == Q.PR_UNWITNESSED
     claim = next(r for r in health.reasons if r.startswith("PR-UNWITNESSED"))
-    assert "1 the probe budget never REACHED" in claim and "1 whose jobs read itself FAILED" in claim, claim
+    assert "1 the probe budget never REACHED" in claim and "1 whose jobs read did not PROVE them idle" in claim, claim
 
 
 # --- review round (2026-11-12, fresh-context reviewer): the settle gate -------------

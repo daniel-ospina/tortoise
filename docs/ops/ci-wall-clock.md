@@ -452,10 +452,15 @@ same step with the same tail is the investigation.
     `..._unread` in `--json`, and the annotation names the one that applies):
     - **the probe budget never REACHED the run** — raise `--max-job-probes`. The budget is spent
       oldest-first, so the surplus is the *newest* runs;
-    - **the jobs read itself FAILED** — RETRY the reading. A larger budget does not help: it
-      only probes more runs that fail the same way (the failure is not sticky — every reading
-      re-probes from scratch — it is just invisible, since a failed read abstains into
-      `has_live_job = None` by design).
+    - **the jobs read did not PROVE them idle** — RETRY the reading. This bucket now has THREE
+      causes and they share the one lever: the read ITSELF FAILED; the read SUCCEEDED but
+      returned `False` on a run that had not been STILL for `JOB_SETTLE_SECONDS` (300 s), so an
+      all-`completed` job list was not yet a proof (a DYNAMIC matrix creates its shards only
+      after its parent job finishes, so retrying immediately reproduces the same downgrade —
+      retry once the runs have settled); or a proof whose completeness could not be
+      established. A larger budget does not help: it only probes more runs the same way (the
+      failure is not sticky — every reading re-probes from scratch — it is just invisible,
+      since an unproven read abstains into `has_live_job = None` by design).
 
     There is deliberately **no** "repair the frozen run" remedy here, and that is not an
     omission: a frozen run — `in_progress` with every job `completed` **and its own
