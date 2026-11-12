@@ -8051,8 +8051,13 @@ def _item_flatten_depth(item: dict, section: str) -> int:
     """How many times the item's write door applies ``_coerce_props``."""
     if section == "points":
         return _POINT_ITEM_FLATTEN_DEPTH
-    return _ENTITY_ITEM_FLATTEN_DEPTH.get(
-        str(item.get("type") or "").strip().lower(), 1)
+    # ⛔ The DEPTH is a function of the label the WRITER resolves, so it reads the
+    # type by the same rule every other arm does (#11825 review cycle 11, P1).
+    # While this line rendered, the arms above could read the status at depth 1
+    # while the writer folded 2: `{"type": Lie("subject"), "props": {"props":
+    # {"status": "dead"}}}` measured TEN violations' worth of difference — Phase 1
+    # returned [] and `ingest` raised in step 3 with the point already committed.
+    return _ENTITY_ITEM_FLATTEN_DEPTH.get(_item_type_text(item), 1)
 
 
 def _status_is_evaluable(value: object) -> bool:
@@ -21010,6 +21015,32 @@ class TortoiseSDK:
             if missing_ok:
                 return None
             raise ValueError(f"No point {point_id!r}")
+        # ── #11825 → the LIFECYCLE doors: an `:Event` has no lifecycle ──
+        # The three terminalizing doors (`retract_point` / `supersede_point` /
+        # `invalidate_point`) reach this guard BEFORE any write, and each of them
+        # writes a TERMINAL status — so a node carrying BOTH `:Point` and
+        # `:Event` (`#3311`'s `retype`, migrated graphs) was terminalized here
+        # while the `update_entity` door refused the same value (measured, review
+        # cycle 11: `retract_point(<:Point:Event>)` -> `['retracted',
+        # ['Point','Event']]`). The probe is the update door's own text for the
+        # same question — Events resolve on `eventId` OR `id` — so the doors
+        # cannot disagree about which nodes are Events.
+        #
+        # Scoped by `refuse_terminal`: that is exactly the "this door
+        # terminalizes" predicate (the docstring above defines it that way), and
+        # the one caller that passes `False` (`update_point`) writes a window or
+        # a non-terminal prop through its own policy, so an `:Event` carrying one
+        # is not this refusal's business.
+        if refuse_terminal and self._get_proj().g.query(
+                "MATCH (e:Event) WHERE e.eventId = $id OR e.id = $id "
+                "RETURN count(e)",
+                params={"id": point_id},
+        ).result_set[0][0]:
+            raise ValueError(
+                f"Point {point_id!r} carries the :Event label — {method} "
+                f"cannot terminalize it: an :Event has no lifecycle, so a "
+                f"terminal status would store a value no reader names and no "
+                f"retrieval leg filters (#11825)")
         if kind == "operator" and not allow_operator:
             raise ValueError(
                 f"Point {point_id!r} is an operator — {method} is for "
@@ -27770,7 +27801,7 @@ class TortoiseSDK:
                     # Subject/Object/Event entity item — the same label set the
                     # write primitives accept. An entity item typed `document`
                     # is a `:Source`, so it stays out.
-                    etype = str(item.get("type") or "").strip().lower()
+                    etype = _item_type_text(item)
                     elabel = entity_labels.get(etype)
                     # #7925 review P1: an operator-SHAPED item is not an
                     # endpoint on either route — `is_operator` rides the
@@ -27994,8 +28025,7 @@ class TortoiseSDK:
                     esection, eitem = local[v]
                     if esection != "entities":
                         continue
-                    ep_label = entity_labels.get(
-                        str(eitem.get("type") or "").strip().lower())
+                    ep_label = entity_labels.get(_item_type_text(eitem))
                     ep_name = eitem.get("name")
                 else:
                     info = node_info.get(v) or {}
@@ -28117,8 +28147,7 @@ class TortoiseSDK:
                     # route) — the graph
                     # write refuses it on presence, so a name simulation would
                     # add nothing there.
-                    elabel = entity_labels.get(
-                        str(item.get("type") or "").strip().lower())
+                    elabel = entity_labels.get(_item_type_text(item))
                     name = item.get("name")
                     if elabel not in ("Subject", "Object", "Event"):
                         continue

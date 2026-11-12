@@ -217,8 +217,8 @@ class TestTheUpdateDoor:
     change exists to prevent reachable.
     """
 
-    def _multi_label(self, sdk, name, *, event_id: bool):
-        node = sdk.create_point("statement", name)
+    def _multi_label(self, sdk, name, *, event_id: bool, status="live"):
+        node = sdk.create_point("statement", name, status=status)
         pid = (node.get("node") or {}).get("id") or node.get("id")
         g = sdk._get_proj().g
         g.query("MATCH (p:Point {id:$p}) SET p:Event", params={"p": pid})
@@ -247,8 +247,15 @@ class TestTheUpdateDoor:
             "a refused update must not journal a restatus the fold would replay")
 
     def test_a_non_terminal_update_still_lands_on_a_multi_label_event(self, sdk):
-        """No over-block: `live` is a legal `:Event` prop-lane write (#2788)."""
-        pid = self._multi_label(sdk, "Multi-live", event_id=False)
+        """No over-block: `live` is a legal `:Event` prop-lane write (#2788).
+
+        ⛔ The node is born `draft`, not `live`: created `live`, the assertion below
+        held with the write deleted entirely, so it pinned nothing (measured,
+        review cycle 11 P2). The pin is the MOVE.
+        """
+        pid = self._multi_label(sdk, "Multi-live", event_id=False,
+                                status="draft")
+        assert self._state(sdk, pid)[0] == "draft"
         sdk.update_entity(pid, status="live")
         assert self._state(sdk, pid)[0] == "live"
 
@@ -324,6 +331,58 @@ class TestTheUpdateDoor:
         assert _props(sdk, eid).get("status") == "draft"
         sdk.update_entity(eid, status="scheduled")
         assert _props(sdk, eid).get("status") == "scheduled"
+
+
+# ── The lifecycle doors: retract / supersede / invalidate ────────────────────
+
+
+class TestTheLifecycleDoors:
+    """An `:Event` that is also a `:Point` must not be TERMINALIZED (#11825).
+
+    All three doors reach `_assert_lifecycle_guard` before any write, so that is
+    where the refusal belongs — and it must be there, because each of them writes a
+    TERMINAL status of its own, none of which passes through `update_entity`.
+    Measured at review cycle 11 on a `:Point:Event`:
+    `retract_point` → `['retracted', ['Point','Event']]`, a node the belief layer
+    reads as dead and every retrieval leg serves as live.
+    """
+
+    def _multi_label(self, sdk, name):
+        pid = sdk.create_point("statement", name)["id"]
+        sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$p}) SET p:Event", params={"p": pid})
+        return pid
+
+    def _state(self, sdk, pid):
+        return sdk._get_proj().g.query(
+            "MATCH (n {id:$p}) RETURN n.status", params={"p": pid},
+        ).result_set[0][0]
+
+    def test_retract_refuses_a_multi_label_event(self, sdk):
+        pid = self._multi_label(sdk, "RetractEvent")
+        with pytest.raises(ValueError, match=":Event"):
+            sdk.retract_point(pid)
+        assert self._state(sdk, pid) != "retracted"
+
+    def test_invalidate_refuses_a_multi_label_event(self, sdk):
+        pid = self._multi_label(sdk, "InvalidateEvent")
+        replacement = sdk.create_point("statement", "Replacement")["id"]
+        with pytest.raises(ValueError, match=":Event"):
+            sdk.invalidate_point(pid, replacement)
+        assert self._state(sdk, pid) != "outdated"
+
+    def test_supersede_refuses_a_multi_label_event(self, sdk):
+        pid = self._multi_label(sdk, "SupersedeEvent")
+        replacement = sdk.create_point("statement", "Successor")["id"]
+        with pytest.raises(ValueError, match=":Event"):
+            sdk.supersede_point(pid, replacement)
+        assert self._state(sdk, pid) != "superseded"
+
+    def test_an_ordinary_point_still_terminalizes(self, sdk):
+        """No over-block: the guard is label-scoped, not a blanket refusal."""
+        pid = sdk.create_point("statement", "PlainPoint")["id"]
+        sdk.retract_point(pid)
+        assert self._state(sdk, pid) == "retracted"
 
 
 # ── The third door: EventAPI.add_event ──────────────────────────────────────
@@ -1028,6 +1087,19 @@ class TestTheBundleValidationDoor:
               "objectKind": "policy", "status": "superseded"},
              "the Object/Event mint arm: content 'object', renders 'harmless'"),
         )
+        # ⛔ The DEPTH the arm reads the status at is decided by the SAME
+        # resolution (`_item_flatten_depth`), so a rendering there re-opened the
+        # defect one level down: measured, `props.props.status='dead'` under a
+        # `Lie("subject")` returned ZERO violations while the writer folded two
+        # levels and stored the value — the same half-commit, one key deeper.
+        deep = {"points": [{"content": "must-not-commit"}],
+                "entities": [{"type": Lie("subject"), "name": "DeepLie",
+                              "subjectKind": "organization",
+                              "props": {"props": {"status": "dead"}}}]}
+        assert sdk._validate_bundle(deep), (
+            "a nested `props.props.status` was read at the wrong DEPTH — "
+            "Phase 1 passed and step 3 would raise with the point committed")
+
         for item, why in cases:
             bundle = {"points": [{"content": "must-not-commit"}],
                       "entities": [item]}
