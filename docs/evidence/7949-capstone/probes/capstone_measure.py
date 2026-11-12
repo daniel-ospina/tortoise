@@ -3329,37 +3329,7 @@ def _a4_pointkind(projection) -> dict:
     this function is the compatibility door the existing pins read. Sharing them is deliberate —
     a second copy of the exclusion predicate is how a rewrite re-opens the fold (#10988).
     """
-    # ⛔ TRUTHINESS, not `IS NULL`: `create_point(is_episodic=False)` really writes the property
-    # (`projection/entities.py:3052`), so an explicit `false` is a CLAIM — `IS NULL` dropped it
-    # from the denominator while the capture count reported it as a turn row it is not. The same
-    # predicate the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1133`,
-    # which tests `is_episodic` ALONE and would count an operator Point as a claim (#10982 review
-    # round 2).
-    capture = projection.g.query(
-        "MATCH (n:Point) WHERE coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false) "
-        "RETURN count(n)").result_set
-    capture = int(capture[0][0] or 0) if capture else 0
-    rows = projection.g.query(
-        "MATCH (n:Point) WHERE NOT coalesce(n.is_episodic, false) "
-        "AND NOT coalesce(n.is_operator, false) "
-        "RETURN coalesce(n.pointKind, 'NULL') AS k, count(*) AS n "
-        "ORDER BY n DESC").result_set
-    by_kind: dict[str, int] = {}
-    for row in rows:
-        key = str(row[0])
-        # a blank kind is the ABSENT state, not a typed one — ACCUMULATED into the NULL bucket,
-        # because assigning would overwrite the real NULL row's count instead of adding to it.
-        key = "NULL" if key in ("NULL", "") else key
-        by_kind[key] = by_kind.get(key, 0) + int(row[1] or 0)
-    total = sum(by_kind.values())
-    null_count = by_kind.pop("NULL", 0)
-    statement = by_kind.pop("statement", 0)
-    typed = sum(by_kind.values())
-    return {"claim_points": total, "excluded_capture_rows": capture,
-            "statement": statement, "null": null_count,
-            "typed": typed, "typed_by_kind": dict(sorted(by_kind.items())),
-            "typed_share": (typed / total) if total else unmeasured(
-                "a claim-point population (is_episodic and is_operator both absent)")}
+    return _a4_claim_diagnostics(projection)
 
 
 def _a5_subjects(projection) -> dict:
