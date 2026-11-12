@@ -2247,12 +2247,14 @@ surfaces:
   # `manifest drift: ['test_pricing_storage_dimensions.py']`, and the REQUIRED
   # `manifest-integrity` leg (a `python-ci-gate.needs` entry) red on
   # `refs/pull/N/merge` — measured on #12002, `COMPLETED FAILURE` with the merge
-  # blocked. ⚠️ That is HISTORY, not the current tree: #11837 (`3557a476e1`)
-  # registered the file on `main` first, in the `api` block, and `--integrity`
-  # on `main` is green. So this row is not a main-red repair any more — it is the
-  # `core` arm main still does not carry, and the `api` block's row (not a second
-  # one here) is what covers `metering.py`. Two rows, one per surface: a second
-  # `api` row is a `duplicate entry` and reds the gate it was added to green.
+  # blocked. ⚠️ #12003 re-measured this on `origin/main @ 7f7ac34a`: the `api` row
+  # IS `#11837`'s (`3557a476e1`) and main carried it, but `--integrity` on `main`
+  # was NOT green — `main` had accumulated THREE `core` rows and TWO `durations:`
+  # keys for this one file, and those duplicates are what reddened the gate. They
+  # are deleted; what remains is one row per surface. The `api` block's row (not a
+  # second one here) is what covers `metering.py` on an exact-`api` diff, and this
+  # `core` row is what covers the three subjects that fall through. Two rows, one
+  # per surface: a second `api` row is a `duplicate entry` and reds the gate.
   # Same class as the `test_percent_value_11915.py` row directly above — which is
   # what #11978 was filed for 42 minutes before this drift landed (issue
   # 2026-11-12T00:47:22Z, `a3d20763ab` 01:29:58Z), not hours.
