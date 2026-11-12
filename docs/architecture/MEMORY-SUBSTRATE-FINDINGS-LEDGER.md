@@ -383,29 +383,30 @@ siblings, and pinned by `tests/test_findings_ledger_2852.py`):
   **complement** list ("still read as written"), which was joined across sentences and compared as a
   set-union: a second complement sentence could assert a STILL-TRUE letter the real sentence does not,
   so the page could say *seven of the twelve no longer read as written* beside *only `**(a)**` still
-  read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). ⛔ **THE SENTENCE IS
-  SPLIT ON ITS OWN PHRASE, AND COMPARED BY LIST MEMBERSHIP.** The page's shape is `<still list>`,
-  the phrase, then the complement its negation governs, so the PHRASE is the boundary. Reading
-  membership from text adjacent to either end of that split was wrong in both directions, and each
-  was measured: a marked letter in prose — this page writes `(i)` as a roman-numeral enumerator and
-  `(a)`/`(c)`/`**(e)**`/`**(i)**` as cross-references — certified a member the list omits (fail-open)
-  and reded a correct page that refers to a non-still row (false accusation); and peeling the
-  governed group off the clause END stopped at the first word between the group and its verb (any
-  adverb) while refusing a correct complement joined by `&`, `or`, `also`, `plus`, `as well as`,
-  `followed by` or `namely`, all of which this section lists as separators. Membership is now the RUN
-  the page wrote, on each side of the phrase, so no separator set and no prose can change it. ⚠️ The
-  one-member case is the DECLARED OVER-REFUSAL that buys it: a lone PARENTHESISED letter is prose (the
-  same rule that keeps a stray `(c)` out of candidacy), so a complement naming a single row must write
-  it marked — `a` in code, bold or italic — rather than as a bare parenthetical. ⛔ **AND THE CLAUSE THE
-  NEGATION GOVERNS IS VALIDATED, NOT DISCARDED.** It used to be sliced off unread, so the group could
-  name any rows at all — including the STILL-TRUE ones, i.e. the sentence could contradict the table
-  and itself at rc 0 (measured, fixed, pinned). It is the complement, so every letter in its run must
-  be a row the table does NOT call STILL-TRUE; a lone MARKED letter there is only read when the span
-  IS that item, because otherwise it is a cross-reference and reading it accuses a correct page
-  (measured both ways). ⛔ **THE PHRASE — NOT THE WORD `no longer` — DECIDES WHICH GROUP A SENTENCE IS.**
-  Excluding every sentence containing `no longer` made that governor unreachable, so the natural
-  spelling of a STALE second sentence (`…, while the rest no longer do.`) rode out of the "exactly
-  one" rule while the CORRECT complement written the same way red (both measured, both fixed).
+  read as written* — 7 + 1 against a table of twelve — at rc 0 (measured). ⛔ **EACH GROUP MUST BE A
+  BARE LIST, and that is the whole rule.** The sentence's shape is `<list> still read as written
+  [— <list> do not]`, so the phrase is the boundary, and the text on each side of it must be
+  separators, row letters and whitespace — nothing else. Anything else is REFUSED with a message
+  naming the shape. Reading a span generously instead was measured wrong in nine review rounds, and
+  every round's fix left the next shape open: a marked cross-reference after the phrase certified a
+  member the list omits (`(see correction **(i)**)`) while accusing a correct page that refers to a
+  non-still row; prose BEFORE the list did the same (Per `**(i)**`, only ...); an adverb between the
+  governed group and its verb skipped its validation; `don't` and `are not` matched no negation at
+  all; a group on the far side of the verb was skipped; a list written after the phrase was
+  invisible; and a quoted phrase earlier in the sentence truncated the clause the arm read. All
+  measured. ⚠️ THE COST IS STATED, NOT HIDDEN: a reworded tally REDS instead of being read, which is
+  the over-block side of the A/B trade (fail-open is A, over-block is B), and it is the only rule
+  under which "the guard and a reader agree on which letters are asserted" is remotely true. The
+  one-member case is the SAME trade one level down: a lone PARENTHESISED letter is prose (the rule
+  that also keeps a stray `(c)` out of candidacy), so a one-row list must be written marked — `a` in
+  code, bold or italic. ⛔ **AND THE CLAUSE THE NEGATION GOVERNS IS VALIDATED, NOT DISCARDED.** It
+  used to be sliced off unread, so the group could name any rows at all — including the STILL-TRUE
+  ones, i.e. the sentence could contradict the table and itself at rc 0 (measured, fixed, pinned).
+  It is the complement, so every letter in its list must be a row the table does NOT call STILL-TRUE.
+  ⛔ **THE PHRASE — NOT THE WORD `no longer` — DECIDES WHICH GROUP A SENTENCE IS.** Excluding every
+  sentence containing `no longer` made that governor unreachable, so the natural spelling of a STALE
+  second sentence (`…, while the rest no longer do.`) rode out of the "exactly one" rule while the
+  CORRECT complement written the same way red (both measured, both fixed).
   ⚠️ **Residual, stated:** the
   "exactly one" rule is scoped to the tally's own paragraph, so a second complementary or "no longer"
   sentence **two newlines below** it is not counted. Widening it to the whole page is not available

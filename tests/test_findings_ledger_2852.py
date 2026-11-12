@@ -246,7 +246,7 @@ def test_mutation_population_is_pinned():
     complement naming a STILL-TRUE row behind an adverb; a marked cross-reference
     certifying a missing complement member), because the arms that review changed had no
     killing mutant and `--self-test` stayed green over both fail-opens.
-    49 is the population at this head.
+    51 is the population at this head.
     """
     # ⛔ EQUALITY, not `>=` (#11902 review P2). A floor cannot see a one-arm shrink:
     # at this head two merges of two 25-arm populations produced 26 arms while the
@@ -257,8 +257,8 @@ def test_mutation_population_is_pinned():
         "the registered population must EQUAL the floor it declares — a `>=` floor "
         "cannot see a one-arm shrink"
     )
-    assert flc.MIN_SELF_TEST_MUTATIONS == 49, (
-        "this line RECORDS the population (49 arms); removing one means editing the "
+    assert flc.MIN_SELF_TEST_MUTATIONS == 51, (
+        "this line RECORDS the population (51 arms); removing one means editing the "
         "floor here too, which is the second place a shrink has to touch"
     )
 
@@ -1511,7 +1511,11 @@ def _tally_problems() -> list[str]:
     return [
         p
         for p in _doc_problems()
-        if "STILL-TRUE list names" in p or "negated complement" in p
+        if "STILL-TRUE list names" in p
+        or "negated complement" in p
+        or "must be a BARE list" in p
+        or "carries letters AFTER" in p
+        or "sentences saying 'still read as written'" in p
     ]
 
 
@@ -1543,15 +1547,20 @@ def test_a_marked_cross_reference_is_not_a_complement_member(tmp_path, monkeypat
             assert any("STILL-TRUE list names" in p for p in problems), (
                 f"a marked cross-reference {tail!r} must not certify the list: {problems}"
             )
-    # …and the mirror: a CORRECT list followed by a marked reference to a non-still row must
-    # not be accused of naming it.
+    # …and the mirror: a CORRECT list followed by a marked reference to a non-still row is no
+    # longer ACCUSED of naming it. It is REFUSED, because prose after the phrase is not a
+    # bare list — the accepted over-block side that round 9 made explicit. What must never
+    # come back is reading that reference as a member.
     with monkeypatch.context() as patch:
         _mutated(
             tmp_path,
             patch,
             lambda t: t.replace(anchor, anchor[:-1] + ", unlike **(b)**.", 1),
         )
-        assert not _tally_problems()
+        problems = _tally_problems()
+        assert not any("STILL-TRUE list names" in p for p in problems), (
+            f"a marked reference must never be read as a still member: {problems}"
+        )
 
 
 def test_the_governed_complement_is_read_by_its_run_not_by_its_tail(tmp_path, monkeypatch):
@@ -1628,6 +1637,75 @@ def test_no_longer_governs_a_complement_and_does_not_hide_a_second_tally(tmp_pat
         assert any("2 sentences saying 'still read as written'" in p for p in problems), (
             f"a stale second still-sentence spelled with `no longer do` must be counted: {problems}"
         )
+
+
+def test_the_tally_s_groups_must_be_bare_lists(tmp_path, monkeypatch):
+    """FAILS open, in six shapes at once, if prose can sit inside a group the arm reads.
+
+    Rounds 7 and 8 each closed ONE shape of the same class — a span read as a list that the
+    page had written as prose — and round 9 found six more, each measured against the
+    shipped sentence at the head before this rule:
+
+        Per **(i)**, only **(a)**, **(f)**, **(h)** and **(j)** still read as written.
+                             -> CLEAN over a list that omits STILL-TRUE `i`   (fail-open)
+        Per **(e)**, only <full correct list> …   -> RED                (false accusation)
+        … — <all five STILL-TRUE rows> don't.     -> CLEAN   (`don't` matched no negation)
+        … — … are not.                            -> CLEAN
+        … — do not: **(a)** and **(f)**.          -> CLEAN   (group on the far side of the verb)
+        The rows that still read as written are …  -> RED     (list after the phrase: invisible)
+        The phrase "still read as written" aside, … -> RED    (the locator landed in the quote)
+
+    WHY IT IS REACHABLE: every one is ordinary English around a correct list. The cure is not
+    another reading rule — nine rounds proved each new rule leaves the next shape — but to
+    require each group to BE a list: separators, items, whitespace and nothing else. A
+    reworded tally then reds with a message naming the shape, which is the accepted
+    over-block side of the A/B trade (fail-open is A).
+
+    ⚠️ OVER-BLOCK IS PINNED HERE TOO, so a future widening has to move it deliberately: the
+    documented spellings (bare, bold, code, italic, Oxford comma, `&`/`or`/`;`, and the
+    `while … no longer do` complement) must stay CLEAN.
+    """
+    anchor = "Only **(a)**, **(f)**,\n**(h)**, **(i)** and **(j)** still read as written."
+    correct = "Only **(a)**, **(f)**, **(h)**, **(i)** and **(j)** still read as written."
+    stale = "Only **(a)**, **(f)**, **(h)** and **(j)** still read as written."
+    # Prose on either side of a group is refused — and the MISSING member is then reported.
+    for mutation in (
+        "Per **(i)**, " + stale,
+        'The phrase "still read as written" aside, ' + stale + ".",
+        stale[:-1] + " (see correction **(i)**).",
+        "The rows that still read as written are **(a)**, **(f)**, **(h)** and **(j)**.",
+        correct + " And " + correct[5:],
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(tmp_path, patch, lambda t, m=mutation: t.replace(anchor, m, 1))
+            problems = _tally_problems()
+            assert problems, f"a prose-embedded group must be refused, not read: {mutation!r}"
+    # The governed half: an unreadable negation, or the group after the verb, is refused
+    # rather than skipped (the fail-open round 9 measured three ways).
+    for governed in (
+        " — **(a)**, **(f)**, **(h)**, **(i)** and **(j)** don't.",
+        " — **(a)**, **(f)**, **(h)**, **(i)** and **(j)** are not.",
+        " — do not: **(a)** and **(f)**.",
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(tmp_path, patch, lambda t, g=governed: t.replace(anchor, anchor[:-1] + g, 1))
+            problems = _tally_problems()
+            assert problems, f"a governed group spelled {governed!r} must be refused: {problems}"
+    # …and every documented spelling stays CLEAN (the over-block is bounded to prose).
+    for spelling in (
+        correct,
+        "Only a, f, h, i, j still read as written.",
+        "Only a, f, h, i, and j still read as written.",
+        "Only `a`, `f`, `h`, `i` and `j` still read as written.",
+        "Only *(a)*, *(f)*, *(h)*, *(i)* and *(j)* still read as written.",
+        correct[:-1] + " — **(b)**, **(k)** and **(l)** do not.",
+        correct[:-1] + " — **(b)** & **(k)** & **(l)** do not.",
+        correct[:-1] + " — **(b)** or **(k)** or **(l)** do not.",
+        correct[:-1] + ", while **(b)**, **(k)** and **(l)** no longer do.",
+    ):
+        with monkeypatch.context() as patch:
+            _mutated(tmp_path, patch, lambda t, sp=spelling: t.replace(anchor, sp, 1))
+            assert not _tally_problems(), f"a documented spelling must stay CLEAN: {spelling!r}"
 
 
 def test_a_still_list_may_spell_its_own_complement(tmp_path, monkeypatch):

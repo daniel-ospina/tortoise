@@ -399,9 +399,10 @@ VOCAB_HEADER_RE = re.compile(r"^\|\s*Verdict\s*\|", re.IGNORECASE)
 #: round's re-listing across rows and leading-zero re-spelling, then round 3's
 #: replacement by a number the index never carried, then round 8's two group-orientation
 #: mutants (a governed complement behind an adverb, a marked cross-reference certifying a
-#: member). Bump it with any arm added or
+#: member), then round 9's two class-cure mutants (prose before the list; an unread negation).
+#: Bump it with any arm added or
 #: removed — the population is what the pin compares.
-MIN_SELF_TEST_MUTATIONS = 49
+MIN_SELF_TEST_MUTATIONS = 51
 # A verdict cell may be `**DRIFTED**`, `**DRIFTED, and much further**`, or
 # `**STILL-TRUE as a rule; MOOT-BY-LOSS as an object**` — so the rule is that the
 # cell must BEGIN with a verdict token, not that the whole bold span is one.
@@ -789,18 +790,6 @@ _NAMED_LETTER_RE = re.compile(_LETTER_ALT_MARKED, re.IGNORECASE)
 #: the clause end (the negated complement), which is why attribution does not use this:
 #: there, a bare letter is prose, and `a`/`i` are English words (#12028's own finding).
 _LETTER_ITEM_ANY = "(?:" + _LETTER_ALT_MARKED + r"|\b[a-l]\b)"
-#: A span that is NOTHING BUT one list item, separators and whitespace aside. Used by the
-#: governed-complement arm: a lone MARKED letter inside a span that carries other words is
-#: this page's cross-reference idiom (`(see correction **(i)**)`), while a span that IS the
-#: item is a one-member list. The distinction is the difference between a fail-open and a
-#: false accusation — both were measured (#11902 review round 8).
-_LIST_SEPARATOR_ALT = r"(?:,|;|&|—|–|-|\band\b|\bor\b|\balso\b|\bplus\b|\bas\s+well\s+as\b|\bfollowed\s+by\b|\bnamely\b)"
-_SOLE_ITEM_RE = re.compile(
-    rf"\s*(?:{_LIST_SEPARATOR_ALT}\s*)*"
-    rf"(?:{_LETTER_ITEM_ANY})"
-    rf"(?:\s*{_LIST_SEPARATOR_ALT})*\s*",
-    re.IGNORECASE,
-)
 
 
 def _letters_in_span(span: str) -> list[str]:
@@ -841,6 +830,24 @@ _RUN_ITEM_RE = re.compile(r"\u0000|(?<![\w*`])([a-l])(?![\w*`])", re.IGNORECASE)
 _LIST_SEP_RE = re.compile(
     r"\s*(?:(?:,|;|&)\s*"
     r"|\b(?:and|or|also|plus|as\s+well\s+as|followed\s+by|namely)\b\s*)+",
+    re.IGNORECASE,
+)
+
+#: ⛔ A BARE LIST — separators, items and whitespace, and NOTHING ELSE. This is the shape
+#: the tally sentence's two groups must have, and requiring it is what ends the class
+#: #11902's reviews kept finding one instance of (rounds 7, 8 and 9: a marked
+#: cross-reference, an adverb, a `don't`, a group after the verb, a list after the phrase, a
+#: quoted phrase earlier in the sentence, a dash join). Every one of those was a way for
+#: PROSE to sit inside a span the arm read as a list, and each fix closed one shape while
+#: the next round found the next — nine rounds, one class. A span that must BE the list
+#: cannot smuggle prose into it: anything else is refused, out loud, naming the shape.
+#: ⚠️ OVER-BLOCK IS THE ACCEPTED SIDE (fail-open is A, over-block is B): a reworded tally
+#: reds instead of being read generously, and the message says how to spell it.
+_BARE_LIST_RE = re.compile(
+    rf"(?:{_LIST_SEP_RE.pattern}\s*)?"
+    rf"(?:{_LETTER_ITEM_ANY})"
+    rf"(?:(?:\s*{_LIST_SEP_RE.pattern}\s*)(?:{_LETTER_ITEM_ANY}))*"
+    rf"(?:\s*{_LIST_SEP_RE.pattern})?",
     re.IGNORECASE,
 )
 
@@ -1569,16 +1576,27 @@ def check_verdict_tally(text: str) -> list[str]:
     # Everything after the phrase is the page's SECOND group — its complement — and it is
     # only a governed group when a negation governs it.
     after_phrase = still_sentence[phrase.end() :] if phrase else ""
-    negation = re.search(r"\b(?:do|does|did) not\b|\bno longer\b", after_phrase)
-    # ⛔ THE PHRASE, NOT THE WORD `no longer`, DECIDES WHICH GROUP A SENTENCE IS — see the
-    # candidacy filter in `check_verdict_tally`'s still-sentence list. Reading the governed
-    # group out of `still_clause` (the pre-phrase half) is what makes the split sound.
-    # The still-list is the RUN the page wrote, read by LIST membership — never every marked
-    # letter in the clause. A marked letter in prose (`(see correction **(i)**)`, `(see `i`)`)
-    # is a CROSS-REFERENCE, and reading it unconditionally let a stale list that omits `i`
-    # read CLEAN while a correct page that says `unlike **(b)**` reded (both measured, round
-    # 8) — the same fail-open and the same false accusation in two spellings.
-    named_still = _listed_letters(still_clause)
+    # ⛔ BOTH GROUPS MUST BE BARE LISTS (#11902 review round 9, the class-cure). Reading
+    # "the run the page wrote" still left the RUN's neighbours open: prose BEFORE the list
+    # (`Per **(i)**, only **(a)**, …`) certified a member and accused a correct page; a list
+    # AFTER the phrase (`The rows that still read as written are …`) was invisible; a quoted
+    # phrase earlier in the sentence truncated the clause; `don't` / `are not` matched no
+    # negation, so the governed group went unvalidated; `— do not: **(a)**` put the group on
+    # the far side of the verb. Each was measured at the head before this block. The cure is
+    # not another reading rule — it is to refuse a span that is not a list, so no prose can
+    # ever be inside one.
+    still_span = still_clause.strip()
+    # `Only` is part of the documented sentence, not part of the list.
+    still_span = re.sub(r"^only\b[\s,:-]*", "", still_span, flags=re.IGNORECASE).strip()
+    if not _BARE_LIST_RE.fullmatch(still_span):
+        problems.append(
+            "§3 tally: the text before 'still read as written' must be a BARE list "
+            f"of row letters (optionally preceded by `Only`), but it carries other text: "
+            f"{still_span[:120]!r}. Write the tally as `<letters> still read as written` — "
+            "prose around the list is refused rather than read, because the guard and a "
+            "reader must agree on which letters are asserted"
+        )
+    named_still = _listed_letters(still_span)
     if named_still != set(still_true):
         problems.append(
             f"§3 tally: the paragraph's STILL-TRUE list names "
@@ -1596,16 +1614,35 @@ def check_verdict_tally(text: str) -> list[str]:
     #   `… **(a)**… **(j)** still read as written — **(a)**, **(f)**, **(h)**, **(i)** and
     #   **(j)** do not.`                                -> CLEAN (contradicts itself, twice)
     #
-    # ⚠️ A LONE MARKED ITEM IS READ HERE ONLY WHEN THE SPAN *IS* THAT ITEM. In the governed
-    # half a marked letter is also how this page cross-references a row, so reading a lone
-    # marked item inside a span that carries other words would accuse a CORRECT page of
-    # naming a still-true row as overtaken (the mirror of the fail-open, measured round 8).
-    # A multi-item run is a list claim wherever it sits and is always read.
+    # The same bare-list rule applies to this side, which is what makes the negation
+    # VOCABULARY irrelevant: whatever the sentence says after the group (`do not`, `don't`,
+    # `are not`) is not read as a list, and a group on the far side of the verb is refused
+    # rather than silently skipped.
     governed_letters: set[str] = set()
+    tail = after_phrase
+    negation = re.search(r"\b(?:do|does|did) not\b|\bno longer\b", after_phrase)
     if negation:
-        governed_span = after_phrase[: negation.start()]
-        sole_item = bool(_SOLE_ITEM_RE.fullmatch(governed_span.strip()))
-        governed_letters = _listed_letters(governed_span, lone_marked=sole_item)
+        governed_span = after_phrase[: negation.start()].strip()
+        # The documented spellings put the group straight after a dash or a comma, or
+        # introduce it with `while` (`…, while **(b)**, **(k)** and **(l)** no longer do.`).
+        # Those are the SENTENCE's words, not letters, so they are trimmed here; anything
+        # else is refused by the bare-list test below rather than read past.
+        governed_span = re.sub(r"^[,;:—–-]+\s*", "", governed_span).strip()
+        governed_span = re.sub(r"^(?:while|whereas)\b[\s,:;-]*", "", governed_span, flags=re.IGNORECASE).strip()
+        tail = after_phrase[negation.end() :]
+        if governed_span and not _BARE_LIST_RE.fullmatch(governed_span):
+            problems.append(
+                f"§3 tally: the group the negation governs must be a BARE list of row "
+                f"letters, but it carries other text: {governed_span[:120]!r}. Write it as "
+                "`<letters> do not` — a reworded complement is refused rather than read"
+            )
+        governed_letters = _listed_letters(governed_span)
+    if _NAMED_LETTER_RE.search(tail) or re.search(r"\b[a-l]\b", tail):
+        problems.append(
+            "§3 tally: the tally sentence carries letters AFTER its last group "
+            f"({tail.strip()[:120]!r}) — the guard cannot tell which group they belong to, "
+            "so name rows only inside the two lists"
+        )
     wrong_governed = sorted(governed_letters & set(still_true))
     if wrong_governed:
         problems.append(
@@ -3060,6 +3097,23 @@ MUTATIONS: tuple[tuple[str, Callable[[str], str], str], ...] = (
             1,
         ),
         "STILL-TRUE list names",
+    ),
+    # Round 9: the class-cure's own killer — a prose-embedded group is REFUSED, not read.
+    (
+        "prose before the STILL-TRUE list",
+        lambda t: t.replace(
+            "Only **(a)**,", "Per **(i)**, only **(a)**,", 1
+        ),
+        "must be a BARE list",
+    ),
+    (
+        "a governed group spelled with an unread negation",
+        lambda t: t.replace(
+            "still read as written.",
+            "still read as written — **(a)** and **(f)** don't.",
+            1,
+        ),
+        "carries letters AFTER",
     ),
 )
 
