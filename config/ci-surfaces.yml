@@ -7415,12 +7415,29 @@ surfaces:
   # `_update_entity`, `create_entity(type='event')` / `create_event`,
   # `EventAPI.add_event`, and `EventAPI.emit_belief("EventRecorded", …)` — while a
   # NON-terminal `status` still lands (the #2788 prop lane `_promote_incident_operators`
-  # gates on, #7853/#10828). The composition lives in ONE place,
-  # `tortoise/live.py::is_terminal_status`, which is the same predicate `ep.py`
-  # applies and which `live.py`-only diffs resolve to through the `tortoise/`
-  # fallback — so `core` is the RIGHT home and the only one that helps (`select()`
-  # REPLACES the `core` fallback on a named-surface match, so registering it under
-  # `sdk`/`api` would run it on none of the diffs that can break it). It landed with
+  # gates on, #7853/#10828). The VOCABULARY lives in ONE place —
+  # `tortoise/live.py::TERMINAL_EXCLUDED_STATUSES`, imported by both `live.py` and
+  # `ep.py`. The COMPOSITION is still spelled in THREE places, and this row's pins
+  # cover only the first: `live.py::is_terminal_status` (the write-door guard it
+  # registers), `live.py::_terminal_excluded`'s Cypher string, and `ep.py:2128`
+  # inline (`status in TERMINAL_EXCLUDED_STATUSES or bool(outdated)`).
+  # ⛔ `ep.py` does NOT call `is_terminal_status` — only the set is shared, so an
+  # ARM added to `is_terminal_status` (as opposed to a new vocabulary member) would
+  # not reach EP's factor selection, which is the half-believed state #11825 was
+  # filed for. Equivalent today, and recorded on #11824 as a residual rather than
+  # fixed by widening this PR onto EP's factor-selection surface.
+  # `core` is the right home: `live.py` matches no `SOURCE_PATTERNS` row, so a
+  # `live.py`-only diff resolves to `core` through the `tortoise/` fallback. `core`
+  # is ALSO selected beside `api` (`api.py` is a `CORE_ALSO` entry) and is
+  # superseded by the full matrix on any `sdk.py` diff (`SHARED_MODULES`), so this
+  # single row already covers every diff that can break the guard — a second
+  # `api`/`sdk` row would add nothing. Measured per file that can break it:
+  # `ep.py` -> full matrix, `sdk.py` -> full matrix, `api.py` -> ['api','core'],
+  # `live.py` -> ['core'] — this file is selected in all four. (The `#11822` note
+  # above says api/sdk
+  # registration is worthless; that is true for `goal_judgement.py`, which matches
+  # no row and is not `CORE_ALSO` — do NOT generalise it to a guard whose call
+  # sites live in `api.py`.) It landed with
   # NO row here, so `tools/ci_selection.py --integrity` redded (`manifest drift:
   # ['test_11825_event_terminal_status_refused.py']`) and `manifest-integrity` —
   # which IS in `python-ci-gate.needs` — held the merge red while the pins ran in NO
@@ -7429,10 +7446,13 @@ surfaces:
   # #11825 defect: each refusal test is RED at the parent head if the guard is
   # removed (measured, table in PR #12108's evidence comment), and
   # `TestTheGuardDoesNotOverBlock` is the other half — a Point, a Subject and a
-  # non-terminal Event status must still be written. Hermetic in the sense that
-  # matters here (the shared URI-aware `sdk_factory` fixture, so it runs on the
-  # docker lane AND under `TORTOISE_TEST_CARVE_OUT=1`), so it needs no `carve_out:`
-  # row and no `TEST_NO_REDIRECT_STEMS` entry.
+  # non-terminal Event status must still be written. It needs no `carve_out:` row and
+  # no `TEST_NO_REDIRECT_STEMS` entry: it defines its OWN `sdk` fixture
+  # (`tempfile.mkdtemp()` + `TortoiseSDK(db, event_log_path=log)`), carries no
+  # `embedded_only` marker and does not use `fresh_embedded_proj` — unlike the
+  # `sdk_factory` fixture the `#11822` note above relies on, so do not cite that as
+  # the reason. Measured green on the docker lane (64 tests collected; 436 passed in
+  # the ci-selection + this file + lifecycle-guards suite).
   - test_11825_event_terminal_status_refused.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
