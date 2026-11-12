@@ -412,6 +412,36 @@ RUNTIME_FILES = (
     "website/apps/blog-admin/src/pages/PostsList.tsx",
 )
 
+#: The members the guard opens and expects to find ZERO occurrences of the retired
+#: origin in — and therefore the population a tidy-up is most tempted to DELETE,
+#: because a zero looks like a leftover. Two reasons sit in this one group; the
+#: difference matters when editing it:
+#:
+#:   * `website/functions/blog/_lib.ts`, `invite-accept.html`, `welcome.html`,
+#:     `wizardPrompts.js` — each CARRIED a retired-origin literal, was re-aimed to 0
+#:     (#12058, #11764), and had its allowlist row deleted. The file STAYS in the
+#:     surface so a literal coming back REDS the count check instead of leaving the
+#:     surface silently.
+#:   * `tortoise/email_notify.py`, `tortoise/abuse.py`, the two onboarding
+#:     `SKILL.md` copies and `.env.example` — in the surface for a different pin
+#:     (`test_documents_humans_copy_do_not_name_the_retired_host`), so their measured
+#:     count is 0 by construction rather than by a re-aim.
+#:
+#: ⛔ COUNT THE TREE, NOT THIS COMMENT — the four/five split above is the reason each
+#: member is here, and the group as a whole is the set that measures 0 today
+#: (measured 2026-11-12 on `4b1d6cd0`).
+EXPECTED_ZERO_COUNT_FILES = frozenset({
+    "tortoise/email_notify.py",
+    "tortoise/abuse.py",
+    "tortoise/onboarding/SKILL.md",
+    "website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md",
+    ".env.example",
+    "website/apps/dashboard/public/invite-accept.html",
+    "website/apps/dashboard/public/welcome.html",
+    "website/apps/dashboard/src/wizardPrompts.js",
+    "website/functions/blog/_lib.ts",
+})
+
 
 def test_retired_origin_literals_match_the_recorded_allowlist():
     offenders = {}
@@ -488,6 +518,49 @@ def test_every_allowlisted_occurrence_has_a_reason():
         "these files carry an allowlist entry but are NOT in RUNTIME_FILES, so no "
         f"test counts them: {orphans} — add the path to RUNTIME_FILES or drop the "
         "entry; an allowlist row for a file the guard never opens is invisible")
+
+
+def test_the_runtime_surface_is_the_whole_population_it_claims():
+    """#12144 — the SET is pinned, not only the direction of one relation.
+
+    `RUNTIME_FILES` is this guard's entire surface: `test_retired_origin_literals
+    _match_the_recorded_allowlist` walks it, and every other check here is about a
+    member of it. Nothing pinned the set itself. The one set relation above is
+    one-directional, so it reds when an allowlist row names a file the guard never
+    opens and stays GREEN when a file the guard used to open LEAVES. A member at 0
+    occurrences carries no row, so it sits in neither side of that relation — and
+    deleting its line was a one-line diff that left all 16 tests GREEN over a file
+    the guard had stopped opening: the exact false PASS the module docstring twice
+    promises cannot happen ("this guard cannot report GREEN over a file it never
+    opened"), on the very file whose docstring argues the point.
+
+    Both directions now red: an unexpected member moves the count, and a deleted
+    zero-count member drops out of `EXPECTED_ZERO_COUNT_FILES` and is NAMED. The
+    count alone would not name it, which is why the group assertion is separate.
+    """
+    duplicates = sorted({rel for rel in RUNTIME_FILES if RUNTIME_FILES.count(rel) > 1})
+    assert not duplicates, (
+        "a duplicated entry inflates the population count, so a DELETED member "
+        f"could hide behind it: {duplicates}")
+    # ⛔ THE GROUP ASSERTION RUNS BEFORE THE COUNT ON PURPOSE. Every member is either
+    # allowlisted (14 — a deletion from the tuple reds `test_every_allowlisted
+    # _occurrence_has_a_reason`'s `orphans` check, which NAMES it) or zero-count (9 —
+    # a deletion is invisible to `orphans` and to every count check, so this is its
+    # only detector). Asserting the count FIRST would mask this: the count moves for
+    # both classes, so it would fire first and never name the zero-count member.
+    missing = sorted(EXPECTED_ZERO_COUNT_FILES - set(RUNTIME_FILES))
+    assert not missing, (
+        "these files sit at ZERO retired-origin occurrences and carry no allowlist "
+        "row, so no count check can see them leave the surface — but they must stay "
+        f"IN it: {missing}. Deleting the line stops the guard OPENING the file, so "
+        "a literal coming back would no longer RED: that is #12144's false PASS."
+    )
+    assert len(RUNTIME_FILES) == 23, (
+        f"the runtime surface has {len(RUNTIME_FILES)} members, not 23 — a member "
+        "was added or removed. Adding one is a deliberate act (record why); "
+        "removing one takes the guard off a file it used to open. Update this pin "
+        "in the same commit, and say which member moved and why."
+    )
 
 
 def test_canonical_origin_set_is_what_the_runtime_may_emit():
