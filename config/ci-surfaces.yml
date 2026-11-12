@@ -2219,6 +2219,13 @@ surfaces:
   # `test_9664_premise_census.py` precedent). ⛔ NOT in `battery`: a docs census
   # has no business running on a battery-only diff.
   - test_11739_quote_population_probe.py
+  # #12051: the record drill's PostgreSQL CLIENT major must equal the servers'
+  # major. A newer client writes a preamble the RESTORE target cannot execute
+  # (`SET transaction_timeout`, PG17 client into the pg16 scratch server), and
+  # the job reds with "the artifact did NOT restore" — a message that blames the
+  # record path for a runner-image property. Hermetic: reads
+  # `.github/workflows/python-ci.yml` only — no DB, no client binary, no network.
+  - test_12051_ci_pg_client_matches_server.py
 
   # #11855: pins the BLAST RADIUS of an unreadable belief operand — a batch
   # containing a legacy `List`-valued α still returns every requested row, and
