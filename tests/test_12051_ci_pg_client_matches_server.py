@@ -1323,9 +1323,10 @@ def _with_aliases_each(body: list[str], var: str) -> list[str]:
 #: instead of a bracket-matching special case for each.
 #: ⛔ A BRACE INSIDE A PARAMETER EXPANSION IS NOT A SEPARATOR (#12069 review 6).
 #: Splitting on every `{` cut `${tool}` into `$` + `tool}`, so
-#: `if [ "${tool}" = pg_dump ]` yielded one clause holding `= pg_dump ]` and another
-#: holding `tool}` — neither held both, `pg_restore` was never checked and the row went
-#: GREEN (measured; the parent head refused it). `(?<!\$)…` is the whole fix.
+#: `if [ "${tool}" = pg_dump ]` yielded the fragments `if [ "$` and `tool}" = pg_dump ]`
+#: — the second holds the operator and `tool}` but no `$`, so `ref` could not match it,
+#: `pg_restore` was never checked and the row went GREEN (measured; `5de9f4b5d7`, the head
+#: before the clause rule, refused it). `(?<!\$)…` is the whole fix.
 CLAUSE_SPLIT_RE = re.compile(
     r"&&|\|\||;|\b(?:then|else|elif|do|done|fi)\b|(?<!\$)\{|(?<!\$)\("
 )
@@ -1345,13 +1346,38 @@ CONDITION_LEAD_RE = re.compile(
 )
 
 
-def _comparison_clauses(line: str) -> list[str]:
-    """The separator-delimited clauses of `line` that OPEN a comparison."""
+#: Does a condition OPENED on this line still run on the next one? A shell condition
+#: continues across a line break after `&&`, `||` or an unescaped `\`, and an
+#: unterminated `[[` does too.
+#: ⛔ A CONTINUED CONDITION FAILED OPEN (#12069 review 7). The lead requirement is
+#: evaluated per LINE, so a condition split over two lines dropped the one clause
+#: holding the operator and the variable:
+#:     if [[ -n "${ONLY:-}" &&
+#:           "$tool" == pg_dump ]]; then version="$("$tool" --version)"; fi
+#: — the second line does not OPEN a condition (its `[[` is on the previous one),
+#: so nothing graded it, both tools were credited and `pg_restore --version` was
+#: never reached (measured GREEN; the head before this requirement refused it).
+def _condition_continues(line: str) -> bool:
+    """Will this line's condition (if any) keep running on the NEXT line?"""
+
+    stripped = line.rstrip()
+    if stripped.endswith(("&&", "||", "\\")):
+        return True
+    return stripped.count("[[") > stripped.count("]]")
+
+
+def _comparison_clauses(line: str, *, continued: bool = False) -> list[str]:
+    """The separator-delimited clauses of `line` that OPEN a comparison.
+
+    `continued` grades the FIRST clause without requiring a lead, for a condition
+    that began on the previous line (see `_condition_continues`).
+    """
 
     return [
         clause
-        for clause in CLAUSE_SPLIT_RE.split(line)
-        if CONDITION_LEAD_RE.match(clause) and COMPARISON_RE.search(clause)
+        for index, clause in enumerate(CLAUSE_SPLIT_RE.split(line))
+        if CONDITION_LEAD_RE.match(clause) or (continued and index == 0)
+        if COMPARISON_RE.search(clause)
     ]
 
 
@@ -1432,19 +1458,20 @@ def _selects_on_var(body: list[str], var: str) -> bool:
         r"(?P<brace>\$\{" + re.escape(var) + r"(?![A-Za-z0-9_])[^}]*\})"
         r"|\$" + re.escape(var) + r"(?!\w)"
     )
+    continued = False
     for line in _with_aliases_each(body, var):
         match = ref.search(line)
-        if not match:
-            continue
-        brace = match.group("brace")
-        if brace is not None and brace != "${" + var + "}":
-            return True
-        matcher = PATTERN_MATCHER_RE.search(line)
-        if matcher and _matches_on(line, matcher, ref):
-            return True
-        for clause in _comparison_clauses(line):
+        if match:
+            brace = match.group("brace")
+            if brace is not None and brace != "${" + var + "}":
+                return True
+            matcher = PATTERN_MATCHER_RE.search(line)
+            if matcher and _matches_on(line, matcher, ref):
+                return True
+        for clause in _comparison_clauses(line, continued=continued):
             if ref.search(clause):
                 return True
+        continued = _condition_continues(line)
     return False
 
 
@@ -2669,6 +2696,14 @@ VERSION_CHECK_POLARITY = [
         'done',
         {"pg_dump", "pg_restore"},
         "#12069 round-6: an `=` PRINTED in a message opens no condition",
+    ),
+    (
+        'for tool in pg_dump pg_restore; do\n'
+        '  if [[ -n "${ONLY:-}" &&\n'
+        '        "$tool" == pg_dump ]]; then v="$("$tool" --version)"; fi\n'
+        'done',
+        set(),
+        "#12069 round-7: a condition CONTINUED over a line break is still a condition",
     ),
 ]
 
