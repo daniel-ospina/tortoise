@@ -235,7 +235,17 @@ def test_the_client_pin_fails_closed_on_a_mismatch(job: dict) -> None:
     # expansion is the SAME operand (this file's `_version_branch` accepts it).
     # Redundancy plus false-block surface is the worst of both.
     for tool in ("pg_dump", "pg_restore"):
-        assert tool in text, (
+        # CODE, not `text`: both names appear in this step's own prose comment, so a
+        # raw search stays green after the tool is dropped from the `for` loop —
+        # MEASURED (review of `7b02823f41`): `for tool in pg_restore; do` plus a
+        # comment naming `pg_dump` passed all six tests. STATED LIMIT:
+        # `_code_only` drops comment-ONLY lines, so a trailing `# …pg_dump…` on the
+        # loop's own line still satisfies this. Stripping inline comments needs
+        # shell-quote awareness (every `#` here would have to be classified), which
+        # is a new false-red surface on the assertions that share `_code_only`; the
+        # shape is a deliberate note, not a removal, so it is named rather than
+        # half-guarded.
+        assert tool in _code_only(text), (
             f"the pin must assert `{tool} --version`: the drill resolves BOTH "
             "from PATH, and pinning only one leaves the other on the image's "
             "client"
@@ -354,7 +364,14 @@ def _precondition(code: str) -> re.Match[str]:
 #: stayed green with `if [ "$major" != "16" ]; then :; fi`. FACTS only: the
 #: comparison is on `$major`, against a literal, inside `then … fi`.
 _VERSION_BRANCH_RE = re.compile(
-    r"^[ \t]*if\s+\[\s*\"?\$\{?major\}?\"?\s*!=\s*\"?(?P<major>\d+)\"?\s*\]"
+    r"^[ \t]*if\s+"
+    # TWO spellings for the same FACT, because `[ … ]` and the `test …` builtin are
+    # the same test and a guard that reds one is a false block (MEASURED, review of
+    # `7b02823f41`: narrowing to `[ … ]` alone re-introduced a false block on
+    # `if test "$major" != "16"; then` that `origin/main`'s two-pattern tuple did
+    # NOT have — a regression against the base, so both are accepted here).
+    r"(?:\[\s*\"?\$\{?major\}?\"?\s*!=\s*\"?(?P<bracket_major>\d+)\"?\s*\]"
+    r"|test\s+\"?\$\{?major\}?\"?\s*!=\s*\"?(?P<test_major>\d+)\"?)"
     # `; then` and a newline before `then` are the two forms bash ACCEPTS. `] then`
     # (no separator) is a syntax error, so it must NOT match: accepting it would
     # assert an armed branch over one the shell cannot parse.
@@ -383,14 +400,24 @@ def _version_branch(code: str, server_major: int) -> str:
     """
     match = _VERSION_BRANCH_RE.search(code)
     assert match, (
-        "the pin has no `if [ \"$major\" != \"<major>\" ]; then … fi` block — a "
-        "branch that cannot be FOUND is the same symptom as no branch at all: "
-        "the job would carry on with a client whose major differs from the "
-        f"servers' ({server_major}) and the artifact would be unrestorable"
+        # The message NAMES the spellings accepted, before it names the
+        # consequence: a false block that opens with "the artifact would be
+        # unrestorable" over a mere spelling change is what taught the last lane
+        # to widen this assertion instead of trusting it (MEASURED, review of
+        # `7b02823f41`). `if [[ "$major" != "16" ]]; then` is the one bash spelling
+        # NOT matched here — the `[[ … ]]` form; nothing in this workflow uses it
+        # (0 occurrences), so widening to it is a deliberate edit, not this guard's
+        # implicit promise.
+        "the pin has no `if [ \"$major\" != \"<major>\" ]; then … fi` block "
+        "(`[ … ]` or the `test …` builtin, `$major` or `${major}`, `; then` or a "
+        "newline before `then`) — a branch that cannot be FOUND is the same "
+        "symptom as no branch at all: the job would carry on with a client whose "
+        f"major differs from the servers' ({server_major})"
     )
-    assert int(match.group("major")) == server_major, (
+    major = match.group("bracket_major") or match.group("test_major")
+    assert int(major) == server_major, (
         "the version branch compares the client's major with "
-        f"{match.group('major')}, but BOTH provisioned servers are "
+        f"{major}, but BOTH provisioned servers are "
         f"{server_major} — a branch pinned to any other major can never fire"
     )
     return match.group("body")
