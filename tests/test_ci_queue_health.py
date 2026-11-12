@@ -2920,6 +2920,12 @@ def test_NO_site_states_the_retracted_ONE_HALF_exclusion_rule():
         # GREEN with the two-route gloss and again with the three-route gloss plus the wrong
         # conclusion, so the presence pin is what keeps the conclusion honest.
         ("module", "so that count is an UPPER BOUND on executing work and cannot"),
+        # ⛔ AND THE GLOSSES THAT ONLY A MAINTAINER READS — pinned because the delta's own rule
+        # is that a corrected claim needs a leg, and these had none (#12166 review round 16).
+        # The `--help` one is EMITTED (argparse's description), i.e. operator-visible; a revert
+        # of any of the three measured GREEN while the suite stayed at 157 passed.
+        ("module", "read, or whose read did not PROVE them idle — a count, not a proof"),
+        ("module", "whose jobs were never read, or whose read did not PROVE them idle) but the oldest"),
     ]
     # ⛔ PER-FILE, NOT "SOMEWHERE" (review NIT, round 11). The comments above name a SITE, so
     # a presence check over all four surfaces passes when the named site loses the clause and
