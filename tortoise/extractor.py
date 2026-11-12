@@ -1097,6 +1097,26 @@ def _referentiality_hold(surface: str) -> tuple[str, str] | None:
     return referentiality.judge(surface)
 
 
+def _referentiality_tokens(surface: str) -> list[str]:
+    """The cue's OWN tokenisation of ``surface`` — the phrase it actually judged.
+
+    The hold decision is taken on these tokens (lower-cased, edge punctuation
+    stripped), so the occurrence offset must be located with the SAME
+    definition; reconstructing the phrase from the RAW model string is how the
+    two paths disagree (#12102 round-3 review: ``The  Former`` is held while a
+    case-sensitive raw search records ``None`` for a phrase that is present).
+
+    Fail-open to ``[]``: a tokeniser that raises must not turn a RECORDED hold
+    into an aborted document pass — the surface stays held and the offset is
+    simply ``None``.
+    """
+    try:
+        from tortoise import referentiality
+        return referentiality.phrase_tokens(surface)
+    except Exception:  # a provenance field never blocks capture
+        return []
+
+
 class LLMExtractor:
     """Cheap point model + large relation model, same Extractor interface as the
     mock. Spans/quotes come from the deterministic segmenter, so provenance
@@ -1494,7 +1514,21 @@ class LLMExtractor:
                     # — measured at the #12102 review (`body[34:36] == 'it'` inside
                     # "with"). `None` when the phrase is genuinely absent is the
                     # honest answer, never a nearby match.
-                    _match = re.search(rf"(?<!\w){re.escape(name)}(?!\w)", body)
+                    # ⛔ AND IT MATCHES THE PHRASE THE CUE JUDGED, not the raw model
+                    # string (#12102 round-3 review P2): `referentiality.judge`
+                    # decides on CASE-FOLDED, EDGE-STRIPPED TOKENS, so a surface the
+                    # model returned as `The  Former` is HELD while the raw
+                    # case-sensitive search found nothing and recorded `None` for a
+                    # phrase that IS in the section — the "None means absent"
+                    # reading a measurement would take. Building the pattern from
+                    # the SAME tokeniser the decision used is what makes the two
+                    # paths unable to disagree; `\s+` between tokens covers the
+                    # whitespace difference, `IGNORECASE` the case difference.
+                    _phrase = r"\s+".join(
+                        re.escape(tok) for tok in _referentiality_tokens(name))
+                    _match = (re.search(rf"(?<!\w){_phrase}(?!\w)", body,
+                                        re.IGNORECASE)
+                              if _phrase else None)
                     _offset = _match.start() if _match is not None else None
                     # ⚠️ COORDINATE BASE (#12102 review P3): `_offset` indexes
                     # THIS SECTION'S STRIPPED BODY (`body`, leading whitespace
