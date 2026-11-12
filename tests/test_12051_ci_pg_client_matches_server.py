@@ -993,10 +993,13 @@ def _run_code(step: dict) -> str:
 def _run_commands(step: dict) -> str:
     """`_run_code()` with trailing comments removed and continuations joined.
 
-    ` #…` (whitespace before the `#`) is the shell's comment start outside
-    quotes, which is what every call site needs: they match a whole write/entry
-    line, and a trailing comment there is either a tombstone (the value it
-    names is NOT what runs) or noise (the capstone's name in the pin step).
+    A `#` starts a comment wherever a WORD could begin (`; & | (`, a group-closing
+    `)`, unquoted whitespace, column 0) and never inside quotes — see the ⛔ block
+    below, which is the only statement of the rule; this sentence used to state the
+    superseded narrow "whitespace before the `#`" form (#12279 REVIEW 3, P3).
+    Stripping is what every call site needs: they match a whole write/entry line,
+    and a trailing comment there is either a tombstone (the value it names is NOT
+    what runs) or noise (the capstone's name in the pin step).
 
     A BACKSLASH CONTINUATION IS JOINED first (#12051 review round 7): measured,
     `echo "/usr/lib/postgresql/17/bin" >> \\` on one line and `"$GITHUB_PATH"`
@@ -5889,6 +5892,16 @@ def test_a_substitution_closer_is_not_a_comment_boundary() -> None:
         "echo $(case a in a) echo hi;; esac)#note",
         "echo $(case \"$M\" in full) echo hi;; *) echo lo;; esac)#note",
         "echo $(echo ${x%)})#note",
+        # ⛔ A `(` INSIDE A WORD PART DOES NOT OPEN A GROUP (#12279 REVIEW 3, P0,
+        # measured RED→GREEN in 8 of 17 spellings). bash keeps `#` as DATA inside
+        # `${…}`, and an extglob `(` is a word part, so the replacement still runs;
+        # opening a GROUP there let the `)` set a boundary and erase the line.
+        ": ${x:-(a)#}",
+        "echo ${x:-()#}",
+        "x=${y:-(a)#}",
+        "echo ${x:+(a)#}",
+        "echo @(b)#x",
+        "echo ${x:-plain}#note",
     ):
         step = {"run": f"b=/usr/lib/postgresql; {opener}; {replacement}"}
         assert replacement in _run_commands(step), (
@@ -5924,7 +5937,14 @@ def test_an_escaped_or_assignment_closer_does_not_start_a_comment() -> None:
     """
 
     replacement = 'sudo rsync -a "$b/17/bin/" "$b/16/bin/"'
-    for opener in (r"echo x\;#note", r"echo a\ #note", "a=(16 17)#note"):
+    # ⛔ `\"` INSIDE DOUBLE QUOTES DOES NOT CLOSE THE SPAN (#12279 REVIEW 2 P1;
+    # the fix shipped without a row, so reverting it left the suite green).
+    for opener in (
+        r"echo x\;#note",
+        r"echo a\ #note",
+        "a=(16 17)#note",
+        r'echo "expected \"16\" # note"#note',
+    ):
         step = {"run": f"b=/usr/lib/postgresql; {opener}; {replacement}"}
         survived = _run_commands(step)
         assert replacement in survived, (
@@ -6750,6 +6770,7 @@ def _strip_trailing_comment(line: str) -> str:
     index = 0
     quote = ""
     stack: list[str] = []
+    braces = 0
     #: Does the character AT `index` begin a new shell WORD? Column 0 does, and so
     #: does the character after unquoted whitespace or an unquoted operator — the
     #: shell's own rule, which is what `boundary` tracks instead of re-reading
@@ -6787,9 +6808,28 @@ def _strip_trailing_comment(line: str) -> str:
             boundary = False
             index += 1
             continue
+        if char == "#" and braces:
+            boundary = False
+            index += 1
+            continue
         if char == "#":
             if boundary:
                 return line[:index]
+            boundary = False
+            index += 1
+            continue
+        # ⛔ `${…}` IS A WORD, SO NOTHING INSIDE IT ENDS ONE (#12279 REVIEW 3,
+        # P0, measured RED→GREEN in 8 of 17 spellings). A `(` inside a parameter
+        # expansion is a word part (`${x:-(a)#}` — bash prints `(a)#`), so the
+        # group frame it used to open let its `)` set a boundary and the `#`, which
+        # bash keeps as DATA, was read as a comment that erased the live line.
+        if char == "$" and index + 1 < len(line) and line[index + 1] == "{":
+            braces += 1
+            boundary = False
+            index += 2
+            continue
+        if char == "}" and braces:
+            braces -= 1
             boundary = False
             index += 1
             continue
@@ -6805,7 +6845,11 @@ def _strip_trailing_comment(line: str) -> str:
             # ⛔ `index and` IS LOAD-BEARING: `"" in "$<>"` is True in Python, so a
             # `(` at column 0 was classified as a SUBSTITUTION and `(true)#x`
             # stopped stripping a real comment (caught by the suite, 2 failed).
-            if index and previous in "$<>":
+            # A `(` inside `${…}`, or the `(` of an extglob pattern (`@(b)#x`
+            # prints `@(b)#x`), is also a WORD part — same measured class.
+            if braces or (index and previous in "?*+@!"):
+                stack.append("word")
+            elif index and previous in "$<>":
                 stack.append("sub")
             elif previous == "=":
                 stack.append("word")
