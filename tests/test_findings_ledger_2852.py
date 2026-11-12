@@ -204,8 +204,10 @@ def test_mutation_population_is_pinned():
     `CITATION_UNCOLONED_SHAPE_RE.search()`'s FIRST match only, so one exempt token
     certified every citation beside it in the same code span — an HTTP status beside a
     page name hid an out-of-range line, or a citation of a file that does not exist
-    (measured at `6413d5e8`). The 32nd–35th fixed the permalink arm for the same shape
-    one branch above; this is the arm that was left behind.
+    (measured at `6413d5e8`). The `#L` permalink arm one branch above was fixed for
+    this same shape in an earlier round; this is the arm that was left behind. The
+    sentence deliberately names no ordinal: an arm number here is a count that rots the
+    moment the population moves, which is the class of staleness this page exists for.
 
     The 37th and 38th close two holes the review of that pass found in the fixes
     themselves: a §1 row whose first cell merely BEGINS with `Verdict` (the header skip
