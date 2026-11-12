@@ -1620,20 +1620,26 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
         assert int(seen) == measured_none, (
             f"this module restates the complement as 'the {seen} blocks that cite "
             f"nothing'; measured {measured_none}")
-    # ⛔ ANCHORED TO SENTENCES THAT NAME `D2 — A`, so the sweep judges claims ABOUT
+    # ⛔ ANCHORED TO SENTENCES THAT NAME `D2 — A`, so BOTH sites judge claims ABOUT
     # that block only: a true statement about the OTHER v3.33 entry ("the second of
     # the two v3.33 entries landed #11827") is not a misidentification of the
-    # lander, and over-blocking it is a false refusal (measured before this anchor).
-    ordinal_sentences = [sentence for sentence in re.split(r"(?<=[.)])\s+", module_source)
-                         if "D2 — A" in sentence]
-    ordinals = [word for sentence in ordinal_sentences
-                for word in re.findall(
-                    r"the (first|second) of the (?:file's )?two v3\.33 entries",
-                    sentence, re.I)]
+    # lander, and over-blocking it is a false refusal (measured before the anchor:
+    # such a sentence placed before the SCOPE sentence redded it).
+    #
+    # ⛔ AND ONE RECOGNISER FOR BOTH SITES. The pin's own docstring uses the shape
+    # "the first of the file's two v3.33 entries", while an earlier cut of this
+    # sweep tolerated `file's` in the other position — so a truthful sentence was
+    # accepted by the sweep and refused by the pin (measured). This pattern accepts
+    # `file's` in EITHER position, and both sites read it.
+    ordinal_pattern = (r"the (?:file's )?(first|second) of the (?:file's )?"
+                       r"two v3\.33 entries")
+    d2_sentences = [re.sub(r"\s+", " ", sentence)
+                    for sentence in re.split(r"(?<=[.)])\s+", module_source)
+                    if "D2 — A" in sentence]
+    ordinals = [word for sentence in d2_sentences
+                for word in re.findall(ordinal_pattern, sentence, re.I)]
     assert ordinals, (
         "the module must say which of the two v3.33 entries lands `D2 — A`")
-    # (each captured ordinal is compared with the MEASURED position below, once
-    # the blocks are in hand — `ordinals` stays in scope for it)
 
     assert (int(stated.group(1)), int(stated.group(2))) == (len(citing), len(blocks)), (
         f"the docstring states {stated.group(1)} of {stated.group(2)} blocks citing a "
@@ -1683,14 +1689,21 @@ def test_the_citation_scope_docstring_states_the_measured_count() -> None:
     # sentence that names the WRONG one of two same-version blocks, or cites an id
     # the block does not carry, is exactly what C5 found. Each claim is PARSED, so
     # its claim must be recognisable, not free-form: the shapes below are the ones
-    # accepted, they mirror the module-wide sweep's own tolerance (a `file's` is
-    # accepted by both, and both are CASE-INSENSITIVE — the sweep matches with
-    # `re.I`, so these do too; measured before: "the FIRST of the two …" redded
-    # here while the sweep accepted it), and a truthful sentence phrased outside
-    # them is a recogniser gap to widen here — not evidence that the sentence is
-    # wrong.
-    ordinal = re.search(
-        r"the (?:file's )?(first|second) of the two v3\.33 entries", flat_doc, re.I)
+    # accepted, they mirror the module-wide sweep's own tolerance (the SAME
+    # `ordinal_pattern` is read at both sites, so a `file's` in either position is
+    # accepted, and both are CASE-INSENSITIVE — measured before: "the FIRST of the
+    # two …" and "the first of the file's two …" each redded here while the sweep
+    # accepted them), and a truthful sentence phrased outside them is a recogniser
+    # gap to widen here — not evidence that the sentence is wrong.
+    #
+    # ⛔ AND THE DOCSTRING'S CLAIM IS READ FROM ITS OWN `D2 — A` SENTENCE: an
+    # un-anchored first-match search elsewhere in the paragraph can pick up a true
+    # statement about the OTHER v3.33 entry and then red with a message denying
+    # what the paragraph says (measured).
+    ordinal = next((match for match in
+                    (re.search(ordinal_pattern, sentence, re.I)
+                     for sentence in d2_sentences)
+                    if match), None)
     assert ordinal, (
         "the SCOPE paragraph must say WHICH of the two v3.33 entries it means — "
         "\"the first/second of the two v3.33 entries\" — so this pin can check it")
