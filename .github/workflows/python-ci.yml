@@ -4831,7 +4831,7 @@ jobs:
           # regression, on exactly the pool-box class this cleanup exists for. On such a box
           # the operator's stanza already provides the index, so this step adds nothing; the
           # ORIGIN check below still proves apt.postgresql.org lists this major.
-          if grep -rqs 'apt\.postgresql\.org' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+          if grep -rqE '^[[:space:]]*(deb[[:space:]]|URIs:).*apt\.postgresql\.org' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
             echo "apt.postgresql.org is already configured on this box [$identity] — reusing that stanza rather than adding a second one for the same suite (a duplicate with a different Signed-By makes apt refuse the whole source list, #12051)."
           else
             # ⚠️ `mktemp`, not a fixed `/tmp/pgdg.asc`: this job is pool-eligible and `curl -o`
@@ -4866,7 +4866,7 @@ jobs:
             echo "deb [signed-by=/etc/apt/keyrings/tortoise-12051-pgdg.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/tortoise-12051-pgdg.list >/dev/null
           fi
           if ! sudo apt-get update -qq; then
-            echo "::error::apt-get update FAILED after the PGDG source was added (suite ${VERSION_CODENAME:-unknown}-pgdg) [$identity] — the repository or its signing key did not resolve, so the pg16 client this drill needs cannot be installed, and BOTH provisioned servers are pg16 (#12051). Check the key at /etc/apt/keyrings/tortoise-12051-pgdg.asc, the suite name derived from /etc/os-release, and network egress."
+            echo "::error::apt-get update FAILED [$identity] — a PGDG source or its signing key did not resolve, so the pg16 client this drill needs cannot be installed, and BOTH provisioned servers are pg16 (#12051). Check the apt.postgresql.org stanza apt is actually using (this step adds /etc/apt/sources.list.d/tortoise-12051-pgdg.list plus /etc/apt/keyrings/tortoise-12051-pgdg.asc ONLY when the box had no PGDG source of its own, so on a box that already had one neither file exists), and network egress."
             exit 1
           fi
           # ⛔ THE ORIGIN IS THE FACT; A BARE PROBE'S EXIT STATUS IS NOT. `apt-get update`
@@ -4904,7 +4904,7 @@ jobs:
           # i.e. the guard ABOVE, so the old `--repair-labels` advice here was advice that
           # could not change apt's answer.
           if ! apt-cache policy postgresql-client-16 2>/dev/null | grep -F 'apt.postgresql.org' >/dev/null; then
-            echo "::error::apt.postgresql.org did not SUPPLY postgresql-client-16 for this codename [$identity] — either its index never LOADED (apt-get update only WARNS and exits 0 on a DNS/egress/5xx failure, and a failed fetch leaves the PREVIOUS lists in place — so a row can still appear from a STALE index; look for 'W: Some index files failed to download' above) or the suite '${VERSION_CODENAME:-unknown}-pgdg' carries no such package. BOTH provisioned servers are pg16 and the client major is part of the artifact's contract (#12051), so this drill cannot fall back to the image's own archive client. Check 'apt-cache policy postgresql-client-16': apt.postgresql.org must list this major."
+            echo "::error::apt.postgresql.org did not SUPPLY postgresql-client-16 for this codename [$identity] — either its index never LOADED (apt-get update only WARNS and exits 0 on a DNS/egress/5xx failure, and a failed fetch leaves the PREVIOUS lists in place — so a row can still appear from a STALE index; look for 'W: Some index files failed to download' above) or the PGDG suite this box's stanza lists carries no such package. BOTH provisioned servers are pg16 and the client major is part of the artifact's contract (#12051), so this drill cannot fall back to the image's own archive client. Check 'apt-cache policy postgresql-client-16': apt.postgresql.org must list this major."
             exit 1
           fi
           if ! sudo apt-get install -y --no-install-recommends postgresql-client-16; then
