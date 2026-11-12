@@ -661,14 +661,25 @@ def _prose_stripped(line: str) -> str:
     this shape. The demanded remedy (`ensure gh`) FAILS CLOSED, so the false
     positive would red a healthy job on a no-egress runner.
 
-    The strip is scoped to quoted spans containing whitespace, i.e. sentences: a
-    quoted span with no whitespace is an argv WORD (`"$GITHUB_WORKSPACE/tools/
-    ci_timing.py"`) and stays visible. Cost, stated and the same direction as
-    `_code_only`'s: a real invocation written inside a quoted sentence
-    (`sh -c 'cd repo && tools/x.sh'`) is not seen — a hazard the pin guards against
-    is written as a plain step command, not smuggled through a message.
+    ⛔ BUT NOT EVERY QUOTED SPAN WITH WHITESPACE IS A SENTENCE (#12092 review): a
+    quoted COMMAND SUBSTITUTION (`OUT="$(python3 tools/x.sh --flag)"`) carries
+    whitespace and really RUNS the script, so a whitespace-only test hid two real
+    invocations that exist in this repo (`e2e-live-reconcile.yml`,
+    `mergify-guard-recut.yml`) — a false NEGATIVE in a gate, i.e. a fail-open.
+    The lookahead below therefore leaves a span whose body starts with `$(` or
+    `${` alone, which keeps those while still stripping every message. Measured
+    over all workflows: 5 job verdicts change, of which 3 are `echo` messages
+    (correct) and **2 are real invocations that stay visible**.
+
+    Cost, stated and the same direction as `_code_only`'s: a real invocation
+    written as plain prose inside quotes (`sh -c 'cd repo && tools/x.sh'`) is not
+    seen — a hazard the pin guards against is written as a plain step command, not
+    smuggled through a message, and the assignment shape above is the one that
+    occurs in this repo.
     """
-    return re.sub(r"'[^']*\s[^']*'|\"[^\"]*\s[^\"]*\"", "''", line)
+    return re.sub(
+        r"'(?!\$[({])[^']*\s[^']*'|\"(?!\$[({])[^\"]*\s[^\"]*\"", "''", line
+    )
 
 
 def _looks_poolable(value: str) -> bool:
@@ -910,6 +921,15 @@ def test_an_error_message_naming_a_gh_script_is_not_a_hazard():
     assert _gh_hazards(
         ["        run: bash tools/install-ci-runner-x64.sh --repair-labels"], scripts
     ), "an unquoted script invocation must stay a hazard"
+    # …and so is a quoted COMMAND SUBSTITUTION, which carries whitespace and is
+    # therefore message-shaped. Two sites in this repo already have the shape
+    # (`e2e-live-reconcile.yml`'s `OUT="$(python3 graph-scripts/… --json)"`,
+    # `mergify-guard-recut.yml`'s `head_digest="$(python3 tools/… --print-digest)"`),
+    # so a whitespace-only strip is a fail-open in the gate (#12092 review).
+    assert _gh_hazards(
+        ['        run: OUT="$(python3 tools/install-ci-runner-x64.sh --repair-labels --count 4)"'],
+        scripts,
+    ), "a quoted command SUBSTITUTION runs its script — the message strip must not hide it"
 
 
 def test_the_poolable_label_reader_sees_every_yaml_shape():

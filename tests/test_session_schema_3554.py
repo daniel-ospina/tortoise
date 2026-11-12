@@ -1439,10 +1439,16 @@ def test_the_newest_block_recording_4_3_cites_a_comment_id() -> None:
     person's answer lives. The sibling entries do it by comment id —
     ``#11827 (comment 6805834755)``, ``#11083 (comment 6667121779)`` — and v3.34
     does it with the relay comment ``6815950417``. ⛔ NOT "v3.34 did not cite
-    one": the citation and the block were added by the SAME commit
-    (``c1df4c6914``, and the pre-squash commits pair them identically), so no
-    commit in this repo has ever carried a v3.34 block without it — a review
-    round measured that and this sentence is what it corrected. What the entry
+    one" — but NOT the universal that replaced it either, because that one was
+    falsified too (#12092 review): the citation was added inside #12004's own
+    chain by ``e657e6493c`` (``c1df4c6914`` is the squash that carries both),
+    while THREE earlier commits on that same chain (``e77f207bb8``,
+    ``3e5f2f3632``, ``6057b6d4d2``) carry a v3.34 block with **no**
+    ``6815950417`` in it — measured with
+    ``git show <rev>:docs/ONTOLOGY-CHANGELOG.md | grep -c 6815950417`` → 0 at
+    each (2026-11-12), and all three are ancestors of
+    ``c7cac6144e``/``e657e6493c``. The true statement is narrower and is the
+    one the pin needs: **no MERGED artifact ever has**. What the entry
     ALSO records is the approval it was written from: *"the owner answered `ok`
     to a three-item amendment proposal"*, an answer whose only home was a
     decision lane's pane, on no surface the next lane could read (``DECISION
