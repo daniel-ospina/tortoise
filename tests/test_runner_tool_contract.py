@@ -489,6 +489,12 @@ _STEP_MARKER = re.compile(r"^      -(?:\s|$)")
 #: no provisioned tool and dies 127 (#9018) while every textual check still passes.
 _STEP_DEFUSERS = ("if", "continue-on-error")
 
+#: The `- ` a step's FIRST key can share a line with (`      - if: always()`). YAML accepts
+#: it and GitHub's own examples use it, so the key must be read THROUGH it — a plain
+#: `split(":")[0]` on that line yields `- if`, which matches no defuser, and the guarded step
+#: reported clean in BOTH arms (measured, #12167 review round 2).
+_STEP_DASH = re.compile(r"^-\s+")
+
 
 def _step_bounds(lines: list[str], at: int) -> tuple[int, int]:
     """The range of `lines` holding the step that owns `lines[at]`.
@@ -517,14 +523,35 @@ def _step_defusers(lines: list[str], at: int) -> list[str]:
     predicate that saw a guard where the other did not would SUPPRESS the very finding the
     ordering arm raises — `_undeclared_gh_jobs` reads this function too, through
     `_live_contract_step`. A commented-out key is not a key.
+
+    ⛔ THE KEY IS READ THE WAY YAML WRITES IT, not the way this loop first spelled it. Three
+    shapes answered `[]` while the step really was guarded (measured, #12167 review round 2):
+
+        - if: always()                 # key shares the dash line: `"- if".split(":")[0]`
+        "if": runner.os == 'Linux'     # quoted key
+        if : runner.os == 'Linux'      # space before the colon
+
+    So the leading `- ` is stripped, the key is whitespace-trimmed and unquoted. And a line
+    indented DEEPER than the step's own `run:` is not the step's key at all — it is a block
+    scalar's body or a nested mapping, which the first version read as a guard:
+
+        env:
+          NOTE: |
+            if: this line is documentation      # → a FALSE violation, measured
+
+    The bound is the `run:` line's own indent, so it follows the block rather than assuming
+    the repo's 8 spaces.
     """
     start, end = _step_bounds(lines, at)
+    key_indent = len(lines[at]) - len(lines[at].lstrip())
     out = []
     for line in lines[start:end]:
         stripped = line.strip()
         if stripped.startswith("#"):
             continue
-        key = stripped.split(":")[0]
+        if len(line) - len(line.lstrip()) > key_indent:
+            continue  # a block scalar's body or a nested mapping: not this step's key
+        key = _STEP_DASH.sub("", stripped).split(":")[0].strip().strip("'\"")
         if key in _STEP_DEFUSERS:
             out.append(key)
     return out
@@ -711,6 +738,53 @@ def test_a_guarded_contract_step_is_not_compliant():
             f"step reported clean ({got!r})"
         )
 
+    # ⛔ AND THE KEY IS READ THE WAY YAML WRITES IT (#12167 review round 2). Three spellings
+    # of the SAME guard answered `[]` in BOTH arms — the key sharing the step's dash line
+    # (`- if: always()`, which `split(":")[0]` reads as `- if`), a quoted key, and a space
+    # before the colon. All three are ordinary YAML, and `- if: always()` is a shape this
+    # repo's step style invites. Each must ALSO fail the coverage arm's `_live_contract_step`,
+    # or the two arms disagree and the scan suppresses the job.
+    for spelling in (
+        "      - if: runner.os == 'Linux'",
+        "      - continue-on-error: true",
+        "      - \"if\": runner.os == 'Linux'",
+        "      - if : runner.os == 'Linux'",
+    ):
+        block = (
+            "  job:\n    steps:\n"
+            + spelling
+            + "\n        run: bash .github/scripts/"
+            + CONTRACT_STEP
+            + "\n      - name: peek\n        run: gh pr view 1\n"
+        )
+        got = _contract_violations(block, scripts)
+        assert got and "carries a `" in got[0], (
+            f"the guard `{spelling.strip()}` was not read as a guard — a guarded contract "
+            f"step reported clean ({got!r})"
+        )
+        assert _live_contract_step(block.splitlines()) is False, (
+            f"the coverage arm counted the guarded step `{spelling.strip()}` as coverage — "
+            "the two arms disagree, which is how a new job joins the gap (#9018)"
+        )
+
+    # …and the mirror image: a COMPLIANT step whose own block scalar merely mentions a
+    # defuser is not guarded. The first cut read every line of the step, including a block
+    # scalar's body, so this spelled a false violation — the direction the file says gets a
+    # `|| true` bolted on (measured, #12167 review round 2).
+    for prose in ("if: this line is documentation", "continue-on-error: true"):
+        doc = (
+            "  job:\n    steps:\n      - name: contract\n"
+            "        run: bash .github/scripts/"
+            + CONTRACT_STEP
+            + "\n        env:\n          NOTE: |\n            "
+            + prose
+            + "\n"
+        )
+        assert _contract_violations(doc, scripts) == [], (
+            f"prose inside the step's own block scalar was read as a guard (`{prose}`)"
+        )
+        assert _live_contract_step(doc.splitlines()) is True
+
     # …and the SAME scan must not reach OUTSIDE the step. A bare `-` marker (the step's first
     # key on the next line) did not match `^      - `, so `step_start` stayed 0 and the JOB's
     # own `if:` was attributed to the contract step — a false violation whose demanded remedy
@@ -773,8 +847,11 @@ def test_the_derivation_covers_the_operations_harness_home():
 def test_every_gh_subcommand_is_recognised():
     """`_GH_CMD`'s closed list must not be narrower than the installed `gh`.
 
-    This is the pin that keeps the list honest: the enumeration named 12 of the 28
-    subcommands `gh --help` publishes, so eight real invocations (`gh cache delete`,
+    This is the pin that keeps the list honest: the enumeration named 12 of the **33**
+    subcommands `gh --help` publishes (`gh 2.102.0`, measured: CORE 12 + GITHUB ACTIONS 3 +
+    ADDITIONAL 18, alias section excluded — the sentence said 28, which was wrong twice: the
+    installed count is 33 and its own arithmetic, 12 named + 8 newly-real, closes only to 20),
+    so eight real invocations (`gh cache delete`,
     `gh gist create`, `gh attestation verify`, `gh ruleset list`, `gh alias set`,
     `gh extension install`, `gh org list`, `gh ssh-key list`) were all really executed and
     all read CLEAN. Each was confirmed real by `gh <name> --help` exiting 0.
