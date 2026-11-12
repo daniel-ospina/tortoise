@@ -2,7 +2,10 @@
 
 Identifies: missing sourceKind (point-level legacy + Source-level canonical),
 missing sourceDate, superseded gaps (missing CORRECTS edge), live IMPL/NAND
-edges into superseded points, naive-IMPL heuristics, missing mitigations,
+edges into superseded points, live IMPL/NAND edges into superseded OBJECTS
+(#11826 — the Object lane moves no edges, so there the shape is lost belief,
+not leftover wiring), a superseded Object whose ``supersededBy`` name resolves
+to no node at all (#11826), naive-IMPL heuristics, missing mitigations,
 legacy ``mitigates`` edges, and inverted validity windows (``validTo`` before
 ``validFrom`` — the point is unreadable to temporal queries, #5361).
 
@@ -572,6 +575,203 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         )
         for sup_id, sup_content, edge_type, active_id, active_nid_value in rows4
     ], count4)
+
+    # ── 4b. superseded_object_active_edges (high) ────────────────
+    # #11826: the OBJECT supersession lane moves NO edges (the fold writes
+    # ``status``/``supersededBy``/``supersededAt`` only —
+    # ``projection/entities.py::_fold_object_superseded``), so the shape check 4
+    # reports as LEFTOVER WIRING on a :Point is LOST BELIEF on an :Object: the
+    # operator's input stays anchored to the node the supersession just made
+    # terminal for EP, EP strips that input (``1/2 inputs stripped — factor
+    # skipped (degenerate, #780/#2422)``), and the factor stops funding the
+    # successor that should carry it — silently, because nothing reports it.
+    #
+    # HIGH, and deliberately not check 4's ``medium``: on a :Point the transfer
+    # is the lane's own job and a surviving edge is an anomaly; on an :Object the
+    # successor inherits nothing BY CONSTRUCTION, so every finding here is the
+    # measured defect rather than a stray survivor.
+    #
+    # INCOMING only — check 4's orientation, kept so the two checks answer ONE
+    # question in two vocabularies. An outgoing IMPL/NAND from a superseded
+    # :Object would mean the Object is acting as the OPERATOR, which the EP
+    # loader does not do (operators are Points carrying ``is_operator`` /
+    # ``op_type``); if that shape ever becomes constructible it is a NEW check,
+    # not this one widened — the rule the module-scope note above already states
+    # for provenance coverage.
+    #
+    # ANCHORED on ``status = 'superseded'`` and nothing wider. NOT the legacy
+    # ``outdated`` status/flag: an ``outdated`` :Object has no successor to
+    # inherit anything, so the finding this check exists for cannot be phrased
+    # against it (it is a different defect — the unguarded Object status door,
+    # #8166), and NOT ``retracted``/``archived``/``deprecated`` either, for
+    # ``_superseded_w``'s recorded reason: those are terminal without being
+    # produced by a supersession write.
+    #
+    # NOT gated on ``pointKind``: that is a POINT-only property, so scoping an
+    # entity-anchored check by it would silently drop every Object whose
+    # operator carries no kind value — a false CLEAN, the one result a read
+    # surface may not produce (#6146).
+    count4b = _count(
+        proj,
+        "MATCH (sup:Object) WHERE sup.status = 'superseded'\n"
+        # #6976: load-bearing `WITH sup` — without it FalkorDB drops the whole
+        # WHERE predicate at the re-binding MATCH below (see the count4 note).
+        "WITH sup\n"
+        "MATCH (sup)<-[r:IMPL|NAND]-(active) "
+        # #7927: ``active`` is a TRAVERSAL position, so the live endpoint may be
+        # a :Point/:Subject/:Event as readily as another :Object.
+        f"WHERE {epistemic_disjunction('active')} "
+        "AND (active.status IS NULL OR active.status = 'live')\n"
+        "RETURN count(DISTINCT r)",
+    )
+    rows4b = _rows(
+        proj,
+        "MATCH (sup:Object) WHERE sup.status = 'superseded'\n"
+        # #6976: load-bearing `WITH sup` — see the count4b note above.
+        "WITH sup\n"
+        "MATCH (sup)<-[r:IMPL|NAND]-(active) "
+        f"WHERE {epistemic_disjunction('active')} "
+        "AND (active.status IS NULL OR active.status = 'live')\n"
+        "RETURN DISTINCT sup.id, sup.name, type(r), "
+        f"{epistemic_identity('active')}, active.id "
+        f"LIMIT {SAMPLE_LIMIT}",
+    )
+    _record("superseded_object_active_edges", [
+        AuditIssue(
+            issue_type="superseded_object_active_edges",
+            severity="high",
+            node_id=str(sup_id) if sup_id is not None else str(sup_name),
+            # ⛔ The consequence is STATED AT ITS MEASURED SCOPE. EP strips the
+            # terminal input (`ep.py`'s participation predicate), and only a
+            # TWO-input operator is then skipped as degenerate
+            # (`len(input_ids) < 2 <= len(full_inputs)`, #780/#2422) — a factor
+            # with three or more inputs still runs on the survivors, so its belief
+            # is diluted rather than zeroed. Claiming "the factor is skipped"
+            # unconditionally would misreport every wider operator as a
+            # higher-severity consequence than it has.
+            detail=(f"Superseded Object '{sup_name}' still carries an active "
+                    f"{edge_type} edge from "
+                    f"{active_id if active_id is not None else '<no id or eventId>'}"
+                    " — EP strips that terminal input: a two-input factor is then "
+                    "skipped as degenerate (#780/#2422) and a wider one runs "
+                    "without it, so either way the successor inherits no belief "
+                    "from it (#11826)"
+                    + ("" if active_id is not None else
+                       "; that endpoint carries no identity, so it cannot be "
+                       "named by the repair")),
+            # The repair is a TRANSFER, not a deletion: the successor is the node
+            # the belief belongs to.
+            #
+            # ⛔ It is NOT a `tortoise_create_operator` call, and that is not a
+            # style choice. `create_operator(op_type, source_id, target_ids)`
+            # MINTS an operator whose `source_id` is the idx-0 input, so handing
+            # it this row's `active.id` builds a meta-operator OVER the existing
+            # one and moves no belief to the successor — guidance that executes
+            # and builds the wrong graph (the #7819 rule: a remedy that is wrong
+            # or always raises is worse than no remedy). There is no SDK door
+            # that REWIRES an operator's input list, so the repair is stated as
+            # the explicit edge write it is, and it names what must be preserved
+            # (`idx` is the slot EP reads, `ep.py`).
+            #
+            # `edge_type` is safe to interpolate: it is `type(r)` from a pattern
+            # restricted to `:IMPL|NAND`, so it is one of two server-supplied
+            # literals and never caller text. The ids go through `_quoted`.
+            #
+            # ⛔ PROSE, deliberately, and not an executable sketch. Every sketch
+            # tried here was misleading in a way only the engine disproves: an
+            # unbound destination (`(operator)-[:IMPL]->(successor)`) makes MERGE
+            # match the WHOLE pattern, so in exactly the state this check reports
+            # it re-matches the existing edge into the superseded node, creates
+            # nothing, and the following delete removes the operator's only input
+            # — the repair would destroy the belief it is meant to move (#11826
+            # round-6 measurement). A remedy that reads as runnable but builds the
+            # wrong graph is the #7819 failure this module refuses to emit, so the
+            # fix states the PROPERTIES the write must have (target the
+            # successor's ID; preserve `idx`) and leaves the statement to whoever
+            # has the successor in hand.
+            fix=((f"Re-point this {edge_type} input from {_quoted(sup_id)} to the "
+                  f"successor named by its supersededBy: an explicit edge write "
+                  f"against the successor's ID that PRESERVES the edge idx (the "
+                  f"slot EP reads), then delete the edge into {_quoted(sup_id)}. "
+                  f"No SDK door rewires an operator's inputs")
+                 if sup_id is not None
+                 else (f"Re-point the active {edge_type} edge off the superseded "
+                       f"Object {_quoted(sup_name)} onto its successor, preserving "
+                       f"the edge idx")),
+        )
+        for sup_id, sup_name, edge_type, active_id, active_nid in rows4b
+    ], count4b)
+
+    # ── 4c. superseded_by_unresolvable (medium) ─────────────────
+    # #11826's second measured defect, and a regression against a recorded
+    # ruling rather than a design gap: ``supersededBy`` is a NAME stored in a
+    # column, while #3590 made the Object name MUTABLE and the id the identity.
+    # Rename the successor and the pointer dangles — measured: supersede
+    # ``PolicyV1`` → ``PolicyV2``, rename to ``PolicyV2b``, and
+    # ``supersededBy='PolicyV2'`` resolves to NO node. The superseded Object then
+    # holds no relationship of ANY type to its successor, nothing repairs it, and
+    # before this check nothing warned.
+    #
+    # SCOPE, declared rather than implied: this check is `:Object`-anchored, and a
+    # `:Subject` carries the same name-keyed `supersededBy` (#1423's lane), so a
+    # Subject's dangling pointer stays silent here — a KNOWN false-clean for that
+    # label, not an oversight. Widening it means deciding whether the two families
+    # answer one question (the #11824 target model), which is not this change's.
+    #
+    # "UNRESOLVABLE" IS ZERO CARRIERS, and the distinction is load-bearing: N≥2
+    # Objects sharing one name is a DIFFERENT fact (same-name coexistence,
+    # #3573) and is NOT reported here — folding the two would flag an AMBIGUOUS
+    # pointer as a DEAD one, and the two need different repairs (disambiguation
+    # vs. re-pointing). N≥1 means the name still addresses something, so this
+    # check stays silent even where a read path would refuse to pick one.
+    count4c = _count(
+        proj,
+        "MATCH (sup:Object) WHERE sup.status = 'superseded' "
+        "AND sup.supersededBy IS NOT NULL "
+        "AND sup.supersededBy <> ''\n"
+        # #6976: load-bearing `WITH sup` — see the count4b note above.
+        "WITH sup\n"
+        # An OPTIONAL MATCH that binds nothing yields ONE row holding NULL; two
+        # carriers yield two non-NULL rows that the WHERE then drops. So the
+        # filter is `carrier IS NULL` (zero carriers), never "fewer than two".
+        "OPTIONAL MATCH (carrier:Object) WHERE carrier.name = sup.supersededBy\n"
+        "WITH sup, carrier WHERE carrier IS NULL\n"
+        "RETURN count(DISTINCT sup)",
+    )
+    rows4c = _rows(
+        proj,
+        "MATCH (sup:Object) WHERE sup.status = 'superseded' "
+        "AND sup.supersededBy IS NOT NULL "
+        "AND sup.supersededBy <> ''\n"
+        "WITH sup\n"
+        "OPTIONAL MATCH (carrier:Object) WHERE carrier.name = sup.supersededBy\n"
+        "WITH sup, carrier WHERE carrier IS NULL\n"
+        "RETURN DISTINCT sup.id, sup.name, sup.supersededBy "
+        f"LIMIT {SAMPLE_LIMIT}",
+    )
+    _record("superseded_by_unresolvable", [
+        AuditIssue(
+            issue_type="superseded_by_unresolvable",
+            severity="medium",
+            node_id=str(sup_id) if sup_id is not None else str(sup_name),
+            detail=(f"Superseded Object '{sup_name}' names successor "
+                    f"'{sb_name}', but NO Object carries that name any more "
+                    "(a rename dangles the name-keyed pointer, #3590/#11826)"),
+            # ⛔ The PROPS form is the door's own signature — ``tortoise_update_entity(
+            # id, props)`` (``mcp_server.py``) takes the properties as ONE dict, so a
+            # keyword spelling (``status='superseded'``) is a ``TypeError`` at the
+            # caller: a repair that always raises is worse than no repair, which is
+            # the rule the #7819 note in this module already records. Same shape as
+            # the other `fix` strings here (``tortoise_update_point(id, {...})``).
+            fix=((f"Re-point the successor link: tortoise_update_entity({_quoted(sup_id)}, "
+                  "{'status': 'superseded', 'supersededBy': "
+                  "'<the successor CURRENT name>'}')")
+                 if sup_id is not None else
+                 (f"Set the successor name on the Object named {_quoted(sup_name)} "
+                  f"to the CURRENT name of {_quoted(sb_name)}")),
+        )
+        for sup_id, sup_name, sb_name in rows4c
+    ], count4c)
 
     # ── 5. impl_instead_of_nand (low, advisory heuristic) ──────────
     # Substring keyword matching produced false positives ("no " in

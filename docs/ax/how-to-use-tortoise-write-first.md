@@ -500,10 +500,16 @@ structure, not the return value.
   is the most valuable check, because it is the one thing a
   structurally-correct-looking graph can still get wrong.
 - **Run both integrity surfaces, and read what each covers.** They are not
-  interchangeable. The **hygiene audit** reports nine classes, among them a
+  interchangeable. The **hygiene audit** reports eleven classes, among them a
   superseded claim with no replacement edge (`superseded_no_edge`, high),
   evidence with no provenance (`missing_sourceKind`), a superseded claim that
-  still has live `IMPL`/`NAND` edges into it (`superseded_active_edges`), and a
+  still has live `IMPL`/`NAND` edges into it (`superseded_active_edges`), a
+  superseded **Object** that still has a live `IMPL`/`NAND` edge on it
+  (`superseded_object_active_edges`, high — the `:Point` lane transfers its
+  edges on supersede, the `:Object` lane moves none, so on an Object the
+  survivor is lost belief rather than leftover wiring), a superseded Object
+  whose `supersededBy` name resolves to no node at all
+  (`superseded_by_unresolvable`), and a
   keyword heuristic over `IMPL` edges that may have belonged to `NAND`
   (`impl_instead_of_nand`). The **chain-integrity check** validates the
   product-strategy chain rules only — dangling journey→use-case, workflow→JTBD

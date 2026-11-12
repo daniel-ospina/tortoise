@@ -25101,8 +25101,11 @@ class TortoiseSDK:
 
         Runs the audit checks (missing sourceKind point-level legacy + Source-
         level canonical, missing sourceDate, superseded points without a
-        CORRECTS edge, live IMPL/NAND edges into superseded points, naive-IMPL
-        heuristic, low-confidence operators without mitigation, legacy
+        CORRECTS edge, live IMPL/NAND edges into superseded points, live
+        IMPL/NAND edges into superseded OBJECTS (#11826 — that lane moves no
+        edges, so a survivor there is lost belief, not leftover wiring), a
+        superseded Object whose ``supersededBy`` name resolves to no node,
+        naive-IMPL heuristic, low-confidence operators without mitigation, legacy
         ``mitigates`` edges, and inverted validity windows — a persisted
         ``validTo`` earlier than ``validFrom``, which no instant satisfies).
         Returns per-check counts (uncapped) + capped
@@ -40995,7 +40998,13 @@ class TortoiseSDK:
 
           "found" — exactly one window covers ``at_date``. ``valid_point``
             is present, ``found`` is True, and ``current``/``chain`` give
-            context.
+            context. ``current`` is the CHAIN HEAD (the point the walk started
+            from, which for a superseded predecessor IS that predecessor), so
+            it carries ``status`` and ``terminal`` — the stored state rendered
+            as every other read surface renders it (an absent status reads
+            ``live``) and the shared lifecycle predicate EP itself uses. A
+            consumer must branch on ``current.terminal`` before reading
+            ``current`` as the claim that stands today (#11826).
           "ambiguous" — two or more windows cover it. ``ambiguous`` (True)
             and ``candidates`` are present and ``valid_point`` is ABSENT,
             but ``found`` is **True**: a candidate WAS found, just not a
@@ -41079,7 +41088,7 @@ class TortoiseSDK:
             rows = proj.g.query(
                 "MATCH (p:Point {id:$id}) RETURN p.content, p.validFrom, "
                 "p.validTo, p.createdAt, p.validFromPrecision, "
-                "p.validToPrecision",
+                "p.validToPrecision, p.status, p.outdated",
                 params={"id": cur},
             ).result_set
             if not rows:
@@ -41089,9 +41098,20 @@ class TortoiseSDK:
                             "point_id": point_id,
                             "at_date": at_date, "chain": []}
                 break
-            content, vf, vt, created, vfp, vtp = rows[0]  # noqa: RUF059
+            content, vf, vt, created, vfp, vtp, st, od = rows[0]  # noqa: RUF059
             entry = {"id": cur, "content": content,
-                     "valid_from": vf, "valid_to": vt}
+                     "valid_from": vf, "valid_to": vt,
+                     # #11826: the STORED state, on the chain entry so
+                     # ``current`` can report it. A :Point is a status-carrying
+                     # label, so an absent status renders ``live``
+                     # (``status_as_reported``, #9974 R1) rather than ``""``.
+                     "status": status_as_reported(st),
+                     # The lifecycle predicate EP itself uses — the terminal
+                     # vocabulary OR the legacy ``outdated=true`` flag
+                     # (``live.is_terminal_status``, the one mirror), so a
+                     # caller reading this field cannot disagree with the loader
+                     # about whether the entry point is dead.
+                     "terminal": is_terminal_status(st, bool(od))}
             entry.update(window_read_fields(vf, vt, vfp, vtp))
             chain.append(entry)
             older = proj.g.query(
@@ -41189,7 +41209,18 @@ class TortoiseSDK:
         out = {
             "point_id": point_id,
             "at_date": at_date,
-            "current": {"id": chain[0]["id"], "content": chain[0]["content"]},
+            # #11826: ``current`` is the CHAIN HEAD — the point the walk STARTED
+            # from, which for a superseded predecessor is that predecessor
+            # itself. Reporting only ``{id, content}`` let a terminal point be
+            # served as the current one with nothing a consumer could branch on
+            # (measured: ``current: {that superseded point}``, no status field).
+            # ``status`` is the STORED state rendered the way every other read
+            # surface renders it (absent ⇒ ``live``), and ``terminal`` is the
+            # shared lifecycle predicate, so ``current.terminal`` is the ONE
+            # field a caller needs to stop reading a dead head as alive.
+            "current": {"id": chain[0]["id"], "content": chain[0]["content"],
+                        "status": chain[0]["status"],
+                        "terminal": chain[0]["terminal"]},
             "chain": [window_entry(e, include_content=False) for e in chain],
         }
         # #2350: a covering window whose END is un-datable cannot be excluded
