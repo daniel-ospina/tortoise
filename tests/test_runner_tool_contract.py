@@ -1192,11 +1192,16 @@ def test_an_operator_message_naming_a_helper_is_not_a_gh_hazard():
     """PROSE is not an INVOCATION — the false positive that reddened main's tip.
 
     MEASURED 2026-11-12 on main `4b1d6cd0d4`: `test-record-postgres`'s client-pin step
-    emits `::error::… tools/install-ci-runner-x64.sh --repair-labels …` as operator
+    emitted `::error::… tools/install-ci-runner-x64.sh --repair-labels …` as operator
     guidance, and the NAME arm — reading the raw line, which it must — took the message
     for a hazard. `test_every_pool_eligible_gh_job_is_declared` then named
     `python-ci.yml::test-record-postgres` an undeclared gap, `test-carve-out (c)` reddened
     on main's tip, and `python-ci-gate` withheld a REQUIRED check from every PR.
+
+    ⛔ THE `::error::` BRANCH IS GONE NOW (`9c9dcdd3cc`, #12117), so this is a READER CASE
+    and not a row copied from the tree; the sentence above is a dated measurement about
+    main's tip then, not a claim about today. The live-row version of this pin is what
+    #12188 fixed after the deletion turned it red.
     """
     scripts = _gh_executing_scripts()
     assert "install-ci-runner-x64.sh" in scripts, (
@@ -1582,54 +1587,65 @@ def test_the_cross_line_redirect_residual_is_a_declared_miss():
 def test_a_script_named_only_in_an_operator_message_is_not_a_gh_hazard():
     """The false positive that red `test-carve-out (c)` on every PR (#12133).
 
-    `python-ci.yml::test-record-postgres` names `tools/install-ci-runner-x64.sh` in its
+    `python-ci.yml::test-record-postgres` named `tools/install-ci-runner-x64.sh` in its
     `::error::` REMEDY text — an operator instruction, never an invocation. The name arm
     reads the RAW command (a real invocation is usually quoted), so the job was reported
     as a `gh` user and the remedy the scan demanded (`ensure gh`, a step that fails closed
     on a no-egress pool runner) would have reddened a healthy job.
 
-    ⛔ THE ROW IS READ FROM THE WORKFLOW, not paraphrased — #12149 review P2: the live
-    remedy line is one long physical line whose wording has changed twice, and a
-    hand-copied paraphrase pins a shape the tree does not contain.
+    ⛔ THE LIVE ROW IS GONE, so this no longer reads one (#12188). The pin used to derive
+    the row from the job's own body and assert it still NAMED the helper, so it could not
+    go vacuous if the remedy were reworded. `9c9dcdd3cc` (`#12117`) then moved the PG client
+    to PGDG, which deleted that `::error::` branch — correctly, the failure it described no
+    longer exists — and took the row with it: the job keeps only a `#` comment naming the
+    helper, which the scan and this pin both ignore. The assert fired as designed and
+    `main` went red on the shard, which is what #12188 fixes.
 
-    ⛔ AND THE ROW IS ALLOWED TO BE ABSENT — #12149's own version of this test asserted
-    `len(mentioning) == 1` and was RED on `main` when this branch rebased onto it: a later
-    commit (#12051's PG-client pin, `9c9dcdd3cc`) reworded the remedy away, the job body
-    no longer names the helper at all, and the premise assertion failed while the rule it
-    guards was perfectly healthy (measured on `origin/main` at `1f28d107cf`: 1 failed,
-    36 passed — `test_a_script_named_only_in_an_operator_message_is_not_a_gh_hazard`). A
-    pin whose premise can be reworded out from under it is a red main waiting to happen,
-    so the live leg is conditional and the DISCRIMINATION is carried by the synthetic
-    rows below, which cannot go vacuous.
+    So the shape is pinned as a READER CASE now, never as a copy of live tree text: a
+    live-text pin is a cross-lane collision surface — the pin's author cannot see an
+    in-flight edit to the text it pins, and that editor cannot see the pin. ⛔ A live prose
+    row DOES still exist, so a live pin is refused for the COLLISION, not for want of one:
+    a probe at `1f28d107cf` found 33 non-comment lines naming one of the 49 gh-executing
+    helpers — 30 the arm flags and 3 `echo` prose it ignores (`finding-provenance.yml` ×2
+    and `mergify-guard-recut.yml::recut`'s `::error::`, which is the SAME prose-only shape
+    as the row below), and one of the 30 is an `on.push.paths` filter entry rather than an
+    invocation. Pinning any of them re-creates the coupling that red `main` here. The
+    `::error::` line below is the shape #12133 red on.
+
+    ⛔ THE OVERLAP WITH `test_an_operator_message_naming_a_helper_…` IS DELIBERATE, and
+    the split is stated so a later de-duplication pass does not delete coverage: that
+    sibling pins the same prose shape for the #12133 false positive (and carries the
+    block-scalar spelling), while the rows UNIQUE to this test are the inert two-argument
+    `printf` spelling (`printf '%s\\n' 'see …'`) and the bare-`echo` residual hazard —
+    neither appears there. What is also unique here is the subject: this pin is the one
+    that READ the live job body, so its docstring is where #12188's red and the reason a
+    live-text pin is refused are recorded.
     """
     scripts = _gh_executing_scripts()
+    # ANTI-VACUITY: the PROSE cases below pass trivially the moment this name stops being a
+    # KNOWN gh-executing helper, because then the name arm has nothing to match. ⛔ This
+    # assert is NOT what stops the test going vacuous — the two positive controls below
+    # collapse to `[]` on their own and red, measured (they are load-bearing; do not drop
+    # one). What this adds is a failure that NAMES the cause (the helper deleted, or it stops
+    # calling `gh`) instead of surfacing on a positive row — and, unlike a live-text pin, it
+    # cannot be invalidated by another lane rewording prose it does not own.
     assert "install-ci-runner-x64.sh" in scripts, (
-        "the derivation no longer sees the helper this pin is written against, so the "
-        "assertions below would pass vacuously"
+        "the derivation no longer sees the helper this pin uses"
     )
-    job_body = dict(_jobs(WORKFLOWS / "python-ci.yml"))["test-record-postgres"]
-    # the scan ignores comment lines, so the pin does too — the job also carries a
-    # `#` comment naming the helper, which is prose for the same reason an echo is.
-    mentioning = [
-        ln for ln in job_body if "install-ci-runner-x64.sh" in ln and not ln.strip().startswith("#")
-    ]
-    # 0 today (the remedy was reworded by #12051); 1 would be #12133's original red. More
-    # than one means the job gained invocations and this pin needs a human, not a `for`.
-    assert len(mentioning) <= 1, mentioning
-    # the live line, when the tree still has one: an operator message, so prose.
-    assert _gh_hazards(mentioning, scripts) == []
-    # …and the SYNTHETIC rows carry the discrimination, whatever the live text becomes.
-    assert (
-        _gh_hazards(["        run: printf '%s\\n' 'see tools/install-ci-runner-x64.sh'"], scripts)
-        == []
-    )
+    # #12133's exact red: the `::error::` operator message that named the helper.
     assert (
         _gh_hazards(
             [
-                '        run: echo "::error::routing drift — run tools/install-ci-runner-x64.sh --repair"'
+                "        run: echo \"::error::no postgresql-client-16 in this image's archive — "
+                "SELF-HOSTED runner: run CI_RUNNER_OS_LABEL=off "
+                'tools/install-ci-runner-x64.sh --repair-labels --count <N>"'
             ],
             scripts,
         )
+        == []
+    )
+    assert (
+        _gh_hazards(["        run: printf '%s\\n' 'see tools/install-ci-runner-x64.sh'"], scripts)
         == []
     )
     # …a launcher's quoted ARGUMENT is still code…
