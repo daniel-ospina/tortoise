@@ -365,8 +365,9 @@ RETIRED_HOST_ALLOWLIST = {
         "COMPARE_PLANS_URL `/#pricing-section` (301 -> premiselabs.co/tortoise). "
         "Deferred to #12057."),}
 
-#: Every runtime file THIS PR touched. An emitted occurrence of the retired
-#: origin in these that is not in the allowlist above fails.
+#: The surface this guard covers: every runtime file the #11767 work touched. An
+#: emitted occurrence of the retired origin in these that is not in the allowlist
+#: above fails.
 #:
 #: ⛔ NOT "every runtime file #11767 owns" — an earlier revision of this comment
 #: said exactly that and it was false. The issue also enumerates five app pages
