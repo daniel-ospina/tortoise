@@ -5838,7 +5838,14 @@ _CRED_WORD_YIELDS_075 = re.compile(
 #: ⚠️ NAMED RESIDUALS, both directions, stated rather than hidden. It does NOT
 #: catch: (i) a false claim whose OWN final clause carries a negator that
 #: negates something else — "the credibility word is not weak and is 0.75"
-#: reads as exempt; (ii) a demoting verb outside the list above. It also still
+#: reads as exempt; (ii) a demoting verb outside the list above; (iii) a BOUND
+#: form — "the credibility word is no more than 0.75" / "… is no higher than
+#: 0.75" — REPORTS, because the copula alternative is number-bound and a bare
+#: `is no <bound>` word is a determiner, not a denial of the attribution. That
+#: is a false block in the expensive direction, disclosed rather than fixed: it
+#: was exempt under the earlier unbound `is\s+no`, and re-widening to admit
+#: `more|higher` would re-open the determiner hole AND admit a genuinely FALSE
+#: bound claim (0.7561 is more than 0.75). It also still
 #: reports an attribution negated in an EARLIER clause and restated without
 #: one, which is outside the read window — a false block, the expensive
 #: direction. It is a tripwire on a class, never a parser, and strings for both
@@ -5937,8 +5944,11 @@ def _cred_word_yields_075(text: str) -> list[str]:
       reads 0.75" is quiet with a reach-back and fires the instant it is
       removed (measured). ⚠️ HOW FAR BACK it starts is INERT: `final_clause`
       re-derives the boundary from the last `_CLAUSE_BREAK` before the number,
-      so `cut = 0` and `cut = <clause start>` yield an identical slice for
-      every input (measured: `span = text[:match.end()]` keeps every pin green).
+      so `cut = 0` and `cut = <clause start>` yield an identical FINAL CLAUSE
+      for every input (the `span` slice itself can differ — only the derived
+      clause is invariant; measured: `span = text[:match.end()]` keeps every
+      pin green, and the two slices differ on "the pair wins: the credibility
+      word is not 0.75 — measured").
       Do NOT restate this as "clause-start matters" — the position is not what
       is pinned, and an earlier revision claimed it was (review cycle 9, P2).
       ⚠️ The sentence a previous revision cited here — "it is NOT the
@@ -6092,8 +6102,10 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # number-bound).
             "the credibility word is no mere flag and reads 0.75",
             # …and the POST-VERB window's LENGTH is load-bearing: this gap is
-            # 20 characters, so narrowing `{0,25}` to 10 or less reds here
-            # (review cycle 9, P2 — the boundary was unpinned).
+            # 21 characters, so narrowing `{0,25}` to `{0,20}` or below reds
+            # here (review cycle 9, P2 — the boundary was unpinned; cycle 10
+            # corrected the count, which an earlier revision stated as 20 and
+            # a threshold of "10 or less").
             "the credibility word reads exactly the default 0.75",
             # …the other spellings of the SAME claim (review cycle 3, P2).
             "the credibility word reads .75",
@@ -6157,13 +6169,6 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             # comma to reach "reads 0.75" (cycle 7, P2).
             "the credibility word is one body, so 0.75 stays the default's "
             "mean",
-            # ⛔ KNOWN FALSE PASS, pinned as a BOUNDARY, not as correctness: a
-            # pre-verb COMMA stops the window, so this false attribution is not
-            # reported today. It is here so that widening the pre-verb class to
-            # cross a comma (which would add false-block surface, this guard's
-            # expensive direction) has to move a row rather than pass unnoticed
-            # (review cycle 9, P2 — the comma stop was unpinned).
-            "the credibility word, as noted, is 0.75",
             # …and the ANCHOR: compound identifiers are a DIFFERENT object. T2 is
             # `(3.0, 1.0)` in `source_credibility.py`, mean 0.7500, so these are
             # TRUE and must never be reported (cycle 7, P1).
@@ -6199,6 +6204,18 @@ def test_the_prose_guards_fire_on_the_wording_they_exist_to_catch():
             "alone reads 0.75"):
         assert not _cred_word_yields_075(true_sentence), (
             f"the credibility guard fires on TRUE prose: {true_sentence!r}")
+    # ⛔ KNOWN FALSE PASS, pinned as a BOUNDARY, not as correctness: a pre-verb
+    # COMMA stops the window, so this false attribution is NOT reported today.
+    # It gets its OWN row, outside the TRUE-prose loop above, because the only
+    # failure it can produce must not say "fires on TRUE prose" — that message
+    # would steer a fixer to revert a deliberate improvement (review cycle 10,
+    # P2). Widening the pre-verb class across a comma adds false-block surface
+    # (this guard's expensive direction), so it has to move this row.
+    assert not _cred_word_yields_075(
+        "the credibility word, as noted, is 0.75"), (
+        "a KNOWN FALSE PASS started firing — if the window was widened "
+        "deliberately, move this row to the must-fire loop above instead of "
+        "deleting it")
     assert _cred_word_claims("tortoise/volunteer.py") == [], (
         "the credibility guard reports the shipped `volunteer.py` note: "
         + repr(_cred_word_claims("tortoise/volunteer.py")[:1]))
