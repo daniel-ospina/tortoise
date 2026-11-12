@@ -2344,15 +2344,16 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
         tmp_path, monkeypatch):
     """The `#11455` CLAUSE, SCORED — one armed TEMPLATE must not complete row 1.
 
-    ⛔ Fresh review of PR #12016 (P2): every OTHER row-1 test feeds a reading in which
-    `shipped["on"]` and `shipped["deployment"]["on"]` AGREE — `_fake_shipped` sets
-    both from one argument, and `_row_one_fixture` arms `docker-compose.yml`, which is
-    both an any-surface and a deployment surface. So reverting the one line
-    `on_by_default = deployment["on"]` to `shipped["on"]`, or folding `ambient` back
-    into it, left the WHOLE suite green. The divergent shape existed only in
-    `test_the_gate_is_not_read_True_off_ONE_armed_surface`, which asserts the NOTE and
-    never scores the row — and `row.verdict` is the artefact `#11086` item 4 is ticked
-    on, so the clause that `#11455` exists for was pinned nowhere.
+    ⛔ Fresh review of PR #12016 (P2): 31 of the 32 row-1 `score_rule_bullet()` call
+    sites feed a reading in which `shipped["on"]` and `shipped["deployment"]["on"]`
+    AGREE — `_fake_shipped` sets both from one argument, and `_row_one_fixture` arms
+    `docker-compose.yml`, which is both an any-surface and a deployment surface. The
+    32nd, `test_the_shipped_default_is_searched_not_assumed`, scores the REAL tree
+    where the two diverge, but asserts only the note and never `row.verdict`. So
+    reverting the one line `on_by_default = deployment["on"]` to `shipped["on"]`, or
+    folding `ambient` back into it, left the WHOLE suite green — and `row.verdict` is
+    the artefact `#11086` item 4 is ticked on, so the clause `#11455` exists for was
+    pinned nowhere.
     """
     _row_one_fixture(tmp_path, monkeypatch)
     # The divergent shape: the TEMPLATE arms the flag, the deployment surface does not.
@@ -2369,6 +2370,15 @@ def test_the_row_VERDICT_reads_the_DEPLOYMENT_not_the_any_surface_bool(
     assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
     hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
     assert "docker-compose.yml" in hold, hold
+    # ⛔ The TEMPLATE branch, pinned (round-12 review, P3): with `.env.example` the only
+    # armed surface the intersection with the deployment surfaces is EMPTY, so the note
+    # must carry the template clause and NOT the deployment one. Without this the branch
+    # selection could be inverted (`if shipped["armed"] else`) and the whole suite stayed
+    # green — measured — while the real tree, the shape a reader actually reads, printed
+    # "the surface(s) that do arm it (['.env.example']) are themselves deployment files,
+    # so a build that uses one of them carries the flag".
+    assert "do not deploy the container's environment on their own" in hold, hold
+    assert "themselves deployment files" not in hold, hold
 
     # …and the `ambient` HALF of the same clause: a lane's exported flag is not a
     # DEFAULT. With the switch armed in the ENVIRONMENT and the deployment still
@@ -2553,7 +2563,7 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     # with the rule off" was false for exactly the shape below — the same
     # per-file-vs-merged-view conflation the note builder above had already been
     # corrected for. Both notes now qualify it.
-    assert "one of them ALONE runs with the rule off" in hold, hold
+    assert "Read from that file ALONE the deployment is unarmed" in hold, hold
     assert "INHERITS that image's `ENV`" in hold, hold
 
     # The latent shape, executed: the compose file is silent while a DEPLOYMENT file
@@ -2569,7 +2579,7 @@ def test_the_row_holds_at_PARTIAL_because_the_deployment_is_unarmed(
     row = probe.score_rule_bullet()
     assert row.verdict == "PARTIAL", f"{row.verdict}: {row.observed}"
     hold = next(n for n in row.notes if n.startswith("shipped default NOT armed"))
-    assert "one of them ALONE runs with the rule off" in hold, hold
+    assert "Read from that file ALONE the deployment is unarmed" in hold, hold
     # ⛔ And the OTHER half of the same conflation (round-11 review, P2): with an armed
     # surface that IS a deployment file, the note must NOT claim that surface "does
     # not deploy the container's environment on their own" — a build using it carries
