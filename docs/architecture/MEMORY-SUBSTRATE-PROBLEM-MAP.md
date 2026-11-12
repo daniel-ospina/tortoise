@@ -426,9 +426,10 @@ rounding:**
   refuses to read GitHub and re-derives none of this from the tree, so re-derive
   those literals from the tree on every re-cut; a re-cut that only makes the
   suite green has proven nothing about the statuses. The two halves are not
-  equally dark, though: a moved **status** is uncaught, while a moved **count**
-  reds six arms whose FIXTURES encode the shipped numbers (`fixture no longer
-  finds §2's OPEN row`) — detected as breakage, never confirmed.
+  equally dark, though: a moved **status** is caught only by a fixture premise
+  that happens to name that row, never as a status finding, while a moved
+  **count** breaks several arms' fixtures at once — detected as breakage, never
+  confirmed.
 - **Anchor RELEVANCE.** The guard proves an anchor exists and is merged. It cannot
   prove the commit is *the fix* — a lane once cited a merge that mentioned nothing
   of the issue (this page carried exactly that defect until review caught it on

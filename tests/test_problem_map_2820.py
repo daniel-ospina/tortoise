@@ -182,8 +182,8 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     does carry a per-issue status literal, but as a MUTATION FIXTURE's premise
     rather than an assertion: `_rewrite_row(..., 2813, "| VERIFIED-FIXED |", …)`
     fails with "row #2813 does not contain '| VERIFIED-FIXED |'", i.e. as a
-    broken fixture, not as a status finding. So a swap touching `#2813` reds by
-    accident of that fixture and nothing else, which is not coverage.
+    broken fixture, not as a status finding. So a swap touching `#2813` reds only
+    by accident of a fixture premise that names it, which is not coverage.
     Reverting §2's `#2782` to `OPEN`
     **and** promoting `#2684` to `VERIFIED-FIXED` (one row each way, so §2 stays
     22/4/0, the total 26, WS-C 4 of 6, and both headlines intact) left
@@ -206,9 +206,9 @@ def test_the_recut_row_and_survivors_hold_their_status_by_ISSUE():
     refuses to read GitHub and re-derives none of this from the tree, so re-derive
     these on every re-cut; a re-cut that only makes this file green has proven
     nothing about the statuses. The two halves are not equally dark: a moved
-    STATUS is uncaught, while a moved COUNT reds six arms whose FIXTURES encode
-    the shipped numbers ("fixture no longer finds §2's OPEN row") — detected as
-    breakage, never confirmed.
+    STATUS is caught only by a fixture premise that happens to name that row,
+    never as a status finding, while a moved COUNT breaks several arms' fixtures
+    at once — detected as breakage, never confirmed.
     """
     rows, _ = pmc.parse_rows(DOC.read_text(encoding="utf-8"))
     status = {r.issue: r.status for r in rows}
