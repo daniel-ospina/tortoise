@@ -395,7 +395,7 @@ pin proves *who*. And `sealed_before_any_scored_run` carries its own `_basis`, m
 `capstone_verdict_check.py`'s `CRITERIA` is a **closed** tuple that refuses unknown ids.
 
 ⛔ **Corrected after review — "record ids == enum minus declared sub-rows" is FALSE today.** The record's ids are
-`E1, E1b, E2a, E2b, E3, E4, E5` (7 E-rows) **plus `A1…A5`, which the record already registers**, **plus `E6`** — 13 total (`#11673` added the `E6` criteria entry; 12 when this section was first written) while the enum was `E1…E5` (5) when this section was first written and is now `(*CRITERIA, *E6_CRITERIA, *A_CRITERIA)` (`capstone_verdict_check.py:191`, tested at `:964-970`), and the check's own `SUB_ROW_CRITERIA` is
+`E1, E1b, E2a, E2b, E3, E4, E5` (7 E-rows) **plus `A1…A5`, which the record already registers**, **plus `E6`** — 13 total (`#11673` added the `E6` criteria entry; 12 when this section was first written) while the enum was `E1…E5` (5) when this section was first written and is now `(*CRITERIA, *E6_CRITERIA, *A_CRITERIA)` (`capstone_verdict_check.py:191`, tested at `:970-976`), and the check's own `SUB_ROW_CRITERIA` is
 `("E2",)` — which answers a **different** question ("may stand in for E2"), not "is not a verdict row". So the
 subtraction set is declared **literally, in one place**:
 
@@ -424,8 +424,8 @@ commit**. §4.1 did not say that.
 
 **Cardinality is a decision, and it moves the verdict tool's hardcoded five.** If the A-rows become verdict rows (and §1 J1's
 "ten rows" says they do), then the table is **10**, and these move **in the same change**: the `V2` "the table is 5 rows"
-refusal (`capstone_verdict_check.py:941`), the `--require-green: {len(red)}/5` message (`:1506`), and the `5/5`
-prose and strings at `:160`, `:178`, `:624`, `:1103`, `:1118`, `:1500`, `:1694`. **And
+refusal (`capstone_verdict_check.py:947`), the `--require-green: {len(red)}/5` message (`:1512`), and the `5/5`
+prose and strings at `:160`, `:178`, `:630`, `:1109`, `:1124`, `:1506`, `:1700`. **And
 `blocker-states.json` must move too** — a non-green A-row reds V12 unless every blocker it cites is covered there,
 which the first version of this section omitted.
 
@@ -569,7 +569,7 @@ exactly the same gates** - not "CI". W2a's "the lane is `workflow_dispatch` only
   payload below is empty for an unresolved lookup, this reds, and `config/v4-mechanisms.yml`'s row must flip to
   `implemented`"* - plus the flip condition. ⚠️ The *"if a create gate landed, flip `failure_policy` …"* wording is
   that test's **assert message**, not its docstring, and *"the day a create gate lands"* appears in no test at all
-  (it is `docs/00_index.md:170`'s prose) — an earlier revision quoted the two as one docstring. **Do not**
+  (it is `docs/00_index.md:175`'s prose) — an earlier revision quoted the two as one docstring. **Do not**
   use `preconditions:` for composition: the file defines it as **ordering**, not "part of".
   The two planning docs disagreed (C3 vs C4); **C4 is the owner**, because `symbols:` can only be satisfied by the
   producer.
@@ -636,7 +636,7 @@ core**. So:
 
 | path | derivation | where |
 |---|---|---|
-| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/sdk.py:23397` → `pack_registry.py:609` (`declared_relation_predicates()`) |
+| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/sdk.py:24003` (`declared = declared_relation_predicates()`) → `pack_registry.py:609`/`:635` (`declared_relation_predicates()` — the `def` and the union it builds) |
 | **structural path** | ⛔ **a static literal** — and it is **1 of FIVE declarations in one file**, and **not the one the verdict reads**: `relation_write_paths` reads **`STRUCTURAL_WRITE_PREDICATES`** (the union), while `create_edge` gates on `_VALID_EDGE_PREDICATES` | `projection/edges.py:621` (`_VALID_EDGE_PREDICATES`) · `:639` (`_VALID_ABOUT_EDGE_PREDICATES`) · `:655` (`STRUCTURAL_WRITE_PREDICATES`) · `:54` (`DERIVABLE_STRUCTURAL_RELS`) · `:1129` (`structural_edge_carrier`) · the reader `from .projection.edges import STRUCTURAL_WRITE_PREDICATES` at `pack_registry.py:723` (used `:729`) |
 | **per-graph gating** | ✅ **the resolver exists and is THREE-VALUED** — `pack_state.graph_installed_namespaces(sdk, *, graph_name=None)`: `None` ⇒ no `:PackInstall` records ⇒ **catalog union**; a `frozenset` ⇒ recorded ∪ already-in-data; an **empty** frozenset ⇒ a configured graph whose set is deliberately empty (`#2728`), where the union fallback **must not** apply. The SDK v2 master's write gate stays ungated (`#5202`) | `tortoise/pack_state.py:1170`; caveat in `docs/EXPANSION_PACKS.md` (`#2714`/`#2728`) |
 
@@ -940,7 +940,7 @@ the strongest evidence either is right.
 | R1 | **quota** (`#10976`) blocks every A-row | **high** (already at cap) | epic cannot close | `BLOCKED(402)` state; blocking precondition named; the epic reports rather than fakes |
 | R2 | **gold fitted to the query** by the same lane | medium | A1's headline claim is void | sealed + hash-pinned + **labeller ≠ rollup author**, checked (I3) |
 | R3 | **non-determinism** (D6) makes "green" unreproducible | high | a green run that cannot be re-derived | repeat policy + disagreement-vs-policy = failing run |
-| R4 | **enum drift** — an A-row the verdict gate refuses (`:964-970` tests `RECOGNISED_CRITERIA`) *(the LOUD half; the silent half is R8)* — ⚠️ **and a SECOND bundle, `5087-hypothesis`, shares `capstone-preregistration/v1` and is invoked in the same CI step**, so a schema rule written unbundled reds six sibling criteria | medium | the row cannot land at all | derive the enum (4.4) + CI pin; **I1's field set is bundle-scoped and `5087-hypothesis` is named as a consumer** |
+| R4 | **enum drift** — an A-row the verdict gate refuses (`:970-976` tests `RECOGNISED_CRITERIA`) *(the LOUD half; the silent half is R8)* — ⚠️ **and a SECOND bundle, `5087-hypothesis`, shares `capstone-preregistration/v1` and is invoked in the same CI step**, so a schema rule written unbundled reds six sibling criteria | medium | the row cannot land at all | derive the enum (4.4) + CI pin; **I1's field set is bundle-scoped and `5087-hypothesis` is named as a consumer** |
 | R5 | **CI bloat** — ten children each adding a merge-gating test | medium | the suite the owner already called expensive | #11454's tier rule; **Tier-E marker required**; ~20 s recovered |
 | R6 | **stale copies** — a claim fixed in a summary, stale in its copies | **high** (hit 3× in this lane alone) | a green claim beside a refuted copy | one vocabulary (`I4`); the repo's existing double-copy pins |
 | R7 | **mechanism dependency** — `#11001`/`#10997`/`#10998`/`#10999` slip | medium | A1/A2/A3 unmeasurable | `blocked-by` by id, stated per child; the epic never builds them (except C4's argued half) |
