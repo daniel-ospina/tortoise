@@ -34,9 +34,11 @@
 #      (the PAT trap: it would file a duplicate on every failing run)
 #  17b. the excerpt squeeze's EXIT STATUS is neither the alert's nor evidence of what it
 #      did: an iconv that reports the mid-character cut in its status must not abort the
-#      ledger leg, one that emits nothing must paste the raw tail and SAY so (never claiming
-#      a squeeze), and the drop must be disclosed from a BYTE MEASURE — so it is disclosed on
-#      a glibc that drops the sequence silently (2.39, rc=0) too
+#      ledger leg, one that emits nothing must paste the ASCII FALLBACK and SAY so (never
+#      claiming a squeeze, and never pasting the raw tail — the cut can leave a half
+#      character in it, and an undecodable body is not a report), and the drop must be
+#      disclosed from a BYTE MEASURE — so it is disclosed on a glibc that drops the
+#      sequence silently (2.39, rc=0) too
 #  19-21. `--resolve` (#8841) retires EXACTLY the keys whose steps reported
 #      `success` in this run (plus the job-level key only when `job.status` is
 #      `success`) — `skipped` and outcome-less steps are never read as a pass, and
@@ -481,10 +483,20 @@ fi
 # `iconv -c` reports the mid-character cut in its EXIT STATUS on glibc 2.43
 # (`ubuntu-26.04`, the runner image: the convertible bytes are emitted and rc is
 # still 1) while glibc 2.39 exits 0 — so on an ordinary box the defect is
-# INVISIBLE and the old code passes. Both arms are simulated here so the harness
-# discriminates on any host: (a) status 1 with the bytes emitted must still file
-# the alert, and (b) an iconv that emits NOTHING must not paste an empty block
-# under a heading that promises the report verbatim — it must say it went raw.
+# INVISIBLE and an ordinary box cannot see it. THREE arms are simulated here so the
+# harness discriminates on any host: (a) status 1 with the bytes emitted must still
+# file the alert, (b) an iconv that emits NOTHING must not paste an empty block under
+# a heading that promises the report verbatim (it must say it went to the ASCII
+# fallback), and (c) the SILENT shape — bytes emitted, the split character dropped,
+# status 0 — must still DISCLOSE the drop.
+#
+# ⚠️ SCOPE OF THIS CASE, stated because it is not obvious: the status-catch half of
+# #12077 was landed INDEPENDENTLY on `main` (#12020, `49cf5193541f`) before this
+# branch's merge base, so arm (a) below is GREEN on the pre-fix code this PR merges
+# into — it is the host-real-`iconv` duplicate of case 17g (which pins the same two
+# properties with a stub, converter-independently), NOT the pin that carries this
+# PR's Root 2. What is new at this head is the BYTE-MEASURED disclosure (arms b/c),
+# the guarded re-read, the `-e`/`! -p` widening and the ASCII-fallback wording.
 PATH_BEFORE_ICONV_SHIM="$PATH"
 REAL_ICONV="$(command -v iconv)"
 # The arm below simulates glibc 2.43's `iconv -c` by wrapping the REAL one. With no
@@ -507,7 +519,7 @@ chmod +x "$ICONV_STATUS_DIR/iconv"
 export PATH="$ICONV_STATUS_DIR:$PATH"
 reset_case
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
-assert_eq "$RC" "0" "an iconv that reports the cut in its STATUS does not fail the alert"
+assert_eq "$RC" "0" "an iconv that reports the cut in its STATUS does not fail the alert (host REAL iconv — a duplicate of case 17g, already true at the merge base)"
 assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "and the squeezed excerpt is still carried"
 # ⚠️ The two assertions above are ALSO satisfied by the raw-tail fallback (its tail
 # carries the same `BLOCKING` line), so on their own they cannot tell the squeeze
@@ -521,6 +533,30 @@ if python3 -c "import sys,pathlib; pathlib.Path(sys.argv[1]).read_text(encoding=
 else
   bad "the squeezed body is NOT valid UTF-8 — the raw fallback's bytes reached the issue"
 fi
+
+# ── arm (c): the SILENT drop — bytes emitted, split character gone, status 0 ─────────
+# glibc 2.39 (this box, and every ordinary dev host) drops the split sequence and exits
+# 0, so the drop is visible ONLY from the bytes. The mirror of arm (a): the REAL
+# converter, then `exit 0` regardless of what it reported — i.e. glibc 2.39's shape
+# reproduced on a 2.43 host and vice versa. An implementation that derives the
+# disclosure from `$?` says "nothing was dropped" here and reds the assertion below
+# ON THE RUNNER TOO; on arm (a) alone it passes on every host. This is what makes
+# "measure, not status" a pinned property rather than a host generation's accident.
+ICONV_SILENT_DIR="$FIX/bin-iconv-silent"
+mkdir -p "$ICONV_SILENT_DIR"
+cat > "$ICONV_SILENT_DIR/iconv" <<ICONV_SILENT_EOF
+#!/usr/bin/env bash
+"$REAL_ICONV" "\$@"
+exit 0
+ICONV_SILENT_EOF
+chmod +x "$ICONV_SILENT_DIR/iconv"
+export PATH="$ICONV_SILENT_DIR:$PATH_BEFORE_ICONV_SHIM"
+reset_case
+run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
+assert_eq "$RC" "0" "an iconv that drops the split character and reports SUCCESS does not fail the alert either"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "BLOCKING repo-ahead migrations" "arm c: the squeezed excerpt is carried"
+assert_not_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "could not be byte-squeezed" "arm c: and it is the SQUEEZED excerpt, not the ASCII fallback"
+assert_contains "$(cat "$RUNNER_TEMP/deploy-api-alert-body.md" 2>/dev/null)" "NOT byte-identical" "arm c: and the SILENTLY dropped character is still disclosed — the measure, not the status (this reds a status-based implementation on every host)"
 
 ICONV_BROKEN_DIR="$FIX/bin-iconv-broken"
 mkdir -p "$ICONV_BROKEN_DIR"
@@ -549,8 +585,8 @@ export PATH="$PATH_BEFORE_ICONV_SHIM"
 # glibc 2.39 drops the split sequence and exits 0, so a status-based disclosure says
 # nothing on every ordinary dev box while the excerpt IS short. This arm runs the REAL
 # iconv — whichever generation this host has — and requires the drop to be disclosed
-# anyway. Without it the disclosure is pinned only on the one host generation that
-# happens to report the drop in its exit status.
+# anyway. Without it, and without arm (c) above, the disclosure would be pinned only on
+# the one host generation that happens to report the drop in its exit status.
 reset_case
 run_alert --job deploy-api --steps "$DRIFT_STEPS" --drift-report "$FIX/drift-report-utf8.txt"
 assert_eq "$RC" "0" "a real iconv files the alert on either glibc generation"
