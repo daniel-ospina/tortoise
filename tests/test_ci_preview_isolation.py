@@ -195,7 +195,7 @@ def _record_when_running(name: str, pid: int, env: dict[str, str],
     return result
 
 
-def _refusal_arm(env: dict[str, str], name: str) -> str:
+def _refusal_arm(env: dict[str, str], name: str, pid: int) -> str:
     """WHICH of `record`'s two refusal arms fired — read from the SUT's OWN witness.
 
     ⛔ THE ARM IS A FACT THE SUT WROTE AT REFUSAL TIME, not an inference from the pid
@@ -207,14 +207,30 @@ def _refusal_arm(env: dict[str, str], name: str) -> str:
     by the time the message is formatted, and a derived "the decoy died" would then
     invert the attribution in the very message #12039 asks to be legible.
 
-    An unrecognised or missing witness is reported as such, never guessed.
+    ⛔ AND THE WITNESS MUST NAME *THIS* PID. The file is never removed by `stop` or
+    `stop-all`, and `cmd_record` writes nothing at all on its `die`/`mkdir` paths — so
+    a refusal that does not reach either arm (an unwritable `PREVIEW_STATE`, a bad
+    argument) leaves an EARLIER refusal's witness in place. Reading it unqualified would
+    report a confident arm for a refusal that never happened, which is the same
+    attribution inversion this helper exists to end, one layer up.
+
+    An unrecognised, mismatched or missing witness is reported as such, never guessed.
     """
     path = Path(env.get("PREVIEW_STATE", "")) / f"{name}.refused"
     try:
         text = path.read_text().strip()
     except OSError:
         return f"no `{name}.refused` witness was written — the arm is unrecorded"
-    arm = text.split()[2] if len(text.split()) > 2 else ""
+    parts = text.split()
+    if len(parts) < 3 or parts[0] != "refused":
+        return f"unrecognised refusal witness {text!r} — the arm is not covered here"
+    if parts[1] != str(pid):
+        return (
+            f"the witness on disk names pid {parts[1]}, not this refusal's pid {pid} — "
+            "the arm is unrecorded for this pid (a refusal that writes no witness, e.g. "
+            "an unwritable state dir, leaves an EARLIER one in place)"
+        )
+    arm = parts[2]
     if arm == "not-running":
         return ("the LIVENESS leg refused (`pid_running`): the spawn was already gone "
                 "or a zombie when `record` ran — that red is the fixture's, not the "
@@ -250,7 +266,7 @@ def _recorded(result: subprocess.CompletedProcess, pid: int, env: dict[str, str]
     """
     return (
         f"`record` refused pid {pid} for {timeout:g}s: {result.stderr.strip()!r} — "
-        f"the SUT's own arm: {_refusal_arm(env, name)}; observed NOW: {_pid_now(pid)} "
+        f"the SUT's own arm: {_refusal_arm(env, name, pid)}; observed NOW: {_pid_now(pid)} "
         "(#12039: the refusing arm is the SUT's witness, not a later guess)"
     )
 
@@ -881,18 +897,42 @@ def test_the_refusal_message_names_the_arm_the_SUT_recorded(tmp_path: Path, stat
     afterwards (a later sample, which can invert the attribution: a decoy alive at
     refusal can be a zombie by the time the message is formatted).
 
-    Each arm is pinned from the witness the SUT itself would write, and the pid's
-    current state is labelled an observation — never the explanation.
+    ⛔ THE LIVENESS WITNESS IS PRODUCED BY THE SUT, NOT WRITTEN BY HAND. The parser
+    couples to `cmd_record`'s exact wording, and a fabricated string cannot notice the
+    day that wording moves — every arm would silently degrade to "arm is unrecorded"
+    and every run would stay green. Recording a dead pid is the real, cheap way to make
+    the SUT emit it (rc 4, `refused <pid> not-running`).
+
+    The START-TIME arm cannot be forced on demand (it needs `/proc` to lose a live pid
+    between two reads), so that one witness IS fabricated and is therefore the weaker
+    half of this test — said here rather than passed off as equal.
+
+    The pid's current state is labelled an observation — never the explanation.
     """
     state_dir = Path(state["PREVIEW_STATE"])
     state_dir.mkdir(parents=True, exist_ok=True)
     dead = subprocess.CompletedProcess([], 4, "", "pid 4242 is not running — nothing recorded")
 
-    (state_dir / "app.refused").write_text("refused 4242 not-running\n")
-    liveness = _recorded(dead, 4242, state)
-    assert "LIVENESS leg refused" in liveness, liveness
+    sut_refusal = _script("record", "--name", "app", "--pid", "999999", env=state)
+    assert sut_refusal.returncode == 4, (
+        f"the harness cannot measure: the SUT must refuse a dead pid (rc 4): {sut_refusal.stderr}"
+    )
+    liveness = _recorded(sut_refusal, 999999, state)
+    assert "LIVENESS leg refused" in liveness, (
+        "the SUT's own witness no longer parses — its wording moved and every arm is now "
+        f"attributed to nothing: {liveness}"
+    )
     assert "fixture's, not the SUT's" in liveness, liveness
     assert "observed NOW" in liveness, liveness
+
+    # ⛔ A witness for a DIFFERENT pid is not this refusal's arm. `cmd_record` writes
+    # nothing on its `die`/`mkdir` paths, so an earlier refusal's witness can be the one
+    # on disk — reading it unqualified reports a confident arm for a refusal that never
+    # happened.
+    (state_dir / "app.refused").write_text("refused 4242 not-running\n")
+    stale = _recorded(dead, 4243, state)
+    assert "names pid 4242" in stale and "arm is unrecorded for this pid" in stale, stale
+    assert "LIVENESS leg refused" not in stale, stale
 
     (state_dir / "app.refused").write_text("refused 4242 no-start-time\n")
     starttime = _recorded(dead, 4242, state)
