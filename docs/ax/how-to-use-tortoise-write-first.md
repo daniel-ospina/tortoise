@@ -510,11 +510,11 @@ structure, not the return value.
   survivor is lost belief rather than leftover wiring **where the row is an
   operator input, or a direct edge whose own direction flows** — a direct edge's
   direction lives on the RELATIONSHIP, and a neutral (`-`) one carries no
-  confidence in either direction. The check distinguishes four mechanisms and
-  its emitted `detail` names which one this row is: a neutral edge, a shaped
-  non-`:Point` endpoint (in neither EP arm), and a direct edge that has stopped
-  building a factor are leftover wiring; the operator input and the flowing
-  direct edge are lost belief. The `fix` differs for each for that reason.
+  confidence in either direction. The check separates the row mechanisms and its
+  emitted `detail` names which one this row is: a neutral edge, and a shaped
+  non-`:Point` endpoint (in neither EP arm) are leftover wiring; the operator
+  input and the direct edge whose direction flows are lost belief — they carried
+  it while the endpoint was live. The `fix` differs for each for that reason.
   Severity is `high` on every row until #12154 (this module's aggregates carry one
   severity per check); the check is `:Object`-anchored, so a superseded
   `:Subject` input is still not covered, and neither is an OUTGOING direct

@@ -561,6 +561,11 @@ def test_a_neutral_direct_edge_carries_nothing_and_says_so(sdk):
     # ...and the archive clause must be the neutral one, not the flowing one.
     assert "neutral" in issue.fix, issue.fix
     assert "CLEARING THE DEFICIT" not in issue.fix, issue.fix
+    # ⛔ The INSTRUCTION must agree with the triage: a neutral edge carried nothing,
+    # so "re-point it onto the successor" contradicts the DROP appended after it.
+    assert "Delete this IMPL edge" in issue.fix, issue.fix
+    assert "Re-point this IMPL edge off" not in issue.fix, (
+        "a neutral edge has no belief to preserve by re-pointing: " + issue.fix)
 
 
 def test_a_direct_edge_into_a_shaped_successor_keeps_its_belief_claim(sdk):
@@ -597,6 +602,12 @@ def test_a_direct_edge_into_a_shaped_successor_keeps_its_belief_claim(sdk):
         "successor's shape: " + fix)
     assert "EP assembles no factor for this row in the first place" not in fix, (
         "that sentence belongs to a neither-arm row, not a direct edge: " + fix)
+    # ⛔ ...and the sentence must answer the question THIS arm asks (the repair
+    # leaves the belief where it was), not promise a move the arm measured as
+    # absent: re-pointing onto the shaped successor leaves `confidences {}`.
+    assert "that belief is NOT moved" in fix, (
+        "the repair this arm names does not move the belief: " + fix)
+    assert "so the re-point moves that belief onto the successor" not in fix, fix
 
 
 def test_a_supersession_chain_points_the_repair_at_the_live_head(sdk):

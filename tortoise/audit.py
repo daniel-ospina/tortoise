@@ -982,10 +982,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "confidence transfers through it by design and the re-point "
                     "moves no belief either way")
         if not s["is_operator"]:
+            # ⛔ Every caller is an "EP will not read it" arm (an operator-shaped or
+            # draft successor, or a neutral edge), so the honest sentence is that the
+            # belief this edge DID carry is NOT moved by the repair named — measured:
+            # a direct edge re-pointed onto an operator-shaped successor leaves
+            # ``confidences {}`` (and onto a live claim successor restores two).
             return ("the direct edge carried belief into the superseded endpoint "
-                    "while it was live, so the re-point moves that belief onto the "
-                    "successor — the wiring is what carries it, not an operator "
-                    "slot")
+                    "while it was live, but EP's direct-edge arm refuses a non-live "
+                    "or operator-shaped endpoint, so an edge written there builds no "
+                    "factor either and that belief is NOT moved — the wiring alone "
+                    "carries it, and only onto a live claim")
         return ("EP drops that input from the factor and re-scores it over the "
                 "REMAINING inputs — TWO OR MORE run without it (measured on a "
                 "three-input operator: two confidences and an EMPTY skip record), "
@@ -1170,9 +1176,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             fwd_d, bwd_d = direction_flows(s["direction"])
             detail += (
                 " — the Object lane moved no edges on supersession, and EP builds "
-                "NO factor for a direct edge: with a terminal endpoint the row is "
-                "excluded before evaluation, so there is no skipped-factor record "
-                "for it and " + (
+                "NO factor for a direct edge ONCE its endpoint is terminal: the row "
+                "is excluded before evaluation, so there is no skipped-factor "
+                "record for it, and " + (
                     "the claim silently loses that support (#11826)"
                     if (fwd_d or bwd_d) else
                     "this edge is " + _quoted(s["direction"]) + " (neutral), so "
@@ -1299,14 +1305,20 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         not fit (measured: an id-less DIRECT-edge row emitted a ``fix`` promising
         "EP still strips its input … the same degenerate factor" beside a
         ``detail`` that correctly said EP builds no factor for a direct edge at
-        all). The four mechanisms, in the same order ``_active_edge_detail``
-        spells them:
+        all). The mechanisms, in the order this function tests them (SHAPE first,
+        exactly as ``_active_edge_detail`` and ``_triage`` do — a shaped endpoint is
+        in neither EP arm whatever the edge's direction says, so testing neutral
+        first attributed the silence to a direction EP never consults):
 
           * a SHAPED non-``:Point`` endpoint is in NEITHER EP arm — no factor, no
             skipped-factor record;
-          * a DIRECT edge is excluded before evaluation — same, nothing stripped;
-          * a NEUTRAL operator (``direction='-'``) transfers NO confidence by
-            design, so archiving loses no belief — only the stale edge survives;
+          * a NEUTRAL edge (``direction='-'``) transfers NO confidence by design —
+            an operator with that direction, or a DIRECT edge whose RELATIONSHIP
+            carries it — so archiving loses no belief and only the stale edge
+            survives;
+          * a DIRECT edge with a flowing direction DID carry belief while its
+            endpoint was live, and the row is excluded before evaluation once it is
+            terminal;
           * an OPERATOR input IS stripped, and the factor is re-scored over its
             REMAINING inputs: ONE left is skipped as ``degenerate``, TWO OR MORE
             run without it, and a DIRECTIONAL operator is skipped outright when
@@ -1325,6 +1337,15 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                  f"{{'status': 'archived'}}) — ")
                 if s["sup_id"] is not None else "Archiving it instead ")
         fwd, bwd = direction_flows(s["direction"])
+        if s["shape"] and not s["is_operator"]:
+            return lead + (
+                "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: EP builds no "
+                "factor for that endpoint in EITHER arm, so " + anchor + " "
+                "over a claim whose support was never there — and the claim's "
+                "support has to be wired through a :Point operator regardless: "
+                "clearing the shape alone restores nothing while this edge still "
+                "ends at the superseded Object. (A neutral direction does not change "
+                "this: EP never reaches the direction test for this endpoint)")
         if not (fwd or bwd):
             return lead + (
                 "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: this edge is "
@@ -1334,14 +1355,6 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "either direction. But " + anchor + " over a stale edge that is "
                 "still there, which is leftover wiring to clean up")
         if not s["is_operator"]:
-            if s["shape"]:
-                return lead + (
-                    "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: EP builds no "
-                    "factor for that endpoint in EITHER arm, so " + anchor + " "
-                    "over a claim whose support was never there — and the claim's "
-                    "support has to be wired through a :Point operator regardless: "
-                    "clearing the shape alone restores nothing while this edge still "
-                    "ends at the superseded Object")
             return lead + (
                 "SILENCES THIS CHECK WITHOUT CLEARING THE WIRING: this is a DIRECT "
                 "edge that DID carry belief while its endpoint was live (measured: "
@@ -1483,6 +1496,20 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                 "superseded Object (measured: ``confidences {}`` and this finding "
                 "returns as a direct-edge row)" + tail)
         if not s["is_operator"]:
+            # ⛔ The NEUTRAL test belongs HERE too, not only below: it used to sit
+            # after this branch, so a `-` direct edge got "re-point it onto the
+            # successor" from this line and "the disposition here is DROP" from the
+            # §3.1 triage appended to the same `fix` — the self-contradicting pair
+            # the triage exists to prevent, on the family whose direction lives on
+            # the RELATIONSHIP.
+            fwd_d, bwd_d = direction_flows(s["direction"])
+            if not (fwd_d or bwd_d):
+                return prefix + (
+                    f"Delete this {s['edge_type']} edge off {q} — it is "
+                    f"{_quoted(s['direction'])} (neutral), so it carried no belief "
+                    f"to preserve and §3.1's disposition is DROP; re-pointing it "
+                    f"onto the successor only keeps the same inert connection."
+                    + tail)
             return prefix + (
                 f"Re-point this {s['edge_type']} edge off {q} onto the successor "
                 f"({successor}): it is a DIRECT edge, so there is no factor to "
